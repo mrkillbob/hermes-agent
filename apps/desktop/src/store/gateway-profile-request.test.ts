@@ -56,6 +56,7 @@ const {
   gatewayActivationEpoch,
   disposeSecondariesForConnection,
   openGatewayForAgent,
+  openGatewayForProfile,
   pruneSecondaryGateways,
   requestGatewayForAgent,
   requestGatewayForProfile,
@@ -547,19 +548,6 @@ describe('retainGatewayForAgent (#93602)', () => {
     expect(secondaryGateways[1].close).toHaveBeenCalledOnce()
   })
 
-  it('without the retain, the leased socket closes after each request (the #93602 race)', async () => {
-    const primary = makePrimary()
-    setPrimaryGateway(primary as never, 'default')
-    installRegistryDesktop()
-    await ensureGatewayForProfile('default')
-
-    await requestGatewayForAgent('mini', 'helper', 'session.create', { title: 'g' })
-
-    // Refcount hit 0 → disposed: this is the socket close that reaps the
-    // runtime session server-side and makes the later prompt.submit 4001.
-    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
-  })
-
   it('plain-profile retain leases the pooled profile socket and releases it', async () => {
     const primary = makePrimary()
     setPrimaryGateway(primary as never, 'default')
@@ -753,5 +741,177 @@ describe('attached shared-remote group turns (#96493)', () => {
 
     expect(await ensureGatewayForAgent('homelab', 'voter')).toBe(false)
     expect(secondaryGateways).toHaveLength(0)
+  })
+})
+
+describe('session-owner calls for a profile on the shared local host backend (#120005)', () => {
+  function installLocalHost(descriptorFor: (profile: string) => Record<string, unknown>) {
+    const getConnectionFor = vi.fn(async ({ connectionId, profile }: { connectionId: string; profile: string }) => ({
+      connectionId,
+      mode: 'local',
+      port: 4242,
+      token: 't',
+      ...descriptorFor(profile)
+    }))
+
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
+      getConnection: vi.fn(async (profile: null | string) => ({
+        mode: 'local',
+        port: 4242,
+        profile,
+        token: 't',
+        ...descriptorFor(profile ?? 'default')
+      })),
+      getConnectionFor,
+      getGatewayWsUrlFor: vi.fn(async ({ connectionId, profile }: { connectionId: string; profile: string }) => ({
+        ok: true as const,
+        wsUrl: `ws://${connectionId}/${profile}`
+      })),
+      touchBackend: vi.fn(async () => undefined)
+    }
+
+    return getConnectionFor
+  }
+
+  it('reuses the primary socket when main says the profile rides the host backend (sharedPrimary)', async () => {
+    // Under multiplex-only (#118246) one local `hermes serve` serves every
+    // profile. A registry secondary here is a second WebSocket to the SAME
+    // process: the backend joins it to the chat and the renderer processes
+    // every event twice (garbled deltas, duplicate interim bubble).
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ profile, sharedPrimary: true }))
+    await ensureGatewayForProfile('default')
+
+    const release = await retainGatewayForAgent('local', 'work')
+    await requestGatewayForAgent('local', 'work', 'session.create', { title: 'g' })
+    await requestGatewayForAgent('local', 'work', 'prompt.submit', { session_id: 'rt-1', text: 'hi' })
+    release()
+
+    expect(secondaryGateways).toHaveLength(0)
+    expect(primary.request).toHaveBeenCalledTimes(2)
+    expect(primary.request).toHaveBeenNthCalledWith(1, 'session.create', { title: 'g', profile: 'work' })
+    expect(primary.request).toHaveBeenNthCalledWith(2, 'prompt.submit', {
+      session_id: 'rt-1',
+      text: 'hi',
+      profile: 'work'
+    })
+  })
+
+  it('closes a prewarmed secondary when the route resolves to the shared primary', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ port: 5151, profile, sharedPrimary }))
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForAgent('local', 'work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    expect(await ensureGatewayForAgent('local', 'work')).toBe(true)
+
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+    // This array records constructed mocks, so the closed socket remains at index 0.
+    expect(secondaryGateways).toHaveLength(1)
+  })
+
+  it('recognizes the local source when the primary descriptor has no registry id', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ mode: 'local' })
+    installLocalHost(profile => ({ port: 5151, profile, sharedPrimary }))
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForAgent('local', 'work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    await requestGatewayForAgent('local', 'work', 'profiles.list')
+
+    expect(primary.request).toHaveBeenCalledWith('profiles.list', { profile: 'work' })
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
+  it('closes a prewarmed profile socket when profile routing resolves to the shared primary', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installDesktop(
+      vi.fn(async (profile: null | string) => ({
+        port: profile ? 5151 : 4242,
+        ...(profile ? { profile, sharedPrimary } : {}),
+        token: 't'
+      }))
+    )
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForProfile('work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    await requestGatewayForProfile('work', 'profiles.list')
+
+    expect(primary.request).toHaveBeenCalledWith('profiles.list', { profile: 'work' })
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
+  it('closes a local registry prewarm when profile routing resolves to the shared primary', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ profile, sharedPrimary }))
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForAgent('local', 'work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    await requestGatewayForProfile('work', 'profiles.list')
+
+    expect(primary.request).toHaveBeenCalledWith('profiles.list', { profile: 'work' })
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
+  it('closes a superseded secondary after its active request drains', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ port: 5151, profile, sharedPrimary }))
+    await ensureGatewayForProfile('default')
+    await openGatewayForAgent('local', 'work')
+
+    const pendingRequest = deferred<{ method: string; params: Record<string, unknown> }>()
+    secondaryGateways[0].request.mockReturnValueOnce(pendingRequest.promise)
+    const request = requestGatewayForAgent('local', 'work', 'profiles.list')
+    await vi.waitFor(() => expect(secondaryGateways[0].request).toHaveBeenCalledOnce())
+
+    sharedPrimary = true
+    expect(await ensureGatewayForAgent('local', 'work')).toBe(true)
+    expect(secondaryGateways[0].close).not.toHaveBeenCalled()
+
+    pendingRequest.resolve({ method: 'profiles.list', params: {} })
+    await expect(request).resolves.toEqual({ method: 'profiles.list', params: {} })
+
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
+  it('still dials a secondary for a pooled local profile (isolated backend, #101416)', async () => {
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ port: 5151, profile }))
+    await ensureGatewayForProfile('default')
+
+    await requestGatewayForAgent('local', 'work', 'session.create', { title: 'g' })
+
+    expect(secondaryGateways).toHaveLength(1)
+    expect(primary.request).not.toHaveBeenCalled()
   })
 })

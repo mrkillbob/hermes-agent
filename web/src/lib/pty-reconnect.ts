@@ -1,3 +1,5 @@
+import { reconnectBackoffDelayMs } from "@hermes/shared";
+
 export type PtyConnectionState =
   | "connecting"
   | "open"
@@ -25,6 +27,28 @@ export const PTY_CONNECTING_TIMEOUT_MS = 8000;
 // retry. Bound it so the failure routes into the ordinary backoff instead.
 export const PTY_TICKET_TIMEOUT_MS = 8000;
 
+// Short ladder, tight cap: the PTY is the user's live terminal, so a transient
+// drop must come back fast and a dead backend must stop chasing quickly (the
+// banner offers a manual Reconnect). Deterministic so the banner can print it.
+export const PTY_RECONNECT_BASE_MS = 250;
+export const PTY_RECONNECT_MAX_MS = 3000;
+export const PTY_RECONNECT_MAX_ATTEMPTS = 5;
+
+// Browsers cannot emit WebSocket ping frames directly. A resize control frame
+// is consumed by `/api/pty` without reaching the child process, so it is a
+// safe application-level keepalive for quiet terminals behind idle-closing
+// proxies.
+export const PTY_KEEPALIVE_INTERVAL_MS = 20_000;
+
+/** Delay before PTY reconnect `attempt` (1-based: ChatPage bumps its counter before scheduling). */
+export function ptyReconnectDelayMs(attempt: number): number {
+  return reconnectBackoffDelayMs(attempt - 1, {
+    baseDelayMs: PTY_RECONNECT_BASE_MS,
+    capMs: PTY_RECONNECT_MAX_MS,
+    jitter: false,
+  });
+}
+
 // How long after a resumed socket opens we keep suppressing ANSI erase codes
 // (`ESC[K` / `ESC[X`) from the PTY stream. Ink's two-pass virtual scroll emits
 // them while replaying a long session; past that replay they are legitimate
@@ -42,6 +66,8 @@ export interface PtyResumeReconnectInput {
   socketReadyState?: number | null;
   ptyState: PtyConnectionState;
   connectInFlight?: boolean;
+  /** The automatic ladder used its last attempt; only the explicit Reconnect button restarts it. */
+  reconnectGaveUp?: boolean;
 }
 
 const WS_CONNECTING = 0;
@@ -56,8 +82,14 @@ export function shouldReconnectPtyOnPageResume({
   socketReadyState,
   ptyState,
   connectInFlight,
+  reconnectGaveUp,
 }: PtyResumeReconnectInput): boolean {
   if (!isActive || !online || visibilityState === "hidden") {
+    return false;
+  }
+  // The overlay says retries stopped: a tab focus or network blip must not
+  // silently restart the whole ladder behind it.
+  if (reconnectGaveUp) {
     return false;
   }
   if (ptyState === "ended") {

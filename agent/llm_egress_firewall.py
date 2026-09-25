@@ -87,6 +87,13 @@ class CodexReasoningReplaySegment:
 
 
 @dataclass(frozen=True, slots=True)
+class AnthropicThinkingReplaySegment:
+    """Opaque provider-issued thinking signature replayed only to Anthropic."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class GeneratedContextKey:
     """Application-owned JSON key for generated provider tool schemas."""
 
@@ -133,6 +140,7 @@ class OutboundText:
         | SanitizedSegment
         | GeneratedContextSegment
         | CodexReasoningReplaySegment
+        | AnthropicThinkingReplaySegment
         | ValidatedToolSyntaxSegment
         | SourceBoundSegment
         | SourcePresentationSegment
@@ -240,6 +248,17 @@ _CHUNKED_BASE64_CANDIDATE = re.compile(
 _HERMES_TASK_ID = re.compile(r"^t_[0-9a-f]{8}$")
 _PROMPT_CACHE_KEY = re.compile(r"^pck_[0-9a-f]{24}$")
 _CODEX_ENCRYPTED_REASONING_REPLAY = re.compile(r"^gAAAA[A-Za-z0-9_=-]{20,}$")
+# Anthropic's extended-thinking `signature` field is a provider-issued
+# cryptographic value on each `thinking` content block. It has no fixed
+# magic prefix like Codex's Fernet-wrapped `encrypted_content`, so this
+# shape check only bounds it to the real base64 alphabet (standard,
+# unpadded-or-padded) at a length consistent with observed signatures; the
+# actual trust boundary is the caller only constructing this segment type
+# for a `signature` key inside a `type: "thinking"` block on the Anthropic
+# route (see `allow_anthropic_thinking_replay` in llm_egress_classifier.py).
+# It must round-trip byte-exact on replay, so it cannot be redacted like an
+# ordinary base64-shaped string without breaking the Anthropic API contract.
+_ANTHROPIC_THINKING_SIGNATURE_REPLAY = re.compile(r"^[A-Za-z0-9+/]{20,8192}={0,2}$")
 _BOUNDED_DURATION = re.compile(r"^(?:0|[1-9][0-9]{0,6})(?:ms|s|m|h)$")
 _BOUNDED_CLI_WORD = re.compile(r"^--[a-z]+(?:-[a-z]+)*$")
 _SAFE_DIAGNOSTIC_STATUS_WORDS = frozenset({
@@ -613,7 +632,12 @@ _VALIDATED_TOOL_SYNTAX = {
 }
 _PRIVATE_ABSOLUTE_PATH = re.compile(
     r"(?:^|[\s\"'`(])(?:"
-    r"/(?:Users|home|private|var/folders|root|Volumes)/[^\s\"'`)]+"
+    # macOS resolves its real /tmp and /var/tmp under /private, already
+    # covered below; Linux CI runners and containers commonly place a
+    # process's own scratch/home directory directly under /tmp or
+    # /var/tmp (e.g. a pytest ``tmp_path``), which reveals the same kind
+    # of local filesystem layout a remote provider must not see.
+    r"/(?:Users|home|private|var/folders|var/tmp|tmp|root|Volumes)/[^\s\"'`)]+"
     r"|~(?:/|\\)[^\s\"'`)]+"
     r"|[A-Za-z]:\\+(?:Users|Documents and Settings)\\+[^\s\"'`)]+"
     r")",
@@ -949,6 +973,13 @@ def _canonical_base64_candidate(candidate: str) -> bool:
         return False
     if not 4 <= len(candidate) <= _MAX_BASE64_CANDIDATE_CHARS:
         return False
+    if len(set(candidate)) == 1:
+        # A single character repeated any number of times is a multiple of 4 in length
+        # about a quarter of the time, and a base64-alphabet character (there are 64 of
+        # them) round-trips through decode/re-encode trivially — filler/padding text
+        # ("xxxx...", separators, ASCII art) is not an encoding channel just because it
+        # happens to satisfy that arithmetic coincidence.
+        return False
     # Short words and word-shaped structural fragments frequently round-trip
     # mathematically as unpadded Base64. Their bounded lexical form is the
     # disambiguating signal; padding, digits, mixed punctuation, and long
@@ -1001,6 +1032,18 @@ def _canonical_chunked_base64_candidate(candidate: str) -> bool:
         # A run of bounded Ruff/flake8 findings is structured CI output, not
         # a wrapped encoding. Without this guard, ``E501 F821 W391`` is joined
         # across spaces and can happen to decode canonically.
+        return False
+    if any(chunk.isalpha() and chunk.islower() for chunk in chunks) and all(
+        (chunk.isalpha() and chunk.islower()) or (chunk.isdigit() and int(chunk) < 1000)
+        for chunk in chunks
+    ):
+        # Ordinary lowercase prose with an interpolated small count (e.g. a
+        # generated tool description reading "up to 10 in parallel", where
+        # the number comes from a config value and cannot be enumerated as a
+        # fixed literal) can coincidentally join into a canonical Base64
+        # string once spaces are removed. Genuine fixed-width encodings mix
+        # case, padding, and symbols; pure lowercase words plus a plain small
+        # decimal count is not an encoding channel.
         return False
     width = len(chunks[0])
     if not all(len(chunk) == width for chunk in chunks[:-1]):
@@ -1081,6 +1124,22 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
                     # protocol fields, not encoded text. A quoted numeric
                     # string remains eligible for Base64 detection.
                     continue
+            if (
+                candidate[:1] == "n"
+                and candidate[1:].isdigit()
+                and value[match.start(1) - 1 : match.start(1)] == "\\"
+                and value[match.end(1) : match.end(1) + 1] == "|"
+            ):
+                # A tool result carrying read_file's own line-number gutter
+                # ("{line}|{content}", tools/file_operations.py) is delivered
+                # as a JSON-escaped string; the escaped newline's literal "n"
+                # merges with the following line number into a coincidentally
+                # Base64-shaped token ("...\n100|chunk..." -> "n100"). A line
+                # number is never secret; the exemption requires the exact
+                # escaped-newline-then-pipe bracketing, so arbitrary content
+                # (including a real short Base64 blob elsewhere) stays
+                # fail-closed.
+                continue
             # The fixed Kanban task-id grammar carries only a 32-bit hex
             # database key. It is application protocol metadata, not an
             # encoded source payload.
@@ -1225,6 +1284,12 @@ def _source_text_for_base64_scan(
             # SQL snippets in source comments/queries likewise use fixed
             # keywords whose short uppercase spelling can decode by chance.
             or source_atom in {"PROVIDER", "TOOLSETS", "OPEN", "LIKE", "YAML"}
+            # Built-in tool descriptions (delegate_task, memory/kanban entry
+            # editing, write_file, MCP tool-call batching) use these fixed
+            # words/prefixes in ordinary English guidance. They are Hermes's
+            # own generated tool schema text, not encoded payloads, even
+            # though their spelling happens to decode canonically.
+            or source_atom in {"COMPLETE", "EXISTING", "YOUR", "connectors__"}
         )
 
     def is_source_identifier_in_code(
@@ -1699,6 +1764,12 @@ def _is_strict_sanitized_only_payload(
             and _CODEX_ENCRYPTED_REASONING_REPLAY.fullmatch(value.text) is not None,
             1 if isinstance(value.text, str) else 0,
         )
+    if isinstance(value, AnthropicThinkingReplaySegment):
+        return (
+            isinstance(value.text, str)
+            and _ANTHROPIC_THINKING_SIGNATURE_REPLAY.fullmatch(value.text) is not None,
+            1 if isinstance(value.text, str) else 0,
+        )
     if isinstance(value, UntrustedProvenanceSegment):
         return False, 0
     if isinstance(value, ValidatedToolSyntaxSegment):
@@ -1768,7 +1839,7 @@ class LLMEgressFirewall:
         state_dir: Path | str,
         *,
         max_serialized_bytes: int = 262_144,
-        max_sanitized_bytes: int = 32_768,
+        max_sanitized_bytes: int = 262_144,
         max_sanitized_segment_bytes: int = 32_768,
         max_conservative_tokens: int = 87_382,
         max_granted_serialized_bytes: int | None = None,
@@ -2155,6 +2226,7 @@ class LLMEgressFirewall:
                 | SanitizedSegment
                 | GeneratedContextSegment
                 | CodexReasoningReplaySegment
+                | AnthropicThinkingReplaySegment
                 | ValidatedToolSyntaxSegment
                 | SourceBoundSegment
                 | SourcePresentationSegment
@@ -2212,6 +2284,21 @@ class LLMEgressFirewall:
                 # is typed only for a reasoning item on that route. It must be
                 # replayed verbatim for cache and reasoning continuity, but it
                 # is not an independently usable credential payload.
+                return segment.text
+            if isinstance(segment, AnthropicThinkingReplaySegment):
+                if not _ANTHROPIC_THINKING_SIGNATURE_REPLAY.fullmatch(segment.text):
+                    reasons.append("invalid_anthropic_thinking_replay")
+                    return ""
+                # This signature is produced by the Anthropic Messages API for
+                # a `thinking` content block and must be replayed byte-exact
+                # on a later turn (Anthropic rejects a re-signed or altered
+                # thinking block). It is provider-issued protocol data, not
+                # user-supplied or model-generated free text, so it is exempt
+                # from the base64 encoding scan the same way the Codex
+                # `encrypted_content` replay token and the GitHub legacy
+                # GraphQL node id are: the classifier's job is to catch
+                # secrets smuggled through free text, not to flag a value the
+                # provider itself round-trips as opaque binding data.
                 return segment.text
             if isinstance(segment, ValidatedToolSyntaxSegment):
                 try:
@@ -2289,6 +2376,7 @@ class LLMEgressFirewall:
                     SanitizedSegment,
                     GeneratedContextSegment,
                     CodexReasoningReplaySegment,
+                    AnthropicThinkingReplaySegment,
                     ValidatedToolSyntaxSegment,
                     SourceBoundSegment,
                     SourcePresentationSegment,
@@ -2334,6 +2422,7 @@ class LLMEgressFirewall:
                             SanitizedSegment,
                             GeneratedContextSegment,
                             CodexReasoningReplaySegment,
+                            AnthropicThinkingReplaySegment,
                             ValidatedToolSyntaxSegment,
                         ),
                     ):

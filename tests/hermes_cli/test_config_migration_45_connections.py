@@ -8,6 +8,8 @@ decline, and leaves composites/empty lists alone.
 """
 
 import os
+import sys
+import types
 from unittest.mock import patch
 
 import pytest
@@ -62,6 +64,26 @@ class TestConnectionsToolsetMigration:
         assert "connections" in raw["known_builtin_toolsets"]["cli"]
         added = [entry for entry in results["config_added"] if "connections" in entry.lower()]
         assert len(added) == 1, results["config_added"]
+
+    def test_migrate_config_discards_a_cached_pre_migration_ladder(self, tmp_path, monkeypatch):
+        """The update process may load old migrations before swapping its checkout."""
+        from hermes_cli.config import migrate_config
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self._write_config(
+            tmp_path,
+            {
+                "_config_version": 45,
+                "mcp_servers": {"legacy-off": {"command": "/bin/true", "disabled": True}},
+            },
+        )
+        stale = types.ModuleType("hermes_cli.config_migrations")
+        monkeypatch.setitem(sys.modules, "hermes_cli.config_migrations", stale)
+
+        migrate_config(interactive=False, quiet=True)
+
+        raw = self._read_config(tmp_path)
+        assert raw["mcp_servers"]["legacy-off"] == {"command": "/bin/true", "enabled": False}
 
     @pytest.mark.parametrize(
         "platform_toolsets, known",

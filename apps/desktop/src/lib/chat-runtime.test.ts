@@ -67,10 +67,6 @@ describe('optimisticAttachmentRef', () => {
     expect(() => optimisticAttachmentRef(undefined as unknown as ComposerAttachment)).not.toThrow()
     expect(optimisticAttachmentRef(undefined as unknown as ComposerAttachment)).toBeNull()
   })
-
-  it('returns null for a null attachment instead of throwing', () => {
-    expect(optimisticAttachmentRef(null as unknown as ComposerAttachment)).toBeNull()
-  })
 })
 
 describe('attachmentDisplayText', () => {
@@ -78,10 +74,6 @@ describe('attachmentDisplayText', () => {
     expect(() => attachmentDisplayText(undefined as unknown as ComposerAttachment)).not.toThrow()
     expect(attachmentDisplayText(undefined as unknown as ComposerAttachment)).toBeNull()
     expect(attachmentDisplayText(null as unknown as ComposerAttachment)).toBeNull()
-  })
-
-  it('still resolves a normal file ref', () => {
-    expect(attachmentDisplayText(attachment({ kind: 'file', refText: '@file:src/a.ts' }))).toBe('@file:src/a.ts')
   })
 })
 

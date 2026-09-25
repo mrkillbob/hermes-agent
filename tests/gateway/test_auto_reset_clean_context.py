@@ -19,16 +19,9 @@ guarantee regressed once the Telegram topic-binding heal landed
 The fix captures the fresh entry from ``reset_session`` and re-syncs the
 topic binding to it (a no-op on non-topic lanes).
 
-Two tests:
-
-* ``TestAutoResetBlockReSyncsBinding`` — an AST invariant on
-  ``gateway/run.py`` (mirrors ``test_compression_session_id_persistence.py``):
-  the compression-exhausted auto-reset block must capture
-  ``reset_session(...)`` and call ``_sync_telegram_topic_binding`` afterward.
-  This is the load-bearing regression pin.
-* ``TestAutoResetLoadsCleanContext`` — a behavioral contract on the real
-  ``SessionStore``: after ``reset_session`` the next turn loads an EMPTY
-  transcript for the new session_id, never the bloated child's transcript.
+``TestAutoResetLoadsCleanContext`` — a behavioral contract on the real
+``SessionStore``: after ``reset_session`` the next turn loads an EMPTY
+transcript for the new session_id, never the bloated child's transcript.
 """
 
 from __future__ import annotations
@@ -36,8 +29,6 @@ from __future__ import annotations
 import ast
 import inspect
 
-from gateway import run as gateway_run
-from gateway import run_turn as gateway_run_turn
 from gateway import run_turn as gateway_run_turn
 from gateway.config import GatewayConfig, Platform
 from gateway.session import SessionSource, SessionStore

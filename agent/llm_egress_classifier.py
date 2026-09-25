@@ -10,6 +10,7 @@ from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from agent.llm_egress_firewall import (
+    AnthropicThinkingReplaySegment,
     CodexReasoningReplaySegment,
     GeneratedContextKey,
     GeneratedContextSegment,
@@ -472,6 +473,7 @@ def _typed_payload_mapping(
     generated_context: bool = False,
     redact_generated_context: bool = False,
     allow_codex_reasoning_replay: bool = False,
+    allow_anthropic_thinking_replay: bool = False,
     registry: SourceProvenanceRegistry | None = None,
     request_identity: tuple[str, str, str, str] = ("", "", "", ""),
 ) -> Any:
@@ -484,7 +486,11 @@ def _typed_payload_mapping(
                 or value.get("name") == "read_file"
             )
         )
-        output_call_id = value.get("tool_call_id") or value.get("call_id")
+        output_call_id = (
+            value.get("tool_call_id")
+            or value.get("call_id")
+            or value.get("tool_use_id")
+        )
         is_recognized_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in syntax_tool_call_ids
@@ -538,7 +544,7 @@ def _typed_payload_mapping(
             and output_call_id in read_file_projection_tool_call_ids
             and (
                 value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
+                or value.get("type") in {"function_call_output", "tool_result"}
             )
         )
         is_web_replay_tool_result = (
@@ -794,6 +800,18 @@ def _typed_payload_mapping(
             and isinstance(value.get("encrypted_content"), str)
             and isinstance(value.get("summary", []), list)
         )
+        # Anthropic replays a prior turn's signed `thinking` block verbatim on
+        # a later turn (required for cache/reasoning continuity); only the
+        # `signature` field on that exact block shape earns the opaque replay
+        # type, mirroring the Codex `reasoning`/`encrypted_content` handling
+        # above. The `thinking` text itself stays ordinary free text so it
+        # still gets normal secret/path scanning.
+        is_anthropic_thinking_replay = (
+            allow_anthropic_thinking_replay
+            and value.get("type") == "thinking"
+            and isinstance(value.get("signature"), str)
+            and isinstance(value.get("thinking", ""), str)
+        )
         mapping_state = locals()
         for key, item in value.items():
             _typed_payload_mapping_item(mapping_state, key, item, typed)
@@ -846,6 +864,7 @@ def _typed_payload_mapping_item(
     generated_context = state['generated_context']
     redact_generated_context = state['redact_generated_context']
     allow_codex_reasoning_replay = state['allow_codex_reasoning_replay']
+    allow_anthropic_thinking_replay = state['allow_anthropic_thinking_replay']
     registry = state['registry']
     request_identity = state['request_identity']
     combined_github_list_limit = state['combined_github_list_limit']
@@ -859,6 +878,7 @@ def _typed_payload_mapping_item(
     github_list_limit = state['github_list_limit']
     handled_tool_result = state['handled_tool_result']
     is_codex_reasoning_replay = state['is_codex_reasoning_replay']
+    is_anthropic_thinking_replay = state['is_anthropic_thinking_replay']
     is_elided_kanban_tool_result = state['is_elided_kanban_tool_result']
     is_file_mutation_replay_call = state['is_file_mutation_replay_call']
     is_file_mutation_replay_result = state['is_file_mutation_replay_result']
@@ -914,6 +934,30 @@ def _typed_payload_mapping_item(
     )
     if is_codex_reasoning_replay and key == "encrypted_content":
         typed[typed_key] = CodexReasoningReplaySegment(item)
+        return True
+    if is_anthropic_thinking_replay and key == "signature":
+        typed[typed_key] = AnthropicThinkingReplaySegment(item)
+        return True
+    if (
+        allow_anthropic_thinking_replay
+        and value.get("type") == "tool_use"
+        and key == "input"
+        and isinstance(direct_name, str)
+        and isinstance(item, Mapping)
+    ):
+        # Anthropic sends the assistant's prior tool_use block back verbatim on
+        # the next request.  The input is generated context for every tool_use
+        # block, including provider aliases whose name is not in our local
+        # read-only registry. Redact unsafe-looking generated values while
+        # preserving the object shape required by the Messages API.
+        typed[key] = _typed_payload(
+            item,
+            grant_texts,
+            used_grants,
+            sanitized_cap=sanitized_cap,
+            generated_context=True,
+            redact_generated_context=True,
+        )
         return True
     if is_codex_reasoning_replay and key == "summary":
         typed[typed_key] = _typed_payload(
@@ -980,11 +1024,12 @@ def _typed_payload_mapping_item(
                 generated_context
                 or context_mapping
                 or generated_assistant_mapping
-                or key in {"instructions", "system_prompt", "tools"}
+                or key in {"instructions", "system_prompt", "system", "tools"}
             )
         ),
         redact_generated_context=redact_generated_context,
         allow_codex_reasoning_replay=allow_codex_reasoning_replay,
+        allow_anthropic_thinking_replay=allow_anthropic_thinking_replay,
         registry=registry,
         request_identity=request_identity,
     )
@@ -1156,6 +1201,13 @@ def _typed_payload_mapping_structured(
         or is_read_file_projection_tool_result
         or is_scratch_read_file_tool_result
     ):
+        if (
+            is_read_file_projection_tool_result
+            and protected_kanban_context
+            and value.get("type") == "tool_result"
+        ):
+            typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+            return True
         if (
             source_metadata is not None
             and not is_scratch_read_file_tool_result
@@ -1371,6 +1423,19 @@ def _typed_payload_mapping_scalar_content(
         # An exact call-id proves this is the local read tool's result,
         # but an error/denial has no source grant.  Replay only the
         # bounded outcome instead of treating the error text as source.
+        typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+        return True
+    if (
+        is_read_file_projection_tool_result
+        and protected_kanban_context
+        and value.get("type") == "tool_result"
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        # Anthropic represents a tool result as a scalar ``content`` field.
+        # Keep the exact call binding, but never replay local file bytes on a
+        # protected remote route where an assistant turn may contain opaque
+        # encodings that the final firewall must reject.
         typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
         return True
     if (
@@ -1930,6 +1995,7 @@ def _typed_payload_violation_locations(
         LiteralSegment,
         ValidatedToolSyntaxSegment,
         CodexReasoningReplaySegment,
+        AnthropicThinkingReplaySegment,
         SourcePresentationSegment,
         SourceBoundSegment,
         UntrustedProvenanceSegment,

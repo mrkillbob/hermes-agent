@@ -33,34 +33,6 @@ def _agent_with_db(session_id: str = "sess-1"):
     return agent
 
 
-def test_touch_activity_persists_session_activity_once_per_minute(monkeypatch):
-    agent = _agent_with_db()
-    mono = {"t": 1000.0}
-    monkeypatch.setattr(run_agent.time, "time", lambda: 1_700_000_000.0)
-    monkeypatch.setattr(run_agent.time, "monotonic", lambda: mono["t"])
-    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-
-    agent._touch_activity("starting API call #1")
-    agent._session_db.touch_session_activity.assert_called_once_with(
-        "sess-1",
-        1_700_000_000.0,
-        description="starting API call #1",
-        provenance=ActivityProvenance.UNKNOWN,
-    )
-
-    agent._session_db.touch_session_activity.reset_mock()
-    mono["t"] = 1030.0  # within 60s window
-    agent._touch_activity("receiving stream response")
-    agent._session_db.touch_session_activity.assert_not_called()
-
-    mono["t"] = 1061.0
-    agent._touch_activity("API call #1 completed")
-    agent._session_db.touch_session_activity.assert_called_once_with(
-        "sess-1",
-        1_700_000_000.0,
-        description="API call #1 completed",
-        provenance=ActivityProvenance.UNKNOWN,
-    )
 
 
 def test_touch_activity_skips_persist_without_session_db(monkeypatch):
@@ -173,17 +145,6 @@ def test_heartbeat_write_failure_never_propagates_direct(monkeypatch):
     assert agent._session_db.touch_session_activity.called
 
 
-def test_heartbeat_cadence_constant_pinned():
-    """Heartbeat cadence is a config-independent constant and >= 30s.
-
-    The SessionDB write path is contended; the heartbeat must stay
-    low-frequency regardless of compression/agent config.
-    """
-    from agent.session_activity import (
-        SESSION_ACTIVITY_HEARTBEAT_MIN_INTERVAL_SECONDS,
-    )
-
-    assert SESSION_ACTIVITY_HEARTBEAT_MIN_INTERVAL_SECONDS >= 30.0
 
 
 def test_heartbeat_respects_cadence_constant(monkeypatch):

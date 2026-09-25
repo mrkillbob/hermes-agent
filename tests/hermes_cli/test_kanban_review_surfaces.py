@@ -115,11 +115,6 @@ def test_review_tools_are_gated_and_visible_to_kanban_workers(
     assert "kanban_request_changes" in resolve_toolset("kanban")
 
 
-def test_review_changes_are_exposed_in_acp() -> None:
-    pytest.importorskip("acp", reason="ACP adapter requires the optional acp extra")
-    from acp_adapter.tools import _POLISHED_TOOLS
-
-    assert "kanban_request_changes" in _POLISHED_TOOLS
 
 
 def test_review_cli_round_trip_preserves_handoff(

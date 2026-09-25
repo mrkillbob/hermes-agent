@@ -281,6 +281,14 @@ class CodexAppServerClient:
 
     def stderr_tail(self, n: int = 20) -> list[str]:
         """Return last n lines of codex's stderr (for error reports)."""
+        # The stdout reader can observe EOF and report the transport loss just
+        # before the stderr reader has drained the child's final diagnostics.
+        # Join only after process exit, and only for a bounded interval, so
+        # crash reports include the useful tail without delaying live calls.
+        if self._proc.poll() is not None:
+            reader = getattr(self, "_stderr_reader", None)
+            if reader is not None and reader.is_alive():
+                reader.join(timeout=0.5)
         with self._stderr_lock:
             return list(self._stderr_lines[-n:])
 

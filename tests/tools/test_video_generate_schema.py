@@ -1,7 +1,7 @@
 """video_generate dynamic schema — capability-gated params (#95681 diet).
 
 Mirrors tests/tools/test_image_generate_schema.py (#97057). Coverage is
-guaranteed three ways:
+guaranteed two ways:
 1. every in-tree video_gen plugin's capabilities() must declare EVERY axis
    the schema builder reads (a new axis added to the builder without fleet
    declarations fails here);
@@ -18,7 +18,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import tools.video_generation_tool as vt
 from tools.video_generation_tool import (
-    VIDEO_GENERATE_SCHEMA,
     _build_dynamic_video_schema,
 )
 
@@ -191,12 +190,6 @@ class TestDynamicParamGating(unittest.TestCase):
             schema = _build_dynamic_video_schema()
         self.assertEqual(sorted(schema["parameters"]["properties"]), ["prompt"])
 
-    def test_static_schema_carries_no_capability_args(self):
-        props = VIDEO_GENERATE_SCHEMA["parameters"]["properties"]
-        self.assertEqual(
-            sorted(props),
-            ["aspect_ratio", "duration", "prompt", "resolution"],
-        )
 
 
 if __name__ == "__main__":

@@ -64,3 +64,52 @@ def test_drop_stale_root_modules_leaves_complete_utils_alone():
     before = sys.modules["utils"]
     assert drop_stale_root_modules() == []
     assert sys.modules["utils"] is before
+
+
+def test_drop_stale_root_modules_also_heals_stale_package_modules():
+    import types
+    from hermes_cli.stale_modules import drop_stale_root_modules
+
+    names = ("hermes_cli.config", "hermes_cli.tools_config", "hermes_cli.config_migrations", "gateway.status")
+    before = {name: sys.modules.pop(name, None) for name in names}
+    try:
+        for name in names:
+            sys.modules[name] = types.ModuleType(name)
+        stale_config = sys.modules["hermes_cli.config"]
+        stale_config.migrate_config = lambda *_args, **_kwargs: {}
+        assert not hasattr(stale_config, "drop_stale_root_modules")
+        stale_tools_config = sys.modules["hermes_cli.tools_config"]
+        stale_tools_config._configurable_keys = lambda: set()
+        # The 45→46 MCP migration imports this parser, added after some N-1
+        # updater processes had already cached tools_config.
+        assert not hasattr(stale_tools_config, "_parse_enabled_flag")
+        stale_migrations = sys.modules["hermes_cli.config_migrations"]
+        stale_migrations._migrate_to_46 = lambda *_args: None
+        stale_migrations.MIGRATIONS = ((45, lambda *_args: None),)
+        assert set(drop_stale_root_modules()) == set(names)
+        assert all(name not in sys.modules for name in names)
+    finally:
+        for name in names:
+            sys.modules.pop(name, None)
+            if before[name] is not None:
+                sys.modules[name] = before[name]
+
+
+def test_drop_stale_root_modules_keeps_module_being_imported():
+    import importlib.machinery
+    import types
+    from hermes_cli.stale_modules import drop_stale_root_modules
+
+    name = "hermes_cli.tools_config"
+    before = sys.modules.get(name)
+    module = types.ModuleType(name)
+    module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+    module.__spec__._initializing = True
+    sys.modules[name] = module
+    try:
+        assert drop_stale_root_modules() == []
+        assert sys.modules[name] is module
+    finally:
+        sys.modules.pop(name, None)
+        if before is not None:
+            sys.modules[name] = before

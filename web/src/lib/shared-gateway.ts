@@ -1,4 +1,5 @@
 import type { StatusResponse } from "@/lib/api";
+import { ApiError } from "@/lib/api-error";
 
 /** Profiles a gateway restart would blip when the managed profile is carried by the shared
  *  multiplexer (default first). `null` for a standalone gateway or an older backend without
@@ -69,13 +70,17 @@ export function gatewayActionFailedMessage(
   const head = trimmed
     ? `${GATEWAY_VERB_COPY[verb]}: ${trimmed}${ended ? "" : "."}`
     : `${GATEWAY_VERB_COPY[verb]}.`;
-  const unreachable = error instanceof Error && error.message.startsWith("0:");
+  const unreachable = error instanceof ApiError && error.status === 0;
   return unreachable ? head : `${head} Open Logs for details.`;
 }
 
 /** A 409 on gateway start/stop for a served profile carries the multiplexer explanation in
  *  `detail`, which `fetchJSON` already lifts into `ApiError.message`. Return it, else null. */
 export function servedProfileRefusal(error: unknown): string | null {
+  if (error instanceof ApiError) {
+    return error.status === 409 ? error.message : null;
+  }
+  // Pre-ApiError shape (`"409: {...}"`) from callers that still hand-roll fetch.
   const text = error instanceof Error ? error.message : String(error ?? "");
   if (!text.startsWith("409")) return null;
   const detail = text.match(/"detail"\s*:\s*"([^"]+)"/)?.[1];

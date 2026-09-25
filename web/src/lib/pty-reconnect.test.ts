@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  PTY_RECONNECT_BASE_MS,
+  PTY_RECONNECT_MAX_MS,
+  ptyReconnectDelayMs,
   shouldBlockPtyInput,
   shouldReconnectPtyOnPageResume,
 } from "./pty-reconnect";
@@ -112,12 +115,20 @@ describe("shouldReconnectPtyOnPageResume", () => {
   });
 });
 
-describe("shouldBlockPtyInput", () => {
-  it("allows input only while the PTY socket is open", () => {
-    expect(shouldBlockPtyInput("open")).toBe(false);
-    expect(shouldBlockPtyInput("connecting")).toBe(true);
-    expect(shouldBlockPtyInput("reconnecting")).toBe(true);
-    expect(shouldBlockPtyInput("closed")).toBe(true);
-    expect(shouldBlockPtyInput("ended")).toBe(true);
-  });
-});
+describe('shouldBlockPtyInput', () => {
+  it('allows input only while the PTY socket is open', () => {
+    expect(shouldBlockPtyInput('open')).toBe(false)
+    expect(shouldBlockPtyInput('connecting')).toBe(true)
+    expect(shouldBlockPtyInput('reconnecting')).toBe(true)
+    expect(shouldBlockPtyInput('closed')).toBe(true)
+    expect(shouldBlockPtyInput('ended')).toBe(true)
+  })
+})
+
+describe('ptyReconnectDelayMs', () => {
+  it('doubles from the base on each attempt and clamps at the cap', () => {
+    expect(ptyReconnectDelayMs(1)).toBe(PTY_RECONNECT_BASE_MS)
+    expect(ptyReconnectDelayMs(2)).toBe(Math.min(PTY_RECONNECT_BASE_MS * 2, PTY_RECONNECT_MAX_MS))
+    expect(ptyReconnectDelayMs(99)).toBe(PTY_RECONNECT_MAX_MS)
+  })
+})

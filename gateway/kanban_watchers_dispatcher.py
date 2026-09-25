@@ -12,6 +12,7 @@ import os
 import sqlite3
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 from gateway.kanban_watchers_common import _board_slugs, _positive_int_setting, logger
@@ -290,43 +291,44 @@ class _KanbanDispatcher:
             return 0
         attempted = 0
         successes = 0
-        for slug in self._board_slugs():
-            if attempted >= auto_decompose_per_tick:
-                break
-            # Pin the board via env for the call: the decomposer connects
-            # with no board kwarg (same pattern as the dashboard specify endpoint).
-            prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-            try:
-                os.environ["HERMES_KANBAN_BOARD"] = slug
+        with _default_profile_secret_scope():
+            for slug in self._board_slugs():
+                if attempted >= auto_decompose_per_tick:
+                    break
+                # Pin the board via env for the call: the decomposer connects
+                # with no board kwarg (same pattern as the dashboard specify endpoint).
+                prev_env = os.environ.get("HERMES_KANBAN_BOARD")
                 try:
-                    triage_ids = _decomp.list_triage_ids()
-                except Exception as exc:
-                    logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
-                    triage_ids = []
-                for tid in triage_ids:
-                    if attempted >= auto_decompose_per_tick:
-                        break
+                    os.environ["HERMES_KANBAN_BOARD"] = slug
                     try:
-                        with _kbc().connect_closing(board=slug) as conn:
-                            history = {row["kind"] for row in conn.execute(
-                                "SELECT kind FROM task_events WHERE task_id = ? AND kind IN ('decomposed', 'specified')", (tid,))}
-                            if "decomposed" in history:
-                                continue
-                            if "specified" in history:
-                                task = self.kb.get_task(conn, tid)
-                                if task and task.body and task.title and task.block_kind != "needs_input":
-                                    successes += int(self.kb.specify_triage_task(conn, tid, author="auto-decomposer"))
-                                continue
-                    except Exception:
-                        logger.exception("kanban auto-decompose: history unavailable for %s; skipping", tid)
-                        continue
-                    attempted += 1
-                    successes += self._decompose_one(_decomp, slug, tid)
-            finally:
-                if prev_env is None:
-                    os.environ.pop("HERMES_KANBAN_BOARD", None)
-                else:
-                    os.environ["HERMES_KANBAN_BOARD"] = prev_env
+                        triage_ids = _decomp.list_triage_ids()
+                    except Exception as exc:
+                        logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
+                        triage_ids = []
+                    for tid in triage_ids:
+                        if attempted >= auto_decompose_per_tick:
+                            break
+                        try:
+                            with _kbc().connect_closing(board=slug) as conn:
+                                history = {row["kind"] for row in conn.execute(
+                                    "SELECT kind FROM task_events WHERE task_id = ? AND kind IN ('decomposed', 'specified')", (tid,))}
+                                if "decomposed" in history:
+                                    continue
+                                if "specified" in history:
+                                    task = self.kb.get_task(conn, tid)
+                                    if task and task.body and task.title and task.block_kind != "needs_input":
+                                        successes += int(self.kb.specify_triage_task(conn, tid, author="auto-decomposer"))
+                                    continue
+                        except Exception:
+                            logger.exception("kanban auto-decompose: history unavailable for %s; skipping", tid)
+                            continue
+                        attempted += 1
+                        successes += self._decompose_one(_decomp, slug, tid)
+                finally:
+                    if prev_env is None:
+                        os.environ.pop("HERMES_KANBAN_BOARD", None)
+                    else:
+                        os.environ["HERMES_KANBAN_BOARD"] = prev_env
         return successes
 
     @staticmethod
@@ -355,6 +357,31 @@ class _KanbanDispatcher:
         else:
             logger.info("kanban auto-decompose [%s]: %s → single task (no fanout)", slug, tid)
         return 1
+
+
+@contextlib.contextmanager
+def _default_profile_secret_scope():
+    """Install the gateway launch profile's secret scope while multiplexing is on.
+
+    The tick runs via ``_to_thread_process_service`` in a fresh context, so no
+    per-turn scope exists and ``get_secret`` fails closed. The decomposer's aux
+    LLM reads ``auxiliary.*`` from ``get_hermes_home()``, so its credentials come
+    from that same home. No-op for single-profile gateways.
+    """
+    from agent.secret_scope import (
+        build_profile_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope)
+    from hermes_constants import get_hermes_home
+
+    if not is_multiplex_active():
+        yield
+        return
+    token = set_secret_scope(
+        build_profile_secret_scope(Path(get_hermes_home())), profile_home=str(get_hermes_home()))
+    try:
+        yield
+    finally:
+        reset_secret_scope(token)
+
 
 
 def _log_spawn_results(results: Optional[list]) -> bool:

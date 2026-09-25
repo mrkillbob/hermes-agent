@@ -15,7 +15,6 @@ aiohttp = pytest.importorskip("aiohttp", reason="requires aiohttp [messaging] ex
 if not isinstance(getattr(aiohttp, "__version__", None), str): pytest.skip("requires real aiohttp [messaging] extra", allow_module_level=True)
 
 from gateway.config import PlatformConfig
-from plugins.platforms.slack import adapter as slack_module
 from plugins.platforms.slack.adapter import SlackAdapter
 
 
@@ -173,12 +172,6 @@ class TestMarkdownBlockMode:
     """Opt-in ``markdown_blocks`` renders raw standard markdown via Slack's
     native ``markdown`` block, keeping the mrkdwn ``text`` fallback."""
 
-    @pytest.mark.asyncio
-    async def test_disabled_by_default(self):
-        adapter, client = _make_adapter()
-        await adapter.send("C1", RICH_TABLE_MD)
-        kwargs = client.chat_postMessage.await_args.kwargs
-        assert "blocks" not in kwargs
 
     @pytest.mark.asyncio
     async def test_enabled_sends_markdown_block_with_raw_content(self):

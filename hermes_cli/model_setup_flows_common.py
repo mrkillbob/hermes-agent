@@ -12,7 +12,6 @@ import contextlib
 import subprocess
 from urllib.parse import urlparse
 
-from hermes_cli.cli_output import line_input
 from hermes_cli.config import clear_model_endpoint_credentials
 
 _HTTP = ("http://", "https://")
@@ -31,7 +30,11 @@ def _ask(prompt: str, *, secret: bool = False, raw: bool = False, cancel_msg: st
     if secret:
         from hermes_cli.secret_prompt import masked_secret_prompt as fn
     else:
-        fn = input if raw else line_input
+        if raw:
+            fn = input
+        else:
+            from hermes_cli.cli_output import line_input
+            fn = line_input
     try:
         return fn(prompt).strip()
     except (KeyboardInterrupt, EOFError):

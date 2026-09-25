@@ -442,10 +442,14 @@ def served_profile_child_env(
 
 
 def _is_routed_home(target_home: "str | Path") -> bool:
-    """True when ``target_home`` is not the process's own (launch) home."""
-    from hermes_constants import get_process_hermes_home
+    """True when ``target_home`` is not the process's own (launch) home.
+
+    Same launch-home identity as ``agent.secret_scope.serves_routed_profile()``: under a host that
+    mirrors the served profile into ``HERMES_HOME``, the live env var names the served home and the
+    launch residue would never be stripped from that profile's child env."""
+    from hermes_constants import get_routing_process_hermes_home
     try:
-        return Path(target_home).resolve() != get_process_hermes_home().resolve()
+        return Path(target_home).resolve() != get_routing_process_hermes_home().resolve()
     except OSError:
         return True
 
@@ -738,8 +742,11 @@ def _trusted_local_terminal_session() -> bool:
 
 
 def _make_run_env(env: dict) -> dict:
-    """Build a run environment with a sane PATH and provider-var stripping."""
-    source = dict(os.environ | env)
+    """Build a run environment with a sane PATH and provider-var stripping. The process env is
+    the LAUNCH profile's; under a routed home override its ``.env`` residue is dropped first
+    (``strip_launch_profile_env``, a no-op for the launch profile) so the backend's own ``env``
+    and the served profile's declared passthrough names are what the child sees."""
+    source = dict(strip_launch_profile_env(os.environ.copy()) | env)
     result = _scrubbed_env(
         [(source, True)], frozenset(),
         lambda p: _prepend_git_bash_dirs(_append_missing_sane_path_entries(p)),
@@ -1032,6 +1039,17 @@ class LocalEnvironment(BaseEnvironment):
         except OSError:  # ProcessLookupError / PermissionError included
             with contextlib.suppress(Exception):
                 proc.kill()
+
+    def _force_kill_process(self, proc):
+        """SIGKILL the whole group with no TERM grace or wait: the caller os._exit()s next."""
+        if _IS_WINDOWS:  # already a forced tree kill
+            return self._kill_process(proc)
+        with contextlib.suppress(OSError):
+            pgid = getattr(proc, "_hermes_pgid", None) or os.getpgid(proc.pid)
+            if pgid != os.getpgrp():  # never our own group (see _kill_process_group_posix)
+                os.killpg(pgid, signal.SIGKILL)  # windows-footgun: ok — POSIX only (_IS_WINDOWS returned above)
+        with contextlib.suppress(OSError):
+            proc.kill()
 
     def _extract_cwd_from_output(self, result: dict):
         """Base semantics plus: Git Bash ``pwd -P`` emits MSYS form on Windows —

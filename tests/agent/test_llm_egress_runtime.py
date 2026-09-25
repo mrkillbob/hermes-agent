@@ -110,6 +110,100 @@ def test_runtime_authorizes_mixed_exact_source_and_bounded_sanitized_text(tmp_pa
     assert "policy_digest" not in wire
 
 
+def test_anthropic_replays_readonly_tool_use_without_raw_local_path(tmp_path):
+    """Provider-generated Anthropic tool history keeps its wire shape but not local paths."""
+
+    agent = _agent(tmp_path)
+    agent.provider = "anthropic"
+    agent.api_mode = "anthropic_messages"
+    local_path = str(tmp_path / "private" / "wire.txt")
+    kwargs = {
+        "model": "claude-test",
+        "messages": [{
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_read_1",
+                "name": "mcp__read_file",
+                "input": {"path": local_path},
+            }],
+        }],
+    }
+
+    authorized, _ = authorize_agent_sdk_kwargs(agent, kwargs)
+
+    block = authorized["messages"][0]["content"][0]
+    assert block["type"] == "tool_use"
+    assert block["input"]["path"] != local_path
+
+
+def test_anthropic_replays_unknown_tool_use_without_raw_local_path(tmp_path):
+    """Unknown provider aliases still use the generated Anthropic tool boundary."""
+
+    agent = _agent(tmp_path)
+    agent.provider = "anthropic"
+    agent.api_mode = "anthropic_messages"
+    local_path = str(tmp_path / "private" / "context-note.txt")
+    kwargs = {
+        "model": "claude-test",
+        "messages": [{
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_unknown_1",
+                "name": "mcp__context_notes",
+                "input": {"path": local_path},
+            }],
+        }],
+    }
+
+    authorized, _ = authorize_agent_sdk_kwargs(agent, kwargs)
+
+    block = authorized["messages"][0]["content"][0]
+    assert block["type"] == "tool_use"
+    assert block["input"]["path"] != local_path
+
+
+def test_anthropic_tool_result_scalar_is_elided_on_protected_route(tmp_path, monkeypatch):
+    """Anthropic's nested scalar tool_result content never replays local bytes."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "anthropic"
+    agent.api_mode = "anthropic_messages"
+    kwargs = {
+        "model": "claude-test",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_read_1",
+                        "name": "mcp__read_file",
+                        "input": {"path": "wire.txt"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_read_1",
+                        "content": "c2VjcmV0LXBheWxvYWQ=",
+                    }
+                ],
+            },
+        ],
+    }
+
+    authorized, _ = authorize_agent_sdk_kwargs(agent, kwargs)
+
+    result = authorized["messages"][1]["content"][0]
+    assert result["content"] == _READ_FILE_REPLAY_ELISION
+
+
 def test_runtime_granted_caps_default_to_the_configured_request_caps(tmp_path):
     registry = SourceProvenanceRegistry()
     path = tmp_path / "large-source.txt"

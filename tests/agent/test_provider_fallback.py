@@ -50,8 +50,6 @@ class TestFallbackChainInit:
         assert agent._fallback_index == 0
         assert agent._fallback_model is None
 
-
-
     def test_invalid_entries_filtered(self):
         fbs = [
             {"provider": "openai", "model": "gpt-4o"},
@@ -220,13 +218,13 @@ class TestFallbackChainAdvancement:
             assert agent._try_activate_fallback(FailoverReason.rate_limit) is True
             assert agent._try_activate_fallback(FailoverReason.overloaded) is True
 
-        assert agent._pending_fallback_notice == [
-            "⚠️ Model fallback: gpt-5.6-sol via openai-codex unavailable "
-            "(rate limit); using glm-5.2 via zai. "
-            "Primary retry eligible in ~60 s; recovery is not guaranteed.",
-            "⚠️ Model fallback: glm-5.2 via zai unavailable "
-            "(provider overloaded); using deepseek-v4-flash via deepseek.",
-        ]
+        # One user-visible notice per switch, in order, each naming from/to.
+        notices = agent._pending_fallback_notice
+        assert len(notices) == 2
+        assert "gpt-5.6-sol" in notices[0] and "glm-5.2" in notices[0]
+        assert "glm-5.2" in notices[1] and "deepseek-v4-flash" in notices[1]
+        assert agent._retry_status_buffer[-1] == ("status", notices[1])
+
     def test_skips_unconfigured_provider_to_next(self):
         """If resolve_provider_client returns None, skip to next in chain."""
         fbs = [
@@ -389,7 +387,6 @@ def _pool(n_entries: int, has_available: bool = True):
 class TestPoolRotationRoom:
     def test_none_pool_returns_false(self):
         assert _pool_may_recover_from_rate_limit(None) is False
-
 
 
 

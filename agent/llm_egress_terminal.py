@@ -31,7 +31,9 @@ _VALIDATED_SYNTAX_TOOL_NAMES = frozenset({"terminal"})
 _REMOTE_KANBAN_PROJECTION_TOOL_NAMES = frozenset({"kanban_show"})
 _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES = frozenset({"terminal", "browser_exec"})
 _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"search_files"})
-_REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file"})
+_REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset(
+    {"read_file", "mcp__read_file", "mcp__context_notes"}
+)
 _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES = frozenset({"web_extract", "web_search"})
 _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES = frozenset({"patch", "write_file"})
 _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES = frozenset(
@@ -42,6 +44,8 @@ _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES = frozenset(
         "read_file",
         "web_extract",
         "web_search",
+        # Anthropic's OAuth adapter uses the wire alias for this built-in tool.
+        "mcp__read_file",
     }
 )
 _GITHUB_LIST_TERMINAL_MAX_ROWS = 100
@@ -254,7 +258,7 @@ def _recognized_tool_call_ids(
                 else item.get("name")
             )
             if (
-                item.get("type") in {"function", "function_call"}
+                item.get("type") in {"function", "function_call", "tool_use"}
                 and direct_name in tool_names
             ):
                 call_id = item.get("call_id") or item.get("id")

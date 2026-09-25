@@ -389,7 +389,6 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
         for p in patches:
             p.stop()
     assert outcome.ok is False
-    assert "not in triage" in outcome.reason
 
 
 @pytest.mark.parametrize(

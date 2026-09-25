@@ -654,7 +654,7 @@ def _is_codex_gpt54_or_gpt55(model: Optional[str], provider: Optional[str] = Non
         return "900k" not in bare
     return bare == "gpt-daybreak-blue-latest" or any(
         bare == fam or bare.startswith(fam + "-") or bare.startswith(fam + ".")
-        for fam in ("gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6-sol", "gpt-6-terra", "gpt-6-luna"))
+        for fam in ("gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-6-sol", "gpt-6-luna"))
 
 
 def _codex_route_bare_model(model: Optional[str], provider: Optional[str]) -> Optional[str]:
@@ -1120,15 +1120,17 @@ def _scoped_key_env(name: str) -> str:
     """Read a provider API key (or its paired base-URL) env var through the profile secret scope.
 
     In agent turns the scope's verdict is authoritative (a scoped miss must not borrow another
-    profile's key); unscoped startup/CLI paths fall back to os.environ.
+    profile's key); only the unscoped default-profile path (``UnscopedSecretError``) reads
+    ``os.environ`` -- any other scope failure propagates instead of borrowing the ambient env.
     """
     if not name:
         return ""
-    with contextlib.suppress(Exception):
-        from agent.secret_scope import UnscopedSecretError, get_secret
-        with contextlib.suppress(UnscopedSecretError):
-            return (get_secret(name) or "").strip()
-    return (os.getenv(name) or "").strip()
+    from agent.secret_scope import UnscopedSecretError, get_secret
+
+    try:
+        return (get_secret(name) or "").strip()
+    except UnscopedSecretError:
+        return (os.getenv(name) or "").strip()
 
 
 # Codex Responses → chat.completions adapter, so aux consumers need no changes.
@@ -2557,6 +2559,11 @@ def _auxiliary_egress_binding(
         "_llm_egress_policy_digest": policy_digest,
         "_llm_egress_state_dir": Path(get_hermes_home()) / "egress",
     }
+    if str(relay.get("task") or "") == "vision":
+        # Vision requests intentionally retain the strict default sanitized
+        # aggregate cap; unlike compression they must not inherit the larger
+        # allowance used for ordinary protected history.
+        attrs["_llm_egress_aux_task"] = "vision"
     if str(relay.get("task") or "") == "compression":
         attrs.update(
             _llm_egress_max_serialized_bytes=2_000_000,
@@ -3372,6 +3379,11 @@ def _is_connection_error(exc: Exception) -> bool:
     ))
 
 
+def _exc_http_status(exc: Exception) -> Any:
+    """HTTP status on the exception itself or on its ``response`` (None when neither carries one)."""
+    return getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+
+
 def _is_transient_transport_error(exc: Exception) -> bool:
     """One-off transport blip worth retrying on the SAME provider: connection/stream-close errors plus pure 5xx/408.
 
@@ -3379,7 +3391,7 @@ def _is_transient_transport_error(exc: Exception) -> bool:
     """
     if _is_connection_error(exc):
         return True
-    status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    status = _exc_http_status(exc)
     return isinstance(status, int) and (status == 408 or 500 <= status < 600)
 
 
@@ -3448,6 +3460,12 @@ def _is_structured_output_rejection(exc: Exception) -> bool:
     # than the usual unsupported-parameter wording.
     if ("response_format" in err_lower and "json_schema" in err_lower
             and "str type expected" in err_lower):
+        return True
+    # Gemini native names its own generationConfig keys, never ours: "Function calling with a response
+    # mime type: 'application/json' is unsupported" (pre-Gemini-3 + tools via a proxy), or an
+    # "Unknown name"/"Invalid value" 400 on response_schema / response_json_schema for a schema the
+    # surface cannot express. Same remedy: one retry without the format.
+    if _contains_any(err_lower, ("response mime type", "response_schema", "response_json_schema")):
         return True
     return _is_unsupported_parameter_error(exc, "response_format") or _is_unsupported_parameter_error(exc, "output_config")
 
@@ -3518,6 +3536,25 @@ def _is_invalid_aux_response_error(exc: Exception) -> bool:
         return False
     msg = str(exc).lower()
     return "auxiliary " in msg and "llm returned invalid response" in msg and "choices[0].message" in msg
+
+
+def _is_statusless_structured_provider_error(exc: Exception) -> bool:
+    """Detect a structured provider failure that has no HTTP status.
+
+    OpenAI-compatible relays may commit SSE with status 200, then send an
+    OpenAI-style ``error`` event. The SDK raises a status-less ``APIError`` with
+    ``body=data["error"]`` — the INNER error object or a bare string (an
+    ``{"error": ...}`` wrapper is accepted too). Any non-empty structured error in
+    that status-less shape is a route failure; ordinary HTTP errors keep their
+    existing status-based classifiers, and message text alone is insufficient.
+    """
+    if _exc_http_status(exc) is not None:
+        return False
+    body = getattr(exc, "body", None)
+    err = body.get("error") if isinstance(body, dict) and "error" in body else body
+    if isinstance(err, str):
+        return bool(err.strip())
+    return isinstance(err, dict) and any(err.get(k) for k in ("type", "code", "message"))
 
 
 # Tasks on a user-visible critical path (compression blocks resuming an oversized session; vision
@@ -7407,8 +7444,12 @@ _RERAISE_ORIGINAL = object()
 _FALLBACK_REASONS: Tuple[Tuple[Callable[[Exception], bool], str], ...] = (
     (_is_auth_error, "auth error"), (_is_payment_error, "payment error"),
     (_is_rate_limit_error, "rate limit"), (_is_model_incompatible_error, "model incompatible with route"),
-    (_is_invalid_aux_response_error, "invalid provider response"), (_is_timeout_error, "request timed out"),
-    (_is_connection_error, "connection error"),
+    (_is_invalid_aux_response_error, "invalid provider response"),
+    # A status-less in-stream ``error`` event (SSE committed 200) is a route failure (#101538).
+    (_is_statusless_structured_provider_error, "structured provider error"),
+    # Before the connection-error rung (its superset): a full-budget timeout must be named as one, or
+    # a slow local model reads as an unreachable endpoint (#89445).
+    (_is_timeout_error, "request timed out"), (_is_connection_error, "connection error"),
 )
 
 
@@ -7428,6 +7469,7 @@ def _param_rung_accepts(exc: Exception) -> bool:
     """After a parameter-strip retry: fall through to the max_tokens/payment/auth
     chains with the stripped kwargs; re-raise anything those chains won't handle."""
     return (_is_payment_error(exc) or _is_connection_error(exc) or _is_auth_error(exc)
+            or _is_rate_limit_error(exc) or _is_statusless_structured_provider_error(exc)
             or "max_tokens" in str(exc) or "unsupported_parameter" in str(exc)
             or _is_structured_output_rejection(exc) or _is_unsupported_parameter_error(exc, "temperature")
             or _is_reasoning_field_rejection(exc) or _is_reasoning_required_rejection(exc))
@@ -8154,13 +8196,12 @@ def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = 
         raw = str(raw) if raw else ""
     content = raw.strip()
     if content:
-        # Mirrors _strip_think_blocks
-        cleaned = re.sub(
-            r"<(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)>"
-            r".*?"
-            r"</(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)>",
-            "", content, flags=re.DOTALL | re.IGNORECASE,
-        ).strip()
+        # Same precompiled closed-pair patterns as strip_think_blocks.
+        from agent.agent_runtime_helpers import _REASONING_BLOCK_PATTERNS
+        cleaned = content
+        for pattern in _REASONING_BLOCK_PATTERNS:
+            cleaned = pattern.sub("", cleaned)
+        cleaned = cleaned.strip()
         if cleaned:
             return cleaned
     # Content is empty or reasoning-only — try structured reasoning fields

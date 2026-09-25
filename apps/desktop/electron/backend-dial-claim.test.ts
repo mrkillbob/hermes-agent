@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { BackendDialClaims } from './backend-dial-claim'
 import { backendScopeKey, parseBackendScopeKey } from './connection-registry'
+import { resolveDesktopConnectionRequest } from './desktop-profile'
 
 describe('BackendDialClaims (#90812)', () => {
   it('coalesces two concurrent dials for the same (connectionId, profile) onto ONE backend spawn', async () => {
@@ -113,6 +114,31 @@ describe('parseBackendScopeKey (#90812/#93910)', () => {
     expect(parseBackendScopeKey('default')).toEqual({ connectionId: null, profile: 'default' })
     expect(parseBackendScopeKey('work')).toEqual({ connectionId: null, profile: 'work' })
   })
+})
+
+describe('resolved window routes share one dial claim (#90812)', () => {
+  it.each([null, 'office-ssh'])(
+    'coalesces resolved window routes without absorbing a same-named source (%s)',
+    async connectionId => {
+      const claims = new BackendDialClaims()
+      const source = { connectionId, profile: 'work', registryScoped: connectionId !== null }
+      const route = resolveDesktopConnectionRequest(undefined, source, 'default')
+      const key = backendScopeKey(route.connectionId, route.profile)
+      const dial = vi.fn(async () => ({ baseUrl: 'http://localhost:53150' }))
+      const other = vi.fn(async () => ({ baseUrl: 'http://localhost:53151' }))
+
+      const [first, second, separate] = await Promise.all([
+        claims.run(key, dial),
+        claims.run(key, dial),
+        claims.run(backendScopeKey('another-source', route.profile), other)
+      ])
+
+      expect(first).toBe(second)
+      expect(first).not.toBe(separate)
+      expect(dial).toHaveBeenCalledTimes(1)
+      expect(other).toHaveBeenCalledTimes(1)
+    }
+  )
 })
 
 describe('backend scope keys (#90812)', () => {

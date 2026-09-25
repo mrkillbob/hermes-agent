@@ -74,10 +74,11 @@ async function openTab(
 }
 
 beforeEach(() => {
-  let nextTokenByte = 0;
+  // Keep mints distinct across tabs; reset the sequence only between tests.
+  let nextByte = 0;
   vi.stubGlobal("crypto", {
     getRandomValues: (values: Uint8Array) => {
-      values.fill(++nextTokenByte);
+      values.fill(++nextByte);
       return values;
     },
   });

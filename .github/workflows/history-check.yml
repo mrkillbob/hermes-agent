@@ -26,7 +26,11 @@ permissions:
 jobs:
   check-common-ancestor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # fetch-depth: 0 below means checkout does a full unshallow clone; that
+    # alone has been observed taking >10 min on this fork right after a large
+    # upstream-sync merge. Generous headroom so a slow-but-succeeding fetch
+    # isn't killed.
+    timeout-minutes: 25
     outputs:
       review_status: ${{ steps.merge-base-check.outputs.review_status }}
     steps:

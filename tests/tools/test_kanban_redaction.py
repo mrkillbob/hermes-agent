@@ -7,7 +7,6 @@ test_kanban_tools.py.
 """
 from __future__ import annotations
 
-import json
 
 import pytest
 
@@ -35,9 +34,11 @@ def worker_env(monkeypatch, tmp_path):
     try:
         tid = kb.create_task(conn, title="worker-test", assignee="test-worker")
         kb.claim_task(conn, tid)
+        run_id = kb._current_run_id(conn, tid)
     finally:
         conn.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
     return tid
 
 
@@ -80,8 +81,10 @@ def test_kanban_block_reason_scrubbed_jwt(worker_env):
         run = kb.latest_run(conn, worker_env)
     finally:
         conn.close()
-    # block_task stores reason as run.summary
+    # kanban_block never lands on "blocked" (it routes unresolved work to the repair
+    # profile instead); the reason still lands as run.summary.
     assert run is not None
+    assert run.outcome == "routed_to_repair_profile"
     stored = run.summary or ""
     assert jwt not in stored
 
@@ -144,5 +147,6 @@ def test_kanban_complete_result_field_scrubbed(worker_env):
     finally:
         conn.close()
     assert run is not None
-    stored = run.summary or run.result if hasattr(run, "result") else run.summary or ""
-    assert secret not in (stored or "")
+    assert run.outcome == "completed"
+    stored = run.summary or ""
+    assert secret not in stored

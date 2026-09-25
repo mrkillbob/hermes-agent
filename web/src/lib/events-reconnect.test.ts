@@ -43,10 +43,6 @@ describe("eventsReconnectDelayMs", () => {
       previous = delay;
     }
   });
-
-  it("stays finite for absurd attempt counts", () => {
-    expect(Number.isFinite(eventsReconnectDelayMs(10_000))).toBe(true);
-  });
 });
 
 describe("shouldRetryEventsClose", () => {

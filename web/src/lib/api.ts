@@ -26,6 +26,7 @@ import {
   attemptDashboardTokenReloadOnce,
   clearDashboardTokenReloadAttempt,
 } from "@/lib/dashboard-auth-reload";
+import { apiErrorFromNetworkFailure, apiErrorFromResponse } from "@/lib/api-error";
 
 // Ephemeral session token for protected endpoints.
 // Injected into index.html by the server — never fetched via API.
@@ -156,15 +157,26 @@ export async function fetchJSON<T>(
   if (token) {
     setSessionHeader(headers, token);
   }
-  const res = await fetch(`${BASE}${url}`, {
-    ...init,
-    headers,
-    // ``credentials: 'include'`` so the cookie-auth path (gated mode) works
-    // for any fetch routed through here. Loopback mode is unaffected — the
-    // server doesn't read cookies and the legacy session-token header is
-    // already attached above.
-    credentials: init?.credentials ?? "include",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${url}`, {
+      ...init,
+      headers,
+      // ``credentials: 'include'`` so the cookie-auth path (gated mode) works
+      // for any fetch routed through here. Loopback mode is unaffected — the
+      // server doesn't read cookies and the legacy session-token header is
+      // already attached above.
+      credentials: init?.credentials ?? "include",
+    });
+  } catch (cause) {
+    // fetch() only rejects when the request never got a response: the
+    // backend is down, the port is closed, or the network dropped. Tell the
+    // user that in words instead of `TypeError: Failed to fetch`.
+    const err = apiErrorFromNetworkFailure(cause, url);
+    // The toast shows only the sentence; keep status/path/body in the console for bug reports.
+    console.warn("[api]", err.details);
+    throw err;
+  }
   if (res.status === 401) {
     // Phase 6: the gated middleware emits a structured envelope so the
     // SPA can full-page-navigate to /login on session expiry. Parse it,
@@ -222,7 +234,9 @@ export async function fetchJSON<T>(
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`${res.status}: ${text}`);
+    const err = apiErrorFromResponse(res.status, text, url);
+    console.warn("[api]", err.details);
+    throw err;
   }
   return res.json();
 }
@@ -443,6 +457,20 @@ export const api = {
   getSessionDetail: (id: string, profile = getManagementProfile()) =>
     fetchJSON<SessionInfo>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}`, profile),
+    ),
+  /**
+   * Directories a FRESH dashboard chat may start in: the profile's explicit
+   * projects plus discovered git repos (session-derived + scanned). ``scan``
+   * asks the host to rescan its discovery roots first (headless installs have
+   * no Desktop to populate the cache).
+   */
+  getChatWorkspaces: (profile = getManagementProfile(), scan = false) =>
+    fetchJSON<ChatWorkspacesResponse>(
+      appendQueryParam(
+        appendProfileParam("/api/chat/workspaces", profile),
+        "scan",
+        scan ? "1" : undefined,
+      ),
     ),
   getSessionLatestDescendant: (id: string, profile = getManagementProfile()) =>
     fetchJSON<SessionLatestDescendantResponse>(
@@ -1966,6 +1994,13 @@ export interface StatusResponse {
   config_version: number;
   env_path: string;
   gateway_exit_reason: string | null;
+  /** Why a multi-profile host's gateway came up STANDALONE on a boot guard (unset
+   * ``gateway.multiplex_profiles`` refused): the other profiles' bots are silent until
+   * ``hermes gateway migrate --multiplex`` runs. null/absent when it multiplexes or only one
+   * profile exists. */
+  multiplex_standalone_reason?: string | null;
+  /** Every profile installed on this host (multiplex or not). */
+  profiles?: string[];
   gateway_health_url: string | null;
   /** Seconds since the gateway's housekeeping last stamped gateway_state.json, set only when the
    * process is alive but the stamp is past the freshness TTL (loop/housekeeping wedged).
@@ -2018,6 +2053,31 @@ export interface DiskPressureStatus {
   total_mb?: number | null;
   free_mb?: number | null;
   used_percent?: number | null;
+}
+
+export interface ChatWorkspaceProject {
+  id: string;
+  slug: string;
+  name: string;
+  primary_path: string | null;
+  archived: boolean;
+  folders: Array<{ path: string; label: string | null; is_primary: boolean }>;
+}
+
+export interface ChatWorkspaceRepo {
+  root: string;
+  label: string;
+  sessions: number;
+  last_active: number;
+}
+
+export interface ChatWorkspacesResponse {
+  projects: ChatWorkspaceProject[];
+  repos: ChatWorkspaceRepo[];
+  /** Where a fresh chat lands when no workspace is picked. */
+  default_cwd: string;
+  home: string;
+  scan_enabled: boolean;
 }
 
 export interface SessionInfo {

@@ -1,7 +1,7 @@
 """Regression tests for iteration-limit exit normalization (#61631)."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 

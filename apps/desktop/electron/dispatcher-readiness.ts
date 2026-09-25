@@ -27,7 +27,14 @@ interface DispatcherReadinessOptions {
   sleep?: (ms: number) => Promise<void>
 }
 
-const DEFAULT_START_ATTEMPTS = 60
+// 60 attempts * 250ms = 15s was tuned against a fast dev machine; a real
+// `hermes gateway start` spawns a Python process that imports the full
+// agent stack before it answers readiness, and on a CPU-constrained box
+// (a shared 4-vCPU CI runner, or a slow real machine) that alone can take
+// longer than 15s, well before the dispatcher itself is even reachable.
+// 240 attempts keeps the same 250ms poll granularity but quadruples the
+// budget to 60s, still a small fraction of a normal boot's total time.
+const DEFAULT_START_ATTEMPTS = 240
 const DEFAULT_START_POLL_MS = 250
 
 function parseReadiness(payload: unknown): Partial<DispatcherReadiness> {

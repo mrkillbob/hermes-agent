@@ -24,14 +24,34 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_cli.plugin_validate_desktop import check_desktop_surface
+from hermes_cli.plugins_manifest import _CONFIG_SCHEMA_TYPES
 
 _UPPER_SNAKE_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_CONFIG_TYPES = {
-    "str", "string", "int", "integer", "float", "number",
-    "bool", "boolean", "list", "array", "dict", "mapping", "map",
-}
+# Admission accepts exactly the ``config_schema`` types the loader type-checks at load time (and the
+# Desktop settings renderer keys its field table on) — a private copy drifted and rejected ``secret``.
+_CONFIG_TYPES = frozenset(_CONFIG_SCHEMA_TYPES)
 _PROBE_TIMEOUT = 30
 _PROBE_SENTINEL = "HERMES_VALIDATE_JSON:"
+
+
+def _stop_capability_probe(proc, process_group: int | None, job) -> None:
+    """Stop the probe tree before its scratch home is removed."""
+    if job is not None:
+        try:
+            job.close()
+        except Exception:
+            pass
+    if process_group is not None:
+        try:
+            import signal
+
+            os.killpg(process_group, signal.SIGKILL)  # windows-footgun: ok — POSIX-only value
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
 
 
 @dataclass
@@ -323,11 +343,16 @@ def _run_capability_probe(plugin_dir: Path, manifest: dict) -> Tuple[Optional[di
     is the ``{tools, hooks, middleware, commands, providers}`` dict on
     success, and *error* is a human-readable failure description otherwise.
     """
+    from hermes_cli.local_runtime.processes import spawn_server
+
     with tempfile.TemporaryDirectory(prefix="hermes-validate-") as scratch:
         env = dict(os.environ)
         env["HERMES_HOME"] = scratch
+        proc = None
+        process_group = None
+        job = None
         try:
-            result = subprocess.run(
+            proc, job = spawn_server(
                 [
                     sys.executable,
                     "-c",
@@ -336,13 +361,24 @@ def _run_capability_probe(plugin_dir: Path, manifest: dict) -> Tuple[Optional[di
                     _PROBE_SENTINEL,
                     json.dumps(_probe_options(manifest)),
                 ],
-                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=_PROBE_TIMEOUT,
                 env=env,
+                **({"process_group": 0} if os.name != "nt" else {}),
+            )
+            if os.name != "nt":
+                process_group = os.getpgid(proc.pid)
+            stdout, stderr = proc.communicate(timeout=_PROBE_TIMEOUT)
+            result = subprocess.CompletedProcess(
+                proc.args, proc.returncode, stdout=stdout, stderr=stderr
             )
         except subprocess.TimeoutExpired:
             return None, f"capability probe timed out after {_PROBE_TIMEOUT}s"
+        finally:
+            if proc is not None:
+                _stop_capability_probe(proc, process_group, job)
 
     payload: Optional[dict] = None
     for line in (result.stdout or "").splitlines():

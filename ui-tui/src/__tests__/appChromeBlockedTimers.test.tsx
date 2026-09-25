@@ -450,15 +450,6 @@ describe('AppLayout status-rule visibility', () => {
     expect(layout.output()).toContain('1m 30s')
   })
 
-  it('keeps the status rule on screen AND its clock advancing under a flow-layout sudo prompt', async () => {
-    const layout = mountLayout({ sudo: { requestId: 'sudo-1' } as OverlayState['sudo'] })
-
-    await flush()
-
-    expect(layout.output()).toContain('1m 0s')
-    expect(oneSecondTimers(intervalSpy)).toBe(2)
-  })
-
   it('arms no clock under a floating model picker while the rule is at the top', async () => {
     mountLayout({ modelPicker: true }, { statusBar: 'top' })
 

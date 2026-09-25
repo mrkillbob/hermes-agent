@@ -2,7 +2,7 @@
 
 [project]
 name = "hermes-agent"
-version = "0.21.4"
+version = "0.21.5"
 description = "The self-improving AI agent — creates skills from experience, improves them during use, and runs anywhere"
 readme = "README.md"
 # Upper bound is load-bearing, not cosmetic. uv resolves the project's
@@ -74,8 +74,8 @@ dependencies = [
   # ``packaging`` is imported directly on three production paths but was never
   # declared, so it only reached users transitively (pip/uv pull it for other
   # tools). The slim official Docker image ships without it, where the
-  # try/except-ImportError fallbacks silently degrade: Hindsight's
-  # ``_meets_minimum_version`` disables update_mode='append' (#40503),
+  # try/except-ImportError fallbacks silently degrade: memory plugins'
+  # version compares disable features (#40503),
   # tools/lazy_deps.py treats every version constraint as satisfied, and
   # hermes_cli/main.py drops to naive requirement parsing. Pure-Python
   # py3-none-any wheel, no compiled extensions — safe to ship everywhere.
@@ -260,9 +260,9 @@ honcho = ["honcho-ai==2.2.0"]
 # Cloud memory providers — opt-in, lazy-installed via tools/lazy_deps.py
 # (memory.supermemory / memory.mem0) at first use. Where BOTH pin exactly the
 # versions MUST match (enforced by tests/test_project_metadata.py); LAZY_DEPS
-# entries that mirror a plugin.yaml range (mem0ai, hindsight-client) keep the
+# entries that mirror a plugin.yaml range (mem0ai) keep the
 # extra as the floor install and never downgrade a newer compatible release.
-# Deliberately excluded from [all] like honcho/hindsight so a quarantined
+# Deliberately excluded from [all] like honcho so a quarantined
 # upstream release can't break fresh installs.
 supermemory = ["supermemory==3.50.0"]
 mem0 = ["mem0ai==2.0.10"]
@@ -431,7 +431,7 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 hermes = "hermes_cli.main:main"
-hermes-agent = "run_agent:main"
+hermes-agent = "agent.legacy_cli:main"
 hermes-acp = "acp_adapter.entry:main"
 
 [tool.uv]
@@ -610,12 +610,6 @@ include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*",
 
 [tool.setuptools.package-data]
 hermes_cli = ["observability/schemas/*.json", "data/*.json", "local_runtime/*.json"]
-
-[tool.setuptools.data-files]
-# Federation is a checked-in, user-auditable manifest rather than Python
-# code. Install it beside the environment so the CLI remains functional from
-# a wheel as well as from a source checkout.
-"configs/federation" = ["configs/federation/roles.json"]
 # gateway/assets/ ships status_phrases.yaml and the Telegram BotFather
 # screenshot. Without this, sealed venvs (uv2nix) silently lose both —
 # status phrases fall back to the tiny hardcoded set and the Telegram
@@ -626,14 +620,26 @@ gateway = ["assets/**/*"]
 # sealed wheels with the plugin Python modules; without this declaration the
 # wheel contains adapters but discovery finds zero bundled plugins.
 plugins = ["**/plugin.yaml", "**/plugin.yml"]
+# Bot Desktop starts Xvnc + Xfce through a shell launcher and seeds the wallpaper; both are read
+# via Path(__file__).parent in tools/bot_desktop/runtime.py and vanish from sealed wheels otherwise.
+tools = ["bot_desktop/launcher.sh", "bot_desktop/wallpaper.png"]
+
+[tool.setuptools.data-files]
+# Federation is a checked-in, user-auditable manifest rather than Python
+# code. Install it beside the environment so the CLI remains functional from
+# a wheel as well as from a source checkout.
+"configs/federation" = ["configs/federation/roles.json"]
 # The curated catalog is bare YAML data, not a Python package. Keep it in
 # sealed installs so plugin removal entries remain enforceable offline.
-"plugin-catalog" = ["*.yaml"]
+# data-files sources are project-root-relative, unlike package-data's
+# package-relative globs, so this must carry the directory prefix.
+"plugin-catalog" = ["plugin-catalog/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
     "integration: marks tests requiring external services (API keys, Modal, etc.)",
+    "live: secrets-gated canaries against REAL LLM provider APIs (spends money; select with -m live)",
     "real_concurrent_gate: opt out of the autouse stub that disables _detect_concurrent_hermes_instances",
     "real_post_swap_handoff: opt out of the autouse stub that runs the update post-swap tail in-process",
     "real_agent_prewarm: opt out of the autouse stub that disables the tui_gateway deferred agent pre-warm timer",
@@ -646,7 +652,7 @@ markers = [
     "windows_only: exercises native-Windows behaviour; skipped on other hosts",
 ]
 # integration tests take way too long to run in the normal CI environments
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration and not live'"
 
 [tool.ty.environment]
 python-version = "3.13"

@@ -643,7 +643,20 @@ def authorize_agent_sdk_kwargs(
         getattr(agent, "_llm_egress_max_sanitized_segment_bytes", 32_768)
     )
     sanitized_aggregate_cap = int(
-        getattr(agent, "_llm_egress_max_sanitized_bytes", 32_768)
+        # The per-segment cap (32,768) already bounds any single chunked
+        # piece; the aggregate exists to bound how many such chunks one
+        # request may carry in total, so it must be a real multiple of the
+        # segment cap or chunking (which exists specifically to split
+        # oversized-but-legitimate tool content, e.g. a read_file result,
+        # into sub-cap pieces) is defeated by anything over one chunk.
+        # Bounded by the same ceiling already enforced on the request as a
+        # whole (max_serialized_bytes' default), never a smaller ad hoc
+        # number.
+        getattr(
+            agent,
+            "_llm_egress_max_sanitized_bytes",
+            32_768 if getattr(agent, "_llm_egress_aux_task", "") == "vision" else 262_144,
+        )
     )
     used_grants: dict[str, SourceGrant] = {}
     # Protected providers must use the bounded-context path regardless of
@@ -827,6 +840,14 @@ def authorize_agent_sdk_kwargs(
                 or _is_codex_responses_replay_body(body)
             )
         ),
+        # Anthropic's Messages API returns a `signature` on each `thinking`
+        # block, and Hermes must replay it byte-exact on a later turn (the
+        # API rejects a request whose prior thinking block was altered).
+        # Only the Anthropic route needs this opaque-replay exemption, same
+        # as the Codex reasoning replay above being scoped to that route.
+        allow_anthropic_thinking_replay=(
+            str(route_provider or "").strip().lower() == "anthropic"
+        ),
         registry=registry if isinstance(registry, SourceProvenanceRegistry) else None,
         request_identity=(session_id, turn_id, request_id, policy_digest),
     )
@@ -917,7 +938,7 @@ def dispatch_authorized_agent_request(
         _route_field(resolved_route, "api_mode"),
     )
     if destination in {DestinationClass.LOCAL_PROCESS, DestinationClass.LOOPBACK}:
-        return callback(dict(kwargs))
+        return callback({key: value for key, value in kwargs.items() if key not in _INTERNAL_EGRESS_KEYS})
     authorized, receipt = authorize_agent_sdk_kwargs(
         agent,
         kwargs,

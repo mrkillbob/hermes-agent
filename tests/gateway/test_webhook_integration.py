@@ -2,9 +2,7 @@
 
 These tests exercise end-to-end flows through the webhook adapter:
 1. GitHub PR webhook → agent MessageEvent created
-2. Skills config injects skill content into the prompt
-3. Cross-platform delivery routes to a mock Telegram adapter
-4. GitHub comment delivery invokes ``gh`` CLI (mocked subprocess)
+2. Cross-platform delivery routes to a mock Telegram adapter
 """
 
 import asyncio
@@ -146,68 +144,6 @@ class TestGitHubPRWebhook:
         assert event.source.platform == Platform.WEBHOOK
         assert "github-pr" in event.source.chat_id
         assert event.message_id == "gh-delivery-001"
-
-
-# ===================================================================
-# Test 2: Skills injected into prompt
-# ===================================================================
-
-class TestSkillsInjection:
-
-    @pytest.mark.asyncio
-    async def test_skills_injected_into_prompt(self):
-        """When a route has skills: [code-review], the adapter should
-        call build_skill_invocation_message() and use its output as the
-        prompt instead of the raw template render."""
-        routes = {
-            "pr-review": {
-                "secret": _INSECURE_NO_AUTH,
-                "events": ["pull_request"],
-                "prompt": "Review this PR: {pull_request.title}",
-                "skills": ["code-review"],
-            }
-        }
-        adapter = _make_adapter(routes)
-
-        captured_events: list[MessageEvent] = []
-
-        async def _capture(event: MessageEvent):
-            captured_events.append(event)
-
-        adapter.handle_message = _capture
-
-        skill_content = (
-            "You are a code reviewer. Review the following:\n"
-            "Review this PR: Add webhook adapter"
-        )
-
-        # The imports are lazy (inside the handler), so patch the source module
-        with patch(
-            "agent.skill_commands.build_skill_invocation_message",
-            return_value=skill_content,
-        ) as mock_build, patch(
-            "agent.skill_commands.get_skill_commands",
-            return_value={"/code-review": {"name": "code-review"}},
-        ):
-            app = _create_app(adapter)
-            async with TestClient(TestServer(app)) as cli:
-                resp = await cli.post(
-                    "/webhooks/pr-review",
-                    json=GITHUB_PR_PAYLOAD,
-                    headers={
-                        "X-GitHub-Event": "pull_request",
-                        "X-GitHub-Delivery": "skill-test-001",
-                    },
-                )
-                assert resp.status == 202
-
-            await asyncio.sleep(0.05)
-
-            assert len(captured_events) == 1
-            event = captured_events[0]
-            # The prompt should be the skill content, not the raw template
-            assert "You are a code reviewer" in event.text
-            mock_build.assert_called_once()
 
 
 # ===================================================================

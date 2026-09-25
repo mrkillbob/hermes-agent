@@ -28,6 +28,8 @@ export interface Translations {
     delete: string;
     refresh: string;
     retry: string;
+    loadFailed?: string;
+    loadFailedDetails?: string;
     search: string;
     loading: string;
     create: string;
@@ -124,6 +126,8 @@ export interface Translations {
     /** NS-656 disk-usage banner — optional, English fallback. */
     diskCriticalBanner?: string;
     diskElevatedBanner?: string;
+    /** Multi-profile host whose gateway boots standalone on a guard — optional, English fallback. */
+    multiplexStandaloneBanner?: string;
     dismiss?: string;
   };
 
@@ -205,6 +209,10 @@ export interface Translations {
     failedToDeleteSelected: string;
     resumeInChat: string;
     newChat: string;
+    workspace: string;
+    workspaceDefault: string;
+    workspaceRescan: string;
+    workspaceCustom: string;
     previousPage: string;
     nextPage: string;
     roles: {
@@ -268,6 +276,7 @@ export interface Translations {
 
   // ── Cron page ──
   cron: {
+    loadWhat?: string;
     confirmDeleteMessage: string;
     confirmDeleteTitle: string;
     newJob: string;
@@ -458,6 +467,7 @@ export interface Translations {
 
   // ── Skills page ──
   skills: {
+    loadWhat?: string;
     title: string;
     searchPlaceholder: string;
     enabledOf: string;
