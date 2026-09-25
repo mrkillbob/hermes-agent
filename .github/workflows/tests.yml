@@ -329,7 +329,7 @@ jobs:
           shard = int(os.environ["E2E_SHARD"])
           if shard == 0:
               bins[shard][0].extend(terminal_files)
-          print("\\n".join(sorted(bins[shard][0])))
+          print("\n".join(sorted(bins[shard][0])))
           PY
             )
             echo "Shard ${{ matrix.shard }}: ${#files[@]} E2E files"
