@@ -456,6 +456,13 @@ async function ridesPrimaryBackend(
     Boolean(id && g.primaryConnectionId && id === g.primaryConnectionId) ||
     (id === 'local' && g.primaryConnectionMode === 'local')
 
+  // A descriptor cannot redirect to the primary when this window has no live
+  // primary socket. Skipping this probe also keeps a parked local secondary's
+  // explicit re-open to one authoritative dial.
+  if (id === 'local' && !isOpen(g.primaryGateway)) {
+    return false
+  }
+
   // The local registry route can itself prove it is the primary backend even
   // before the renderer has published the primary connection identity. This
   // matters during startup roster prewarm: main returns `sharedPrimary` from
@@ -783,6 +790,18 @@ async function openSecondary(entry: Secondary, spawnPriority: SpawnPriority = 'b
           )
 
     entry.connection = conn
+
+    // Main can discover that a local registry profile shares the primary
+    // backend only on this authoritative dial. Do not open a second WebSocket
+    // after that descriptor has resolved the route; callers below redirect to
+    // the primary and retire this speculative entry.
+    if (conn && typeof conn === 'object' && (conn as { sharedPrimary?: boolean }).sharedPrimary === true) {
+      entry.supersededBySharedPrimary = true
+      entry.wantOpen = false
+      discardSupersededSharedPrimarySecondaries(entry.connectionId, entry.profile)
+
+      return
+    }
 
     const wsDeps =
       entry.connectionId && desktop.getGatewayWsUrlFor
@@ -1182,6 +1201,12 @@ async function gatewayForProfile(
     throw error
   }
 
+  if (entry.connection?.sharedPrimary === true) {
+    discardSupersededSharedPrimarySecondary(key)
+
+    return { gateway: g.primaryGateway, key, release, scopeProfile: true }
+  }
+
   return { gateway: entry.gateway, key, release, scopeProfile: false }
 }
 
@@ -1290,6 +1315,12 @@ export async function requestGatewayForAgent<T>(
   try {
     if (!isOpen(entry.gateway)) {
       await openSecondary(entry, spawnPriority)
+    }
+
+    if (entry.connection?.sharedPrimary === true) {
+      discardSupersededSharedPrimarySecondaries(connectionId, key)
+
+      return await requestOnPrimaryGateway<T>(method, { ...params, profile: key }, timeoutMs, signal)
     }
 
     return await (timeoutMs === undefined && signal === undefined
@@ -1560,6 +1591,13 @@ export async function retainGatewayForAgent(
     throw error
   }
 
+  if (entry.connection?.sharedPrimary === true) {
+    discardSupersededSharedPrimarySecondaries(connectionId, key)
+    release()
+
+    return () => undefined
+  }
+
   return release
 }
 
@@ -1816,6 +1854,10 @@ export async function openGatewayForAgent(
 
     throw error
   }
+
+  if (entry.connection?.sharedPrimary === true) {
+    discardSupersededSharedPrimarySecondaries(connectionId, profile)
+  }
 }
 
 export async function ensureGatewayForAgent(
@@ -1885,6 +1927,12 @@ export async function ensureGatewayForAgent(
   // right to move the foreground route when that work eventually settles.
   if (signal?.aborted) {
     return false
+  }
+
+  if (entry.connection?.sharedPrimary === true) {
+    discardSupersededSharedPrimarySecondaries(connectionId, profile)
+
+    return Boolean(isOpen(g.primaryGateway) && applyActive(g.primaryProfile, activationEpoch))
   }
 
   // A source edit/remove may dispose this entry while its dial is still in
@@ -1969,6 +2017,13 @@ export async function ensureGatewayForProfile(profile: string): Promise<void> {
   } finally {
     // The activation is settling either way — release the prune lease.
     entry.activationLeaseUntil = 0
+  }
+
+  if (entry.connection?.sharedPrimary === true) {
+    discardSupersededSharedPrimarySecondary(key)
+    applyActive(g.primaryProfile, activationEpoch)
+
+    return
   }
 
   // Only publish when the WebSocket actually reached open -- entry.connection

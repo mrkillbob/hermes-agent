@@ -93,7 +93,8 @@ def _drive_turns(rig) -> None:
     for n in range(2, TURNS + 1):
         proc = rig.run("chat", "--resume", session_id, "-q", f"Read chunk {n}.", "-Q")
         assert proc.returncode == 0 and f"TURN-{n}-DONE" in proc.stdout, (
-            n, (proc.stdout + proc.stderr)[-4000:], rig.log_tail(pattern="egress", chars=4000)
+            f"turn {n} failed\nstdout/stderr tail:\n{(proc.stdout + proc.stderr)[-4000:]}\n"
+            f"egress log tail:\n{rig.log_tail(pattern='egress', chars=4000)}"
         )
 
 

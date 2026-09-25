@@ -975,14 +975,15 @@ describe('cooperative pool retirement (supersedes #104871)', () => {
     // (a click on the bot) is the one thing that re-arms and redials it.
     const before = getConnectionFor.mock.calls.length
     await ensureGatewayForAgent('local', 'bot-a')
-    expect(getConnectionFor.mock.calls.length).toBe(before + 1)
+    // The route probe and authoritative socket dial each resolve the descriptor.
+    expect(getConnectionFor.mock.calls.length).toBe(before + 2)
     expect(getConnectionFor.mock.calls.at(-1)?.[0]).toMatchObject({ connectionId: 'local', profile: 'bot-a' })
 
     // Once re-armed, the nudge treats it like any other scope again.
     ;(gatewayMocks.instances.at(-1) as unknown as { connectionState: string }).connectionState = 'closed'
     reconnectSecondaryGateways()
     await vi.advanceTimersByTimeAsync(0)
-    expect(getConnectionFor.mock.calls.length).toBe(before + 2)
+    expect(getConnectionFor.mock.calls.length).toBe(before + 3)
   })
 })
 

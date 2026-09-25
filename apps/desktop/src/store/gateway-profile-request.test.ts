@@ -810,6 +810,28 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     expect(secondaryGateways).toHaveLength(0)
   })
 
+  it('uses the shared primary when the authoritative registry dial resolves to it', async () => {
+    const primary = makePrimary()
+    let workLookups = 0
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({
+      profile,
+      // The route probe says pooled, but main resolves the actual dial to the
+      // primary. This can happen while startup route identity is publishing.
+      sharedPrimary: profile === 'work' && ++workLookups > 1
+    }))
+    await ensureGatewayForProfile('default')
+
+    await requestGatewayForAgent('local', 'work', 'session.list')
+
+    expect(workLookups).toBeGreaterThan(1)
+    expect(primary.request).toHaveBeenCalledWith('session.list', { profile: 'work' })
+    expect(secondaryGateways).toHaveLength(1)
+    expect(secondaryGateways[0].connect).not.toHaveBeenCalled()
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
   it('closes a prewarmed secondary when the route resolves to the shared primary', async () => {
     let sharedPrimary = false
     const primary = makePrimary()
