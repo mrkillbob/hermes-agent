@@ -1891,6 +1891,10 @@ DEFAULT_CONFIG = {
     # promotes dependency-satisfied todos to ready, and fires `hermes -p <assignee> chat -q ...` per
     # claimable task. Run ONE dispatcher per profile; two on the same kanban.db race for claims.
     "kanban": {
+        # Optional installation topology guard. When non-empty, every board
+        # creation surface (CLI, dashboard, and gateway) accepts only these
+        # normalized slugs. Empty preserves Hermes' general multi-board mode.
+        "allowed_boards": [],
         # Cross-machine Kanban admission is deliberately opt-in. The coordinator URL is
         # non-secret config; the bearer token remains in the profile/root .env as a secret.
         "federated": {
