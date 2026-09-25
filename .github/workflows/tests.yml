@@ -7,19 +7,28 @@ on:
         description: Number of parallel Python test slices
         type: number
         default: 8
+      e2e_mode:
+        description: Run the short PR smoke checks or the complete E2E suite
+        type: string
+        default: smoke
+      run_unit:
+        description: Run the unit-test matrix
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 # Cancel in-progress runs for the same ref
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   generate:
     name: Generate test slices
     runs-on: ubuntu-latest
+    if: inputs.run_unit
     timeout-minutes: 10
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -36,6 +45,7 @@ jobs:
   test:
     name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
     needs: generate
+    if: inputs.run_unit
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -166,14 +176,15 @@ jobs:
           key: test-durations-${{ github.run_id }}
 
   e2e:
-    # The core suites spawn real serve / gateway / tui_gateway / MCP / SQLite
-    # writer processes per test; a 4-vCPU runner serialises them into timeouts.
-    # Upstream runs this on its own ubuntu-latest-32-core larger runner; this
-    # fork has no access to that runner group, so it falls back to the
-    # standard (4-vCPU) runner with a longer timeout to absorb the
-    # serialisation upstream's comment warns about.
+    # Four independent runners keep the complete E2E suite from serializing
+    # all multi-process tests on one standard runner. PRs use shard 0 as a
+    # fast smoke gate; nightly and post-merge runs execute all shards.
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.e2e_mode == 'full' && '[0, 1, 2, 3]' || '[0]') }}
+    timeout-minutes: 45
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -186,6 +197,7 @@ jobs:
           node-version: 26
 
       - name: Install Node deps and build the Ink TUI
+        if: inputs.e2e_mode == 'full' && matrix.shard == 0
         # tests/e2e/core/terminal drives the real `hermes --tui` over a PTY;
         # HERMES_E2E_REQUIRE_TUI=1 below turns a missing build into a failure.
         uses: ./.github/actions/retry
@@ -259,6 +271,16 @@ jobs:
           source .venv/bin/activate
           python -c "import sqlite3, hermes_state_wal as w; print('sqlite', sqlite3.sqlite_version); assert not w.is_sqlite_wal_reset_vulnerable()"
 
+      - name: Restore per-file duration cache
+        # Keep E2E timing history per shard so every runner can balance from
+        # its own measured durations rather than whichever cache wrote last.
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: test_durations.json
+          key: test-durations-e2e-${{ matrix.shard }}-never-exact
+          restore-keys: |
+            test-durations-e2e-${{ matrix.shard }}-
+
       - name: Run e2e tests
         # One subprocess per file, in parallel: the core suites spawn real
         # processes (serve, gateway, tui_gateway, MCP servers, SQLite writers)
@@ -266,9 +288,55 @@ jobs:
         # tests/e2e/core/upgrade runs in its own job (e2e-upgrade) below.
         run: |
           source .venv/bin/activate
-          mapfile -t files < <(find tests/e2e -name 'test_*.py' -not -path 'tests/e2e/core/upgrade/*' | sort)
+          if [[ '${{ inputs.e2e_mode }}' == 'smoke' ]]; then
+            files=(
+              tests/e2e/core/parity/test_boot_contract.py
+              tests/e2e/core/providers/test_anthropic_discovery_and_aliases.py
+              tests/e2e/core/security/test_secret_redaction.py
+            )
+          else
+            mapfile -t files < <(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          all_files = sorted(p.as_posix() for p in Path("tests/e2e").rglob("test_*.py")
+                             if "tests/e2e/core/upgrade/" not in p.as_posix())
+          terminal_files = [p for p in all_files if p.startswith("tests/e2e/core/terminal/")]
+          files = [p for p in all_files if p not in terminal_files]
+          try:
+              durations = json.loads(Path("test_durations.json").read_text())
+          except (OSError, json.JSONDecodeError):
+              durations = {}
+          # The first run on a new runner may not have E2E timings cached.
+          # Seed the heaviest files from the last hosted run, then replace
+          # these estimates with measured durations as the cache fills in.
+          known_slow = {
+              "tests/e2e/core/delivery/test_messaging_exactly_once.py": 321,
+              "tests/e2e/core/history/test_prefix_stability.py": 254,
+              "tests/e2e/core/delivery/test_cron_virtual_clock_soak.py": 154,
+              "tests/e2e/core/history/test_transcript_ledger.py": 139,
+              "tests/e2e/core/providers/test_anthropic_errors.py": 132,
+              "tests/e2e/core/sqlite/test_compaction_contention.py": 124,
+              "tests/e2e/core/compaction/test_compaction_manual.py": 123,
+          }
+          durations = {path: max(durations.get(path, 15), known_slow.get(path, 0)) for path in files}
+          bins = [([], 0.0) for _ in range(4)]
+          for path in sorted(files, key=lambda p: durations.get(p, 1.0), reverse=True):
+              bucket = min(range(4), key=lambda i: bins[i][1])
+              bins[bucket][0].append(path)
+              bins[bucket] = (bins[bucket][0], bins[bucket][1] + durations.get(path, 1.0))
+          import os
+          shard = int(os.environ["E2E_SHARD"])
+          if shard == 0:
+              bins[shard][0].extend(terminal_files)
+          print("\\n".join(sorted(bins[shard][0])))
+          PY
+            )
+            echo "Shard ${{ matrix.shard }}: ${#files[@]} E2E files"
+          fi
           scripts/run_tests.sh --include-integration "${files[@]}"
         env:
+          E2E_SHARD: ${{ matrix.shard }}
           # Multi-process episodes (torture chamber, compaction kill -9,
           # gateway liveness, delivery exactly-once through a real gateway,
           # the cron virtual-clock soak) legitimately run past the 300 s default.
@@ -277,10 +345,18 @@ jobs:
           # exactly-once/compaction suites are race detectors, and a rare
           # corruption that passes on retry is still a corruption.
           HERMES_TEST_FILE_RETRIES: "0"
+          HERMES_TEST_WORKERS: 4
           HERMES_E2E_REQUIRE_TUI: "1"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
+
+      - name: Save per-file duration cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('test_durations.json') != ''
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: test_durations.json
+          key: test-durations-e2e-${{ matrix.shard }}-${{ github.run_id }}
 
   e2e-upgrade:
     # tests/e2e/core/upgrade: a real N-1 -> HEAD `hermes update` (clean,
@@ -290,6 +366,7 @@ jobs:
     # This fork has no access to upstream's ubuntu-latest-32-core runner
     # group; falls back to the standard runner with a longer timeout.
     runs-on: ubuntu-latest
+    if: inputs.e2e_mode == 'full'
     timeout-minutes: 120
     steps:
       - name: Checkout code
@@ -304,6 +381,12 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 26
+          cache: npm
+
+      - name: Prepare shared Node dependencies for updater legs
+        run: |
+          echo "HERMES_E2E_NODE_CACHE=$HOME/.npm" >> "$GITHUB_ENV"
+          npm ci --workspace ui-tui --workspace web --include-workspace-root --no-audit --no-fund
 
       - name: Install ripgrep (prebuilt binary)
         run: |
@@ -383,6 +466,10 @@ jobs:
           scripts/run_tests.sh --include-integration tests/e2e/core/upgrade
         env:
           HERMES_TEST_FILE_TIMEOUT: "3000"
+          # Each file contains deterministic, destructive-in-a-sandbox update scenarios; retrying
+          # the whole file after a failure repeats several full installs without adding evidence.
+          HERMES_TEST_FILE_RETRIES: "0"
+          HERMES_E2E_SEED_NODE_MODULES: "1"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""

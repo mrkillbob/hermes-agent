@@ -55,7 +55,12 @@ def test_typed_payload_preserves_anthropic_tool_protocol_ids_without_trusting_co
                 {
                     "role": "assistant",
                     "content": [
-                        {"type": "tool_use", "id": opaque_id, "name": "read_file", "input": {}},
+                    {
+                        "type": "tool_use",
+                        "id": opaque_id,
+                        "name": "mcp__context_notes",
+                        "input": {},
+                    },
                     ],
                 },
                 {
@@ -76,6 +81,8 @@ def test_typed_payload_preserves_anthropic_tool_protocol_ids_without_trusting_co
     tool_result = typed["messages"][1]["content"][0]
     assert isinstance(tool_use["id"], ValidatedToolSyntaxSegment)
     assert tool_use["id"].text == opaque_id
+    assert isinstance(tool_use["name"], ValidatedToolSyntaxSegment)
+    assert tool_use["name"].text == "mcp__context_notes"
     assert isinstance(tool_result["tool_use_id"], ValidatedToolSyntaxSegment)
     assert tool_result["tool_use_id"].text == opaque_id
     assert isinstance(tool_result["content"], SanitizedSegment)

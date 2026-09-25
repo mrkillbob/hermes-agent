@@ -329,6 +329,55 @@ def _write_wrappers(leg_root: Path, install: Path, hermes_home: Path) -> Path:
     return wrap
 
 
+def _copy_node_modules_file(source: str, target: str) -> str:
+    """Hard-link the preinstalled workspace tree when possible; fall back across filesystems."""
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+    return target
+
+
+def _seed_node_dependencies(leg: Leg) -> None:
+    """Share this job's already-installed Node workspace across isolated update legs.
+
+    These scenarios all update the same lockfile. Installing the identical UI dependency graph
+    once per sandbox dominated the updater lane while exercising no behavior under test; each leg
+    still runs the real web build and the updater's lockfile readiness checks.
+    """
+    if os.environ.get("HERMES_E2E_SEED_NODE_MODULES") != "1":
+        return
+    changed = _git(
+        "diff", "--name-only", _refs().base, _refs().head, "--", "package*.json", "**/package.json",
+        "**/package-lock.json", cwd=H.WORKTREE,
+    ).splitlines()
+    if changed:
+        return
+    source = H.WORKTREE / "node_modules"
+    if not source.is_dir():
+        raise AssertionError("Node workspace preinstall did not create node_modules")
+    target = leg.install / "node_modules"
+    shutil.copytree(source, target, symlinks=True, copy_function=_copy_node_modules_file)
+    if not all((target / ".bin" / name).exists() for name in ("tsc", "vite")):
+        raise AssertionError("preinstalled Node workspace is missing the web build toolchain")
+
+    # Use the updater's own digest and cache path so the cloned install records a successful
+    # workspace install with the same manifest bytes, instead of reinstalling them per scenario.
+    from hermes_cli import main as cli_main
+    from hermes_cli.update_cmd_deps import _npm_lock_cache_file, _npm_manifests_digest
+
+    project_root = cli_main.PROJECT_ROOT
+    cli_main.PROJECT_ROOT = leg.install
+    try:
+        digest = _npm_manifests_digest()
+        stamp = _npm_lock_cache_file(leg.hermes_home)
+    finally:
+        cli_main.PROJECT_ROOT = project_root
+    if not digest:
+        raise AssertionError("could not compute Node manifest digest for the update leg")
+    stamp.write_text(digest, encoding="utf-8")
+
+
 def make_leg(root: Path, template_home: Path | None) -> Leg:
     root.mkdir(parents=True, exist_ok=True)
     origin = _make_origin(root)
@@ -358,7 +407,9 @@ def make_leg(root: Path, template_home: Path | None) -> Leg:
         shutil.copytree(template_home, hermes_home, symlinks=True)
     wrap = _write_wrappers(root, install, hermes_home)
     env = H.isolated_env(root, extra_path=[wrap])
-    return Leg(root=root, origin=origin, install=install, env=env, hermes_home=hermes_home, wrap_dir=wrap)
+    leg = Leg(root=root, origin=origin, install=install, env=env, hermes_home=hermes_home, wrap_dir=wrap)
+    _seed_node_dependencies(leg)
+    return leg
 
 
 # ---------------------------------------------------------------------------

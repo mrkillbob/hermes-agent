@@ -1,0 +1,25 @@
+name: Nightly E2E
+
+on:
+  schedule:
+    - cron: '17 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-e2e:
+    name: Full Python E2E suite
+    uses: ./.github/workflows/tests.yml
+    with:
+      e2e_mode: full
+      run_unit: false
+
+  desktop-core:
+    name: Desktop core E2E
+    uses: ./.github/workflows/e2e-desktop-core.yml

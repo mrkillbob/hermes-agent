@@ -204,6 +204,8 @@ done
 #     HERMES_GIT_SHA build-arg the workflow bakes in).
 #   * HERMES_E2E_REQUIRE_TUI turns a missing Ink TUI build into a failure in
 #     tests/e2e/core/terminal instead of a skip (set by the e2e CI job).
+#   * The upgrade E2E lane shares its preinstalled Node workspace and npm cache
+#     across isolated updater legs; these variables gate only that optimization.
 #   * CI / GITHUB_ACTIONS tell suites they run on a disposable runner (e.g.
 #     tests/e2e/core/upgrade runs the real updater unsandboxed only there).
 #
@@ -215,7 +217,8 @@ done
 TEST_ENV=()
 for _test_var in HERMES_TEST_IMAGE HERMES_TEST_WORKERS HERMES_TEST_PATHS \
   HERMES_TEST_FILE_TIMEOUT HERMES_TEST_FILE_RETRIES HERMES_TEST_SLICE \
-  HERMES_GATEWAY_LOCK_DIR HERMES_E2E_REQUIRE_TUI CI GITHUB_ACTIONS; do
+  HERMES_GATEWAY_LOCK_DIR HERMES_E2E_REQUIRE_TUI HERMES_E2E_SEED_NODE_MODULES \
+  HERMES_E2E_NODE_CACHE CI GITHUB_ACTIONS; do
   if [ -n "${!_test_var:-}" ]; then
     TEST_ENV+=("$_test_var=${!_test_var}")
   fi

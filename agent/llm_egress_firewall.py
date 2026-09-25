@@ -596,7 +596,7 @@ _BOUNDED_SLASH_WORDS = re.compile(
 _MAX_BASE64_CANDIDATE_CHARS = 262_144
 _VALIDATED_TOOL_SYNTAX = {
     "tool_protocol_identifier": re.compile(
-        r"[A-Za-z0-9][A-Za-z0-9_.|:-]{0,255}"
+        r"[A-Za-z0-9][A-Za-z0-9_.|:_-]{0,255}"
     ),
     "application_identifier": re.compile(
         r"(?:t_[0-9a-f]{8}|[0-9a-f]{40}|[0-9a-f]{64}|"

@@ -926,6 +926,16 @@ def _typed_payload_mapping_item(
             item, "tool_protocol_identifier"
         )
         return True
+    if (
+        key == "name"
+        and value.get("type") in {"tool_use", "tool_result"}
+        and isinstance(item, str)
+    ):
+        # Anthropic round-trips the provider-visible tool name in both blocks.
+        # OAuth MCP aliases such as mcp__context_notes are protocol identifiers,
+        # not user text, and can be canonical URL-safe Base64 by coincidence.
+        typed[key] = ValidatedToolSyntaxSegment(item, "tool_protocol_identifier")
+        return True
     if _typed_payload_mapping_structured(state, key, item, typed):
         return
     if _typed_payload_mapping_scalar(state, key, item, typed):
