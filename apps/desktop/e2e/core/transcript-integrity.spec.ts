@@ -277,7 +277,11 @@ test('transcript oracle holds across every transition', async () => {
           () =>
             ws.sockets
               .filter(s => !s.closed && sameBackend.has(new URL(s.url).port))
-              .map(s => s.url.replace(/token=[^&]+/, 'token=…')),
+              .map(s => {
+                const requests = ws.sent.filter(frame => frame.socket === s.id).map(frame => frame.method)
+
+                return `socket ${s.id} [${requests.join(', ')}] ${s.url.replace(/token=[^&]+/, 'token=…')}`
+              }),
           {
             timeout: 30_000,
             message: 'live sockets to the one host backend'

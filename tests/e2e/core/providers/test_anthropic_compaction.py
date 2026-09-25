@@ -89,7 +89,9 @@ def _drive_turns(rig) -> None:
     (session_id,) = rig.session_ids()
     for n in range(2, TURNS + 1):
         proc = rig.run("chat", "--resume", session_id, "-q", f"Read chunk {n}.", "-Q")
-        assert proc.returncode == 0 and f"TURN-{n}-DONE" in proc.stdout, (n, proc.stderr[-2000:])
+        assert proc.returncode == 0 and f"TURN-{n}-DONE" in proc.stdout, (
+            n, (proc.stdout + proc.stderr)[-4000:], rig.log_tail(pattern="egress", chars=4000)
+        )
 
 
 def test_compaction_keeps_pairing_and_signatures(rig) -> None:

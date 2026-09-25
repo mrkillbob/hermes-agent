@@ -70,7 +70,7 @@ def test_drop_stale_root_modules_also_heals_stale_package_modules():
     import types
     from hermes_cli.stale_modules import drop_stale_root_modules
 
-    names = ("hermes_cli.tools_config", "gateway.status")
+    names = ("hermes_cli.tools_config", "hermes_cli.config_migrations", "gateway.status")
     before = {name: sys.modules.pop(name, None) for name in names}
     try:
         for name in names:
@@ -82,3 +82,23 @@ def test_drop_stale_root_modules_also_heals_stale_package_modules():
             sys.modules.pop(name, None)
             if before[name] is not None:
                 sys.modules[name] = before[name]
+
+
+def test_drop_stale_root_modules_keeps_module_being_imported():
+    import importlib.machinery
+    import types
+    from hermes_cli.stale_modules import drop_stale_root_modules
+
+    name = "hermes_cli.tools_config"
+    before = sys.modules.get(name)
+    module = types.ModuleType(name)
+    module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+    module.__spec__._initializing = True
+    sys.modules[name] = module
+    try:
+        assert drop_stale_root_modules() == []
+        assert sys.modules[name] is module
+    finally:
+        sys.modules.pop(name, None)
+        if before is not None:
+            sys.modules[name] = before

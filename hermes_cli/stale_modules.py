@@ -26,6 +26,7 @@ from typing import Mapping, Sequence
 _MODULE_REQUIRED_ATTRS: dict[str, tuple[str, ...]] = {
     "utils": ("file_signature",),
     "hermes_cli.tools_config": ("_configurable_keys",),
+    "hermes_cli.config_migrations": ("_migrate_to_46",),
     "gateway.status": ("profile_flag_value",),
 }
 
@@ -39,6 +40,11 @@ def drop_stale_root_modules(
     for name, attrs in checks.items():
         mod = sys.modules.get(name)
         if mod is None:
+            continue
+        # Python publishes a module in sys.modules before executing its body.
+        # A nested import can reach this bridge while that module is still being
+        # initialized; an absent newly-added attribute is not evidence of staleness.
+        if getattr(getattr(mod, "__spec__", None), "_initializing", False):
             continue
         if any(not hasattr(mod, attr) for attr in attrs):
             sys.modules.pop(name, None)
