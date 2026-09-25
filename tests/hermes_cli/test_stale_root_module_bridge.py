@@ -70,11 +70,14 @@ def test_drop_stale_root_modules_also_heals_stale_package_modules():
     import types
     from hermes_cli.stale_modules import drop_stale_root_modules
 
-    names = ("hermes_cli.tools_config", "hermes_cli.config_migrations", "gateway.status")
+    names = ("hermes_cli.config", "hermes_cli.tools_config", "hermes_cli.config_migrations", "gateway.status")
     before = {name: sys.modules.pop(name, None) for name in names}
     try:
         for name in names:
             sys.modules[name] = types.ModuleType(name)
+        stale_config = sys.modules["hermes_cli.config"]
+        stale_config.migrate_config = lambda *_args, **_kwargs: {}
+        assert not hasattr(stale_config, "drop_stale_root_modules")
         stale_tools_config = sys.modules["hermes_cli.tools_config"]
         stale_tools_config._configurable_keys = lambda: set()
         # The 45→46 MCP migration imports this parser, added after some N-1

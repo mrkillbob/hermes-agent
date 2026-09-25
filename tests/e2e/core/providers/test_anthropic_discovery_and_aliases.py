@@ -131,7 +131,7 @@ def test_oauth_wire_names_map_back_to_real_tools(rig) -> None:
     target = r.project / "wire.txt"
     # Avoid an ambiguous canonical Base64-shaped sentinel: the egress firewall
     # correctly rejects arbitrary encoded payloads, even when they are fixture text.
-    target.write_text("WIRE FILE CONTENT 93", encoding="utf-8")
+    target.write_text("wire marker value: blue; id 93", encoding="utf-8")
     r.srv.push(
         Reply([ToolUse("mcp__read_file", {"path": target.name}),
                ToolUse("mcp__context_notes", {"action": "add", "target": "memory", "content": note})]),
@@ -147,7 +147,7 @@ def test_oauth_wire_names_map_back_to_real_tools(rig) -> None:
     assert {"mcp__read_file", "mcp__context_notes"} <= wire_names, sorted(wire_names)
     assert not {"memory", "session_search", "read_file"} & wire_names, "real names leaked onto the OAuth wire"
     results = _tool_results(mains[1]["body"])
-    assert any("WIRE FILE CONTENT 93" in res for res in results), results
+    assert any("wire marker value: blue; id 93" in res for res in results), results
     memory_md = r.hermes_home / "memories" / "MEMORY.md"
     assert memory_md.exists() and note in memory_md.read_text(encoding="utf-8"), (
         f"aliased context_notes call did not reach the memory tool: {results}")

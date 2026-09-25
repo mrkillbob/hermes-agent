@@ -346,6 +346,10 @@ def test_tui_gateway_model_switch_routing(tmp_path: Path, request: pytest.Fixtur
     trap = EgressTrap()
     home = tmp_path / "home"
     config, env = base_config(fleet)
+    # This matrix exercises model-switch routing. The model-title upgrade is
+    # an independent background LLM call that can outlive the first turn and
+    # arrive after the next leg snapshots provider traffic.
+    config["auxiliary"] = {"title_generation": {"model_upgrade_enabled": False}}
     # Built-in vendor label + foreign host, no key: ANTHROPIC_API_KEY must stay home (#28660).
     config["model_aliases"]["builtin-label-lan"] = {
         "model": MODEL_ID, "provider": "anthropic", "base_url": fleet.url("alias")}  # id the host lists
@@ -377,7 +381,7 @@ def test_tui_gateway_model_switch_routing(tmp_path: Path, request: pytest.Fixtur
             pool_state["fail"] = leg.host == "pool" and not leg.ok
             done = gw.turn(sid, f"turn {i}")
             if i == 0:
-                gw.seen_or_wait(gw.event("session.title", sid), timeout=120)  # first-turn aux call settles
+                gw.seen_or_wait(gw.event("session.title", sid), timeout=120)
             log = fleet.since(marks)
             payload = (done.get("params") or {}).get("payload") or {}
             ctx = f"leg {i} ({leg.value!r} -> {leg.host}): {done.get('params', {}).get('type')} {str(payload)[:300]}\n{describe(log)}"

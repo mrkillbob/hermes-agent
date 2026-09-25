@@ -146,6 +146,13 @@ def _check_and_apply_config_migration(
 
     See #91360.
     """
+    # The pre-update process can retain hermes_cli.config while its package
+    # cache is cleared. Drop that incomplete root before reading the version
+    # or importing migrate_config, otherwise a newly pulled migration ladder
+    # can be skipped and the config stamped at the latest version.
+    from hermes_cli.stale_modules import drop_stale_root_modules
+    drop_stale_root_modules()
+
     from hermes_cli.update_cmd import (
         _migrate_sibling_profile_configs, _run_config_check_fresh, _run_migrate_config_fresh)
     print()

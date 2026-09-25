@@ -25,6 +25,7 @@ from typing import Mapping, Sequence
 # incomplete module that survived the legacy package purge.
 _MODULE_REQUIRED_ATTRS: dict[str, tuple[str, ...]] = {
     "utils": ("file_signature",),
+    "hermes_cli.config": ("drop_stale_root_modules",),
     "hermes_cli.tools_config": ("_configurable_keys", "_parse_enabled_flag"),
     "hermes_cli.config_migrations": ("_migrate_to_46",),
     "gateway.status": ("profile_flag_value",),

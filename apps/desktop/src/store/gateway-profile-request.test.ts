@@ -755,7 +755,13 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     }))
 
     ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
-      getConnection: vi.fn(async (profile: null | string) => ({ mode: 'local', port: 4242, profile, token: 't' })),
+      getConnection: vi.fn(async (profile: null | string) => ({
+        mode: 'local',
+        port: 4242,
+        profile,
+        token: 't',
+        ...descriptorFor(profile ?? 'default')
+      })),
       getConnectionFor,
       getGatewayWsUrlFor: vi.fn(async ({ connectionId, profile }: { connectionId: string; profile: string }) => ({
         ok: true as const,
@@ -845,6 +851,24 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     await ensureGatewayForProfile('default')
 
     await openGatewayForProfile('work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    await requestGatewayForProfile('work', 'profiles.list')
+
+    expect(primary.request).toHaveBeenCalledWith('profiles.list', { profile: 'work' })
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
+  it('closes a local registry prewarm when profile routing resolves to the shared primary', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ profile, sharedPrimary }))
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForAgent('local', 'work')
     expect(secondaryGateways).toHaveLength(1)
 
     sharedPrimary = true

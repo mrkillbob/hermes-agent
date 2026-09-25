@@ -1120,6 +1120,7 @@ async function gatewayForProfile(
     // A roster prewarm may have opened the old pooled route before main
     // identified this profile as shared with the primary.
     discardSupersededSharedPrimarySecondary(key)
+    discardSupersededSharedPrimarySecondary(registryBackendScopeKey('local', key))
 
     return { gateway: g.primaryGateway, key, release: noRelease, scopeProfile: true }
   }

@@ -10,6 +10,7 @@ byte-exact, and the body validates against the SDK schema.
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import threading
@@ -35,9 +36,9 @@ SUMMARY_TOKEN = "E2E-ANTHROPIC-SUMMARY-7f3a"
 
 
 def _sig(i: int) -> str:
-    # Keep the opaque test signature deliberately outside canonical Base64 so
-    # the egress firewall can inspect the surrounding conversation payload.
-    return f"signature:EqRound{i:02d}:sigBytes{'x' * i}"
+    # Anthropic signatures are canonical Base64 and are validated as opaque
+    # thinking replay tokens by the egress firewall.
+    return base64.b64encode(f"EqRound{i:02d}-signature-{i}".encode("ascii")).decode("ascii")
 
 
 def _think(i: int) -> str:
