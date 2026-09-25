@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   check-common-ancestor:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-small
     # fetch-depth: 0 below means checkout does a full unshallow clone; that
     # alone has been observed taking >10 min on this fork right after a large
     # upstream-sync merge. Generous headroom so a slow-but-succeeding fetch

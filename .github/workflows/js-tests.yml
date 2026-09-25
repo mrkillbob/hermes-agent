@@ -7,9 +7,8 @@ on:
 jobs:
   check:
     name: JS & TS checks
-    # This pool is shared with the Hermes Agent fork. One 32-core job avoids
-    # repeated setup across small runners and parallelizes each workspace check.
-    runs-on: ubuntu-latest-32-core
+    # Use NousResearch's shared ARC pool for the workspace checks.
+    runs-on: arc-runner-set
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

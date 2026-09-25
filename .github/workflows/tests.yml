@@ -3,6 +3,10 @@ name: Tests
 on:
   workflow_call:
     inputs:
+      slice_count:
+        description: Number of parallel Python test slices
+        type: number
+        default: 8
       e2e_mode:
         description: Run the short PR smoke checks or the complete E2E suite
         type: string
@@ -21,12 +25,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Run tests
+  generate:
+    name: Generate test slices
+    runs-on: arc-runner-small
     if: inputs.run_unit
-    # Match NousResearch: one unsliced suite on a 96-core runner.
-    runs-on: ubuntu-latest-96-core
-    timeout-minutes: 30
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Generate test matrix
+        id: matrix
+        run: |
+          matrix="$(python3 scripts/run_tests_parallel.py --generate-slices '${{ inputs.slice_count }}')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
+    needs: generate
+    if: inputs.run_unit
+    # Use NousResearch's shared ARC pool and balanced unit-test slices.
+    runs-on: arc-runner-set
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.generate.outputs.matrix) }}
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 60 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -128,15 +153,12 @@ jobs:
         # in its own freshly-spawned `python -m pytest <file>` subprocess
         # with bounded parallelism. No xdist, no shared workers, no
         # module-level state leakage between files.
-        # The runner discovers the complete suite; there is no slice matrix.
+        #
         run: |
           source .venv/bin/activate
-          scripts/run_tests.sh
+          scripts/run_tests.sh --files '${{ matrix.slice.files }}'
         env:
-          # One isolated test subprocess per core, matching NousResearch's
-          # measured setting for this runner.
-          HERMES_TEST_WORKERS: 96
-          # A cold-cache compression file can exceed 300s under 96-worker load.
+          # A cold-cache compression file can exceed 300s under heavy load.
           HERMES_TEST_FILE_TIMEOUT: 600
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
@@ -153,8 +175,8 @@ jobs:
           key: test-durations-${{ github.run_id }}
 
   e2e:
-    # Use the same 32-core runner for the fast PR smoke and full E2E suite.
-    runs-on: ubuntu-latest-32-core
+    # Use the shared ARC pool for the fast PR smoke and full E2E suite.
+    runs-on: arc-runner-set
     strategy:
       fail-fast: false
       matrix:
@@ -347,8 +369,8 @@ jobs:
     # autostash, killed mid-pull / mid-deps, offline), fresh-process import and
     # entrypoint smoke, and the config round-trip property matrix. Its own job:
     # it needs full history + tags, bubblewrap, and one file runs ~5-15 min.
-    # Match NousResearch's 32-core runner for the process-heavy update suite.
-    runs-on: ubuntu-latest-32-core
+    # Use the shared ARC pool for the process-heavy update suite.
+    runs-on: arc-runner-set
     if: inputs.e2e_mode == 'full'
     timeout-minutes: 60
     steps:
