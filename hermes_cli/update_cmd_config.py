@@ -53,6 +53,7 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
             (candidate for candidate in (active_profiles_root, canonical_root) if candidate.is_dir()),
             canonical_root,
         )
+        print(f"DEBUG sibling profiles: active={active_path} root={root} entries={list(root.iterdir()) if root.is_dir() else []}")
         if not root.is_dir():
             return migrated
         for entry in sorted(root.iterdir()):
@@ -68,6 +69,7 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
             token = set_hermes_home_override(entry)
             try:
                 current_ver, latest_ver = _run_config_check_fresh()
+                print(f"DEBUG sibling profile {entry.name}: home={entry.resolve()} config={entry / 'config.yaml'} version={current_ver}/{latest_ver}")
                 if current_ver >= latest_ver:
                     continue
                 _run_migrate_config_fresh(interactive=False, quiet=True)
