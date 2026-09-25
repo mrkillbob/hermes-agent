@@ -34,7 +34,7 @@ concurrency:
 jobs:
   diff:
     name: package-lock.json semantic diff
-    runs-on: arc-runner-set
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       changed: ${{ steps.diff.outputs.changed }}

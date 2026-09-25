@@ -37,7 +37,7 @@ jobs:
   # open (every lane true), so post-merge validation is never weakened.
   detect:
     name: Detect affected areas
-    runs-on: arc-runner-small
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       build: ${{ steps.gate.outputs.build }}
@@ -83,12 +83,12 @@ jobs:
         variant: [slim, desktop]
         include:
           - arch: amd64
-            runner: arc-runner-docker
+            runner: ubuntu-latest-32-core
             platform: linux/amd64
           # arm64 builds on the native arm64 larger runner. A build of
           # linux/arm64 on an x64 host uses emulation.
           - arch: arm64
-            runner: arc-runner-arm64
+            runner: ubuntu-latest-32-arm-core
             platform: linux/arm64
 
     runs-on: ${{ matrix.runner }}
@@ -182,8 +182,8 @@ jobs:
         run: |
           # Each of these tests drives a container, so the docker daemon sets
           # the limit and not the processor. This caps the workers. The
-          # default from run_tests.sh is cpu_count*2; cap at the runner's
-          # visible CPU count to keep daemon-backed tests bounded.
+          # default from run_tests.sh is cpu_count*2, which starts 64
+          # containers together on the 32-core amd64 runner.
           HERMES_TEST_WORKERS=$(nproc) scripts/run_tests.sh tests/docker/ --file-timeout 600
 
   # ---------------------------------------------------------------------------
@@ -201,11 +201,11 @@ jobs:
         variant: [slim, desktop]
         include:
           - arch: amd64
-            runner: arc-runner-docker
+            runner: ubuntu-latest-32-core
             platform: linux/amd64
           # Native arm64 for the same reason as the build matrix above.
           - arch: arm64
-            runner: arc-runner-arm64
+            runner: ubuntu-latest-32-arm-core
             platform: linux/arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -277,7 +277,7 @@ jobs:
     # `needs` is the whole 4-leg matrix and a failed need skips the job, so a
     # transient desktop push would take slim's :latest with it. Guard below.
     if: ${{ !cancelled() && github.repository == 'NousResearch/hermes-agent' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'release') }}
-    runs-on: arc-runner-docker
+    runs-on: ubuntu-latest
     needs: [publish]
     timeout-minutes: 10
     environment: container-publish

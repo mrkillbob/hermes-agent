@@ -37,7 +37,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   detect:
     name: Detect affected areas
-    runs-on: arc-runner-small
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       python: ${{ steps.classify.outputs.python }}
@@ -80,7 +80,7 @@ jobs:
     if: needs.detect.outputs.python == 'true'
     uses: ./.github/workflows/tests.yml
     with:
-      # Use the same balanced unit-test slices as the NousResearch workflow.
+      # Match NousResearch's unsliced 96-core unit-test job.
       # Keep PR feedback short; push-to-main and scheduled runs retain the
       # complete suite.
       e2e_mode: ${{ needs.detect.outputs.event_name == 'pull_request' && 'smoke' || 'full' }}
@@ -295,7 +295,7 @@ jobs:
       # to block a merge. A separate run also stops it from holding this
       # run open. That is what blocked ``gh run rerun``.
     if: always()
-    runs-on: arc-runner-small
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
@@ -338,7 +338,7 @@ jobs:
     name: CI timing report
     needs: [all-checks-pass]
     if: always()
-    runs-on: arc-runner-small
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout code

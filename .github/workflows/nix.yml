@@ -35,7 +35,7 @@ jobs:
   # flake inputs. On push the classifier fails open and every lane is true.
   detect:
     name: Detect affected areas
-    runs-on: arc-runner-set
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       nix: ${{ steps.classify.outputs.nix }}
@@ -54,8 +54,9 @@ jobs:
     if: needs.detect.outputs.nix == 'true'
     # The build compiles the package and its whole dependency closure, so this
     # takes minutes and not seconds when the cache misses. `nix flake check`
-    # builds 21 checks; use NousResearch's shared ARC pool.
-    runs-on: arc-runner-set
+    # builds 21 checks, and --max-jobs defaults to the core count. Use the
+    # same 32-core runner pool as the NousResearch repository.
+    runs-on: ubuntu-latest-32-core
     timeout-minutes: 60
     steps:
       - name: Checkout code

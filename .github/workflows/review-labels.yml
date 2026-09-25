@@ -51,7 +51,7 @@ jobs:
   check:
     name: Review label gate
     if: inputs.ci_review || inputs.mcp_catalog || inputs.supply_chain
-    runs-on: arc-runner-small
+    runs-on: ubuntu-latest
     # Checkout alone has been observed taking >5 min on this fork right after a
     # large upstream-sync merge (materializing/transferring the huge
     # refs/pull/<N>/merge synthetic commit is slow); the job's own work is

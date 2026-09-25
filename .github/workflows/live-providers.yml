@@ -37,7 +37,7 @@ jobs:
     name: Live provider canaries
     # Forks and PRs never see these secrets; only run where they exist.
     if: github.repository == 'NousResearch/hermes-agent'
-    runs-on: arc-runner-set
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     # Only booleans at job level: the key VALUES are scoped to the one step that
     # needs them ('Run live canaries'), so `uv sync` build backends and the

@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   check-attribution:
-    runs-on: arc-runner-set
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       review_status: ${{ steps.check-emails.outputs.review_status }}
