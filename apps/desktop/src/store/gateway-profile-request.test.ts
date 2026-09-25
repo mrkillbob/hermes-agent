@@ -56,6 +56,7 @@ const {
   gatewayActivationEpoch,
   disposeSecondariesForConnection,
   openGatewayForAgent,
+  openGatewayForProfile,
   pruneSecondaryGateways,
   requestGatewayForAgent,
   requestGatewayForProfile,
@@ -809,6 +810,30 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
     // This array records constructed mocks, so the closed socket remains at index 0.
     expect(secondaryGateways).toHaveLength(1)
+  })
+
+  it('closes a prewarmed profile socket when profile routing resolves to the shared primary', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installDesktop(
+      vi.fn(async (profile: null | string) => ({
+        port: profile ? 5151 : 4242,
+        ...(profile ? { profile, sharedPrimary } : {}),
+        token: 't'
+      }))
+    )
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForProfile('work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    await requestGatewayForProfile('work', 'profiles.list')
+
+    expect(primary.request).toHaveBeenCalledWith('profiles.list', { profile: 'work' })
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
   })
 
   it('closes a superseded secondary after its active request drains', async () => {
