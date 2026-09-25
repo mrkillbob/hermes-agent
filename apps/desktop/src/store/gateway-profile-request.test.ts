@@ -799,6 +799,17 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     })
   })
 
+  it('does not prewarm a shared-primary registry route before primary identity publishes', async () => {
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    installLocalHost(() => ({ profile: 'work', sharedPrimary: true }))
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForAgent('local', 'work')
+
+    expect(secondaryGateways).toHaveLength(0)
+  })
+
   it('closes a prewarmed secondary when the route resolves to the shared primary', async () => {
     let sharedPrimary = false
     const primary = makePrimary()

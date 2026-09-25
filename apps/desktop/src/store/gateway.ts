@@ -456,7 +456,12 @@ async function ridesPrimaryBackend(
     Boolean(id && g.primaryConnectionId && id === g.primaryConnectionId) ||
     (id === 'local' && g.primaryConnectionMode === 'local')
 
-  if (!attachedPrimarySource) {
+  // The local registry route can itself prove it is the primary backend even
+  // before the renderer has published the primary connection identity. This
+  // matters during startup roster prewarm: main returns `sharedPrimary` from
+  // the same coalesced primary boot, while an early identity guard would let
+  // openGatewayForAgent dial a second WebSocket to that process.
+  if (id !== 'local' && !attachedPrimarySource) {
     return false
   }
 
@@ -484,7 +489,7 @@ async function ridesPrimaryBackend(
     const flags =
       conn && typeof conn === 'object' ? (conn as { sharedPrimary?: boolean; sharedRemote?: boolean }) : null
 
-    return flags?.sharedRemote === true || flags?.sharedPrimary === true
+    return flags?.sharedPrimary === true || (attachedPrimarySource && flags?.sharedRemote === true)
   } catch {
     // Probe failed on a remote (or not-yet-classified) primary: a secondary at
     // this already-attached source is the #96493 ghost WebSocket (accept/close,
@@ -496,7 +501,7 @@ async function ridesPrimaryBackend(
     // its own pid, but the exact-owner route names the pool backend — after a
     // renderer reload or a pool respawn the resume dials that backend and is
     // refused SESSION_NOT_OWNED by a pid of the same Desktop (#101416).
-    return g.primaryConnectionMode !== 'local'
+    return id !== 'local' && g.primaryConnectionMode !== 'local'
   }
 }
 
