@@ -383,6 +383,13 @@ jobs:
           fetch-tags: true
           filter: blob:none
 
+      - name: Fetch official release tags
+        # Forks may not carry the newest upstream release tag. The upgrade
+        # base and historical updater scenario are defined by NousResearch tags.
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch --filter=blob:none --no-recurse-submodules upstream '+refs/tags/v20*:refs/tags/v20*'
+
       - name: Set up Node
         # `hermes update` builds the web UI / TUI workspaces.
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -463,8 +470,6 @@ jobs:
 
           refs = _refs()
           assert refs.base_tag, "N-1 release tag is not reachable from HEAD"
-          pre_handoff = _pre_handoff_tag()
-          assert pre_handoff is not None, "pre-handoff release tag is not reachable from HEAD"
 
           def hydrate(tag: str, *paths: str) -> None:
               archive = subprocess.Popen(
@@ -475,6 +480,20 @@ jobs:
               listing = subprocess.run(["tar", "-tf", "-"], stdin=archive.stdout, stdout=subprocess.DEVNULL)
               archive.stdout.close()
               assert archive.wait() == 0 and listing.returncode == 0, f"could not hydrate {tag}"
+
+          release_tags = subprocess.run(
+              ["git", "tag", "--merged", "HEAD", "--sort=-v:refname", "--list", "v20*"],
+              capture_output=True, text=True, check=True,
+          ).stdout.splitlines()[:15]
+          pre_handoff = None
+          for tag in release_tags:
+              # The discovery helper reads these files; materialize them one
+              # candidate at a time in this blob-filtered checkout.
+              hydrate(tag, "hermes_cli")
+              pre_handoff = _pre_handoff_tag()
+              if pre_handoff is not None:
+                  break
+          assert pre_handoff is not None, "pre-handoff release tag is not reachable from HEAD"
 
           hydrate(refs.base_tag)
           config = tomllib.loads(Path("pyproject.toml").read_text())
