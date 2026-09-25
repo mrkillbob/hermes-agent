@@ -10,10 +10,9 @@ gateway-restart phase then imports new ``hermes_cli.gateway`` /
 'utils'``.
 
 Post-swap hand-off (``hermes_cli.update_handoff``) makes this class dead for
-updaters that already include it. This module is the bridge for the one
-upgrade from a pre-handoff release onto a tree that needs new root symbols:
-freshly imported ``hermes_cli`` code drops the incomplete cache before
-importing ``utils``.
+updaters that already include it. This module bridges upgrades from
+pre-handoff releases by dropping incomplete cached modules before updated
+code imports symbols added by the pulled tree.
 """
 
 from __future__ import annotations
@@ -21,11 +20,13 @@ from __future__ import annotations
 import sys
 from typing import Mapping, Sequence
 
-# Root modules the narrow purge left behind, keyed by attributes that must
-# exist on the on-disk copy after this release. Extend when a new root-level
-# symbol would otherwise break the pre-handoff upgrade path.
-_ROOT_MODULE_REQUIRED_ATTRS: dict[str, tuple[str, ...]] = {
+# Modules a pre-handoff updater can leave behind, keyed by symbols introduced
+# after the cached copy. Extend this when a post-pull import fails against an
+# incomplete module that survived the legacy package purge.
+_MODULE_REQUIRED_ATTRS: dict[str, tuple[str, ...]] = {
     "utils": ("file_signature",),
+    "hermes_cli.tools_config": ("_configurable_keys",),
+    "gateway.status": ("profile_flag_value",),
 }
 
 
@@ -33,7 +34,7 @@ def drop_stale_root_modules(
     required: Mapping[str, Sequence[str]] | None = None,
 ) -> list[str]:
     """Drop cached root modules missing required attrs. Returns dropped names."""
-    checks = _ROOT_MODULE_REQUIRED_ATTRS if required is None else required
+    checks = _MODULE_REQUIRED_ATTRS if required is None else required
     dropped: list[str] = []
     for name, attrs in checks.items():
         mod = sys.modules.get(name)

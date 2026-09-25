@@ -18,6 +18,13 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+# Legacy pre-handoff updaters can retain an older status module after the
+# checkout changes. Drop it before this facade binds newly-added status names.
+from hermes_cli.stale_modules import drop_stale_root_modules
+
+drop_stale_root_modules()
+
 from hermes_cli import setup_platforms  # noqa: F401 — resolved lazily by siblings through the facade
 
 # UV's bundled Python ships a minimal PATH; ensure launchctl/systemctl are discoverable.

@@ -64,3 +64,21 @@ def test_drop_stale_root_modules_leaves_complete_utils_alone():
     before = sys.modules["utils"]
     assert drop_stale_root_modules() == []
     assert sys.modules["utils"] is before
+
+
+def test_drop_stale_root_modules_also_heals_stale_package_modules():
+    import types
+    from hermes_cli.stale_modules import drop_stale_root_modules
+
+    names = ("hermes_cli.tools_config", "gateway.status")
+    before = {name: sys.modules.pop(name, None) for name in names}
+    try:
+        for name in names:
+            sys.modules[name] = types.ModuleType(name)
+        assert set(drop_stale_root_modules()) == set(names)
+        assert all(name not in sys.modules for name in names)
+    finally:
+        for name in names:
+            sys.modules.pop(name, None)
+            if before[name] is not None:
+                sys.modules[name] = before[name]
