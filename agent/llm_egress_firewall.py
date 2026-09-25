@@ -632,7 +632,12 @@ _VALIDATED_TOOL_SYNTAX = {
 }
 _PRIVATE_ABSOLUTE_PATH = re.compile(
     r"(?:^|[\s\"'`(])(?:"
-    r"/(?:Users|home|private|var/folders|root|Volumes)/[^\s\"'`)]+"
+    # macOS resolves its real /tmp and /var/tmp under /private, already
+    # covered below; Linux CI runners and containers commonly place a
+    # process's own scratch/home directory directly under /tmp or
+    # /var/tmp (e.g. a pytest ``tmp_path``), which reveals the same kind
+    # of local filesystem layout a remote provider must not see.
+    r"/(?:Users|home|private|var/folders|var/tmp|tmp|root|Volumes)/[^\s\"'`)]+"
     r"|~(?:/|\\)[^\s\"'`)]+"
     r"|[A-Za-z]:\\+(?:Users|Documents and Settings)\\+[^\s\"'`)]+"
     r")",
