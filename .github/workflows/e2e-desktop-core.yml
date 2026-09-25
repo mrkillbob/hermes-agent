@@ -31,8 +31,10 @@ concurrency:
 jobs:
   core:
     name: Desktop core E2E (Linux)
-    # Use the same 32-core runner for the fork and NousResearch repository.
-    runs-on: ubuntu-latest-32-core
+    # This fork has no access to upstream's ubuntu-latest-32-core runner
+    # group; it uses the standard runner. In NousResearch, match the full
+    # process-heavy E2E lane's 32-core runner.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

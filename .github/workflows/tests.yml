@@ -46,8 +46,9 @@ jobs:
     name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
     needs: generate
     if: inputs.run_unit
-    # The Hermes Agent fork uses the same 96-core runner pool as NousResearch.
-    runs-on: ubuntu-latest-96-core
+    # NousResearch's 96-core runner is private to that repository. Fork PRs
+    # keep using standard hosted runners and the slice matrix above.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-96-core' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.generate.outputs.matrix) }}
@@ -158,11 +159,12 @@ jobs:
           source .venv/bin/activate
           scripts/run_tests.sh --files '${{ matrix.slice.files }}'
         env:
-          # One isolated test subprocess per core, matching NousResearch's
-          # measured setting for this runner.
-          HERMES_TEST_WORKERS: 96
-          # A cold-cache compression file can exceed 300s under 96-worker load.
-          HERMES_TEST_FILE_TIMEOUT: 600
+          # Upstream has one worker per core on its 96-core runner. The fork
+          # keeps four isolated subprocesses per standard runner.
+          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '96' || '4' }}
+          # A cold-cache compression file can exceed the default 300s under
+          # the upstream 96-worker load; match NousResearch's 600s allowance.
+          HERMES_TEST_FILE_TIMEOUT: ${{ github.repository == 'NousResearch/hermes-agent' && '600' || '300' }}
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
@@ -178,13 +180,15 @@ jobs:
           key: test-durations-${{ github.run_id }}
 
   e2e:
-    # Use the same 32-core runner for the fast PR smoke and full E2E suite.
-    runs-on: ubuntu-latest-32-core
+    # Upstream runs the complete process-heavy suite on one 32-core runner.
+    # The fork cannot access that private runner group, so its full suite uses
+    # four independent standard runners. PRs use one smoke shard in either repo.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        shard: [0]
-    timeout-minutes: 30
+        shard: ${{ fromJSON(inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '[0, 1, 2, 3]' || '[0]') }}
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -343,7 +347,7 @@ jobs:
           scripts/run_tests.sh --include-integration "${files[@]}"
         env:
           E2E_SHARD: ${{ matrix.shard }}
-          E2E_SHARD_COUNT: "1"
+          E2E_SHARD_COUNT: ${{ inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '4' || '1' }}
           # Multi-process episodes (torture chamber, compaction kill -9,
           # gateway liveness, delivery exactly-once through a real gateway,
           # the cron virtual-clock soak) legitimately run past the 300 s default.
@@ -372,10 +376,10 @@ jobs:
     # autostash, killed mid-pull / mid-deps, offline), fresh-process import and
     # entrypoint smoke, and the config round-trip property matrix. Its own job:
     # it needs full history + tags, bubblewrap, and one file runs ~5-15 min.
-    # Match NousResearch's 32-core runner for the process-heavy update suite.
-    runs-on: ubuntu-latest-32-core
+    # Upstream uses its 32-core runner; forks use standard hosted runners.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
     if: inputs.e2e_mode == 'full'
-    timeout-minutes: 60
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 60 || 120 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
