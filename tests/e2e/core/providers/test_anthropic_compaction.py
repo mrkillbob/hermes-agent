@@ -35,7 +35,9 @@ SUMMARY_TOKEN = "E2E-ANTHROPIC-SUMMARY-7f3a"
 
 
 def _sig(i: int) -> str:
-    return f"EqRound{i:02d}+/sigBytes{'x' * i}=="
+    # Keep the opaque test signature deliberately outside canonical Base64 so
+    # the egress firewall can inspect the surrounding conversation payload.
+    return f"signature:EqRound{i:02d}:sigBytes{'x' * i}"
 
 
 def _think(i: int) -> str:

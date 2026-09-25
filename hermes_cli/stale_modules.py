@@ -25,9 +25,15 @@ from typing import Mapping, Sequence
 # incomplete module that survived the legacy package purge.
 _MODULE_REQUIRED_ATTRS: dict[str, tuple[str, ...]] = {
     "utils": ("file_signature",),
-    "hermes_cli.tools_config": ("_configurable_keys",),
+    "hermes_cli.tools_config": ("_configurable_keys", "_parse_enabled_flag"),
     "hermes_cli.config_migrations": ("_migrate_to_46",),
     "gateway.status": ("profile_flag_value",),
+}
+
+_MODULE_REQUIRED_MIGRATIONS: dict[str, tuple[int, ...]] = {
+    # The step function may exist in a stale module whose migration ladder did
+    # not register it before an in-place checkout update.
+    "hermes_cli.config_migrations": (46,),
 }
 
 
@@ -46,7 +52,14 @@ def drop_stale_root_modules(
         # initialized; an absent newly-added attribute is not evidence of staleness.
         if getattr(getattr(mod, "__spec__", None), "_initializing", False):
             continue
-        if any(not hasattr(mod, attr) for attr in attrs):
+        missing_attr = any(not hasattr(mod, attr) for attr in attrs)
+        required_migrations = _MODULE_REQUIRED_MIGRATIONS.get(name, ())
+        migrations = getattr(mod, "MIGRATIONS", ())
+        missing_migration = any(
+            not any(isinstance(entry, tuple) and entry and entry[0] == version for entry in migrations)
+            for version in required_migrations
+        )
+        if missing_attr or missing_migration:
             sys.modules.pop(name, None)
             dropped.append(name)
     return dropped

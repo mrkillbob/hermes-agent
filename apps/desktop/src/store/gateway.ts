@@ -452,7 +452,11 @@ async function ridesPrimaryBackend(
     rearmSecondary(parked, spawnPriority)
   }
 
-  if (!id || !g.primaryConnectionId || id !== g.primaryConnectionId) {
+  const attachedPrimarySource =
+    Boolean(id && g.primaryConnectionId && id === g.primaryConnectionId) ||
+    (id === 'local' && g.primaryConnectionMode === 'local')
+
+  if (!attachedPrimarySource) {
     return false
   }
 

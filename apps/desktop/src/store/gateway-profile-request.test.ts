@@ -812,6 +812,24 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     expect(secondaryGateways).toHaveLength(1)
   })
 
+  it('recognizes the local source when the primary descriptor has no registry id', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ mode: 'local' })
+    installLocalHost(profile => ({ port: 5151, profile, sharedPrimary }))
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForAgent('local', 'work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    await requestGatewayForAgent('local', 'work', 'profiles.list')
+
+    expect(primary.request).toHaveBeenCalledWith('profiles.list', { profile: 'work' })
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
   it('closes a prewarmed profile socket when profile routing resolves to the shared primary', async () => {
     let sharedPrimary = false
     const primary = makePrimary()

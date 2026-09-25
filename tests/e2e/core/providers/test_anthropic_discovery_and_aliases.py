@@ -133,7 +133,7 @@ def test_oauth_wire_names_map_back_to_real_tools(rig) -> None:
     # correctly rejects arbitrary encoded payloads, even when they are fixture text.
     target.write_text("WIRE FILE CONTENT 93", encoding="utf-8")
     r.srv.push(
-        Reply([ToolUse("mcp__read_file", {"path": str(target)}),
+        Reply([ToolUse("mcp__read_file", {"path": target.name}),
                ToolUse("mcp__context_notes", {"action": "add", "target": "memory", "content": note})]),
         Reply([Text("ALIASES-DONE")]),
     )
