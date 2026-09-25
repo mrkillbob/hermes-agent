@@ -228,7 +228,7 @@ class MemoryStore:
 
     def _usage_pct(self, target: str, current: int) -> str:
         limit = self._char_limit(target)
-        return f"{min(100, int((current / limit) * 100)) if limit > 0 else 0}% — {current:,}/{limit:,} chars"
+        return f"{min(100, int((current / limit) * 100)) if limit > 0 else 0}% — {current:,} of {limit:,} chars"
 
     def _failure_with_entries(self, target: str, message: str) -> Dict[str, Any]:
         """Consolidation failure carrying the live entries so the model can consolidate."""

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import stat
 import pytest
 from pathlib import Path
@@ -160,6 +161,18 @@ class TestMemoryStoreAdd:
         result = store.add("user", "Name: Alice")
         assert result["success"] is True
         assert result["target"] == "user"
+
+    def test_success_usage_describes_counts_without_ambiguous_encoded_text(self, store):
+        result = store.add("memory", "one durable fact")
+
+        match = re.fullmatch(r"(\d+)% — ([\d,]+) of ([\d,]+) chars", result["usage"])
+        assert match is not None
+        percent, current, limit = match.groups()
+        current = int(current.replace(",", ""))
+        limit = int(limit.replace(",", ""))
+        assert current == store._char_count("memory")
+        assert limit == store._char_limit("memory")
+        assert int(percent) == int((current / limit) * 100)
 
 
     def test_overflow_returns_consolidation_context(self, store):
