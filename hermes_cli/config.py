@@ -1363,6 +1363,10 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     # ancient install: it gets only the legacy-key steps and a version stamp.
     # Missing/unparseable files never trip the floor gate.
     # Imported lazily because the steps call back into this module.
+    # A pre-handoff updater may have loaded an old migration ladder before replacing its checkout.
+    # Recheck at this lazy-import boundary so the new config version cannot be stamped by a cached
+    # ladder that lacks a newly-added migration step.
+    drop_stale_root_modules()
     from hermes_cli.config_migrations import (
         SUPPORT_FLOOR_VERSION, run_migrations, support_floor_message)
 

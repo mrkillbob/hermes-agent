@@ -146,6 +146,8 @@ interface Secondary {
   livenessProbeFailures: number
   /** Pending deferred liveness re-probe after an in-flight-work deferral. */
   livenessReprobeTimer: ReturnType<typeof setTimeout> | null
+  /** Route resolution moved this scope onto the primary while a request drained. */
+  supersededBySharedPrimary: boolean
   /** Consecutive automatic dials that stalled (slot wait / dial timeout)
    *  rather than failing fast; see SECONDARY_STALLED_DIAL_BUDGET. */
   stalledDials: number
@@ -883,6 +885,7 @@ function rearmSecondary(entry: Secondary, priority: SpawnPriority = 'foreground'
   entry.wantOpen = true
   entry.stalledDials = 0
   entry.retiredByPool = false
+  entry.supersededBySharedPrimary = false
 }
 
 function scheduleReconnect(entry: Secondary): void {
@@ -999,6 +1002,7 @@ function createSecondary(profile: string, connectionId: null | string = null): S
     reconnectAttempt: 0,
     livenessProbeFailures: 0,
     livenessReprobeTimer: null,
+    supersededBySharedPrimary: false,
     stalledDials: 0,
     reconnecting: false,
     pendingConnectionRedial: false,
@@ -1241,10 +1245,14 @@ export async function requestGatewayForAgent<T>(
   // Require both owner identities to agree before collapsing the route; a
   // different source or profile must retain its isolated secondary.
   if (isPrimaryRegistryRoute(connectionId, key)) {
+    discardSupersededSharedPrimarySecondary(scope)
+
     return requestGatewayForProfile<T>(key, method, params, timeoutMs, signal, { spawnPriority })
   }
 
   if (await ridesPrimaryBackend(connectionId, key, spawnPriority)) {
+    discardSupersededSharedPrimarySecondary(scope)
+
     return requestOnPrimaryGateway<T>(method, { ...params, profile: key }, timeoutMs, signal)
   }
 
@@ -1277,7 +1285,15 @@ export async function requestGatewayForAgent<T>(
   } finally {
     entry.activeRequests = Math.max(0, entry.activeRequests - 1)
 
-    if (
+    if (entry.supersededBySharedPrimary && entry.activeRequests === 0) {
+      disposeSecondary(entry)
+
+      if (g.secondaries.get(entry.scope) === entry) {
+        g.secondaries.delete(entry.scope)
+      }
+
+      restoreActiveToPrimaryIfEvicted()
+    } else if (
       !drainPendingConnectionRedial(entry) &&
       entry.activeRequests === 0 &&
       !entry.retained &&
@@ -1463,6 +1479,8 @@ export async function retainGatewayForAgent(
   }
 
   if (isPrimaryRegistryRoute(connectionId, key) || (await ridesPrimaryBackend(connectionId, key, spawnPriority))) {
+    discardSupersededSharedPrimarySecondary(scope)
+
     // Primary socket stays open for the window lifetime — no secondary to hold.
     return () => undefined
   }
@@ -1739,10 +1757,14 @@ export async function openGatewayForAgent(
   const scope = registryBackendScopeKey(connectionId, profile)
 
   if (scope === normKey(profile) || isPrimaryRegistryRoute(connectionId, profile)) {
+    discardSupersededSharedPrimarySecondary(scope)
+
     return openGatewayForProfile(profile, { spawnPriority })
   }
 
   if (await ridesPrimaryBackend(connectionId, profile, spawnPriority)) {
+    discardSupersededSharedPrimarySecondary(scope)
+
     if (!isOpen(g.primaryGateway)) {
       throw new Error('Hermes gateway unavailable')
     }
@@ -1801,7 +1823,13 @@ export async function ensureGatewayForAgent(
   if (await ridesPrimaryBackend(connectionId, profile, 'foreground')) {
     // A retained primary can be open while the foreground still points at a
     // different source. Reusing its socket must also move the active route.
-    return Boolean(isOpen(g.primaryGateway) && !signal?.aborted && applyActive(g.primaryProfile, activationEpoch))
+    const activated = Boolean(isOpen(g.primaryGateway) && !signal?.aborted && applyActive(g.primaryProfile, activationEpoch))
+
+    if (activated) {
+      discardSupersededSharedPrimarySecondary(scope)
+    }
+
+    return activated
   }
 
   if (!window.hermesDesktop?.getConnectionFor) {
@@ -2211,6 +2239,29 @@ function disposeSecondary(entry: Secondary): void {
   entry.offRequest()
   entry.offState()
   entry.gateway.close()
+}
+
+// Route resolution can change after a roster prewarm opened a pooled socket.
+// Once main confirms that a registry profile rides the primary backend, an
+// idle secondary for that exact scope is obsolete and would receive duplicate
+// host-backend events.
+function discardSupersededSharedPrimarySecondary(scope: string): void {
+  const entry = g.secondaries.get(scope)
+
+  if (!entry) {
+    return
+  }
+
+  entry.supersededBySharedPrimary = true
+  entry.retained = false
+  entry.wantOpen = false
+  clearTimer(entry)
+
+  if (entry.activeRequests === 0) {
+    disposeSecondary(entry)
+    g.secondaries.delete(scope)
+    restoreActiveToPrimaryIfEvicted()
+  }
 }
 
 // Invariant restore for every eviction path: if the active key names a

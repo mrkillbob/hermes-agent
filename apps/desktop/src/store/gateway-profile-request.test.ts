@@ -792,6 +792,49 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     })
   })
 
+  it('closes a prewarmed secondary when the route resolves to the shared primary', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ port: 5151, profile, sharedPrimary }))
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForAgent('local', 'work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    expect(await ensureGatewayForAgent('local', 'work')).toBe(true)
+
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+    // This array records constructed mocks, so the closed socket remains at index 0.
+    expect(secondaryGateways).toHaveLength(1)
+  })
+
+  it('closes a superseded secondary after its active request drains', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ port: 5151, profile, sharedPrimary }))
+    await ensureGatewayForProfile('default')
+    await openGatewayForAgent('local', 'work')
+
+    const pendingRequest = deferred<{ method: string; params: Record<string, unknown> }>()
+    secondaryGateways[0].request.mockReturnValueOnce(pendingRequest.promise)
+    const request = requestGatewayForAgent('local', 'work', 'profiles.list')
+    await vi.waitFor(() => expect(secondaryGateways[0].request).toHaveBeenCalledOnce())
+
+    sharedPrimary = true
+    expect(await ensureGatewayForAgent('local', 'work')).toBe(true)
+    expect(secondaryGateways[0].close).not.toHaveBeenCalled()
+
+    pendingRequest.resolve({ method: 'profiles.list', params: {} })
+    await expect(request).resolves.toEqual({ method: 'profiles.list', params: {} })
+
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
   it('still dials a secondary for a pooled local profile (isolated backend, #101416)', async () => {
     const primary = makePrimary()
     setPrimaryGateway(primary as never, 'default')

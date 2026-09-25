@@ -63,7 +63,7 @@ def rig(tmp_path: Path):
                 return Reply([Thinking(f"Answer {n}.", _sig(50 + n)), Text(f"TURN-{n}-DONE")], input_tokens=tokens)
             state["calls"] += 1
             i = state["calls"]
-        return Reply([Thinking(_think(i), _sig(i)), ToolUse("read_file", {"path": str(files[i - 1])})],
+        return Reply([Thinking(_think(i), _sig(i)), ToolUse("read_file", {"path": files[i - 1].name})],
                      input_tokens=tokens)
 
     def aux(record):
