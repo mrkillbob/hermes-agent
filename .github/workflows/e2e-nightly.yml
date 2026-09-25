@@ -23,3 +23,5 @@ jobs:
   desktop-core:
     name: Desktop core E2E
     uses: ./.github/workflows/e2e-desktop-core.yml
+    with:
+      concurrency_scope: nightly
