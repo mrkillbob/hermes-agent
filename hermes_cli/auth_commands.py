@@ -1,7 +1,6 @@
 """Credential-pool auth subcommands."""
 
 from __future__ import annotations
-from hermes_cli.cli_output import line_input
 
 import math
 import sys
@@ -357,6 +356,8 @@ def _unsuppress_provider_sources(provider: str) -> None:
 
 
 def _add_api_key_credential(args, provider: str, pool) -> PooledCredential:
+    from hermes_cli.cli_output import line_input
+
     token = ((getattr(args, "api_key", None) or "").strip()
              or masked_secret_prompt("Paste your API key: ").strip())
     if not token:
@@ -790,6 +791,8 @@ def _interactive_auth() -> None:
 
 def _pick_provider(prompt: str = "Provider") -> str:
     """Prompt for a provider name with auto-complete hints."""
+    from hermes_cli.cli_output import line_input
+
     known = sorted(set(list(PROVIDER_REGISTRY.keys()) + ["openrouter"]))
     custom_display = [entry["name"] for entry in _get_custom_provider_entries()]
     print(f"\nKnown providers: {', '.join(known)}")
@@ -802,6 +805,8 @@ def _pick_provider(prompt: str = "Provider") -> str:
 
 
 def _interactive_add() -> None:
+    from hermes_cli.cli_output import line_input
+
     provider = _pick_provider("Provider to add credential for")
     if dispatch_plugin_auth("add", SimpleNamespace(provider=provider), provider):
         return
@@ -831,6 +836,8 @@ def _interactive_add() -> None:
 
 
 def _interactive_remove() -> None:
+    from hermes_cli.cli_output import line_input
+
     provider = _pick_provider("Provider to remove credential from")
     pool = load_pool(provider)
     if not pool.has_credentials():

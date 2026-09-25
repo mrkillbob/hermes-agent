@@ -1202,6 +1202,13 @@ def _typed_payload_mapping_structured(
         or is_scratch_read_file_tool_result
     ):
         if (
+            is_read_file_projection_tool_result
+            and protected_kanban_context
+            and value.get("type") == "tool_result"
+        ):
+            typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+            return True
+        if (
             source_metadata is not None
             and not is_scratch_read_file_tool_result
             and structured_text is not None
@@ -1416,6 +1423,19 @@ def _typed_payload_mapping_scalar_content(
         # An exact call-id proves this is the local read tool's result,
         # but an error/denial has no source grant.  Replay only the
         # bounded outcome instead of treating the error text as source.
+        typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
+        return True
+    if (
+        is_read_file_projection_tool_result
+        and protected_kanban_context
+        and value.get("type") == "tool_result"
+        and key in {"content", "output"}
+        and isinstance(item, str)
+    ):
+        # Anthropic represents a tool result as a scalar ``content`` field.
+        # Keep the exact call binding, but never replay local file bytes on a
+        # protected remote route where an assistant turn may contain opaque
+        # encodings that the final firewall must reject.
         typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
         return True
     if (

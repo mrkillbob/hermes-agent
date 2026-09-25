@@ -12721,7 +12721,11 @@ async function runPoolBackendStart(
   // --profile wins over the inherited HERMES_HOME env (see _apply_profile_override
   // step 3 in hermes_cli/main.py), so the child re-homes to this profile.
   // --port 0: the OS assigns an ephemeral port; the child announces it on stdout.
-  const backendArgs = ['--profile', profile, 'serve', '--host', '127.0.0.1', '--port', '0']
+  // The Desktop build already supplies the web bundle through HERMES_WEB_DIST.
+  // Do not make every managed backend cold-start rebuild the UI; on CI and on
+  // a slow checkout that turns a backend boot into a multi-minute npm job and
+  // causes the readiness watchdog to report a misleading gateway-offline error.
+  const backendArgs = ['--profile', profile, 'serve', '--skip-build', '--host', '127.0.0.1', '--port', '0']
 
   const backend = await ensureRuntime(await resolveHermesBackend(backendArgs), () =>
     assertPoolEntryStillOwned(poolKey, entry)
@@ -13431,7 +13435,7 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
 
     const token = crypto.randomBytes(32).toString('base64url')
     // --port 0: the OS assigns an ephemeral port; the child announces it on stdout.
-    const backendArgs = ['serve', '--host', '127.0.0.1', '--port', '0']
+    const backendArgs = ['serve', '--skip-build', '--host', '127.0.0.1', '--port', '0']
     // Pin the desktop's chosen profile via the global --profile flag. This is
     // deterministic (it wins over the sticky ~/.hermes/active_profile file) and
     // resolves HERMES_HOME the same way `hermes -p <name>` does on the CLI. An

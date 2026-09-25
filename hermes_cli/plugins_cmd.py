@@ -19,7 +19,6 @@ from typing import Any, Callable, NoReturn, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import noninteractive_git_env
-from hermes_cli.cli_output import line_input
 from hermes_cli.config import cfg_get
 from hermes_cli.plugin_capabilities import _child_dict, _write_raw_config_value, _write_raw_config_values
 from hermes_cli.secret_prompt import masked_secret_prompt
@@ -402,6 +401,7 @@ def _prompt_plugin_env_vars(manifest: dict, console) -> None:
     if not missing:
         return
     from hermes_cli.config import save_env_value
+    from hermes_cli.cli_output import line_input
     from hermes_constants import display_hermes_home
     plugin_name = manifest.get("name", "this plugin")
     console.print(f"\n[bold]{plugin_name}[/bold] requires the following environment variables:\n")

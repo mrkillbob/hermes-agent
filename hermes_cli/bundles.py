@@ -8,7 +8,6 @@ from typing import List
 from rich.console import Console
 from rich.table import Table
 
-from hermes_cli.cli_output import line_input
 
 from agent.skill_bundles import (
     _bundles_dir, delete_bundle, get_bundle, list_bundles, reload_bundles, save_bundle, scan_bundles
@@ -67,6 +66,8 @@ def _cmd_show(args) -> None:
 
 
 def _cmd_create(args) -> None:
+    from hermes_cli.cli_output import line_input
+
     c = _console()
     name = args.name
     skills: List[str] = list(args.skill or [])

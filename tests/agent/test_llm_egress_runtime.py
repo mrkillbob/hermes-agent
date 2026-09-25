@@ -164,6 +164,46 @@ def test_anthropic_replays_unknown_tool_use_without_raw_local_path(tmp_path):
     assert block["input"]["path"] != local_path
 
 
+def test_anthropic_tool_result_scalar_is_elided_on_protected_route(tmp_path, monkeypatch):
+    """Anthropic's nested scalar tool_result content never replays local bytes."""
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "anthropic"
+    agent.api_mode = "anthropic_messages"
+    kwargs = {
+        "model": "claude-test",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_read_1",
+                        "name": "mcp__read_file",
+                        "input": {"path": "wire.txt"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_read_1",
+                        "content": "c2VjcmV0LXBheWxvYWQ=",
+                    }
+                ],
+            },
+        ],
+    }
+
+    authorized, _ = authorize_agent_sdk_kwargs(agent, kwargs)
+
+    result = authorized["messages"][1]["content"][0]
+    assert result["content"] == _READ_FILE_REPLAY_ELISION
+
+
 def test_runtime_granted_caps_default_to_the_configured_request_caps(tmp_path):
     registry = SourceProvenanceRegistry()
     path = tmp_path / "large-source.txt"
