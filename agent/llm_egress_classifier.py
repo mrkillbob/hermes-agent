@@ -939,14 +939,13 @@ def _typed_payload_mapping_item(
         and value.get("type") == "tool_use"
         and key == "input"
         and isinstance(direct_name, str)
-        and direct_name in _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES
         and isinstance(item, Mapping)
     ):
         # Anthropic sends the assistant's prior tool_use block back verbatim on
-        # the next request.  Read-only calls have already executed locally;
-        # redact their generated arguments while preserving the object shape
-        # required by the Messages API.  This is intentionally limited to the
-        # exact read-only tool set and the provider-generated tool_use shape.
+        # the next request.  The input is generated context for every tool_use
+        # block, including provider aliases whose name is not in our local
+        # read-only registry. Redact unsafe-looking generated values while
+        # preserving the object shape required by the Messages API.
         typed[key] = _typed_payload(
             item,
             grant_texts,

@@ -31,7 +31,7 @@ _VALIDATED_SYNTAX_TOOL_NAMES = frozenset({"terminal"})
 _REMOTE_KANBAN_PROJECTION_TOOL_NAMES = frozenset({"kanban_show"})
 _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES = frozenset({"terminal", "browser_exec"})
 _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES = frozenset({"search_files"})
-_REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file"})
+_REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES = frozenset({"read_file", "mcp__read_file"})
 _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES = frozenset({"web_extract", "web_search"})
 _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES = frozenset({"patch", "write_file"})
 _REMOTE_KANBAN_READONLY_REPLAY_TOOL_NAMES = frozenset(
@@ -256,7 +256,7 @@ def _recognized_tool_call_ids(
                 else item.get("name")
             )
             if (
-                item.get("type") in {"function", "function_call"}
+                item.get("type") in {"function", "function_call", "tool_use"}
                 and direct_name in tool_names
             ):
                 call_id = item.get("call_id") or item.get("id")
