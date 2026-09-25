@@ -82,7 +82,7 @@ from agent.source_provenance import SourceProvenanceRegistry
 
 _PROTOCOL_LITERAL_FIELDS = frozenset({"role", "type"})
 _TOOL_PROTOCOL_IDENTIFIER_FIELDS = frozenset(
-    {"id", "call_id", "tool_call_id", "response_item_id"}
+    {"id", "call_id", "tool_call_id", "tool_use_id", "response_item_id"}
 )
 _PROTOCOL_LITERAL_VALUES = frozenset({
     "assistant",
@@ -757,7 +757,10 @@ def _typed_payload_mapping(
         generated_assistant_mapping = value.get("role") == "assistant"
         is_tool_protocol_mapping = (
             value.get("role") in {"assistant", "tool"}
-            or value.get("type") in {"function", "function_call", "function_call_output"}
+            or value.get("type") in {
+                "function", "function_call", "function_call_output",
+                "tool_use", "tool_result",
+            }
         )
         is_untrusted_tool_result = (
             protected_kanban_context

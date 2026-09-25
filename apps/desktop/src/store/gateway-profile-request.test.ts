@@ -878,6 +878,25 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
   })
 
+  it('retires a legacy profile prewarm when the agent route resolves to the shared local primary', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ port: profile ? 5151 : 4242, profile, sharedPrimary }))
+    await ensureGatewayForProfile('default')
+
+    // The roster's legacy profile prewarm is keyed by the bare profile name.
+    await openGatewayForProfile('work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    await requestGatewayForAgent('local', 'work', 'session.list')
+
+    expect(primary.request).toHaveBeenCalledWith('session.list', { profile: 'work' })
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
   it('closes a superseded secondary after its active request drains', async () => {
     let sharedPrimary = false
     const primary = makePrimary()

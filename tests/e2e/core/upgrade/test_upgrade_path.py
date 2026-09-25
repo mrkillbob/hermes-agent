@@ -471,6 +471,8 @@ def assert_healthy_at_head(leg: Leg, provider: FakeLLMServer, final: subprocess.
         expected = migrate_oracle(leg, name, orig)
         assert after == expected, (
             f"{name} config.yaml differs from HEAD's own migration of the pre-update file\n"
+            f"--- updater stdout (tail) ---\n{final.stdout[-6000:]}\n"
+            f"--- updater stderr (tail) ---\n{final.stderr[-3000:]}\n"
             f"--- after update ---\n{after.decode()}\n--- expected ---\n{expected.decode()}")
         # Independent of the oracle (a clobbering migration would be mirrored by it): the user's
         # values survive semantically and every comment line survives verbatim.

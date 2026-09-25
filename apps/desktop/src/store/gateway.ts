@@ -1119,8 +1119,7 @@ async function gatewayForProfile(
   if (await sharedPrimaryRoute(key, spawnPriority)) {
     // A roster prewarm may have opened the old pooled route before main
     // identified this profile as shared with the primary.
-    discardSupersededSharedPrimarySecondary(key)
-    discardSupersededSharedPrimarySecondary(registryBackendScopeKey('local', key))
+    discardSupersededSharedPrimarySecondaries('local', key)
 
     return { gateway: g.primaryGateway, key, release: noRelease, scopeProfile: true }
   }
@@ -1260,7 +1259,7 @@ export async function requestGatewayForAgent<T>(
   }
 
   if (await ridesPrimaryBackend(connectionId, key, spawnPriority)) {
-    discardSupersededSharedPrimarySecondary(scope)
+    discardSupersededSharedPrimarySecondaries(connectionId, key)
 
     return requestOnPrimaryGateway<T>(method, { ...params, profile: key }, timeoutMs, signal)
   }
@@ -1488,7 +1487,11 @@ export async function retainGatewayForAgent(
   }
 
   if (isPrimaryRegistryRoute(connectionId, key) || (await ridesPrimaryBackend(connectionId, key, spawnPriority))) {
-    discardSupersededSharedPrimarySecondary(scope)
+    if (isPrimaryRegistryRoute(connectionId, key)) {
+      discardSupersededSharedPrimarySecondary(scope)
+    } else {
+      discardSupersededSharedPrimarySecondaries(connectionId, key)
+    }
 
     // Primary socket stays open for the window lifetime — no secondary to hold.
     return () => undefined
@@ -1772,7 +1775,7 @@ export async function openGatewayForAgent(
   }
 
   if (await ridesPrimaryBackend(connectionId, profile, spawnPriority)) {
-    discardSupersededSharedPrimarySecondary(scope)
+    discardSupersededSharedPrimarySecondaries(connectionId, profile)
 
     if (!isOpen(g.primaryGateway)) {
       throw new Error('Hermes gateway unavailable')
@@ -1835,7 +1838,7 @@ export async function ensureGatewayForAgent(
     const activated = Boolean(isOpen(g.primaryGateway) && !signal?.aborted && applyActive(g.primaryProfile, activationEpoch))
 
     if (activated) {
-      discardSupersededSharedPrimarySecondary(scope)
+      discardSupersededSharedPrimarySecondaries(connectionId, profile)
     }
 
     return activated
@@ -2270,6 +2273,21 @@ function discardSupersededSharedPrimarySecondary(scope: string): void {
     disposeSecondary(entry)
     g.secondaries.delete(scope)
     restoreActiveToPrimaryIfEvicted()
+  }
+}
+
+// A local profile route can be discovered through either the profile API or
+// the registry API after a prewarm opened its bare-name secondary. Retire both
+// identities once the route proves they name the same host backend; otherwise
+// that old socket keeps receiving the same events as the primary.
+function discardSupersededSharedPrimarySecondaries(connectionId: null | string, profile: string): void {
+  const id = String(connectionId ?? '').trim()
+  const key = normKey(profile)
+
+  discardSupersededSharedPrimarySecondary(registryBackendScopeKey(id, key))
+
+  if (id === 'local') {
+    discardSupersededSharedPrimarySecondary(key)
   }
 }
 
