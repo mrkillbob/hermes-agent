@@ -46,11 +46,13 @@ jobs:
     name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
     needs: generate
     if: inputs.run_unit
-    runs-on: ubuntu-latest
+    # NousResearch's 96-core runner is private to that repository. Fork PRs
+    # keep using standard hosted runners and the slice matrix above.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-96-core' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.generate.outputs.matrix) }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 60 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -157,10 +159,9 @@ jobs:
           source .venv/bin/activate
           scripts/run_tests.sh --files '${{ matrix.slice.files }}'
         env:
-          # Each standard runner exposes four vCPUs. Keep one isolated pytest
-          # subprocess per vCPU; wall-clock speed comes from independent
-          # slices, not oversubscribing one runner.
-          HERMES_TEST_WORKERS: 4
+          # Upstream has one worker per core on its 96-core runner. The fork
+          # keeps four isolated subprocesses per standard runner.
+          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '96' || '4' }}
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
@@ -176,15 +177,15 @@ jobs:
           key: test-durations-${{ github.run_id }}
 
   e2e:
-    # Four independent runners keep the complete E2E suite from serializing
-    # all multi-process tests on one standard runner. PRs use shard 0 as a
-    # fast smoke gate; nightly and post-merge runs execute all shards.
-    runs-on: ubuntu-latest
+    # Upstream runs the complete process-heavy suite on one 32-core runner.
+    # The fork cannot access that private runner group, so its full suite uses
+    # four independent standard runners. PRs use one smoke shard in either repo.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(inputs.e2e_mode == 'full' && '[0, 1, 2, 3]' || '[0]') }}
-    timeout-minutes: 45
+        shard: ${{ fromJSON(inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '[0, 1, 2, 3]' || '[0]') }}
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -324,12 +325,13 @@ jobs:
               "tests/e2e/core/compaction/test_compaction_manual.py": 123,
           }
           durations = {path: max(durations.get(path, 15), known_slow.get(path, 0)) for path in files}
-          bins = [([], 0.0) for _ in range(4)]
+          import os
+          shard_count = int(os.environ["E2E_SHARD_COUNT"])
+          bins = [([], 0.0) for _ in range(shard_count)]
           for path in sorted(files, key=lambda p: durations.get(p, 1.0), reverse=True):
-              bucket = min(range(4), key=lambda i: bins[i][1])
+              bucket = min(range(shard_count), key=lambda i: bins[i][1])
               bins[bucket][0].append(path)
               bins[bucket] = (bins[bucket][0], bins[bucket][1] + durations.get(path, 1.0))
-          import os
           shard = int(os.environ["E2E_SHARD"])
           if shard == 0:
               # These suites launch the built Ink TUI; keep them with shard 0's build.
@@ -342,6 +344,7 @@ jobs:
           scripts/run_tests.sh --include-integration "${files[@]}"
         env:
           E2E_SHARD: ${{ matrix.shard }}
+          E2E_SHARD_COUNT: ${{ inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '4' || '1' }}
           # Multi-process episodes (torture chamber, compaction kill -9,
           # gateway liveness, delivery exactly-once through a real gateway,
           # the cron virtual-clock soak) legitimately run past the 300 s default.
@@ -350,7 +353,9 @@ jobs:
           # exactly-once/compaction suites are race detectors, and a rare
           # corruption that passes on retry is still a corruption.
           HERMES_TEST_FILE_RETRIES: "0"
-          HERMES_TEST_WORKERS: 4
+          # Each E2E file is a process tree; cap concurrent trees at the
+          # empirically stable three on both hosted-runner configurations.
+          HERMES_TEST_WORKERS: 3
           HERMES_E2E_REQUIRE_TUI: "1"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
@@ -368,11 +373,10 @@ jobs:
     # autostash, killed mid-pull / mid-deps, offline), fresh-process import and
     # entrypoint smoke, and the config round-trip property matrix. Its own job:
     # it needs full history + tags, bubblewrap, and one file runs ~5-15 min.
-    # This fork has no access to upstream's ubuntu-latest-32-core runner
-    # group; falls back to the standard runner with a longer timeout.
-    runs-on: ubuntu-latest
+    # Upstream uses its 32-core runner; forks use standard hosted runners.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
     if: inputs.e2e_mode == 'full'
-    timeout-minutes: 120
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 60 || 120 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -535,6 +539,7 @@ jobs:
           source .venv/bin/activate
           scripts/run_tests.sh --include-integration tests/e2e/core/upgrade
         env:
+          HERMES_TEST_WORKERS: 4
           HERMES_TEST_FILE_TIMEOUT: "3000"
           # Each file contains deterministic, destructive-in-a-sandbox update scenarios; retrying
           # the whole file after a failure repeats several full installs without adding evidence.
