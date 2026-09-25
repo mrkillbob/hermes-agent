@@ -643,7 +643,16 @@ def authorize_agent_sdk_kwargs(
         getattr(agent, "_llm_egress_max_sanitized_segment_bytes", 32_768)
     )
     sanitized_aggregate_cap = int(
-        getattr(agent, "_llm_egress_max_sanitized_bytes", 32_768)
+        # The per-segment cap (32,768) already bounds any single chunked
+        # piece; the aggregate exists to bound how many such chunks one
+        # request may carry in total, so it must be a real multiple of the
+        # segment cap or chunking (which exists specifically to split
+        # oversized-but-legitimate tool content, e.g. a read_file result,
+        # into sub-cap pieces) is defeated by anything over one chunk.
+        # Bounded by the same ceiling already enforced on the request as a
+        # whole (max_serialized_bytes' default), never a smaller ad hoc
+        # number.
+        getattr(agent, "_llm_egress_max_sanitized_bytes", 262_144)
     )
     used_grants: dict[str, SourceGrant] = {}
     # Protected providers must use the bounded-context path regardless of

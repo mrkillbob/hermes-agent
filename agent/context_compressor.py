@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from agent.image_eviction_policy import outbound_image_retire_count
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX, _COMPRESSION_MARKER_TEMPLATE
+from agent.llm_egress_firewall import redact_remote_unsafe_text
 from agent.auxiliary_client import (
     AuxiliaryExplicitCancellation,
     _coerce_llm_message,
@@ -1679,16 +1680,27 @@ def _sum_terminal(name, args, content, content_len, line_count):
     return f"[terminal] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
 
 
+def _sum_arg_path(args, key: str, default: str) -> str:
+    """A path argument, redacted the same way remote-bound generated context always is.
+
+    These one-line summaries replace the tool's real result once compaction
+    runs and are sent to the model like any other generated context; the raw
+    local filesystem layout must not leak into them on a protected remote route.
+    """
+    value = args.get(key, default)
+    return redact_remote_unsafe_text(value) if isinstance(value, str) else value
+
+
 def _sum_write_file(name, args, content, content_len, line_count):
     written_lines = _str_arg(args, "content").count("\n") + 1 if args.get("content") else "?"
-    return f"[write_file] wrote to {args.get('path', '?')} ({written_lines} lines)"
+    return f"[write_file] wrote to {_sum_arg_path(args, 'path', '?')} ({written_lines} lines)"
 
 
 def _sum_search_files(name, args, content, content_len, line_count):
     count = m.group(1) if (m := re.search(r'"total_count"\s*:\s*(\d+)', content)) else "?"
     return (
         f"[search_files] {args.get('target', 'content')} search for "
-        f"'{args.get('pattern', '?')}' in {args.get('path', '.')} -> {count} matches"
+        f"'{args.get('pattern', '?')}' in {_sum_arg_path(args, 'path', '.')} -> {count} matches"
     )
 
 
@@ -1818,10 +1830,20 @@ def _skill_result_failure_suffix(content: str) -> str:
 
 
 def _sum_template(template: str, **defaults):
-    """Summarizer formatting ``template`` from the parsed args (``defaults`` fill missing keys) plus ``content_len``."""
-    return lambda name, args, content, content_len, line_count: template.format_map(
-        {**defaults, **args, "content_len": content_len}
-    )
+    """Summarizer formatting ``template`` from the parsed args (``defaults`` fill missing keys) plus ``content_len``.
+
+    A local absolute path in ``args`` (``read_file``'s/``patch``'s ``path``) is
+    redacted the same way remote-bound generated context always is: this
+    summary replaces the tool's real result once compaction runs, so the raw
+    local filesystem layout must not leak into it on a protected remote route.
+    """
+    def render(name, args, content, content_len, line_count):
+        values = {**defaults, **args, "content_len": content_len}
+        if "path" in values:
+            values["path"] = _sum_arg_path(values, "path", values["path"])
+        return template.format_map(values)
+
+    return render
 
 
 # tool_name -> (name, args, content, content_len, line_count) -> one-line summary.

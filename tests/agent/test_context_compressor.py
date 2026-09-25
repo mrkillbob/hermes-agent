@@ -67,6 +67,34 @@ class TestSummarizeToolResultWebExtract:
         assert summary == "[web_extract] https://example.com/h (500 chars)"
 
 
+class TestSummarizeToolResultRedactsLocalPaths:
+    """A compaction summary replaces the tool's real result and is sent to the
+    model like any other Hermes-generated context; it must not leak the local
+    filesystem layout through a raw ``path`` argument (read_file/patch go
+    through ``_sum_template``, write_file/search_files have their own
+    summarizers — all three interpolate ``path`` directly)."""
+
+    LOCAL_PATH = "/Users/example/project/secret-notes.txt"
+
+    def test_read_file_path_is_redacted(self):
+        args = json.dumps({"path": self.LOCAL_PATH, "offset": 1})
+        summary = _summarize_tool_result("read_file", args, "x" * 50)
+        assert self.LOCAL_PATH not in summary
+        assert "<private-path>" in summary
+
+    def test_write_file_path_is_redacted(self):
+        args = json.dumps({"path": self.LOCAL_PATH, "content": "line one\nline two"})
+        summary = _summarize_tool_result("write_file", args, "")
+        assert self.LOCAL_PATH not in summary
+        assert "<private-path>" in summary
+
+    def test_search_files_path_is_redacted(self):
+        args = json.dumps({"pattern": "TODO", "path": self.LOCAL_PATH})
+        summary = _summarize_tool_result("search_files", args, json.dumps({"total_count": 3}))
+        assert self.LOCAL_PATH not in summary
+        assert "<private-path>" in summary
+
+
 class TestSummarizeToolResultSkillTools:
     """`skill_manage` names live at ``operations[i].name`` and `skills_list` has no ``name`` arg at
     all, so the shared ``name=`` stub rendered ``name=?`` for both and dropped the outcome — a failed

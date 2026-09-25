@@ -1124,6 +1124,22 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
                     # protocol fields, not encoded text. A quoted numeric
                     # string remains eligible for Base64 detection.
                     continue
+            if (
+                candidate[:1] == "n"
+                and candidate[1:].isdigit()
+                and value[match.start(1) - 1 : match.start(1)] == "\\"
+                and value[match.end(1) : match.end(1) + 1] == "|"
+            ):
+                # A tool result carrying read_file's own line-number gutter
+                # ("{line}|{content}", tools/file_operations.py) is delivered
+                # as a JSON-escaped string; the escaped newline's literal "n"
+                # merges with the following line number into a coincidentally
+                # Base64-shaped token ("...\n100|chunk..." -> "n100"). A line
+                # number is never secret; the exemption requires the exact
+                # escaped-newline-then-pipe bracketing, so arbitrary content
+                # (including a real short Base64 blob elsewhere) stays
+                # fail-closed.
+                continue
             # The fixed Kanban task-id grammar carries only a 32-bit hex
             # database key. It is application protocol metadata, not an
             # encoded source payload.
@@ -1823,7 +1839,7 @@ class LLMEgressFirewall:
         state_dir: Path | str,
         *,
         max_serialized_bytes: int = 262_144,
-        max_sanitized_bytes: int = 32_768,
+        max_sanitized_bytes: int = 262_144,
         max_sanitized_segment_bytes: int = 32_768,
         max_conservative_tokens: int = 87_382,
         max_granted_serialized_bytes: int | None = None,
