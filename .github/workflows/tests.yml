@@ -301,8 +301,12 @@ jobs:
 
           all_files = sorted(p.as_posix() for p in Path("tests/e2e").rglob("test_*.py")
                              if "tests/e2e/core/upgrade/" not in p.as_posix())
-          terminal_files = [p for p in all_files if p.startswith("tests/e2e/core/terminal/")]
-          files = [p for p in all_files if p not in terminal_files]
+          tui_files = [p for p in all_files if p in {
+              "tests/e2e/core/security/test_attach_handshake.py",
+              "tests/e2e/core/dashboard/test_dashboard_pty.py",
+              "tests/e2e/core/terminal/test_terminal_transcript_pty.py",
+          }]
+          files = [p for p in all_files if p not in tui_files]
           try:
               durations = json.loads(Path("test_durations.json").read_text())
           except (OSError, json.JSONDecodeError):
@@ -328,7 +332,8 @@ jobs:
           import os
           shard = int(os.environ["E2E_SHARD"])
           if shard == 0:
-              bins[shard][0].extend(terminal_files)
+              # These suites launch the built Ink TUI; keep them with shard 0's build.
+              bins[shard][0].extend(tui_files)
           print("\n".join(sorted(bins[shard][0])))
           PY
             )
