@@ -80,9 +80,9 @@ jobs:
     if: needs.detect.outputs.python == 'true'
     uses: ./.github/workflows/tests.yml
     with:
-      # NousResearch runs the full unit suite on one 96-core runner. Forks
-      # do not have access to that private runner group, so keep their slices.
-      slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 8 }}
+      # The Hermes Agent fork is authorized for the same large-runner pool as
+      # NousResearch. Keep one 96-core unit job in both repositories.
+      slice_count: 1
       # Keep PR feedback short; push-to-main and scheduled runs retain the
       # complete suite.
       e2e_mode: ${{ needs.detect.outputs.event_name == 'pull_request' && 'smoke' || 'full' }}

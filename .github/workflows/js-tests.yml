@@ -6,12 +6,10 @@ on:
 
 jobs:
   check:
-    name: JS & TS checks shard ${{ matrix.shard }}/5
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5]
-    runs-on: ubuntu-latest
+    name: JS & TS checks
+    # This pool is shared with the Hermes Agent fork. One 32-core job avoids
+    # repeated setup across small runners and parallelizes each workspace check.
+    runs-on: ubuntu-latest-32-core
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -91,4 +89,4 @@ jobs:
       # not an empty run, because an empty run reports green after it checks
       # nothing.
       - name: Run all workspace checks
-        run: node .github/scripts/run-workspace-checks.mjs --shard '${{ matrix.shard }}/5'
+        run: node .github/scripts/run-workspace-checks.mjs
