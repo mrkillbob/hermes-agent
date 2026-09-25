@@ -725,6 +725,8 @@ def authorize_agent_sdk_kwargs(
             _recognized_tool_call_ids(
                 body, _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES
             )
+            if protected_kanban_remote and protected_provider_route
+            else frozenset()
         ),
         web_replay_tool_call_ids=(
             _recognized_tool_call_ids(body, _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES)

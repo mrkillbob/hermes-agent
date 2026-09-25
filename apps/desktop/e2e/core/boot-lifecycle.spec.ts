@@ -11,7 +11,8 @@
  *  2. kill -9 the backend: the supervisor respawns EXACTLY one replacement
  *     (no crash-loop, no double spawn), and the app serves a new turn.
  *  3. quit while a turn is streaming and a tool subprocess is running: zero
- *     sandbox processes remain — no backend, no tool child, no Electron helper.
+ *     Desktop-owned sandbox processes remain. A gateway launched by the
+ *     gateway control plane is a separately managed daemon and outlives the UI.
  *  4. relaunch the same HERMES_HOME repeatedly: each boot has exactly one
  *     backend, each quit leaves zero processes, and the transcript persisted
  *     by the first launch cold-hydrates exactly once every time.
@@ -46,6 +47,11 @@ const nonce = Math.random()
 const U = (n: number) => `U${n}-${nonce}`
 const A = (n: number) => `A${n}-${nonce}`
 const TOOL_TAG = `core-orphan-${nonce}`
+
+/** Gateways are separately managed daemons; Desktop quit owns only its backend tree. */
+function desktopOwnedSandboxProcesses(sandbox: Parameters<typeof sandboxProcesses>[0]): ProcInfo[] {
+  return sandboxProcesses(sandbox).filter(proc => !/ hermes_cli\.main gateway run(?: |$)/.test(proc.cmdline))
+}
 
 /** Every live process whose command line carries `tag` (tool children may scrub HERMES_HOME). */
 function taggedProcesses(tag: string): ProcInfo[] {
@@ -178,12 +184,12 @@ test('boot handshake, supervised respawn, and zero orphans on quit', async () =>
       await expect
         .poll(
           () =>
-            [...sandboxProcesses(sandbox), ...taggedProcesses(TOOL_TAG)].map(
+            [...desktopOwnedSandboxProcesses(sandbox), ...taggedProcesses(TOOL_TAG)].map(
               p => `${p.pid} ${p.cmdline.slice(0, 120)}`
             ),
           {
             timeout: 60_000,
-            message: 'no sandbox process (backend, tool child, Electron helper) survives quit'
+            message: 'no Desktop-owned sandbox process (backend, tool child, Electron helper) survives quit'
           }
         )
         .toEqual([])
@@ -252,9 +258,9 @@ test('relaunching the same home: one backend per boot, zero after each quit, tra
         await app.close()
         live = null
         await expect
-          .poll(() => sandboxProcesses(sandbox).map(p => `${p.pid} ${p.cmdline.slice(0, 120)}`), {
+          .poll(() => desktopOwnedSandboxProcesses(sandbox).map(p => `${p.pid} ${p.cmdline.slice(0, 120)}`), {
             timeout: 60_000,
-            message: `no sandbox process survives quit #${launch}`
+            message: `no Desktop-owned sandbox process survives quit #${launch}`
           })
           .toEqual([])
       })
