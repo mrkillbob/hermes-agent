@@ -18,7 +18,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: e2e-desktop-core-${{ github.ref }}
+  # This reusable lane is called by both CI and the nightly E2E workflow.
+  # Keep their runs independent when a scheduled run overlaps a main push.
+  group: e2e-desktop-core-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
