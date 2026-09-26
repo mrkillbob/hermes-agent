@@ -52,7 +52,9 @@ concurrency:
 jobs:
   os-tests:
     name: ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
+    # The 32-core Windows runners belong to the upstream organization. Use
+    # native standard runners in the public fork so PR lanes can be scheduled.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && matrix.runner || matrix.fork_runner || matrix.runner }}
     timeout-minutes: ${{ matrix.timeout || 30 }}
     strategy:
       fail-fast: false
@@ -63,9 +65,11 @@ jobs:
             marker: macos
           - name: Windows-only tests
             runner: windows-latest-32-core
+            fork_runner: windows-2025
             marker: windows
           - name: Windows-only tests (arm64)
             runner: windows-latest-32-arm-core
+            fork_runner: windows-11-arm
             marker: windows
             timeout: 60
     steps:
