@@ -3388,6 +3388,18 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             content = msg.get("content")
             if isinstance(content, list):
                 content = "\n".join(_summary_part_text(part) for part in content if isinstance(part, (dict, str)))
+            elif isinstance(content, dict):
+                # Native provider blocks can be persisted as a single object as
+                # well as a list. Render only their summary-facing text; stringifying
+                # the object can leak opaque replay fields such as Anthropic's
+                # signed-thinking token into the auxiliary summary request.
+                nested_parts = content.get("content")
+                if isinstance(nested_parts, list):
+                    content = "\n".join(
+                        _summary_part_text(part) for part in nested_parts if isinstance(part, (dict, str))
+                    )
+                else:
+                    content = _summary_part_text(content)
             content = _redact_compaction_text(content or "")
             content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
             # Strip inline <think>-style blocks: scratch work wastes summarizer context and risks being kept as fact.

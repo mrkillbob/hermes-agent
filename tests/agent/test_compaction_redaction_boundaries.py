@@ -100,6 +100,21 @@ def test_serializer_input_redacts_content_and_tool_args():
     _assert_clean(serialized)
 
 
+def test_serializer_does_not_stringify_a_native_provider_block():
+    c = _compressor()
+    signature = "RXFSb3VuZDAxLXNpZ25hdHVyZS0x"
+    serialized = c._serialize_for_summary([
+        {
+            "role": "assistant",
+            "content": {"type": "thinking", "thinking": "working", "signature": signature},
+        }
+    ])
+
+    assert "[thinking]" in serialized
+    assert "working" not in serialized
+    assert signature not in serialized
+
+
 def test_fallback_summary_redacts_secrets():
     c = _compressor()
     turns = [
