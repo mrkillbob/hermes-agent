@@ -3023,6 +3023,15 @@ class TestDoubleCompactionSummaryRole:
 
 class TestSummaryPromptBounding:
 
+    def test_summary_serialization_omits_provider_tool_call_ids(self, compressor):
+        provider_call_id = "dG9vbHVfY2FsbF9pZA=="
+        records = compressor._serialize_records_for_summary([
+            {"role": "tool", "tool_call_id": provider_call_id, "content": "read complete"},
+        ])
+
+        assert records == ["[TOOL RESULT]: read complete"]
+        assert provider_call_id not in "\n".join(records)
+
     _ELISION_MARKER = re.compile(r"\n*\.\.\.\[[^\]]*elided[^\n]*\.\.\.\n*")
 
     def test_lean_sampling_keeps_record_boundaries(self):
