@@ -57,7 +57,7 @@ def _command_runtime_fingerprint(command: list[str]) -> str:
     executable = command[0]
     resolved = shutil.which(executable) if not Path(executable).is_absolute() else executable
     if Path(executable).is_file():
-        first = Path(executable).read_text(encoding="utf-8", errors="replace").splitlines()[:1]
+        first = Path(executable).read_text(encoding="utf-8-sig", errors="replace").splitlines()[:1]
         if first and first[0].startswith("#!"):
             parts = first[0][2:].split()
             if parts and Path(parts[0]).name == "env":
@@ -149,7 +149,7 @@ def main() -> int:
         raise SystemExit(f"compression report missing: {report_path}")
     if _resolve_clean_source(hermes_root)[1] != source_sha or _evaluator_digest(harness, command) != evaluator_digest:
         raise SystemExit("source or evaluator changed during compression evaluation")
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report = json.loads(report_path.read_text(encoding="utf-8-sig"))
     if report.get("evaluator_digest") != evaluator_digest or report.get("battery_digest") != battery_digest:
         raise SystemExit("invalid compression evaluator or battery provenance")
     if report.get("probe_manifest") != expected or set(report.get("probe_scores", {})) != set(expected):

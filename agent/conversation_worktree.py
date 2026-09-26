@@ -172,7 +172,7 @@ def _lease_file_lock(path: Path, *, timeout: float) -> Iterator[None]:
 
 def _read_root_leases(path: Path) -> tuple[list[dict[str, object]], bool]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         return [], True
     except Exception:
@@ -352,7 +352,7 @@ def conversation_worktree_ownership_verdict(path: Path) -> bool | None:
     if marker.exists():
         try:
             if _owner_claim_matches(
-                json.loads(marker.read_text(encoding="utf-8")),
+                json.loads(marker.read_text(encoding="utf-8-sig")),
                 worktree_path=path,
                 repo_common_dir=repo_common_dir,
             ):
@@ -366,7 +366,7 @@ def conversation_worktree_ownership_verdict(path: Path) -> bool | None:
         return False
     try:
         if _owner_claim_matches(
-            json.loads(common_claim.read_text(encoding="utf-8")),
+            json.loads(common_claim.read_text(encoding="utf-8-sig")),
             worktree_path=path,
             repo_common_dir=repo_common_dir,
         ):
@@ -1446,8 +1446,8 @@ class ConversationWorktreeManager:
             common_claim = _common_owner_claim_path(
                 Path(record.repo_common_dir).resolve(), path
             )
-            marker_data = json.loads(marker.read_text(encoding="utf-8"))
-            common_data = json.loads(common_claim.read_text(encoding="utf-8"))
+            marker_data = json.loads(marker.read_text(encoding="utf-8-sig"))
+            common_data = json.loads(common_claim.read_text(encoding="utf-8-sig"))
         except (ConversationWorktreeError, OSError, ValueError, TypeError):
             return False
         return _owner_claim_matches_record(
@@ -1464,7 +1464,7 @@ class ConversationWorktreeManager:
             reflog_path = Path(reflog_text)
             if not reflog_path.is_absolute():
                 reflog_path = path / reflog_path
-            lines = reflog_path.read_text(encoding="utf-8").splitlines()
+            lines = reflog_path.read_text(encoding="utf-8-sig").splitlines()
         except (ConversationWorktreeError, OSError):
             return False
         for line in lines:

@@ -495,7 +495,7 @@ def test_merge_queue_preflight_failure_releases_retryable_lease(tmp_path: Path) 
     assert first.decision.blockers == ("merge_queue_preflight_failed",)
     assert second.decision.blockers == ("merge_queue_preflight_failed",)
     assert ledger.verification_required_merge_numbers("acme/widgets") == ()
-    assert args_log.read_text(encoding="utf-8").splitlines() == [
+    assert args_log.read_text(encoding="utf-8-sig").splitlines() == [
         "api repos/acme/widgets/rules/branches/stable",
         "api repos/acme/widgets/rules/branches/stable",
     ]

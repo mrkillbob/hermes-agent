@@ -140,7 +140,7 @@ def _profile_is_explicitly_read_only(profile: Optional[str]) -> bool:
         from hermes_cli.profiles import get_profile_dir
 
         profile_path = get_profile_dir(profile) / "profile.yaml"
-        with profile_path.open("r", encoding="utf-8") as handle:
+        with profile_path.open("r", encoding="utf-8-sig") as handle:
             data = yaml.safe_load(handle) or {}
     except Exception:
         return False

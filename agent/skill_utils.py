@@ -530,7 +530,7 @@ def _git_common_dir(root: Path) -> Optional[Path]:
         if not marker.is_file():
             return None
         prefix = "gitdir:"
-        line = marker.read_text(encoding="utf-8").strip()
+        line = marker.read_text(encoding="utf-8-sig").strip()
         if not line.casefold().startswith(prefix):
             return None
         git_dir = Path(line[len(prefix) :].strip())
@@ -540,7 +540,7 @@ def _git_common_dir(root: Path) -> Optional[Path]:
         common_marker = git_dir / "commondir"
         if not common_marker.is_file():
             return git_dir
-        common = Path(common_marker.read_text(encoding="utf-8").strip())
+        common = Path(common_marker.read_text(encoding="utf-8-sig").strip())
         return (common if common.is_absolute() else git_dir / common).resolve()
     except (OSError, UnicodeError):
         return None

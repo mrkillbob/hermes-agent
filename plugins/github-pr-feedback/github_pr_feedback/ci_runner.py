@@ -764,7 +764,7 @@ class LocalCIRunner:
         if resolved.is_file() and os.access(resolved, os.X_OK):
             expected_path = worktree / ".python-version"
             if expected_path.is_file():
-                expected = expected_path.read_text(encoding="utf-8").strip().splitlines()[0]
+                expected = expected_path.read_text(encoding="utf-8-sig").strip().splitlines()[0]
                 if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", expected):
                     raise CIValidationError("worktree Python version pin is invalid")
                 probe = (

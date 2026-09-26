@@ -14,7 +14,7 @@ def validate_profile_config(profile_home: str) -> None:
     if not config.is_file():
         return
     try:
-        parsed = yaml.safe_load(config.read_text(encoding="utf-8"))
+        parsed = yaml.safe_load(config.read_text(encoding="utf-8-sig"))
     except (OSError, yaml.YAMLError) as error:
         raise ValueError(f"invalid profile config: {config}: {error}") from error
     if parsed is not None and not isinstance(parsed, dict):

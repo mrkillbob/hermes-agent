@@ -33,7 +33,7 @@ def _declared_hooks(plugin_dir: Path) -> set[str] | None:
     for filename in ("plugin.yaml", "plugin.yml"):
         manifest = plugin_dir / filename
         try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+            data = yaml.safe_load(manifest.read_text(encoding="utf-8-sig"))
         except (OSError, UnicodeError, ValueError, yaml.YAMLError):
             continue
         if not isinstance(data, dict) or data.get("name") != _PLUGIN_NAME:
@@ -54,7 +54,7 @@ def _runtime_manifest_present(plugin_dir: Path) -> bool:
         if not manifest.is_file():
             continue
         try:
-            data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+            data = yaml.safe_load(manifest.read_text(encoding="utf-8-sig"))
         except (OSError, UnicodeError, ValueError, yaml.YAMLError):
             return False
         # Matches parse_manifest_file(): a manifest without an explicit `name`

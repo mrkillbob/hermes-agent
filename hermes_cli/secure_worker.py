@@ -46,7 +46,7 @@ class PackPolicy:
 
     @classmethod
     def from_json(cls, path: str | os.PathLike[str]) -> "PackPolicy":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         return cls(
             policy_version=str(data["policy_version"]),
             max_file_bytes=int(data["max_file_bytes"]),
@@ -74,7 +74,7 @@ class WorkerImageLock:
 
     @classmethod
     def from_json(cls, path: str | os.PathLike[str]) -> "WorkerImageLock":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         lock = cls(
             schema=str(data["schema"]),
             image=str(data["image"]),
@@ -114,7 +114,7 @@ class PackManifest:
 
     @classmethod
     def from_path(cls, path: str | os.PathLike[str]) -> "PackManifest":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         return cls(
             schema=str(data["schema"]),
             policy_version=str(data["policy_version"]),
@@ -908,7 +908,7 @@ def verify_admission_receipt(
     if path.is_symlink() or not path.is_file():
         raise SecurityBoundaryError("admission receipt is missing or unsafe")
     try:
-        receipt = AdmissionReceipt(**json.loads(path.read_text(encoding="utf-8")))
+        receipt = AdmissionReceipt(**json.loads(path.read_text(encoding="utf-8-sig")))
     except (OSError, TypeError, ValueError) as exc:
         raise SecurityBoundaryError("admission receipt is invalid") from exc
     expected = admission_receipt_from_report(report)
