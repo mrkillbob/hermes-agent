@@ -112,7 +112,9 @@ def test_compaction_keeps_pairing_and_signatures(rig) -> None:
     summarised = [i for i, b in enumerate(mains) if SUMMARY_TOKEN in json.dumps(b.get("messages"))]
     assert summarised, (
         f"precondition: the trigger never fired, nothing was compacted (last request "
-        f"{len(json.dumps(mains[-1])) // 4} est. tokens)\n{rig.log_tail(pattern='compress', chars=6000)}")
+        f"{len(json.dumps(mains[-1])) // 4} est. tokens)\n"
+        f"{rig.log_tail(pattern='compress', chars=6000)}\n"
+        f"egress diagnostics:\n{rig.log_tail(pattern='egress', chars=3000)}")
     assert not rig.srv.schema_errors(), rig.srv.schema_errors()
 
     checked = 0

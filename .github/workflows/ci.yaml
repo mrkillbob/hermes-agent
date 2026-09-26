@@ -83,9 +83,9 @@ jobs:
       # NousResearch runs the full unit suite on one 96-core runner. Forks
       # do not have access to that private runner group, so keep their slices.
       slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 8 }}
-      # Keep PR feedback short; push-to-main and scheduled runs retain the
-      # complete suite.
-      e2e_mode: ${{ needs.detect.outputs.event_name == 'pull_request' && 'smoke' || 'full' }}
+      # The fork runs the complete suite on parallel GitHub-hosted shards; PRs
+      # keep the same E2E coverage as main without requiring NousResearch runners.
+      e2e_mode: full
 
   # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
   # the OS-marked tests it collects are skipped there by design (see the

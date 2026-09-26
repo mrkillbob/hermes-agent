@@ -799,6 +799,25 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     })
   })
 
+  it('closes a superseded active secondary after its final request lease releases', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ profile, sharedPrimary }))
+
+    await ensureGatewayForAgent('local', 'work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    const release = await retainGatewayForAgent('local', 'work')
+    sharedPrimary = true
+    await requestGatewayForAgent('local', 'work', 'profiles.list')
+    release()
+
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+    expect($gateway.get()).toBe(primary)
+  })
+
   it('does not prewarm a shared-primary registry route before primary identity publishes', async () => {
     const primary = makePrimary()
     setPrimaryGateway(primary as never, 'default')

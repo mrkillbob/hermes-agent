@@ -1178,15 +1178,14 @@ async function gatewayForProfile(
 
       if (
         entry.activeRequests === 0 &&
-        !entry.retained &&
-        !relayRetained(entry) &&
-        !foregroundPinned(entry) &&
-        g.activeKey !== entry.scope
+        (entry.supersededBySharedPrimary ||
+          (!entry.retained && !relayRetained(entry) && !foregroundPinned(entry) && g.activeKey !== entry.scope))
       ) {
         disposeSecondary(entry)
 
         if (g.secondaries.get(entry.scope) === entry) {
           g.secondaries.delete(entry.scope)
+          restoreActiveToPrimaryIfEvicted()
         }
       }
     }
@@ -1569,15 +1568,14 @@ export async function retainGatewayForAgent(
 
     if (
       entry.activeRequests === 0 &&
-      !entry.retained &&
-      !relayRetained(entry) &&
-      !foregroundPinned(entry) &&
-      g.activeKey !== entry.scope
+      (entry.supersededBySharedPrimary ||
+        (!entry.retained && !relayRetained(entry) && !foregroundPinned(entry) && g.activeKey !== entry.scope))
     ) {
       disposeSecondary(entry)
 
       if (g.secondaries.get(entry.scope) === entry) {
         g.secondaries.delete(entry.scope)
+        restoreActiveToPrimaryIfEvicted()
       }
     }
   }
@@ -1882,7 +1880,9 @@ export async function ensureGatewayForAgent(
   if (await ridesPrimaryBackend(connectionId, profile, 'foreground')) {
     // A retained primary can be open while the foreground still points at a
     // different source. Reusing its socket must also move the active route.
-    const activated = Boolean(isOpen(g.primaryGateway) && !signal?.aborted && applyActive(g.primaryProfile, activationEpoch))
+    const activated = Boolean(
+      isOpen(g.primaryGateway) && !signal?.aborted && applyActive(g.primaryProfile, activationEpoch)
+    )
 
     if (activated) {
       discardSupersededSharedPrimarySecondaries(connectionId, profile)

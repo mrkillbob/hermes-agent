@@ -328,6 +328,10 @@ jobs:
               "tests/e2e/core/providers/test_anthropic_errors.py": 132,
               "tests/e2e/core/sqlite/test_compaction_contention.py": 124,
               "tests/e2e/core/compaction/test_compaction_manual.py": 123,
+              "tests/e2e/core/chaos/test_gateway_turn_liveness.py": 103,
+              "tests/e2e/core/chaos/test_agent_turn_liveness.py": 87,
+              "tests/e2e/core/chaos/test_tui_gateway_turn_liveness.py": 79,
+              "tests/e2e/core/kanban/test_kanban_decompose_billing.py": 55,
           }
           durations = {path: max(durations.get(path, 15), known_slow.get(path, 0)) for path in files}
           import os
@@ -378,15 +382,16 @@ jobs:
     # autostash, killed mid-pull / mid-deps, offline), fresh-process import and
     # entrypoint smoke, and the config round-trip property matrix. Its own job:
     # it needs full history + tags and bubblewrap. The real update scenarios
-    # share one historically slow test module, so split its cases across two
-    # isolated runners and run the remaining files on a third.
+    # share one historically slow test module. Its measured four-case selection
+    # takes 329s because the test harness runs a file in one subprocess, so put
+    # the independent updater scenarios on separate hosted runners.
     # Upstream uses its 32-core runner; forks use standard hosted runners.
     runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
     if: inputs.e2e_mode == 'full'
     strategy:
       fail-fast: false
       matrix:
-        shard: [path-a, path-b, other]
+        shard: [path-clean, path-edits, path-interrupts, path-b, other]
     timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 60 || 120 }}
     steps:
       - name: Checkout code
@@ -549,11 +554,17 @@ jobs:
         run: |
           source .venv/bin/activate
           case "${{ matrix.shard }}" in
-            path-a)
+            path-clean)
               scripts/run_tests.sh --include-integration \
                 tests/e2e/core/upgrade/test_upgrade_path.py::test_clean_update \
-                tests/e2e/core/upgrade/test_upgrade_path.py::test_clean_update_keeps_long_scalar_lines_verbatim \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_clean_update_keeps_long_scalar_lines_verbatim
+              ;;
+            path-edits)
+              scripts/run_tests.sh --include-integration \
                 tests/e2e/core/upgrade/test_upgrade_path.py::test_update_with_local_edits_and_orphan_autostash \
+              ;;
+            path-interrupts)
+              scripts/run_tests.sh --include-integration \
                 tests/e2e/core/upgrade/test_upgrade_path.py::test_kill_mid_pull_then_retry_heals
               ;;
             path-b)
