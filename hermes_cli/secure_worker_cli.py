@@ -12,8 +12,6 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import yaml
-
 from hermes_cli.secure_worker import (
     PackPolicy,
     SecurityBoundaryError,
@@ -100,6 +98,8 @@ def register_cli(parent: argparse.ArgumentParser) -> None:
 
 
 def _load_yaml(path: str) -> dict[str, object]:
+    import yaml
+
     value = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise SecurityBoundaryError("configuration must be a YAML mapping")
