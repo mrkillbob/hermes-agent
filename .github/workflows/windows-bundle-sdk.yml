@@ -22,7 +22,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   windows-bundle-tools:
-    name: Cold Windows SDK (ARM64)
+    name: Cold Windows SDK (ARM64, run ${{ matrix.attempt }})
     # The 32-core ARM runner belongs to the upstream organization. The public
     # fork uses GitHub-hosted standard ARM64 runners instead of queueing forever
     # for a runner that is not available to this repository.
@@ -32,7 +32,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [windows-latest-32-arm-core, windows-latest-32-arm-core]
+        attempt: [1, 2]
+        runner: [windows-latest-32-arm-core]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
