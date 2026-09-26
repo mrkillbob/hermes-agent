@@ -336,7 +336,9 @@ def _probe_options(manifest: dict) -> dict:
     }
 
 
-def _run_capability_probe(plugin_dir: Path, manifest: dict) -> Tuple[Optional[dict], str]:
+def _run_capability_probe(
+    plugin_dir: Path, manifest: dict, *, python_executable: Path | None = None,
+) -> Tuple[Optional[dict], str]:
     """Run the recording probe in a scratch subprocess.
 
     Returns ``(recorded, error)`` — exactly one is meaningful: *recorded*
@@ -354,7 +356,7 @@ def _run_capability_probe(plugin_dir: Path, manifest: dict) -> Tuple[Optional[di
         try:
             proc, job = spawn_server(
                 [
-                    sys.executable,
+                    str(python_executable or sys.executable),
                     "-c",
                     _PROBE_SCRIPT,
                     str(plugin_dir),
@@ -406,7 +408,8 @@ def _declared_list(manifest: dict, key: str) -> List[str]:
 
 
 def _check_capabilities(
-    report: ValidationReport, manifest: dict, plugin_dir: Path
+    report: ValidationReport, manifest: dict, plugin_dir: Path,
+    *, python_executable: Path | None = None,
 ) -> Optional[dict]:
     """Probe actual registrations and diff against declared capabilities.
 
@@ -420,7 +423,9 @@ def _check_capabilities(
         report.add("capability probe", True, "skipped (no __init__.py)")
         return None
 
-    recorded, error = _run_capability_probe(plugin_dir, manifest)
+    recorded, error = _run_capability_probe(
+        plugin_dir, manifest, python_executable=python_executable,
+    )
     if recorded is None:
         report.add("capability probe", False, error)
         return None
@@ -499,7 +504,9 @@ def _check_builtin_collisions(
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 
-def validate_plugin_dir(plugin_dir: Path) -> ValidationReport:
+def validate_plugin_dir(
+    plugin_dir: Path, *, python_executable: Path | None = None,
+) -> ValidationReport:
     """Run every admission check against *plugin_dir* and return the report."""
     report = ValidationReport()
     plugin_dir = Path(plugin_dir)
@@ -547,7 +554,9 @@ def validate_plugin_dir(plugin_dir: Path) -> ValidationReport:
     _check_requires_env(report, manifest)
     _check_loadable(report, plugin_dir)
     _check_python_dependencies(report, plugin_dir)
-    recorded = _check_capabilities(report, manifest, plugin_dir)
+    recorded = _check_capabilities(
+        report, manifest, plugin_dir, python_executable=python_executable,
+    )
     _check_builtin_collisions(report, manifest, recorded)
     _check_security_scan(report, plugin_dir)
     check_desktop_surface(report, plugin_dir)

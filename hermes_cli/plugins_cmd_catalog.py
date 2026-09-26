@@ -769,14 +769,18 @@ def cmd_validate(path: str, as_json: bool = False, install_deps: bool = False) -
     installs the declared Python deps first so the capability probe imports what an install would."""
     from hermes_cli.plugin_validate import validate_plugin_dir
     from hermes_cli.plugins_cmd import _console
+    python_executable = None
     if install_deps:
         import pm
+        import pm.environments
+        import pm.paths
         from pm.plugin_inputs import Candidates
         try:
             pm.sync_venv(plugins=Candidates([Path(path)]))
+            python_executable = pm.environments.project_python(pm.paths.repo_root())
         except Exception as exc:  # validation still runs; the probe reports what is missing
             print(f"dependency preparation failed: {exc}", file=sys.stderr)
-    report = validate_plugin_dir(Path(path))
+    report = validate_plugin_dir(Path(path), python_executable=python_executable)
     if as_json:
         print(json.dumps(report.to_dict(), indent=2))
         sys.exit(report.exit_code)

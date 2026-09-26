@@ -77,6 +77,37 @@ BASE_MANIFEST = {
 }
 
 
+def test_validate_after_dependency_sync_uses_selected_interpreter(monkeypatch, tmp_path):
+    """A PM sync can publish a new venv while the CLI process still runs from the old one."""
+    from types import SimpleNamespace
+
+    import pytest
+    import pm
+    import pm.environments
+    import pm.paths
+    from hermes_cli import plugin_validate, plugins_cmd_catalog
+
+    plugin_dir = tmp_path / "candidate"
+    selected_python = tmp_path / "install" / "generations" / "new" / "bin" / "python"
+    calls = []
+
+    monkeypatch.setattr(pm, "sync_venv", lambda **kwargs: calls.append(("sync", kwargs)))
+    monkeypatch.setattr(pm.paths, "repo_root", lambda: tmp_path / "checkout")
+    monkeypatch.setattr(pm.environments, "project_python", lambda root: selected_python)
+
+    def validate(path, *, python_executable):
+        calls.append(("validate", Path(path), python_executable))
+        return SimpleNamespace(to_dict=lambda: {}, exit_code=0)
+
+    monkeypatch.setattr(plugin_validate, "validate_plugin_dir", validate)
+    with pytest.raises(SystemExit) as raised:
+        plugins_cmd_catalog.cmd_validate(str(plugin_dir), as_json=True, install_deps=True)
+
+    assert raised.value.code == 0
+    assert calls[0][0] == "sync"
+    assert calls[-1] == ("validate", plugin_dir, selected_python)
+
+
 def test_requires_hermes_spec_is_validated(tmp_path):
     manifest = dict(BASE_MANIFEST, description="café", requires_hermes=">=0.21")
     d = _make_plugin(tmp_path, manifest=manifest)
