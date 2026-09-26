@@ -66,7 +66,7 @@ jobs:
       - name: Generate SARIF report
         uses: google/osv-scanner-action/osv-reporter-action@8dc09193bb540e09b23da07ad7e30bd33bf87018 # v2.3.8
         with:
-          scan-args: >-
+          scan-args: |-
             --output=osv-results.sarif
             --new=osv-results.json
             --gh-annotations=false
