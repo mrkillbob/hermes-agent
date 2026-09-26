@@ -62,6 +62,22 @@ def test_sibling_behind_is_migrated_on_disk(monkeypatch, tmp_path):
     assert on_disk["model"]["provider"] == "nous"
 
 
+def test_profile_tree_uses_active_home_when_canonical_root_is_different(monkeypatch, tmp_path):
+    profiles_root = tmp_path / "isolated" / "profiles"
+    active = _write_profile(profiles_root, "default", _latest_version())
+    sibling = _write_profile(profiles_root, "work", 12)
+    _setup(monkeypatch, tmp_path, active)
+
+    import hermes_cli.profiles as profiles_mod
+
+    monkeypatch.setattr(profiles_mod, "_get_profiles_root", lambda: tmp_path / "wrong-root")
+
+    migrated = update_cmd._migrate_sibling_profile_configs()
+
+    assert migrated == [("work", 12, _latest_version())]
+    assert yaml.safe_load((sibling / "config.yaml").read_text())["_config_version"] == _latest_version()
+
+
 def test_active_profile_is_skipped(monkeypatch, tmp_path):
     active = _write_profile(tmp_path / "profiles", "active", 12)
     _setup(monkeypatch, tmp_path, active)

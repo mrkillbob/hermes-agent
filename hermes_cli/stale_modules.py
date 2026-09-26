@@ -28,6 +28,7 @@ _MODULE_REQUIRED_ATTRS: dict[str, tuple[str, ...]] = {
     "hermes_cli.config": ("drop_stale_root_modules",),
     "hermes_cli.tools_config": ("_configurable_keys", "_parse_enabled_flag"),
     "hermes_cli.config_migrations": ("_migrate_to_46",),
+    "tools.tool_backend_helpers": ("NOUS_MANAGED_PROVIDER",),
     "gateway.status": ("profile_flag_value",),
 }
 

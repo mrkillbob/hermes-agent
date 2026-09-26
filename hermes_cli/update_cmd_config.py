@@ -41,7 +41,18 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
             get_process_hermes_home, reset_hermes_home_override, set_hermes_home_override)
         from hermes_cli.profiles import _get_profiles_root, _PROFILE_ID_RE
         active_home = get_process_hermes_home()
-        root = _get_profiles_root()
+        active_path = Path(active_home).resolve()
+        if active_path.name == "profiles":
+            active_profiles_root = active_path
+        elif active_path.parent.name == "profiles":
+            active_profiles_root = active_path.parent
+        else:
+            active_profiles_root = active_path / "profiles"
+        canonical_root = _get_profiles_root()
+        root = next(
+            (candidate for candidate in (active_profiles_root, canonical_root) if candidate.is_dir()),
+            canonical_root,
+        )
         if not root.is_dir():
             return migrated
         for entry in sorted(root.iterdir()):
@@ -64,7 +75,7 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
                 if after_ver > current_ver:
                     migrated.append((entry.name, current_ver, after_ver))
             except Exception as exc:
-                logger.debug("Config migration for profile %s failed: %s", entry.name, exc)
+                logger.warning("Config migration for profile %s failed: %s", entry.name, exc)
             finally:
                 reset_hermes_home_override(token)
     return migrated

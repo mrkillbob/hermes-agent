@@ -456,7 +456,19 @@ async function ridesPrimaryBackend(
     Boolean(id && g.primaryConnectionId && id === g.primaryConnectionId) ||
     (id === 'local' && g.primaryConnectionMode === 'local')
 
-  if (!attachedPrimarySource) {
+  // A descriptor cannot redirect to the primary when this window has no live
+  // primary socket. Skipping this probe also keeps a parked local secondary's
+  // explicit re-open to one authoritative dial.
+  if (id === 'local' && !isOpen(g.primaryGateway)) {
+    return false
+  }
+
+  // The local registry route can itself prove it is the primary backend even
+  // before the renderer has published the primary connection identity. This
+  // matters during startup roster prewarm: main returns `sharedPrimary` from
+  // the same coalesced primary boot, while an early identity guard would let
+  // openGatewayForAgent dial a second WebSocket to that process.
+  if (id !== 'local' && !attachedPrimarySource) {
     return false
   }
 
@@ -484,7 +496,7 @@ async function ridesPrimaryBackend(
     const flags =
       conn && typeof conn === 'object' ? (conn as { sharedPrimary?: boolean; sharedRemote?: boolean }) : null
 
-    return flags?.sharedRemote === true || flags?.sharedPrimary === true
+    return flags?.sharedPrimary === true || (attachedPrimarySource && flags?.sharedRemote === true)
   } catch {
     // Probe failed on a remote (or not-yet-classified) primary: a secondary at
     // this already-attached source is the #96493 ghost WebSocket (accept/close,
@@ -496,7 +508,7 @@ async function ridesPrimaryBackend(
     // its own pid, but the exact-owner route names the pool backend — after a
     // renderer reload or a pool respawn the resume dials that backend and is
     // refused SESSION_NOT_OWNED by a pid of the same Desktop (#101416).
-    return g.primaryConnectionMode !== 'local'
+    return id !== 'local' && g.primaryConnectionMode !== 'local'
   }
 }
 
@@ -778,6 +790,18 @@ async function openSecondary(entry: Secondary, spawnPriority: SpawnPriority = 'b
           )
 
     entry.connection = conn
+
+    // Main can discover that a local registry profile shares the primary
+    // backend only on this authoritative dial. Do not open a second WebSocket
+    // after that descriptor has resolved the route; callers below redirect to
+    // the primary and retire this speculative entry.
+    if (conn && typeof conn === 'object' && (conn as { sharedPrimary?: boolean }).sharedPrimary === true) {
+      entry.supersededBySharedPrimary = true
+      entry.wantOpen = false
+      discardSupersededSharedPrimarySecondaries(entry.connectionId, entry.profile)
+
+      return
+    }
 
     const wsDeps =
       entry.connectionId && desktop.getGatewayWsUrlFor
@@ -1119,8 +1143,7 @@ async function gatewayForProfile(
   if (await sharedPrimaryRoute(key, spawnPriority)) {
     // A roster prewarm may have opened the old pooled route before main
     // identified this profile as shared with the primary.
-    discardSupersededSharedPrimarySecondary(key)
-    discardSupersededSharedPrimarySecondary(registryBackendScopeKey('local', key))
+    discardSupersededSharedPrimarySecondaries('local', key)
 
     return { gateway: g.primaryGateway, key, release: noRelease, scopeProfile: true }
   }
@@ -1155,15 +1178,14 @@ async function gatewayForProfile(
 
       if (
         entry.activeRequests === 0 &&
-        !entry.retained &&
-        !relayRetained(entry) &&
-        !foregroundPinned(entry) &&
-        g.activeKey !== entry.scope
+        (entry.supersededBySharedPrimary ||
+          (!entry.retained && !relayRetained(entry) && !foregroundPinned(entry) && g.activeKey !== entry.scope))
       ) {
         disposeSecondary(entry)
 
         if (g.secondaries.get(entry.scope) === entry) {
           g.secondaries.delete(entry.scope)
+          restoreActiveToPrimaryIfEvicted()
         }
       }
     }
@@ -1176,6 +1198,12 @@ async function gatewayForProfile(
   } catch (error) {
     release()
     throw error
+  }
+
+  if (entry.connection?.sharedPrimary === true) {
+    discardSupersededSharedPrimarySecondary(key)
+
+    return { gateway: g.primaryGateway, key, release, scopeProfile: true }
   }
 
   return { gateway: entry.gateway, key, release, scopeProfile: false }
@@ -1260,7 +1288,7 @@ export async function requestGatewayForAgent<T>(
   }
 
   if (await ridesPrimaryBackend(connectionId, key, spawnPriority)) {
-    discardSupersededSharedPrimarySecondary(scope)
+    discardSupersededSharedPrimarySecondaries(connectionId, key)
 
     return requestOnPrimaryGateway<T>(method, { ...params, profile: key }, timeoutMs, signal)
   }
@@ -1286,6 +1314,12 @@ export async function requestGatewayForAgent<T>(
   try {
     if (!isOpen(entry.gateway)) {
       await openSecondary(entry, spawnPriority)
+    }
+
+    if (entry.connection?.sharedPrimary === true) {
+      discardSupersededSharedPrimarySecondaries(connectionId, key)
+
+      return await requestOnPrimaryGateway<T>(method, { ...params, profile: key }, timeoutMs, signal)
     }
 
     return await (timeoutMs === undefined && signal === undefined
@@ -1488,7 +1522,11 @@ export async function retainGatewayForAgent(
   }
 
   if (isPrimaryRegistryRoute(connectionId, key) || (await ridesPrimaryBackend(connectionId, key, spawnPriority))) {
-    discardSupersededSharedPrimarySecondary(scope)
+    if (isPrimaryRegistryRoute(connectionId, key)) {
+      discardSupersededSharedPrimarySecondary(scope)
+    } else {
+      discardSupersededSharedPrimarySecondaries(connectionId, key)
+    }
 
     // Primary socket stays open for the window lifetime — no secondary to hold.
     return () => undefined
@@ -1530,15 +1568,14 @@ export async function retainGatewayForAgent(
 
     if (
       entry.activeRequests === 0 &&
-      !entry.retained &&
-      !relayRetained(entry) &&
-      !foregroundPinned(entry) &&
-      g.activeKey !== entry.scope
+      (entry.supersededBySharedPrimary ||
+        (!entry.retained && !relayRetained(entry) && !foregroundPinned(entry) && g.activeKey !== entry.scope))
     ) {
       disposeSecondary(entry)
 
       if (g.secondaries.get(entry.scope) === entry) {
         g.secondaries.delete(entry.scope)
+        restoreActiveToPrimaryIfEvicted()
       }
     }
   }
@@ -1550,6 +1587,13 @@ export async function retainGatewayForAgent(
   } catch (error) {
     release()
     throw error
+  }
+
+  if (entry.connection?.sharedPrimary === true) {
+    discardSupersededSharedPrimarySecondaries(connectionId, key)
+    release()
+
+    return () => undefined
   }
 
   return release
@@ -1772,7 +1816,7 @@ export async function openGatewayForAgent(
   }
 
   if (await ridesPrimaryBackend(connectionId, profile, spawnPriority)) {
-    discardSupersededSharedPrimarySecondary(scope)
+    discardSupersededSharedPrimarySecondaries(connectionId, profile)
 
     if (!isOpen(g.primaryGateway)) {
       throw new Error('Hermes gateway unavailable')
@@ -1808,6 +1852,10 @@ export async function openGatewayForAgent(
 
     throw error
   }
+
+  if (entry.connection?.sharedPrimary === true) {
+    discardSupersededSharedPrimarySecondaries(connectionId, profile)
+  }
 }
 
 export async function ensureGatewayForAgent(
@@ -1832,10 +1880,12 @@ export async function ensureGatewayForAgent(
   if (await ridesPrimaryBackend(connectionId, profile, 'foreground')) {
     // A retained primary can be open while the foreground still points at a
     // different source. Reusing its socket must also move the active route.
-    const activated = Boolean(isOpen(g.primaryGateway) && !signal?.aborted && applyActive(g.primaryProfile, activationEpoch))
+    const activated = Boolean(
+      isOpen(g.primaryGateway) && !signal?.aborted && applyActive(g.primaryProfile, activationEpoch)
+    )
 
     if (activated) {
-      discardSupersededSharedPrimarySecondary(scope)
+      discardSupersededSharedPrimarySecondaries(connectionId, profile)
     }
 
     return activated
@@ -1879,6 +1929,12 @@ export async function ensureGatewayForAgent(
     return false
   }
 
+  if (entry.connection?.sharedPrimary === true) {
+    discardSupersededSharedPrimarySecondaries(connectionId, profile)
+
+    return Boolean(isOpen(g.primaryGateway) && applyActive(g.primaryProfile, activationEpoch))
+  }
+
   // A source edit/remove may dispose this entry while its dial is still in
   // flight. Only the still-registered, still-owned activation may publish --
   // and only when the WebSocket actually reached open: entry.connection is
@@ -1918,6 +1974,10 @@ export async function ensureGatewayForProfile(profile: string): Promise<void> {
   // descriptor — $activeGatewayProfile still moves to `key`, so request
   // scoping and profile-aware surfaces behave identically.
   if (await sharedPrimaryRoute(key, 'foreground')) {
+    // A hover/roster prewarm may have opened a secondary before this route
+    // resolved to the primary. Activation is another route-resolution edge,
+    // so retire both local scope identities here as well.
+    discardSupersededSharedPrimarySecondaries('local', key)
     applyActive(g.primaryProfile, activationEpoch)
 
     return
@@ -1957,6 +2017,13 @@ export async function ensureGatewayForProfile(profile: string): Promise<void> {
   } finally {
     // The activation is settling either way — release the prune lease.
     entry.activationLeaseUntil = 0
+  }
+
+  if (entry.connection?.sharedPrimary === true) {
+    discardSupersededSharedPrimarySecondary(key)
+    applyActive(g.primaryProfile, activationEpoch)
+
+    return
   }
 
   // Only publish when the WebSocket actually reached open -- entry.connection
@@ -2270,6 +2337,21 @@ function discardSupersededSharedPrimarySecondary(scope: string): void {
     disposeSecondary(entry)
     g.secondaries.delete(scope)
     restoreActiveToPrimaryIfEvicted()
+  }
+}
+
+// A local profile route can be discovered through either the profile API or
+// the registry API after a prewarm opened its bare-name secondary. Retire both
+// identities once the route proves they name the same host backend; otherwise
+// that old socket keeps receiving the same events as the primary.
+function discardSupersededSharedPrimarySecondaries(connectionId: null | string, profile: string): void {
+  const id = String(connectionId ?? '').trim()
+  const key = normKey(profile)
+
+  discardSupersededSharedPrimarySecondary(registryBackendScopeKey(id, key))
+
+  if (id === 'local') {
+    discardSupersededSharedPrimarySecondary(key)
   }
 }
 

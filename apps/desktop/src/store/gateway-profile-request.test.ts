@@ -799,6 +799,58 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     })
   })
 
+  it('closes a superseded active secondary after its final request lease releases', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ profile, sharedPrimary }))
+
+    await ensureGatewayForAgent('local', 'work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    const release = await retainGatewayForAgent('local', 'work')
+    sharedPrimary = true
+    await requestGatewayForAgent('local', 'work', 'profiles.list')
+    release()
+
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+    expect($gateway.get()).toBe(primary)
+  })
+
+  it('does not prewarm a shared-primary registry route before primary identity publishes', async () => {
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    installLocalHost(() => ({ profile: 'work', sharedPrimary: true }))
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForAgent('local', 'work')
+
+    expect(secondaryGateways).toHaveLength(0)
+  })
+
+  it('uses the shared primary when the authoritative registry dial resolves to it', async () => {
+    const primary = makePrimary()
+    let workLookups = 0
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({
+      profile,
+      // The route probe says pooled, but main resolves the actual dial to the
+      // primary. This can happen while startup route identity is publishing.
+      sharedPrimary: profile === 'work' && ++workLookups > 1
+    }))
+    await ensureGatewayForProfile('default')
+
+    await requestGatewayForAgent('local', 'work', 'session.list')
+
+    expect(workLookups).toBeGreaterThan(1)
+    expect(primary.request).toHaveBeenCalledWith('session.list', { profile: 'work' })
+    expect(secondaryGateways).toHaveLength(1)
+    expect(secondaryGateways[0].connect).not.toHaveBeenCalled()
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
   it('closes a prewarmed secondary when the route resolves to the shared primary', async () => {
     let sharedPrimary = false
     const primary = makePrimary()
@@ -860,6 +912,30 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
   })
 
+  it('closes a prewarmed profile socket when activation resolves to the shared primary', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installDesktop(
+      vi.fn(async (profile: null | string) => ({
+        port: profile ? 5151 : 4242,
+        ...(profile ? { profile, sharedPrimary } : {}),
+        token: 't'
+      }))
+    )
+    await ensureGatewayForProfile('default')
+
+    await openGatewayForProfile('work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    await ensureGatewayForProfile('work')
+
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+    expect($gateway.get()).toBe(primary)
+  })
+
   it('closes a local registry prewarm when profile routing resolves to the shared primary', async () => {
     let sharedPrimary = false
     const primary = makePrimary()
@@ -875,6 +951,25 @@ describe('session-owner calls for a profile on the shared local host backend (#1
     await requestGatewayForProfile('work', 'profiles.list')
 
     expect(primary.request).toHaveBeenCalledWith('profiles.list', { profile: 'work' })
+    expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
+  })
+
+  it('retires a legacy profile prewarm when the agent route resolves to the shared local primary', async () => {
+    let sharedPrimary = false
+    const primary = makePrimary()
+    setPrimaryGateway(primary as never, 'default')
+    setPrimaryGatewayConnection({ connectionId: 'local', mode: 'local' })
+    installLocalHost(profile => ({ port: profile ? 5151 : 4242, profile, sharedPrimary }))
+    await ensureGatewayForProfile('default')
+
+    // The roster's legacy profile prewarm is keyed by the bare profile name.
+    await openGatewayForProfile('work')
+    expect(secondaryGateways).toHaveLength(1)
+
+    sharedPrimary = true
+    await requestGatewayForAgent('local', 'work', 'session.list')
+
+    expect(primary.request).toHaveBeenCalledWith('session.list', { profile: 'work' })
     expect(secondaryGateways[0].close).toHaveBeenCalledOnce()
   })
 

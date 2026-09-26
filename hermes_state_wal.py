@@ -345,6 +345,27 @@ def _enable_wal(conn: sqlite3.Connection, db_label: str, require_wal: bool, curr
         raise  # the require_wal silent-refusal raise above — propagate unchanged
     except sqlite3.OperationalError as exc:
         msg = str(exc).lower()
+        if "database is locked" in msg or "database table is locked" in msg:
+            # Two processes can both observe DELETE during first-open and then
+            # race to switch the same file to WAL. SQLite rejects one switch
+            # with SQLITE_BUSY immediately; after the winner commits the mode
+            # change, retrying is safe and returns the now-effective WAL mode.
+            # Never interpret lock contention as a filesystem incompatibility
+            # or attempt a DELETE fallback while another opener may be active.
+            for _ in range(10):
+                time.sleep(0.05)
+                try:
+                    row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                except sqlite3.OperationalError as retry_exc:
+                    retry_msg = str(retry_exc).lower()
+                    if "database is locked" not in retry_msg and "database table is locked" not in retry_msg:
+                        raise
+                    exc = retry_exc
+                    continue
+                if _mode_from_row(row) == "wal":
+                    return _wal_activated()
+                break
+            raise exc
         if not any(marker in msg for marker in _WAL_INCOMPAT_MARKERS):
             raise  # unrelated OperationalError — don't silently swallow
         # ``disk i/o error`` is ambiguous: on ZFS / APFS-CoW it is a deterministic WAL-incompatibility (SHM
