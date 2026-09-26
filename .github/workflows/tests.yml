@@ -112,6 +112,7 @@ jobs:
         run: |
           scripts/run_tests.sh
         env:
+          HERMES_TEST_SLICE: ${{ matrix.slice.index }}/${{ inputs.slice_count }}
           # This is the maximum number of test FILES that run together.
           # run_tests_parallel.py starts one pytest subprocess for each file
           # from a single ThreadPoolExecutor, so this value IS the limit. The
@@ -272,18 +273,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # Keep all commit ancestry and release tags for N-1 and the historical
-          # updater scenario, but defer unrelated historical file contents.
+          # Upgrade E2E tests build a shared local bare origin and exercise real
+          # full-history clones from it. A blob-filtered checkout leaves promised
+          # historical objects unavailable to that local upload-pack server.
           fetch-depth: 0
           fetch-tags: true
-          filter: blob:none
 
       - name: Fetch official release tags
         # Forks may not carry the newest upstream release tag. The upgrade
         # base and historical updater scenario are defined by NousResearch tags.
         run: |
           git remote add upstream https://github.com/NousResearch/hermes-agent.git
-          git fetch --filter=blob:none --no-recurse-submodules upstream '+refs/tags/v20*:refs/tags/v20*'
+          git fetch --no-recurse-submodules upstream '+refs/tags/v20*:refs/tags/v20*'
 
       - name: Set up Node
         # `hermes update` builds the web UI / TUI workspaces.
@@ -349,14 +350,12 @@ jobs:
         with:
           command: uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
 
-      - name: Verify and hydrate upgrade release snapshots
-        # The real upgrade clone uses --shared from this checkout. Materialize
-        # the exact N-1 and pre-handoff snapshots first, so its offline local
-        # origin has every blob those full-tree scenarios need.
+      - name: Verify upgrade release snapshots
+        # The real upgrade clone uses --shared from this complete checkout.
+        # Verify the exact N-1 and pre-handoff snapshots before running scenarios.
         run: |
           source .venv/bin/activate
           python - <<'PY'
-          import os
           import subprocess
           import tomllib
           from pathlib import Path
@@ -377,21 +376,13 @@ jobs:
               archive.stdout.close()
               assert archive.wait() == 0 and listing.returncode == 0, f"could not hydrate {tag}"
 
-          # The `other` shard runs fresh-install scenarios from a local bare
-          # origin shared with this blob-filtered checkout. Materialize the
-          # current tree once so parallel test files never make that local
-          # origin fetch promised blobs from GitHub at the same time.
-          if os.environ["UPGRADE_SHARD"] == "other":
-              hydrate("HEAD")
-
           release_tags = subprocess.run(
               ["git", "tag", "--merged", "HEAD", "--sort=-v:refname", "--list", "v20*"],
               capture_output=True, text=True, check=True,
           ).stdout.splitlines()[:15]
           pre_handoff = None
           for tag in release_tags:
-              # The discovery helper reads these files; materialize them one
-              # candidate at a time in this blob-filtered checkout.
+              # The discovery helper reads these files from each candidate.
               hydrate(tag, "hermes_cli")
               pre_handoff = _pre_handoff_tag()
               if pre_handoff is not None:
@@ -412,9 +403,6 @@ jobs:
           hydrate(pre_handoff[0], *old_entries)
           print(f"Hydrated upgrade bases: {refs.base_tag}, {pre_handoff[0]}")
           PY
-        env:
-          UPGRADE_SHARD: ${{ matrix.shard }}
-
       - name: Install bubblewrap
         # Every spawned updater runs in bwrap (own PID namespace, no user
         # systemd bus, only the test tmp writable). Ubuntu 24.04 restricts
