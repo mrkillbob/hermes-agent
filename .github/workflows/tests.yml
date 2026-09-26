@@ -182,12 +182,14 @@ jobs:
   e2e:
     # Upstream runs the complete process-heavy suite on one 32-core runner.
     # The fork cannot access that private runner group, so its full suite uses
-    # four independent standard runners. PRs use one smoke shard in either repo.
+    # eight independent standard runners after the measured four-shard full
+    # run still left the slowest shard above six minutes. PRs use one smoke
+    # shard in either repo.
     runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '[0, 1, 2, 3]' || '[0]') }}
+        shard: ${{ fromJSON(inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '[0, 1, 2, 3, 4, 5, 6, 7]' || '[0]') }}
     timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
     steps:
       - name: Checkout code
@@ -347,7 +349,7 @@ jobs:
           scripts/run_tests.sh --include-integration "${files[@]}"
         env:
           E2E_SHARD: ${{ matrix.shard }}
-          E2E_SHARD_COUNT: ${{ inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '4' || '1' }}
+          E2E_SHARD_COUNT: ${{ inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '8' || '1' }}
           # Multi-process episodes (torture chamber, compaction kill -9,
           # gateway liveness, delivery exactly-once through a real gateway,
           # the cron virtual-clock soak) legitimately run past the 300 s default.

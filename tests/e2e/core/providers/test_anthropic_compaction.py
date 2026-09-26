@@ -26,7 +26,7 @@ from tests.e2e.core.providers._anthropic_helpers import (
     thinking_of,
     tool_pairing_problems,
 )
-from tests.fakes.providers.anthropic_messages import Reply, Text, Thinking, ToolUse
+from tests.fakes.providers.anthropic_messages import MODEL_ID, Reply, Text, Thinking, ToolUse
 
 pytestmark = [pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process-tree cleanup uses /proc"),
               pytest.mark.live_system_guard_bypass]
@@ -76,6 +76,10 @@ def rig(tmp_path: Path):
     r = start_rig(tmp_path / "r", respond, aux=aux, config={
         "model": {"context_length": 64000},
         "compression": {"threshold_tokens": 20000, "protect_last_n": 4},
+        # `aux=` scripts summarisation responses, but the runtime still needs an
+        # explicit route to the fake Anthropic endpoint. Without it compression
+        # aborts with `aux_model=""`, leaving the test's precondition unfulfilled.
+        "auxiliary": {"compression": {"provider": "anthropic", "model": MODEL_ID}},
     })
     for i in range(1, TURNS + 1):
         path = r.project / f"chunk{i}.txt"
