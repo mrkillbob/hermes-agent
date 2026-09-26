@@ -125,8 +125,8 @@ jobs:
     uses: ./.github/workflows/tests.yml
     with:
       # NousResearch runs the full unit suite on one 96-core runner. Forks
-      # do not have access to that private runner group, so keep their slices.
-      slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 8 }}
+      # have standard 4-core runners, so use more, smaller slices there.
+      slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 16 }}
       # The fork runs the complete suite on parallel GitHub-hosted shards; PRs
       # keep the same E2E coverage as main without requiring NousResearch runners.
       e2e_mode: full
