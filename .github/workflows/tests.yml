@@ -356,6 +356,7 @@ jobs:
         run: |
           source .venv/bin/activate
           python - <<'PY'
+          import os
           import subprocess
           import tomllib
           from pathlib import Path
@@ -375,6 +376,13 @@ jobs:
               listing = subprocess.run(["tar", "-tf", "-"], stdin=archive.stdout, stdout=subprocess.DEVNULL)
               archive.stdout.close()
               assert archive.wait() == 0 and listing.returncode == 0, f"could not hydrate {tag}"
+
+          # The `other` shard runs fresh-install scenarios from a local bare
+          # origin shared with this blob-filtered checkout. Materialize the
+          # current tree once so parallel test files never make that local
+          # origin fetch promised blobs from GitHub at the same time.
+          if os.environ["UPGRADE_SHARD"] == "other":
+              hydrate("HEAD")
 
           release_tags = subprocess.run(
               ["git", "tag", "--merged", "HEAD", "--sort=-v:refname", "--list", "v20*"],
@@ -404,6 +412,8 @@ jobs:
           hydrate(pre_handoff[0], *old_entries)
           print(f"Hydrated upgrade bases: {refs.base_tag}, {pre_handoff[0]}")
           PY
+        env:
+          UPGRADE_SHARD: ${{ matrix.shard }}
 
       - name: Install bubblewrap
         # Every spawned updater runs in bwrap (own PID namespace, no user

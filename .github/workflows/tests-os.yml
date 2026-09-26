@@ -79,9 +79,18 @@ jobs:
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
         if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        id: native_build
         uses: ./.github/actions/setup-windows-build-deps
 
+      - name: Save verified ARM64 OpenSSL cache
+        if: ${{ runner.arch == 'ARM64' && steps.native_build.outcome == 'success' && steps.native_build.outputs.openssl-cache-hit != 'true' && !cancelled() }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:\vcpkg\installed\arm64-windows-static-md
+          key: windows-build-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/windows-build-deps.ps1', 'scripts/build/windows-deps.ps1') }}
+
       - name: Set up locked Python and test dependencies
+        id: setup_pm
         uses: ./.github/actions/setup-pm
         with:
           # Installer stage tests inherit setup-pm's HERMES_RUNTIME_DIR. Prepare
@@ -91,6 +100,15 @@ jobs:
           extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web"]'
           test-environment: 'true'
           prune-python-cache: true
+          save-python-cache: ${{ runner.arch == 'ARM64' && 'false' || 'true' }}
+
+      - name: Save verified ARM64 Python dependency cache
+        if: ${{ runner.arch == 'ARM64' && steps.setup_pm.outcome == 'success' }}
+        uses: ./.github/actions/save-pm-cache
+        with:
+          python: ${{ steps.setup_pm.outputs.python-path }}
+          path: ${{ steps.setup_pm.outputs.uv-cache-path }}
+          key: ${{ steps.setup_pm.outputs.python-cache-key }}
 
       - name: Run ${{ matrix.marker }} tests
         # scripts/run_tests.sh — the canonical runner, same as every other
