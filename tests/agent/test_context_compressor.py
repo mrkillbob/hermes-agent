@@ -3035,9 +3035,11 @@ class TestSummaryPromptBounding:
 
     @pytest.mark.parametrize("has_user_turn", [True, False])
     @pytest.mark.parametrize("focus_topic", [None, "synthetic focus"])
+    @pytest.mark.parametrize("previous_summary", [None, "synthetic previous summary"])
     def test_summary_prompt_is_admitted_by_egress_sanitizer(
-        self, compressor, has_user_turn, focus_topic
+        self, compressor, has_user_turn, focus_topic, previous_summary
     ):
+        compressor._previous_summary = previous_summary
         prompt = compressor._build_summary_prompt(
             "synthetic transcript", 1000, focus_topic, "", has_user_turn=has_user_turn
         )
