@@ -22,10 +22,13 @@ concurrency:
   cancel-in-progress: true
 jobs:
   windows-bundle-tools:
-    name: Cold Windows SDK (${{ matrix.runner }})
-    runs-on: ${{ matrix.runner }}
+    name: Cold Windows SDK (ARM64)
+    # The 32-core ARM runner belongs to the upstream organization. The public
+    # fork uses GitHub-hosted standard ARM64 runners instead of queueing forever
+    # for a runner that is not available to this repository.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && matrix.runner || 'windows-11-arm' }}
     # Cold ARM64 npm extraction alone can exceed 15 minutes on the hosted runner.
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
