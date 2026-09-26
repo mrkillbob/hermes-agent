@@ -38,11 +38,16 @@ permissions:
   contents: read
   pull-requests: read
 
-# Keep workflow scheduling compatible with every trigger. Release runs still
-# force every validation lane; concurrency stays keyed by event and ref.
+# cancel-in-progress only ever applies to PR events. A push, a dispatch, and
+# above all a stable-release workflow_call run are never cancelled by a later
+# commit or a rerun of the same branch — the caller's own concurrency uses
+# github.run_id, so even a parent rerun cannot kill this child mid-flight.
+# Release (workflow_call with inputs.release) never cancels and never gets
+# cancelled: its group is github.run_id. PRs collapse per-PR; pushes use the
+# ref as before.
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ inputs.release == true && github.run_id || (github.event_name == 'pull_request' && github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────
@@ -187,7 +192,7 @@ jobs:
     # occurred") — every ci.yaml run repo-wide dispatched 0 jobs from
     # 24f5a60ed1 until this line changed. To re-enable, restore:
     #   if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
-    if: false
+    if: ${{ github.event_name == 'workflow_call' }}
     uses: ./.github/workflows/e2e-desktop.yml
 
   e2e-desktop-core:
