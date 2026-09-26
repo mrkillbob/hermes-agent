@@ -126,7 +126,7 @@ jobs:
     with:
       # NousResearch runs the full unit suite on one 96-core runner. Forks
       # have standard 4-core runners, so use more, smaller slices there.
-      slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 16 }}
+      slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 24 }}
       # The fork runs the complete suite on parallel GitHub-hosted shards; PRs
       # keep the same E2E coverage as main without requiring NousResearch runners.
       e2e_mode: full
