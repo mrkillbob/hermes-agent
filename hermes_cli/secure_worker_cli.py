@@ -12,6 +12,8 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import hermes_yaml as yaml
+
 from hermes_cli.secure_worker import (
     PackPolicy,
     SecurityBoundaryError,

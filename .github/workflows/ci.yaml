@@ -353,10 +353,9 @@ jobs:
       - icons-freshness-check
       - supply-chain
       - review-labels
-      # OSV runs weekly against main (osv-scanner.yml schedule), not per PR:
-      # every PR was reporting the same repo-wide baseline of pinned-dep CVEs
-      # in its review comment, and the SARIF upload tripped GitHub's
-      # per-installation API rate limit during merge trains.
+      - osv-scanner
+      # OSV findings are advisory, but the PR scan still runs so its artifact
+      # and review status are collected. It does not fail on existing CVEs.
       # The image build runs in its own workflow (docker.yml) and reports
       # its own check. It was never required here, because it is too slow
       # to block a merge. A separate run also stops it from holding this

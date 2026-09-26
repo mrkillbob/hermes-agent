@@ -1080,7 +1080,7 @@ def test_scheduled_cloud_route_skips_moa_with_scoped_lan_override(tmp_path, monk
 
 def test_scheduled_cloud_route_skips_moa_with_auto_selected_local_route(tmp_path, monkeypatch):
     """A MoA auto slot inherits the effective local main route before cron classifies it."""
-    import yaml
+    import hermes_yaml as yaml
 
     import agent.moa_loop as moa_loop
     from cron.scheduler_provider import scheduled_model_fallback_chain
@@ -1117,7 +1117,7 @@ def test_scheduled_cloud_route_skips_moa_with_auto_selected_local_route(tmp_path
 
 def test_scheduled_cloud_route_skips_effective_scoped_and_auto_local_fallbacks(tmp_path, monkeypatch):
     """Ordinary fallbacks are classified from scoped runtime routes, not catalog URLs."""
-    import yaml
+    import hermes_yaml as yaml
 
     from agent.secret_scope import set_multiplex_active
     from cron.scheduler_provider import _profile_cron_scope, scheduled_model_fallback_chain

@@ -1258,7 +1258,10 @@ def _epoch_file_age(name: str) -> Optional[float]:
     ticked", the opposite of what a liveness check needs."""
     try:
         raw = (_current_cron_store().cron_dir / name).read_text(encoding="utf-8-sig").strip()
-        return max(0.0, time.time() - float(raw))
+        age = time.time() - float(raw)
+        if age < -_FUTURE_STAMP_TOLERANCE_S:
+            return None
+        return max(0.0, age)
     except Exception:
         return None
 

@@ -197,7 +197,7 @@ def _model_provenance(model: str) -> dict[str, str]:
     config: object = {}
     config_path = HOME / "config.yaml"
     if config_path.exists():
-        import yaml
+        import hermes_yaml as yaml
 
         try:
             config = yaml.safe_load(config_path.read_text(encoding="utf-8-sig")) or {}

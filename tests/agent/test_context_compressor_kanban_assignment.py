@@ -86,7 +86,7 @@ def test_pressure_preserves_current_kanban_assignment_projection(monkeypatch):
         calls[call_id] = ("other_tool", "{}")
 
     compressor = ContextCompressor("test-model", quiet_mode=True)
-    compressor._pressure_demote_tail(messages, 0, 100, calls, 0)
+    compressor._pressure_demote_tail(messages, 0, 100, calls, 0, spared=range(1))
     assert json.loads(messages[0]["content"])["task"]["body"] == body
     assert messages[1]["content"].startswith("[other_tool]")
 

@@ -145,7 +145,7 @@ class TestPulseSocketReachable:
             assert _pulse_socket_reachable() is True
         finally:
             server.close()
-            shutil.rmtree(short_root, ignore_errors=True)
+            shutil.rmtree(runtime_dir, ignore_errors=True)
 
 class TestDetectAudioEnvironment:
     def test_clean_environment_is_available(self, monkeypatch):
