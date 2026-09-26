@@ -278,6 +278,10 @@ _SAFE_DIAGNOSTIC_STATUS_WORDS = frozenset({
     # as canonical Base64 by coincidence.
     "APPROVE",
     "TEXT",
+    # These words occur as ordinary labels in generated/tool context and are
+    # too short and low-entropy to carry a useful encoded payload.
+    "TOOL",
+    "WINS",
 })
 _LINTER_DIAGNOSTIC_CODE = re.compile(r"^[A-Z][0-9]{3,4}$")
 _PYTHON_DUNDER_IDENTIFIER = re.compile(r"^__[a-z][a-z0-9_]{0,62}__$")
@@ -1027,6 +1031,16 @@ def _canonical_chunked_base64_candidate(candidate: str) -> bool:
 
     chunks = re.findall(r"[A-Za-z0-9_+/=-]{2,4}", candidate)
     if len(chunks) < 3:
+        return False
+    if (
+        len(candidate) <= 32
+        and chunks[0].startswith("---")
+        and set(chunks[0]) == {"-"}
+        and all(re.fullmatch(r"[A-Z]{2,8}", chunk) for chunk in chunks[1:])
+    ):
+        # Markdown horizontal rules are followed by headings like
+        # "--- END OF". The divider's hyphens and heading words can align
+        # into fixed-width Base64 chunks, but the result is ordinary prose.
         return False
     if all(_LINTER_DIAGNOSTIC_CODE.fullmatch(chunk) for chunk in chunks):
         # A run of bounded Ruff/flake8 findings is structured CI output, not

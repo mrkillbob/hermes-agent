@@ -707,6 +707,21 @@ def test_ordinary_prose_with_small_count_is_not_treated_as_chunked_base64(tmp_pa
     assert "base64_payload" not in decision.reason_codes
 
 
+@pytest.mark.parametrize("word", ["TOOL", "WINS"])
+def test_short_context_words_are_not_treated_as_base64(tmp_path, word):
+    decision = firewall(tmp_path).preflight(
+        _sanitized_request(f"The {word} label appears in this ordinary context."), _route()
+    )
+    assert "base64_payload" not in decision.reason_codes
+
+
+def test_markdown_divider_and_heading_are_not_treated_as_chunked_base64(tmp_path):
+    decision = firewall(tmp_path).preflight(
+        _sanitized_request("--- END OF"), _route()
+    )
+    assert "base64_payload" not in decision.reason_codes
+
+
 def _source_presentation_request(grant: SourceGrant, text: str) -> TypedOutboundRequest:
     return TypedOutboundRequest(
         payload={
