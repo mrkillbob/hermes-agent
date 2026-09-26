@@ -61,7 +61,10 @@
     "undici@^7": "7.29.0",
     "postcss": "8.5.23",
     "tar": "7.5.22",
-    "@xmldom/xmldom": "0.9.12"
+    "@xmldom/xmldom": "0.9.12",
+    "app-builder-lib@27.0.0-alpha.6": {
+      "plist@3.1.0": "3.1.1"
+    }
   },
   "engines": {
     "node": "^22.22.0 || ^24.11.0 || >=26.0.0",
