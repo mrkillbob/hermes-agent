@@ -19,6 +19,7 @@ from agent.context_compressor import (
     _is_summary_access_or_quota_error,
     _truncate_tool_call_args_json,
 )
+from agent.llm_egress_firewall import validate_sanitized_text
 from hermes_state import SessionDB
 
 
@@ -3031,6 +3032,17 @@ class TestSummaryPromptBounding:
 
         assert records == ["[TOOL RESULT]: read complete"]
         assert provider_call_id not in "\n".join(records)
+
+    @pytest.mark.parametrize("has_user_turn", [True, False])
+    @pytest.mark.parametrize("focus_topic", [None, "synthetic focus"])
+    def test_summary_prompt_is_admitted_by_egress_sanitizer(
+        self, compressor, has_user_turn, focus_topic
+    ):
+        prompt = compressor._build_summary_prompt(
+            "synthetic transcript", 1000, focus_topic, "", has_user_turn=has_user_turn
+        )
+
+        assert validate_sanitized_text(prompt) == prompt
 
     _ELISION_MARKER = re.compile(r"\n*\.\.\.\[[^\]]*elided[^\n]*\.\.\.\n*")
 
