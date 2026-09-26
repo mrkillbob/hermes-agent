@@ -38,16 +38,11 @@ permissions:
   contents: read
   pull-requests: read
 
-# cancel-in-progress only ever applies to PR events. A push, a dispatch, and
-# above all a stable-release workflow_call run are never cancelled by a later
-# commit or a rerun of the same branch — the caller's own concurrency uses
-# github.run_id, so even a parent rerun cannot kill this child mid-flight.
-# Release (workflow_call with inputs.release) never cancels and never gets
-# cancelled: its group is github.run_id. PRs collapse per-PR; pushes use the
-# ref as before.
+# Cancel stale PR work when a new commit arrives. Pushes, dispatches, and
+# release calls keep their current run and are never cancelled by this rule.
 concurrency:
-  group: ci-${{ inputs.release == true && github.run_id || (github.event_name == 'pull_request' && github.event.pull_request.number || github.ref) }}
-  cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────
