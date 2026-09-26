@@ -3382,6 +3382,27 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         """Serialize turns into a list of labeled, redacted records for the summarizer."""
         # Lazy import: agent_runtime_helpers pulls heavy transitive imports.
         from agent.agent_runtime_helpers import strip_think_blocks
+
+        # Provider replay artifacts are not conversation facts. A serializer
+        # path may flatten provider metadata into a text field before reaching
+        # this boundary, so remove the exact opaque values carried by the turns
+        # as well as omitting their structured fields below.
+        opaque_replay_values: set[str] = set()
+
+        def collect_replay_values(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key in {"signature", "encrypted_content"} and isinstance(child, str) and child:
+                        opaque_replay_values.add(child)
+                    else:
+                        collect_replay_values(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect_replay_values(child)
+
+        for message in turns:
+            collect_replay_values(message)
+
         parts = []
         for msg in turns:
             role = msg.get("role", "unknown")
@@ -3413,6 +3434,15 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             if role == "assistant" and msg.get("tool_calls", []):
                 content += "\n[Tool calls:\n" + "\n".join(map(self._render_tool_call_for_summary, msg["tool_calls"])) + "\n]"
             parts.append(f"[{role.upper()}]: {content}")
+        if opaque_replay_values:
+            replay_values = sorted(opaque_replay_values, key=len, reverse=True)
+
+            def omit_replay_tokens(part: str) -> str:
+                for value in replay_values:
+                    part = part.replace(value, "[opaque provider replay token omitted]")
+                return part
+
+            parts = [omit_replay_tokens(part) for part in parts]
         return parts
 
     def _serialize_for_summary(self, turns: List[Dict[str, Any]]) -> str:

@@ -115,6 +115,21 @@ def test_serializer_does_not_stringify_a_native_provider_block():
     assert signature not in serialized
 
 
+def test_serializer_removes_opaque_replay_values_from_flattened_text():
+    c = _compressor()
+    signature = "RXFSb3VuZDAxLXNpZ25hdHVyZS0x"
+    serialized = c._serialize_for_summary([
+        {
+            "role": "assistant",
+            "content": f"provider block metadata: {signature}",
+            "reasoning_details": [{"type": "thinking", "thinking": "working", "signature": signature}],
+        }
+    ])
+
+    assert "provider block metadata:" in serialized
+    assert signature not in serialized
+
+
 def test_fallback_summary_redacts_secrets():
     c = _compressor()
     turns = [
