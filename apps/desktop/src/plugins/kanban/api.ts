@@ -75,49 +75,60 @@ const INTRO_KEY = 'introDismissed'
 const LANES_KEY = 'lanesByProfile'
 const COLLAPSED_KEY = 'collapsedLanes'
 
-/** Worker heartbeats only advance liveness. Reloading the full board for them
- *  is both unnecessary and expensive: GET /board computes diagnostics from
- *  every active task's event/run history. */
-export function eventsNeedBoardRefresh(events: CompletionEvent[]): boolean {
-  return events.some(event => event.kind !== 'heartbeat' && event.kind !== 'respawn_guarded')
+// Last frame cursor per (connection, board) this plugin bind. The socket
+// reopens on every board switch and connection change; resuming from the last
+// frame replays only what was missed. Keyed by connection so one gateway's
+// cursor cannot resume another's stream. Cleared on bind/unbind — events that
+// land while the plugin is unloaded are not replayed.
+const eventCursorByBoard = new Map<string, number>()
+
+function cursorKey(scope: string, slug: string): string {
+  return `${scope}\0${slug}`
 }
 
-export function applyHeartbeatEvents(board: KanbanBoard, events: CompletionEvent[]): KanbanBoard {
-  const heartbeats = new Map<string, number>()
-  let latestEventId = board.latest_event_id
-  let now = board.now
+function snapshotCursor(scope: string, slug: string): number | undefined {
+  for (const archived of [false, true]) {
+    const board = queryClient.getQueryData<KanbanBoard>(boardKey(scope, slug, archived))
 
-  for (const event of events) {
-    if (event.kind !== 'heartbeat' || !event.task_id || typeof event.created_at !== 'number') {
-      continue
+    if (typeof board?.latest_event_id === 'number') {
+      return board.latest_event_id
     }
-
-    heartbeats.set(event.task_id, Math.max(heartbeats.get(event.task_id) ?? 0, event.created_at))
-
-    if (typeof event.id === 'number') {
-      latestEventId = Math.max(latestEventId, event.id)
-    }
-
-    now = Math.max(now, event.created_at)
   }
 
-  if (heartbeats.size === 0) {
-    return board
+  return undefined
+}
+
+/** Cursor a fresh socket starts from: the last frame this connection saw, else
+ *  the cached board snapshot's tail. Undefined means nothing is known yet —
+ *  fetch the snapshot before opening, never open at since=0. */
+function eventsSince(scope: string, slug: string): number | undefined {
+  const seen = eventCursorByBoard.get(cursorKey(scope, slug))
+
+  if (typeof seen === 'number') {
+    return seen
   }
 
-  return {
-    ...board,
-    columns: board.columns.map(column => ({
-      ...column,
-      tasks: column.tasks.map(task => {
-        const heartbeat = heartbeats.get(task.id)
+  return snapshotCursor(scope, slug)
+}
 
-        return heartbeat === undefined ? task : { ...task, last_heartbeat_at: heartbeat }
-      })
-    })),
-    latest_event_id: latestEventId,
-    now
+function eventsUrl(slug: string, since: number | undefined): string {
+  const params = new URLSearchParams()
+
+  if (slug) {
+    params.set('board', slug)
   }
+
+  if (since !== undefined) {
+    params.set('since', String(since))
+  }
+
+  const query = params.toString()
+
+  return query ? `/events?${query}` : '/events'
+}
+
+function boardSnapshotPath(slug: string): string {
+  return slug ? `/board?board=${encodeURIComponent(slug)}` : '/board'
 }
 
 /** Cache-scope id for the active connection — the segment every query key
@@ -147,23 +158,23 @@ const routedScope = (): string => host.activeConnectionId() ?? LOCAL_SCOPE
  *  `bindApi`; sites with their own `enabled` compose it. */
 export const routedToScope = (query: { queryKey: readonly unknown[] }): boolean => query.queryKey[2] === routedScope()
 
-/** One live `task_events` frame → cache-local heartbeat updates plus one
- *  coalesced refresh for events that can actually change board state. */
-function activeSourceKey(): string {
-  return `${host.state.connectionId.get() ?? 'local'}::${host.state.profile.get() || 'default'}`
-}
+/** One live `task_events` frame → precise cache invalidation: the board, plus
+ *  each touched task's detail. The polls (8s board / 4s drawer) stay as the
+ *  fallback — the socket just makes the board feel instant. */
+function onEventsFrame(scope: string, slug: string, data: unknown): void {
+  const frame = data as { cursor?: unknown; events?: CompletionEvent[] }
 
-function onEventsFrame(slug: string, data: unknown, scheduleBoardRefresh: () => void, sourceKey: string): void {
-  const events = (data as { events?: CompletionEvent[] })?.events
+  if (typeof frame?.cursor === 'number') {
+    eventCursorByBoard.set(cursorKey(scope, slug), frame.cursor)
+  }
+
+  const events = frame?.events
 
   if (!events?.length) {
     return
   }
 
-  const scope = kanbanConnectionScope()
-  queryClient.setQueriesData<KanbanBoard>({ queryKey: boardKeyPrefix(scope) }, cached =>
-    cached ? applyHeartbeatEvents(cached, events) : cached
-  )
+  void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
   // Any event can change a board's card count — keep the switcher badge honest.
   if (eventsNeedBoardRefresh(events)) {
     void queryClient.invalidateQueries({ queryKey: boardsKey(scope) })
@@ -223,42 +234,54 @@ export function bindApi(
   persist($lanesByProfile, LANES_KEY, false)
   persist($collapsedLanes, COLLAPSED_KEY, {})
 
-  let socketGeneration = 0
-  let close: (() => void) | null = null
-  let boardRefreshTimer: null | ReturnType<typeof setTimeout> = null
+  eventCursorByBoard.clear()
 
-  const scheduleBoardRefresh = () => {
-    if (boardRefreshTimer !== null) {
+  let close: (() => void) | null = null
+  let socketGeneration = 0
+
+  const dial = (scope: string, slug: string, since: number | undefined) =>
+    socket(eventsUrl(slug, since), data => onEventsFrame(scope, slug, data))
+
+  const open = (slug: string) => {
+    const generation = ++socketGeneration
+    const scope = kanbanConnectionScope()
+
+    close?.()
+    close = null
+
+    const since = eventsSince(scope, slug)
+
+    if (since !== undefined) {
+      close = dial(scope, slug, since)
+
       return
     }
 
-    boardRefreshTimer = setTimeout(() => {
-      boardRefreshTimer = null
-      const scope = kanbanConnectionScope()
-      void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
-      void queryClient.invalidateQueries({ queryKey: boardsKey(scope) })
-    }, 500)
-  }
+    // No cached tail yet. Wait for the snapshot and open at its
+    // latest_event_id. A board switch or unload bumps the generation so a
+    // late snapshot cannot open a stale socket. A failed fetch still opens
+    // with no since — the server starts at the tail rather than replaying.
+    void queryClient
+      .fetchQuery({
+        queryFn: () => r<KanbanBoard>(boardSnapshotPath(slug)),
+        queryKey: boardKey(scope, slug, false)
+      })
+      .then(board => {
+        if (generation !== socketGeneration) {
+          return
+        }
 
-  const open = (slug: string) => {
-    close?.()
+        const tail = typeof board?.latest_event_id === 'number' ? board.latest_event_id : undefined
 
-    if (boardRefreshTimer !== null) {
-      clearTimeout(boardRefreshTimer)
-      boardRefreshTimer = null
-    }
+        close = dial(scope, slug, tail)
+      })
+      .catch(() => {
+        if (generation !== socketGeneration) {
+          return
+        }
 
-    const sourceKey = activeSourceKey()
-    const generation = ++socketGeneration
-    const path = slug ? `/events?board=${encodeURIComponent(slug)}` : '/events'
-
-    close = socket(path, data => {
-      // A closed socket can still deliver queued frames. They belong to its
-      // original source and must not update the current cache or cursor.
-      if (generation === socketGeneration && sourceKey === activeSourceKey()) {
-        onEventsFrame(slug, data, scheduleBoardRefresh, sourceKey)
-      }
-    })
+        close = dial(scope, slug, undefined)
+      })
   }
 
   // The local connection keeps the BARE key (the bare-local rule of
@@ -298,6 +321,7 @@ export function bindApi(
 
   return () => {
     socketGeneration += 1
+    eventCursorByBoard.clear()
     unsubs.forEach(unsub => unsub())
     close?.()
 

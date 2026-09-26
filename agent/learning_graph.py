@@ -90,7 +90,7 @@ def _load_usage() -> dict[str, dict[str, Any]]:
     except Exception:
         path = get_hermes_home() / "skills" / ".usage.json"
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads((get_hermes_home() / "skills" / ".usage.json").read_text(encoding="utf-8-sig"))
         except Exception:
             return {}
 
@@ -126,31 +126,30 @@ def _usage_timestamp(rec: dict[str, Any]) -> Optional[int]:
 def build_skill_nodes(skill_roots: list[tuple[str, Path]]) -> dict[str, SkillNode]:
     usage = _load_usage()
     nodes: dict[str, SkillNode] = {}
-
-    for source, skill_md in _iter_skill_files(skill_roots):
-        if any(p in {".archive", ".hub", "node_modules", ".git"} for p in skill_md.parts):
-            continue
-        try:
-            fm = _frontmatter(skill_md.read_text(encoding="utf-8")[:4000])
-        except OSError:
-            continue
-        name = str(fm.get("name") or skill_md.parent.name).strip()
-        if not name or name in nodes:
-            continue
-        rec = usage.get(name, {})
-        last_activity = _usage_timestamp(rec)
-        file_ts = _to_int_ts(skill_md.stat().st_mtime)
-        nodes[name] = SkillNode(
-            name=name,
-            category=_category(fm, skill_md),
-            source=source,
-            timestamp=last_activity or file_ts,
-            use_count=int(rec.get("use_count", 0) or 0),
-            state=str(rec.get("state", "active") or "active"),
-            created_by=rec.get("created_by"),
-            pinned=bool(rec.get("pinned", False)),
-            related=_related(fm),
-        )
+    for source, root in skill_roots:
+        for skill_md in root.rglob("SKILL.md") if root.exists() else ():
+            if _SKIP_PARTS.intersection(skill_md.parts):
+                continue
+            try:
+                text = skill_md.read_text(encoding="utf-8-sig")[:4000]
+            except OSError:
+                continue
+            try:
+                from agent.skill_utils import parse_frontmatter
+                fm = parse_frontmatter(text)[0] or {}
+            except Exception:
+                fm = {}
+            name = str(fm.get("name") or skill_md.parent.name).strip()
+            if not name or name in nodes:
+                continue
+            rec, cat, parts = usage.get(name, {}), _fm_field(fm, "category"), skill_md.parts  # …/skills/<category>/<skill>/SKILL.md
+            usage_ts = next((ts for ts in (_to_int_ts(rec.get(k)) for k in _USAGE_TS_KEYS) if ts is not None), None)
+            nodes[name] = SkillNode(
+                name=name, category=str(cat) if cat else parts[-3] if len(parts) >= 3 else "general", source=source,
+                timestamp=usage_ts or _to_int_ts(skill_md.stat().st_mtime),
+                use_count=int(rec.get("use_count", 0) or 0), state=str(rec.get("state", "active") or "active"),
+                created_by=rec.get("created_by"), pinned=bool(rec.get("pinned", False)), related=_related(fm),
+            )
     return nodes
 
 

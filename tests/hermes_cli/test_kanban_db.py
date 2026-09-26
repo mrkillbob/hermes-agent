@@ -89,7 +89,7 @@ def test_busy_timeout_below_minimum_uses_default(monkeypatch, raw_value):
 
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_cross_process_init_lock_uses_windows_byte_range_lock(tmp_path, monkeypatch):
     """Windows must use a real (non-blocking) process lock, not a no-op open.
 
@@ -97,7 +97,7 @@ def test_cross_process_init_lock_uses_windows_byte_range_lock(tmp_path, monkeypa
     wedged holder can never block connect() forever; a clean acquire takes the
     lock once and releases it once.
 
-    ``windows_only``: ``msvcrt`` does not exist off Windows, so faking
+    ``platforms("windows")``: ``msvcrt`` does not exist off Windows, so faking
     ``_IS_WINDOWS`` on Linux meant injecting a fake ``msvcrt`` module too —
     the test then asserted against its own stub rather than the byte-range
     locking API. Here the platform is real; only ``msvcrt.locking`` is
