@@ -183,9 +183,8 @@ jobs:
           prune-python-cache: true
 
       - name: Install Node deps and build the Ink TUI
-        if: inputs.e2e_mode == 'full' && matrix.shard == 0
         # tests/e2e/core/terminal drives the real `hermes --tui` over a PTY;
-        # HERMES_E2E_REQUIRE_TUI=1 below turns a missing build into a failure.
+        # every shard can receive those files, so build it on every runner.
         uses: ./.github/actions/retry
         with:
           command: npm ci --workspace ui-tui --ignore-scripts --no-audit --no-fund && npm run build --workspace ui-tui
@@ -227,7 +226,12 @@ jobs:
         # tests/e2e/core/upgrade runs in its own job (e2e-upgrade) below.
         run: |
           mapfile -t files < <(find tests/e2e -name 'test_*.py' -not -path 'tests/e2e/core/upgrade/*' | sort)
-          scripts/run_tests.sh --include-integration "${files[@]}"
+          slice_count=1
+          if [[ "${{ inputs.e2e_mode }}" == full && "${{ github.repository }}" != NousResearch/hermes-agent ]]; then
+            slice_count=8
+          fi
+          slice_index=$(( ${{ matrix.shard }} + 1 ))
+          scripts/run_tests.sh --include-integration --slice "${slice_index}/${slice_count}" "${files[@]}"
         env:
           # An e2e file is a process tree, not one CPU-bound pytest worker. With
           # 32 files at once the hosted run starved live children before their

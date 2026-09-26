@@ -2,7 +2,7 @@
 import importlib.metadata
 from pathlib import Path
 
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.config import _ENV_REF_RE, _expand_env_vars, read_user_config_raw
 from hermes_cli.managed_scope import apply_managed_overlay
