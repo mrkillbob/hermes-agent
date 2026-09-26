@@ -361,9 +361,9 @@ def _run_capability_probe(plugin_dir: Path, manifest: dict) -> Tuple[Optional[di
                     _PROBE_SENTINEL,
                     json.dumps(_probe_options(manifest)),
                 ],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace",
-                timeout=_PROBE_TIMEOUT,
                 env=env,
                 **({"process_group": 0} if os.name != "nt" else {}),
             )
