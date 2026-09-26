@@ -131,6 +131,49 @@ function boardSnapshotPath(slug: string): string {
   return slug ? `/board?board=${encodeURIComponent(slug)}` : '/board'
 }
 
+/** Heartbeats update liveness but do not change board membership or summaries. */
+export function eventsNeedBoardRefresh(events: CompletionEvent[]): boolean {
+  return events.some(event => event.kind !== 'heartbeat' && event.kind !== 'respawn_guarded')
+}
+
+export function applyHeartbeatEvents(board: KanbanBoard, events: CompletionEvent[]): KanbanBoard {
+  const heartbeats = new Map<string, number>()
+  let latestEventId = board.latest_event_id
+  let now = board.now
+
+  for (const event of events) {
+    if (event.kind !== 'heartbeat' || !event.task_id || typeof event.created_at !== 'number') {
+      continue
+    }
+
+    heartbeats.set(event.task_id, Math.max(heartbeats.get(event.task_id) ?? 0, event.created_at))
+
+    if (typeof event.id === 'number') {
+      latestEventId = Math.max(latestEventId, event.id)
+    }
+
+    now = Math.max(now, event.created_at)
+  }
+
+  if (heartbeats.size === 0) {
+    return board
+  }
+
+  return {
+    ...board,
+    columns: board.columns.map(column => ({
+      ...column,
+      tasks: column.tasks.map(task => {
+        const heartbeat = heartbeats.get(task.id)
+
+        return heartbeat === undefined ? task : { ...task, last_heartbeat_at: heartbeat }
+      })
+    })),
+    latest_event_id: latestEventId,
+    now
+  }
+}
+
 /** Cache-scope id for the active connection — the segment every query key
  *  embeds. `'local'` covers the pre-descriptor null; the SDK atom already
  *  reports 'local' for the local pool. For NON-rendering code (mutations,
@@ -150,6 +193,10 @@ export function useKanbanScope(): string {
  *  outgoing scope's key while a fetch would land on the incoming backend. */
 const routedScope = (): string => host.activeConnectionId() ?? LOCAL_SCOPE
 
+function activeSourceKey(): string {
+  return `${host.state.connectionId.get() ?? LOCAL_SCOPE}::${host.state.profile.get() || 'default'}`
+}
+
 /** `enabled` for every kanban query: only fetch while the key's scope is the
  *  routed one. A switch's app-wide invalidation then leaves the outgoing
  *  observers alone (the incoming keys are already a cache miss) instead of
@@ -161,7 +208,13 @@ export const routedToScope = (query: { queryKey: readonly unknown[] }): boolean 
 /** One live `task_events` frame → precise cache invalidation: the board, plus
  *  each touched task's detail. The polls (8s board / 4s drawer) stay as the
  *  fallback — the socket just makes the board feel instant. */
-function onEventsFrame(scope: string, slug: string, data: unknown): void {
+function onEventsFrame(
+  scope: string,
+  slug: string,
+  data: unknown,
+  scheduleBoardRefresh: () => void,
+  sourceKey: string
+): void {
   const frame = data as { cursor?: unknown; events?: CompletionEvent[] }
 
   if (typeof frame?.cursor === 'number') {
@@ -174,11 +227,9 @@ function onEventsFrame(scope: string, slug: string, data: unknown): void {
     return
   }
 
-  void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
-  // Any event can change a board's card count — keep the switcher badge honest.
-  if (eventsNeedBoardRefresh(events)) {
-    void queryClient.invalidateQueries({ queryKey: boardsKey(scope) })
-  }
+  queryClient.setQueriesData<KanbanBoard>({ queryKey: boardKeyPrefix(scope) }, cached =>
+    cached ? applyHeartbeatEvents(cached, events) : cached
+  )
 
   if (eventsNeedBoardRefresh(events)) {
     scheduleBoardRefresh()
@@ -238,21 +289,51 @@ export function bindApi(
 
   let close: (() => void) | null = null
   let socketGeneration = 0
+  let boardRefreshTimer: null | ReturnType<typeof setTimeout> = null
 
-  const dial = (scope: string, slug: string, since: number | undefined) =>
-    socket(eventsUrl(slug, since), data => onEventsFrame(scope, slug, data))
+  const scheduleBoardRefresh = (scope: string, sourceKey: string) => {
+    if (boardRefreshTimer !== null) {
+      return
+    }
+
+    boardRefreshTimer = setTimeout(() => {
+      boardRefreshTimer = null
+
+      if (sourceKey !== activeSourceKey()) {
+        return
+      }
+
+      void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
+      void queryClient.invalidateQueries({ queryKey: boardsKey(scope) })
+    }, 500)
+  }
+
+  const dial = (scope: string, slug: string, since: number | undefined, generation: number, sourceKey: string) =>
+    socket(eventsUrl(slug, since), data => {
+      if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
+        return
+      }
+
+      onEventsFrame(scope, slug, data, () => scheduleBoardRefresh(scope, sourceKey), sourceKey)
+    })
 
   const open = (slug: string) => {
     const generation = ++socketGeneration
     const scope = kanbanConnectionScope()
+    const sourceKey = activeSourceKey()
 
     close?.()
     close = null
 
+    if (boardRefreshTimer !== null) {
+      clearTimeout(boardRefreshTimer)
+      boardRefreshTimer = null
+    }
+
     const since = eventsSince(scope, slug)
 
     if (since !== undefined) {
-      close = dial(scope, slug, since)
+      close = dial(scope, slug, since, generation, sourceKey)
 
       return
     }
@@ -267,20 +348,20 @@ export function bindApi(
         queryKey: boardKey(scope, slug, false)
       })
       .then(board => {
-        if (generation !== socketGeneration) {
+        if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
           return
         }
 
         const tail = typeof board?.latest_event_id === 'number' ? board.latest_event_id : undefined
 
-        close = dial(scope, slug, tail)
+        close = dial(scope, slug, tail, generation, sourceKey)
       })
       .catch(() => {
-        if (generation !== socketGeneration) {
+        if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
           return
         }
 
-        close = dial(scope, slug, undefined)
+        close = dial(scope, slug, undefined, generation, sourceKey)
       })
   }
 

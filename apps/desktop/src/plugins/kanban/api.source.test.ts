@@ -8,6 +8,7 @@ vi.mock('@hermes/plugin-sdk', () => ({
     state: { connectionId: atom('local'), profile: atom('default') }
   },
   queryClient: {
+    getQueryData: vi.fn(() => ({ latest_event_id: 0 })),
     setQueriesData: state.update,
     invalidateQueries: state.invalidate,
     setQueryDefaults: vi.fn()
