@@ -246,7 +246,6 @@ jobs:
           HERMES_TEST_FILE_RETRIES: "0"
           # Each E2E file is a process tree; cap concurrent trees at the
           # empirically stable three on both hosted-runner configurations.
-          HERMES_TEST_WORKERS: 3
           HERMES_E2E_REQUIRE_TUI: "1"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
