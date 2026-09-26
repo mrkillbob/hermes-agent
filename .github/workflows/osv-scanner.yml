@@ -14,10 +14,8 @@ name: OSV-Scanner
 # code patterns in PR diffs) by covering the orthogonal "currently-pinned
 # dep became known-vulnerable" case.
 #
-# Uses Google's scanner and reporter actions pinned by SHA. The upstream
-# reusable workflow wraps the same actions, but currently calls an unpinned
-# download-artifact action internally; spelling the steps out here keeps this
-# repo's full-SHA action policy intact.
+# Uses Google's scanner and reporter actions pinned by SHA. Keep the steps
+# local because the upstream reusable workflow includes an unpinned action.
 #
 # Findings land in the repo's Security tab (Code Scanning > OSV-Scanner).
 # fail-on-vuln is disabled so the job does not block merges on pre-existing
@@ -48,15 +46,40 @@ permissions:
 jobs:
   scan:
     name: Scan lockfiles
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-    with:
-      # Scan explicit lockfiles rather than recursing, so we only look at
-      # the five sources of truth and skip vendored / test / worktree dirs.
-      scan-args: |-
-        --lockfile=uv.lock
-        --lockfile=package-lock.json
-        --lockfile=website/package-lock.json
-        --lockfile=plugins/platforms/photon/sidecar/package-lock.json
-        --lockfile=scripts/whatsapp-bridge/package-lock.json
-      results-file-name: osv-results.sarif
-      fail-on-vuln: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run scanner
+        uses: google/osv-scanner-action/osv-scanner-action@8dc09193bb540e09b23da07ad7e30bd33bf87018 # v2.3.8
+        with:
+          scan-args: |-
+            --output=osv-results.json
+            --format=json
+            --lockfile=uv.lock
+            --lockfile=package-lock.json
+            --lockfile=website/package-lock.json
+            --lockfile=plugins/platforms/photon/sidecar/package-lock.json
+            --lockfile=scripts/whatsapp-bridge/package-lock.json
+        continue-on-error: true
+      - name: Generate SARIF report
+        uses: google/osv-scanner-action/osv-reporter-action@8dc09193bb540e09b23da07ad7e30bd33bf87018 # v2.3.8
+        with:
+          scan-args: >-
+            --output=osv-results.sarif
+            --new=osv-results.json
+            --gh-annotations=false
+            --fail-on-vuln=false
+      - name: Upload SARIF artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: OSV Scanner SARIF file
+          path: osv-results.sarif
+          retention-days: 5
+      - name: Upload SARIF to code scanning
+        if: ${{ !cancelled() && inputs.upload-sarif == true }}
+        uses: github/codeql-action/upload-sarif@cdefb33c0f6224e58673d9004f47f7cb3e328b89 # v4.31.10
+        with:
+          sarif_file: osv-results.sarif
