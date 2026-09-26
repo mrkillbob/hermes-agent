@@ -5,7 +5,7 @@ previous compaction summary for iterative updates.  It is cleared by
 on_session_reset() which is called for /new and /reset, but NOT when a cron
 session ends naturally.  A cron session's compaction sets _previous_summary,
 then the cron session ends.  A subsequent live messaging session inherits this
-stale summary, and _generate_summary() injects it as "PREVIOUS SUMMARY:" into
+stale summary, and _generate_summary() injects it under the "Previous summary:" heading into
 the summarizer prompt — contaminating the live session's context.
 
 Fix: compress() guards against this by clearing _previous_summary when no
@@ -126,5 +126,4 @@ def test_previous_summary_preserved_when_handoff_found():
         "compress() must NOT clear _previous_summary when handoff summary "
         "exists in current messages"
     )
-
 
