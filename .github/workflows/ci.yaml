@@ -77,13 +77,18 @@ jobs:
       ci_review_files: ${{ steps.classify.outputs.ci_review_files }}
       event_name: ${{ github.event_name }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 1
-          sparse-checkout: |
-            scripts/ci/classify_changes.py
-            .github/actions/detect-changes/action.yml
-          sparse-checkout-cone-mode: false
+      - name: Fetch the diff classifier at this event's SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLASSIFIER_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          CLASSIFIER_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          for path in .github/actions/detect-changes/action.yml scripts/ci/classify_changes.py; do
+            mkdir -p "$(dirname "$path")"
+            gh api "repos/${CLASSIFIER_REPOSITORY}/contents/${path}?ref=${CLASSIFIER_REF}" --jq .content \
+              | base64 --decode > "$path"
+          done
       - name: Detect affected areas
         id: classify
         uses: ./.github/actions/detect-changes
