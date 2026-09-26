@@ -7,19 +7,28 @@ on:
         description: Number of parallel Python test slices
         type: number
         default: 8
+      e2e_mode:
+        description: Run the short PR smoke checks or the complete E2E suite
+        type: string
+        default: smoke
+      run_unit:
+        description: Run the unit-test matrix
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 # Cancel in-progress runs for the same ref
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   generate:
     name: Generate test slices
     runs-on: ubuntu-latest
+    if: inputs.run_unit
     timeout-minutes: 10
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -36,11 +45,14 @@ jobs:
   test:
     name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
     needs: generate
-    runs-on: ubuntu-latest
+    if: inputs.run_unit
+    # NousResearch's 96-core runner is private to that repository. Fork PRs
+    # keep using standard hosted runners and the slice matrix above.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-96-core' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.generate.outputs.matrix) }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 60 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -147,10 +159,12 @@ jobs:
           source .venv/bin/activate
           scripts/run_tests.sh --files '${{ matrix.slice.files }}'
         env:
-          # Each standard runner exposes four vCPUs. Keep one isolated pytest
-          # subprocess per vCPU; wall-clock speed comes from independent
-          # slices, not oversubscribing one runner.
-          HERMES_TEST_WORKERS: 4
+          # Upstream has one worker per core on its 96-core runner. The fork
+          # keeps four isolated subprocesses per standard runner.
+          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '96' || '4' }}
+          # A cold-cache compression file can exceed the default 300s under
+          # the upstream 96-worker load; match NousResearch's 600s allowance.
+          HERMES_TEST_FILE_TIMEOUT: ${{ github.repository == 'NousResearch/hermes-agent' && '600' || '300' }}
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
@@ -166,14 +180,17 @@ jobs:
           key: test-durations-${{ github.run_id }}
 
   e2e:
-    # The core suites spawn real serve / gateway / tui_gateway / MCP / SQLite
-    # writer processes per test; a 4-vCPU runner serialises them into timeouts.
-    # Upstream runs this on its own ubuntu-latest-32-core larger runner; this
-    # fork has no access to that runner group, so it falls back to the
-    # standard (4-vCPU) runner with a longer timeout to absorb the
-    # serialisation upstream's comment warns about.
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Upstream runs the complete process-heavy suite on one 32-core runner.
+    # The fork cannot access that private runner group, so its full suite uses
+    # eight independent standard runners after the measured four-shard full
+    # run still left the slowest shard above six minutes. PRs use one smoke
+    # shard in either repo.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '[0, 1, 2, 3, 4, 5, 6, 7]' || '[0]') }}
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -186,6 +203,7 @@ jobs:
           node-version: 26
 
       - name: Install Node deps and build the Ink TUI
+        if: inputs.e2e_mode == 'full' && matrix.shard == 0
         # tests/e2e/core/terminal drives the real `hermes --tui` over a PTY;
         # HERMES_E2E_REQUIRE_TUI=1 below turns a missing build into a failure.
         uses: ./.github/actions/retry
@@ -259,6 +277,16 @@ jobs:
           source .venv/bin/activate
           python -c "import sqlite3, hermes_state_wal as w; print('sqlite', sqlite3.sqlite_version); assert not w.is_sqlite_wal_reset_vulnerable()"
 
+      - name: Restore per-file duration cache
+        # Keep E2E timing history per shard so every runner can balance from
+        # its own measured durations rather than whichever cache wrote last.
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: test_durations.json
+          key: test-durations-e2e-${{ matrix.shard }}-never-exact
+          restore-keys: |
+            test-durations-e2e-${{ matrix.shard }}-
+
       - name: Run e2e tests
         # One subprocess per file, in parallel: the core suites spawn real
         # processes (serve, gateway, tui_gateway, MCP servers, SQLite writers)
@@ -266,9 +294,66 @@ jobs:
         # tests/e2e/core/upgrade runs in its own job (e2e-upgrade) below.
         run: |
           source .venv/bin/activate
-          mapfile -t files < <(find tests/e2e -name 'test_*.py' -not -path 'tests/e2e/core/upgrade/*' | sort)
+          if [[ '${{ inputs.e2e_mode }}' == 'smoke' ]]; then
+            files=(
+              tests/e2e/core/parity/test_boot_contract.py
+              tests/e2e/core/providers/test_anthropic_discovery_and_aliases.py
+              tests/e2e/core/security/test_secret_redaction.py
+            )
+          else
+            mapfile -t files < <(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          all_files = sorted(p.as_posix() for p in Path("tests/e2e").rglob("test_*.py")
+                             if "tests/e2e/core/upgrade/" not in p.as_posix())
+          tui_files = [p for p in all_files if p in {
+              "tests/e2e/core/security/test_attach_handshake.py",
+              "tests/e2e/core/dashboard/test_dashboard_pty.py",
+              "tests/e2e/core/terminal/test_terminal_transcript_pty.py",
+          }]
+          files = [p for p in all_files if p not in tui_files]
+          try:
+              durations = json.loads(Path("test_durations.json").read_text())
+          except (OSError, json.JSONDecodeError):
+              durations = {}
+          # The first run on a new runner may not have E2E timings cached.
+          # Seed the heaviest files from the last hosted run, then replace
+          # these estimates with measured durations as the cache fills in.
+          known_slow = {
+              "tests/e2e/core/delivery/test_messaging_exactly_once.py": 321,
+              "tests/e2e/core/history/test_prefix_stability.py": 254,
+              "tests/e2e/core/delivery/test_cron_virtual_clock_soak.py": 154,
+              "tests/e2e/core/history/test_transcript_ledger.py": 139,
+              "tests/e2e/core/providers/test_anthropic_errors.py": 132,
+              "tests/e2e/core/sqlite/test_compaction_contention.py": 124,
+              "tests/e2e/core/compaction/test_compaction_manual.py": 123,
+              "tests/e2e/core/chaos/test_gateway_turn_liveness.py": 103,
+              "tests/e2e/core/chaos/test_agent_turn_liveness.py": 87,
+              "tests/e2e/core/chaos/test_tui_gateway_turn_liveness.py": 79,
+              "tests/e2e/core/kanban/test_kanban_decompose_billing.py": 55,
+          }
+          durations = {path: max(durations.get(path, 15), known_slow.get(path, 0)) for path in files}
+          import os
+          shard_count = int(os.environ["E2E_SHARD_COUNT"])
+          bins = [([], 0.0) for _ in range(shard_count)]
+          for path in sorted(files, key=lambda p: durations.get(p, 1.0), reverse=True):
+              bucket = min(range(shard_count), key=lambda i: bins[i][1])
+              bins[bucket][0].append(path)
+              bins[bucket] = (bins[bucket][0], bins[bucket][1] + durations.get(path, 1.0))
+          shard = int(os.environ["E2E_SHARD"])
+          if shard == 0:
+              # These suites launch the built Ink TUI; keep them with shard 0's build.
+              bins[shard][0].extend(tui_files)
+          print("\n".join(sorted(bins[shard][0])))
+          PY
+            )
+            echo "Shard ${{ matrix.shard }}: ${#files[@]} E2E files"
+          fi
           scripts/run_tests.sh --include-integration "${files[@]}"
         env:
+          E2E_SHARD: ${{ matrix.shard }}
+          E2E_SHARD_COUNT: ${{ inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '8' || '1' }}
           # Multi-process episodes (torture chamber, compaction kill -9,
           # gateway liveness, delivery exactly-once through a real gateway,
           # the cron virtual-clock soak) legitimately run past the 300 s default.
@@ -277,33 +362,65 @@ jobs:
           # exactly-once/compaction suites are race detectors, and a rare
           # corruption that passes on retry is still a corruption.
           HERMES_TEST_FILE_RETRIES: "0"
+          # Each E2E file is a process tree; cap concurrent trees at the
+          # empirically stable three on both hosted-runner configurations.
+          HERMES_TEST_WORKERS: 3
           HERMES_E2E_REQUIRE_TUI: "1"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
 
+      - name: Save per-file duration cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('test_durations.json') != ''
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: test_durations.json
+          key: test-durations-e2e-${{ matrix.shard }}-${{ github.run_id }}
+
   e2e-upgrade:
     # tests/e2e/core/upgrade: a real N-1 -> HEAD `hermes update` (clean,
     # autostash, killed mid-pull / mid-deps, offline), fresh-process import and
     # entrypoint smoke, and the config round-trip property matrix. Its own job:
-    # it needs full history + tags, bubblewrap, and one file runs ~5-15 min.
-    # This fork has no access to upstream's ubuntu-latest-32-core runner
-    # group; falls back to the standard runner with a longer timeout.
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # it needs full history + tags and bubblewrap. The real update scenarios
+    # share one historically slow test module. Its measured four-case selection
+    # takes 329s because the test harness runs a file in one subprocess, so put
+    # the independent updater scenarios on separate hosted runners.
+    # Upstream uses its 32-core runner; forks use standard hosted runners.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
+    if: inputs.e2e_mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [path-clean, path-edits, path-interrupts, path-b, other]
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 60 || 120 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # N-1 = `git describe --tags --abbrev=0 HEAD~1`.
+          # Keep all commit ancestry and release tags for N-1 and the historical
+          # updater scenario, but defer unrelated historical file contents.
           fetch-depth: 0
           fetch-tags: true
+          filter: blob:none
+
+      - name: Fetch official release tags
+        # Forks may not carry the newest upstream release tag. The upgrade
+        # base and historical updater scenario are defined by NousResearch tags.
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch --filter=blob:none --no-recurse-submodules upstream '+refs/tags/v20*:refs/tags/v20*'
 
       - name: Set up Node
         # `hermes update` builds the web UI / TUI workspaces.
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 26
+          cache: npm
+
+      - name: Prepare shared Node dependencies for updater legs
+        run: |
+          echo "HERMES_E2E_NODE_CACHE=$HOME/.npm" >> "$GITHUB_ENV"
+          npm ci --workspace ui-tui --workspace web --include-workspace-root --no-audit --no-fund
 
       - name: Install ripgrep (prebuilt binary)
         run: |
@@ -357,6 +474,62 @@ jobs:
         with:
           command: uv sync --locked --python 3.11.15 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
 
+      - name: Verify and hydrate upgrade release snapshots
+        # The real upgrade clone uses --shared from this checkout. Materialize
+        # the exact N-1 and pre-handoff snapshots first, so its offline local
+        # origin has every blob those full-tree scenarios need.
+        run: |
+          source .venv/bin/activate
+          python - <<'PY'
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          from tests.e2e.core.upgrade.test_upgrade_path import _refs
+          from tests.e2e.core.upgrade.test_fresh_process_entrypoints import _pre_handoff_tag
+
+          refs = _refs()
+          assert refs.base_tag, "N-1 release tag is not reachable from HEAD"
+
+          def hydrate(tag: str, *paths: str) -> None:
+              archive = subprocess.Popen(
+                  ["git", "archive", "--format=tar", tag, "--", *paths],
+                  stdout=subprocess.PIPE,
+              )
+              assert archive.stdout is not None
+              listing = subprocess.run(["tar", "-tf", "-"], stdin=archive.stdout, stdout=subprocess.DEVNULL)
+              archive.stdout.close()
+              assert archive.wait() == 0 and listing.returncode == 0, f"could not hydrate {tag}"
+
+          release_tags = subprocess.run(
+              ["git", "tag", "--merged", "HEAD", "--sort=-v:refname", "--list", "v20*"],
+              capture_output=True, text=True, check=True,
+          ).stdout.splitlines()[:15]
+          pre_handoff = None
+          for tag in release_tags:
+              # The discovery helper reads these files; materialize them one
+              # candidate at a time in this blob-filtered checkout.
+              hydrate(tag, "hermes_cli")
+              pre_handoff = _pre_handoff_tag()
+              if pre_handoff is not None:
+                  break
+          assert pre_handoff is not None, "pre-handoff release tag is not reachable from HEAD"
+
+          hydrate(refs.base_tag)
+          config = tomllib.loads(Path("pyproject.toml").read_text())
+          package_tops = {
+              entry.split(".", 1)[0]
+              for entry in config["tool"]["setuptools"]["packages"]["find"]["include"]
+          }
+          old_entries = subprocess.run(
+              ["git", "ls-tree", "--name-only", pre_handoff[0]],
+              capture_output=True, text=True, check=True,
+          ).stdout.splitlines()
+          old_entries = [name for name in old_entries if name.endswith(".py") or name in package_tops]
+          hydrate(pre_handoff[0], *old_entries)
+          print(f"Hydrated upgrade bases: {refs.base_tag}, {pre_handoff[0]}")
+          PY
+
       - name: Install bubblewrap
         # Every spawned updater runs in bwrap (own PID namespace, no user
         # systemd bus, only the test tmp writable). Ubuntu 24.04 restricts
@@ -380,9 +553,42 @@ jobs:
       - name: Run upgrade e2e tests
         run: |
           source .venv/bin/activate
-          scripts/run_tests.sh --include-integration tests/e2e/core/upgrade
+          case "${{ matrix.shard }}" in
+            path-clean)
+              scripts/run_tests.sh --include-integration \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_clean_update \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_clean_update_keeps_long_scalar_lines_verbatim
+              ;;
+            path-edits)
+              scripts/run_tests.sh --include-integration \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_update_with_local_edits_and_orphan_autostash \
+              ;;
+            path-interrupts)
+              scripts/run_tests.sh --include-integration \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_kill_mid_pull_then_retry_heals
+              ;;
+            path-b)
+              scripts/run_tests.sh --include-integration \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_kill_before_deps_then_retry_heals \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_offline_update_fails_loudly_and_changes_nothing
+              ;;
+            other)
+              scripts/run_tests.sh --include-integration \
+                tests/e2e/core/upgrade/test_config_roundtrip_properties.py \
+                tests/e2e/core/upgrade/test_fresh_process_entrypoints.py \
+                tests/e2e/core/upgrade/test_install_fresh.py \
+                tests/e2e/core/upgrade/test_profile_update_cron.py \
+                tests/e2e/core/upgrade/test_update_userstate_import.py \
+                tests/e2e/core/upgrade/test_update_userstate_realistic.py
+              ;;
+          esac
         env:
+          HERMES_TEST_WORKERS: 4
           HERMES_TEST_FILE_TIMEOUT: "3000"
+          # Each file contains deterministic, destructive-in-a-sandbox update scenarios; retrying
+          # the whole file after a failure repeats several full installs without adding evidence.
+          HERMES_TEST_FILE_RETRIES: "0"
+          HERMES_E2E_SEED_NODE_MODULES: "1"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""

@@ -200,6 +200,31 @@ class TestApplyWalWithFallback:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         conn.close()
 
+    def test_transient_database_lock_during_wal_upgrade_retries(self, tmp_path):
+        """A concurrent first opener may win the WAL switch between our
+        read-only mode probe and upgrade. Retry SQLITE_BUSY without falling
+        back to DELETE or surfacing a spurious initialization failure.
+        """
+        attempts = [0]
+
+        class _TransientBusyConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):  # type: ignore[override]
+                if "journal_mode=wal" in sql.lower().replace(" ", ""):
+                    attempts[0] += 1
+                    if attempts[0] == 1:
+                        raise sqlite3.OperationalError("database is locked")
+                return super().execute(sql, *args, **kwargs)
+
+        conn = sqlite3.connect(
+            str(tmp_path / "busy.db"),
+            factory=_TransientBusyConnection,
+            isolation_level=None,
+        )
+        assert apply_wal_with_fallback(conn) == "wal"
+        assert attempts[0] == 2
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        conn.close()
+
     def test_persistent_disk_io_error_falls_back_to_delete(self, tmp_path, caplog):
         """Deterministic EIO (ZFS / APFS-CoW SHM corruption — #55305, #71498)
         keeps failing across retries → guarded fallback to DELETE with one

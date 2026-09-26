@@ -124,6 +124,9 @@ def isolated_env(
     real_uv_cache = Path(os.environ.get("UV_CACHE_DIR") or REAL_HOME / ".cache" / "uv")
     if real_uv_cache.is_dir():
         env["UV_CACHE_DIR"] = str(real_uv_cache)
+    shared_node_cache = os.environ.get("HERMES_E2E_NODE_CACHE")
+    if shared_node_cache:
+        env["NPM_CONFIG_CACHE"] = shared_node_cache
     base_path = os.environ.get("PATH", "/usr/bin:/bin")
     uv = shutil.which("uv") or (str(REAL_HOME / ".hermes" / "bin" / "uv") if (REAL_HOME / ".hermes" / "bin" / "uv").exists() else None)
     path_parts = [str(shim_dir), *[str(p) for p in extra_path]]

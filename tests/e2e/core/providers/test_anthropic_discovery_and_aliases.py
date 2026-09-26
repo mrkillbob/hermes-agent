@@ -138,7 +138,10 @@ def test_oauth_wire_names_map_back_to_real_tools(rig) -> None:
         Reply([Text("ALIASES-DONE")]),
     )
     proc = r.run("-z", "Read wire.txt and remember the note.")
-    assert proc.returncode == 0 and "ALIASES-DONE" in proc.stdout, proc.stderr[-2000:]
+    assert proc.returncode == 0 and "ALIASES-DONE" in proc.stdout, (
+        f"stdout/stderr tail:\n{(proc.stdout + proc.stderr)[-4000:]}\n"
+        f"egress log tail:\n{r.log_tail(pattern='egress', chars=4000)}"
+    )
     mains = r.srv.main_requests()
     assert len(mains) == 2
     first = mains[0]

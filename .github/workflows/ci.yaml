@@ -26,7 +26,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -79,6 +79,13 @@ jobs:
     needs: detect
     if: needs.detect.outputs.python == 'true'
     uses: ./.github/workflows/tests.yml
+    with:
+      # NousResearch runs the full unit suite on one 96-core runner. Forks
+      # do not have access to that private runner group, so keep their slices.
+      slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 8 }}
+      # The fork runs the complete suite on parallel GitHub-hosted shards; PRs
+      # keep the same E2E coverage as main without requiring NousResearch runners.
+      e2e_mode: full
 
   # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
   # the OS-marked tests it collects are skipped there by design (see the
@@ -147,7 +154,7 @@ jobs:
     needs: detect
     # The deterministic core suite (apps/desktop/e2e/core): transcript
     # integrity, boot/respawn/orphans, clarify+approval. Required; retries 0.
-    if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
+    if: ${{ needs.detect.outputs.event_name != 'pull_request' && (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true') }}
     uses: ./.github/workflows/e2e-desktop-core.yml
 
   docs-site:
