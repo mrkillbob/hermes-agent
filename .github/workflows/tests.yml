@@ -377,10 +377,16 @@ jobs:
     # tests/e2e/core/upgrade: a real N-1 -> HEAD `hermes update` (clean,
     # autostash, killed mid-pull / mid-deps, offline), fresh-process import and
     # entrypoint smoke, and the config round-trip property matrix. Its own job:
-    # it needs full history + tags, bubblewrap, and one file runs ~5-15 min.
+    # it needs full history + tags and bubblewrap. The real update scenarios
+    # share one historically slow test module, so split its cases across two
+    # isolated runners and run the remaining files on a third.
     # Upstream uses its 32-core runner; forks use standard hosted runners.
     runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
     if: inputs.e2e_mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [path-a, path-b, other]
     timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 60 || 120 }}
     steps:
       - name: Checkout code
@@ -542,7 +548,29 @@ jobs:
       - name: Run upgrade e2e tests
         run: |
           source .venv/bin/activate
-          scripts/run_tests.sh --include-integration tests/e2e/core/upgrade
+          case "${{ matrix.shard }}" in
+            path-a)
+              scripts/run_tests.sh --include-integration \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_clean_update \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_clean_update_keeps_long_scalar_lines_verbatim \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_update_with_local_edits_and_orphan_autostash \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_kill_mid_pull_then_retry_heals
+              ;;
+            path-b)
+              scripts/run_tests.sh --include-integration \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_kill_before_deps_then_retry_heals \
+                tests/e2e/core/upgrade/test_upgrade_path.py::test_offline_update_fails_loudly_and_changes_nothing
+              ;;
+            other)
+              scripts/run_tests.sh --include-integration \
+                tests/e2e/core/upgrade/test_config_roundtrip_properties.py \
+                tests/e2e/core/upgrade/test_fresh_process_entrypoints.py \
+                tests/e2e/core/upgrade/test_install_fresh.py \
+                tests/e2e/core/upgrade/test_profile_update_cron.py \
+                tests/e2e/core/upgrade/test_update_userstate_import.py \
+                tests/e2e/core/upgrade/test_update_userstate_realistic.py
+              ;;
+          esac
         env:
           HERMES_TEST_WORKERS: 4
           HERMES_TEST_FILE_TIMEOUT: "3000"
