@@ -187,7 +187,7 @@ jobs:
     # occurred") — every ci.yaml run repo-wide dispatched 0 jobs from
     # 24f5a60ed1 until this line changed. To re-enable, restore:
     #   if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
-    if: ${{ github.event_name == 'workflow_call' }}
+    if: false
     uses: ./.github/workflows/e2e-desktop.yml
 
   e2e-desktop-core:
