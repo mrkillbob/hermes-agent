@@ -108,6 +108,36 @@ def test_progress_output_tolerates_legacy_stdout_encoding(tmp_path: Path) -> Non
     assert "1 tests passed" in proc.stdout
 
 
+def test_shard_selector_is_not_forwarded_to_test_processes(tmp_path: Path) -> None:
+    """The matrix shard selects this invocation, not nested test runners."""
+    repo_root = _probe_root(tmp_path)
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    probe = probe_dir / "test_probe_shard_env.py"
+    probe.write_text(
+        "import os\n"
+        "def test_slice_selector_is_not_inherited():\n"
+        "    assert 'HERMES_TEST_SLICE' not in os.environ\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["HERMES_TEST_SLICE"] = "1/1"
+    proc = subprocess.run(
+        [sys.executable, str(runner), "--paths", str(probe_dir), "-j", "1"],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert "1 tests passed" in proc.stdout
+
+
 @pytest.mark.platforms("posix")
 @pytest.mark.live_system_guard_bypass
 def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:

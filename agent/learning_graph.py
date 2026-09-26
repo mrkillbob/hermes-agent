@@ -25,6 +25,8 @@ from typing import Any, Optional
 
 from hermes_constants import get_hermes_home
 
+_SKIP_PARTS = {".archive", ".hub", ".locks", "node_modules", ".git"}
+
 
 @dataclass
 class SkillNode:

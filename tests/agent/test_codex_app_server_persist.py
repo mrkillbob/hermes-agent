@@ -100,7 +100,7 @@ def test_codex_user_interrupt_is_reported_and_cleared():
     agent.clear_interrupt.assert_called_once_with()
     assert agent._interrupt_requested is False
 
-def test_codex_turn_persists_each_message_exactly_once():
+def test_codex_turn_persists_each_message_exactly_once(tmp_path: Path):
     """The user turn (flushed at turn start) must not be duplicated; the
     projected assistant message must land once.  Uses a real SessionDB and the
     real AIAgent._flush_messages_to_session_db to prove no #860/#42039

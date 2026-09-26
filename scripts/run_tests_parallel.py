@@ -529,6 +529,11 @@ def _run_one_file_once(
     # One root for each subprocess removes the shared directory that the race
     # needs. The parent deletes the root after the attempt.
     env = os.environ.copy()
+    # The shard selector applies only to this runner's file discovery. Child
+    # test processes may invoke the runner recursively (for example, runner
+    # contract tests); forwarding the selector would silently re-shard those
+    # explicit nested runs and can leave them with zero files.
+    env.pop("HERMES_TEST_SLICE", None)
     temproot = tempfile.mkdtemp(prefix="r-", dir=_runner_scratch_root())
     env["PYTEST_DEBUG_TEMPROOT"] = temproot
     # Every tempfile.* call inside the test process lands in the same per-run root, so the
