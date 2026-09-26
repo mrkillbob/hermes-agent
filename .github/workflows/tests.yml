@@ -152,16 +152,10 @@ jobs:
           key: test-durations-${{ github.run_id }}
 
   e2e:
-    # Upstream runs the complete process-heavy suite on one 32-core runner.
-    # The fork cannot access that private runner group, so its full suite uses
-    # eight independent standard runners after the measured four-shard full
-    # run still left the slowest shard above six minutes. PRs use one smoke
-    # shard in either repo.
+    # Keep the process-heavy suite in one job, as upstream does. The fork
+    # cannot access NousResearch's private runner groups, but one hosted runner
+    # avoids multiplying dependency setup and flooding the fork's runner quota.
     runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '[0, 1, 2, 3, 4, 5, 6, 7]' || '[0]') }}
     timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
     steps:
       - name: Checkout code
@@ -183,8 +177,9 @@ jobs:
           prune-python-cache: true
 
       - name: Install Node deps and build the Ink TUI
+        if: inputs.e2e_mode == 'full'
         # tests/e2e/core/terminal drives the real `hermes --tui` over a PTY;
-        # every shard can receive those files, so build it on every runner.
+        # build the TUI before the suite starts.
         uses: ./.github/actions/retry
         with:
           command: npm ci --workspace ui-tui --ignore-scripts --no-audit --no-fund && npm run build --workspace ui-tui
@@ -215,9 +210,9 @@ jobs:
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: test_durations.json
-          key: test-durations-e2e-${{ matrix.shard }}-never-exact
+          key: test-durations-e2e-never-exact
           restore-keys: |
-            test-durations-e2e-${{ matrix.shard }}-
+            test-durations-e2e-
 
       - name: Run e2e tests
         # One subprocess per file, in parallel: the core suites spawn real
@@ -226,12 +221,7 @@ jobs:
         # tests/e2e/core/upgrade runs in its own job (e2e-upgrade) below.
         run: |
           mapfile -t files < <(find tests/e2e -name 'test_*.py' -not -path 'tests/e2e/core/upgrade/*' | sort)
-          slice_count=1
-          if [[ "${{ inputs.e2e_mode }}" == full && "${{ github.repository }}" != NousResearch/hermes-agent ]]; then
-            slice_count=8
-          fi
-          slice_index=$(( ${{ matrix.shard }} + 1 ))
-          scripts/run_tests.sh --include-integration --slice "${slice_index}/${slice_count}" "${files[@]}"
+          scripts/run_tests.sh --include-integration "${files[@]}"
         env:
           # An e2e file is a process tree, not one CPU-bound pytest worker. With
           # 32 files at once the hosted run starved live children before their
@@ -260,7 +250,7 @@ jobs:
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: test_durations.json
-          key: test-durations-e2e-${{ matrix.shard }}-${{ github.run_id }}
+          key: test-durations-e2e-${{ github.run_id }}
 
   e2e-upgrade:
     # tests/e2e/core/upgrade: a real N-1 -> HEAD `hermes update` (clean,

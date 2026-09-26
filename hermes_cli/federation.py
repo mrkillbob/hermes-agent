@@ -848,7 +848,7 @@ def _group_room_id(group: FederationGroup) -> str:
 
 
 def _read_profile_yaml(path: Path) -> dict[str, Any]:
-    import yaml
+    import hermes_yaml as yaml
 
     if not path.is_file():
         return {}

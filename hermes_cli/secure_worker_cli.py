@@ -98,7 +98,7 @@ def register_cli(parent: argparse.ArgumentParser) -> None:
 
 
 def _load_yaml(path: str) -> dict[str, object]:
-    import yaml
+    import hermes_yaml as yaml
 
     value = yaml.safe_load(Path(path).read_text(encoding="utf-8-sig"))
     if not isinstance(value, dict):

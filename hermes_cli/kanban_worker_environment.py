@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def validate_profile_config(profile_home: str) -> None:
-    import yaml
+    import hermes_yaml as yaml
 
     config = Path(profile_home) / "config.yaml"
     if not config.is_file():

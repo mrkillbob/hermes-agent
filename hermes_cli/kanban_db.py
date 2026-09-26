@@ -135,7 +135,7 @@ def _profile_is_explicitly_read_only(profile: Optional[str]) -> bool:
     if not profile:
         return False
     try:
-        import yaml
+        import hermes_yaml as yaml
 
         from hermes_cli.profiles import get_profile_dir
 
