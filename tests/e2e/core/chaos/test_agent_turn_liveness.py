@@ -164,9 +164,12 @@ SCENARIOS: list[Scenario] = [
     Scenario("provider_hang", lambda c: Hang()),
     # request_timeout LONG: only the explicit stale timeout can end it, and it must beat the
     # reasoning-model floor (#115024). The stale streak it leaves behind trips the cross-turn
-    # stale breaker (#58962), so the PROBE must be refused at once, surfaced, and unbilled.
+    # stale breaker (#58962), so the PROBE must be refused at once, surfaced, and unbilled. The
+    # default two retries cannot reach the breaker's five-attempt threshold, so this case raises
+    # the retry budget enough to exercise that cross-turn behavior.
     Scenario("provider_stall_reasoning_model", lambda c: StallMidStream(),
-             cfg={"model": REASONING_MODEL, "request_timeout": LONG_TIMEOUT_S}, probe="breaker"),
+             cfg={"model": REASONING_MODEL, "request_timeout": LONG_TIMEOUT_S, "api_max_retries": 6},
+             probe="breaker"),
     Scenario("provider_500_forever", lambda c: Error(500)),
     Scenario("provider_429_forever", lambda c: Error(429, retry_after=1)),
     Scenario("provider_400_forever", lambda c: Error(400, "invalid request"), call_bound=2),
