@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-import yaml
+import hermes_yaml as yaml
 
 from agent.skill_utils import parse_frontmatter
 

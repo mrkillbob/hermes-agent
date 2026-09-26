@@ -18,8 +18,8 @@ from hermes_startup_watchdog import report_startup_progress
 from hermes_state_common import (
     _LISTABLE_CHILD_SQL, _PREVIEW_ELIGIBLE_SQL, _PREVIEW_RAW_SELECT, _RECOVERABLE_END_REASONS,
     _RECOVERABLE_END_REASONS_SQL, _RESET_CHILD_SQL, _RESET_END_REASONS, _legacy_reset_child_sql, _shape_preview,
-    _sql_json_extract, _sql_session_last_active, _sql_session_last_active_by_id, escape_like as _escape_like,
-    _SQL_IN_CHUNK, _id_chunks, _placeholders as _session_ids_placeholders,
+    _sql_in_window, _sql_json_extract, _sql_session_last_active, _sql_session_last_active_by_id,
+    escape_like as _escape_like, _SQL_IN_CHUNK, _id_chunks, _placeholders as _session_ids_placeholders,
 )
 
 # caplog tests pin the "hermes_state" logger name.
@@ -1323,7 +1323,7 @@ class SessionSessionsMixin:
                     GROUP BY root_id
                 )
                 {select_head}{_sql_session_last_active("s")} AS last_active,
-                    COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
+                    COALESCE(cm.effective_last_active, {_sql_in_window("s.started_at")}) AS _effective_last_active
                 FROM sessions s
                 LEFT JOIN chain_max cm ON cm.root_id = s.id
                 {prompt_join}
@@ -1402,7 +1402,8 @@ class SessionSessionsMixin:
         return statuses
 
     def assert_export_safe(self, session_id: str, max_messages: Optional[int] = None) -> int:
-        """Active row count of this segment, or raise SessionExportTooLargeError (the LIMITed subquery
+        """Row count of this segment — every row, archived included, as the transfer export materializes
+        it — or raise SessionExportTooLargeError (the LIMITed subquery
         stops once the bound is exceeded). ``None`` resolves ``sessions.max_export_messages``; 0 disables
         the guard."""
         from hermes_state import SessionExportTooLargeError, resolved_max_export_messages
@@ -1413,7 +1414,7 @@ class SessionSessionsMixin:
         if max_messages == 0:
             return 0
         row = self._read_one(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM messages WHERE session_id = ? AND active = 1 LIMIT ?)",
+            "SELECT COUNT(*) FROM (SELECT 1 FROM messages WHERE session_id = ? LIMIT ?)",
             (session_id, max_messages + 1),
         )
         message_count = int(row[0] if row else 0)

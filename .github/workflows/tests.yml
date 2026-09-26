@@ -21,8 +21,8 @@ permissions:
 
 # Cancel in-progress runs for the same ref
 concurrency:
-  group: tests-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: tests-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   generate:
@@ -71,67 +71,21 @@ jobs:
           rm -rf "$RG_TARBALL" "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
           rg --version
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
         with:
-          # Pin the uv version: unpinned, setup-uv resolves "latest" by
-          # fetching a manifest from raw.githubusercontent.com on EVERY job —
-          # a transient fetch failure fails the whole job (2026-07-28 slice-5
-          # incident). Pinned, the binary downloads directly; no manifest hop.
-          #
-          # The uv pin also fixes which CPython `uv python install 3.11`
-          # resolves, and with it the linked SQLite. uv 0.9.28 resolved
-          # 3.11.14 / SQLite 3.50.4, which has the WAL-reset bug, so Hermes
-          # ran every state.db in DELETE mode here and the WAL path went
-          # untested. 0.12.13 resolves 3.11.16 / SQLite 3.53.1. The
-          # "Check SQLite runs WAL" step fails the job if a bump regresses it.
-          version: "0.12.13"
-          # Persist uv's download/wheel cache (~/.cache/uv) across runs.
-          # Keyed on the dependency manifests, so the cache is reused until
-          # pyproject.toml or uv.lock changes. `uv sync` still runs every
-          # time, but resolves from the warm cache instead of re-downloading
-          # and re-building wheels.
-          enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
-
-      - name: Set up Python 3.11
-        uses: ./.github/actions/retry
-        with:
-          command: uv python install 3.11
-
-      - name: Install dependencies
-        # `uv sync --locked` installs the exact pinned set from uv.lock (and
-        # fails if the lock is out of sync with pyproject.toml), giving a
-        # reproducible env. It also creates .venv itself, so no separate
-        # `uv venv` step is needed.
-        #
-        # The trailing extras beyond all/dev are the lazy-install features
-        # (tools/lazy_deps.py) that tests exercise for real: provider.anthropic,
-        # stt/tts.mistral, image.fal, terminal.modal, terminal.daytona,
-        # search.parallel, provider.bedrock. The hermetic test env forbids
-        # mid-run pip installs (HERMES_DISABLE_LAZY_INSTALLS=1 in
-        # tests/conftest.py), so the SDKs those tests need must be in the
-        # venv up front — resolved from uv.lock like everything else, which
-        # also honors the exact supply-chain pins these extras carry.
-        uses: ./.github/actions/retry
-        with:
-          command: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web --extra bedrock
-
-      - name: Minimize uv cache
-        # Optimized for CI: prunes pre-built wheels that are cheap to
-        # re-download, keeping the persisted cache small and fast to restore.
-        run: uv cache prune --ci
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+          prune-python-cache: true
 
       - name: Check SQLite runs WAL
         # Hermes picks DELETE journal mode on a SQLite with the WAL-reset
-        # bug. If this interpreter links one, every WAL test silently runs
-        # DELETE (or skips), so fail loudly instead. Tests that need DELETE
+        # bug. If the PM-pinned interpreter links one, every WAL test silently
+        # runs DELETE (or skips), so fail loudly instead. Tests that need DELETE
         # select it explicitly (journal_mode config, a pinned vulnerable
         # version), so they run on any interpreter.
         run: |
-          .venv/bin/python -c "import sqlite3, sys, hermes_state_wal as w; v = w.is_sqlite_wal_reset_vulnerable(); print(f'Python {sys.version.split()[0]}, SQLite {sqlite3.sqlite_version}, WAL-reset vulnerable: {v}'); sys.exit(1 if v else 0)"
+          "$HERMES_PYTHON" -c "import sqlite3, sys, hermes_state_wal as w; v = w.is_sqlite_wal_reset_vulnerable(); print(f'Python {sys.version.split()[0]}, SQLite {sqlite3.sqlite_version}, WAL-reset vulnerable: {v}'); sys.exit(1 if v else 0)"
 
       - name: Restore per-file duration cache
         # scripts/run_tests_parallel.py raises a file's timeout to
@@ -156,15 +110,33 @@ jobs:
         # module-level state leakage between files.
         #
         run: |
-          source .venv/bin/activate
-          scripts/run_tests.sh --files '${{ matrix.slice.files }}'
+          scripts/run_tests.sh
         env:
-          # Upstream has one worker per core on its 96-core runner. The fork
-          # keeps four isolated subprocesses per standard runner.
+          # This is the maximum number of test FILES that run together.
+          # run_tests_parallel.py starts one pytest subprocess for each file
+          # from a single ThreadPoolExecutor, so this value IS the limit. The
+          # upstream runner has 96 cores; public hosted runners have 4.
+          #
+          # Measured on this runner (96-core EPYC 7763, 377GB). Whole suite,
+          # two repetitions for each value. See run 32549672063:
+          #
+          #     workers   x cores   mean
+          #        48       0.5x    138s
+          #        96       1.0x    126s   <- fastest
+          #       144       1.5x    132s
+          #       192       2.0x    132s
+          #       240       2.5x    140s
+          #       288       3.0x    142s
+          #
+          # One worker for each core wins. The curve is shallow: 126s to 142s
+          # across a 6x range. The suite has sufficient concurrency at this
+          # size. The remaining time is the slowest files plus the setup.
+          # Workers above the core count only add contention.
           HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '96' || '4' }}
-          # A cold-cache compression file can exceed the default 300s under
-          # the upstream 96-worker load; match NousResearch's 600s allowance.
-          HERMES_TEST_FILE_TIMEOUT: ${{ github.repository == 'NousResearch/hermes-agent' && '600' || '300' }}
+          # A healthy 44-test compression file takes ~197s alone and can exceed
+          # the 300s default under 96-worker load before its duration is cached.
+          # Match the runner's 3x known-slow headroom on the first PR run too.
+          HERMES_TEST_FILE_TIMEOUT: 600
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
@@ -180,32 +152,34 @@ jobs:
           key: test-durations-${{ github.run_id }}
 
   e2e:
-    # Upstream runs the complete process-heavy suite on one 32-core runner.
-    # The fork cannot access that private runner group, so its full suite uses
-    # eight independent standard runners after the measured four-shard full
-    # run still left the slowest shard above six minutes. PRs use one smoke
-    # shard in either repo.
+    # Keep the process-heavy suite in one job, as upstream does. The fork
+    # cannot access NousResearch's private runner groups, but one hosted runner
+    # avoids multiplying dependency setup and flooding the fork's runner quota.
     runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '[0, 1, 2, 3, 4, 5, 6, 7]' || '[0]') }}
     timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Set up Node
-        # The boot-contract suite feeds serve's stdout through Desktop's own
-        # backend-ready.ts (native TS stripping needs Node >= 22.18).
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Set up locked Python, Node and test dependencies
+        # toolchain: all puts PM's locked Node in the runner's PM store, not
+        # only on PATH. The E2E sandboxes copy node from that store
+        # (tests/e2e/core/_pm_dependencies.py) and forbid lazy installs, and
+        # the dashboard's /api/pty resolves the TUI's node through PM only.
+        # A setup-node binary on PATH is invisible to PM, so every /api/pty
+        # chat refused to start. The locked Node also satisfies the
+        # boot-contract suite (backend-ready.ts needs Node >= 22.18).
+        uses: ./.github/actions/setup-pm
         with:
-          node-version: 26
+          toolchain: all
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+          prune-python-cache: true
 
       - name: Install Node deps and build the Ink TUI
-        if: inputs.e2e_mode == 'full' && matrix.shard == 0
+        if: inputs.e2e_mode == 'full'
         # tests/e2e/core/terminal drives the real `hermes --tui` over a PTY;
-        # HERMES_E2E_REQUIRE_TUI=1 below turns a missing build into a failure.
+        # build the TUI before the suite starts.
         uses: ./.github/actions/retry
         with:
           command: npm ci --workspace ui-tui --ignore-scripts --no-audit --no-fund && npm run build --workspace ui-tui
@@ -224,58 +198,11 @@ jobs:
           rm -rf "$RG_TARBALL" "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
           rg --version
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
-        with:
-          # Pin the uv version: unpinned, setup-uv resolves "latest" by
-          # fetching a manifest from raw.githubusercontent.com on EVERY job —
-          # a transient fetch failure fails the whole job (2026-07-28 slice-5
-          # incident). Pinned, the binary downloads directly; no manifest hop.
-          # Newer than the unit job's pin on purpose: 0.9.28 only knows CPython
-          # 3.11.14, whose bundled SQLite has the WAL-reset bug, so Hermes runs
-          # state.db in DELETE mode and the WAL torture chamber would skip.
-          version: "0.12.13"
-          # Persist uv's download/wheel cache (~/.cache/uv) across runs.
-          # Keyed on the dependency manifests, so the cache is reused until
-          # pyproject.toml or uv.lock changes. `uv sync` still runs every
-          # time, but resolves from the warm cache instead of re-downloading
-          # and re-building wheels.
-          enable-cache: true
-          # Own cache entry: the unit job's older uv would otherwise share and
-          # overwrite this key with a cache this uv version did not write.
-          cache-suffix: e2e
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
-
-      - name: Set up Python 3.11
-        run: uv python install 3.11.15
-
-      - name: Install dependencies
-        # `uv sync --locked` installs the exact pinned set from uv.lock (and
-        # fails if the lock is out of sync with pyproject.toml), giving a
-        # reproducible env. It also creates .venv itself, so no separate
-        # `uv venv` step is needed.
-        #
-        # Same extras as the test job's sync above: the hermetic test env
-        # forbids mid-run pip installs (HERMES_DISABLE_LAZY_INSTALLS=1 in
-        # tests/conftest.py), so lazy-install SDKs exercised by tests must be
-        # in the venv up front.
-        uses: ./.github/actions/retry
-        with:
-          command: uv sync --locked --python 3.11.15 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web --extra bedrock
-
-      - name: Minimize uv cache
-        # Optimized for CI: prunes pre-built wheels that are cheap to
-        # re-download, keeping the persisted cache small and fast to restore.
-        run: uv cache prune --ci
-
       - name: Require a WAL-capable SQLite
         # The state.db suites skip on a WAL-reset-vulnerable SQLite; fail
         # instead of reporting green over zero coverage.
         run: |
-          source .venv/bin/activate
-          python -c "import sqlite3, hermes_state_wal as w; print('sqlite', sqlite3.sqlite_version); assert not w.is_sqlite_wal_reset_vulnerable()"
+          "$HERMES_PYTHON" -c "import sqlite3, hermes_state_wal as w; print('sqlite', sqlite3.sqlite_version); assert not w.is_sqlite_wal_reset_vulnerable()"
 
       - name: Restore per-file duration cache
         # Keep E2E timing history per shard so every runner can balance from
@@ -283,9 +210,9 @@ jobs:
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: test_durations.json
-          key: test-durations-e2e-${{ matrix.shard }}-never-exact
+          key: test-durations-e2e-never-exact
           restore-keys: |
-            test-durations-e2e-${{ matrix.shard }}-
+            test-durations-e2e-
 
       - name: Run e2e tests
         # One subprocess per file, in parallel: the core suites spawn real
@@ -293,67 +220,16 @@ jobs:
         # and must not share interpreter state.
         # tests/e2e/core/upgrade runs in its own job (e2e-upgrade) below.
         run: |
-          source .venv/bin/activate
-          if [[ '${{ inputs.e2e_mode }}' == 'smoke' ]]; then
-            files=(
-              tests/e2e/core/parity/test_boot_contract.py
-              tests/e2e/core/providers/test_anthropic_discovery_and_aliases.py
-              tests/e2e/core/security/test_secret_redaction.py
-            )
-          else
-            mapfile -t files < <(python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          all_files = sorted(p.as_posix() for p in Path("tests/e2e").rglob("test_*.py")
-                             if "tests/e2e/core/upgrade/" not in p.as_posix())
-          tui_files = [p for p in all_files if p in {
-              "tests/e2e/core/security/test_attach_handshake.py",
-              "tests/e2e/core/dashboard/test_dashboard_pty.py",
-              "tests/e2e/core/terminal/test_terminal_transcript_pty.py",
-          }]
-          files = [p for p in all_files if p not in tui_files]
-          try:
-              durations = json.loads(Path("test_durations.json").read_text())
-          except (OSError, json.JSONDecodeError):
-              durations = {}
-          # The first run on a new runner may not have E2E timings cached.
-          # Seed the heaviest files from the last hosted run, then replace
-          # these estimates with measured durations as the cache fills in.
-          known_slow = {
-              "tests/e2e/core/delivery/test_messaging_exactly_once.py": 321,
-              "tests/e2e/core/history/test_prefix_stability.py": 254,
-              "tests/e2e/core/delivery/test_cron_virtual_clock_soak.py": 154,
-              "tests/e2e/core/history/test_transcript_ledger.py": 139,
-              "tests/e2e/core/providers/test_anthropic_errors.py": 132,
-              "tests/e2e/core/sqlite/test_compaction_contention.py": 124,
-              "tests/e2e/core/compaction/test_compaction_manual.py": 123,
-              "tests/e2e/core/chaos/test_gateway_turn_liveness.py": 103,
-              "tests/e2e/core/chaos/test_agent_turn_liveness.py": 87,
-              "tests/e2e/core/chaos/test_tui_gateway_turn_liveness.py": 79,
-              "tests/e2e/core/kanban/test_kanban_decompose_billing.py": 55,
-          }
-          durations = {path: max(durations.get(path, 15), known_slow.get(path, 0)) for path in files}
-          import os
-          shard_count = int(os.environ["E2E_SHARD_COUNT"])
-          bins = [([], 0.0) for _ in range(shard_count)]
-          for path in sorted(files, key=lambda p: durations.get(p, 1.0), reverse=True):
-              bucket = min(range(shard_count), key=lambda i: bins[i][1])
-              bins[bucket][0].append(path)
-              bins[bucket] = (bins[bucket][0], bins[bucket][1] + durations.get(path, 1.0))
-          shard = int(os.environ["E2E_SHARD"])
-          if shard == 0:
-              # These suites launch the built Ink TUI; keep them with shard 0's build.
-              bins[shard][0].extend(tui_files)
-          print("\n".join(sorted(bins[shard][0])))
-          PY
-            )
-            echo "Shard ${{ matrix.shard }}: ${#files[@]} E2E files"
-          fi
+          mapfile -t files < <(find tests/e2e -name 'test_*.py' -not -path 'tests/e2e/core/upgrade/*' | sort)
           scripts/run_tests.sh --include-integration "${files[@]}"
         env:
-          E2E_SHARD: ${{ matrix.shard }}
-          E2E_SHARD_COUNT: ${{ inputs.e2e_mode == 'full' && github.repository != 'NousResearch/hermes-agent' && '8' || '1' }}
+          # An e2e file is a process tree, not one CPU-bound pytest worker. With
+          # 32 files at once the hosted run starved live children before their
+          # ready frames (empty stderr, still alive) and hit 60–120s deadlines
+          # across unrelated SQLite, tenancy, provider and terminal suites.
+          # Bound the trees, not the child readiness/turn timeouts. At 4 the
+          # PTY turn and serve-SIGTERM deadlines still starved intermittently.
+          HERMES_TEST_WORKERS: "3"
           # Multi-process episodes (torture chamber, compaction kill -9,
           # gateway liveness, delivery exactly-once through a real gateway,
           # the cron virtual-clock soak) legitimately run past the 300 s default.
@@ -364,7 +240,6 @@ jobs:
           HERMES_TEST_FILE_RETRIES: "0"
           # Each E2E file is a process tree; cap concurrent trees at the
           # empirically stable three on both hosted-runner configurations.
-          HERMES_TEST_WORKERS: 3
           HERMES_E2E_REQUIRE_TUI: "1"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
@@ -375,7 +250,7 @@ jobs:
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: test_durations.json
-          key: test-durations-e2e-${{ matrix.shard }}-${{ github.run_id }}
+          key: test-durations-e2e-${{ github.run_id }}
 
   e2e-upgrade:
     # tests/e2e/core/upgrade: a real N-1 -> HEAD `hermes update` (clean,
@@ -457,8 +332,8 @@ jobs:
             pyproject.toml
             uv.lock
 
-      - name: Set up Python 3.11
-        run: uv python install 3.11.15
+      - name: Set up Python 3.14
+        run: uv python install 3.14
 
       - name: Install dependencies
         # `uv sync --locked` installs the exact pinned set from uv.lock (and
@@ -472,7 +347,7 @@ jobs:
         # in the venv up front.
         uses: ./.github/actions/retry
         with:
-          command: uv sync --locked --python 3.11.15 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+          command: uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
 
       - name: Verify and hydrate upgrade release snapshots
         # The real upgrade clone uses --shared from this checkout. Materialize
@@ -481,6 +356,7 @@ jobs:
         run: |
           source .venv/bin/activate
           python - <<'PY'
+          import os
           import subprocess
           import tomllib
           from pathlib import Path
@@ -500,6 +376,13 @@ jobs:
               listing = subprocess.run(["tar", "-tf", "-"], stdin=archive.stdout, stdout=subprocess.DEVNULL)
               archive.stdout.close()
               assert archive.wait() == 0 and listing.returncode == 0, f"could not hydrate {tag}"
+
+          # The `other` shard runs fresh-install scenarios from a local bare
+          # origin shared with this blob-filtered checkout. Materialize the
+          # current tree once so parallel test files never make that local
+          # origin fetch promised blobs from GitHub at the same time.
+          if os.environ["UPGRADE_SHARD"] == "other":
+              hydrate("HEAD")
 
           release_tags = subprocess.run(
               ["git", "tag", "--merged", "HEAD", "--sort=-v:refname", "--list", "v20*"],
@@ -529,6 +412,8 @@ jobs:
           hydrate(pre_handoff[0], *old_entries)
           print(f"Hydrated upgrade bases: {refs.base_tag}, {pre_handoff[0]}")
           PY
+        env:
+          UPGRADE_SHARD: ${{ matrix.shard }}
 
       - name: Install bubblewrap
         # Every spawned updater runs in bwrap (own PID namespace, no user
@@ -583,7 +468,9 @@ jobs:
               ;;
           esac
         env:
-          HERMES_TEST_WORKERS: 4
+          # Each file drives real installs/updaters (process trees plus uv and
+          # git I/O); cpu_count of them at once starves their deadlines.
+          HERMES_TEST_WORKERS: "4"
           HERMES_TEST_FILE_TIMEOUT: "3000"
           # Each file contains deterministic, destructive-in-a-sandbox update scenarios; retrying
           # the whole file after a failure repeats several full installs without adding evidence.

@@ -49,7 +49,7 @@ def _federation_seed_reservation_is_stale(profile_dir: Path) -> bool:
         return True
 
     try:
-        payload = json.loads(reservation.read_text(encoding="utf-8"))
+        payload = json.loads(reservation.read_text(encoding="utf-8-sig"))
     except (OSError, TypeError, ValueError):
         # An empty or unparseable lock has no PID and therefore no live
         # owner — treat it as immediately reclaimable rather than waiting
@@ -211,7 +211,7 @@ def load_manifest(path: Path | str | None = None) -> FederationManifest:
     """Load and validate the checked-in federation role manifest."""
     manifest_path = Path(path) if path is not None else _default_manifest_path()
     try:
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError as exc:
         raise FileNotFoundError(
             f"federation role manifest not found: {manifest_path}"
@@ -614,7 +614,7 @@ def _write_role_identity(
     )
     soul_path = profile_dir / "SOUL.md"
     if preserve_existing_soul and soul_path.is_file():
-        existing_soul = soul_path.read_text(encoding="utf-8")
+        existing_soul = soul_path.read_text(encoding="utf-8-sig")
         marker = "<!-- hermes-federation-role:v1 -->"
         if marker not in existing_soul:
             style = _ROLE_STYLES.get(
@@ -848,12 +848,12 @@ def _group_room_id(group: FederationGroup) -> str:
 
 
 def _read_profile_yaml(path: Path) -> dict[str, Any]:
-    import yaml
+    import hermes_yaml as yaml
 
     if not path.is_file():
         return {}
     try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
     except yaml.YAMLError as exc:
         raise ValueError(f"invalid YAML in {path}: {exc}") from exc
     if not isinstance(loaded, dict):

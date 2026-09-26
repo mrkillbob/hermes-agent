@@ -134,7 +134,7 @@ def download_laya(repo: str, revision: str, destination: Path) -> Path:
 
 
 def calibrate_laya(runtime: LayaRuntime, fixtures_path: Path, output_path: Path, *, model_revision: str) -> dict[str, Any]:
-    raw_lines = [line for line in fixtures_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    raw_lines = [line for line in fixtures_path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
     fixture_digest = hashlib.sha256(("\n".join(raw_lines) + "\n").encode("utf-8")).hexdigest()
     total = 0
     valid = 0

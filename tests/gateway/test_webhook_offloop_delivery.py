@@ -28,17 +28,7 @@ def fake_gh(tmp_path, monkeypatch):
     if sys.platform.startswith("win"):
         pytest.skip("POSIX shell stub")
     gh = tmp_path / "gh"
-    gh.write_text(
-        "#!/bin/bash\n"
-        "if [[ \"$1 $2\" == \"api user\" ]]; then\n"
-        "  echo '{\"login\":\"mrkillbobbot\"}'\n"
-        "  exit 0\n"
-        "fi\n"
-        "sleep 1\n"
-        "echo posted\n"
-        "exit 0\n",
-        encoding="utf-8",
-    )
+    gh.write_text("#!/usr/bin/env bash\nsleep 1\necho posted\nexit 0\n", encoding="utf-8")
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("HERMES_GITHUB_BOT_LOGIN", "mrkillbobbot")

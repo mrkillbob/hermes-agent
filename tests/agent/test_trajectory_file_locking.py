@@ -99,7 +99,7 @@ def test_failed_gzip_replace_leaves_previous_members_intact(tmp_path, monkeypatc
     assert values == ["before-failure", "after-failure"]
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_concurrent_gzip_appends_are_serialized_on_windows(tmp_path):
     """Windows must serialize gzip members through one stable raw descriptor lock."""
     target = tmp_path / "windows-trajectory.jsonl.gz"
@@ -118,7 +118,7 @@ def test_concurrent_gzip_appends_are_serialized_on_windows(tmp_path):
     assert {entry["conversations"][0]["value"] for entry in entries} == {f"P{n}" for n in range(4)}
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_default_gzip_trajectory_saves_on_windows(tmp_path, monkeypatch):
     """The default gzip path must work with Windows' file-locking API."""
     monkeypatch.chdir(tmp_path)
@@ -196,7 +196,7 @@ def test_interrupted_append_recovers_without_reading_history(tmp_path, monkeypat
         assert stream.read() == "first\nsecond\n"
 
 
-@pytest.mark.macos_only
+@pytest.mark.platforms("macos")
 def test_first_gzip_creation_honors_umask(tmp_path):
     import os
     import stat

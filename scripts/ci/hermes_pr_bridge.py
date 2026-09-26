@@ -306,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not args.event_path or not args.event_path.is_file():
             raise BridgeError("GitHub event payload is unavailable")
-        event = json.loads(args.event_path.read_text(encoding="utf-8"))
+        event = json.loads(args.event_path.read_text(encoding="utf-8-sig"))
         if not isinstance(event, dict):
             raise BridgeError("GitHub event payload is invalid")
         repository = os.environ.get("GITHUB_REPOSITORY", "")

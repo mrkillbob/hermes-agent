@@ -12,8 +12,6 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import yaml
-
 from hermes_cli.secure_worker import (
     PackPolicy,
     SecurityBoundaryError,
@@ -100,7 +98,9 @@ def register_cli(parent: argparse.ArgumentParser) -> None:
 
 
 def _load_yaml(path: str) -> dict[str, object]:
-    value = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    import hermes_yaml as yaml
+
+    value = yaml.safe_load(Path(path).read_text(encoding="utf-8-sig"))
     if not isinstance(value, dict):
         raise SecurityBoundaryError("configuration must be a YAML mapping")
     return value
@@ -134,7 +134,7 @@ def _audit_from_args(args: argparse.Namespace):
     config = _load_yaml(args.config)
     value = None
     if args.attestation:
-        value = json.loads(Path(args.attestation).read_text(encoding="utf-8"))
+        value = json.loads(Path(args.attestation).read_text(encoding="utf-8-sig"))
         if not isinstance(value, dict):
             raise SecurityBoundaryError("attestation must be a JSON object")
     return config, audit_profile_boundary(

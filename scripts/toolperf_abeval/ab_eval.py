@@ -141,13 +141,13 @@ def make_sandbox(work: Path):
 SUCCESS = {
     "err_python_env": lambda t, w: "ENV_OK_4477" in t,
     "err_replay_patch": lambda t, w: "CONFIG_OK_881" in t and (
-        w / "proj" / "config.py").read_text(encoding="utf-8").count("RETRY_LIMIT = 30") == 1,
+        w / "proj" / "config.py").read_text(encoding="utf-8-sig").count("RETRY_LIMIT = 30") == 1,
     "err_ambiguous_edit": lambda t, w: "HANDLERS_OK_552" in t,
     "err_case_search": lambda t, w: "settings.ini" in t and "client.go" in t,
     "err_hidden_search": lambda t, w: "rotation.cfg" in t and "ops.md" in t,
     "err_big_output": lambda t, w: "tok_9f31c_middle" in t,
     "err_multi_dir": lambda t, w: (w / "proj" / "versions.txt").exists()
-    and "1.4.2,0.9.7,3.2.1" in (w / "proj" / "versions.txt").read_text(encoding="utf-8"),
+    and "1.4.2,0.9.7,3.2.1" in (w / "proj" / "versions.txt").read_text(encoding="utf-8-sig"),
     # sum of squares of 1..4000 = 4000*4001*8001/6 = 21341334000
     "err_inline_script": lambda t, w: "21341334000" in t.replace(",", ""),
     "err_big_file_read": lambda t, w: "X99Q" in t,
@@ -200,7 +200,7 @@ def _model_provenance(model: str) -> dict[str, str]:
         import yaml
 
         try:
-            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8-sig")) or {}
         except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
             raise SystemExit(f"unable to read ABEVAL_HOME model config: {config_path}") from exc
     model_config = config.get("model", {}) if isinstance(config, Mapping) else {}
@@ -268,7 +268,7 @@ def run(arm: str, model: str, reps: int, pythonpath: str, only=None, only_rep=No
     manifest_path = ROOT / "results" / model.replace("/", "_") / _BATTERY_MANIFEST
     manifest = {"model": model, "tasks": sorted(TASKS), "repetitions": reps}
     if manifest_path.exists():
-        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        existing = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         if existing != manifest:
             raise SystemExit(f"evaluation battery manifest mismatch: {manifest_path}")
     else:
@@ -279,7 +279,7 @@ def run(arm: str, model: str, reps: int, pythonpath: str, only=None, only_rep=No
     done = set()
     if meta_path.exists():
         existing_rows = []
-        for line in meta_path.read_text(encoding="utf-8").splitlines():
+        for line in meta_path.read_text(encoding="utf-8-sig").splitlines():
             try:
                 existing_rows.append(json.loads(line))
             except (ValueError, KeyError) as exc:
@@ -421,7 +421,7 @@ def score_run(atof: Path):
     if not atof.exists():
         return None
     try:
-        lines = atof.read_text(encoding="utf-8").splitlines()
+        lines = atof.read_text(encoding="utf-8-sig").splitlines()
     except (OSError, UnicodeError):
         return None
     open_scopes = Counter()
@@ -486,7 +486,7 @@ def report(models):
             meta_path = mdir / arm / "meta.jsonl"
             if not meta_path.exists():
                 continue
-            for line in meta_path.read_text(encoding="utf-8").splitlines():
+            for line in meta_path.read_text(encoding="utf-8-sig").splitlines():
                 m = json.loads(line)
                 s = score_run(mdir / arm / f"{m['run_id']}.atof.jsonl")
                 if s is None:
@@ -533,7 +533,7 @@ def report(models):
                   f"{a['llm'] / n:5.1f} {a['tools'] / n:5.1f} {a['errs'] / n:5.1f} "
                   f"{a['retries'] / n:5.1f} {a['kb'] / n:5.0f} {a['wall'] / n:5.0f}s")
         manifest_path = mdir / _BATTERY_MANIFEST
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig")) if manifest_path.exists() else {}
         expected_tasks = set(manifest.get("tasks", ()))
         repetitions = manifest.get("repetitions")
         expected = (
@@ -547,7 +547,7 @@ def report(models):
         for arm in ("baseline", "fixes"):
             meta_path = mdir / arm / "meta.jsonl"
             if meta_path.exists():
-                rows = [json.loads(line) for line in meta_path.read_text(encoding="utf-8").splitlines()]
+                rows = [json.loads(line) for line in meta_path.read_text(encoding="utf-8-sig").splitlines()]
                 if rows:
                     shas = {row.get("source_sha") for row in rows}
                     if len(shas) != 1 or not all(isinstance(sha, str) and _GIT_SHA.fullmatch(sha) for sha in shas):
@@ -586,7 +586,7 @@ def report(models):
         observed = {}
         for arm in ("baseline", "fixes"):
             meta_path = mdir / arm / "meta.jsonl"
-            rows = [json.loads(line) for line in meta_path.read_text(encoding="utf-8").splitlines()] if meta_path.exists() else []
+            rows = [json.loads(line) for line in meta_path.read_text(encoding="utf-8-sig").splitlines()] if meta_path.exists() else []
             observed[arm] = Counter((row.get("task"), row.get("rep")) for row in rows)
         complete = bool(expected) and all(observed[arm] == Counter({pair: 1 for pair in expected}) for arm in ("baseline", "fixes"))
         outcome_failures = _outcome_failures(table, expected_tasks)

@@ -183,7 +183,7 @@ def test_request_gate_recovers_conservatively_from_nonfinite_state(tmp_path) -> 
         pass
 
     assert sleeps == [5.0]
-    stored = json.loads(path.read_text(encoding="utf-8"))
+    stored = json.loads(path.read_text(encoding="utf-8-sig"))
     assert stored["cooldown_until"] == 105.0
     assert all(value == value and abs(value) != float("inf") for value in stored.values())
 
@@ -1409,7 +1409,7 @@ def test_github_client_blocks_merge_queue_before_merge_write(tmp_path: Path) -> 
         )
 
     assert raised.value.code == "merge_queue_required"
-    assert args_log.read_text(encoding="utf-8").splitlines() == [
+    assert args_log.read_text(encoding="utf-8-sig").splitlines() == [
         "api repos/acme/widgets/rules/branches/stable"
     ]
 

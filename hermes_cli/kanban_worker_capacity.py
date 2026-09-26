@@ -3,7 +3,7 @@
 from collections import Counter
 from pathlib import Path
 
-import yaml
+import hermes_yaml as yaml
 
 from hermes_cli.kanban_worker_routing import (
     _LOCAL_KANBAN_PROVIDERS,

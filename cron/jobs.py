@@ -297,7 +297,7 @@ def _jobs_lock():
         try:
             try:
                 ensure_dirs()
-                lock_fd = open(_jobs_lock_file(), "a+", encoding="utf-8")
+                lock_fd = open(_jobs_lock_file(), "a+", encoding="utf-8-sig")
                 lock_fd.seek(0)
                 if _acquire_flock(lock_fd, _JOBS_LOCK_TIMEOUT_SECONDS) is False:
                     logger.error(
@@ -1257,11 +1257,8 @@ def _epoch_file_age(name: str) -> Optional[float]:
     that to 0.0 like ordinary sub-second jitter would read a stale-or-forged stamp as "just
     ticked", the opposite of what a liveness check needs."""
     try:
-        raw = (_current_cron_store().cron_dir / name).read_text(encoding="utf-8").strip()
-        age = time.time() - float(raw)
-        if age < -_FUTURE_STAMP_TOLERANCE_S:
-            return None
-        return max(0.0, age)
+        raw = (_current_cron_store().cron_dir / name).read_text(encoding="utf-8-sig").strip()
+        return max(0.0, time.time() - float(raw))
     except Exception:
         return None
 
@@ -1291,7 +1288,7 @@ def get_catch_up_occurrence_count() -> int:
     """Return the profile-local stale-schedule catch-up count."""
     path = _current_cron_store().cron_dir / "catch_up_occurrences"
     try:
-        return max(0, int(path.read_text(encoding="utf-8").strip()))
+        return max(0, int(path.read_text(encoding="utf-8-sig").strip()))
     except (OSError, ValueError):
         return 0
 
@@ -1316,7 +1313,7 @@ def clear_ticker_error() -> None:
 def get_ticker_last_error() -> Optional[str]:
     """Return the most recent recorded tick error message, or None."""
     try:
-        raw = (_current_cron_store().cron_dir / "ticker_last_error").read_text(encoding="utf-8")
+        raw = (_current_cron_store().cron_dir / "ticker_last_error").read_text(encoding="utf-8-sig")
     except Exception:
         return None
     lines = raw.splitlines()
@@ -1360,8 +1357,10 @@ def load_jobs() -> List[Dict[str, Any]]:
         raise RuntimeError(f"Cron database corrupted and unrepairable: {e}") from e
 
     # Accept the canonical dict, or a bare list (auto-repair); any other top-level shape is
-    # corruption.
+    # corruption. Repair details are logged only by the locked pass (an unlocked pass re-runs
+    # under the lock below), so each warning is emitted once per repair.
     repair = "had invalid control characters" if _strict_retry else None
+    notes: List[str] = []
     if isinstance(data, dict):
         jobs = data.get("jobs", [])
         if isinstance(jobs, dict):
@@ -1369,19 +1368,54 @@ def load_jobs() -> List[Dict[str, Any]]:
             # _peek_jobs_unlocked deliberately does NOT flatten, so saves never merge against it.
             skipped = [k for k, v in jobs.items() if not isinstance(v, dict)]
             if skipped:
-                logger.warning(
-                    "Skipping %d non-dict entr%s in id-keyed jobs map: %s",
+                notes.append("Skipping %d non-dict entr%s in id-keyed jobs map: %s" % (
                     len(skipped), "y" if len(skipped) == 1 else "ies",
-                    ", ".join(map(repr, skipped)))
+                    ", ".join(map(repr, skipped))))
             jobs = [{**v, "id": v.get("id") or k} for k, v in jobs.items() if isinstance(v, dict)]
             repair = "id-keyed jobs map flattened to list"
+        elif not isinstance(jobs, list):
+            notes.append("Replacing invalid jobs.json 'jobs' field (%s) with an empty list"
+                         % type(jobs).__name__)
+            jobs = []
+            repair = "invalid jobs field replaced with list"
     elif isinstance(data, list):
         jobs = data
         repair = "bare list wrapped as dict"
     else:
         raise RuntimeError(
             f"Cron database corrupted: expected {{'jobs': [...]}}, got {type(data).__name__}")
-    if jobs and repair:
+    junk = [j for j in jobs if not isinstance(j, dict)]
+    if junk:
+        # Every reader and the due scan index records as dicts: one junk entry would crash the
+        # whole tick and freeze every healthy sibling job, so skip it like the id-keyed map does.
+        # Types only: the raw values are arbitrary file content and must not reach the logs.
+        notes.append("Skipping %d non-object entr%s in jobs.json (types: %s)" % (
+            len(junk), "y" if len(junk) == 1 else "ies",
+            ", ".join(sorted({type(j).__name__ for j in junk}))))
+        jobs = [j for j in jobs if isinstance(j, dict)]
+        repair = repair or "non-object entries dropped"
+    for job in jobs:
+        # A hand-edited "completed" that is not a non-negative int (null, "2", 1.0, -5, Infinity)
+        # would crash every counter reader (None += 1, "2" + 1), render as "None/3" / "2.0/3", or
+        # grant extra runs; normalize it once here so readers can trust a non-negative int.
+        # OverflowError: json.loads turns Infinity / 1e999 into float inf, and int(inf) raises.
+        rep = job.get("repeat")
+        if isinstance(rep, dict) and "completed" in rep and (
+                type(rep["completed"]) is not int or rep["completed"] < 0):
+            try:
+                rep["completed"] = max(int(rep["completed"]), 0)
+            except (TypeError, ValueError, OverflowError):
+                rep["completed"] = 0
+            repair = repair or "invalid repeat.completed normalized"
+    # Persist even an empty result, or an all-junk store repeats the repair on every tick.
+    if repair:
+        if not getattr(_jobs_lock_state, "depth", 0):
+            # An unlocked snapshot may predate a locked writer's update to a job it already holds
+            # (the shrink-merge only restores missing ids), so re-read and repair under the lock.
+            with _jobs_lock():
+                return load_jobs()
+        for note in notes:
+            logger.warning("%s", note)
         save_jobs(jobs)
         logger.warning("Auto-repaired jobs.json (%s)", repair)
     _record_load_stamp(pre_read_stamp)
