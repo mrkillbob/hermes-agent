@@ -44,7 +44,7 @@ def test_set_journal_mode_converts_wal_store_offline(tmp_path, monkeypatch, caps
     assert "wal → delete" in capsys.readouterr().out
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("force", [False, True], ids=["normal", "force"])
 def test_set_journal_mode_refuses_while_another_process_holds_the_store(
     force, tmp_path, monkeypatch, capsys

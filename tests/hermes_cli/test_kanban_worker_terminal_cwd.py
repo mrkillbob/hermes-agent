@@ -157,7 +157,7 @@ def test_worker_path_prefers_workspace_venv_for_terminal_commands(monkeypatch, t
     ]
 
 
-@pytest.mark.macos_only
+@pytest.mark.platforms("macos")
 def test_protected_control_command_executes_in_spawned_environment(monkeypatch, tmp_path):
     from hermes_cli import kanban_db as kb
     from tools.kanban_tools import _sanitize_remote_worker_payload

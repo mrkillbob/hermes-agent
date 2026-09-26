@@ -840,7 +840,7 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         assert kbd.check_respawn_guard(conn, spawn_failed_id) == "blocker_auth"
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_infrastructure_spawn_refusal_never_charges_the_card(
     kanban_home, monkeypatch, all_assignees_spawnable,
 ):
@@ -1168,7 +1168,7 @@ def test_worktree_bootstrap_links_ignored_project_environment_when_missing(
     )
 
 
-@pytest.mark.macos_only
+@pytest.mark.platforms("macos")
 def test_worktree_bootstrap_accepts_project_local_environment_symlink(
     kanban_home, tmp_path
 ):
@@ -1207,7 +1207,7 @@ def test_worktree_bootstrap_accepts_project_local_environment_symlink(
     )
 
 
-@pytest.mark.macos_only
+@pytest.mark.platforms("macos")
 def test_worktree_bootstrap_refuses_environment_symlink_outside_project(
     kanban_home, tmp_path
 ):
@@ -1243,7 +1243,7 @@ def test_worktree_bootstrap_refuses_environment_symlink_outside_project(
     assert not linked_environment.is_symlink()
 
 
-@pytest.mark.macos_only
+@pytest.mark.platforms("macos")
 @pytest.mark.parametrize("environment_name", (".venv", "venv"))
 @pytest.mark.parametrize("existing_checkout", (False, True))
 def test_worktree_bootstrap_accepts_canonical_same_repository_environment(
@@ -1284,7 +1284,7 @@ def test_worktree_bootstrap_accepts_canonical_same_repository_environment(
     assert "refused unsafe" not in caplog.text
 
 
-@pytest.mark.macos_only
+@pytest.mark.platforms("macos")
 @pytest.mark.parametrize("external_kind", (
     "unrelated_repository", "main_checkout_escape", "nested_unrelated_repository",
 ))

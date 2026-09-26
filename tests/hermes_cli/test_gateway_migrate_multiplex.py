@@ -729,7 +729,7 @@ def test_known_bringup_refusal_is_rejected_before_any_secondary_is_touched(fleet
     assert fleet.ops == [] and _config_flag(fleet.root) is None and not (fleet.root / gm.MANIFEST_NAME).exists()
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_inventory_includes_user_and_system_units(tmp_path, monkeypatch):
     from hermes_cli import gateway as gw
     monkeypatch.setattr(gw, "supports_systemd_services", lambda: True)

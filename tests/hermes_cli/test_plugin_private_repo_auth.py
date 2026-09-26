@@ -237,12 +237,12 @@ def test_credential_fill_uses_stored_helper_and_never_prompts(tmp_path, monkeypa
     assert git_credentials.resolve_git_basic_auth("https://nothing.example.test/x.git") is None
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_credential_fill_uses_stored_helper_linux(tmp_path, monkeypatch):
     _check_credential_fill_uses_stored_helper_and_never_prompts(tmp_path, monkeypatch)
 
 
-@pytest.mark.macos_only
+@pytest.mark.platforms("macos")
 def test_credential_fill_uses_stored_helper_macos(tmp_path, monkeypatch):
     _check_credential_fill_uses_stored_helper_and_never_prompts(tmp_path, monkeypatch)
 
