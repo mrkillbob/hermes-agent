@@ -37,13 +37,9 @@ from tests.fakes.providers.anthropic_messages import Reply, Text, Thinking, Tool
 pytestmark = [pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process-tree cleanup uses /proc"),
               pytest.mark.live_system_guard_bypass]
 
-# The SDK treats signatures as opaque strings. These local-oracle sentinels cover the
-# Base64 alphabet, punctuation, and padding while separators keep the LLM egress guard
-# from mistaking test metadata for an encoded payload. Replay still compares every byte.
-SIG = {
-    n: f"Eq{n}:+/A:bCd:EfG:hIj:KlM:nOp:QrS:tUv:WxY:z01:234:567:89+:/{n}:{n}=="
-    for n in ("A", "B", "C", "D")
-}
+# Signatures are opaque base64 blobs on the real API; include every base64 symbol plus
+# padding so any re-encoding, trimming or normalisation shows up as a byte mismatch.
+SIG = {n: f"Eq{n}+/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/{n * 3}==" for n in ("A", "B", "C", "D")}
 THINK = {n: f"Reasoning step {n}: weigh the files.\n  Keep  spacing\tand unicode \u00e9\u2014{n}." for n in SIG}
 
 
