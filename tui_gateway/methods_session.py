@@ -881,7 +881,8 @@ def _resume_deferred(ctx: _Resume) -> dict:
     sid, source, cwd = ctx.mint()
     with _profile_build_scope(ctx.profile_home):
         overrides = _stored_session_runtime_overrides(ctx.found)
-    record = ctx.record(source, cwd, [], overrides)
+    record = ctx.record(source, cwd, [], overrides,
+                        todo_state=_todo_state_from_db(ctx.db, ctx.target))
     record.update(resume_history_ready=threading.Event(), resume_hydrating=True,
                   resume_message_count=int(ctx.found.get("message_count") or 0))
     if (reused := ctx.claim(sid, record)) is not None:
@@ -1163,6 +1164,8 @@ def _(rid, params: dict, session: dict) -> dict:
 @method("session.delete")
 def _(rid, params: dict) -> dict:
     """Delete a stored session + transcripts; refused while live here (FK trips on the agent's next flush)."""
+    from hermes_state_errors import SessionActiveWriteGuardError  # body runs on server.py globals
+
     if not (target := params.get("session_id", "")):
         return _err(rid, 4006, "session_id required")
     snapshot, err = _snapshot_sessions(rid)
@@ -1176,7 +1179,9 @@ def _(rid, params: dict) -> dict:
             return _db_unavailable_error(rid, code=5036)
         try:
             home = Path(profile_home) if profile_home is not None else get_hermes_home()
-            deleted = db.delete_session(target, sessions_dir=home / "sessions")
+            deleted = db.delete_session(target, sessions_dir=home / "sessions", exclude_active_write_guards=True)
+        except SessionActiveWriteGuardError:
+            return _err(rid, 4023, "cannot delete an active session")
         except Exception as e:
             return _err(rid, 5036, f"delete failed: {e}")
     return _ok(rid, {"deleted": target}) if deleted else _err(rid, 4007, "session not found")
@@ -2051,7 +2056,7 @@ def _status_dt(value, fallback=None):
 
 @_session_method("session.status")
 def _(rid, params: dict, session: dict) -> dict:
-    from hermes_constants import display_hermes_home
+    from hermes_cli.status_report import build_status_fields, status_lines
     key = session.get("session_key") or params.get("session_id") or ""
     agent = session.get("agent")
     meta = _status_row(session, params, key)
@@ -2059,21 +2064,23 @@ def _(rid, params: dict, session: dict) -> dict:
     updated = next((_status_dt(meta[f], created) for f in ("updated_at", "last_updated_at", "last_activity_at")
                     if meta.get(f)), created)
     mirror = _metadata_mirror(session)
-    if session.get("_compute_host_active") and mirror:
-        model = mirror.get("model") or getattr(agent, "model", None) or "(unknown)"
-        provider = mirror.get("provider") or getattr(agent, "provider", None) or "unknown"
-    else:
-        model = getattr(agent, "model", None) or mirror.get("model") or "(unknown)"
-        provider = getattr(agent, "provider", None) or mirror.get("provider") or "unknown"
+    # Under turn isolation the compute host owns the live route: a stale in-process agent object
+    # must not outrank the host's mirrored model/provider. Before the first host frame fills the
+    # mirror, the in-process agent is still the only route we know (same order as _session_info).
+    live_agent = session.get("agent")
+    agent = None if session.get("_compute_host_active") else live_agent
+    fields = build_status_fields(
+        key, agent, _status_row(session, params, key),
+        model=mirror.get("model") or getattr(live_agent, "model", None),
+        provider=mirror.get("provider") or getattr(live_agent, "provider", None),
+        home=session.get("profile_home"),
+    )
     project = _project_info_for_cwd(_display_session_cwd(session))
     title = (meta.get("title") or "").strip()
     lines = [
-        "Hermes TUI Status", "", f"Session ID: {key}", f"Path: {display_hermes_home()}",
-        *([f"Project: {project['name']}"] if project else []), *([f"Title: {title}"] if title else []),
-        f"Model: {model} ({provider})", f"Created: {created.strftime('%Y-%m-%d %H:%M')}",
-        f"Last Activity: {updated.strftime('%Y-%m-%d %H:%M')}",
-        f"Tokens: {int(_session_usage_snapshot(session).get('total') or 0):,}",
-        f"Agent Running: {'Yes' if session.get('running') else 'No'}"]
+        "Hermes TUI Status", "", *status_lines(fields, "session_id", "path"),
+        *([f"Project: {project['name']}"] if project else []),
+        *status_lines(fields, "title", "model", "created", "last_activity", "tokens", "agent_running")]
     return _ok(rid, {"output": "\n".join(lines)})
 
 

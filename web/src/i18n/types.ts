@@ -206,6 +206,7 @@ export interface Translations {
     deleteSelectedConfirmTitle: string;
     deleteSelectedConfirmMessage: string;
     selectedSessionsDeleted: string;
+    selectedSessionsSkippedActive: string;
     failedToDeleteSelected: string;
     resumeInChat: string;
     newChat: string;

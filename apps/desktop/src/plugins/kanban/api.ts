@@ -213,7 +213,8 @@ function onEventsFrame(
   slug: string,
   data: unknown,
   scheduleBoardRefresh: () => void,
-  sourceKey: string
+  sourceKey: string,
+  selectedSlug = slug
 ): void {
   const frame = data as { cursor?: unknown; events?: CompletionEvent[] }
 
@@ -242,6 +243,10 @@ function onEventsFrame(
 
   for (const taskId of new Set(changedTaskIds)) {
     void queryClient.invalidateQueries({ queryKey: taskKey(scope, slug, taskId!) })
+
+    if (selectedSlug !== slug) {
+      void queryClient.invalidateQueries({ queryKey: taskKey(scope, selectedSlug, taskId!) })
+    }
   }
 
   // Completion notification (after invalidation so notify failure
@@ -308,16 +313,23 @@ export function bindApi(
     }, 500)
   }
 
-  const dial = (scope: string, slug: string, since: number | undefined, generation: number, sourceKey: string) =>
+  const dial = (
+    scope: string,
+    slug: string,
+    since: number | undefined,
+    generation: number,
+    sourceKey: string,
+    selectedSlug: string
+  ) =>
     socket(eventsUrl(slug, since), data => {
       if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
         return
       }
 
-      onEventsFrame(scope, slug, data, () => scheduleBoardRefresh(scope, sourceKey), sourceKey)
+      onEventsFrame(scope, slug, data, () => scheduleBoardRefresh(scope, sourceKey), sourceKey, selectedSlug)
     })
 
-  const open = (slug: string) => {
+  const open = (selectedSlug: string) => {
     const generation = ++socketGeneration
     const scope = kanbanConnectionScope()
     const sourceKey = activeSourceKey()
@@ -330,39 +342,57 @@ export function bindApi(
       boardRefreshTimer = null
     }
 
-    const since = eventsSince(scope, slug)
+    const openResolved = (slug: string) => {
+      if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
+        return
+      }
 
-    if (since !== undefined) {
-      close = dial(scope, slug, since, generation, sourceKey)
+      const since = eventsSince(scope, slug)
+
+      if (since !== undefined) {
+        close = dial(scope, slug, since, generation, sourceKey, selectedSlug)
+
+        return
+      }
+
+      // No cached tail yet. Wait for the snapshot and open at its
+      // latest_event_id. A board switch or unload bumps the generation so a
+      // late snapshot cannot open a stale socket. A failed fetch still opens
+      // with no since — the server starts at the tail rather than replaying.
+      void queryClient
+        .fetchQuery({
+          queryFn: () => r<KanbanBoard>(boardSnapshotPath(slug)),
+          queryKey: boardKey(scope, slug, false)
+        })
+        .then(board => {
+          if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
+            return
+          }
+
+          const tail = typeof board?.latest_event_id === 'number' ? board.latest_event_id : undefined
+
+          close = dial(scope, slug, tail, generation, sourceKey, selectedSlug)
+        })
+        .catch(() => {
+          if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
+            return
+          }
+
+          close = dial(scope, slug, undefined, generation, sourceKey, selectedSlug)
+        })
+    }
+
+    if (selectedSlug) {
+      openResolved(selectedSlug)
 
       return
     }
 
-    // No cached tail yet. Wait for the snapshot and open at its
-    // latest_event_id. A board switch or unload bumps the generation so a
-    // late snapshot cannot open a stale socket. A failed fetch still opens
-    // with no since — the server starts at the tail rather than replaying.
-    void queryClient
-      .fetchQuery({
-        queryFn: () => r<KanbanBoard>(boardSnapshotPath(slug)),
-        queryKey: boardKey(scope, slug, false)
-      })
-      .then(board => {
-        if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
-          return
-        }
-
-        const tail = typeof board?.latest_event_id === 'number' ? board.latest_event_id : undefined
-
-        close = dial(scope, slug, tail, generation, sourceKey)
-      })
-      .catch(() => {
-        if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
-          return
-        }
-
-        close = dial(scope, slug, undefined, generation, sourceKey)
-      })
+    // Resolve the server-current board before the handshake: /events is pinned
+    // to that board when opened, and notifications must stay on this generation.
+    void r<BoardsResponse>('/boards')
+      .then(boards => openResolved(typeof boards.current === 'string' ? boards.current : ''))
+      .catch(() => openResolved(''))
   }
 
   // The local connection keeps the BARE key (the bare-local rule of
