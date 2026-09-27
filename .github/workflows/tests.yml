@@ -255,22 +255,55 @@ jobs:
           path: test_durations.json
           key: test-durations-e2e-${{ github.run_id }}
 
+  e2e-upgrade-plan:
+    if: inputs.e2e_mode == 'full'
+    # One e2e-upgrade shard per suite directory: the files directly under
+    # tests/e2e/core/upgrade ("core") plus every subdirectory that holds
+    # test_*.py (pm, git, handoff, network, hosts, ...). A new suite
+    # directory gets its own shard without editing this file, and no shard
+    # carries the whole tree's wall time against the 60-minute timeout.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: tests/e2e/core/upgrade
+      - name: List suite directories
+        id: plan
+        run: |
+          set -euo pipefail
+          shards=$(python3 - <<'PY'
+          import json, pathlib
+          root = pathlib.Path("tests/e2e/core/upgrade")
+          shards = ["core"] if any(root.glob("test_*.py")) else []
+          shards += sorted(d.name for d in root.iterdir()
+                           if d.is_dir() and not d.name.startswith(("_", ".")) and any(d.rglob("test_*.py")))
+          print(json.dumps(shards))
+          PY
+          )
+          echo "shards=$shards" | tee -a "$GITHUB_OUTPUT"
+
   e2e-upgrade:
+    if: inputs.e2e_mode == 'full'
     # tests/e2e/core/upgrade: a real N-1 -> HEAD `hermes update` (clean,
     # autostash, killed mid-pull / mid-deps, offline), fresh-process import and
-    # entrypoint smoke, and the config round-trip property matrix. Its own job:
-    # it needs full history + tags and bubblewrap. The real update scenarios
-    # share one historically slow test module. Its measured four-case selection
-    # takes 329s because the test harness runs a file in one subprocess, so put
-    # the independent updater scenarios on separate hosted runners.
-    # Upstream uses its 32-core runner; forks use standard hosted runners.
+    # entrypoint smoke, the config round-trip property matrix, and the lane
+    # suites below it (pm: PM environment lifecycle across updates, ...).
+    # Its own job: it needs full history + tags, bubblewrap, and one file
+    # runs ~5-15 min. Sharded by suite directory (see e2e-upgrade-plan).
+    name: e2e-upgrade (${{ matrix.shard }})
+    needs: e2e-upgrade-plan
+    # NousResearch has dedicated high-core runners; forks use public hosted
+    # runners and a lower per-job worker cap to avoid starving updater processes.
     runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
-    if: inputs.e2e_mode == 'full'
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 60 || 120 }}
     strategy:
       fail-fast: false
       matrix:
-        shard: [path-clean, path-edits, path-interrupts, path-b, other]
-    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 60 || 120 }}
+        shard: ${{ fromJSON(needs.e2e-upgrade-plan.outputs.shards) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -425,42 +458,25 @@ jobs:
           source .venv/bin/activate
           python -c "import sqlite3, hermes_state_wal as w; print('sqlite', sqlite3.sqlite_version); assert not w.is_sqlite_wal_reset_vulnerable()"
 
-      - name: Run upgrade e2e tests
+      - name: Run upgrade e2e tests (${{ matrix.shard }})
         run: |
+          set -euo pipefail
           source .venv/bin/activate
-          case "${{ matrix.shard }}" in
-            path-clean)
-              scripts/run_tests.sh --include-integration \
-                tests/e2e/core/upgrade/test_upgrade_path.py::test_clean_update \
-                tests/e2e/core/upgrade/test_upgrade_path.py::test_clean_update_keeps_long_scalar_lines_verbatim
-              ;;
-            path-edits)
-              scripts/run_tests.sh --include-integration \
-                tests/e2e/core/upgrade/test_upgrade_path.py::test_update_with_local_edits_and_orphan_autostash \
-              ;;
-            path-interrupts)
-              scripts/run_tests.sh --include-integration \
-                tests/e2e/core/upgrade/test_upgrade_path.py::test_kill_mid_pull_then_retry_heals
-              ;;
-            path-b)
-              scripts/run_tests.sh --include-integration \
-                tests/e2e/core/upgrade/test_upgrade_path.py::test_kill_before_deps_then_retry_heals \
-                tests/e2e/core/upgrade/test_upgrade_path.py::test_offline_update_fails_loudly_and_changes_nothing
-              ;;
-            other)
-              scripts/run_tests.sh --include-integration \
-                tests/e2e/core/upgrade/test_config_roundtrip_properties.py \
-                tests/e2e/core/upgrade/test_fresh_process_entrypoints.py \
-                tests/e2e/core/upgrade/test_install_fresh.py \
-                tests/e2e/core/upgrade/test_profile_update_cron.py \
-                tests/e2e/core/upgrade/test_update_userstate_import.py \
-                tests/e2e/core/upgrade/test_update_userstate_realistic.py
-              ;;
-          esac
+          if [ "$SHARD" = core ]; then
+            mapfile -t files < <(find tests/e2e/core/upgrade -maxdepth 1 -name 'test_*.py' | sort)
+          else
+            mapfile -t files < <(find "tests/e2e/core/upgrade/$SHARD" -name 'test_*.py' | sort)
+          fi
+          # A shard that collects nothing is a wiring bug, not a pass.
+          [ "${#files[@]}" -gt 0 ] || { echo "no test files for shard $SHARD" >&2; exit 1; }
+          printf 'shard %s: %s\n' "$SHARD" "${files[*]}"
+          scripts/run_tests.sh --include-integration "${files[@]}"
         env:
+          SHARD: ${{ matrix.shard }}
           # Each file drives real installs/updaters (process trees plus uv and
-          # git I/O); cpu_count of them at once starves their deadlines.
-          HERMES_TEST_WORKERS: "4"
+          # git I/O); cpu_count of them at once starves their deadlines. A
+          # shard holds at most ~7 files, so this runs each shard in one wave.
+          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '6' || '3' }}
           HERMES_TEST_FILE_TIMEOUT: "3000"
           # Each file contains deterministic, destructive-in-a-sandbox update scenarios; retrying
           # the whole file after a failure repeats several full installs without adding evidence.

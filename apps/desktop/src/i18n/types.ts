@@ -3116,6 +3116,7 @@ export interface Translations {
       backgroundRunning: string
       draftSession: string
       handoffOrigin: (platform: string) => string
+      continuationOrigin: string
       ownedByProfile: (profile: string) => string
       renamed: string
       renameFailed: string
@@ -4314,6 +4315,8 @@ export interface Translations {
       preparingAudio: string
       stopReading: string
       readAloud: string
+      copyFullResponse: string
+      readAloudFullResponseHint: string
       editMessage: string
       expandMessage: string
       scrollToBottom: string
