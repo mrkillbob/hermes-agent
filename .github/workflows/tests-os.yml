@@ -225,7 +225,11 @@ jobs:
         uses: ./.github/actions/setup-pm
         with:
           packages: git,ripgrep
-          extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          # These selected real-process tests use the shipped runtime surface
+          # and test group only. Provider/service SDK extras add unrelated
+          # installs here; `daytona` notably compiles obstore from Rust on
+          # Windows and cost over four minutes in the #145 run.
+          extras: '["all"]'
           test-environment: 'true'
           prune-python-cache: true
 

@@ -189,6 +189,13 @@ export async function launchCoreApp(env: Record<string, string>): Promise<{ app:
   return { app, page }
 }
 
+/** Exercise Electron's real before-quit path and wait for its process to exit. */
+export async function quitCoreApp(app: ElectronApplication): Promise<void> {
+  const closed = app.waitForEvent('close', { timeout: 30_000 })
+  await app.evaluate(({ app }) => app.quit())
+  await closed
+}
+
 const APP_LOGS = new WeakMap<ElectronApplication, string[]>()
 
 /** Last main-process output lines of `app` (for failure messages). */
