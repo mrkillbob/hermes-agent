@@ -1567,7 +1567,10 @@ const localBackendLifecycle = createLocalBackendLifecycle<ChildProcess>({
 })
 
 function spawnOwnedBackend(...args: Parameters<typeof spawn>): ChildProcess {
-  const child = localBackendLifecycle.spawn((): ChildProcess => spawn(...args))
+  const [command, spawnArgs, options = {}] = args
+  const child = localBackendLifecycle.spawn((): ChildProcess =>
+    spawn(command, spawnArgs, { ...options, detached: !IS_WINDOWS })
+  )
   child.once('exit', (): boolean => localBackendLifecycle.release(child))
   child.once('error', (): void => {
     if (!child.pid) {

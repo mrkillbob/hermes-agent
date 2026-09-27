@@ -37,10 +37,17 @@ vi.mock('@/store/session', () => ({
 }))
 vi.mock('@/store/notify-baseline', () => ({ markNativeNotifyBaseline: vi.fn() }))
 
-const { $gateway, closeSecondaryGateways, configureGatewayRegistry, ensureGatewayForProfile, setPrimaryGateway } =
-  await import('./gateway')
+const {
+  $gateway,
+  closeSecondaryGateways,
+  configureGatewayRegistry,
+  ensureGatewayForProfile,
+  openGatewayForAgent,
+  setPrimaryGateway,
+  setPrimaryGatewayConnectionId
+} = await import('./gateway')
 
-type DesktopStub = { getConnection: ReturnType<typeof vi.fn> }
+type DesktopStub = { getConnection: ReturnType<typeof vi.fn>; getConnectionFor?: ReturnType<typeof vi.fn> }
 
 function installDesktop(stub: DesktopStub): void {
   ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = stub
@@ -60,6 +67,8 @@ beforeEach(() => {
 
 afterEach(() => {
   closeSecondaryGateways()
+  setPrimaryGateway(null)
+  setPrimaryGatewayConnectionId(null, null)
   vi.clearAllMocks()
   delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
 })
@@ -140,4 +149,19 @@ describe('ensureGatewayForProfile under a shared global remote', () => {
     expect(gatewayMocks.setConnection).toHaveBeenCalledTimes(1)
     expect(gatewayMocks.setConnection).toHaveBeenLastCalledWith(connection)
   })
+})
+
+it('reuses a local primary for a shared profile when the legacy connection id is null', async () => {
+  const primary = makePrimary()
+  const getConnectionFor = vi.fn(async () => ({ port: 4242, profile: 'work', sharedPrimary: true, token: 't' }))
+
+  setPrimaryGateway(primary as never, 'default')
+  setPrimaryGatewayConnectionId(null, 'local')
+  installDesktop({ getConnection: vi.fn(), getConnectionFor })
+
+  await openGatewayForAgent(null, 'work')
+
+  expect(getConnectionFor).toHaveBeenCalledWith({ connectionId: '', profile: 'work' })
+  expect(gatewayMocks.connect).not.toHaveBeenCalled()
+  expect($gateway.get()?.connectionState).toBe('open')
 })

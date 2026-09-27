@@ -472,7 +472,7 @@ async function ridesPrimaryBackend(
 
   const attachedPrimarySource =
     Boolean(id && g.primaryConnectionId && id === g.primaryConnectionId) ||
-    (id === 'local' && g.primaryConnectionMode === 'local')
+    ((id === 'local' || !id) && g.primaryConnectionMode === 'local')
 
   // A descriptor cannot redirect to the primary when this window has no live
   // primary socket. Skipping this probe also keeps a parked local secondary's
@@ -528,6 +528,15 @@ async function ridesPrimaryBackend(
     // refused SESSION_NOT_OWNED by a pid of the same Desktop (#101416).
     return id !== 'local' && g.primaryConnectionMode !== 'local'
   }
+}
+
+function isImplicitLocalRegistryRoute(connectionId: null | string, profile: string): boolean {
+  return (
+    !connectionId &&
+    normKey(profile) !== g.primaryProfile &&
+    g.primaryConnectionMode === 'local' &&
+    Boolean(window.hermesDesktop?.getConnectionFor)
+  )
 }
 
 async function requestOnPrimaryGateway<T>(
@@ -1827,7 +1836,10 @@ export async function openGatewayForAgent(
 ): Promise<void> {
   const scope = registryBackendScopeKey(connectionId, profile)
 
-  if (scope === normKey(profile) || isPrimaryRegistryRoute(connectionId, profile)) {
+  if (
+    (scope === normKey(profile) && !isImplicitLocalRegistryRoute(connectionId, profile)) ||
+    isPrimaryRegistryRoute(connectionId, profile)
+  ) {
     discardSupersededSharedPrimarySecondary(scope)
 
     return openGatewayForProfile(profile, { spawnPriority })
@@ -1883,7 +1895,10 @@ export async function ensureGatewayForAgent(
 ): Promise<boolean> {
   const scope = registryBackendScopeKey(connectionId, profile)
 
-  if (scope === normKey(profile) || isPrimaryRegistryRoute(connectionId, profile)) {
+  if (
+    (scope === normKey(profile) && !isImplicitLocalRegistryRoute(connectionId, profile)) ||
+    isPrimaryRegistryRoute(connectionId, profile)
+  ) {
     if (signal?.aborted) {
       return false
     }
