@@ -145,7 +145,8 @@ def _ac_inflight_original(session: dict) -> str:
 
 
 def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[str] | None = None,
-                    turn_author: dict | None = None) -> dict | None:
+                    turn_author: dict | None = None, client_surface: str = "",
+                    voice_live_context: str = "") -> dict | None:
     """Queue a message for the next turn. Text-only arrivals share a slot and merge losslessly (like the
     consecutive-user merge in ``repair_message_sequence``); image-bearing and authored ones stay separate
     envelopes so attachment chronology and the sender survive. ``transport`` is pinned so the drained turn
@@ -160,14 +161,25 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
     # A text-only self-copy of the live prompt would restart it on drain; an authored copy is another sender's message.
     if text_only and not turn_author and text.strip() == _ac_inflight_original(session) != "":
         return None
-    queued = {"text": text, "transport": transport, **({"image_paths": image_paths} if image_paths else {}),
-              **({"turn_author": turn_author} if turn_author else {})}
+    queued = {
+        "text": text,
+        "transport": transport,
+        "client_surface": client_surface,
+        "voice_live_context": voice_live_context if client_surface == "voice-live" else "",
+        **({"image_paths": image_paths} if image_paths else {}),
+        **({"turn_author": turn_author} if turn_author else {}),
+    }
     existing = session.get("queued_prompt")
     if (existing and text_only and not turn_author and isinstance(existing.get("text"), str)
             and not existing.get("image_paths") and not existing.get("turn_author")
             and not session.get("queued_prompts")):
         prev = existing["text"]
         existing["text"] = f"{prev}\n\n{text}" if prev and text else (prev or text)
+        if existing.get("client_surface") == client_surface == "voice-live":
+            existing["voice_live_context"] = voice_live_context
+        else:
+            existing["client_surface"] = ""
+            existing["voice_live_context"] = ""
         return existing
     if existing:
         session.setdefault("queued_prompts", []).append(queued)
@@ -360,7 +372,8 @@ def _replace_queued_user_row_for_turn(session: dict, queued: dict) -> dict | Non
 
 
 def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False,
-                        turn_author: dict | None = None, display_kind: str | None = None) -> dict | None:
+                        turn_author: dict | None = None, display_kind: str | None = None,
+                        client_surface: str = "", voice_live_context: str = "") -> dict | None:
     """Apply ``display.busy_input_mode`` to a mid-turn prompt instead of rejecting it (rejection made clients busy-retry
     and drop sends): ``interrupt`` (default) → redirect, falling back to hard interrupt + queue; ``queue`` → queue only;
     ``steer`` → inject after the current atomic action. ``queued=True`` (client queue drain) forces queue mode: a "run
@@ -396,7 +409,9 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
             if image_paths:
                 session["attached_images"] = image_paths + list(session.get("attached_images", []))
             return None
-        envelope = _enqueue_prompt(session, text, transport, image_paths=image_paths, turn_author=turn_author)
+        envelope = _enqueue_prompt(
+            session, text, transport, image_paths=image_paths, turn_author=turn_author,
+            client_surface=client_surface, voice_live_context=voice_live_context)
         # Durable AT ACCEPT (not when the turn runs): a cold resume sees the queued message and a
         # backend restart cannot lose it. Lives on the envelope, never the shared session slot.
         if envelope is not None:

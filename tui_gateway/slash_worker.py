@@ -147,7 +147,8 @@ def main():
         # "moa" provider included). Without it HermesCLI re-resolves from config and dispatches the
         # MoA preset NAME to the configured real provider (#57283).
         cli = HermesCLI(model=args.model or None, provider=args.provider or None,
-                        compact=True, resume=args.session_key, verbose=False)
+                        compact=True, resume=args.session_key, verbose=False,
+                        manage_conversation_worktree=False)
     # Spurious stdin-EOF recovery (same shared-file-description O_NONBLOCK issue as the gateway entry
     # point — any child inheriting fd 0 can flip the flag).
     _sw_recovery_times: list[float] = []

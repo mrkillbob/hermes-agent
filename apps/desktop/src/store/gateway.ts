@@ -1296,7 +1296,7 @@ export async function requestGatewayForAgent<T>(
   const key = normKey(profile)
   const scope = registryBackendScopeKey(connectionId, key)
 
-  if (scope === key) {
+  if (scope === key && !isImplicitLocalRegistryRoute(connectionId, key)) {
     return requestGatewayForProfile<T>(key, method, params, timeoutMs, signal, { spawnPriority })
   }
 
@@ -1540,7 +1540,7 @@ export async function retainGatewayForAgent(
   const key = normKey(profile)
   const scope = registryBackendScopeKey(connectionId, key)
 
-  if (scope === key) {
+  if (scope === key && !isImplicitLocalRegistryRoute(connectionId, key)) {
     // Plain-profile route: gatewayForProfile's request lease IS the retain —
     // hold it until the caller releases.
     const route = await gatewayForProfile(key, true, spawnPriority)

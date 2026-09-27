@@ -193,6 +193,7 @@ def _run_git(repo: Path, *args: str) -> str:
             check=True,
             text=True,
             capture_output=True,
+            encoding="utf-8",
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         detail = getattr(exc, "stderr", "") or str(exc)

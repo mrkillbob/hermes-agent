@@ -11,6 +11,8 @@ def test_worktree_runner_never_borrows_live_editable_venv(tmp_path: Path) -> Non
     source = Path(__file__).resolve().parents[2] / "scripts" / "run_tests.sh"
     runner = scripts / "run_tests.sh"
     runner.write_bytes(source.read_bytes())
+    activation_source = source.with_name("_activation.sh")
+    (scripts / "_activation.sh").write_bytes(activation_source.read_bytes())
 
     fake_python = tmp_path / "home" / ".hermes" / "hermes-agent" / "venv" / "bin" / "python"
     fake_python.parent.mkdir(parents=True)

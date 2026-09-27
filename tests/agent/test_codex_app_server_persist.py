@@ -24,6 +24,7 @@ duplicate the user turn (#860 / #42039). This test locks in:
 """
 
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 

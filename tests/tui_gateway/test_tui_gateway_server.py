@@ -1894,7 +1894,7 @@ def test_prompt_submit_typed_stop_phrase_ends_voice_chat(monkeypatch):
     monkeypatch.setenv("HERMES_VOICE", "1")
     monkeypatch.setenv("HERMES_VOICE_TTS", "1")
 
-    resp = server.dispatch(
+    resp = _dispatch_sync(
         {
             "id": "typed-stop",
             "method": "prompt.submit",
@@ -1923,7 +1923,7 @@ def test_prompt_submit_typed_stop_passes_through_when_voice_off(monkeypatch):
     )
     monkeypatch.setenv("HERMES_VOICE", "0")
 
-    resp = server.dispatch(
+    resp = _dispatch_sync(
         {
             "id": "typed-stop-off",
             "method": "prompt.submit",
@@ -15838,6 +15838,10 @@ def test_session_branch_writes_to_parent_profile_db(monkeypatch, tmp_path):
             seen["title"] = (key, title)
             return True
 
+        def set_auto_title(self, _key, _title, *, source="llm"):
+            seen["title_source"] = source
+            return True
+
         def get_session(self, key):
             return {"id": key, "cwd": str(tmp_path)}
 
@@ -16320,6 +16324,9 @@ def test_session_branch_installs_parent_profile_secret_scope(monkeypatch, tmp_pa
             return list(range(1, len(messages) + 1))
 
         def set_session_title(self, key, title):
+            return True
+
+        def set_auto_title(self, _key, _title, *, source="llm"):
             return True
 
         def get_session(self, key):

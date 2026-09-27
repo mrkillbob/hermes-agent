@@ -2616,6 +2616,7 @@ dev = [
 test = [
     { name = "anthropic" },
     { name = "distlib", marker = "sys_platform == 'win32'" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -2801,6 +2802,7 @@ dev = [
 test = [
     { name = "anthropic", specifier = "==0.87.0" },
     { name = "distlib", marker = "sys_platform == 'win32'", specifier = "==0.4.3" },
+    { name = "pyyaml", specifier = "==6.0.3" },
 ]
 
 [[package]]

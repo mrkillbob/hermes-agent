@@ -536,7 +536,7 @@ def test_shared_server_tools_are_callable_and_removed_on_non_owner_reload(
         _tools=[tool],
         tool_timeout=30,
         _registered_tool_names=[],
-        _config={},
+        _config={"command": "unused"},
         initialize_result=None,
     )
     owner_tool_name = "mcp__shared__echo"
@@ -567,7 +567,9 @@ def test_shared_server_tools_are_callable_and_removed_on_non_owner_reload(
     try:
         monkeypatch.setattr(mcp_tool, "_ensure_mcp_sdk", lambda: True)
         monkeypatch.setattr(_mcp_config, "_filter_suspicious_mcp_servers", lambda servers: servers)
-        assert _mcp_discovery.register_mcp_servers({"shared": {}})
+        # A real stdio configuration is required even though this test reuses
+        # the already-connected shared server and never starts a subprocess.
+        assert _mcp_discovery.register_mcp_servers({"shared": {"command": "unused"}})
         tool_names = registry.get_tool_names_for_toolset("mcp-shared")
         assert tool_names
         assert callable(registry.get_entry(tool_names[0]).handler)

@@ -710,7 +710,10 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4009, "session busy")
         busy_response = _handle_busy_submit(
             rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author,
-            display_kind=display_kind)
+            display_kind=display_kind,
+            client_surface="voice-live" if params.get("surface") == "voice-live" else "",
+            voice_live_context=(str(params.get("voice_context") or "")
+                                if params.get("surface") == "voice-live" else ""))
         if busy_response is not None:
             return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")

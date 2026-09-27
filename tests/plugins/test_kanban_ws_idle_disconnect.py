@@ -126,6 +126,8 @@ class _CursorBaselineConnection:
         return {"m": 50}
 
     def fetchall(self):
+        if self._mode == "max":
+            return [{"m": 50}]
         assert self._mode == "events"
         rows = [
             {

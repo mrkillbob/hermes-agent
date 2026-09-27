@@ -2101,6 +2101,17 @@ def read_user_config_raw(config_path: Optional[Path] = None) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def validate_user_config_file(config_path: Path) -> None:
+    """Validate a config file's raw YAML syntax and mapping root without loading behavior."""
+    try:
+        with open(config_path, encoding="utf-8-sig") as f:
+            data = fast_safe_load(f)
+    except FileNotFoundError:
+        return
+    if data is not None and not isinstance(data, dict):
+        raise TypeError(f"top-level YAML must be a mapping, got {type(data).__name__}")
+
+
 def read_raw_config_readonly() -> Dict[str, Any]:
     """``read_raw_config()`` without the per-call deepcopy, for callers that ONLY READ.
     **Mutating the result corrupts the in-process cache for every subsequent caller.** Meant for

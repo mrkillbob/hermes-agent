@@ -43,6 +43,8 @@ const {
   configureGatewayRegistry,
   ensureGatewayForProfile,
   openGatewayForAgent,
+  requestGatewayForAgent,
+  retainGatewayForAgent,
   setPrimaryGateway,
   setPrimaryGatewayConnectionId
 } = await import('./gateway')
@@ -152,15 +154,19 @@ describe('ensureGatewayForProfile under a shared global remote', () => {
 })
 
 it('reuses a local primary for a shared profile when the legacy connection id is null', async () => {
-  const primary = makePrimary()
+  const primary = Object.assign(makePrimary(), { request: vi.fn(async () => 'ok') })
   const getConnectionFor = vi.fn(async () => ({ port: 4242, profile: 'work', sharedPrimary: true, token: 't' }))
 
   setPrimaryGateway(primary as never, 'default')
   setPrimaryGatewayConnectionId(null, 'local')
   installDesktop({ getConnection: vi.fn(), getConnectionFor })
 
+  await expect(requestGatewayForAgent(null, 'work', 'session.create')).resolves.toBe('ok')
+  const release = await retainGatewayForAgent(null, 'work')
+  release()
   await openGatewayForAgent(null, 'work')
 
+  expect(getConnectionFor).toHaveBeenCalledTimes(3)
   expect(getConnectionFor).toHaveBeenCalledWith({ connectionId: '', profile: 'work' })
   expect(gatewayMocks.connect).not.toHaveBeenCalled()
   expect($gateway.get()?.connectionState).toBe('open')

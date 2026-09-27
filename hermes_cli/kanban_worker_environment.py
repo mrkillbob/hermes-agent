@@ -11,14 +11,12 @@ def validate_profile_config(profile_home: str) -> None:
     import hermes_yaml as yaml
 
     config = Path(profile_home) / "config.yaml"
-    if not config.is_file():
-        return
     try:
-        parsed = yaml.safe_load(config.read_text(encoding="utf-8-sig"))
-    except (OSError, yaml.YAMLError) as error:
+        from hermes_cli.config import validate_user_config_file
+
+        validate_user_config_file(config)
+    except (OSError, TypeError, yaml.YAMLError) as error:
         raise ValueError(f"invalid profile config: {config}: {error}") from error
-    if parsed is not None and not isinstance(parsed, dict):
-        raise ValueError(f"invalid profile config: {config} must contain a mapping")
 
 
 def bind_worker_environment(env: dict[str, str], workspace: str) -> None:

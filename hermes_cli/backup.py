@@ -17,7 +17,7 @@ from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from hermes_constants import (
     LOCAL_RUNTIME_ROOT_DIRS, _get_platform_default_hermes_home, get_default_hermes_root, get_hermes_home,
@@ -461,7 +461,7 @@ def _zip_sqlite_snapshot(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, ou
 
 
 def _write_zip_entries(
-    zf: zipfile.ZipFile, files_to_add: List[Tuple[Path, Path]], out_path: Path,
+    zf: zipfile.ZipFile, files_to_add: Iterable[Tuple[Path, Path]], out_path: Path,
     *, on_db_failure, on_error, on_progress, track_bytes: bool) -> int:
     """Add every ``(abs_path, rel_path)`` to *zf*, WAL-safe for ``*.db``; return bytes archived.
 
@@ -994,16 +994,12 @@ def run_import(args) -> Optional[int]:
         # for backups with no messaging config). Best-effort and prompt-free;
         # failures print a manual fallback and never fail the import.
         native_default = _get_platform_default_hermes_home()
-        default_has_install = any(
-            (native_default / marker).exists()
-            for marker in ("config.yaml", ".env", "state.db")
-        )
         # A restore into a sandbox or profile home must not silently install
         # a second gateway pointed at it — on the default service name that
         # would shadow or hijack the machine's primary install. Only revive
         # the service automatically when the restore landed in the default
-        # home, or when no other install exists on this machine.
-        if hermes_root != native_default and default_has_install:
+        # home. An alternate restore is an explicit target and stays inert.
+        if hermes_root != native_default:
             print(
                 "\nRestored into a non-default home; leaving the gateway service "
                 "alone to avoid clashing with the install at "
@@ -2005,34 +2001,46 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
     scan_started = time.monotonic()
     logger.info("automatic backup phase=scan status=started")
     try:
-        files_to_add = list(_iter_backup_files(hermes_root, out_path))
+        files_to_add = iter(_iter_backup_files(hermes_root, out_path))
+        first_entry = next(files_to_add, None)
     except OSError as exc:
         logger.warning("Full-zip backup: walk failed: %s", exc)
         return None
-    if not files_to_add:
+    if first_entry is None:
         return None
-    logger.info("automatic backup phase=scan status=complete duration_ms=%.1f files=%d",
-                (time.monotonic() - scan_started) * 1000, len(files_to_add))
+
+    file_count = 0
+
+    def entries():
+        nonlocal file_count
+        file_count += 1
+        yield first_entry
+        for entry in files_to_add:
+            file_count += 1
+            yield entry
+        logger.info("automatic backup phase=scan status=complete duration_ms=%.1f files=%d",
+                    (time.monotonic() - scan_started) * 1000, file_count)
 
     def _db_failure(rel_path: Path) -> None:
         logger.warning("Full-zip backup aborted: SQLite snapshot failed for %s", rel_path)
         raise _SQLiteSnapshotError(str(rel_path))
 
+    logger.info("automatic backup phase=archive status=started")
     archive_started = time.monotonic()
     try:
         with _atomic_output_path(out_path) as archive_path, zipfile.ZipFile(
                 archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             _write_zip_entries(
-                zf, files_to_add, out_path, on_db_failure=_db_failure, track_bytes=False,
+                zf, entries(), out_path, on_db_failure=_db_failure, track_bytes=False,
                 on_error=lambda rel, exc: logger.debug("Skipping %s in zip backup: %s", rel, exc),
                 on_progress=lambda i: logger.info(
-                    "automatic backup phase=archive status=progress completed=%d total=%d", i, len(files_to_add)))
+                    "automatic backup phase=archive status=progress completed=%d", i))
     except (OSError, _SQLiteSnapshotError) as exc:
         # The hidden partial is already gone; ``out_path`` may be a previous valid backup: keep it.
         logger.warning("Full-zip backup: zip write failed: %s", exc)
         return None
     logger.info("automatic backup phase=archive status=complete duration_ms=%.1f files=%d bytes=%d",
-                (time.monotonic() - archive_started) * 1000, len(files_to_add),
+                (time.monotonic() - archive_started) * 1000, file_count,
                 out_path.stat().st_size)
     return out_path
 

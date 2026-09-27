@@ -128,11 +128,11 @@ def test_reaching_the_model_resets_ladder_and_oneshots_never_retry(tmp_cron_home
     assert remaining is None or remaining.get(ur.STATE_KEY) is None
 
 
-def test_short_natural_schedule_consumes_retry_budget_and_notifies(tmp_cron_home):
+def test_short_natural_schedule_yields_to_the_schedule(tmp_cron_home):
     job = create_job("frequent report", "every 1m")
-    for attempt in range(len(ur.RETRY_DELAYS_SECONDS)):
-        assert ur.will_retry(job)
-        assert mark_job_run(job["id"], False, "ConnectError: dns", model_unreachable=True)
-        job = get_job(job["id"])
-        assert job[ur.STATE_KEY]["attempt"] == attempt + 1
-    assert not ur.will_retry(job)
+    assert ur.will_retry(job) is False
+    assert mark_job_run(job["id"], False, "ConnectError: dns", model_unreachable=True)
+    job = get_job(job["id"])
+    assert job is not None
+    assert job.get(ur.STATE_KEY) is None
+    assert ur.will_retry(job) is False

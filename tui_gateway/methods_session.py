@@ -89,9 +89,16 @@ def _profile_build_scope(profile_home):
 def _make_agent_in_context(sid: str, key: str, **kwargs):
     """``_make_agent`` with the session context bound for the build and cleared after."""
     tokens = _set_session_context(key, cwd=kwargs.get("cwd_override"))
+    cwd_token = None
     try:
+        if cwd := kwargs.get("cwd_override"):
+            from agent.runtime_cwd import set_session_cwd
+            cwd_token = set_session_cwd(cwd)
         return _make_agent(sid, key, session_id=key, **kwargs)
     finally:
+        if cwd_token is not None:
+            from agent.runtime_cwd import reset_session_cwd
+            reset_session_cwd(cwd_token)
         _clear_session_context(tokens)
 
 
@@ -355,7 +362,10 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
     explicit_cwd = False
     raw_cwd = _str_param(params, "cwd")  # unguarded, as on BASE: only the path check is best-effort
     with contextlib.suppress(Exception):
-        explicit_cwd = bool(raw_cwd) and os.path.isdir(os.path.abspath(os.path.expanduser(raw_cwd)))
+        explicit_cwd = bool(raw_cwd) and (
+            (_cwd_is_remote(profile_home) and _is_remote_cwd_shape(raw_cwd))
+            or os.path.isdir(os.path.abspath(os.path.expanduser(raw_cwd)))
+        )
     _enable_gateway_prompts()
     session_model_override, create_reasoning_override, create_service_tier_override = _create_overrides(params)
     conversation_worktree = {}
@@ -1066,16 +1076,21 @@ def _(rid, params: dict) -> dict:
     if not (raw := _str_param(params, "cwd")):
         return _err(rid, 4016, "cwd required")
     from hermes_constants import translate_cwd_for_wsl_backend
-    resolved = os.path.abspath(os.path.expanduser(translate_cwd_for_wsl_backend(raw)))
-    if not os.path.isdir(resolved):
-        return _err(rid, 4017, f"working directory does not exist: {raw}")
+    profile_home = _profile_home(_str_param(params, "profile") or None)
+    translated = translate_cwd_for_wsl_backend(raw)
+    try:
+        resolved = _workspace_cwd(profile_home, translated)
+    except ValueError as exc:
+        return _err(rid, 4017, str(exc))
     # Snapshot under the lock — concurrent RPCs mutate _sessions.
     with _sessions_lock:
         live_sid, live = next(
             ((sid, sess) for sid, sess in list(_sessions.items()) if sess.get("session_key") == target), ("", None))
     if live is not None and live.get("conversation_worktree"):
         return _err(rid, 4018, "workspace is managed by conversation worktree")
-    branch, root = git_probe.branch(resolved), git_probe.common_repo_root(resolved)
+    is_remote = _cwd_is_remote(profile_home)
+    branch, root = (None, None) if is_remote else (
+        git_probe.branch(resolved), git_probe.common_repo_root(resolved))
     with _profile_db(params, writer=True) as db:
         if db is None:
             return _db_unavailable_error(rid, code=5007)
@@ -2283,6 +2298,7 @@ def _build_branch_agent(session: dict, new_sid: str, new_key: str, history: list
         with _profile_build_scope(parent_home):
             agent = _make_agent_in_context(new_sid, new_key, session_db=branch_db, platform_override=source,
                                            cwd_override=branch_cwd,
+                                           auth_user_id=_session_auth_user_id(session),
                                            context_cwd_is_launch_artifact=(
                                                False if conversation_worktree
                                                else _context_cwd_is_launch_artifact(session)),

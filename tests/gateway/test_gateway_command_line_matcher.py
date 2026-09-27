@@ -61,7 +61,8 @@ def test_accepts_real_gateway_run(cmd):
 
 @pytest.mark.parametrize("cmd", REJECT)
 def test_rejects_non_gateway_run(cmd):
-    assert matches(cmd) is False
+    assert not matches(cmd)
+    assert not matches_runtime(cmd)
 
 
 # ``python -c <src> <old_pid> <gateway argv…>`` — the detached restart watcher
@@ -163,5 +164,4 @@ ATOMIC_DESKTOP = (
 def test_accepts_atomic_desktop_gateway():
     assert matches(ATOMIC_DESKTOP) is True
     assert matches_runtime(ATOMIC_DESKTOP) is True
-
 

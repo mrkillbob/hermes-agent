@@ -520,8 +520,10 @@ class ToolRegistry:
     def get_all_entries(self) -> List[ToolEntry]:
         return self._snapshot_entries()
 
-    def get_tool_names_for_toolset(self, toolset: str) -> List[str]:
-        return sorted(e.name for e in self._grouped(self._snapshot_entries()).get(toolset, []))
+    def get_tool_names_for_toolset(self, toolset: str, *, scope: Optional[str] = None) -> List[str]:
+        """List names visible in the active profile's overlay and the global registry."""
+        active_scope = scope if scope is not None else self.current_scope_key()
+        return sorted(e.name for e in self._toolset_entries(toolset, active_scope))
 
     def register_toolset_alias(self, alias: str, toolset: str) -> None:
         """Register an explicit alias for a canonical toolset name."""

@@ -2037,11 +2037,7 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
     if not update_complete:
         # Fleet caught up, but the independently checked SQLite runtime is unsafe.
         sys.exit(1)
-    # Fleet is healthy on the new code: fold per-profile gateways into one multiplexer when nothing
-    # blocks it (deterministic; never prompts), else print the blockers and the one-liner to run later.
-    with _best_effort('Multiplex auto-migration after update failed: %s'):
-        from hermes_cli.gateway_migrate import maybe_auto_migrate_after_update
-        maybe_auto_migrate_after_update()
+    # Automatic gateway migration ran once above and is recorded in the receipt.
 
 
 def _restart_phase_failure_is_incomplete(surviving, pre_restart_pids) -> bool:
