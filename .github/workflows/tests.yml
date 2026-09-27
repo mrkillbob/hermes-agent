@@ -134,10 +134,10 @@ jobs:
           # size. The remaining time is the slowest files plus the setup.
           # Workers above the core count only add contention.
           HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '96' || '4' }}
-          # The upstream 96-core runner needs extra headroom for the largest
-          # files under its 96-worker load. Keep the standard fork runner's
-          # default cap so a stuck file cannot hold a slice for 10 minutes.
-          HERMES_TEST_FILE_TIMEOUT: ${{ github.repository == 'NousResearch/hermes-agent' && '600' || '300' }}
+          # Match upstream's 10-minute per-file headroom on public fork runners
+          # too. Large files can exceed five minutes under shared-runner load
+          # even when all collected tests pass.
+          HERMES_TEST_FILE_TIMEOUT: "600"
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
