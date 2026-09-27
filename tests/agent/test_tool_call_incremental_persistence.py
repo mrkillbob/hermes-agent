@@ -184,6 +184,7 @@ def test_kanban_worker_exits_after_durable_successful_completion(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_completed")
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "715")
     monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
     # This test's "t_completed"/715 have no real board row, so the real auto-heartbeat/
     # comment-injection bridges (agent._touch_activity -> heartbeat_current_worker_from_env /
     # inject_new_comments_from_env) would either hard-interrupt the turn on a "lease lost"

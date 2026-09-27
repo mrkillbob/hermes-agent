@@ -919,6 +919,15 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
     key = _resolve_plugin_key(name)
     if key is None:
         return {"ok": False, "error": f"Plugin '{name}' is not installed or bundled."}
+    managed_keys = _managed_plugin_toggle_keys(key, enable=enabled)
+    if managed_keys:
+        return {
+            "ok": False,
+            "error": f"Cannot change plugin enablement: {', '.join(managed_keys)} is managed by your administrator.",
+            "name": key,
+            "unchanged": True,
+            "restart_required": False,
+        }
     from hermes_cli.plugins_admission import AdmissionRefused
 
     try:

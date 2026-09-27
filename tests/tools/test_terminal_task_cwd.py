@@ -96,6 +96,7 @@ def test_kanban_workspace_beats_stale_recorded_session_cwd(monkeypatch, tmp_path
     task_id = "kanban-worker-session"
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_workspace")
     monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
     monkeypatch.setenv("TERMINAL_CWD", str(workspace))
     monkeypatch.setattr(terminal_tool, "_active_environments", {"default": FakeEnv()})
     monkeypatch.setattr(terminal_tool, "_last_activity", {})
@@ -144,6 +145,7 @@ def test_kanban_relative_workdir_is_anchored_to_worker_workspace(
     monkeypatch.chdir(workspace)
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_workspace")
     monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
     monkeypatch.setenv("TERMINAL_CWD", str(workspace))
     monkeypatch.setattr(terminal_tool, "_active_environments", {"default": FakeEnv()})
     monkeypatch.setattr(terminal_tool, "_last_activity", {})

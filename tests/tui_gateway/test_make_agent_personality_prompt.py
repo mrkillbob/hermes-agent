@@ -78,6 +78,8 @@ def test_managed_agent_build_uses_certified_prompt_and_scoped_cwd(monkeypatch, t
     from tui_gateway import server
 
     prior = resolve_agent_cwd()
+    for name in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE", "HERMES_DELEGATED_CHILD_CONTEXT"):
+        monkeypatch.delenv(name, raising=False)
     metadata = {"path": str(tmp_path), "root_session_id": "root", "branch": "session/root", "base_commit": "abc"}
     monkeypatch.setattr(server, "_sessions", {"sid-1": {"conversation_worktree": metadata}})
     seen = []

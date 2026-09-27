@@ -893,6 +893,19 @@ def _container_visible_default(default_cwd: str, env_type: str | None, env=None)
     return default_cwd
 
 
+def _owned_kanban_workspace() -> str | None:
+    """The assigned workspace for this dispatcher-owned Kanban worker, if valid."""
+    from agent.delegation_context import owned_kanban_task
+
+    if not owned_kanban_task():
+        return None
+    workspace = os.environ.get("HERMES_KANBAN_WORKSPACE", "").strip()
+    if not workspace:
+        return None
+    resolved = os.path.abspath(os.path.expanduser(workspace))
+    return resolved if os.path.isdir(resolved) else None
+
+
 def _resolve_command_cwd(
     *,
     workdir: Optional[str],
@@ -902,8 +915,11 @@ def _resolve_command_cwd(
     mounted_host: Optional[str] = None,
     env=None,
 ) -> str:
-    """cwd for a command: explicit ``workdir`` > the session's own cwd record >
-    ``default_cwd``.
+    """Resolve a command cwd, keeping an owned Kanban worker inside its assigned workspace.
+
+    An owned worker's workspace anchors relative ``workdir`` values and takes
+    precedence over the inherited session cwd. Other callers keep the usual
+    explicit ``workdir`` > session record > ``default_cwd`` order.
 
     The record is written after every completed command of THIS session, so
     it is the session's ``cd`` state with no shared-env ambiguity. On
@@ -918,8 +934,13 @@ def _resolve_command_cwd(
 
     Same guard class as the env-creation sanitizers (#50636, #54447); this is the per-command sibling site.
     """
+    worker_workspace = _owned_kanban_workspace()
     if workdir:
+        if worker_workspace and not os.path.isabs(workdir):
+            workdir = os.path.abspath(os.path.join(worker_workspace, workdir))
         return coerce_ssh_remote_cwd(_container_visible_cwd(workdir, env_type, env), env_type)
+    if worker_workspace:
+        return coerce_ssh_remote_cwd(_container_visible_cwd(worker_workspace, env_type, env), env_type)
     recorded = get_session_cwd(session_key)
     if recorded and _is_container_backend(env_type) and _is_unusable_container_cwd(
         recorded, mounted_host=mounted_host

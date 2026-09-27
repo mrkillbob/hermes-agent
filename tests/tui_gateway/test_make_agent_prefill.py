@@ -40,7 +40,7 @@ def _built_prefill(monkeypatch, home):
 
 def test_make_agent_injects_the_active_profiles_prefill(monkeypatch, tmp_path):
     monkeypatch.delenv("HERMES_PREFILL_MESSAGES_FILE", raising=False)
-    monkeypatch.setattr(server, "_resolve_agent_model_runtime", lambda *_a, **_kwargs: ("test-model", {}))
+    monkeypatch.setattr(server, "_resolve_agent_model_runtime", lambda *_a, **_kwargs: ("test-model", {}, None))
     monkeypatch.setattr(server, "_load_enabled_toolsets", lambda *_a, **_kw: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
     monkeypatch.setattr(server, "_agent_cbs", lambda sid: {})

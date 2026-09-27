@@ -13,6 +13,7 @@ def test_worktree_runner_never_borrows_live_editable_venv(tmp_path: Path) -> Non
     runner.write_bytes(source.read_bytes())
     activation_source = source.with_name("_activation.sh")
     (scripts / "_activation.sh").write_bytes(activation_source.read_bytes())
+    (repository / "activate").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
     fake_python = tmp_path / "home" / ".hermes" / "hermes-agent" / "venv" / "bin" / "python"
     fake_python.parent.mkdir(parents=True)
@@ -30,5 +31,5 @@ def test_worktree_runner_never_borrows_live_editable_venv(tmp_path: Path) -> Non
     )
 
     assert completed.returncode == 1
-    assert "no virtualenv with pytest found" in completed.stderr
+    assert "activation provided no test interpreter with pytest" in completed.stderr
     assert "using Nix dev venv" not in completed.stdout

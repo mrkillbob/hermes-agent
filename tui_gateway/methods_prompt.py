@@ -455,10 +455,8 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
             failure = describe_storage_failure(_db_error)
             return _err(
                 rid, 5072,
-                "session storage unavailable: "
-                f"{_db_error or 'state.db could not be opened'} — the message "
-                "was not saved; repair state.db with `hermes doctor --fix` and try again",
-                data={"code": "storage_unavailable", "cause": "encoding", "details": _db_error or ""})
+                f"session storage unavailable: {failure.gloss} — the message was not saved; {failure.action}",
+                data=_storage_error_data(failure, _db_error))
         _bind_conversation_worktree_on_submit(session)
         _persist_branch_seed(session)
         _persist_submit_user_row(session, text, display_kind)
@@ -576,7 +574,8 @@ def _validate_truncation_before_materializing(rid, sid, session, params):
 
 def _admit_prompt_submit(
     rid, sid, session, text, params, has_truncation, requested_rebind_ids,
-    hosted_task, internal_hosted_submit, transport, *, reattach=False, client_surface="", display_kind=None):
+    hosted_task, internal_hosted_submit, transport, *, reattach=False, client_surface="", display_kind=None,
+    persist_session=True):
     """Serialize admission, validation, materialization, and turn claim per session."""
     raw_turn_author = params.get("_turn_author")
     turn_author = None
@@ -619,8 +618,9 @@ def _admit_prompt_submit(
             rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
         if err is not None:
             return err, None
-        if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
-            return err, None
+        if persist_session:
+            if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
+                return err, None
         # Record the surface only after this request owns the turn. A rejected busy
         # request must not overwrite the surface used by the in-flight turn.
         session["client_surface"] = client_surface
@@ -728,7 +728,8 @@ def _(rid, params: dict) -> dict:
             if params.get("surface") in {"hud", "voice-live"}
             else ""
         ),
-        display_kind=display_kind)
+        display_kind=display_kind,
+        persist_session=not turn_isolation)
     if err is not None:
         return err
     turn_author = session.pop("_accepted_turn_author", None)
@@ -750,6 +751,8 @@ def _(rid, params: dict) -> dict:
         logger.warning(
             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
             isolated_response["error"].get("message", "unknown error"))
+        if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
+            return err
     # Capture before starting the worker: it consumes the staging dict and may finish before the RPC returns.
     staged_user = session.get("_submit_user_row") or {}
     if isinstance(staged_user.get("_row_id"), int):

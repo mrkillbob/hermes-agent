@@ -46,10 +46,13 @@ def test_enqueue_preserves_order_after_an_image_turn():
     server._enqueue_prompt(session, "C", "ws-1", image_paths=["/tmp/c.png"])
     server._enqueue_prompt(session, "D", "ws-1")
 
-    assert session["queued_prompt"] == {"text": "B", "transport": "ws-1"}
+    assert session["queued_prompt"] == {
+        "text": "B", "transport": "ws-1", "client_surface": "", "voice_live_context": ""
+    }
     assert session["queued_prompts"] == [
-        {"text": "C", "transport": "ws-1", "image_paths": ["/tmp/c.png"]},
-        {"text": "D", "transport": "ws-1"},
+        {"text": "C", "transport": "ws-1", "image_paths": ["/tmp/c.png"],
+         "client_surface": "", "voice_live_context": ""},
+        {"text": "D", "transport": "ws-1", "client_surface": "", "voice_live_context": ""},
     ]
 
 
@@ -170,6 +173,8 @@ def test_enqueue_skips_text_duplicate_of_inflight_user():
     assert session["queued_prompt"] == {
         "text": "different follow-up",
         "transport": "ws-1",
+        "client_surface": "",
+        "voice_live_context": "",
     }
 
 
@@ -187,7 +192,9 @@ def test_enqueue_followup_does_not_merge_stale_inflight_self_duplicate():
 
     server._enqueue_prompt(session, "Q", "ws-1")
 
-    assert session.get("queued_prompt") == {"text": "Q", "transport": "ws-1"}
+    assert session.get("queued_prompt") == {
+        "text": "Q", "transport": "ws-1", "client_surface": "", "voice_live_context": ""
+    }
     assert not session.get("queued_prompts")
 
 
@@ -215,7 +222,10 @@ def test_enqueue_keeps_an_authored_copy_of_the_inflight_text():
 
     server._enqueue_prompt(session, "status?", "ws-1", turn_author=author)
 
-    assert session.get("queued_prompt") == {"text": "status?", "transport": "ws-1", "turn_author": author}
+    assert session.get("queued_prompt") == {
+        "text": "status?", "transport": "ws-1", "turn_author": author,
+        "client_surface": "", "voice_live_context": "",
+    }
 
 
 def test_drop_leaves_an_authored_entry_that_shares_the_inflight_prefix_intact():
@@ -252,7 +262,9 @@ def test_hard_interrupt_queue_path_scrubs_stale_inflight_self_duplicate(monkeypa
     resp = server._handle_busy_submit("r1", "sid", session, "Q", "ws-1")
 
     assert resp["result"]["status"] == "queued"
-    assert _visible(session.get("queued_prompt")) == {"text": "Q", "transport": "ws-1"}
+    assert _visible(session.get("queued_prompt")) == {
+        "text": "Q", "transport": "ws-1", "client_surface": "", "voice_live_context": ""
+    }
     assert not session.get("queued_prompts")
     # Interrupt is async-threaded; policy still enqueued Q after scrubbing P.
 
@@ -588,6 +600,8 @@ def test_busy_submit_claims_attached_image_for_queued_turn(monkeypatch):
         "text": "is this B?",
         "image_paths": ["/tmp/b.png"],
         "transport": None,
+        "client_surface": "",
+        "voice_live_context": "",
     }
 
 
@@ -614,7 +628,8 @@ def test_busy_image_prompts_keep_b_and_c_attachments_in_submission_order(monkeyp
 
         assert session["queued_prompt"]["image_paths"] == ["/tmp/b.png"]
         assert [_visible(e) for e in session["queued_prompts"]] == [
-            {"text": "C", "image_paths": ["/tmp/c.png"], "transport": None}
+            {"text": "C", "image_paths": ["/tmp/c.png"], "transport": None,
+             "client_surface": "", "voice_live_context": ""}
         ]
 
         session["running"] = False
@@ -804,4 +819,3 @@ def test_drain_continues_with_later_queued_prompt_after_dispatch_failure(monkeyp
     assert calls == ["broken", "next"]
     assert session["queued_prompt"] is None
     assert session.get("queued_prompts") is None
-

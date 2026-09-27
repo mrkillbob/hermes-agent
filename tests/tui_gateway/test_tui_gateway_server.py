@@ -15840,6 +15840,7 @@ def test_session_branch_writes_to_parent_profile_db(monkeypatch, tmp_path):
 
         def set_auto_title(self, _key, _title, *, source="llm"):
             seen["title_source"] = source
+            seen["title"] = (_key, _title)
             return True
 
         def get_session(self, key):
