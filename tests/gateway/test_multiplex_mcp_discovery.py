@@ -175,7 +175,7 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
     )
 
     live_server = SimpleNamespace(
-        session=object(), _config={"command": "shared"},
+        session=object(), _config={"url": "https://shared.example/mcp"},
         _resolved_identity="shared-identity",
         _tools=[SimpleNamespace(
             name="tool", description="Tool", inputSchema={"type": "object", "properties": {}},
@@ -202,7 +202,7 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
 
     def fake_discover() -> list[str]:
         _mcp_registration.register_connected_into_current_scope(
-            {"shared": {"command": "shared"}})
+            {"shared": {"url": "https://shared.example/mcp"}})
         return ["mcp__shared__tool"]
 
     monkeypatch.setattr(_mcp_lifecycle, "shutdown_mcp_servers", lambda **_kwargs: None)
@@ -545,7 +545,7 @@ def test_shared_server_tools_are_callable_and_removed_on_non_owner_reload(
         _tools=[tool],
         tool_timeout=30,
         _registered_tool_names=[],
-        _config={"command": "unused"},
+        _config={"url": "https://shared.example/mcp"},
         _resolved_identity="shared-identity",
         initialize_result=None,
     )
@@ -585,7 +585,8 @@ def test_shared_server_tools_are_callable_and_removed_on_non_owner_reload(
                             lambda _name, _config: "shared-identity")
         # A real stdio configuration is required even though this test reuses
         # the already-connected shared server and never starts a subprocess.
-        assert _mcp_discovery.register_mcp_servers({"shared": {"command": "unused"}})
+        assert _mcp_discovery.register_mcp_servers(
+            {"shared": {"url": "https://shared.example/mcp"}})
         tool_names = registry.get_tool_names_for_toolset("mcp-shared")
         assert tool_names
         assert callable(registry.get_entry(tool_names[0]).handler)
