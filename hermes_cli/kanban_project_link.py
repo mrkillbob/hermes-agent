@@ -110,5 +110,3 @@ def _project_from_source_task(
         id=project_id, slug=project_slug, name=project_slug, created_at=0, primary_path=project_repo,
     )
     return project_obj, project_repo
-
-

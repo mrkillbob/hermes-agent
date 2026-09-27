@@ -132,7 +132,7 @@ def test_seed_apply_writes_role_identity_metadata(tmp_path: Path) -> None:
     assert "gpt-5.5" in config
     assert "agent:" in config
     assert "reasoning_effort: low" in config
-    import yaml
+    import hermes_yaml as yaml
 
     parsed_config = yaml.safe_load(config)
     assert parsed_config["toolsets"] == ["file"]
@@ -202,7 +202,7 @@ def test_seed_refresh_existing_preserves_soul_and_adopts_route(tmp_path: Path) -
     assert "old.example" not in refreshed_config
     assert "stale-key" not in refreshed_config
     assert "old-mode" not in refreshed_config
-    import yaml
+    import hermes_yaml as yaml
 
     assert yaml.safe_load(refreshed_config)["toolsets"] == ["kanban", "file"]
 
@@ -256,7 +256,7 @@ def test_write_role_config_persists_toolsets_without_a_model_policy(tmp_path: Pa
 
     _write_role_config(profile_dir, role, manifest)
 
-    import yaml
+    import hermes_yaml as yaml
 
     config = yaml.safe_load((profile_dir / "config.yaml").read_text())
     assert config["toolsets"] == ["kanban", "file"]
@@ -391,7 +391,7 @@ def test_seed_groups_writes_stable_projection_and_memberships(tmp_path: Path) ->
 
     assert len(result["seeded"]) == len(manifest.groups)
     assert not result["failed"]
-    import yaml
+    import hermes_yaml as yaml
 
     default_doc = yaml.safe_load((default / "profile.yaml").read_text())
     snapshot = default_doc["ui_meta"]["hermes-bots-groups"]
@@ -423,7 +423,7 @@ def test_seed_groups_preserves_existing_room_history(tmp_path: Path) -> None:
         apply=True,
         profile_dir_for=lambda name: default if name == "default" else profiles / name,
     )
-    import yaml
+    import hermes_yaml as yaml
 
     path = default / "profile.yaml"
     doc = yaml.safe_load(path.read_text())

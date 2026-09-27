@@ -29,14 +29,12 @@ def fake_gh(tmp_path, monkeypatch):
         pytest.skip("POSIX shell stub")
     gh = tmp_path / "gh"
     gh.write_text(
-        "#!/bin/bash\n"
-        "if [[ \"$1 $2\" == \"api user\" ]]; then\n"
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == api && \"$2\" == user ]]; then\n"
         "  echo '{\"login\":\"mrkillbobbot\"}'\n"
         "  exit 0\n"
         "fi\n"
-        "sleep 1\n"
-        "echo posted\n"
-        "exit 0\n",
+        "sleep 1\necho posted\nexit 0\n",
         encoding="utf-8",
     )
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)

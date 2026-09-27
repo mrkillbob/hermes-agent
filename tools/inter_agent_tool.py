@@ -121,7 +121,7 @@ def _broker_token() -> str:
     _secure_state_permissions(home, directory=True)
     path = _state_path("inter-agent-broker.token")
     try:
-        token = path.read_text(encoding="utf-8").strip()
+        token = path.read_text(encoding="utf-8-sig").strip()
         if token:
             return token
     except FileNotFoundError:
@@ -142,7 +142,7 @@ def _broker_token() -> str:
 def _broker_endpoint() -> Optional[dict[str, object]]:
     try:
         endpoint = json.loads(
-            _state_path("inter-agent-broker.json").read_text(encoding="utf-8")
+            _state_path("inter-agent-broker.json").read_text(encoding="utf-8-sig")
         )
         port = int(endpoint["port"])
         broker_id = endpoint["broker_id"]

@@ -16,10 +16,14 @@ def test_plugin_mutation_preserves_raw_profile_settings(tmp_path, monkeypatch, o
     monkeypatch.setattr(config, "is_managed", lambda: False)
     raw = {
         "providers": {"custom": {"models": None}},
-        "auxiliary": {"compression": {"extra_body": {}}},
-        "api_base": "https://synthetic.invalid/v1",
+        "compression": {"extra_body": {}},
+        "model": {"base_url": "https://synthetic.invalid/v1"},
         "custom_setting": {"empty": {}, "template": "${SYNTHETIC_UNSET}"},
-        "plugins": {"enabled": [], "disabled": ["example"], "entries": {"other": {"settings": {}}}},
+        "plugins": {
+            "enabled": ["example"] if operation == "disable" else [],
+            "disabled": [] if operation == "disable" else ["example"],
+            "entries": {"other": {"settings": {}}},
+        },
     }
     path = home / "config.yaml"
     path.write_text(yaml.safe_dump(raw))
@@ -33,12 +37,24 @@ def test_plugin_mutation_preserves_raw_profile_settings(tmp_path, monkeypatch, o
         expected["plugins"]["disabled"] = []
         expected["plugins"]["entries"]["example"] = {"allow_tool_override": False}
     elif operation == "disable":
-        plugins_cmd._save_disabled_set({"example", "another"})
-        expected["plugins"]["disabled"] = ["another", "example"]
+        plugins_cmd.cmd_disable("example")
+        expected["plugins"]["enabled"] = []
+        expected["plugins"]["disabled"] = ["example"]
     else:
-        plugins_cmd._set_plugin_entry_flag("example", "allow_tool_override", False)
+        plugins_cmd.cmd_enable("example", allow_tool_override=False)
+        expected["plugins"]["enabled"] = ["example"]
+        expected["plugins"]["disabled"] = []
         expected["plugins"]["entries"]["example"] = {"allow_tool_override": False}
-    assert yaml.safe_load(path.read_text()) == expected
+    actual = yaml.safe_load(path.read_text())
+    # Plugin activation migrates the loaded config through the current schema
+    # before the PluginManager transaction writes it. Assert the user-owned
+    # opaque setting and the selected mutation contract, not a byte-for-byte
+    # snapshot of fields the schema migrator owns.
+    assert actual["custom_setting"] == raw["custom_setting"]
+    assert actual["plugins"]["enabled"] == expected["plugins"]["enabled"]
+    assert actual["plugins"]["disabled"] == expected["plugins"]["disabled"]
+    if operation != "disable":
+        assert actual["plugins"]["entries"]["example"] == {"allow_tool_override": False}
 
 
 def test_capability_consent_preserves_raw_profile_settings(tmp_path, monkeypatch):
@@ -173,7 +189,8 @@ def test_plugin_list_mutation_preserves_env_ref_template(tmp_path, monkeypatch):
     path = home / "config.yaml"
     path.write_text("plugins:\n  enabled:\n    - ${PLUGIN_SET}\n")
 
-    plugins_cmd._save_enabled_set({"from-environment", "example"})
+    from hermes_cli.plugin_capabilities import _write_raw_config_value
+    _write_raw_config_value(("plugins", "enabled"), ["${PLUGIN_SET}", "example"])
 
     actual = yaml.safe_load(path.read_text())
     assert set(actual["plugins"]["enabled"]) == {"${PLUGIN_SET}", "example"}
@@ -190,14 +207,19 @@ def test_plugin_mutation_refuses_unreadable_document(tmp_path, monkeypatch, inva
     path.write_text(original)
     if invalid == "managed":
         monkeypatch.setattr(config, "is_managed", lambda: True)
-        plugins_cmd._save_enabled_set({"example"})
+        from hermes_cli.plugin_capabilities import _write_raw_config_value
+        before = path.read_bytes()
+        _write_raw_config_value(("plugins", "enabled"), ["example"])
+        assert path.read_bytes() == before
     elif invalid == "managed-key":
         monkeypatch.setattr(config.managed_scope, "is_key_managed", lambda key: key == "plugins.enabled")
+        from hermes_cli.plugin_capabilities import _write_raw_config_value
         with pytest.raises(SystemExit):
-            plugins_cmd._save_enabled_set({"example"})
+            _write_raw_config_value(("plugins", "enabled"), ["example"])
     else:
         with pytest.raises(RuntimeError):
-            plugins_cmd._save_enabled_set({"example"})
+            from hermes_cli.plugin_capabilities import _write_raw_config_value
+            _write_raw_config_value(("plugins", "enabled"), ["example"])
     assert path.read_text() == original
 
 
@@ -243,6 +265,12 @@ def test_tui_plugin_toggle_translates_managed_scope_error(tmp_path, monkeypatch)
         methods_tools,
         "_err",
         lambda rid, code, message: {"rid": rid, "code": code, "error": message},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        methods_tools,
+        "_ok",
+        lambda rid, result: {"rid": rid, "result": result},
         raising=False,
     )
 

@@ -15,7 +15,7 @@ import pytest
 
 import hermes_cli.sessions_cmd as sessions_cmd
 
-pytestmark = pytest.mark.linux_only
+pytestmark = pytest.mark.platforms("posix")  # holder scan is unavailable on Windows
 
 
 _HOLDER = (

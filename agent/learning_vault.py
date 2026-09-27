@@ -144,7 +144,7 @@ def _read_note(
             return None, VaultLearningDiagnostic("note_outside_vault", label)
         if resolved.stat().st_size > MAX_NOTE_BYTES:
             return None, VaultLearningDiagnostic("note_too_large", label)
-        return resolved.read_text(encoding="utf-8"), None
+        return resolved.read_text(encoding="utf-8-sig"), None
     except UnicodeDecodeError:
         return None, VaultLearningDiagnostic("invalid_utf8", label)
     except OSError:

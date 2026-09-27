@@ -174,9 +174,15 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
         get_or_create_session=MagicMock(side_effect=RuntimeError("skip transcript")),
     )
 
-    live_server = SimpleNamespace(session=object(), _config={}, _tools=[], tool_timeout=30,
+    live_server = SimpleNamespace(
+        session=object(), _config={"url": "https://shared.example/mcp"},
+        _resolved_identity="shared-identity",
+        _tools=[SimpleNamespace(
+            name="tool", description="Tool", inputSchema={"type": "object", "properties": {}},
+            annotations=None,
+        )], tool_timeout=30,
                                   initialize_result=None, _registered_tool_names=[])
-    private_key = f"shared::profile::{launch_scope}"
+    private_key = (launch_scope, "shared")
     monkeypatch.setattr(mcp_tool, "_servers", {private_key: live_server})
     monkeypatch.setattr(mcp_tool, "_server_public_names", {private_key: "shared"})
     monkeypatch.setattr(mcp_tool, "_server_scope_keys", {private_key: launch_scope})
@@ -190,10 +196,13 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
     monkeypatch.setattr(mcp_tool, "_server_connect_errors", {})
     monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {})
     monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: worker_scope)
+    from tools import mcp_tool_registration as _mcp_registration
+    monkeypatch.setattr(_mcp_registration, "_adopter_identity_digest",
+                        lambda _name, _config: "shared-identity")
 
     def fake_discover() -> list[str]:
-        from tools import mcp_tool_registration as _mcp_registration
-        _mcp_registration.register_connected_into_current_scope({"shared": {}})
+        _mcp_registration.register_connected_into_current_scope(
+            {"shared": {"url": "https://shared.example/mcp"}})
         return ["mcp__shared__tool"]
 
     monkeypatch.setattr(_mcp_lifecycle, "shutdown_mcp_servers", lambda **_kwargs: None)
@@ -536,7 +545,8 @@ def test_shared_server_tools_are_callable_and_removed_on_non_owner_reload(
         _tools=[tool],
         tool_timeout=30,
         _registered_tool_names=[],
-        _config={},
+        _config={"url": "https://shared.example/mcp"},
+        _resolved_identity="shared-identity",
         initialize_result=None,
     )
     owner_tool_name = "mcp__shared__echo"
@@ -555,19 +565,27 @@ def test_shared_server_tools_are_callable_and_removed_on_non_owner_reload(
             "_server_scope_keys": dict(mcp_tool._server_scope_keys),
             "_server_tool_scopes": dict(mcp_tool._server_tool_scopes),
             "_mcp_tool_server_names": dict(mcp_tool._mcp_tool_server_names),
+            "_server_public_names": dict(mcp_tool._server_public_names),
         }
         mcp_tool._servers.clear()
         mcp_tool._server_scope_keys.clear()
         mcp_tool._server_tool_scopes.clear()
         mcp_tool._mcp_tool_server_names.clear()
+        mcp_tool._server_public_names.clear()
         mcp_tool._servers["shared"] = server
+        mcp_tool._server_public_names["shared"] = "shared"
         mcp_tool._server_scope_keys["shared"] = launch_scope
         mcp_tool._server_tool_scopes["shared"] = {launch_scope}
 
     try:
         monkeypatch.setattr(mcp_tool, "_ensure_mcp_sdk", lambda: True)
         monkeypatch.setattr(_mcp_config, "_filter_suspicious_mcp_servers", lambda servers: servers)
-        assert _mcp_discovery.register_mcp_servers({"shared": {}})
+        from tools import mcp_tool_registration as _mcp_registration
+        monkeypatch.setattr(_mcp_registration, "_adopter_identity_digest",
+                            lambda _name, _config: "shared-identity")
+        # The shared endpoint is reused without opening another transport.
+        assert _mcp_discovery.register_mcp_servers(
+            {"shared": {"url": "https://shared.example/mcp"}})
         tool_names = registry.get_tool_names_for_toolset("mcp-shared")
         assert tool_names
         assert callable(registry.get_entry(tool_names[0]).handler)
@@ -619,7 +637,8 @@ def test_deregister_scope_kwarg_targets_overlay_and_keeps_plugin_confinement() -
     assert reg.snapshot_registration("mcp__s__t", scope="/home/p1") is None
 
     # A plugin module may not name another profile's overlay.
-    reg._plugin_module_scopes["hermes_plugins.p"] = {"/home/p1"}
+    from hermes_constants import hermes_home_key
+    reg._plugin_module_scopes["hermes_plugins.p"] = {hermes_home_key("/home/p1")}
     reg._caller_module = staticmethod(lambda: "hermes_plugins.p")
     with pytest.raises(PermissionError):
         reg.deregister("anything", scope="/home/p2")

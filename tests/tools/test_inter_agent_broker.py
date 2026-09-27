@@ -265,7 +265,7 @@ def test_broker_uses_platform_detach_helper(monkeypatch):
     ]
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_broker_retries_without_breakaway_when_job_rejects_spawn(monkeypatch):
     calls = []
     readiness = iter((False, False, True))
@@ -358,7 +358,7 @@ def test_message_database_and_sidecars_are_owner_only(monkeypatch, tmp_path):
             assert stat.S_IMODE(candidate.stat().st_mode) == 0o600
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_broker_state_removes_inherited_windows_acl(tmp_path):
     path = tmp_path / "inter-agent-broker.token"
     path.write_text("secret", encoding="utf-8")
@@ -371,7 +371,7 @@ def test_broker_state_removes_inherited_windows_acl(tmp_path):
     assert "(I)" not in acl
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_broker_write_sidecars_have_private_acl(monkeypatch, tmp_path):
     monkeypatch.setattr(broker, "get_default_hermes_root", lambda: tmp_path)
     database = tmp_path / "inter-agent-messages.db"

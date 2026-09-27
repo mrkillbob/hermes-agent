@@ -65,7 +65,7 @@ def _broker_token() -> str:
     _secure_state_permissions(home, directory=True)
     path = _state_path("inter-agent-broker.token")
     try:
-        token = path.read_text(encoding="utf-8").strip()
+        token = path.read_text(encoding="utf-8-sig").strip()
         if token:
             _secure_state_permissions(path)
             return token
@@ -109,7 +109,7 @@ def _write_endpoint(server: _BrokerServer) -> Path:
 def _remove_endpoint_if_owned(path: Path, broker_id: str) -> None:
     """Remove the endpoint only when it still names this broker instance."""
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
         return
     if payload.get("broker_id") != broker_id:

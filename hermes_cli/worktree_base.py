@@ -68,7 +68,7 @@ def resolve_worktree_base(
                 fetch_head = Path(repo_root) / fetch_head
             if not fetch_head.exists():
                 return None
-            if f"'{branch}'" not in fetch_head.read_text(encoding="utf-8", errors="replace"):
+            if f"'{branch}'" not in fetch_head.read_text(encoding="utf-8-sig", errors="replace"):
                 return None
             return max(0.0, time.time() - fetch_head.stat().st_mtime)
         except Exception:

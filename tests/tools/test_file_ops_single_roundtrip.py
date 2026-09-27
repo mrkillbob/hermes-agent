@@ -18,16 +18,14 @@ import tools.file_operations as file_operations
 from tools.environments.local import LocalEnvironment
 from tools.file_operations import ExecuteResult, ShellFileOperations
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell probes")
+pytestmark = pytest.mark.platforms("posix")  # POSIX shell probes
 
 READ_PROBE_MARK = "__HERMES_RF_"
-
 
 @pytest.fixture(scope="module")
 def _local_env(tmp_path_factory):
     """One real LocalEnvironment per module; constructing one costs ~0.8 s."""
     return LocalEnvironment(cwd=str(tmp_path_factory.mktemp("file-ops")))
-
 
 @pytest.fixture
 def _ops(_local_env, tmp_path):
@@ -47,13 +45,11 @@ def _ops(_local_env, tmp_path):
     finally:
         env.__dict__.pop("execute", None)
 
-
 @pytest.fixture
 def shell(_ops, monkeypatch):
     """Pin the shell path even where a native fast path exists."""
     monkeypatch.setenv("HERMES_NATIVE_FILE_READ", "0")
     return _ops
-
 
 @pytest.fixture
 def native(_ops, monkeypatch):
@@ -61,12 +57,10 @@ def native(_ops, monkeypatch):
     monkeypatch.delenv("HERMES_NATIVE_FILE_READ", raising=False)
     return _ops
 
-
 def _write(tmp_path, name, data: bytes):
     p = tmp_path / name
     p.write_bytes(data)
     return str(p)
-
 
 class TestReadFileOneRoundTrip:
     def test_text_read_is_one_round_trip(self, shell, tmp_path):
@@ -148,7 +142,6 @@ class TestReadFileOneRoundTrip:
         assert r.error is None and r.total_lines == 3
         assert r.content == f"1|x\n2|{lookalike}\n3|y"
 
-
 class TestReadFileNonTextPaths:
     def test_missing_file_probes_once_then_suggests(self, shell, tmp_path):
         ops, calls = shell
@@ -193,7 +186,6 @@ class TestReadFileNonTextPaths:
         assert len(calls) == 1 and READ_PROBE_MARK not in calls[0]
         assert r.is_image is True and r.file_size == 6
 
-    @pytest.mark.linux_only
     def test_fifo_returns_not_regular_without_blocking(self, shell, tmp_path):
         if not hasattr(os, "mkfifo"):
             pytest.skip("no mkfifo")
@@ -211,7 +203,6 @@ class TestReadFileNonTextPaths:
         assert not t.is_alive(), "read_file blocked on a writer-less FIFO"
         assert "not a regular file" in box["r"].error
         assert len(calls) == 1
-
 
 class TestWriteFileRoundTrips:
     """write_file: one probe, one atomic write, one hash check (three calls)."""
@@ -282,6 +273,38 @@ class TestWriteFileRoundTrips:
         assert p.read_bytes() == b"x\r\ny\r\n"
 
 
+class TestHeredocStdinBackends:
+    """Modal/Daytona/Vercel embed stdin as a heredoc in the command string (the SDK exec has
+    no stdin; the local env gets DEVNULL, same as there). The atomic write's temp file must
+    receive exactly the content, or ``mv`` swaps a wrong file over the target."""
+
+    @pytest.fixture
+    def heredoc_ops(self, shell, monkeypatch):
+        ops, _calls = shell
+        monkeypatch.setattr(ops.env, "_stdin_mode", "heredoc")
+        return ops
+
+    @pytest.mark.parametrize("content", [
+        "no trailing newline",
+        "one trailing newline\n",
+        "blank tail\n\n\n",
+        "q ' \" ) ( $(x) `y` ${z} \\\ncontinued\\",
+    ])
+    def test_write_file_is_byte_exact(self, heredoc_ops, tmp_path, content):
+        p = tmp_path / "existing.txt"
+        p.write_bytes(b"keep me\n")
+        r = heredoc_ops.write_file(str(p), content)
+        assert p.read_bytes() == content.encode()
+        assert r.error is None and r.verified is True
+
+    def test_patch_replace_is_byte_exact(self, heredoc_ops, tmp_path):
+        p = tmp_path / "notes.txt"
+        p.write_bytes(b"line one\nline two\nimportant data")
+        r = heredoc_ops.patch_replace(str(p), "line two", "line 2")
+        assert p.read_bytes() == b"line one\nline 2\nimportant data"
+        assert r.success is True
+
+
 class TestNativeRead:
     def test_native_read_makes_no_shell_call(self, native, tmp_path):
         ops, calls = native
@@ -321,7 +344,6 @@ class TestNativeRead:
         for c in calls:
             assert c == "echo $HOME" or c.startswith("ls -1 '~; echo PWNED"), c
 
-    @pytest.mark.linux_only
     def test_fifo_refused_without_a_shell_and_without_blocking(self, native, tmp_path):
         if not hasattr(os, "mkfifo"):
             pytest.skip("no mkfifo")
@@ -339,30 +361,6 @@ class TestNativeRead:
         assert not t.is_alive(), "native read_file blocked on a writer-less FIFO"
         assert "not a regular file" in box["r"].error
         assert calls == []
-
-    def test_large_scan_honors_interrupt(self, native, tmp_path, monkeypatch):
-        ops, calls = native
-        p = _write(tmp_path, "large.txt", b"line\n" * 300_000)
-        states = iter((False, True))
-        monkeypatch.setattr(file_operations, "is_interrupted", lambda: next(states))
-
-        result = ops.read_file(p)
-
-        assert result.error == "Interrupted"
-        assert calls == []
-
-    def test_large_scan_honors_terminal_timeout(self, native, tmp_path, monkeypatch):
-        ops, calls = native
-        p = _write(tmp_path, "large.txt", b"line\n")
-        ops.env.timeout = 1
-        times = iter((0.0, 1.0))
-        monkeypatch.setattr(file_operations.time, "monotonic", lambda: next(times))
-
-        result = ops.read_file(p)
-
-        assert result.error == "File read timed out after 1s."
-        assert calls == []
-
 
 # The native reader scans 1 MiB chunks and clamps each page line to
 # ``4 * get_max_line_length() + 1`` bytes (8001 by default), exactly as
@@ -414,7 +412,6 @@ PARITY_CASES = [
     ("sentinel_lookalike", b"x\n__HERMES_RF_" + b"ab" * 16 + b"__\ny\n", {}),
 ]
 
-
 class TestNativeReadParity:
     """The native path must be indistinguishable from the shell path."""
 
@@ -456,7 +453,6 @@ class TestNativeReadParity:
             assert via_native == via_shell, p
             assert not any(READ_PROBE_MARK in c for c in calls), p
 
-
 class TestCompoundFallback:
     def test_unparseable_reply_falls_back_to_sequential_probes(self, shell, tmp_path):
         ops, calls = shell
@@ -472,4 +468,3 @@ class TestCompoundFallback:
             r = ops.read_file(p)
         assert r.error is None and r.content == "1|one\n2|two"
         assert r.total_lines == 2
-

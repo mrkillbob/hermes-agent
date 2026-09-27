@@ -141,13 +141,13 @@ def make_sandbox(work: Path):
 SUCCESS = {
     "err_python_env": lambda t, w: "ENV_OK_4477" in t,
     "err_replay_patch": lambda t, w: "CONFIG_OK_881" in t and (
-        w / "proj" / "config.py").read_text(encoding="utf-8").count("RETRY_LIMIT = 30") == 1,
+        w / "proj" / "config.py").read_text(encoding="utf-8-sig").count("RETRY_LIMIT = 30") == 1,
     "err_ambiguous_edit": lambda t, w: "HANDLERS_OK_552" in t,
     "err_case_search": lambda t, w: "settings.ini" in t and "client.go" in t,
     "err_hidden_search": lambda t, w: "rotation.cfg" in t and "ops.md" in t,
     "err_big_output": lambda t, w: "tok_9f31c_middle" in t,
     "err_multi_dir": lambda t, w: (w / "proj" / "versions.txt").exists()
-    and "1.4.2,0.9.7,3.2.1" in (w / "proj" / "versions.txt").read_text(encoding="utf-8"),
+    and "1.4.2,0.9.7,3.2.1" in (w / "proj" / "versions.txt").read_text(encoding="utf-8-sig"),
     # sum of squares of 1..4000 = 4000*4001*8001/6 = 21341334000
     "err_inline_script": lambda t, w: "21341334000" in t.replace(",", ""),
     "err_big_file_read": lambda t, w: "X99Q" in t,
@@ -279,8 +279,7 @@ def run(arm: str, model: str, reps: int, pythonpath: str, only=None, only_rep=No
     evaluator_provenance = _evaluator_provenance()
     done = set()
     if meta_path.exists():
-        existing_rows = []
-        for line in meta_path.read_text(encoding="utf-8").splitlines():
+        for line in meta_path.read_text(encoding="utf-8-sig").splitlines():
             try:
                 existing_rows.append(json.loads(line))
             except (ValueError, KeyError) as exc:
@@ -421,17 +420,7 @@ def score_run(atof: Path):
     last_err_tool = None
     if not atof.exists():
         return None
-    try:
-        lines = atof.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-        return None
-    open_scopes = Counter()
-    completed = False
-    for line in lines:
-        if not line.strip():
-            continue
-        if completed:
-            return None
+    for line in atof.read_text(encoding="utf-8-sig").splitlines():
         try:
             ev = json.loads(line)
         except ValueError:
@@ -487,7 +476,7 @@ def report(models):
             meta_path = mdir / arm / "meta.jsonl"
             if not meta_path.exists():
                 continue
-            for line in meta_path.read_text(encoding="utf-8").splitlines():
+            for line in meta_path.read_text(encoding="utf-8-sig").splitlines():
                 m = json.loads(line)
                 s = score_run(mdir / arm / f"{m['run_id']}.atof.jsonl")
                 if s is None:

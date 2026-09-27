@@ -201,7 +201,7 @@ def _distribution_realization_digest(
         for metadata_dir in sorted(site_packages.glob("*.dist-info")):
             metadata_path = metadata_dir / "METADATA"
             try:
-                metadata = metadata_path.read_text(encoding="utf-8")
+                metadata = metadata_path.read_text(encoding="utf-8-sig")
             except (OSError, UnicodeError):
                 continue
             actual_name = next(
@@ -264,7 +264,7 @@ def _load_tool_lock(repo_root: Path) -> tuple[dict[str, Any] | None, str | None]
     """Load and validate repository-owned executable/version pins."""
     path = repo_root / _LOCKFILE_NAME
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         return None, f"unable to read {_LOCKFILE_NAME}: {exc}"
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:

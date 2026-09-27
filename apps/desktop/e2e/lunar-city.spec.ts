@@ -12,9 +12,7 @@ import {
   findElectron,
   type MockBackendFixture,
   setupMockBackend,
-  waitForAppReady,
-  writeEnvFile,
-  writeMockProviderConfig
+  waitForAppReady
 } from './fixtures'
 import {
   createLunarCityPopulationFixture,
@@ -22,6 +20,7 @@ import {
   startPopulationGateways
 } from './lunar-city-fixtures'
 import { startMockServer } from '../../../tests-js/scripts/mock-server'
+import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config'
 import { _electron, expect, installErrorBannerGuard, test } from './test'
 
 const DESKTOP_ROOT = path.resolve(import.meta.dirname, '..')

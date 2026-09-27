@@ -413,6 +413,24 @@ export function setPrimaryGatewayConnectionId(
   }
 }
 
+/**
+ * Mode of the socket this window already dialed for `(connectionId, profile)`,
+ * following gatewayForProfile's precedence: the primary socket when it serves
+ * that profile, else a secondary's own descriptor. Null until one is dialed.
+ */
+export function dialedGatewayModeFor(connectionId: null | string, profile: string): 'local' | 'remote' | null {
+  const id = String(connectionId ?? '').trim() || null
+  const key = normKey(profile)
+
+  if (key === g.primaryProfile && (!id || id === g.primaryConnectionId) && g.primaryConnectionMode) {
+    return g.primaryConnectionMode
+  }
+
+  const mode = g.secondaries.get(registryBackendScopeKey(id, key))?.connection?.mode
+
+  return mode === 'local' || mode === 'remote' ? mode : null
+}
+
 /** Publish the registry source owned by the window primary socket. */
 export function setPrimaryGatewayConnection(connection: Pick<HermesConnection, 'connectionId' | 'mode'> | null): void {
   setPrimaryGatewayConnectionId(connection?.connectionId, connection?.mode)
@@ -454,7 +472,7 @@ async function ridesPrimaryBackend(
 
   const attachedPrimarySource =
     Boolean(id && g.primaryConnectionId && id === g.primaryConnectionId) ||
-    (id === 'local' && g.primaryConnectionMode === 'local')
+    ((id === 'local' || !id) && g.primaryConnectionMode === 'local')
 
   // A descriptor cannot redirect to the primary when this window has no live
   // primary socket. Skipping this probe also keeps a parked local secondary's
@@ -510,6 +528,15 @@ async function ridesPrimaryBackend(
     // refused SESSION_NOT_OWNED by a pid of the same Desktop (#101416).
     return id !== 'local' && g.primaryConnectionMode !== 'local'
   }
+}
+
+function isImplicitLocalRegistryRoute(connectionId: null | string, profile: string): boolean {
+  return (
+    !connectionId &&
+    normKey(profile) !== g.primaryProfile &&
+    g.primaryConnectionMode === 'local' &&
+    Boolean(window.hermesDesktop?.getConnectionFor)
+  )
 }
 
 async function requestOnPrimaryGateway<T>(
@@ -1269,7 +1296,7 @@ export async function requestGatewayForAgent<T>(
   const key = normKey(profile)
   const scope = registryBackendScopeKey(connectionId, key)
 
-  if (scope === key) {
+  if (scope === key && !isImplicitLocalRegistryRoute(connectionId, key)) {
     return requestGatewayForProfile<T>(key, method, params, timeoutMs, signal, { spawnPriority })
   }
 
@@ -1513,7 +1540,7 @@ export async function retainGatewayForAgent(
   const key = normKey(profile)
   const scope = registryBackendScopeKey(connectionId, key)
 
-  if (scope === key) {
+  if (scope === key && !isImplicitLocalRegistryRoute(connectionId, key)) {
     // Plain-profile route: gatewayForProfile's request lease IS the retain —
     // hold it until the caller releases.
     const route = await gatewayForProfile(key, true, spawnPriority)
@@ -1809,7 +1836,10 @@ export async function openGatewayForAgent(
 ): Promise<void> {
   const scope = registryBackendScopeKey(connectionId, profile)
 
-  if (scope === normKey(profile) || isPrimaryRegistryRoute(connectionId, profile)) {
+  if (
+    (scope === normKey(profile) && !isImplicitLocalRegistryRoute(connectionId, profile)) ||
+    isPrimaryRegistryRoute(connectionId, profile)
+  ) {
     discardSupersededSharedPrimarySecondary(scope)
 
     return openGatewayForProfile(profile, { spawnPriority })
@@ -1865,7 +1895,10 @@ export async function ensureGatewayForAgent(
 ): Promise<boolean> {
   const scope = registryBackendScopeKey(connectionId, profile)
 
-  if (scope === normKey(profile) || isPrimaryRegistryRoute(connectionId, profile)) {
+  if (
+    (scope === normKey(profile) && !isImplicitLocalRegistryRoute(connectionId, profile)) ||
+    isPrimaryRegistryRoute(connectionId, profile)
+  ) {
     if (signal?.aborted) {
       return false
     }

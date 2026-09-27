@@ -91,7 +91,7 @@ class EngineeringMemoryLedger:
             if resolved.stat().st_size > self.max_record_bytes:
                 self.diagnostics.append(LedgerDiagnostic("record_too_large", label))
                 return None
-            return parse_markdown_record(resolved.read_text(encoding="utf-8"), source_path=resolved)
+            return parse_markdown_record(resolved.read_text(encoding="utf-8-sig"), source_path=resolved)
         except (OSError, UnicodeDecodeError, EngineeringMemorySchemaError, EngineeringMemoryLedgerError):
             self.diagnostics.append(LedgerDiagnostic("invalid_record", label))
             return None

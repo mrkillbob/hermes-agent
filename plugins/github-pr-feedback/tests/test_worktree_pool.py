@@ -166,8 +166,8 @@ def test_dirty_released_slot_is_preserved_and_uses_overflow(tmp_path, filename):
         pool, repo, receipt(second), tmp_path / "overflow"
     )
     assert prepared.path != original.path
-    assert (original.path / filename).read_text(encoding="utf-8") == "preserved work"
-    assert (prepared.path / "source.txt").read_text(encoding="utf-8") == "second PR"
+    assert (original.path / filename).read_text(encoding="utf-8-sig") == "preserved work"
+    assert (prepared.path / "source.txt").read_text(encoding="utf-8-sig") == "second PR"
     ledger.close()
 
 
@@ -240,7 +240,7 @@ def test_pool_preserves_legacy_global_slot_directory(tmp_path: Path) -> None:
     prepared = pool.prepare_receipt_worktree(repo, receipt(sha))
 
     assert prepared.path != legacy_slot
-    assert legacy_marker.read_text(encoding="utf-8") == "preserve me"
+    assert legacy_marker.read_text(encoding="utf-8-sig") == "preserve me"
     ledger.close()
 
 
@@ -341,8 +341,8 @@ def test_pool_never_removes_the_linked_venv_between_reuses(tmp_path: Path) -> No
 
     assert venv_link.is_symlink()
     assert (venv_link / "bin" / "python").is_file()
-    assert (prepared_a.path / "__pycache__" / "junk.pyc").read_text(encoding="utf-8") == "x"
-    assert (prepared_a.path / "stray_untracked.txt").read_text(encoding="utf-8") == "x"
+    assert (prepared_a.path / "__pycache__" / "junk.pyc").read_text(encoding="utf-8-sig") == "x"
+    assert (prepared_a.path / "stray_untracked.txt").read_text(encoding="utf-8-sig") == "x"
     assert prepared_b.path != prepared_a.path
     assert (prepared_b.path / ".venv" / "bin" / "python").is_file()
     ledger.close()
@@ -473,7 +473,7 @@ def test_reconcile_preserves_parent_checkout_until_review_child_finishes(tmp_pat
     assert pool.reconcile_leases(client) == 0
     with pytest.raises(WorktreePoolExhausted):
         pool.prepare_receipt_worktree(repo, receipt(second))
-    assert (prepared.path / "source.txt").read_text(encoding="utf-8") == "reviewed source"
+    assert (prepared.path / "source.txt").read_text(encoding="utf-8-sig") == "reviewed source"
     runner.child_status = "done"
     assert pool.reconcile_leases(client) == 1
     assert pool.prepare_receipt_worktree(repo, receipt(second)).expected_sha == second

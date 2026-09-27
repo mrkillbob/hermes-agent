@@ -22,7 +22,7 @@ def test_worker_identity_requires_hermes_entry_and_exact_task_query(monkeypatch)
         assert worker_process.pid_matches_task_worker(123, "t_one") is expected
 
 
-@pytest.mark.macos_only
+@pytest.mark.platforms("macos")
 def test_worker_reclaim_signal_reaches_real_child_process():
     command = (
         "import subprocess,sys,time; "

@@ -31,7 +31,6 @@ from aiohttp.test_utils import TestClient, TestServer
 from gateway.config import PlatformConfig
 from gateway.platforms.webhook import WebhookAdapter, _INSECURE_NO_AUTH
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -42,18 +41,15 @@ def _make_adapter(routes, **extra_kw) -> WebhookAdapter:
     config = PlatformConfig(enabled=True, extra=extra)
     return WebhookAdapter(config)
 
-
 def _create_app(adapter: WebhookAdapter) -> web.Application:
     app = web.Application()
     app.router.add_post("/webhooks/{route_name}", adapter._handle_webhook)
     return app
 
-
 async def _drain_background_tasks(adapter: WebhookAdapter) -> None:
     tasks = list(adapter._background_tasks)
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-
 
 # ===================================================================
 # Core behaviour: event fires the cron job, not a webhook session
@@ -151,7 +147,6 @@ class TestCronJobTrigger:
                 assert resp.status == 202
                 await _drain_background_tasks(adapter)
 
-
     @pytest.mark.asyncio
     async def test_routed_profile_scope_reaches_the_job_run(self, tmp_path, monkeypatch):
         """/p/<profile>/ routes must fire the job from THAT profile's cron store, not the gateway's
@@ -181,7 +176,6 @@ class TestCronJobTrigger:
         assert seen and seen[0][0] == (home / "profiles" / "sec").resolve()
         assert "hello 1" in seen[0][1]
 
-
 # ===================================================================
 # Startup validation
 # ===================================================================
@@ -200,7 +194,6 @@ class TestCronJobRouteValidation:
         adapter = _make_adapter(routes)
         with pytest.raises(ValueError, match="mutually exclusive"):
             await adapter.connect()
-
 
 # ===================================================================
 # execute_job_for_event unit behaviour
@@ -231,4 +224,3 @@ class TestExecuteJobForEvent:
         assert result["claimed"] is False
         assert result["success"] is False
         assert "ambiguous" in result["error"].lower()
-

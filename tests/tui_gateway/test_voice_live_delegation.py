@@ -102,21 +102,22 @@ class TestVoiceLiveTurnNote:
             "r1", {"session_id": "sid", "text": "what's the weather", "queued": True, "surface": "voice-live",
                    "voice_context": "Voice assistant: Hi\nUser: what's the weather"})
 
-        assert busy_session["client_surface"] == "voice-live"
-        note = server._hud_surface_note(busy_session)
-        assert note.startswith(voice_live.VOICE_LIVE_TURN_NOTE)
-        assert "User: what's the weather" in note
+        queued = busy_session["queued_prompt"]
+        assert queued["client_surface"] == "voice-live"
+        assert "User: what's the weather" in queued["voice_live_context"]
 
     def test_voice_context_ignored_off_the_live_surface(self, busy_session):
         server._methods["prompt.submit"](
             "r1", {"session_id": "sid", "text": "x", "queued": True, "voice_context": "User: smuggled"})
 
-        assert busy_session["voice_live_context"] == ""
-        assert server._hud_surface_note(busy_session) == ""
+        queued = busy_session["queued_prompt"]
+        assert queued["client_surface"] == ""
+        assert queued["voice_live_context"] == ""
 
     def test_plain_window_submit_clears_the_live_surface(self, busy_session):
         server._methods["prompt.submit"]("r1", {"session_id": "sid", "text": "x", "queued": True, "surface": "voice-live"})
         server._methods["prompt.submit"]("r2", {"session_id": "sid", "text": "y", "queued": True})
 
-        assert busy_session["client_surface"] == ""
-        assert server._hud_surface_note(busy_session) == ""
+        queued = busy_session["queued_prompt"]
+        assert queued["client_surface"] == ""
+        assert queued["voice_live_context"] == ""

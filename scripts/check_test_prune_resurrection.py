@@ -50,7 +50,7 @@ def find_resurrections(tests_root: Path, banned: set[bytes]) -> list[str]:
         rel = path.relative_to(tests_root).as_posix()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=rel)
         for qualname, node in _functions(tree.body):
             key = f"{rel}::{qualname}"
             if encode_fingerprint(key, node) in banned:

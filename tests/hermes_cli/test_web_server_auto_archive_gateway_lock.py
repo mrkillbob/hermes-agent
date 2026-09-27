@@ -19,7 +19,7 @@ import pytest
 from hermes_cli.profiles import _check_gateway_running
 from hermes_cli import web_server_sessions as wss
 
-pytestmark = pytest.mark.linux_only
+pytestmark = pytest.mark.platforms("posix")  # POSIX flock holder
 
 _HOLDER = (
     "import fcntl, sys, time\n"

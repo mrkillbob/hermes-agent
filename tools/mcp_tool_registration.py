@@ -3,6 +3,7 @@ include/exclude filtering, trust-tier metadata capture, utility-tool selection, 
 resolution and the schema-cache write-through. Both entry points (``_register_server_tools``
 live, ``_register_from_cache_sync`` lazy) build ``_Candidate`` records for ``_register_candidates``."""
 
+import hashlib
 import json
 import logging
 import threading
@@ -490,28 +491,53 @@ def _auth_type(config: dict) -> str:
     return (config.get("auth") or "").lower().strip()
 
 
-def _same_server_route(server: Any, config: dict, *, cross_profile: bool = False) -> bool:
-    """Whether *server* matches *config*, with OAuth connections never reusable across profiles.
+def _identity_digest(resolved: list) -> str:
+    """Keep only a digest of resolved connection inputs; they can contain secrets."""
+    return hashlib.sha256(json.dumps(resolved, sort_keys=True, default=str).encode()).hexdigest()
 
-    OAuth credentials live in the owning profile's token storage rather than the static config,
-    so identical OAuth configs cannot prove that two profiles authenticate as the same account.
-    """
+
+def _adopter_identity_digest(server_name: str, config: dict) -> str | None:
+    """Resolve this profile's connection identity; resolver errors fail closed for adoption."""
+    from tools.mcp_tool_transport import LiveEndpointUnavailable, _connect_inputs
+
+    if "url" not in config and not config.get("command"):
+        return None
+    try:
+        inputs, _ = _connect_inputs(server_name, config)
+    except LiveEndpointUnavailable:
+        return None
+    except Exception as exc:
+        logger.warning("MCP server '%s': cannot resolve this profile's connection identity (%s); "
+                       "not adopting another profile's connection", server_name, exc)
+        return None
+    return _identity_digest(inputs)
+
+
+def _same_server_route(server: Any, config: dict, *, cross_profile: bool = False,
+                       resolved_identity: str | None = None) -> bool:
+    """Compare static config and, across profiles, the resolved identity used on the wire."""
     if _connection_identity(getattr(server, "_config", {}) or {}) != _connection_identity(config):
         return False
-    # Identities match, so both sides carry the same normalised auth type.
-    return not (cross_profile and _auth_type(config) == "oauth")
+    if not cross_profile:
+        return True
+    recorded = getattr(server, "_resolved_identity", None)
+    return (_auth_type(config) != "oauth" and recorded is not None
+            and resolved_identity is not None and recorded == resolved_identity)
 
 
-def _connection_reusable_in_scope(name: str, server: Any, config: dict, scope: str, *, owner_key=None) -> bool:
+def _connection_reusable_in_scope(name: str, server: Any, config: dict, scope: str, *, owner_key=None,
+                                  resolved_identity: str | None = None) -> bool:
     """Allow a profile to adopt only a connection safe for its scope.
 
     Route/auth config equality is not enough for OAuth because the token store is under the
     profile's ``HERMES_HOME``. The same applies to mTLS certificate material resolved from a
     profile-owned path. The owner may reuse its own live session; peer scopes must connect alone.
     """
-    if not _same_server_route(server, config):
-        return False
     owner_key = _server_key_for_task(server) if owner_key is None else owner_key
+    cross_profile = _core._server_scope_keys.get(owner_key) != scope
+    if not _same_server_route(server, config, cross_profile=cross_profile,
+                              resolved_identity=resolved_identity):
+        return False
     return not (_profile_owned_auth(config) and _core._server_scope_keys.get(owner_key) != scope)
 
 
@@ -571,7 +597,16 @@ def _register_connected_into_current_scope(servers: dict) -> int:
     with _core._lock:
         omitted = {_key_name(key) for key, scopes in _core._server_tool_scopes.items()
                    if scope in scopes and _key_name(key) not in servers}
-    profile_servers = _config._load_mcp_config() if omitted else {}
+        foreign = {_key_name(key) for key in _core._servers if _key_scope(key) != scope}
+    from tools.mcp_tool_discovery import _owner_secret_scope
+    with _owner_secret_scope():
+        profile_servers = _config._load_mcp_config() if omitted else {}
+        judged = {**{name: profile_servers.get(name) for name in omitted}, **servers}
+        resolved_ids = {
+            name: _adopter_identity_digest(name, config)
+            for name, config in judged.items()
+            if name in foreign and config is not None and mcp_server_enabled(config)
+        }
     with _core._lock:
         stale = []
         for key, scopes in _core._server_tool_scopes.items():
@@ -582,11 +617,12 @@ def _register_connected_into_current_scope(servers: dict) -> int:
                 continue  # attached after the config read; the next pass judges it
             server = _core._servers.get(key)
             public_name = _core._server_public_names.get(key, name)
-            config = servers[public_name] if public_name in servers else profile_servers.get(public_name)
+            config = judged.get(public_name)
             cross_profile = _key_scope(key) != scope
             if (config is None or not mcp_server_enabled(config) or server is None
                     or getattr(server, "session", None) is None
-                    or getattr(server, "session", None) is None or not _same_server_route(server, config)):
+                    or not _same_server_route(server, config, cross_profile=cross_profile,
+                                              resolved_identity=resolved_ids.get(public_name))):
                 stale.append(key)
     for key in stale:
         _remove_server_scope(key, scope)
@@ -602,7 +638,8 @@ def _register_connected_into_current_scope(servers: dict) -> int:
             shared = [(key, live) for key, live in _core._servers.items()
                       if _core._server_public_names.get(key, _key_name(key)) == name
                       and getattr(live, "session", None) is not None
-                      and _connection_reusable_in_scope(name, live, config, scope, owner_key=key)]
+                      and _connection_reusable_in_scope(name, live, config, scope, owner_key=key,
+                                                         resolved_identity=resolved_ids.get(name))]
         if not shared:
             continue
         key, server = shared[0]

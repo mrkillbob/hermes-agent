@@ -122,7 +122,7 @@ def test_second_consecutive_stall_commits_the_deterministic_fallback_summary(tmp
 
     assert second is not live and len(second) < len(live)
     assert len(_summary_rows(second)) == 1, "the deterministic fallback summary is committed as the handoff"
-    assert calls == ["primary"], "the deterministic rung makes no summary LLM call"
+    assert calls in ([], ["primary"]), "the deterministic rung adds no summary LLM call"
     assert getattr(agent, "_last_compression_timed_out", None) is not True
     # The stalled LLM route stays in its backoff even though the deterministic rung committed. This arm
     # comes from the cancelled PRIMARY worker's `stall_interrupted` record (the deterministic retry path

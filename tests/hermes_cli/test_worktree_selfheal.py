@@ -164,7 +164,7 @@ class TestRepackStampede:
         worktree_ops._maintain_pack_health(str(repo))
         assert len(runs) == 2
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_timeout_kills_the_whole_repack_tree(self, tmp_path, monkeypatch):
         import os
         import time

@@ -30,14 +30,9 @@ export interface StopBackendChildDeps {
    * Injectable so the negative-pid group send is asserted in tests without a
    * live process group. Defaults to process.kill.
    */
-  killGroup?: (pgid: number, signal: string) => void
-}
-
-export interface StopBackendTreesForUpdateDeps {
-  /** Synchronous Windows taskkill /T /F implementation. */
-  forceKillProcessTree: (pid: number) => void
-  /** Clears and stops the desktop's pooled backends. */
-  stopAllPoolBackends: () => void
+  killGroup?: (pgid: number, signal: NodeJS.Signals) => void
+  /** True while the owned POSIX process group still has a live member. */
+  isProcessGroupAlive?: (pgid: number) => boolean
 }
 
 export interface BackendProcessRoot {
@@ -60,23 +55,58 @@ export interface WaitableChild extends KillableChild {
 export async function waitForBackendExit(
   child: WaitableChild | null | undefined,
   deps: StopBackendChildDeps,
-  timeoutMs = 5000
+  timeoutMs: number = 5000
 ): Promise<void> {
-  if (!child || child.exitCode !== null || child.signalCode !== null) {
+  if (!child) {
     return
   }
 
-  const exited = () => child.exitCode !== null || child.signalCode !== null
+  const exited = (): boolean => child.exitCode !== null || child.signalCode !== null
+  const isWindows = deps.isWindows ?? process.platform === 'win32'
+  const hasPid = Number.isInteger(child.pid)
+  const groupAlive = (): boolean => {
+    if (isWindows || !hasPid) {
+      return false
+    }
 
-  const wait = (delay: number) =>
+    if (deps.isProcessGroupAlive) {
+      return deps.isProcessGroupAlive(child.pid as number)
+    }
+
+    try {
+      process.kill(-(child.pid as number), 0)
+
+      return true
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'EPERM'
+    }
+  }
+
+  const waitForGroupExit = (delay: number): Promise<void> =>
     new Promise<void>(resolve => {
+      const deadline = Date.now() + delay
+      const poll = (): void => {
+        if (!groupAlive() || Date.now() >= deadline) {
+          resolve()
+
+          return
+        }
+
+        setTimeout(poll, Math.min(50, Math.max(1, deadline - Date.now())))
+      }
+
+      poll()
+    })
+
+  const wait = (delay: number): Promise<void> =>
+    new Promise<void>((resolve: () => void): void => {
       if (exited()) {
         resolve()
 
         return
       }
 
-      const finish = () => {
+      const finish = (): void => {
         clearTimeout(timer)
         child.removeListener('exit', finish)
         resolve()
@@ -86,34 +116,36 @@ export async function waitForBackendExit(
       child.once('exit', finish)
     })
 
-  await wait(timeoutMs)
+  await Promise.all([wait(timeoutMs), waitForGroupExit(timeoutMs)])
 
-  if (exited()) {
+  if (exited() && !groupAlive()) {
     return
   }
 
   try {
-    if ((deps.isWindows ?? process.platform === 'win32') && Number.isInteger(child.pid)) {
+    if (isWindows && hasPid) {
       deps.forceKillProcessTree(child.pid as number)
-    } else if (Number.isInteger(child.pid)) {
+    } else if (hasPid && groupAlive()) {
       try {
-        const killGroup = deps.killGroup ?? ((pid, signal) => process.kill(pid, signal))
+        const killGroup = deps.killGroup ?? ((pid: number, signal: NodeJS.Signals): boolean => process.kill(pid, signal))
         killGroup(-(child.pid as number), 'SIGKILL')
       } catch {
-        child.kill('SIGKILL')
+        if (!exited()) {
+          child.kill('SIGKILL')
+        }
       }
-    } else {
+    } else if (!exited()) {
       child.kill('SIGKILL')
     }
   } catch {
     // A failed signal may mean the child is gone, but only exit proves it.
   }
 
-  await wait(1000)
+  await Promise.all([wait(1000), waitForGroupExit(1000)])
 
-  if (!exited()) {
+  if (!exited() || groupAlive()) {
     throw new Error(
-      `Backend child${child.pid ? ` (PID ${child.pid})` : ''} did not exit after SIGKILL; retaining ownership.`
+      `Backend child${child.pid ? ` (PID ${child.pid})` : ''} or its process group did not exit after SIGKILL; retaining ownership.`
     )
   }
 }
@@ -124,13 +156,13 @@ export async function waitForBackendExit(
  * throws (the process may already be gone) -- mirrors the original inline
  * best-effort semantics in main.ts.
  */
-export function stopBackendChild(child: KillableChild | null | undefined, deps: StopBackendChildDeps) {
+export function stopBackendChild(child: KillableChild | null | undefined, deps: StopBackendChildDeps): void {
   if (!child || child.killed) {
     return
   }
 
   const isWindows = deps.isWindows ?? process.platform === 'win32'
-  const killGroup = deps.killGroup ?? ((pgid: number, signal: string) => process.kill(pgid, signal))
+  const killGroup = deps.killGroup ?? ((pgid: number, signal: string): boolean => process.kill(pgid, signal))
 
   try {
     if (isWindows && Number.isInteger(child.pid)) {
@@ -149,24 +181,4 @@ export function stopBackendChild(child: KillableChild | null | undefined, deps: 
   } catch {
     // Already gone.
   }
-}
-
-/**
- * Stop every backend tree owned by a Windows Desktop update hand-off.
- *
- * Tree-kill the primary root while its PID is still live, then delegate pool
- * teardown to the existing routine that tree-kills each pooled root exactly
- * once before mutating its registry. In particular, do not signal the primary
- * first: if that root exits before taskkill /T runs, Windows can no longer
- * enumerate its MCP grandchildren and they survive with the venv locked.
- */
-export function stopBackendTreesForUpdate(
-  primary: BackendProcessRoot | null | undefined,
-  deps: StopBackendTreesForUpdateDeps
-): void {
-  if (primary && Number.isInteger(primary.pid)) {
-    deps.forceKillProcessTree(primary.pid as number)
-  }
-
-  deps.stopAllPoolBackends()
 }

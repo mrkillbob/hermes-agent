@@ -70,4 +70,3 @@ secret is configured. Status output never prints the bearer key.
 The current coordinator uses leases and idempotency, so a network partition is
 at-least-once and reclaimable rather than pretending to provide consensus-grade
 exactly-once execution.
-

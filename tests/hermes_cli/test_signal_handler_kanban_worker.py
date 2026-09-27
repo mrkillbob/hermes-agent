@@ -30,13 +30,6 @@ import time
 
 import pytest
 
-
-# These tests intentionally signal a process group that they created. Bypass
-# the suite's live-system guard so cleanup reaches that group instead of
-# raising before ``communicate()`` and leaking the synthetic worker to PID 1.
-pytestmark = pytest.mark.live_system_guard_bypass
-
-
 def _synthetic_worker_script() -> str:
     """A standalone script that mirrors cli.py's single-query SIGTERM handler.
 
@@ -83,7 +76,6 @@ def _synthetic_worker_script() -> str:
         """
     )
 
-
 def _is_alive_like_dispatcher(pid: int) -> bool:
     """Mirrors hermes_cli/kanban_db.py:_pid_alive on Linux.
 
@@ -127,7 +119,6 @@ def _is_alive_like_dispatcher(pid: int) -> bool:
             pass
     return True
 
-
 def _spawn_synthetic(env_overrides: dict) -> subprocess.Popen:
     env = dict(os.environ)
     env.update(env_overrides)
@@ -148,7 +139,6 @@ def _spawn_synthetic(env_overrides: dict) -> subprocess.Popen:
     proc.kill()
     raise RuntimeError("synthetic worker never signalled READY")
 
-
 def _cleanup(proc: subprocess.Popen) -> None:
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -158,7 +148,6 @@ def _cleanup(proc: subprocess.Popen) -> None:
         proc.communicate(timeout=2)
     except subprocess.TimeoutExpired:
         proc.kill()
-
 
 @pytest.mark.skipif(
     sys.platform == "win32",
@@ -187,6 +176,3 @@ def test_sigterm_with_kanban_task_env_terminates_quickly():
         )
     finally:
         _cleanup(proc)
-
-
-

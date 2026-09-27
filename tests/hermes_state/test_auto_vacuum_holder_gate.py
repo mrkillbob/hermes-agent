@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-pytestmark = pytest.mark.linux_only
+pytestmark = pytest.mark.platforms("posix")  # holder scan is unavailable on Windows
 
 _HOLDER = (
     "import sqlite3, sys\n"

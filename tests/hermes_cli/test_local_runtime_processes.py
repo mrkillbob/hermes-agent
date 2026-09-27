@@ -80,7 +80,7 @@ def _kill(identity):
         proc.wait(timeout=10)
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 @pytest.mark.parametrize('stop_mode', ['graceful', 'abrupt'])
 @pytest.mark.parametrize('nested', [False, True])
 def test_owner_exit_kills_router_tree_not_external(tmp_path, stop_mode, nested):
@@ -140,7 +140,7 @@ def test_owner_exit_kills_router_tree_not_external(tmp_path, stop_mode, nested):
                 launcher.wait(timeout=10)
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 @pytest.mark.parametrize('failure', ['assign', 'resume', 'popen', 'configure'])
 def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatch, failure):
     import ctypes
@@ -174,7 +174,10 @@ def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatc
 
     def assign(job, proc):
         children.append(proc)
-        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED
+        # Windows process status is not a reliable indication that its primary
+        # thread is suspended. Prove the child has not executed its first
+        # instruction while the job is assigned instead.
+        assert not _wait(marker.exists, timeout=0.25), 'child ran before job assignment'
         assert not marker.exists()
         # Query the actual kernel object, not implementation source/constants.
         limits = processes._ExtendedLimits()

@@ -6,11 +6,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agent.engineering_memory_curator import EngineeringMemoryCurator
-from agent.engineering_memory_index import EngineeringMemoryIndex
-from agent.engineering_memory_ledger import EngineeringMemoryLedger, EngineeringMemoryLedgerError
-from agent.engineering_memory_schema import EngineeringMemorySchemaError, parse_markdown_record
-
 CONTRACT = "hermes.engineering_memory.v1"
 
 
@@ -70,6 +65,14 @@ def cmd_engineering_memory(args) -> None:
                 _emit(args, _envelope("laya.calibrate", ok=True, artifact=artifact, diagnostics=[]))
                 return
             raise ValueError("choose laya doctor, laya download, or laya calibrate")
+
+        # This feature has optional runtime dependencies. Keep them out of
+        # the normal CLI path so lean installs can use unrelated commands.
+        from agent.engineering_memory_curator import EngineeringMemoryCurator
+        from agent.engineering_memory_index import EngineeringMemoryIndex
+        from agent.engineering_memory_ledger import EngineeringMemoryLedger
+        from agent.engineering_memory_schema import parse_markdown_record
+
         vault, index_path = _paths(args)
         ledger = EngineeringMemoryLedger(vault)
         curator = EngineeringMemoryCurator(ledger)
@@ -80,7 +83,7 @@ def cmd_engineering_memory(args) -> None:
                 raise ValueError("record path is not a regular file")
             if not record_path.is_relative_to(vault.resolve()):
                 raise ValueError("record path is outside configured vault")
-            record = parse_markdown_record(record_path.read_text(encoding="utf-8"), source_path=record_path)
+            record = parse_markdown_record(record_path.read_text(encoding="utf-8-sig"), source_path=record_path)
             decision = curator.stage(record)
             _emit(args, _envelope(operation, ok=True, record_id=decision.record.record_id, status=decision.status, diagnostics=list(decision.reason_codes)))
         elif command == "review":
@@ -108,6 +111,6 @@ def cmd_engineering_memory(args) -> None:
             _emit(args, _envelope(operation, ok=health.ok, health=health.__dict__, diagnostics=list(ledger.diagnostics)))
         else:
             _emit(args, _envelope(operation, ok=False, error="choose propose, review, search, rebuild, or verify", diagnostics=[]))
-    except (OSError, ValueError, EngineeringMemorySchemaError, EngineeringMemoryLedgerError) as exc:
+    except (OSError, ValueError) as exc:
         result = _envelope(operation, ok=False, error=str(exc), diagnostics=[])
         _emit(args, result)
