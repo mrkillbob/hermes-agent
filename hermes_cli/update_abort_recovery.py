@@ -59,11 +59,15 @@ def _surviving_pre_update_serve_runtimes(plan) -> list[dict]:
         if pid not in live:
             return False
         planned_created, live_created = row["_create_time"], live[pid]
-        # Same number, different process: the pre-update runtime is gone and something new
-        # registered under its PID. Not a survivor.
-        return not (
-            planned_created is not None and live_created is not None
-            and abs(float(live_created) - float(planned_created)) >= 2.0)
+        # The plan and the live ledger entry both carry psutil's serialized create_time, so
+        # this comparison is exact. A broad tolerance turns a fast post-update restart that
+        # reuses the PID into a false survivor and makes an otherwise healthy update exit 1.
+        # Missing timestamps still fail closed.
+        return (
+            planned_created is None
+            or live_created is None
+            or float(live_created) == float(planned_created)
+        )
 
     # The operator-facing row drops the incarnation (a matching key only).
     survivors = [

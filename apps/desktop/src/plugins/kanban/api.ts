@@ -194,7 +194,7 @@ export function useKanbanScope(): string {
 const routedScope = (): string => host.activeConnectionId() ?? LOCAL_SCOPE
 
 function activeSourceKey(): string {
-  return `${host.state.connectionId.get() ?? LOCAL_SCOPE}::${host.state.profile.get() || 'default'}`
+  return `${host.state.connectionId.get() ?? LOCAL_SCOPE}::${host.state.profile?.get() || 'default'}`
 }
 
 /** `enabled` for every kanban query: only fetch while the key's scope is the

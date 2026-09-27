@@ -9,6 +9,7 @@ reaches the surfaced error, with the generic text reserved for the case
 gh itself reported nothing.
 """
 
+from contextlib import contextmanager
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
@@ -24,6 +25,20 @@ def _proc(returncode: int = 0, stdout: str = "", stderr: str = "") -> CompletedP
 def _make_gh(returncode: int, stdout: str = "", stderr: str = ""):
     """Patch gh as installed (shutil.which) and running with the given result."""
     return patch.object(web_git, "_run", return_value=_proc(returncode, stdout, stderr))
+
+
+@contextmanager
+def _review_gh(create_result):
+    """Give review_create_pr a verified branch/head and an empty exact-head query."""
+    def gh(_cwd, args):
+        if args[:2] == ["pr", "list"]:
+            return True, "[]", ""
+        return create_result
+
+    with patch.object(web_git, "_review_push"), \
+         patch.object(web_git, "_git_out", side_effect=["test-branch", "a" * 40]), \
+         patch.object(web_git, "_gh", side_effect=gh):
+        yield
 
 
 class TestGhRetainsStderr:
@@ -56,29 +71,25 @@ class TestReviewCreatePrSurfacesGhStderr:
     def test_failure_message_carries_gh_stderr_marker(self, tmp_path):
         # A unique marker: the assertion fails if the wrapper regresses to the
         # generic message or drops stderr anywhere between exec and the raise.
-        with patch.object(web_git.shutil, "which", return_value="/usr/bin/gh"), _make_gh(
-            1, "", "gh: no commits between main and bb/fix-wave2g"
-        ):
+        with _review_gh((False, "", "gh: no commits between main and bb/fix-wave2g")):
             with pytest.raises(RuntimeError, match="no commits between main and bb/fix-wave2g"):
                 web_git.review_create_pr(str(tmp_path))
 
     def test_failure_message_still_names_gh_when_stderr_is_empty(self, tmp_path):
-        with patch.object(web_git.shutil, "which", return_value="/usr/bin/gh"), _make_gh(1, "", "   "):
+        with _review_gh((False, "", "   ")):
             with pytest.raises(RuntimeError, match="is gh installed and authenticated"):
                 web_git.review_create_pr(str(tmp_path))
 
     def test_success_path_returns_the_pr_url(self, tmp_path):
-        with patch.object(web_git.shutil, "which", return_value="/usr/bin/gh"), _make_gh(
-            0, "https://github.com/org/repo/pull/1234\n", ""
-        ):
+        with _review_gh((True, "https://github.com/org/repo/pull/1234\n", "")):
             result = web_git.review_create_pr(str(tmp_path))
 
-        assert result == {"url": "https://github.com/org/repo/pull/1234"}
+        assert result == {"url": "https://github.com/org/repo/pull/1234", "reused": False}
 
     def test_oversized_stderr_is_bounded_to_its_tail(self, tmp_path):
         marker = "TRAILING-MARKER-reason"
         stderr = "x" * 5_000 + "\n" + marker
-        with patch.object(web_git.shutil, "which", return_value="/usr/bin/gh"), _make_gh(1, "", stderr):
+        with _review_gh((False, "", stderr)):
             with pytest.raises(RuntimeError) as excinfo:
                 web_git.review_create_pr(str(tmp_path))
 

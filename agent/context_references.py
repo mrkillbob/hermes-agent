@@ -327,7 +327,12 @@ def _expand_path_reference(ref: ContextReference, cwd: Path, *, allowed_root: Pa
         # between a check and a later open otherwise), but release it before token
         # counting/formatting: the registry lock blocks every tracked connect/close.
         with offline_file_access(path, what="preview context reference"):
-            early, text = _read_file_reference(ref, path, max_inline_tokens)
+            early, text = _read_file_reference(
+                ref, path, max_inline_tokens,
+                source_provenance_registry=source_provenance_registry,
+                session_id=session_id, turn_id=turn_id, request_id=request_id,
+                policy_digest=policy_digest,
+            )
     except LiveConnectionError:
         return None, _on_disk_reference_block(
             ref, path, descriptor="live SQLite database file",
@@ -339,6 +344,9 @@ def _expand_path_reference(ref: ContextReference, cwd: Path, *, allowed_root: Pa
 
 def _read_file_reference(
     ref: ContextReference, path: Path, max_inline_tokens: int | None,
+    *, source_provenance_registry=None, session_id: str | None = None,
+    turn_id: str | None = None, request_id: str | None = None,
+    policy_digest: str | None = None,
 ) -> tuple[Expansion | None, str]:
     """Raw file I/O for an @file ref: ``(early, text)`` where ``early`` is a refusal block
     (then ``text`` is empty) or ``None`` with the text to inline."""

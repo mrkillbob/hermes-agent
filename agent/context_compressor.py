@@ -1969,7 +1969,7 @@ _SECTION_INSTRUCTIONS: Dict[bool, Dict[str, str]] = {
             "Write the summary in the same language the user was using in the "
             "conversation — do not translate or switch to English. "
         ),
-        "historical_task": """[THE SINGLE MOST IMPORTANT FIELD. Identify the user's most recent unfulfilled
+        "historical_task": """[THE KEY FIELD. Identify the user's most recent unfulfilled
 input precisely, but summarize it in your own words rather than copying long
 passages from the transcript. The compressor inserts a bounded, redacted
 snapshot of the real latest user turn after generation, so the model must not
