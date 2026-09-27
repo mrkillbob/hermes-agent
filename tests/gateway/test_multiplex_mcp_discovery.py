@@ -182,7 +182,7 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
             annotations=None,
         )], tool_timeout=30,
                                   initialize_result=None, _registered_tool_names=[])
-    private_key = f"shared::profile::{launch_scope}"
+    private_key = (launch_scope, "shared")
     monkeypatch.setattr(mcp_tool, "_servers", {private_key: live_server})
     monkeypatch.setattr(mcp_tool, "_server_public_names", {private_key: "shared"})
     monkeypatch.setattr(mcp_tool, "_server_scope_keys", {private_key: launch_scope})
@@ -583,8 +583,7 @@ def test_shared_server_tools_are_callable_and_removed_on_non_owner_reload(
         from tools import mcp_tool_registration as _mcp_registration
         monkeypatch.setattr(_mcp_registration, "_adopter_identity_digest",
                             lambda _name, _config: "shared-identity")
-        # A real stdio configuration is required even though this test reuses
-        # the already-connected shared server and never starts a subprocess.
+        # The shared endpoint is reused without opening another transport.
         assert _mcp_discovery.register_mcp_servers(
             {"shared": {"url": "https://shared.example/mcp"}})
         tool_names = registry.get_tool_names_for_toolset("mcp-shared")
