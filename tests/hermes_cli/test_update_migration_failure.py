@@ -21,7 +21,7 @@ def test_failed_migration_writes_partial_receipt_and_keeps_pending_marker(tmp_pa
     restart = update_cmd_fleet._GatewayRestartOutcome(False, [], [], [], [], [], [], set())
     with pytest.raises(SystemExit) as exc:
         update_cmd_fleet._verify_fleet_after_update(restart, _pre_update_plan=None, _windows_gateway_resume=None,
-                                                   node_failures=[], update_complete=True)
+                                                   update_complete=True)
     assert exc.value.code == 1
     assert finalize.call_args.args == ('partial',)
     assert marker.exists()

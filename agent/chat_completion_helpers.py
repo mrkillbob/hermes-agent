@@ -877,7 +877,8 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     request_client = make_client("chat_completion_request")
     return _dispatch_provider_request(
         agent, api_kwargs,
-        lambda authorized: request_client.chat.completions.create(**authorized),
+        lambda authorized: request_client.chat.completions.create(
+            **bypass_chat_sdk_request_transform(authorized, request_client)),
     )
 
 
