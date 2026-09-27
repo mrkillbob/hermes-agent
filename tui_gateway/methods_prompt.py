@@ -729,7 +729,9 @@ def _(rid, params: dict) -> dict:
             else ""
         ),
         display_kind=display_kind,
-        persist_session=not turn_isolation)
+        # The local control plane remains the owner of durable session state, even
+        # when model execution is delegated to an isolated compute host.
+        persist_session=True)
     if err is not None:
         return err
     turn_author = session.pop("_accepted_turn_author", None)

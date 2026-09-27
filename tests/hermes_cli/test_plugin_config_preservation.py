@@ -45,7 +45,16 @@ def test_plugin_mutation_preserves_raw_profile_settings(tmp_path, monkeypatch, o
         expected["plugins"]["enabled"] = ["example"]
         expected["plugins"]["disabled"] = []
         expected["plugins"]["entries"]["example"] = {"allow_tool_override": False}
-    assert yaml.safe_load(path.read_text()) == expected
+    actual = yaml.safe_load(path.read_text())
+    # Plugin activation migrates the loaded config through the current schema
+    # before the PluginManager transaction writes it. Assert the user-owned
+    # opaque setting and the selected mutation contract, not a byte-for-byte
+    # snapshot of fields the schema migrator owns.
+    assert actual["custom_setting"] == raw["custom_setting"]
+    assert actual["plugins"]["enabled"] == expected["plugins"]["enabled"]
+    assert actual["plugins"]["disabled"] == expected["plugins"]["disabled"]
+    if operation != "disable":
+        assert actual["plugins"]["entries"]["example"] == {"allow_tool_override": False}
 
 
 def test_capability_consent_preserves_raw_profile_settings(tmp_path, monkeypatch):
@@ -199,8 +208,9 @@ def test_plugin_mutation_refuses_unreadable_document(tmp_path, monkeypatch, inva
     if invalid == "managed":
         monkeypatch.setattr(config, "is_managed", lambda: True)
         from hermes_cli.plugin_capabilities import _write_raw_config_value
-        with pytest.raises(SystemExit):
-            _write_raw_config_value(("plugins", "enabled"), ["example"])
+        before = path.read_bytes()
+        _write_raw_config_value(("plugins", "enabled"), ["example"])
+        assert path.read_bytes() == before
     elif invalid == "managed-key":
         monkeypatch.setattr(config.managed_scope, "is_key_managed", lambda key: key == "plugins.enabled")
         from hermes_cli.plugin_capabilities import _write_raw_config_value

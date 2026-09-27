@@ -611,7 +611,11 @@ def finalize_turn(
         final_response is not None
         and not failed
         and not interrupted
-        and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
+        and (
+            api_call_count < agent.max_iterations
+            or str(_turn_exit_reason).startswith("text_response(")
+            or _turn_exit_reason == "kanban_terminal_transition"
+        )
     )
 
     _rollback_interrupted_preflight_display(agent, interrupted)
