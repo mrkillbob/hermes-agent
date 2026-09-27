@@ -410,7 +410,7 @@ def _read_file_reference(
                     session_id=session_id, turn_id=turn_id, request_id=request_id, policy_digest=policy_digest,
                 )
             except SourceProvenanceError as exc:
-                return f"{ref.raw}: source provenance grant declined ({exc})", None
+                return (f"{ref.raw}: source provenance grant declined ({exc})", None), ""
     else:
         # estimate_tokens_rough >= bytes/CHARS_PER_TOKEN for every encoding mix, so a
         # file past that byte ceiling is certainly oversized; refuse without reading it.
