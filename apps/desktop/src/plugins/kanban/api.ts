@@ -428,7 +428,9 @@ export function bindApi(
       }
     })
   )
-  unsubs.push(host.state.profile.listen(() => open($boardSlug.get())))
+  if (host.state.profile) {
+    unsubs.push(host.state.profile.listen(() => open($boardSlug.get())))
+  }
 
   return () => {
     socketGeneration += 1
