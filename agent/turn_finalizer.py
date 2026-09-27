@@ -574,6 +574,7 @@ def finalize_turn(
     if (
         not final_response
         and not interrupted
+        and _turn_exit_reason != "kanban_terminal_transition"
         and messages
         and isinstance(messages[-1], dict)
         and messages[-1].get("role") == "tool"

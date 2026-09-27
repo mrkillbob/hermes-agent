@@ -729,9 +729,10 @@ def _(rid, params: dict) -> dict:
             else ""
         ),
         display_kind=display_kind,
-        # The local control plane remains the owner of durable session state, even
-        # when model execution is delegated to an isolated compute host.
-        persist_session=True)
+        # Ordinary isolated turns persist in the compute host. A truncating
+        # submit is different: its rewind is applied locally before dispatch,
+        # so the replacement user row and any branch seed must be written here.
+        persist_session=not turn_isolation or has_truncation)
     if err is not None:
         return err
     turn_author = session.pop("_accepted_turn_author", None)
