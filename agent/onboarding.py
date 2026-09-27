@@ -122,7 +122,7 @@ def profile_build_mode(config: Mapping[str, Any]) -> str:
 # Shared by both first-contact notes so a real first-message task is never
 # replaced by the intro (plain or profile-build offer).
 TASK_FIRST_CLAUSE = (
-    "If this message is itself a real request or task, DO THE TASK FIRST -- call "
+    "If this message is itself a real request or task, HANDLE THE REQUEST FIRST -- call "
     "whatever tools it needs -- and only then, in the closing sentences of that same "
     "reply, do what this note asks. Never let this note replace or skip work the user "
     "actually asked for. "

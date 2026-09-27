@@ -51,8 +51,13 @@ beforeEach(() => {
   getGlobalModelOptions.mockResolvedValue({ providers: MOCK_PROVIDERS })
 })
 
-afterEach(() => {
+afterEach(async () => {
   cleanup()
+  // Radix's modal FocusScope restores focus in a zero-delay task after an
+  // open menu is unmounted. Let that task run while this file's jsdom realm is
+  // still active; otherwise it can dispatch a jsdom Event into the next
+  // isolated test file's realm and fail the whole UI shard after assertions pass.
+  await new Promise((resolve) => setTimeout(resolve, 0))
   vi.clearAllMocks()
 })
 
