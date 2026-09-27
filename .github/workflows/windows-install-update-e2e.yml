@@ -40,7 +40,9 @@ jobs:
         uses: ./.github/actions/setup-pm
         with:
           packages: git,ripgrep
-          extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          # This lane exercises the installer and updater, not optional integrations.
+          # Keep Anthropic and other provider extras out of its test interpreter.
+          extras: '[]'
           test-environment: 'true'
           prune-python-cache: true
 

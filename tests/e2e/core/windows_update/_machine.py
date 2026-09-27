@@ -312,7 +312,10 @@ class Machine:
         cwd = self.root / "install-cwd"
         cwd.mkdir(parents=True, exist_ok=True)
         return self._run_logged(
-            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-NonInteractive"],
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                "-NonInteractive", "-SkipBrowser",
+            ],
             "install", timeout=INSTALL_TIMEOUT, cwd=cwd)
 
     def hermes(self, *args: str, label: str | None = None, timeout: float = CMD_TIMEOUT,

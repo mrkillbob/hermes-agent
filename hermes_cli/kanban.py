@@ -143,6 +143,14 @@ def _dispatcher_readiness(hermes_home: Optional[Path] = None) -> dict[str, Any]:
             "message": f"Kanban dispatcher configuration could not be read: {exc}",
         }
 
+    if not dispatch_on:
+        return {
+            "status": "disabled",
+            "ready": False,
+            "gateway_pid": None,
+            "message": "kanban.dispatch_in_gateway=false in config.yaml",
+        }
+
     pid = liveness.pid
     if pid and dispatch_on:
         return {
