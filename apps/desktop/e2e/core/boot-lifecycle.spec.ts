@@ -29,6 +29,7 @@ import {
   currentSessionId,
   launchCoreApp,
   type ProcInfo,
+  quitCoreApp,
   recordWebSockets,
   sandboxProcesses,
   send,
@@ -178,7 +179,7 @@ test('boot handshake, supervised respawn, and zero orphans on quit', async () =>
         .toBeGreaterThan(0)
       expect(sandboxProcesses(sandbox).length).toBeGreaterThan(0)
 
-      await app.close()
+      await quitCoreApp(app)
       closed = true
       clearInterval(census)
       await expect
@@ -255,7 +256,7 @@ test('relaunching the same home: one backend per boot, zero after each quit, tra
         }
 
         await assertTranscriptOracle(page, ws, provider, session, `launch ${launch}`)
-        await app.close()
+        await quitCoreApp(app)
         live = null
         await expect
           .poll(() => desktopOwnedSandboxProcesses(sandbox).map(p => `${p.pid} ${p.cmdline.slice(0, 120)}`), {

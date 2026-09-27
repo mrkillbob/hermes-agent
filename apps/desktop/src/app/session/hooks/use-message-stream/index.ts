@@ -764,12 +764,40 @@ export function useMessageStream({
           ? prev.findIndex((message, index) => index > lastUserIndex && message.id === streamId)
           : -1
 
+        const persistedAssistantRowId = persistedTurn?.final_assistant_row_id
+
+        const persistedAssistantIndex =
+          typeof persistedAssistantRowId === 'number' && Number.isSafeInteger(persistedAssistantRowId)
+            ? prev.findIndex(
+                (message, index) =>
+                  index > lastUserIndex &&
+                  message.role === 'assistant' &&
+                  message.rowId === persistedAssistantRowId &&
+                  index !== streamIndex
+              )
+            : -1
+
         const settleAt = (index: number) =>
           prev.map((message, messageIndex) => (messageIndex === index ? completeMessage(message) : message))
 
         let collapsed: DuplicateFinalCollapse | null = null
 
-        if (streamIndex >= 0) {
+        if (streamIndex >= 0 && persistedAssistantIndex >= 0) {
+          // Reconnect hydration can publish the durable row while its original
+          // live stream bubble is still on screen. The completion receipt names
+          // the exact durable row, so settle the richer stream into that
+          // identity and remove the duplicate instead of leaving both bubbles.
+          const durable = prev[persistedAssistantIndex]
+          const settledStream = completeMessage(prev[streamIndex])
+          nextMessages = prev
+            .filter((_message, index) => index !== streamIndex)
+            .map((message, index) =>
+              index === persistedAssistantIndex - (streamIndex < persistedAssistantIndex ? 1 : 0)
+                ? { ...durable, ...settledStream, id: durable.id, rowId: durable.rowId }
+                : message
+            )
+          collapsed = { keptId: durable.id, messages: nextMessages }
+        } else if (streamIndex >= 0) {
           collapsed = collapseDuplicateFinalAfterToolInterim(prev, streamIndex, {
             completeMessage,
             finalText,
