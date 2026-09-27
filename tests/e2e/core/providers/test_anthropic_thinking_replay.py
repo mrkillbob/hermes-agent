@@ -180,7 +180,11 @@ def test_tui_gateway_replays_signed_thinking_across_turns(rig_factory) -> None:
         Reply([Thinking(THINK["D"], SIG["D"]), Text("GW-TWO")]),
     ])
     answers = _tui_gateway_two_turns(rig, ["first question", "second question"])
-    assert "GW-ONE" in answers[0] and "GW-TWO" in answers[1], answers
+    assert "GW-ONE" in answers[0] and "GW-TWO" in answers[1], (
+        answers,
+        f"fake API requests={len(rig.srv.main_requests())}",
+        f"egress diagnostics={rig.log_tail(pattern='LLM egress blocked')}",
+    )
     _assert_conformant(rig)
     mains = [r["body"] for r in rig.srv.main_requests()]
     assert len(mains) == 2
