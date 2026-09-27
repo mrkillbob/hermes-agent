@@ -26,6 +26,7 @@ from typing import Any, Optional
 from hermes_constants import get_hermes_home
 
 _SKIP_PARTS = {".archive", ".hub", ".locks", "node_modules", ".git"}
+_USAGE_TS_KEYS = ("last_activity_at", "last_used_at", "last_viewed_at", "last_patched_at", "created_at")
 
 
 @dataclass
@@ -39,6 +40,15 @@ class SkillNode:
     created_by: Optional[str] = None
     pinned: bool = False
     related: list[str] = field(default_factory=list)
+
+
+def _fm_field(fm: dict[str, Any], key: str) -> Any:
+    """Read a top-level skill field or its ``metadata.hermes`` fallback."""
+    if fm.get(key):
+        return fm[key]
+    metadata = fm.get("metadata")
+    hermes = metadata.get("hermes") if isinstance(metadata, dict) else None
+    return hermes.get(key) if isinstance(hermes, dict) else None
 
 
 def _frontmatter(text: str) -> dict[str, Any]:
