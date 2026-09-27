@@ -329,6 +329,7 @@ def _expand_path_reference(ref: ContextReference, cwd: Path, *, allowed_root: Pa
         with offline_file_access(path, what="preview context reference"):
             early, text = _read_file_reference(
                 ref, path, max_inline_tokens,
+                source_path=unresolved_path,
                 source_provenance_registry=source_provenance_registry,
                 session_id=session_id, turn_id=turn_id, request_id=request_id,
                 policy_digest=policy_digest,
@@ -344,7 +345,7 @@ def _expand_path_reference(ref: ContextReference, cwd: Path, *, allowed_root: Pa
 
 def _read_file_reference(
     ref: ContextReference, path: Path, max_inline_tokens: int | None,
-    *, source_provenance_registry=None, session_id: str | None = None,
+    *, source_path: Path | None = None, source_provenance_registry=None, session_id: str | None = None,
     turn_id: str | None = None, request_id: str | None = None,
     policy_digest: str | None = None,
 ) -> tuple[Expansion | None, str]:
@@ -405,7 +406,7 @@ def _read_file_reference(
             from agent.source_provenance import SourceProvenanceError
             try:
                 source_provenance_registry.issue_file_slice(
-                    path=unresolved_path, line_start=ref.line_start, line_end=line_end, content=text.encode("utf-8"),
+                    path=source_path or path, line_start=ref.line_start, line_end=line_end, content=text.encode("utf-8"),
                     session_id=session_id, turn_id=turn_id, request_id=request_id, policy_digest=policy_digest,
                 )
             except SourceProvenanceError as exc:

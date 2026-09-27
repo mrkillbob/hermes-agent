@@ -49,7 +49,13 @@ def _surviving_pre_update_serve_runtimes(plan) -> list[dict]:
         live: dict[int, float | None] = {
             entry["pid"]: _numeric(entry.get("create_time"))
             for entry in ledger_entries()
-            if entry.get("purpose") in ("serve", "dashboard") and isinstance(entry.get("pid"), int)}
+            if entry.get("purpose") in ("serve", "dashboard") and isinstance(entry.get("pid"), int)
+        }
+        verified = {
+            entry["pid"]
+            for entry in ledger_entries(verified_only=True)
+            if entry.get("purpose") in ("serve", "dashboard") and isinstance(entry.get("pid"), int)
+        }
     except Exception as exc:
         logger.debug("Serve/dashboard survivor probe failed: %s", exc)
         live = None
@@ -66,7 +72,7 @@ def _surviving_pre_update_serve_runtimes(plan) -> list[dict]:
         return (
             planned_created is None
             or live_created is None
-            or float(live_created) == float(planned_created)
+            or (float(live_created) == float(planned_created) and pid in verified)
         )
 
     # The operator-facing row drops the incarnation (a matching key only).

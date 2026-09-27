@@ -1093,11 +1093,14 @@ def test_same_pid_and_same_incarnation_is_still_a_survivor(monkeypatch):
 
 
 def test_fast_pid_reuse_is_not_reported_as_the_old_survivor(monkeypatch):
-    """A replacement process can reuse a PID within the old two-second tolerance."""
+    """A replacement process inside the ledger's tolerance is not the old incarnation."""
     monkeypatch.setattr(
         _identity_module(),
         "ledger_entries",
-        lambda *a, **k: [{"pid": 4242, "purpose": "serve", "create_time": 1000.5}],
+        lambda *a, **k: (
+            [] if k.get("verified_only") else
+            [{"pid": 4242, "purpose": "serve", "create_time": 1000.0}]
+        ),
     )
     assert update_cmd._surviving_pre_update_serve_runtimes(
         _plan(_serve_runtime(4242, create_time=1000.0))
