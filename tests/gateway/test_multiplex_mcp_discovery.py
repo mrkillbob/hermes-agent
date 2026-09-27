@@ -175,7 +175,8 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
     )
 
     live_server = SimpleNamespace(
-        session=object(), _config={},
+        session=object(), _config={"command": "shared"},
+        _resolved_identity="shared-identity",
         _tools=[SimpleNamespace(
             name="tool", description="Tool", inputSchema={"type": "object", "properties": {}},
             annotations=None,
@@ -195,10 +196,13 @@ async def test_reload_mcp_reports_a_shared_server_to_a_non_owner_profile(
     monkeypatch.setattr(mcp_tool, "_server_connect_errors", {})
     monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {})
     monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: worker_scope)
+    from tools import mcp_tool_registration as _mcp_registration
+    monkeypatch.setattr(_mcp_registration, "_adopter_identity_digest",
+                        lambda _name, _config: "shared-identity")
 
     def fake_discover() -> list[str]:
-        from tools import mcp_tool_registration as _mcp_registration
-        _mcp_registration.register_connected_into_current_scope({"shared": {}})
+        _mcp_registration.register_connected_into_current_scope(
+            {"shared": {"command": "shared"}})
         return ["mcp__shared__tool"]
 
     monkeypatch.setattr(_mcp_lifecycle, "shutdown_mcp_servers", lambda **_kwargs: None)
@@ -542,6 +546,7 @@ def test_shared_server_tools_are_callable_and_removed_on_non_owner_reload(
         tool_timeout=30,
         _registered_tool_names=[],
         _config={"command": "unused"},
+        _resolved_identity="shared-identity",
         initialize_result=None,
     )
     owner_tool_name = "mcp__shared__echo"
@@ -560,18 +565,24 @@ def test_shared_server_tools_are_callable_and_removed_on_non_owner_reload(
             "_server_scope_keys": dict(mcp_tool._server_scope_keys),
             "_server_tool_scopes": dict(mcp_tool._server_tool_scopes),
             "_mcp_tool_server_names": dict(mcp_tool._mcp_tool_server_names),
+            "_server_public_names": dict(mcp_tool._server_public_names),
         }
         mcp_tool._servers.clear()
         mcp_tool._server_scope_keys.clear()
         mcp_tool._server_tool_scopes.clear()
         mcp_tool._mcp_tool_server_names.clear()
+        mcp_tool._server_public_names.clear()
         mcp_tool._servers["shared"] = server
+        mcp_tool._server_public_names["shared"] = "shared"
         mcp_tool._server_scope_keys["shared"] = launch_scope
         mcp_tool._server_tool_scopes["shared"] = {launch_scope}
 
     try:
         monkeypatch.setattr(mcp_tool, "_ensure_mcp_sdk", lambda: True)
         monkeypatch.setattr(_mcp_config, "_filter_suspicious_mcp_servers", lambda servers: servers)
+        from tools import mcp_tool_registration as _mcp_registration
+        monkeypatch.setattr(_mcp_registration, "_adopter_identity_digest",
+                            lambda _name, _config: "shared-identity")
         # A real stdio configuration is required even though this test reuses
         # the already-connected shared server and never starts a subprocess.
         assert _mcp_discovery.register_mcp_servers({"shared": {"command": "unused"}})

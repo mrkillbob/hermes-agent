@@ -2911,31 +2911,38 @@ def _make_agent(
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
     with _sessions_lock:
         session = _sessions.get(sid)
-    agent = AIAgent(
-        model=model, max_iterations=_cfg_max_turns(cfg, 500), provider=runtime.get("provider"),
-        requested_provider=runtime.get("requested_provider"),
-        base_url=runtime.get("base_url"), api_key=runtime.get("api_key"), api_mode=runtime.get("api_mode"),
-        acp_command=runtime.get("command"), acp_args=runtime.get("args"),
-        credential_pool=runtime.get("credential_pool"), quiet_mode=True,
-        verbose_logging=False,  # DEBUG agent logging; independent of tool_progress_mode
-        reasoning_config=(
-            reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
-        service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
-        enabled_toolsets=_load_enabled_toolsets(platform),
-        disabled_toolsets=_load_disabled_toolsets(),
-        # OpenRouter provider_routing prefs (gateway + CLI parity).
-        providers_allowed=_pr.get("only"), providers_ignored=_pr.get("ignore"), providers_order=_pr.get("order"),
-        provider_sort=_pr.get("sort"), provider_require_parameters=_pr.get("require_parameters", False),
-        provider_data_collection=_pr.get("data_collection"), platform=platform, session_id=session_id or key,
-        cwd=cwd_override or (conversation_worktree or {}).get("path"),
-        # The dashboard login identity reaches memory providers as the runtime user, like a gateway user id.
-        # Builds that run before the record exists (branch, eager resume, compute host) pass it explicitly.
-        user_id=auth_user_id if auth_user_id is not None else _session_auth_user_id(session),
-        session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
-        checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
-        pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
-        skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
-        prefill_messages=_load_prefill_messages() or None, **_agent_cbs(sid))
+    from agent.runtime_cwd import reset_session_cwd, set_session_cwd
+    build_cwd = cwd_override or (conversation_worktree or {}).get("path")
+    cwd_token = set_session_cwd(build_cwd) if build_cwd else None
+    try:
+        agent = AIAgent(
+            model=model, max_iterations=_cfg_max_turns(cfg, 500), provider=runtime.get("provider"),
+            requested_provider=runtime.get("requested_provider"),
+            base_url=runtime.get("base_url"), api_key=runtime.get("api_key"), api_mode=runtime.get("api_mode"),
+            acp_command=runtime.get("command"), acp_args=runtime.get("args"),
+            credential_pool=runtime.get("credential_pool"), quiet_mode=True,
+            verbose_logging=False,  # DEBUG agent logging; independent of tool_progress_mode
+            reasoning_config=(
+                reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
+            service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
+            enabled_toolsets=_load_enabled_toolsets(platform),
+            disabled_toolsets=_load_disabled_toolsets(),
+            # OpenRouter provider_routing prefs (gateway + CLI parity).
+            providers_allowed=_pr.get("only"), providers_ignored=_pr.get("ignore"), providers_order=_pr.get("order"),
+            provider_sort=_pr.get("sort"), provider_require_parameters=_pr.get("require_parameters", False),
+            provider_data_collection=_pr.get("data_collection"), platform=platform, session_id=session_id or key,
+            cwd=build_cwd,
+            # The dashboard login identity reaches memory providers as the runtime user, like a gateway user id.
+            # Builds that run before the record exists (branch, eager resume, compute host) pass it explicitly.
+            user_id=auth_user_id if auth_user_id is not None else _session_auth_user_id(session),
+            session_db=session_db if session_db is not None else _get_db(), ephemeral_system_prompt=system_prompt or None,
+            checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
+            pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
+            skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
+            prefill_messages=_load_prefill_messages() or None, **_agent_cbs(sid))
+    finally:
+        if cwd_token is not None:
+            reset_session_cwd(cwd_token)
     if context_cwd_is_launch_artifact is None:
         context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)
     agent._context_cwd_is_launch_artifact = bool(context_cwd_is_launch_artifact)
