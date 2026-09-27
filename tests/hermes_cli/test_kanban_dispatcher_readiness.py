@@ -57,6 +57,20 @@ def test_dispatcher_readiness_distinguishes_disabled_dispatch(monkeypatch):
     assert result["gateway_pid"] == 4321
 
 
+def test_disabled_dispatch_does_not_request_a_gateway_when_none_is_running(monkeypatch):
+    _set_liveness(monkeypatch, pid=None)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config_readonly",
+        lambda: {"kanban": {"dispatch_in_gateway": False}},
+    )
+
+    result = kanban._dispatcher_readiness()
+
+    assert result["status"] == "disabled"
+    assert result["ready"] is False
+    assert result["gateway_pid"] is None
+
+
 def test_strict_readiness_reports_unknown_but_cli_warning_stays_fail_open(monkeypatch):
     _set_liveness(monkeypatch, probe_error=True)
 

@@ -144,6 +144,14 @@ def _dispatcher_readiness(hermes_home: Optional[Path] = None) -> dict[str, Any]:
         }
 
     pid = liveness.pid
+    if not dispatch_on:
+        return {
+            "status": "disabled",
+            "ready": False,
+            "gateway_pid": pid,
+            "message": "kanban.dispatch_in_gateway=false in config.yaml",
+        }
+
     if pid and dispatch_on:
         return {
             "status": "ready",

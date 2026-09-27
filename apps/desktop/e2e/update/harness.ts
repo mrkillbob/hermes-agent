@@ -208,7 +208,12 @@ export function appEnv(facts: InstallFacts, extra: Record<string, string> = {}):
 
 /** A user who configured a custom OpenAI-compatible endpoint (the scripted provider). */
 export function configureProvider(facts: InstallFacts, providerUrl: string): void {
-  fs.writeFileSync(path.join(facts.hermesHome, 'config.yaml'), providerConfigYaml(providerUrl))
+  // These scenarios exercise Desktop install/update lifecycle, not Kanban.
+  // Do not let the boot readiness gate launch an unrelated long-lived gateway.
+  fs.writeFileSync(
+    path.join(facts.hermesHome, 'config.yaml'),
+    providerConfigYaml(providerUrl, 'kanban:\n  dispatch_in_gateway: false\n')
+  )
   fs.writeFileSync(path.join(facts.hermesHome, '.env'), 'MOCK_API_KEY=update-e2e-key\n')
 }
 
@@ -515,11 +520,15 @@ export async function currentAs(page: Page): Promise<{ currentSha?: string; upda
   }
 }
 
-/** Close an app whose process may already be gone (Playwright's handle throws synchronously then). */
+/** Ask Electron to quit normally so its backend and child processes can shut down cleanly. */
 export async function closeQuietly(app: ElectronApplication): Promise<void> {
+  if (app.process().exitCode !== null || app.process().killed) return
+
+  const closed = app.waitForEvent('close', { timeout: 30_000 }).catch(() => undefined)
   try {
-    await app.close()
+    await app.evaluate(({ app: electronApp }) => electronApp.quit())
   } catch {
-    // already exited
+    // The process may have exited while the quit request was being sent.
   }
+  await closed
 }
