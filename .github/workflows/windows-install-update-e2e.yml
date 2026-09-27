@@ -60,8 +60,8 @@ jobs:
           HERMES_E2E_MACHINE_ROOT: ${{ runner.temp }}\wm
           HERMES_E2E_PROFILES_ROOT: C:\Users
           HERMES_E2E_ARTIFACTS: ${{ runner.temp }}\win-update-e2e
-          # One journey per file, all in parallel (each is mostly network + subprocess wait).
-          HERMES_TEST_WORKERS: '6'
+          # Upstream's 32-core runner can handle six installers; the public fork runner cannot.
+          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '6' || '2' }}
           HERMES_TEST_FILE_TIMEOUT: '2400'
           HERMES_TEST_FILE_RETRIES: '0'
           OPENROUTER_API_KEY: ''
