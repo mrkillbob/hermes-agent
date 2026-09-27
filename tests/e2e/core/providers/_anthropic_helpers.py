@@ -97,6 +97,22 @@ class Rig:
         lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
         return "\n".join(ln for ln in lines if pattern.lower() in ln.lower())[-chars:]
 
+    def egress_diagnostics(self) -> str:
+        """Return only the firewall's value-free structural paths from Hermes logs."""
+        prefixes = (
+            "LLM egress blocked typed locations:",
+            "LLM egress blocked structural locations:",
+        )
+        lines = []
+        for name in ("agent.log", "errors.log", "gateway.log"):
+            log = self.hermes_home / "logs" / name
+            if not log.exists():
+                continue
+            for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+                if any(prefix in line for prefix in prefixes):
+                    lines.append(line)
+        return "\n".join(lines[-20:]) or "<no structural egress diagnostic recorded>"
+
     # persisted state ------------------------------------------------------------
     def _db(self) -> sqlite3.Connection:
         return sqlite3.connect(f"file:{self.hermes_home / 'state.db'}?mode=ro", uri=True)
