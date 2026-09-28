@@ -27,7 +27,7 @@ afterEach(() => {
 })
 it.each(['connectionId', 'profile'] as const)(
   'rebinds on %s changes and rejects late frames even after returning',
-  key => {
+  async key => {
     const frames: Array<(data: unknown) => void> = []
     const closes: Array<ReturnType<typeof vi.fn>> = []
     dispose = bindApi(
@@ -45,6 +45,7 @@ it.each(['connectionId', 'profile'] as const)(
         return close
       }
     )
+    await vi.waitFor(() => expect(closes).toHaveLength(1))
     const source = host.state[key] as WritableAtom<string | null>
     const original = source.get()
     source.set('other')
