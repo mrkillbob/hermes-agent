@@ -50,8 +50,51 @@ const A = (n: number) => `A${n}-${nonce}`
 const TOOL_TAG = `core-orphan-${nonce}`
 
 /** Gateways are separately managed daemons; Desktop quit owns only its backend tree. */
+function isGatewayProcessCommand(cmdline: string): boolean {
+  const tokens = cmdline.trim().split(/\s+/).map(token => token.replace(/^['"]|['"]$/g, '').replace(/\\/g, '/'))
+  const basenames = tokens.map(token => token.split('/').at(-1)?.toLowerCase() ?? '')
+
+  if (basenames.some(name => ['hermes-gateway', 'hermes-gateway.exe', 'desktop-gateway.py'].includes(name))) {
+    return true
+  }
+
+  if (tokens.some(token => token === 'gateway/run.py' || token.endsWith('/gateway/run.py'))) {
+    return true
+  }
+
+  const executableIsHermes = ['hermes', 'hermes.exe'].includes(basenames[0] ?? '')
+  const moduleIndex = tokens.findIndex((token, index) => token === '-m' && tokens[index + 1] === 'hermes_cli.main')
+  const scriptIndex = tokens.findIndex(token => token === 'hermes_cli/main.py' || token.endsWith('/hermes_cli/main.py'))
+  const commandStart = executableIsHermes ? 1 : moduleIndex >= 0 ? moduleIndex + 2 : scriptIndex >= 0 ? scriptIndex + 1 : -1
+
+  if (commandStart < 0) {
+    return false
+  }
+
+  const args: string[] = []
+  let skipValue = false
+
+  for (const token of tokens.slice(commandStart)) {
+    if (skipValue) {
+      skipValue = false
+    } else if (token === '--profile' || token === '-p') {
+      skipValue = true
+    } else if (!token.startsWith('--profile=') && !token.startsWith('-p=')) {
+      args.push(token)
+    }
+  }
+
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === 'gateway') {
+      return args[index + 1] === undefined || args[index + 1] === 'run'
+    }
+  }
+
+  return false
+}
+
 function desktopOwnedSandboxProcesses(sandbox: Parameters<typeof sandboxProcesses>[0]): ProcInfo[] {
-  return sandboxProcesses(sandbox).filter(proc => !/ hermes_cli\.main gateway run(?: |$)/.test(proc.cmdline))
+  return sandboxProcesses(sandbox).filter(proc => !isGatewayProcessCommand(proc.cmdline))
 }
 
 /** Every live process whose command line carries `tag` (tool children may scrub HERMES_HOME). */
@@ -186,7 +229,7 @@ test('boot handshake, supervised respawn, and zero orphans on quit', async () =>
         .poll(
           () =>
             [...desktopOwnedSandboxProcesses(sandbox), ...taggedProcesses(TOOL_TAG)].map(
-              p => `${p.pid} ${p.cmdline.slice(0, 120)}`
+              p => `${p.pid} (ppid ${p.ppid}) ${p.cmdline}`
             ),
           {
             timeout: 60_000,
@@ -259,7 +302,7 @@ test('relaunching the same home: one backend per boot, zero after each quit, tra
         await quitCoreApp(app)
         live = null
         await expect
-          .poll(() => desktopOwnedSandboxProcesses(sandbox).map(p => `${p.pid} ${p.cmdline.slice(0, 120)}`), {
+          .poll(() => desktopOwnedSandboxProcesses(sandbox).map(p => `${p.pid} (ppid ${p.ppid}) ${p.cmdline}`), {
             timeout: 60_000,
             message: `no Desktop-owned sandbox process survives quit #${launch}`
           })
