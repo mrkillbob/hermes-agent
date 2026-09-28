@@ -75,6 +75,38 @@ test('transcript oracle holds across every transition', async () => {
   const ws = recordWebSockets(page)
   const proxies: { close: () => Promise<void> }[] = []
 
+  await app.evaluate(({ ipcMain }) => {
+    const main = globalThis as typeof globalThis & { __coreConnectionRoutes?: unknown[] }
+    const handlers = (ipcMain as any)._invokeHandlers as Map<string, (...args: any[]) => Promise<any>>
+    main.__coreConnectionRoutes = []
+
+    for (const channel of ['hermes:connection', 'hermes:connection:for']) {
+      const original = handlers.get(channel)
+
+      if (!original) {
+        throw new Error(`no IPC handler ${channel}`)
+      }
+
+      ipcMain.removeHandler(channel)
+      ipcMain.handle(channel, async (event, ...args) => {
+        const descriptor = await original(event, ...args)
+        const payload = channel === 'hermes:connection:for' ? args[0] : { profile: args[0] }
+
+        main.__coreConnectionRoutes?.push({
+          channel,
+          profile: payload?.profile ?? null,
+          connectionId: payload?.connectionId ?? descriptor?.connectionId ?? null,
+          mode: descriptor?.mode ?? null,
+          port: descriptor?.port ?? null,
+          sharedPrimary: descriptor?.sharedPrimary ?? false,
+          sharedRemote: descriptor?.sharedRemote ?? false
+        })
+
+        return descriptor
+      })
+    }
+  })
+
   const finished = (marker: string, step = 0) =>
     expect
       .poll(() => provider.completions.some(c => c.marker === marker && c.step === step && c.finished), {
@@ -272,6 +304,13 @@ test('transcript oracle holds across every transition', async () => {
       // One backend process, one socket: the host backend serves p2 too, so
       // the renderer must not hold a second live socket to it (#120006).
       const sameBackend = new Set([String(backendPort), String(proxy.port)])
+      const routeTrace = await app.evaluate(() => {
+        const main = globalThis as typeof globalThis & { __coreConnectionRoutes?: unknown[] }
+
+        return (main.__coreConnectionRoutes ?? [])
+          .filter((route: any) => route.profile === 'p2')
+          .slice(-40)
+      })
       await expect
         .poll(
           () =>
@@ -284,7 +323,7 @@ test('transcript oracle holds across every transition', async () => {
               }),
           {
             timeout: 30_000,
-            message: 'live sockets to the one host backend'
+            message: `live sockets to the one host backend; IPC routes: ${JSON.stringify(routeTrace)}`
           }
         )
         .toHaveLength(1)

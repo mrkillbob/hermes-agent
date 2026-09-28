@@ -18,6 +18,7 @@
  *     by the first launch cold-hydrates exactly once every time.
  */
 
+import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 
 import { expect, test } from '@playwright/test'
@@ -31,6 +32,7 @@ import {
   type ProcInfo,
   quitCoreApp,
   recordWebSockets,
+  REPO_ROOT,
   sandboxProcesses,
   send,
   waitForInteractive,
@@ -50,51 +52,43 @@ const A = (n: number) => `A${n}-${nonce}`
 const TOOL_TAG = `core-orphan-${nonce}`
 
 /** Gateways are separately managed daemons; Desktop quit owns only its backend tree. */
-function isGatewayProcessCommand(cmdline: string): boolean {
-  const tokens = cmdline.trim().split(/\s+/).map(token => token.replace(/^['"]|['"]$/g, '').replace(/\\/g, '/'))
-  const basenames = tokens.map(token => token.split('/').at(-1)?.toLowerCase() ?? '')
+function gatewayProcessPids(sandbox: Parameters<typeof sandboxProcesses>[0]): Set<number> {
+  const candidates = sandboxProcesses(sandbox)
 
-  if (basenames.some(name => ['hermes-gateway', 'hermes-gateway.exe', 'desktop-gateway.py'].includes(name))) {
-    return true
+  if (candidates.length === 0) {
+    return new Set()
   }
 
-  if (tokens.some(token => token === 'gateway/run.py' || token.endsWith('/gateway/run.py'))) {
-    return true
+  const python = process.env.HERMES_E2E_PYTHON
+
+  if (!python) {
+    throw new Error('HERMES_E2E_PYTHON is required to classify gateway processes with the canonical matcher')
   }
 
-  const executableIsHermes = ['hermes', 'hermes.exe'].includes(basenames[0] ?? '')
-  const moduleIndex = tokens.findIndex((token, index) => token === '-m' && tokens[index + 1] === 'hermes_cli.main')
-  const scriptIndex = tokens.findIndex(token => token === 'hermes_cli/main.py' || token.endsWith('/hermes_cli/main.py'))
-  const commandStart = executableIsHermes ? 1 : moduleIndex >= 0 ? moduleIndex + 2 : scriptIndex >= 0 ? scriptIndex + 1 : -1
+  const matcher = [
+    'import json, sys',
+    'from gateway.status import looks_like_gateway_command_line',
+    'processes = json.load(sys.stdin)',
+    'print(json.dumps([p["pid"] for p in processes if looks_like_gateway_command_line(p["cmdline"])]))'
+  ].join('; ')
+  const result = spawnSync(python, ['-c', matcher], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    input: JSON.stringify(candidates)
+  })
 
-  if (commandStart < 0) {
-    return false
+  if (result.error || result.status !== 0) {
+    throw new Error(`Canonical gateway process matching failed: ${result.error?.message ?? result.stderr}`)
   }
 
-  const args: string[] = []
-  let skipValue = false
-
-  for (const token of tokens.slice(commandStart)) {
-    if (skipValue) {
-      skipValue = false
-    } else if (token === '--profile' || token === '-p') {
-      skipValue = true
-    } else if (!token.startsWith('--profile=') && !token.startsWith('-p=')) {
-      args.push(token)
-    }
-  }
-
-  for (let index = 0; index < args.length; index++) {
-    if (args[index] === 'gateway') {
-      return args[index + 1] === undefined || args[index + 1] === 'run'
-    }
-  }
-
-  return false
+  return new Set(JSON.parse(result.stdout) as number[])
 }
 
-function desktopOwnedSandboxProcesses(sandbox: Parameters<typeof sandboxProcesses>[0]): ProcInfo[] {
-  return sandboxProcesses(sandbox).filter(proc => !isGatewayProcessCommand(proc.cmdline))
+function desktopOwnedSandboxProcesses(
+  sandbox: Parameters<typeof sandboxProcesses>[0],
+  gatewayPids: ReadonlySet<number>
+): ProcInfo[] {
+  return sandboxProcesses(sandbox).filter(proc => !gatewayPids.has(proc.pid))
 }
 
 /** Every live process whose command line carries `tag` (tool children may scrub HERMES_HOME). */
@@ -225,10 +219,11 @@ test('boot handshake, supervised respawn, and zero orphans on quit', async () =>
       await quitCoreApp(app)
       closed = true
       clearInterval(census)
+      const gatewayPids = gatewayProcessPids(sandbox)
       await expect
         .poll(
           () =>
-            [...desktopOwnedSandboxProcesses(sandbox), ...taggedProcesses(TOOL_TAG)].map(
+            [...desktopOwnedSandboxProcesses(sandbox, gatewayPids), ...taggedProcesses(TOOL_TAG)].map(
               p => `${p.pid} (ppid ${p.ppid}) ${p.cmdline}`
             ),
           {
@@ -301,11 +296,18 @@ test('relaunching the same home: one backend per boot, zero after each quit, tra
         await assertTranscriptOracle(page, ws, provider, session, `launch ${launch}`)
         await quitCoreApp(app)
         live = null
+        const gatewayPids = gatewayProcessPids(sandbox)
         await expect
-          .poll(() => desktopOwnedSandboxProcesses(sandbox).map(p => `${p.pid} (ppid ${p.ppid}) ${p.cmdline}`), {
-            timeout: 60_000,
-            message: `no Desktop-owned sandbox process survives quit #${launch}`
-          })
+          .poll(
+            () =>
+              desktopOwnedSandboxProcesses(sandbox, gatewayPids).map(
+                p => `${p.pid} (ppid ${p.ppid}) ${p.cmdline}`
+              ),
+            {
+              timeout: 60_000,
+              message: `no Desktop-owned sandbox process survives quit #${launch}`
+            }
+          )
           .toEqual([])
       })
     }
