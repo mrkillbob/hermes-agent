@@ -260,15 +260,6 @@ export function useGatewayBoot({
 
   useEffect(() => {
     let cancelled = false
-    let documentUnloading = false
-    let gatewayOnPageHide: HermesGateway | null = null
-    const markDocumentUnloading = () => {
-      documentUnloading = true
-      gatewayOnPageHide?.close()
-      closeSecondaryGateways()
-    }
-
-    window.addEventListener('pagehide', markDocumentUnloading)
     const desktop = window.hermesDesktop
 
     // Window-state IPC (fullscreen / traffic-light position) that lands while
@@ -302,10 +293,7 @@ export function useGatewayBoot({
       failDesktopBoot('Desktop IPC bridge is unavailable.')
       setSessionsLoading(false)
 
-      return () => {
-        cancelled = true
-        window.removeEventListener('pagehide', markDocumentUnloading)
-      }
+      return () => void (cancelled = true)
     }
 
     // Store-driven switches (Sessions switcher → selectConnection) commit
@@ -966,7 +954,6 @@ export function useGatewayBoot({
     }
 
     const gateway = adoptedFromHmr ? survivor!.gateway : new HermesGateway()
-    gatewayOnPageHide = gateway
 
     // Every socket this window owns (the primary below, every registry
     // secondary via onEvent) funnels through this one gate before any store
@@ -1083,7 +1070,7 @@ export function useGatewayBoot({
 
         openedAt = null
 
-        if (!documentUnloading && bootCompleted && !$gatewaySwitching.get()) {
+        if (bootCompleted && !$gatewaySwitching.get()) {
           // The socket dropped after a healthy boot (typically sleep/wake). Try
           // to bring it back instead of leaving the composer stuck disabled.
           scheduleReconnect()
@@ -1602,7 +1589,6 @@ export function useGatewayBoot({
       offSelectedSession()
       offSessionOwnerHolds()
       window.removeEventListener('online', onOnline)
-      window.removeEventListener('pagehide', markDocumentUnloading)
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('focus', onFocus)
       offPowerResume?.()
@@ -1619,14 +1605,14 @@ export function useGatewayBoot({
       offWindowState?.()
       offBootProgress()
 
-      // HMR teardown vs. document unload. On a hot update we must NOT close the
+      // HMR teardown vs. real unmount. On a hot update we must NOT close the
       // socket — that's the whole bug. Detach this instance's listeners (their
       // closures capture the disposed module), park the still-open gateway, and
       // let the freshly loaded effect re-adopt it. Secondaries are owned by the
-      // gateway store (HMR-stable module state), so they survive untouched. A
-      // real page reload in the dev renderer has import.meta.hot too; pagehide
-      // distinguishes that destructive teardown from a module replacement.
-      if (import.meta.hot && !documentUnloading && gateway.connectionState === 'open') {
+      // gateway store (HMR-stable module state), so they survive untouched.
+      // Production: import.meta.hot is undefined, so this branch never runs and
+      // the original destructive teardown below is byte-for-byte preserved.
+      if (import.meta.hot && gateway.connectionState === 'open') {
         stashGatewaySurvivor({
           gateway,
           profile: survivor?.profile ?? $activeGatewayProfile.get(),
