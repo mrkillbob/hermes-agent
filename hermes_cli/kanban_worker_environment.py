@@ -22,6 +22,16 @@ def validate_profile_config(profile_home: str) -> None:
 def bind_worker_environment(env: dict[str, str], workspace: str) -> None:
     from hermes_constants import get_default_hermes_root
 
+    # The dispatcher may have started from a source checkout that is importable
+    # only through its current working directory. Workers switch to their task
+    # workspace, so `sys.executable -m hermes_cli.main` would otherwise lose the
+    # package path and fail before the task starts. Bind the child to the same
+    # Hermes source that launched the dispatcher.
+    source_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (source_root, env.get("PYTHONPATH", "")) if part
+    )
+
     # These tokens are emitted by protected Kanban payloads. They must exist
     # in the terminal environment, not just in the model's sanitized text.
     env["HERMES_CONTROL_HOME"] = str(get_default_hermes_root())
