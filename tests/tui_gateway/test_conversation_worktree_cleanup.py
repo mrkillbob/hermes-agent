@@ -40,7 +40,7 @@ class _DB:
     def is_explicit_fork_child(self, session_id):
         return session_id in self.explicit_fork_children
 
-    def delete_session(self, target, *, sessions_dir):
+    def delete_session(self, target, *, sessions_dir, exclude_active_write_guards=False):
         self.deleted.append(target)
         return True
 

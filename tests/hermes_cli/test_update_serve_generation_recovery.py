@@ -1083,13 +1083,28 @@ def test_same_pid_and_same_incarnation_is_still_a_survivor(monkeypatch):
     monkeypatch.setattr(
         _identity_module(),
         "ledger_entries",
-        lambda *a, **k: [{"pid": 4242, "purpose": "serve", "create_time": 1000.5}],
+        lambda *a, **k: [{"pid": 4242, "purpose": "serve", "create_time": 1000.0}],
     )
     rows = update_cmd._surviving_pre_update_serve_runtimes(
         _plan(_serve_runtime(4242, create_time=1000.0))
     )
     assert [row["pid"] for row in rows] == [4242]
     assert "_create_time" not in rows[0]
+
+
+def test_fast_pid_reuse_is_not_reported_as_the_old_survivor(monkeypatch):
+    """A replacement process inside the ledger's tolerance is not the old incarnation."""
+    monkeypatch.setattr(
+        _identity_module(),
+        "ledger_entries",
+        lambda *a, **k: (
+            [] if k.get("verified_only") else
+            [{"pid": 4242, "purpose": "serve", "create_time": 1000.0}]
+        ),
+    )
+    assert update_cmd._surviving_pre_update_serve_runtimes(
+        _plan(_serve_runtime(4242, create_time=1000.0))
+    ) == []
 
 
 def test_missing_incarnation_on_either_side_fails_closed(monkeypatch):

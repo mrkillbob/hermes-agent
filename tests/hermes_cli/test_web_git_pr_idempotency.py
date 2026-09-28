@@ -34,7 +34,7 @@ def test_review_create_pr_reuses_existing_exact_head(monkeypatch):
                     "headRefOid": "a" * 40,
                 }
             ]
-        )
+        ), ""
 
     monkeypatch.setattr(web_git, "_gh", fake_gh)
 
@@ -49,7 +49,7 @@ def test_review_create_pr_reuses_existing_exact_head(monkeypatch):
 def test_review_create_pr_fails_closed_when_dedupe_read_fails(monkeypatch):
     monkeypatch.setattr(web_git, "_review_push", lambda _cwd: None)
     monkeypatch.setattr(web_git, "_git_out", _git_identity)
-    monkeypatch.setattr(web_git, "_gh", lambda _cwd, _args: (False, "rate limited"))
+    monkeypatch.setattr(web_git, "_gh", lambda _cwd, _args: (False, "rate limited", ""))
 
     with pytest.raises(RuntimeError, match="verify existing pull requests"):
         web_git.review_create_pr("/repo")
@@ -63,9 +63,9 @@ def test_review_create_pr_creates_only_after_exact_head_dedupe(monkeypatch):
     def fake_gh(_cwd: str, args: list[str]):
         calls.append(args)
         if args[0:2] == ["pr", "list"]:
-            return True, "[]"
+            return True, "[]", ""
         assert args == ["pr", "create", "--fill"]
-        return True, "https://github.com/acme/repo/pull/18\n"
+        return True, "https://github.com/acme/repo/pull/18\n", ""
 
     monkeypatch.setattr(web_git, "_gh", fake_gh)
 

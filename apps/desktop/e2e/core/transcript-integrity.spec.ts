@@ -85,6 +85,7 @@ test('transcript oracle holds across every transition', async () => {
 
   const sessionA: OracleTarget = { sessionId: '', expectUserMarkers: [] }
   const sessionB: OracleTarget = { sessionId: '', expectUserMarkers: [] }
+  let currentDocumentSocketStart = 0
 
   try {
     await waitForInteractive(app, page)
@@ -199,6 +200,11 @@ test('transcript oracle holds across every transition', async () => {
     await routePrimaryWebSocket(app, backendPort, proxy.port)
 
     await test.step('reload: hydrated transcript equals persisted', async () => {
+      // Playwright reports WebSockets opened by earlier documents on the same
+      // Page object; the recorder's close event is not a reliable document
+      // lifetime boundary during a full reload. Count only this renderer's
+      // sockets for the later one-host assertion.
+      currentDocumentSocketStart = ws.sockets.length
       await page.reload()
       await waitForInteractive(app, page)
       await installDuplicateSampler(page)
@@ -276,7 +282,7 @@ test('transcript oracle holds across every transition', async () => {
         .poll(
           () =>
             ws.sockets
-              .filter(s => !s.closed && sameBackend.has(new URL(s.url).port))
+              .filter(s => s.id >= currentDocumentSocketStart && !s.closed && sameBackend.has(new URL(s.url).port))
               .map(s => {
                 const requests = ws.sent.filter(frame => frame.socket === s.id).map(frame => frame.method)
 
@@ -284,7 +290,7 @@ test('transcript oracle holds across every transition', async () => {
               }),
           {
             timeout: 30_000,
-            message: 'live sockets to the one host backend'
+            message: 'live sockets to the one host backend from the current renderer document'
           }
         )
         .toHaveLength(1)

@@ -3120,19 +3120,26 @@ class _StreamingCall(StreamingWaitMonitor):
         with self.stream_attempt_lock:
             self.stream_attempt_state["current"] += 1
             attempt_id = int(self.stream_attempt_state["current"])
+            self.last_chunk_time["t"] = time.time()
         self._stale_kill_requested = False
         self.provider_tool_in_flight["yes"] = False
         self.result["partial_tool_names"] = []
         self.deltas_were_sent["yes"] = False
         return attempt_id
 
-    def _cancel_current_stream_attempt(self, reason: str) -> None:
+    def _cancel_current_stream_attempt(self, reason: str, *, expected_attempt_id: int | None = None) -> bool:
         with self.stream_attempt_lock:
             current = int(self.stream_attempt_state["current"])
-            if current:
-                self.stream_attempt_state["cancelled"].add(current)
+            if (
+                not current
+                or (expected_attempt_id is not None and current != expected_attempt_id)
+                or current in self.stream_attempt_state["cancelled"]
+            ):
+                return False
+            self.stream_attempt_state["cancelled"].add(current)
         if current:
             logger.debug("Marked stream attempt %s cancelled: %s", current, reason)
+        return True
 
     def _stream_attempt_is_active(self, stream_attempt_id: int) -> bool:
         with self.stream_attempt_lock:
@@ -4093,12 +4100,14 @@ class _StreamingCall(StreamingWaitMonitor):
             self._stale_counted_attempts.add(attempt)
             _bump_stale_streak(self.agent)
 
-    def _kill_stale_stream(self, elapsed: float) -> None:
+    def _kill_stale_stream(self, elapsed: float, attempt_id: int) -> None:
         """SSE pings but no chunks: cancel the attempt and abort the request-local
         client so the retry loop opens a fresh one. The shared client is never
         closed from this (stranger) thread — earlier stale-killed workers may
         still be unwinding SSL BIOs (FD-recycle corruption); the OpenAI primary
         is replaced lazily."""
+        if not self._cancel_current_stream_attempt("stale_stream_kill", expected_attempt_id=attempt_id):
+            return  # A retry started after the monitor measured this attempt's stale interval.
         _est_ctx = estimate_request_context_tokens(self.api_kwargs)
         logger.warning(
             "Stream stale for %.0fs (threshold %.0fs) — no chunks received. model=%s context=~%s tokens. Killing connection.",
@@ -4110,7 +4119,6 @@ class _StreamingCall(StreamingWaitMonitor):
         self._stale_kill_requested = True
         _killed_response = self._attempt_stream_response
         with contextlib.suppress(Exception):
-            self._cancel_current_stream_attempt("stale_stream_kill")
             self.clients.close_once("stale_stream_kill")
         self._shutdown_stale_attempt_socket(_killed_response)
         self._count_stale_attempt()
