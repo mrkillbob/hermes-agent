@@ -76,9 +76,10 @@ test('transcript oracle holds across every transition', async () => {
   const proxies: { close: () => Promise<void> }[] = []
 
   await app.evaluate(({ ipcMain }) => {
-    const main = globalThis as typeof globalThis & { __coreConnectionRoutes?: unknown[] }
+    const main = globalThis as typeof globalThis & { __coreConnectionRoutes?: unknown[]; __coreWsUrlRoutes?: unknown[] }
     const handlers = (ipcMain as any)._invokeHandlers as Map<string, (...args: any[]) => Promise<any>>
     main.__coreConnectionRoutes = []
+    main.__coreWsUrlRoutes = []
 
     for (const channel of ['hermes:connection', 'hermes:connection:for']) {
       const original = handlers.get(channel)
@@ -103,6 +104,36 @@ test('transcript oracle holds across every transition', async () => {
         })
 
         return descriptor
+      })
+    }
+
+    for (const channel of ['hermes:gateway:ws-url', 'hermes:gateway:ws-url-for']) {
+      const original = handlers.get(channel)
+
+      if (!original) {
+        throw new Error(`no IPC handler ${channel}`)
+      }
+
+      ipcMain.removeHandler(channel)
+      ipcMain.handle(channel, async (event, ...args) => {
+        const result = await original(event, ...args)
+        const payload = args[0]
+        let endpoint: string | null = null
+
+        if (result?.ok === true && typeof result.wsUrl === 'string') {
+          const url = new URL(result.wsUrl)
+          endpoint = `${url.protocol}//${url.host}${url.pathname}`
+        }
+
+        main.__coreWsUrlRoutes?.push({
+          channel,
+          profile: typeof payload === 'string' ? payload : (payload?.profile ?? null),
+          connectionId: payload?.connectionId ?? null,
+          endpoint,
+          ok: result?.ok ?? null
+        })
+
+        return result
       })
     }
   })
@@ -305,11 +336,17 @@ test('transcript oracle holds across every transition', async () => {
       // the renderer must not hold a second live socket to it (#120006).
       const sameBackend = new Set([String(backendPort), String(proxy.port)])
       const routeTrace = await app.evaluate(() => {
-        const main = globalThis as typeof globalThis & { __coreConnectionRoutes?: unknown[] }
+        const main = globalThis as typeof globalThis & {
+          __coreConnectionRoutes?: unknown[]
+          __coreWsUrlRoutes?: unknown[]
+        }
 
-        return (main.__coreConnectionRoutes ?? [])
-          .filter((route: any) => route.profile === 'p2')
-          .slice(-40)
+        return {
+          connections: (main.__coreConnectionRoutes ?? [])
+            .filter((route: any) => route.profile === 'p2')
+            .slice(-40),
+          wsUrls: (main.__coreWsUrlRoutes ?? []).slice(-40)
+        }
       })
       await expect
         .poll(
