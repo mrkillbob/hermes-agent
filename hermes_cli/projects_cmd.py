@@ -142,6 +142,16 @@ def _cmd_create(args, conn) -> int:
     if proj is None:
         print("project: vanished after create", file=sys.stderr)
         return 2
+    if proj.board_slug:
+        from hermes_cli import kanban_db as kb
+
+        slug = kb._normalize_board_slug(proj.board_slug)
+        if slug and (slug == kb.DEFAULT_BOARD or kb.board_exists(slug)):
+            kb.write_board_metadata(
+                slug,
+                default_workdir=proj.primary_path,
+                project_id=proj.id,
+            )
     print(f"Created project {proj.slug} ({pid})")
     _print_project(proj)
     return 0
@@ -210,18 +220,22 @@ def _flag_command(op: str, verb: str):
 
 @_with_project
 def _cmd_bind_board(args, conn, proj) -> str:
+    previous_board = proj.board_slug
     pdb.update_project(conn, proj.id, board_slug=args.board)
+    from hermes_cli import kanban_db as kb
+
+    previous_slug = kb._normalize_board_slug(previous_board)
+    if previous_slug and (previous_slug == kb.DEFAULT_BOARD or kb.board_exists(previous_slug)):
+        kb.write_board_metadata(previous_slug, project_id="")
     if not args.board.strip():
         return f"Unbound board from {proj.slug}"
-    if proj.primary_path:  # best-effort: point the bound board's default_workdir at the primary repo
-        try:
-            from hermes_cli import kanban_db as kb
-
-            slug = kb._normalize_board_slug(args.board)
-            if slug and (slug == kb.DEFAULT_BOARD or kb.board_exists(slug)):
-                kb.write_board_metadata(slug, default_workdir=proj.primary_path)
-        except Exception:
-            pass
+    slug = kb._normalize_board_slug(args.board)
+    if slug and (slug == kb.DEFAULT_BOARD or kb.board_exists(slug)):
+        kb.write_board_metadata(
+            slug,
+            default_workdir=proj.primary_path,
+            project_id=proj.id,
+        )
     return f"Bound {proj.slug} -> board {args.board}"
 
 
