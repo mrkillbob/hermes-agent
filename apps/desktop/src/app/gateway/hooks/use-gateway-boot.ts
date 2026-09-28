@@ -261,8 +261,11 @@ export function useGatewayBoot({
   useEffect(() => {
     let cancelled = false
     let documentUnloading = false
+    let gatewayOnPageHide: HermesGateway | null = null
     const markDocumentUnloading = () => {
       documentUnloading = true
+      gatewayOnPageHide?.close()
+      closeSecondaryGateways()
     }
 
     window.addEventListener('pagehide', markDocumentUnloading)
@@ -963,6 +966,7 @@ export function useGatewayBoot({
     }
 
     const gateway = adoptedFromHmr ? survivor!.gateway : new HermesGateway()
+    gatewayOnPageHide = gateway
 
     // Every socket this window owns (the primary below, every registry
     // secondary via onEvent) funnels through this one gate before any store
@@ -1079,7 +1083,7 @@ export function useGatewayBoot({
 
         openedAt = null
 
-        if (bootCompleted && !$gatewaySwitching.get()) {
+        if (!documentUnloading && bootCompleted && !$gatewaySwitching.get()) {
           // The socket dropped after a healthy boot (typically sleep/wake). Try
           // to bring it back instead of leaving the composer stuck disabled.
           scheduleReconnect()
