@@ -988,11 +988,28 @@ def _default_session_cwd() -> str:
     return _launch_configured_cwd() or os.getenv("TERMINAL_CWD") or os.getcwd()
 
 
+_SESSION_EVENT_WRITE_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
 def write_json(obj: dict) -> bool:
     """Emit one JSON frame via the most-specific transport: (1) event frames with a session id → that
     session's transport (async events reach the owner even from threads with no contextvar binding);
     (2) the context-bound transport (:func:`dispatch`); (3) module stdio (tests monkey-patch ``_real_stdout``).
-    Every event frame gets a per-session monotonic ``seq`` + replay-ring entry so ``session.events.since`` can resume."""
+    Every event frame gets a per-session monotonic ``seq`` + replay-ring entry so ``session.events.since`` can resume.
+    Keep stamping and dispatch under the same per-session lock: otherwise two worker threads can stamp seq 173
+    and 174, then reach the transport in the opposite order."""
+    params = obj.get("params") if isinstance(obj, dict) else None
+    sid = params.get("session_id") if isinstance(params, dict) else None
+    if obj.get("method") == "event" and sid:
+        # Bounded lock striping avoids retaining a lock for every session ever created.
+        lock = _SESSION_EVENT_WRITE_LOCKS[hash(str(sid)) % len(_SESSION_EVENT_WRITE_LOCKS)]
+        with lock:
+            return _write_json_frame(obj)
+
+    return _write_json_frame(obj)
+
+
+def _write_json_frame(obj: dict) -> bool:
     from tui_gateway.event_replay import _stamp_event
     from tui_gateway.hosted_room_member_activity import project_room_member_activity
     _stamp_event(obj)

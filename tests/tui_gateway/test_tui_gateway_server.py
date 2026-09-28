@@ -1203,6 +1203,65 @@ def test_write_json_serializes_concurrent_writes(monkeypatch):
     assert len(ours) == 8
 
 
+def test_write_json_keeps_session_event_sequence_in_transport_order(monkeypatch):
+    """A second worker cannot dispatch seq 2 while seq 1 is stamped but not yet written."""
+    from tui_gateway import event_replay, hosted_room_member_activity
+
+    session_id = "event-write-order"
+    event_replay.reset_replay_state()
+    monkeypatch.setattr(hosted_room_member_activity, "project_room_member_activity", lambda *_: None)
+    first_stamped = threading.Event()
+    second_stamped = threading.Event()
+    release_first = threading.Event()
+    written: list[int] = []
+
+    class RecordingTransport:
+        def write(self, frame: dict) -> bool:
+            written.append(frame["params"]["seq"])
+            return True
+
+    monkeypatch.setitem(server._sessions, session_id, {"transport": RecordingTransport()})
+    stamp = event_replay._stamp_event
+
+    def pause_after_first_stamp(frame: dict) -> None:
+        stamp(frame)
+        seq = frame["params"]["seq"]
+
+        if seq == 1:
+            first_stamped.set()
+            release_first.wait(timeout=5)
+        elif seq == 2:
+            second_stamped.set()
+
+    monkeypatch.setattr(event_replay, "_stamp_event", pause_after_first_stamp)
+
+    def emit(seq: int) -> None:
+        server.write_json({
+            "jsonrpc": "2.0",
+            "method": "event",
+            "params": {"session_id": session_id, "type": "message.delta", "payload": {"text": str(seq)}},
+        })
+
+    first = threading.Thread(target=emit, args=(1,))
+    second = threading.Thread(target=emit, args=(2,))
+    first.start()
+    try:
+        assert first_stamped.wait(timeout=2)
+        second.start()
+        # The timeout is only a scheduling window while seq 1 is deliberately
+        # paused. A missing dispatch lock lets seq 2 stamp/write in this window.
+        assert not second_stamped.wait(timeout=2)
+    finally:
+        release_first.set()
+        first.join(timeout=5)
+        if second.ident is not None:
+            second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert written == [1, 2]
+
+
 def test_write_json_returns_false_on_broken_pipe(monkeypatch):
     monkeypatch.setattr(server, "_real_stdout", _BrokenStdout())
 
