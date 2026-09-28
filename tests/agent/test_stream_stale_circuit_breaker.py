@@ -201,5 +201,5 @@ class TestStreamStaleCircuitBreaker:
             agent._interruptible_streaming_api_call({})
 
         kills = sum("Stream stale for" in r.getMessage() for r in caplog.records)
-        assert kills >= 2, f"scenario needs the timer to re-fire; saw {kills} kill(s)"
+        assert kills == 1, f"one stream attempt should be killed once; saw {kills} kill(s)"
         assert agent._consecutive_stale_streams == 1

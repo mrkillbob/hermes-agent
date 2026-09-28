@@ -1,4 +1,5 @@
 """Resumed chunks clear only the stream monitor's own silence notice."""
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,8 @@ def test_resumed_chunks_clear_wait_without_erasing_local_load(monkeypatch, local
     )
     call.api_kwargs = {"model": "test-model"}
     call.last_chunk_time = {"t": now[0]}
+    call.stream_attempt_lock = threading.Lock()
+    call.stream_attempt_state = {"current": 0, "cancelled": set()}
     call._stream_stale_timeout = 180.0
     loading = "Loading local model weights"
     monkeypatch.setattr(h, "_managed_local_load_notice",
