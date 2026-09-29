@@ -150,6 +150,9 @@ _RATE_LIMIT_PATTERNS = (
     "resource exhausted", "resource_exhausted", "resource-exhausted", "resourceexhausted",
     "rate increased too quickly", "throttlingexception", "too many concurrent requests",
     "servicequotaexceededexception", "throttling",
+    # Nous can wrap an upstream periodic quota refusal in HTTP 400.
+    # The explicit reset phrase must stay a throttle, not a format failure.
+    "limit resets at ",
 )
 
 # Server busy, credential fine: back off on the same key, never rotate. Z.AI/
