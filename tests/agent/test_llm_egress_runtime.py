@@ -4311,3 +4311,45 @@ def test_yaml_false_egress_posture_is_respected(tmp_path, monkeypatch, posture, 
     config._LOAD_CONFIG_CACHE.clear()
     managed_scope.invalidate_managed_cache()
     assert egress_enforcement_enabled() is False
+
+
+def test_nous_replays_canonical_task_spec_without_legacy_marker(tmp_path, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="Repair current assignment", body=(
+            "Inspect current checkout. token=super-secret-value /Users/private/source.py"
+        ), assignee="worker")
+        kb.claim_task(conn, tid)
+        run_id = kb._current_run_id(conn, tid)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
+    board_text = kt._handle_show({})
+    agent = _agent(tmp_path)
+    agent.provider = "nous"
+    agent.base_url = "https://inference-api.nousresearch.com/v1"
+    authorized, receipt = authorize_agent_sdk_kwargs(agent, {
+        "model": "meituan/longcat-2.5-preview:free",
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call_show", "type": "function",
+              "function": {"name": "kanban_show", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call_show", "content": board_text},
+        ],
+    })
+    rendered = authorized["messages"][1]["content"]
+    assert receipt.allowed
+    assert "Repair current assignment" in rendered
+    assert "Inspect current checkout." in rendered
+    assert "super-secret-value" not in rendered
+    assert "/Users/private/source.py" not in rendered
