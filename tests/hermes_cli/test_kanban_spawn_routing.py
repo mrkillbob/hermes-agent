@@ -51,7 +51,8 @@ def test_local_first_route_fails_closed_when_no_local_model_is_configured() -> N
     assert _resolve_local_first_route(profile) is None
 
 
-def test_explicit_local_task_pin_beats_profile_local_first_route() -> None:
+@pytest.mark.parametrize("provider", ["ollama-launch", "llamacpp", "llama.cpp", "llama-cpp"])
+def test_explicit_local_task_pin_beats_profile_local_first_route(provider) -> None:
     from hermes_cli.kanban_db import Task
 
     task = Task(
@@ -71,13 +72,20 @@ def test_explicit_local_task_pin_beats_profile_local_first_route() -> None:
         claim_expires=None,
         tenant=None,
         model_override="qwen3.6:35b-a3b",
-        provider_override="ollama-launch",
+        provider_override=provider,
     )
 
     assert _resolve_explicit_local_task_route(task) == (
-        "ollama-launch",
+        provider,
         "qwen3.6:35b-a3b",
     )
+
+
+    from hermes_cli.kanban_worker_routing import prepare_worker_route
+    env = {}
+    routed = prepare_worker_route(task, None, env)
+    assert routed.model_override == task.model_override
+    assert env["HERMES_KANBAN_LOCAL_ONLY"] == "1"
 
 
 def test_default_spawn_honors_explicit_local_pin_when_local_first_is_enabled(

@@ -103,3 +103,45 @@ def test_draft_feedback_is_not_admitted_and_pending_dispatch_can_retire(dispatch
     result = retire_closed_feedback(policy, SimpleNamespace(get_pull_request=lambda *_: draft), ledger, receipt)
     assert "draft" in result["reason"]
     assert not ledger.was_actioned_on_any_head(receipt)
+
+
+@pytest.mark.parametrize("dispatched", ["issue_comment"], indirect=True)
+@pytest.mark.parametrize("body, retired", [(
+    "> AI code review — automated review for reference; please use your judgment.\n"
+    "Reviewed current head — no blocking or non-blocking issues found.", True
+), ("Please fix this regression before merging.", False)])
+def test_open_dispatch_retirement_uses_current_public_feedback(dispatched, body, retired):
+    from github_pr_feedback.github_client import Feedback
+    from github_pr_feedback.policy import Reviewer
+    policy, ledger, receipt, pull = dispatched
+    pull = replace(pull, state="OPEN")
+    now = datetime.now(UTC)
+    feedback = Feedback(receipt.feedback_kind, receipt.feedback_id, Reviewer("reviewer", "NONE"), body, now, False)
+    github = SimpleNamespace(get_pull_request=lambda *_: pull, list_feedback=lambda *_: (feedback,))
+    if retired:
+        result = retire_closed_feedback(policy, github, ledger, receipt)
+        assert result["status"] == "retired"
+        assert "advisory_lgtm_report" in result["reason"]
+        assert ledger.exact_pending_task_binding(receipt) is None
+        assert not ledger.was_actioned_on_any_head(receipt)
+    else:
+        with pytest.raises(ValueError):
+            retire_closed_feedback(policy, github, ledger, receipt)
+        assert ledger.exact_pending_task_binding(receipt) is not None
+
+
+@pytest.mark.parametrize("dispatched", ["issue_comment"], indirect=True)
+def test_edited_advisory_cannot_retire_live_repair(dispatched):
+    from github_pr_feedback.github_client import Feedback
+    from github_pr_feedback.policy import Reviewer
+    policy, ledger, receipt, pull = dispatched
+    pull = replace(pull, state="OPEN")
+    now = datetime.now(UTC)
+    feedback = Feedback(receipt.feedback_kind, receipt.feedback_id, Reviewer("reviewer", "NONE"),
+        "> AI code review — automated review for reference; please use your judgment.\nNo findings — reviewed.",
+        now, False)
+    versions = iter([(feedback,), (replace(feedback, body="Please fix this regression."),)])
+    github = SimpleNamespace(get_pull_request=lambda *_: pull, list_feedback=lambda *_: next(versions))
+    with pytest.raises(ValueError):
+        retire_closed_feedback(policy, github, ledger, receipt)
+    assert ledger.exact_pending_task_binding(receipt) is not None

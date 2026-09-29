@@ -2294,65 +2294,7 @@ class ScanController:
                 return "before_not_before"
         except (AttributeError, ValueError):
             return "invalid_feedback_timestamp"
-        if _is_non_actionable_review_container(feedback):
-            return "non_actionable_review_container"
-        if _is_advisory_lgtm_report(feedback):
-            return "advisory_lgtm_report"
-        if _is_codex_review_summary_tracker(feedback):
-            return "codex_review_summary_tracker"
-        if (
-            feedback.kind == "issue_comment"
-            and feedback.reviewer.login.casefold() == owner_login.casefold()
-            and re.match(r"^@[A-Za-z0-9_-]+\s+Please review the current upstream PR head\b", feedback.body)
-            and "specifically for your AI review" in feedback.body
-            and not re.search(r"\[P[0-3]\]|\b(?:fix|repair|regression|bug)\b", feedback.body, re.IGNORECASE)
-        ):
-            return "self_review_request"
-        if is_codex_review_request(feedback.body):
-            return "codex_review_request"
-        if (
-            feedback.reviewer.login.casefold() == owner_login.casefold()
-            and _CI_RECEIPT_MARKER.search(feedback.body) is not None
-        ):
-            # The deterministic local-CI publisher owns this marker.  Suppress
-            # it independently of a profile-local ledger: workers may record
-            # the receipt under their profile while the global scanner reads
-            # the comment from the shared GitHub account.
-            return "self_ci_receipt"
-        if (
-            feedback.kind == "issue_comment"
-            and feedback.reviewer.login.casefold() == owner_login.casefold()
-            and re.match(
-                r"^(?:#{1,6}\s+)?(?:Refactor checkpoint:\s*|Implementation update\s*[—-]\s*)"
-                r"`[0-9a-f]{7,40}`(?:[^\n]*)\n",
-                feedback.body.strip(),
-                flags=re.IGNORECASE,
-            )
-            and not re.search(
-                r"\[P[0-3]\]|\b(?:please|must|need(?:s)? to|request(?:ed)?|regression|bug)\b",
-                feedback.body,
-                flags=re.IGNORECASE,
-            )
-        ):
-            return "self_progress_checkpoint"
-        if _is_self_resolution_receipt(feedback, owner_login=owner_login):
-            return "self_resolution_receipt"
-        identity = self._policy.github_identity
-        if (
-            identity is not None
-            and feedback.reviewer.login.casefold() == identity.expected_login.casefold()
-            and feedback.kind in {"issue_comment", "review_comment"}
-            and len(feedback.body) < MAX_FEEDBACK_BODY_CHARS
-            and re.search(
-                r"<!--\s*pr-maintenance-receipt:v1\s+status=completed\s+"
-                r"kind=\w+\s+head=[0-9a-f]{40,64}\s*-->",
-                feedback.body,
-            ) is not None
-        ):
-            # Governed automation has a separate identity from the PR owner.
-            # Its completion receipts must not become new repair requests.
-            return "self_resolution_receipt"
-        return None
+        return non_actionable_feedback_reason(self._policy, feedback, owner_login=owner_login)
 
     def _ci_feedback_base_reason(
         self,
@@ -3631,3 +3573,65 @@ def _scan_result(
         ),
         local_ci_catalogue_deferred=local_ci_catalogue_deferred,
     )
+
+def non_actionable_feedback_reason(policy: PluginPolicy, feedback: Feedback, *, owner_login: str) -> str | None:
+    """Classify advisory feedback consistently at intake and dispatch retirement."""
+    if _is_non_actionable_review_container(feedback):
+        return "non_actionable_review_container"
+    if _is_advisory_lgtm_report(feedback):
+        return "advisory_lgtm_report"
+    if _is_codex_review_summary_tracker(feedback):
+        return "codex_review_summary_tracker"
+    if (
+        feedback.kind == "issue_comment"
+        and feedback.reviewer.login.casefold() == owner_login.casefold()
+        and re.match(r"^@[A-Za-z0-9_-]+\s+Please review the current upstream PR head\b", feedback.body)
+        and "specifically for your AI review" in feedback.body
+        and not re.search(r"\[P[0-3]\]|\b(?:fix|repair|regression|bug)\b", feedback.body, re.IGNORECASE)
+    ):
+        return "self_review_request"
+    if is_codex_review_request(feedback.body):
+        return "codex_review_request"
+    if (
+        feedback.reviewer.login.casefold() == owner_login.casefold()
+        and _CI_RECEIPT_MARKER.search(feedback.body) is not None
+    ):
+        # The deterministic local-CI publisher owns this marker.  Suppress
+        # it independently of a profile-local ledger: workers may record
+        # the receipt under their profile while the global scanner reads
+        # the comment from the shared GitHub account.
+        return "self_ci_receipt"
+    if (
+        feedback.kind == "issue_comment"
+        and feedback.reviewer.login.casefold() == owner_login.casefold()
+        and re.match(
+            r"^(?:#{1,6}\s+)?(?:Refactor checkpoint:\s*|Implementation update\s*[—-]\s*)"
+            r"`[0-9a-f]{7,40}`(?:[^\n]*)\n",
+            feedback.body.strip(),
+            flags=re.IGNORECASE,
+        )
+        and not re.search(
+            r"\[P[0-3]\]|\b(?:please|must|need(?:s)? to|request(?:ed)?|regression|bug)\b",
+            feedback.body,
+            flags=re.IGNORECASE,
+        )
+    ):
+        return "self_progress_checkpoint"
+    if _is_self_resolution_receipt(feedback, owner_login=owner_login):
+        return "self_resolution_receipt"
+    identity = policy.github_identity
+    if (
+        identity is not None
+        and feedback.reviewer.login.casefold() == identity.expected_login.casefold()
+        and feedback.kind in {"issue_comment", "review_comment"}
+        and len(feedback.body) < MAX_FEEDBACK_BODY_CHARS
+        and re.search(
+            r"<!--\s*pr-maintenance-receipt:v1\s+status=completed\s+"
+            r"kind=\w+\s+head=[0-9a-f]{40,64}\s*-->",
+            feedback.body,
+        ) is not None
+    ):
+        # Governed automation has a separate identity from the PR owner.
+        # Its completion receipts must not become new repair requests.
+        return "self_resolution_receipt"
+    return None

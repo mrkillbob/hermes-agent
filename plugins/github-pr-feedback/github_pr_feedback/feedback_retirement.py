@@ -23,6 +23,26 @@ def retirement_reason(current, receipt, ledger=None):
     return None
 
 
+def _advisory_retirement_reason(policy, github, receipt, current):
+    from .controller import non_actionable_feedback_reason
+
+    if current.state != "OPEN" or receipt.feedback_kind != "issue_comment":
+        return None, None
+    reader = getattr(github, "list_feedback", None)
+    if reader is None:
+        return None, None
+    matches = [item for item in reader(receipt.repository, receipt.pr_number)
+               if item.kind == receipt.feedback_kind and item.feedback_id == receipt.feedback_id]
+    if len(matches) != 1:
+        return None, None
+    feedback = matches[0]
+    reason = non_actionable_feedback_reason(policy, feedback, owner_login=current.author_login)
+    if reason not in {"advisory_lgtm_report", "self_review_request", "self_resolution_receipt",
+                      "self_progress_checkpoint", "codex_review_request", "self_ci_receipt"}:
+        return None, None
+    return f"canonical feedback is non-actionable: {reason}", feedback
+
+
 def retire_closed_feedback(policy, github, ledger, receipt):
     # pr_local_ci normally completes through audit-pr's own typed-receipt flow,
     # not this one -- but audit-pr rejects a non-OPEN PR identity outright, so
@@ -30,6 +50,9 @@ def retire_closed_feedback(policy, github, ledger, receipt):
     # ledger row. Retire it here too rather than leaving it stuck forever.
     current = github.get_pull_request(receipt.repository, receipt.pr_number)
     reason = retirement_reason(current, receipt, ledger)
+    advisory = None
+    if reason is None:
+        reason, advisory = _advisory_retirement_reason(policy, github, receipt, current)
     if (not policy.enabled or reason is None
             or current.number != receipt.pr_number or current.base_repository != receipt.repository
             or not policy.admit_pull_request(replace(current, state="OPEN", is_draft=False)).admitted):
@@ -39,6 +62,10 @@ def retire_closed_feedback(policy, github, ledger, receipt):
     # Re-read after admission: a reopened or changed PR must keep its pending gate.
     if github.get_pull_request(receipt.repository, receipt.pr_number) != current:
         raise ValueError("canonical PR changed during retirement")
+    if advisory is not None:
+        repeated_reason, repeated_feedback = _advisory_retirement_reason(policy, github, receipt, current)
+        if repeated_reason != reason or repeated_feedback != advisory:
+            raise ValueError("canonical feedback changed during retirement")
     with ledger._transaction():
         row = ledger._connection.execute(
             "SELECT task_id, status, action_status FROM feedback_receipts "
