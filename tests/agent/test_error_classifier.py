@@ -2177,3 +2177,25 @@ class TestStreamingRenderFormatError:
         e = MockAPIError("Error rendering prompt with jinja template: ...", status_code=500)
         result = classify_api_error(e, provider="lm-studio", model="x")
         assert result.reason != FailoverReason.format_error
+
+
+@pytest.mark.parametrize("status_code", [400, 429, None])
+def test_nous_wrapped_limit_reset_is_transient_quota(status_code):
+    error = MockAPIError(
+        "This request is not valid. Check the model name and other parameters. "
+        "Additional info: Provider returned error Limit resets at 13:49 (in 1m).",
+        status_code=status_code,
+    )
+    result = classify_api_error(error, provider="nous", model="meituan/longcat-2.5-preview:free")
+    assert result.reason == FailoverReason.rate_limit
+    assert result.retryable is True
+    assert result.should_fallback is True
+
+
+def test_nous_invalid_request_without_quota_signal_stays_fatal():
+    result = classify_api_error(MockAPIError(
+        "This request is not valid. Check the model name and other parameters.",
+        status_code=400,
+    ), provider="nous", model="meituan/longcat-2.5-preview:free")
+    assert result.reason == FailoverReason.format_error
+    assert result.retryable is False
