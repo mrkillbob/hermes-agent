@@ -3735,8 +3735,9 @@ def test_worker_callback_runs_outside_gateway_scope(tmp_path, monkeypatch):
     prefix = _governed_command_prefix(control_home)
     # Execute the actual environment prefix with a harmless child probe.
     import shlex
-    argv = shlex.split(prefix)
-    probe = argv[:argv.index("-m")] + ["-c", "import os,json; print(json.dumps([os.getenv('_HERMES_GATEWAY'), os.getenv('HERMES_HOME')]))"]
+    monkeypatch.setenv("HERMES_KANBAN_HERMES_PYTHON", sys.executable)
+    probe_code = "import os,json; print(json.dumps([os.getenv('_HERMES_GATEWAY'), os.getenv('HERMES_HOME')]))"
+    probe = ["/bin/sh", "-c", prefix.split(" -m ")[0] + " -c " + shlex.quote(probe_code)]
     result = subprocess.run(
         probe, capture_output=True, text=True, encoding="utf-8", check=True
     )

@@ -528,7 +528,9 @@ def _kanban_create_error(result: KanbanCommandResult) -> str:
 
 def _kanban_create_argv(task: KanbanTask) -> list[str]:
     body = (
-        f"{task.instructions}\n\n{task.evidence_heading}:\n"
+        f"{task.instructions}\n\nCanonical receipt worktree: {task.repository_path}\n"
+        "Use the assigned workspace. Do not search for the worktree or infer a replacement.\n\n"
+        f"{task.evidence_heading}:\n"
         f"{json.dumps(task.evidence, sort_keys=True)}"
     )
     argv = [
@@ -609,7 +611,9 @@ def _is_legacy_intake_task(details: object, task: KanbanTask) -> bool:
 
 def _kanban_reconcile_argv(task_id: str, task: KanbanTask) -> list[str]:
     body = (
-        f"{task.instructions}\n\n{task.evidence_heading}:\n"
+        f"{task.instructions}\n\nCanonical receipt worktree: {task.repository_path}\n"
+        "Use the assigned workspace. Do not search for the worktree or infer a replacement.\n\n"
+        f"{task.evidence_heading}:\n"
         f"{json.dumps(task.evidence, sort_keys=True)}"
     )
     return [

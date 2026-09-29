@@ -17,6 +17,7 @@
   },
   "overrides": {
     "protobufjs": "8.7.1",
+    "undici": "7.29.1",
     "@opentelemetry/otlp-transformer": "0.218.0",
     "@opentelemetry/otlp-exporter-base": "0.218.0",
     "@opentelemetry/exporter-trace-otlp-http": "0.218.0",
