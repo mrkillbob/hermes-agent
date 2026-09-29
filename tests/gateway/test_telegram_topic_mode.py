@@ -112,7 +112,7 @@ def _make_runner(session_db=None):
     # session_id. Mirrors SessionStore.switch_session semantics for tests that
     # exercise Telegram topic binding rebinds without a real store.
     def _switch_session(session_key, target_session_id, *, expected_session_id=None,
-                        conversation_kind="interactive", persisted_cwd=None):
+                        conversation_kind="interactive", persisted_cwd=None, preserve_prompt_pin=True):
         return SessionEntry(
             session_key=session_key,
             session_id=target_session_id,
@@ -693,10 +693,8 @@ async def test_handoff_to_telegram_dm_topic_uses_dm_lane_not_generic_thread(tmp_
         captured["source"], conversation_kind="task"
     )
     runner.session_store.switch_session.assert_called_once_with(
-        expected_key,
-        "cli-session",
-        conversation_kind="task",
-        persisted_cwd=str(cli_workspace),
+        expected_key, "cli-session", conversation_kind="task", persisted_cwd=str(cli_workspace),
+        preserve_prompt_pin=False,
     )
     assert captured["source"].chat_type == "dm"
     assert captured["source"].user_id == "208214988"
