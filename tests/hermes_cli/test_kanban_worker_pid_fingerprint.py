@@ -149,3 +149,29 @@ def test_unverified_fingerprint_capture_never_authorizes_a_signal(board, monkeyp
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
     assert kb.release_stale_claims(conn, signal_fn=sig) == 1
     assert killed == [] and kb.get_task(conn, tid2).status == "ready"
+
+
+@pytest.mark.parametrize("matches_worker", [True, False])
+def test_runtime_limit_uses_exact_worker_identity_across_hostname_alias(
+    board, monkeypatch, matches_worker,
+):
+    from hermes_cli import kanban_worker_process as kwp
+    from gateway.status import get_process_start_time
+
+    monkeypatch.setattr(kb, "_host_prefix", lambda: "new-host:")
+    monkeypatch.setattr(kwp, "pid_matches_task_worker", lambda pid, tid: matches_worker)
+    monkeypatch.setattr(kbd, "_poll_worker_exit", lambda *args: None)
+    tid = _claimed_running(board, pid=os.getpid(),
+                           started_at=get_process_start_time(os.getpid()), max_runtime=1)
+    with kb.write_txn(board):
+        board.execute("UPDATE tasks SET claim_lock = ? WHERE id = ?", ("old-host:123", tid))
+    signals = []
+    result = kbd.enforce_max_runtime(board, signal_fn=lambda pid, sig: signals.append((pid, sig)))
+    if matches_worker:
+        assert result == [tid]
+        assert signals[0] == (os.getpid(), signal.SIGTERM)
+        assert kb.get_task(board, tid).status == "ready"
+    else:
+        assert result == []
+        assert signals == []
+        assert kb.get_task(board, tid).status == "running"
