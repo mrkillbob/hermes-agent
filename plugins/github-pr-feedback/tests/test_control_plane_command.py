@@ -16,9 +16,9 @@ def test_control_plane_command_ignores_worktree_module_shadow(tmp_path):
     (shadow / "main.py").write_text("print('WRONG_WORKTREE_CONTROL_PLANE')\n", encoding="utf-8")
     command = shlex.split(_governed_command_prefix(home))
     # Exercise the actual CLI launcher without GitHub credentials or a network
-    # operation; version-local is sufficient to identify module resolution.
+    # operation; --version is sufficient to identify module resolution.
     result = subprocess.run(
-        command[:-1] + ["--version-local"], cwd=workspace,
+        command[:-1] + ["--version"], cwd=workspace,
         capture_output=True, text=True, timeout=20,
     )
     assert result.returncode == 0, result.stderr

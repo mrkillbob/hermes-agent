@@ -1798,7 +1798,7 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     assert task.provider_override is None
     assert task.model_override is None
     assert task.reasoning_effort is None
-    assert task.initial_status == "blocked"
+    assert task.initial_status == "todo"
     assert task.max_retries == 3
     assert task.max_runtime_seconds == 8 * 60 * 60
     assert task.idempotency_key.endswith(":supervised-v4")
