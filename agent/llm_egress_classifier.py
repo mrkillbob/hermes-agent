@@ -187,8 +187,22 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
     projection = {
         "task": projected_task,
         "worker_instruction": (
-            "Use the dispatcher-assigned current workspace. Do not invent or search "
-            "for alternate worktrees; report an unresolved assignment and stop."
+            "Use the dispatcher-assigned current workspace with relative paths. "
+            "Absolute paths and generic terminal stdout are deliberately omitted "
+            "from protected replay. Do not rediscover the workspace with pwd, env, "
+            "directory scans, or guessed cd paths. For source evidence use direct "
+            "read_file calls with narrow line ranges; these bind exact source grants. "
+            "Run git status --short --branch, git diff --stat, and git diff --check "
+            "as separate terminal calls for bounded Git summaries. Do not combine "
+            "them with echo, pwd, env, or git log. To obtain the exact HEAD, run "
+            "mkdir -p artifacts/kanban && git rev-parse HEAD > "
+            "artifacts/kanban/current_head.txt, then read_file that relative file "
+            "at line 1. This local receipt carries source provenance; bare terminal "
+            "stdout does not. Omitted output is not a missing checkout. Use a "
+            "supported projection or narrow local receipt rather than repeating "
+            "a successful diagnostic. Preserve the existing assignment and patch, "
+            "reserve time for an explicit Kanban terminal action, and report only "
+            "verified evidence."
         ),
     }
     safe = redact_remote_unsafe_text(

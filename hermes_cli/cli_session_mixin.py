@@ -617,6 +617,7 @@ class CLISessionMixin:
                 print(t("cli.session.new_session_titled", title=title))
             else:
                 print(t("cli.session.new_session"))
+        return True
 
     def _consume_pending_resume_selection(self, text: str) -> bool:
         """Resolve a bare numeric reply following a bare ``/resume`` prompt.

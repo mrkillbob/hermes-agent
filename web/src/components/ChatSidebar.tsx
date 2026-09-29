@@ -33,7 +33,6 @@ import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { ModelReloadConfirm } from "@/components/ModelReloadConfirm";
 import { ReasoningPicker } from "@/components/ReasoningPicker";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
-import { EventsFeedClient } from "@/lib/eventsFeedClient";
 import { api, buildWsUrl } from "@/lib/api";
 import { maybeReloadForLoopbackWsAuthFailure } from "@/lib/dashboard-auth-reload";
 import {
@@ -132,7 +131,6 @@ export function ChatSidebar({
   // `version` recreates the clients for an explicit reconnect or scope change.
   const [version, setVersion] = useState(0)
   const gw = useMemo(() => new GatewayClient(), [version])
-  const feed = useMemo(() => new EventsFeedClient(), [])
   // The sidecar retry budget survives each redial-triggered effect rebuild.
   const sidecarRedialAttemptRef = useRef(0)
   const sidecarGaveUpRef = useRef(false)

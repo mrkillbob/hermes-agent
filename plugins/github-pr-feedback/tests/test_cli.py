@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+from tools.environments.local import build_subprocess_env
 import signal
 import shutil
 import subprocess
@@ -2485,7 +2486,7 @@ def test_real_hermes_discovers_temp_profile_plugin_and_dry_scan_never_invokes_gh
         encoding="utf-8",
     )
     fake_gh.chmod(0o755)
-    environment = os.environ.copy()
+    environment = build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
     environment.update(
         {
             "HERMES_HOME": str(profile),
@@ -2522,7 +2523,7 @@ def test_real_hermes_registers_the_fixed_card_as_blocked_dir_workspace_without_s
     profile = tmp_path / "profile"
     workspace = tmp_path / "exact-head-worktree"
     workspace.mkdir()
-    environment = os.environ.copy()
+    environment = build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
     environment.update({"HERMES_HOME": str(profile), "HOME": str(tmp_path / "home")})
     for name in (
         "GH_TOKEN",
@@ -3735,8 +3736,9 @@ def test_worker_callback_runs_outside_gateway_scope(tmp_path, monkeypatch):
     prefix = _governed_command_prefix(control_home)
     # Execute the actual environment prefix with a harmless child probe.
     import shlex
-    argv = shlex.split(prefix)
-    probe = argv[:argv.index("-m")] + ["-c", "import os,json; print(json.dumps([os.getenv('_HERMES_GATEWAY'), os.getenv('HERMES_HOME')]))"]
+    monkeypatch.setenv("HERMES_KANBAN_HERMES_PYTHON", sys.executable)
+    probe_code = "import os,json; print(json.dumps([os.getenv('_HERMES_GATEWAY'), os.getenv('HERMES_HOME')]))"
+    probe = ["/bin/sh", "-c", prefix.split(" -m ")[0] + " -c " + shlex.quote(probe_code)]
     result = subprocess.run(
         probe, capture_output=True, text=True, encoding="utf-8", check=True
     )

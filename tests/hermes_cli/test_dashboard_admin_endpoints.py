@@ -30,7 +30,7 @@ def test_gateway_start_uses_manual_run_when_no_service_is_installed(monkeypatch)
 
     result = asyncio.run(ops.start_gateway())
 
-    assert spawned == {"command": ["gateway", "run"], "name": "gateway-start"}
+    assert spawned == {"command": ["-p", "default", "gateway", "run"], "name": "gateway-start"}
     assert result == {"ok": True, "pid": 123, "name": "gateway-start"}
 
 

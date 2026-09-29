@@ -2892,7 +2892,6 @@ def release_stale_claims(
     """
     now = int(time.time())
     reclaimed = 0
-    host_prefix = _host_prefix()
     from hermes_cli.kanban_db_dispatch import _worker_alive
 
     if failure_limit is None:
@@ -2905,7 +2904,11 @@ def release_stale_claims(
         "  AND claim_expires < ?", (now,),
     ).fetchall()
     for row in stale:
-        host_local = (row["claim_lock"] or "").startswith(host_prefix)
+        from hermes_cli.kanban_worker_process import claim_is_host_local
+
+        host_local = claim_is_host_local(
+            row["claim_lock"], pid=row["worker_pid"], task_id=row["id"],
+        )
         hb = row["last_heartbeat_at"]
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).

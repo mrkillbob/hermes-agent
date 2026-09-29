@@ -670,7 +670,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, default_max_runtime_seconds
     """
     timed_out: list[str] = []
     now = int(time.time())
-    host_prefix = _kb._host_prefix()
+    from hermes_cli.kanban_worker_process import claim_is_host_local
 
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.worker_started_at, "
@@ -683,8 +683,9 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, default_max_runtime_seconds
         "  AND t.worker_pid IS NOT NULL"
     ).fetchall()
     for row in rows:
-        lock = row["claim_lock"] or ""
-        if not lock.startswith(host_prefix):
+        if not claim_is_host_local(
+            row["claim_lock"], pid=row["worker_pid"], task_id=row["id"],
+        ):
             continue
         # Runtime is per attempt: ``tasks.started_at`` records the FIRST start,
         # so retries must be measured from the active task_runs row.

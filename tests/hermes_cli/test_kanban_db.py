@@ -2177,8 +2177,8 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
     the worker env scrub strips Hermes-owned PYTHONPATH entries, so the bare
     ``sys.executable -m hermes_cli.main`` child died on import and the board
     auto-blocked (#122299, #122487, #122500). The spawned env must put the
-    running install's root first on PYTHONPATH — and never for a resolved shim
-    path, which owns its own imports.
+    running install's root first on PYTHONPATH. The control-plane binding
+    also preserves that root for a resolved shim while workers change cwd.
     """
     import os
     import sys
@@ -2218,7 +2218,7 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
 
     monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["/opt/hermes/bin/hermes"])
     kbd._default_spawn(task, str(tmp_path / "ws"))
-    assert root not in captured["env"].get("PYTHONPATH", "").split(os.pathsep)
+    assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
 
 
 # ---------------------------------------------------------------------------

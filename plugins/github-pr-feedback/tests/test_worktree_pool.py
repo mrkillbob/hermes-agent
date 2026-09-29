@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from tools.environments.local import build_subprocess_env
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -101,7 +102,7 @@ def commit_case_colliding_paths(repo: Path) -> str:
         text=True,
     ).stdout.strip()
     env = {
-        **os.environ,
+        **build_subprocess_env(scrub_secrets=False, inherit_profile_home=False),
         "GIT_AUTHOR_NAME": "Test",
         "GIT_AUTHOR_EMAIL": "test@example.invalid",
         "GIT_COMMITTER_NAME": "Test",

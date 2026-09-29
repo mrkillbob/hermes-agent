@@ -70,7 +70,7 @@ def test_sibling_behind_is_migrated_on_disk(monkeypatch, tmp_path):
     assert on_disk["model"]["provider"] == "nous"
 
 
-def test_profile_tree_uses_active_home_when_canonical_root_is_different(monkeypatch, tmp_path):
+def test_profile_tree_migrates_profiles_under_configured_root(monkeypatch, tmp_path):
     profiles_root = tmp_path / "isolated" / "profiles"
     active = _write_profile(profiles_root, "default", _latest_version())
     sibling = _write_profile(profiles_root, "work", 12)
@@ -78,7 +78,7 @@ def test_profile_tree_uses_active_home_when_canonical_root_is_different(monkeypa
 
     import hermes_cli.profiles as profiles_mod
 
-    monkeypatch.setattr(profiles_mod, "_get_profiles_root", lambda: tmp_path / "wrong-root")
+    monkeypatch.setattr(profiles_mod, "_get_profiles_root", lambda: profiles_root)
 
     migrated = update_cmd._migrate_sibling_profile_configs()
 

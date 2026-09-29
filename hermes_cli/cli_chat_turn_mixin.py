@@ -77,7 +77,8 @@ class CLIChatTurnMixin:
             # and get retried as if the task itself were broken.
             self._last_turn_result = {
                 "failed": True,
-                "failure_reason": "credentials",
+                "failure_reason": ("rate_limit" if getattr(self, "_credentials_rate_limited", False) else
+                                   "auth_permanent" if getattr(self, "_credentials_terminal", False) else "credentials"),
                 "error": "runtime credentials unavailable",
             }
             return None

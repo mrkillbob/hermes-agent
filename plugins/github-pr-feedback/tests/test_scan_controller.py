@@ -1715,7 +1715,7 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
     assert "still equals the expected receipt SHA" in task.instructions
     assert "complete-feedback" in task.instructions
     assert (
-        f"env -u _HERMES_GATEWAY HERMES_HOME='{control_home}' {sys.executable} -E -P -m hermes_cli.main "
+        f"env -u _HERMES_GATEWAY HERMES_HOME='{control_home}' \"${{HERMES_KANBAN_HERMES_PYTHON:?dispatcher Hermes Python is required}}\" -E -P -m hermes_cli.main "
         "github-pr-feedback complete-feedback"
     ) in (
         task.instructions
@@ -1798,7 +1798,7 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     assert task.provider_override is None
     assert task.model_override is None
     assert task.reasoning_effort is None
-    assert task.initial_status == "blocked"
+    assert task.initial_status == "todo"
     assert task.max_retries == 3
     assert task.max_runtime_seconds == 8 * 60 * 60
     assert task.idempotency_key.endswith(":supervised-v4")
@@ -1822,7 +1822,7 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     assert "process poll or wait" in task.instructions
     assert "do not run the audit command again" in task.instructions.casefold()
     assert (
-        f"env -u _HERMES_GATEWAY HERMES_HOME='{control_home}' {sys.executable} -E -P -m hermes_cli.main "
+        f"env -u _HERMES_GATEWAY HERMES_HOME='{control_home}' \"${{HERMES_KANBAN_HERMES_PYTHON:?dispatcher Hermes Python is required}}\" -E -P -m hermes_cli.main "
         "github-pr-feedback audit-pr"
     ) in (
         task.instructions
@@ -4583,4 +4583,31 @@ def test_incomplete_metadata_skips_only_affected_pr(tmp_path):
     result = ScanController(policy, ledger, github, RecordingKanban(), RecordingLocalGit()).reconcile_labels("acme/widgets")
     assert result["skipped"]["agent_label_metadata_incomplete"] == 1
     assert [(number, set(labels)) for _,number,labels in github.label_calls] == [(2,{"codex","area/ci"})]
+    ledger.close()
+
+
+
+@pytest.mark.parametrize("case", ["checkpoint", "update", "request", "other-reviewer", "inline"])
+def test_scan_suppresses_owner_checkpoints_but_keeps_actual_requests(tmp_path: Path, case: str) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    checkpoint = "### Refactor checkpoint: `bbc9c2c80`\nTyped owners extracted. Tests authored."
+    update = "Implementation update — `770cd4314` (L1 startup policy freeze)\nValidation: 231 passed."
+    candidates = {
+        "checkpoint": feedback("checkpoint", body=checkpoint, reviewer="owner"),
+        "update": feedback("update", body=update, reviewer="owner"),
+        "request": feedback("request", body=checkpoint + "\nPlease fix the fallback.", reviewer="owner"),
+        "other-reviewer": feedback("other-reviewer", body=checkpoint),
+        "inline": replace(feedback("inline", body=checkpoint, reviewer="owner"), kind="review_comment"),
+    }
+    github = FakeGitHub(admitted_pull_request(sha), (candidates[case],))
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+    if case in {"checkpoint", "update"}:
+        assert result.created == 0
+        assert result.skipped["self_progress_checkpoint"] == 1
+    else:
+        assert result.created == 1
+        assert kanban.tasks[0].evidence["feedback_id"] == case
     ledger.close()
