@@ -1,8 +1,8 @@
 name: Label rerun
 
 # When the ``ci-reviewed`` label is added to a PR, rerun all failed jobs in
-# the latest CI run. This re-evaluates ``review-labels`` (which now sees the
-# label) and GitHub reruns the dependent ``all-checks-pass`` gate.
+# the latest pull-request CI run. This re-evaluates ``review-labels`` (which
+# now sees the label) and GitHub reruns the dependent ``all-checks-pass`` gate.
 #
 # ``gh run rerun`` only works on a completed run. Thus this waits when the
 # run is still in progress. The wait is now short. The two slowest jobs are
@@ -37,20 +37,39 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -uo pipefail
 
           # Find the latest CI run for this PR's head SHA.
-          RUN_INFO=$(gh run list \
+          if ! RUN_INFO=$(gh run list \
             --repo "$REPO" \
             --commit "$HEAD_SHA" \
             --workflow ci.yaml \
+            --event pull_request \
             --limit 1 \
             --json databaseId,status \
-            --jq '.[0] | "\(.databaseId) \(.status)"' 2>/dev/null || true)
+            --jq '.[0] // empty | "\(.databaseId) \(.status)"' 2>/dev/null); then
+            echo "Could not inspect pull-request CI runs; stopping instead of guessing."
+            exit 1
+          fi
+
+          dispatch_fresh_ci() {
+            if [ "$HEAD_REPO" != "$REPO" ]; then
+              echo "Cannot dispatch a run for a head branch in a different repository."
+              exit 1
+            fi
+            echo "Starting a fresh CI run for the exact PR head."
+            if ! gh workflow run ci.yaml --repo "$REPO" --ref "$HEAD_REF"; then
+              echo "GitHub rejected the fresh CI dispatch."
+              return 1
+            fi
+          }
 
           if [ -z "$RUN_INFO" ]; then
-            echo "No CI run found for this PR — nothing to rerun."
+            echo "No pull-request CI run exists for this head."
+            dispatch_fresh_ci || exit 1
             exit 0
           fi
 
@@ -82,6 +101,20 @@ jobs:
             fi
           fi
 
-          echo "Run completed. Rerunning all failed jobs..."
-          gh run rerun "$RUN_ID" --repo "$REPO" --failed || true
-          echo "Done. GitHub will rerun review-labels and all dependent jobs."
+          echo "Run completed. Checking whether GitHub created any jobs..."
+          if ! JOB_COUNT=$(gh run view "$RUN_ID" --repo "$REPO" --json jobs --jq '.jobs | length' 2>/dev/null); then
+            echo "Could not inspect the CI run's jobs; stopping instead of guessing."
+            exit 1
+          fi
+          if [ "$JOB_COUNT" = 0 ]; then
+            echo "The pull-request run has no jobs, so GitHub cannot retry it."
+            dispatch_fresh_ci || exit 1
+            exit 0
+          fi
+
+          echo "Run has $JOB_COUNT jobs. Rerunning all failed jobs..."
+          if ! gh run rerun "$RUN_ID" --repo "$REPO" --failed; then
+            echo "GitHub rejected the failed-job retry request."
+            exit 1
+          fi
+          echo "GitHub accepted the retry request."
