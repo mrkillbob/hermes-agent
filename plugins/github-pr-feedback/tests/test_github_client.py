@@ -347,7 +347,7 @@ def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     comments_argv = (
         "gh",
@@ -421,7 +421,7 @@ def test_github_client_lists_only_confirmed_merged_pull_requests() -> None:
         "gh", "pr", "list", "--repo", "acme/widgets", "--state", "merged",
         "--author", "owner", "--limit", str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels,mergedAt,mergeCommit",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels,mergedAt,mergeCommit",
     )
     merged = canonical_list_pull()
     merged.update({"mergedAt": "2026-08-27T00:00:00Z", "mergeCommit": {"oid": "c" * 40}})
@@ -675,7 +675,7 @@ def test_github_client_fails_closed_when_filtered_pr_list_lacks_canonical_fields
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     runner = RecordingRunner({argv: [{"number": 17}]})
 
@@ -701,7 +701,7 @@ def test_github_client_fails_closed_on_malformed_list_labels(labels: object) -> 
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     row = canonical_list_pull()
     row["labels"] = labels
@@ -726,7 +726,7 @@ def test_github_client_fails_closed_if_owned_pr_query_hits_coverage_cap() -> Non
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     runner = RecordingRunner(
         {
@@ -755,7 +755,7 @@ def test_github_client_covers_current_large_owned_pr_backlog() -> None:
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     runner = RecordingRunner(
         {
@@ -781,7 +781,7 @@ def test_github_client_reads_all_open_prs_and_exact_base_head_for_maintenance() 
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     branch_argv = ("gh", "api", "repos/acme/widgets/branches/stable")
     runner = RecordingRunner(
@@ -1501,6 +1501,7 @@ def canonical_pull(number: int = 17, head_sha: str = "a" * 40) -> dict[str, obje
     return {
         "number": number,
         "state": "open",
+        "draft": False,
         "base": {
             "repo": {"full_name": "acme/widgets"},
             "ref": "stable",
@@ -1523,6 +1524,7 @@ def canonical_list_pull(
     return {
         "number": number,
         "state": "OPEN",
+        "isDraft": False,
         "headRepository": {"nameWithOwner": "acme/widgets"},
         "author": {"login": "owner"},
         "headRefName": "codex/fix",
@@ -1584,3 +1586,61 @@ def test_label_permission_requires_explicit_write_capability(permissions, allowe
             assert argv == ["gh", "api", "repos/acme/widgets"]
             return json.dumps({"permissions":permissions})
     assert GitHubClient(Runner()).can_label_repository("acme/widgets") is allowed
+
+
+@pytest.mark.parametrize("failure", [None, "head", "duplicate", "cursor", "missing", "errors"])
+def test_actionable_feedback_requires_complete_exact_head_resolution(failure) -> None:
+    from datetime import UTC, datetime
+    from github_pr_feedback.github_client import Feedback
+    from github_pr_feedback.policy import Reviewer
+
+    head = "a" * 40
+    items = tuple(Feedback(kind, str(identity), Reviewer("reviewer", "MEMBER"),
+                           "fix behavior", datetime(2026, 9, 29, tzinfo=UTC), False)
+                  for kind, identity in (("review_comment", 1), ("review_comment", 2),
+                                         ("review_comment", 3), ("issue_comment", 4)))
+
+    class Runner:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, argv):
+            self.calls.append(argv)
+            query = next(value[6:] for value in argv if value.startswith("query="))
+            if failure == "errors":
+                return json.dumps({"errors": [{"message": "unavailable"}]})
+            if query == GitHubClient.RESOLUTION_HEAD_QUERY:
+                return json.dumps({"data": {"repository": {"pullRequest": {
+                    "headRefOid": "b" * 40 if failure == "head" else head}}}})
+            if query == GitHubClient.RESOLUTION_COMMENTS_QUERY:
+                node = {"id": "resolved", "isResolved": True, "comments": {
+                    "nodes": [{"databaseId": 3}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+                return json.dumps({"data": {"node": node}})
+            later = "cursor=next" in argv
+            nodes = ([{"id": "open", "isResolved": False, "comments": {
+                "nodes": [{"databaseId": 1 if failure == "duplicate" else 2}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None}}}]
+                if later else [{"id": "resolved", "isResolved": True, "comments": {
+                    "nodes": [{"databaseId": 1}],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "comments"}}}])
+            if failure == "missing" and later:
+                nodes = []
+            return json.dumps({"data": {"repository": {"pullRequest": {
+                "headRefOid": head, "reviewThreads": {"nodes": nodes, "pageInfo": {
+                    "hasNextPage": not later or failure == "cursor", "endCursor": "next"}}}}}})
+
+    class Client(GitHubClient):
+        def list_feedback(self, repository, number):
+            return items
+
+    runner = Runner()
+    client = Client(runner)
+    if failure:
+        with pytest.raises(GitHubClientError, match="resolution"):
+            client.list_actionable_feedback("acme/widgets", 17, expected_head_sha=head)
+    else:
+        actual = client.list_actionable_feedback("acme/widgets", 17, expected_head_sha=head)
+        assert [(item.kind, item.feedback_id) for item in actual] == [
+            ("review_comment", "2"), ("issue_comment", "4")]
+        assert len(runner.calls) == 4

@@ -217,6 +217,7 @@ def test_control_plane_feedback_binding_blocks_completion_without_worker_plugin(
     with kbc.connect() as connection:
         tid = kb.create_task(connection, title="Repair an exact PR", assignee="worker")
         kb.claim_task(connection, tid)
+        monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(kb.get_task(connection, tid).current_run_id))
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     ledger = FeedbackLedger(control_home / "github-pr-feedback" / "ledger.sqlite3")
     now = datetime.now(UTC)

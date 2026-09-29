@@ -1274,6 +1274,9 @@ def test_inspect_pr_projects_requested_feedback_excerpt(
             assert number == 17
             return (feedback,)
 
+        def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+            return self.list_feedback(repository, number)
+
     monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", FakeGitHub)
 
     exit_code = _inspect_pr(
@@ -2971,6 +2974,9 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
         def post_issue_comment(self, _repository: str, _pr_number: int, _body: str):
             return None
 
+        def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+            return self.list_feedback(repository, number)
+
     class Runner:
         def __init__(self, _github: object, _ledger: object) -> None:
             pass
@@ -3103,6 +3109,9 @@ def test_audit_handoff_exception_renders_retryable_reason(
 
         def post_issue_comment(self, _repository: str, _pr_number: int, _body: str):
             return None
+
+        def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+            return self.list_feedback(repository, number)
 
     class Ledger:
         def has_pending_mutation(self, repository: str, pr_number: int) -> bool:
@@ -3356,12 +3365,18 @@ class _FakeGitHubComments:
     def post_issue_comment(self, repository: str, number: int, body: str) -> None:
         self.posted.append((repository, number, body))
 
+    def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+        return self.list_feedback(repository, number)
+
 
 class _FakeGitHubCommentsUnavailable(_FakeGitHubComments):
     def list_feedback(self, repository: str, number: int):
         from github_pr_feedback.github_client import GitHubClientError
 
         raise GitHubClientError("boom")
+
+    def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+        return self.list_feedback(repository, number)
 
 
 def _repair_receipt(repository: str = "mrkillbob/luna-bot") -> FeedbackReceipt:
@@ -3579,6 +3594,9 @@ class _FakeGitHubCodex(_FakeGitHubComments):
 
     def list_feedback(self, repository: str, number: int):
         return self._codex_feedback
+
+    def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+        return self.list_feedback(repository, number)
 
 
 def test_retrigger_codex_review_does_not_post_duplicate_requests() -> None:

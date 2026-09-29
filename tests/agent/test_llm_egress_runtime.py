@@ -4353,6 +4353,9 @@ def test_nous_replays_canonical_task_spec_without_legacy_marker(tmp_path, monkey
     assert "read_file calls with narrow line ranges" in rendered
     assert "Omitted output is not a missing checkout" in rendered
     assert "artifacts/kanban/current_head.txt" in rendered
+    assert "HERMES_KANBAN_HERMES_PYTHON" in rendered
+    assert "preserve preexisting" in rendered
+    assert "instead of repeating Python wrappers" in rendered
     assert "Inspect current checkout." in rendered
     assert "super-secret-value" not in rendered
     assert "/Users/private/source.py" not in rendered

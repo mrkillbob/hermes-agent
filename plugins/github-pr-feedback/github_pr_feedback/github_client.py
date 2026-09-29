@@ -657,7 +657,7 @@ class GitHubClient:
                 "--limit",
                 str(MAX_DISCOVERED_PULL_REQUESTS),
                 "--json",
-                "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels,mergedAt,mergeCommit",
+                "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels,mergedAt,mergeCommit",
             ]
         )
         if not isinstance(payload, list) or any(not isinstance(row, dict) for row in payload):
@@ -738,7 +738,7 @@ class GitHubClient:
                 "--limit",
                 str(MAX_DISCOVERED_PULL_REQUESTS),
                 "--json",
-                "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+                "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
             ]
         )
         if not isinstance(payload, list) or any(
@@ -1591,6 +1591,130 @@ class GitHubClient:
         except (KeyError, TypeError, ValueError) as error:
             raise GitHubClientError("GitHub review thread was unavailable") from error
         return ReviewThread(thread_id, str(database_id), observed_head_sha, resolved)
+
+    RESOLUTION_SNAPSHOT_QUERY = (
+        "query($owner:String!,$name:String!,$number:Int!,$cursor:String){"
+        "repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid "
+        "reviewThreads(first:100,after:$cursor){nodes{id isResolved comments(first:100){"
+        "nodes{databaseId} pageInfo{hasNextPage endCursor}}} "
+        "pageInfo{hasNextPage endCursor}}}}}"
+    )
+    RESOLUTION_COMMENTS_QUERY = (
+        "query($id:ID!,$cursor:String!){node(id:$id){... on PullRequestReviewThread{"
+        "id isResolved comments(first:100,after:$cursor){nodes{databaseId} "
+        "pageInfo{hasNextPage endCursor}}}}}"
+    )
+    RESOLUTION_HEAD_QUERY = (
+        "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
+        "pullRequest(number:$number){headRefOid}}}"
+    )
+
+    def _review_resolution_snapshot(
+        self, repository: str, number: int, *, expected_head_sha: str
+    ) -> dict[str, ReviewThread]:
+        """Read complete thread/comment coverage bound to one canonical head."""
+        repository = _validated_repository(repository)
+        number = _positive_number(number)
+        expected_head_sha = _validated_sha(expected_head_sha)
+        owner, name = repository.split("/", 1)
+        common = ["-F", f"owner={owner}", "-F", f"name={name}", "-F", f"number={number}"]
+        result: dict[str, ReviewThread] = {}
+        thread_ids: set[str] = set()
+
+        def page_cursor(connection, seen):
+            info = connection["pageInfo"]
+            if type(info["hasNextPage"]) is not bool:
+                raise TypeError("invalid pagination state")
+            if not info["hasNextPage"]:
+                return None
+            cursor = _required_string(info["endCursor"])
+            if cursor in seen:
+                raise TypeError("pagination cursor repeated")
+            seen.add(cursor)
+            return cursor
+
+        def read(query, args):
+            payload = self._json(["gh", "api", "graphql", "-f", "query=" + query, *args])
+            if not isinstance(payload, dict) or "errors" in payload:
+                raise TypeError("GraphQL resolution query failed")
+            return payload["data"]
+
+        def check_head(pull):
+            observed = _validated_sha(pull["headRefOid"])
+            if observed.casefold() != expected_head_sha.casefold():
+                raise TypeError("pull request head changed")
+
+        try:
+            cursor = None
+            seen: set[str] = set()
+            while True:
+                args = common + (["-f", "cursor=" + cursor] if cursor else [])
+                pull = read(self.RESOLUTION_SNAPSHOT_QUERY, args)["repository"]["pullRequest"]
+                check_head(pull)
+                connection = pull["reviewThreads"]
+                nodes = connection["nodes"]
+                if not isinstance(nodes, list):
+                    raise TypeError("invalid thread nodes")
+                for node in nodes:
+                    thread_id = _required_string(node["id"])
+                    if thread_id in thread_ids or type(node["isResolved"]) is not bool:
+                        raise TypeError("duplicate or invalid thread")
+                    thread_ids.add(thread_id)
+                    resolved = node["isResolved"]
+                    comments = node["comments"]
+                    comment_seen: set[str] = set()
+                    count = 0
+                    while True:
+                        comment_nodes = comments["nodes"]
+                        if not isinstance(comment_nodes, list):
+                            raise TypeError("invalid comment nodes")
+                        for comment in comment_nodes:
+                            database_id = comment["databaseId"]
+                            if type(database_id) is not int or database_id <= 0:
+                                raise TypeError("invalid comment identity")
+                            key = str(database_id)
+                            if key in result:
+                                raise TypeError("ambiguous comment identity")
+                            result[key] = ReviewThread(thread_id, key, expected_head_sha, resolved)
+                            count += 1
+                        comment_cursor = page_cursor(comments, comment_seen)
+                        if comment_cursor is None:
+                            break
+                        nested = read(self.RESOLUTION_COMMENTS_QUERY,
+                                      ["-f", "id=" + thread_id, "-f", "cursor=" + comment_cursor])["node"]
+                        if nested["id"] != thread_id or nested["isResolved"] is not resolved:
+                            raise TypeError("thread resolution changed")
+                        comments = nested["comments"]
+                    if not count:
+                        raise TypeError("thread has no comment identity")
+                cursor = page_cursor(connection, seen)
+                if cursor is None:
+                    break
+            check_head(read(self.RESOLUTION_HEAD_QUERY, common)["repository"]["pullRequest"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise GitHubClientError("GitHub review resolution coverage was unavailable") from error
+        return result
+
+    def list_actionable_feedback(
+        self, repository: str, number: int, *, expected_head_sha: str
+    ) -> tuple[Feedback, ...]:
+        """Exclude only review comments positively identified as resolved."""
+        feedback = self.list_feedback(repository, number)
+        if not any(item.kind == "review_comment" for item in feedback):
+            return feedback
+        threads = self._review_resolution_snapshot(
+            repository, number, expected_head_sha=expected_head_sha
+        )
+        result = []
+        for item in feedback:
+            if item.kind == "review_comment":
+                thread = threads.get(item.feedback_id)
+                if thread is None:
+                    raise GitHubClientError("GitHub review comment resolution was unavailable")
+                if thread.is_resolved:
+                    continue
+            result.append(item)
+        return tuple(result)
 
     def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]:
         endpoints = (

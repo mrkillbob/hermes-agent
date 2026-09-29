@@ -65,6 +65,7 @@ _SELF_RESOLUTION_PREFIXES = (
     "fixed in ",
     "fixed both ",
     "fixed the ",
+    "conflict refresh completed at exact head ",
     "base refresh:",
     "base refresh ",
     "base refresh for this pr:",
@@ -139,7 +140,9 @@ class GitHubReader(Protocol):
         self, repository: str, owner_login: str
     ) -> tuple[PullRequest, ...]: ...
 
-    def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]: ...
+    def list_actionable_feedback(
+        self, repository: str, number: int, *, expected_head_sha: str
+    ) -> tuple[Feedback, ...]: ...
 
     def get_pull_request(self, repository: str, number: int) -> PullRequest: ...
 
@@ -1537,14 +1540,23 @@ class ScanController:
                         if ci_base_reason == "base_refresh_required":
                             base_refresh_pending = True
                         continue
-                    if not self._ledger.was_actioned_on_any_head(receipt):
-                        feedback_pending = True
                     if self._ledger.was_actioned_on_any_head(receipt):
                         skipped["already_actioned"] += 1
                         continue
                     if attempted >= MAX_ADMISSIONS_PER_SCAN:
+                        feedback_pending = True
                         skipped["admission_cap"] += 1
                         continue
+                    if feedback.kind == "review_comment":
+                        github_errors = skipped["github_error"]
+                        revalidated = self._revalidate(receipt, skipped)
+                        if revalidated is None:
+                            # Uncertain coverage cannot clear the feedback gate.
+                            if skipped["github_error"] > github_errors:
+                                feedback_pending = True
+                            continue
+                        feedback, _, _ = revalidated
+                    feedback_pending = True
                     claimed_at = self._clock()
                     lease = _claim_with_orphan_recovery(
                         self._ledger,
@@ -1788,8 +1800,8 @@ class ScanController:
         """Read one PR's independent feedback and canonical identity off-ledger."""
 
         try:
-            feedback_items = self._github.list_feedback(
-                repository, pull_request.number
+            feedback_items = self._github.list_actionable_feedback(
+                repository, pull_request.number, expected_head_sha=pull_request.head_sha
             )
             current = (
                 self._github.get_pull_request(repository, pull_request.number)
@@ -1824,8 +1836,8 @@ class ScanController:
                 )
                 if checks.actions_enabled and not checks.billing_blocked:
                     return "github_ci_enabled"
-            feedback_items = self._github.list_feedback(
-                current.base_repository, current.number
+            feedback_items = self._github.list_actionable_feedback(
+                current.base_repository, current.number, expected_head_sha=current.head_sha
             )
         except Exception:  # noqa: BLE001 - uncertain readiness must fail closed.
             return "github_error"
@@ -2226,8 +2238,8 @@ class ScanController:
             current = self._github.get_pull_request(
                 receipt.repository, receipt.pr_number
             )
-            feedback_items = self._github.list_feedback(
-                receipt.repository, receipt.pr_number
+            feedback_items = self._github.list_actionable_feedback(
+                receipt.repository, receipt.pr_number, expected_head_sha=receipt.head_sha
             )
         except Exception:  # noqa: BLE001 - an adapter failure must not admit work.
             skipped["github_error"] += 1
@@ -2288,6 +2300,14 @@ class ScanController:
             return "advisory_lgtm_report"
         if _is_codex_review_summary_tracker(feedback):
             return "codex_review_summary_tracker"
+        if (
+            feedback.kind == "issue_comment"
+            and feedback.reviewer.login.casefold() == owner_login.casefold()
+            and re.match(r"^@[A-Za-z0-9_-]+\s+Please review the current upstream PR head\b", feedback.body)
+            and "specifically for your AI review" in feedback.body
+            and not re.search(r"\[P[0-3]\]|\b(?:fix|repair|regression|bug)\b", feedback.body, re.IGNORECASE)
+        ):
+            return "self_review_request"
         if is_codex_review_request(feedback.body):
             return "codex_review_request"
         if (
@@ -2845,19 +2865,22 @@ def _is_advisory_lgtm_report(feedback: Feedback) -> bool:
     if feedback.kind not in {"issue_comment", "review_comment", "review"}:
         return False
     body = " ".join(feedback.body.casefold().split())
-    return (
-        "automated review for reference; please use your judgment" in body
-        and re.search(r"\bverdict\s*:\s*lgtm\b", body) is not None
+    reference_report = "automated review for reference; please use your judgment" in body
+    legacy_verdict = (
+        re.search(r"\bverdict\s*:\s*lgtm\b", body) is not None
         and "non-blocking:" in body
-        and not any(
-            marker in body
-            for marker in (
-                "changes requested",
-                "action required",
-                "blocking finding",
-                "must be fixed",
-                "needs to be fixed",
-            )
+    )
+    no_findings_report = (
+        feedback.kind == "issue_comment"
+        and re.search(r"\bno (?:blocking or non-blocking issues found|findings(?:\s|[—:,.]))", body)
+        is not None
+    )
+    return reference_report and (legacy_verdict or no_findings_report) and not any(
+        marker in body
+        for marker in (
+            "changes requested", "action required", "blocking finding", "must be fixed",
+            "needs to be fixed", "[p1]", "[p2]", "p1 badge", "p2 badge",
+            "however", "except", "please fix", "recommend", "blocker remains",
         )
     )
 
