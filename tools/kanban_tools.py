@@ -986,6 +986,14 @@ def _handle_show(args: dict, **kw) -> str:
                 "summary": (terminal_run.summary if terminal_run and terminal_run.summary else parent.result),
                 "metadata": (terminal_run.metadata if terminal_run and terminal_run.metadata else {}),
             })
+        # Route protection is also inferred from the provider at replay time.
+        # Publish the bounded producer contract even when the legacy marker is
+        # absent; exact call binding and final redaction still gate remote use.
+        payload["protected_task_spec"] = {
+            "version": _PROTECTED_TASK_SPEC_VERSION,
+            "title": _truncate_utf8(task.title, _PROTECTED_TASK_TITLE_MAX_BYTES),
+            "body": _truncate_utf8(task.body, _PROTECTED_TASK_BODY_MAX_BYTES),
+        }
         if os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1":
             from hermes_constants import get_default_hermes_root
 
