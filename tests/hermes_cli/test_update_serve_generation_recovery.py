@@ -951,6 +951,9 @@ def test_serve_backend_survives_selection_when_the_dashboard_unit_restarts(monke
     )
     monkeypatch.setattr(dashboard_procs, "_lock_owned_serve_pids", lambda: set())
     monkeypatch.setattr(dashboard_procs.sys, "platform", "linux")
+    # The fake PID can coincide with a real CI process. This test covers unit selection,
+    # not descendant discovery; keep the process-table scan out of the fixture.
+    monkeypatch.setattr(dashboard_procs, "_posix_descendants", lambda _roots: {})
 
     def _fake_kill(pid, sig):
         signalled.append(pid)
