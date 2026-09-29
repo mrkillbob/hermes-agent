@@ -288,6 +288,10 @@ class DoctorProbe:
     def _hermes_executable_ready(self, executable: str) -> bool:
         try:
             result = self._runner.run([executable, "--version-local"])
+            if result.returncode != 0:
+                # Older Hermes launchers expose the same exact install path
+                # through --version; keep the path check below as the authority.
+                result = self._runner.run([executable, "--version"])
         except Exception:  # noqa: BLE001 - doctor reports failure and continues.
             return False
         if result.returncode != 0:

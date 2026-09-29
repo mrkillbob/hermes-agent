@@ -3,3 +3,4 @@ description: Governed GitHub PR feedback, deterministic local CI, and gated main
 provides_hooks:
   - pre_tool_call
   - pre_kanban_complete
+  - pre_kanban_review

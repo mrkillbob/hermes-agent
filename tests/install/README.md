@@ -243,7 +243,7 @@ Alongside the plugin-tree contract below, every upgrade leg also carries a
 **user-state** contract: an upgrade may add state, may rewrite `config.yaml`
 (additive config migration) and the bundled `skills/` tree (the product
 re-syncs it), but it may not delete or modify the user's own durable state —
-`.env`, `auth.json`, `state.db`, `gateway_state.json`, `memories/`, `cron/`,
+`.env`, `auth.json`, `state.db`, `memories/`, `cron/`,
 `sessions/`, `profiles/`, `photon/`, `desktop-plugins/`, `tui-widgets/`,
 `skins/`, `pets/`, `skills/.archive/` — and `state.db` may not lose rows.
 

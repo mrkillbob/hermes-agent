@@ -386,14 +386,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: tests/install/e2e-assets/playback.html
-          sparse-checkout-cone-mode: false
+      # This is one static public file. Avoid a partial Git clone here: a
+      # promisor fetch can hit GitHub's repository rate limit even when the
+      # checkout has a token, and this artifact is needed to inspect failures.
+      - name: Fetch the leg player at this run's immutable source revision
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p player
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors --retry-delay 5 "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${SOURCE_SHA}/tests/install/e2e-assets/playback.html" --output player/playback.html
+          test -s player/playback.html
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: install-e2e-player
-          path: tests/install/e2e-assets/playback.html
+          path: player/playback.html
           archive: false
           retention-days: 14
           if-no-files-found: error

@@ -60,8 +60,10 @@ SKILLS_ROOT = "skills"
 SKILL_ARCHIVE = ".archive"
 CHUNK = 1 << 20
 
-# Top-level files whose content must survive verbatim.
-JUDGED_FILES = ("config.yaml", ".env", "auth.json", "state.db", "gateway_state.json")
+# Top-level durable user files whose content must survive verbatim. Gateway
+# status is deliberately excluded: gateway_state.json is a live process
+# heartbeat/status snapshot rewritten during every launch and shutdown.
+JUDGED_FILES = ("config.yaml", ".env", "auth.json", "state.db")
 # Trees that must survive: every entry under them is judged.
 JUDGED_ROOTS = ("memories", "cron", "sessions", "profiles", "photon",
                 "desktop-plugins", "tui-widgets", "skins", "pets",
