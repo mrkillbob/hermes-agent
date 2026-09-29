@@ -2299,6 +2299,22 @@ class ScanController:
             # the receipt under their profile while the global scanner reads
             # the comment from the shared GitHub account.
             return "self_ci_receipt"
+        if (
+            feedback.kind == "issue_comment"
+            and feedback.reviewer.login.casefold() == owner_login.casefold()
+            and re.match(
+                r"^(?:#{1,6}\s+)?(?:Refactor checkpoint:\s*|Implementation update\s*[—-]\s*)"
+                r"`[0-9a-f]{7,40}`(?:[^\n]*)\n",
+                feedback.body.strip(),
+                flags=re.IGNORECASE,
+            )
+            and not re.search(
+                r"\[P[0-3]\]|\b(?:please|must|need(?:s)? to|request(?:ed)?|regression|bug)\b",
+                feedback.body,
+                flags=re.IGNORECASE,
+            )
+        ):
+            return "self_progress_checkpoint"
         if _is_self_resolution_receipt(feedback, owner_login=owner_login):
             return "self_resolution_receipt"
         identity = self._policy.github_identity
@@ -3563,7 +3579,8 @@ def _governed_command_prefix(control_home: Path) -> str:
 
     return (
         f"env -u _HERMES_GATEWAY HERMES_HOME={shlex.quote(str(control_home))} "
-        f"{shlex.quote(sys.executable)} -E -P -m hermes_cli.main github-pr-feedback"
+        '"${HERMES_KANBAN_HERMES_PYTHON:?dispatcher Hermes Python is required}" '
+        "-E -P -m hermes_cli.main github-pr-feedback"
     )
 
 
