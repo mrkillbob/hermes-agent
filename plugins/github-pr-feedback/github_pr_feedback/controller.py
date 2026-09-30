@@ -1576,7 +1576,11 @@ class ScanController:
                         if feedback.feedback_id not in pending_ids:
                             continue
                     receipt_reason = _ci_receipt_feedback_reason(
-                        self._ledger, receipt, feedback.body
+                        self._ledger,
+                        receipt,
+                        feedback.body,
+                        feedback=feedback,
+                        canonical_head=current.head_sha if current is not None else None,
                     )
                     if receipt_reason is not None:
                         skipped[receipt_reason] += 1
@@ -1933,7 +1937,13 @@ class ScanController:
                 head_sha=current.head_sha,
             )
             if (
-                _ci_receipt_feedback_reason(self._ledger, receipt, feedback.body)
+                _ci_receipt_feedback_reason(
+                    self._ledger,
+                    receipt,
+                    feedback.body,
+                    feedback=feedback,
+                    canonical_head=current.head_sha,
+                )
                 is not None
             ):
                 continue
@@ -2338,7 +2348,11 @@ class ScanController:
             skipped[reason] += 1
             return None
         receipt_reason = _ci_receipt_feedback_reason(
-            self._ledger, receipt, feedback.body
+            self._ledger,
+            receipt,
+            feedback.body,
+            feedback=feedback,
+            canonical_head=current.head_sha,
         )
         if receipt_reason is not None:
             skipped[receipt_reason] += 1
@@ -2809,9 +2823,38 @@ def _same_lane_passes_after_resolution(context: str, after: str) -> bool:
 
 
 def _ci_receipt_feedback_reason(
-    ledger: FeedbackLedger, receipt: FeedbackReceipt, body: str
+    ledger: FeedbackLedger,
+    receipt: FeedbackReceipt,
+    body: str,
+    *,
+    feedback: Feedback | None = None,
+    canonical_head: str | None = None,
 ) -> str | None:
     """Ignore stale or passing audit comments while retaining the latest failure."""
+
+    if (
+        feedback is not None
+        and feedback.kind == "issue_comment"
+        and feedback.is_bot
+        and feedback.reviewer.login == "github-actions[bot]"
+        and body.lstrip().startswith("<!-- hermes-ci-review-bot -->")
+        and canonical_head is not None
+        and re.fullmatch(r"[0-9a-fA-F]{40}", canonical_head)
+    ):
+        binding = re.search(
+            r"^<sub>(?:ran|running) on \[[0-9a-fA-F]{7,40}\]\(https://github\.com/"
+            + re.escape(receipt.repository)
+            + r"/pull/"
+            + str(receipt.pr_number)
+            + r"/commits/([0-9a-fA-F]{40})\)",
+            body.split("## ❌ Job failures", 1)[0],
+            re.MULTILINE,
+        )
+        if (
+            binding is not None
+            and binding.group(1).casefold() != canonical_head.casefold()
+        ):
+            return "stale_ci_feedback"
 
     normalized = body.casefold()
     if "local ci audit" not in normalized and "local pr ci audit" not in normalized:
@@ -3618,7 +3661,7 @@ def _governed_command_prefix(control_home: Path) -> str:
     return (
         f"env -u _HERMES_GATEWAY HERMES_HOME={shlex.quote(str(control_home))} "
         '"${HERMES_KANBAN_HERMES_PYTHON:?dispatcher Hermes Python is required}" '
-        "-E -P -m hermes_cli.main github-pr-feedback"
+        "-P -m hermes_cli.main github-pr-feedback"
     )
 
 

@@ -542,3 +542,33 @@ def test_branch_tip_failure_names_the_cause(installation):
     status = check_for_updates(install_root=root, home=home, force=True)
     assert status["error"] == "fetch-failed"
     assert "HTTP 503" in status["message"]
+
+
+@pytest.mark.parametrize("code,headers", [(403, {"X-RateLimit-Remaining": "0"}), (429, {})])
+def test_rate_limited_main_tip_uses_read_only_git_transport(installation, tmp_path, code, headers):
+    from hermes_cli.source_check import _branch_tip
+
+    root, _, _, _, head, responses, requests, git = installation
+    remote = tmp_path / "remote.git"
+    git("clone", "--bare", str(root), str(remote))
+    git("config", f"url.{remote.as_uri()}.insteadOf", "https://github.com/fixture/fork.git")
+    endpoint = "/repos/fixture/fork/commits/main"
+    responses[endpoint] = (code, {"message": "API rate limit exceeded"})
+    installation.response_headers[endpoint] = headers
+    assert _branch_tip("fixture/fork", "main", root, "git") == (head, False, None)
+    assert requests == [endpoint]
+    assert git("rev-parse", "HEAD") == head
+
+
+@pytest.mark.parametrize("code", [403, 404, 503])
+def test_other_main_api_failures_do_not_use_git_fallback(installation, tmp_path, code):
+    from hermes_cli.source_check import _branch_tip
+
+    root, _, _, _, head, responses, _, git = installation
+    remote = tmp_path / "remote.git"
+    git("clone", "--bare", str(root), str(remote))
+    git("config", f"url.{remote.as_uri()}.insteadOf", "https://github.com/fixture/fork.git")
+    responses["/repos/fixture/fork/commits/main"] = (code, {"message": "unavailable"})
+    sha, missing, failure = _branch_tip("fixture/fork", "main", root, "git")
+    assert sha is None and missing is False and failure
+    assert git("rev-parse", "HEAD") == head
