@@ -246,10 +246,14 @@ def test_control_callback_imports_dispatcher_source_from_unrelated_workspace(
     )
     assert stripped.returncode != 0
     assert "No module named" in stripped.stderr
-    # The credential-free bare interpreter reaches the real PM bootstrap;
-    # this fixture deliberately has no committed managed installation.
+    # Source binding is independent of whether this runner already has a
+    # committed dependency environment. Both permitted states still execute
+    # the exact source owner below; other startup failures are rejected.
     assert "No module named 'hermes_cli'" not in result.stderr
-    assert "no dependency environment is committed" in result.stderr
+    if result.returncode == 0:
+        assert "usage: hermes" in result.stdout
+    else:
+        assert "no dependency environment is committed" in result.stderr
     owner = subprocess.run(
         [
             env["HERMES_KANBAN_HERMES_PYTHON"],
