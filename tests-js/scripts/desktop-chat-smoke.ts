@@ -129,9 +129,14 @@ export function composerClickPosition(editor: Element): ComposerClickPosition | 
 
 export async function clickComposer(composer: Locator, trial: boolean, timeoutMs = 120_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
+  let lastClickFailure: string | undefined
+  let lastPosition: ComposerClickPosition | null = null
 
-  await expect.poll(async () => {
+  try {
+    await expect.poll(async () => {
     const position = await composer.evaluate(composerClickPosition)
+
+    lastPosition = position
 
     if (position === null) { return false }
 
@@ -144,9 +149,26 @@ export async function clickComposer(composer: Locator, trial: boolean, timeoutMs
     } catch (error) {
       if (!(error instanceof errors.TimeoutError)) { throw error }
 
+      lastClickFailure = error.message
+
       return false
     }
-  }, { timeout: timeoutMs, message: 'Composer must accept a normal click at a visible input point' }).toBe(true)
+    }, { timeout: timeoutMs, message: 'Composer must accept a normal click at a visible input point' }).toBe(true)
+  } catch (error) {
+    if (lastClickFailure === undefined) { throw error }
+
+    const geometry = await composer.evaluate((el) => {
+      const rect = el.getBoundingClientRect()
+
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+        viewport: { width: innerWidth, height: innerHeight }, devicePixelRatio }
+    })
+
+    const box = await composer.boundingBox()
+
+    throw new Error(`${(error as Error).message}\nLast normal click: ${lastClickFailure}`
+      + `\nClick geometry: ${JSON.stringify({ position: lastPosition, dom: geometry, playwright: box })}`)
+  }
 }
 
 export async function waitForChatReady(page: Page, timeoutMs = 120_000): Promise<Locator> {
