@@ -657,7 +657,7 @@ class GitHubClient:
                 "--limit",
                 str(MAX_DISCOVERED_PULL_REQUESTS),
                 "--json",
-                "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels,mergedAt,mergeCommit",
+                "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels,mergedAt,mergeCommit",
             ]
         )
         if not isinstance(payload, list) or any(not isinstance(row, dict) for row in payload):
@@ -738,7 +738,7 @@ class GitHubClient:
                 "--limit",
                 str(MAX_DISCOVERED_PULL_REQUESTS),
                 "--json",
-                "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+                "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
             ]
         )
         if not isinstance(payload, list) or any(

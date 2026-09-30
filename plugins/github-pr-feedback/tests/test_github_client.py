@@ -347,7 +347,7 @@ def test_github_client_reads_paginated_canonical_feedback_with_fixed_gh_argv() -
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     comments_argv = (
         "gh",
@@ -421,7 +421,7 @@ def test_github_client_lists_only_confirmed_merged_pull_requests() -> None:
         "gh", "pr", "list", "--repo", "acme/widgets", "--state", "merged",
         "--author", "owner", "--limit", str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels,mergedAt,mergeCommit",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels,mergedAt,mergeCommit",
     )
     merged = canonical_list_pull()
     merged.update({"mergedAt": "2026-08-27T00:00:00Z", "mergeCommit": {"oid": "c" * 40}})
@@ -675,7 +675,7 @@ def test_github_client_fails_closed_when_filtered_pr_list_lacks_canonical_fields
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     runner = RecordingRunner({argv: [{"number": 17}]})
 
@@ -701,7 +701,7 @@ def test_github_client_fails_closed_on_malformed_list_labels(labels: object) -> 
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     row = canonical_list_pull()
     row["labels"] = labels
@@ -726,7 +726,7 @@ def test_github_client_fails_closed_if_owned_pr_query_hits_coverage_cap() -> Non
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     runner = RecordingRunner(
         {
@@ -755,7 +755,7 @@ def test_github_client_covers_current_large_owned_pr_backlog() -> None:
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     runner = RecordingRunner(
         {
@@ -781,7 +781,7 @@ def test_github_client_reads_all_open_prs_and_exact_base_head_for_maintenance() 
         "--limit",
         str(MAX_DISCOVERED_PULL_REQUESTS),
         "--json",
-        "number,state,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
+        "number,state,isDraft,headRepository,author,headRefName,headRefOid,baseRefName,baseRefOid,updatedAt,labels",
     )
     branch_argv = ("gh", "api", "repos/acme/widgets/branches/stable")
     runner = RecordingRunner(
@@ -1501,6 +1501,7 @@ def canonical_pull(number: int = 17, head_sha: str = "a" * 40) -> dict[str, obje
     return {
         "number": number,
         "state": "open",
+        "draft": False,
         "base": {
             "repo": {"full_name": "acme/widgets"},
             "ref": "stable",
@@ -1523,6 +1524,7 @@ def canonical_list_pull(
     return {
         "number": number,
         "state": "OPEN",
+        "isDraft": False,
         "headRepository": {"nameWithOwner": "acme/widgets"},
         "author": {"login": "owner"},
         "headRefName": "codex/fix",

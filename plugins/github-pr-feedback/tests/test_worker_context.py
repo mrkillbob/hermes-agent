@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-def test_pr_feedback_task_body_includes_resolved_receipt_worktree() -> None:
+def test_pr_feedback_workspace_binding_keeps_private_path_out_of_body() -> None:
     from github_pr_feedback.cli import _kanban_create_argv
     from github_pr_feedback.controller import KanbanTask
 
@@ -20,6 +20,6 @@ def test_pr_feedback_task_body_includes_resolved_receipt_worktree() -> None:
     argv = _kanban_create_argv(task)
     body = argv[argv.index("--body") + 1]
 
-    assert "Canonical receipt worktree:" in body
-    assert str(task.repository_path) in body
-    assert "Do not search for the worktree" in body
+    assert argv[argv.index("--workspace") + 1] == f"dir:{task.repository_path}"
+    assert task.instructions in body
+    assert str(task.repository_path) not in body
