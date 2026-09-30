@@ -197,7 +197,12 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
         "Do not repeat a failed diagnostic or guess external paths. "
         if task.get("workspace_kind") == "scratch"
         else (
-            "Run git status --short --branch, git diff --stat, and git diff --check "
+            "A directory workspace need not be a Git repository. Run Git checks "
+            "only when the assignment requires a bound repository; stop after "
+            "the first result saying this is not a Git repository; record that gap. "
+            "For read-only discovery use the assigned relative evidence first. "
+            "When Git checks are required, run git status --short --branch, "
+            "git diff --stat, and git diff --check "
             "as separate terminal calls for bounded Git summaries. Do not combine "
             "them with echo, pwd, env, or git log. To obtain the exact HEAD, run "
             "mkdir -p artifacts/kanban && git rev-parse HEAD > "
@@ -407,6 +412,13 @@ def _untrusted_content_digest(value: Any) -> str:
 def _typed_payload(value: Any, grant_texts: Sequence[tuple[str, SourceGrant]], used_grants: dict[str, SourceGrant], **kwargs: Any) -> Any:
     """Classify a payload through the scalar, mapping, or sequence path."""
 
+    if isinstance(value, SourceBoundSegment):
+        for _, grant in grant_texts:
+            digest = source_grant_digest(grant)
+            if digest == value.source_grant_digest:
+                used_grants[digest] = grant
+                return value
+        return UntrustedProvenanceSegment(sha256(b"unbound-source-segment").hexdigest())
     if isinstance(value, str):
         return _typed_payload_string(value, grant_texts, used_grants, **kwargs)
     if isinstance(value, (list, tuple)):
@@ -868,6 +880,9 @@ def _typed_payload_mapping_item(
     state: Mapping[str, Any], key: Any, item: Any, typed: dict[Any, Any]
 ) -> None:
     """Classify one mapping field while keeping projection families isolated."""
+    if key in {"content", "output"} and isinstance(item, SourceBoundSegment):
+        typed[key] = _typed_payload(item, state["grant_texts"], state["used_grants"])
+        return
     value = state['value']
     grant_texts = state['grant_texts']
     used_grants = state['used_grants']
