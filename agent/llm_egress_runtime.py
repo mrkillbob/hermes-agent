@@ -1003,6 +1003,10 @@ def authorize_agent_sdk_kwargs(
             grants=tuple(used_grants.values()),
         )
     except EgressBlocked:
+        logger.warning(
+            "LLM egress blocked grant counts: input=%d selected=%d",
+            len(grants), len(used_grants),
+        )
         typed_locations = _typed_payload_violation_locations(typed_body)
         if typed_locations:
             logger.warning(

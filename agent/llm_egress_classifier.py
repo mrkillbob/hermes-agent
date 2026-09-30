@@ -2071,6 +2071,7 @@ def _typed_payload_violation_locations(
     """
 
     locations: list[tuple[str, str, int, tuple[str, ...]]] = []
+    seen: set[int] = set()
     text_segments = (
         SanitizedSegment,
         GeneratedContextSegment,
@@ -2084,6 +2085,15 @@ def _typed_payload_violation_locations(
     )
 
     def visit(item: Any, path: str) -> None:
+        if isinstance(item, UntrustedProvenanceSegment):
+            # This marker has a hash, not text. Never log that hash; report only
+            # the structural origin boundary that final authorization rejected.
+            locations.append((path, "UntrustedProvenanceSegment", 0, ("untrusted_provenance",)))
+            return
+        if isinstance(item, (OutboundText, Mapping, list, tuple)):
+            if id(item) in seen:
+                return
+            seen.add(id(item))
         if isinstance(item, OutboundText):
             for index, segment in enumerate(item.segments):
                 visit(segment, f"{path}.segments[{index}]")

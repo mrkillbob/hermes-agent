@@ -4508,7 +4508,7 @@ def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatc
     if variant == "oversized":
         from agent.source_provenance import MAX_SOURCE_SLICE_BYTES
         text += "x" * (MAX_SOURCE_SLICE_BYTES + 1)
-    source.write_text(text)
+    source.write_text(text, encoding="utf-8")
     monkeypatch.setattr(skills_tool, "_skill_search_dirs", lambda: ([], [source.parent.parent], source.parent.parent))
     monkeypatch.setattr(skills_tool, "_locate_skill", lambda *args: (None, source.parent, source))
     payload = {"success": True, "name": "inspection", "content": text,
@@ -4538,3 +4538,42 @@ def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatc
     assert "pseudo-languages" in authorized["messages"][1]["content"]
     assert "missing_credential_files" not in authorized["messages"][1]["content"]
     assert str(source) not in json.dumps(authorized)
+
+
+def test_untrusted_marker_diagnostic_reports_boundary_without_hash():
+    from agent.llm_egress_firewall import OutboundText, UntrustedProvenanceSegment
+
+    value = {"private-key": OutboundText((UntrustedProvenanceSegment("private-hash"),))}
+    locations = _typed_payload_violation_locations(value)
+    assert locations == ((
+        "$.map[0].value.segments[0]", "UntrustedProvenanceSegment", 0,
+        ("untrusted_provenance",),
+    ),)
+    assert "private" not in repr(locations)
+
+
+def test_typed_diagnostic_cycle_preserves_content_free_marker():
+    from agent.llm_egress_firewall import UntrustedProvenanceSegment
+
+    value = [UntrustedProvenanceSegment("private-hash")]
+    value.append(value)
+    assert _typed_payload_violation_locations(value) == ((
+        "$.sequence[0]", "UntrustedProvenanceSegment", 0, ("untrusted_provenance",),
+    ),)
+
+
+def test_runtime_denial_logs_input_and_selected_grant_counts_only(tmp_path, monkeypatch, caplog):
+    import agent.llm_egress_runtime as runtime
+    from agent.llm_egress_firewall import UntrustedProvenanceSegment
+
+    registry = SourceProvenanceRegistry()
+    _grant(tmp_path, registry)
+    monkeypatch.setattr(runtime, "_typed_payload", lambda *args, **kwargs: {
+        "messages": [UntrustedProvenanceSegment("private-hash")],
+    })
+    with pytest.raises(EgressBlocked):
+        authorize_agent_sdk_kwargs(_agent(tmp_path, registry), {"messages": []})
+    assert "blocked grant counts: input=1 selected=0" in caplog.text
+    assert "UntrustedProvenanceSegment" in caplog.text
+    assert "private-hash" not in caplog.text
+    assert "verified source" not in caplog.text
