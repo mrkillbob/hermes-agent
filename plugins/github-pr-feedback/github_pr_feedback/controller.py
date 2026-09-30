@@ -3596,7 +3596,7 @@ def _governed_command_prefix(control_home: Path) -> str:
     return (
         f"env -u _HERMES_GATEWAY HERMES_HOME={shlex.quote(str(control_home))} "
         '"${HERMES_KANBAN_HERMES_PYTHON:?dispatcher Hermes Python is required}" '
-        "-E -P -m hermes_cli.main github-pr-feedback"
+        "-P -m hermes_cli.main github-pr-feedback"
     )
 
 
