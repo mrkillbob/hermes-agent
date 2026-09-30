@@ -22706,6 +22706,95 @@
         "title": "ProfileCanonicalSession",
         "type": "object"
       },
+      "ProfileFederationRole": {
+        "additionalProperties": false,
+        "description": "Governed identity fields exposed by the profile roster.",
+        "properties": {
+          "role_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Role Id"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Display Name"
+          },
+          "department": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Department"
+          },
+          "authority": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Authority"
+          },
+          "schedule": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Schedule"
+          },
+          "skills": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Skills",
+            "type": "array"
+          },
+          "toolsets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Toolsets",
+            "type": "array"
+          },
+          "handoffs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Handoffs",
+            "type": "array"
+          }
+        },
+        "title": "ProfileFederationRole",
+        "type": "object"
+      },
       "ProfileMirrored": {
         "additionalProperties": false,
         "description": "What was copied from the launch profile; ``auth`` is ``\"shared\"`` under ``share_auth``.",
@@ -22943,6 +23032,17 @@
             "default": false,
             "title": "Has Avatar",
             "type": "boolean"
+          },
+          "federation_role": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileFederationRole"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
