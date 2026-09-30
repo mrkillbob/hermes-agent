@@ -71,6 +71,9 @@ class FleetRunner:
         self.profile_models = dict(profile_models or {})
         self.profile_providers = dict(profile_providers or {})
         self.capabilities = tuple(capabilities or self._default_capabilities(models, tools))
+        # Each sweep performs registration, heartbeat and claim requests per profile.
+        # A large fleet must not expire its early profiles before the sweep finishes.
+        self._runner_ttl = max(30.0, 3.0 * len(self.capabilities))
         self._liveness_check = liveness_check or (lambda: True)
         self._executor = executor or self._execute
         self._stop = threading.Event()
@@ -103,7 +106,7 @@ class FleetRunner:
         if not self._is_live():
             return False
         for capability in self.capabilities:
-            self.coordinator.register_runner(capability)
+            self.coordinator.register_runner(capability, ttl=self._runner_ttl)
         return True
 
     def run_once(self, *, now: float | None = None) -> bool:
@@ -111,7 +114,7 @@ class FleetRunner:
             return False
         claimed = False
         for capability in self.capabilities:
-            self.coordinator.heartbeat_runner(capability, now=now)
+            self.coordinator.heartbeat_runner(capability, now=now, ttl=self._runner_ttl)
             claim = self.coordinator.claim_task(capability, now=now)
             if claim is None:
                 continue

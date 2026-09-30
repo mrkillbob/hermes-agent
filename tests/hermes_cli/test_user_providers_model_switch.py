@@ -21,7 +21,7 @@ def _no_live_builtin_provider_probes(monkeypatch):
         "hermes_cli.models.provider_model_ids", lambda *_a, **_kw: []
     )
     monkeypatch.setattr(
-        "hermes_cli.models.fetch_ollama_local_models", lambda *_a, **_kw: None
+        "hermes_cli.models_local.fetch_ollama_local_models", lambda *_a, **_kw: None
     )
     # Never consume the operator's on-disk provider-model cache in unit tests.
     # Route through the patched live seam so each case owns its catalog.

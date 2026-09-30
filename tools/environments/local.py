@@ -271,10 +271,10 @@ def _filter_secret_env(
             if not _is_hermes_internal_secret(key):
                 out[key] = value
             continue
-        if (key in _ALWAYS_STRIP_KEYS or _is_hermes_internal_secret(key)
+        first_party = _is_terminal_first_party_env(key)
+        if ((key in _ALWAYS_STRIP_KEYS and not first_party) or _is_hermes_internal_secret(key)
                 or key in plugin_strip or key.upper() in plugin_strip_folded):
             continue
-        first_party = _is_terminal_first_party_env(key)
         passthrough = is_env_passthrough(key)
         if _is_provider_env_blocklisted(key, registered) and not (passthrough or first_party):
             continue

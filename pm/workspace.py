@@ -129,6 +129,14 @@ def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Pat
         import tomli_w
 
         document = tomllib.loads(core_text)
+        # Core's committed placeholder is not the release version required by
+        # plugin dependencies. Derive it from this source, never the active install.
+        if document.get("project", {}).get("version") == "0.0.0":
+            from hermes_cli.version_info import _git_version_info
+
+            version = _git_version_info(source).base_version
+            if version != "unknown":
+                document["project"]["version"] = version
         _core_release_quarantine(document, source / "uv.lock")
         document.setdefault("tool", {}).setdefault("uv", {})["workspace"] = {"members": sorted(members)}
         text = tomli_w.dumps(document)
@@ -282,7 +290,10 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path) -> Path:
                 spec["path"] = (identity / relative).resolve().as_posix()
                 changed = True
         if virtual:
-            document.setdefault("project", {})["name"] = f"hermes-plugin-{key}"
+            project = document.setdefault("project", {})
+            project["name"] = f"hermes-plugin-{key}"
+            if "version" not in project and "version" not in project.get("dynamic", []):
+                project["version"] = "0.0.0"
         if virtual or changed:
             import tomli_w
 

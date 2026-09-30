@@ -58,7 +58,8 @@
       "assignee": "revenue-artifact-auditor",
       "project": "hermes-revenue-lab",
       "title": "Revenue experiment readiness and evidence",
-      "brief": "Read /Users/mikedemott/HermesRevenueLab/AGENTS.md, config/cron_fleet.json, config/model_routing_policy.json and current guarded run receipts. Audit existing private opportunity and prototype queues, real demand evidence, costs and next measurable experiment. Resolve missing evidence and route bounded code or research work to existing owners. This discovery pass must not execute Revenue workloads through a generic federation worker: model-backed experiments stay behind the HRL resource governor, qualified routing and compliance gates. Report unavailable tiers or provider-binding drift as exact blockers and seek eligible deterministic work. Revenue remains unknown until supported by real receipts; never equate a proposed opportunity or prototype with profit."
+      "brief": "Read /Users/mikedemott/HermesRevenueLab/AGENTS.md, config/cron_fleet.json, config/model_routing_policy.json and current guarded run receipts. Audit existing private opportunity and prototype queues, real demand evidence, costs and next measurable experiment. Resolve missing evidence and route bounded code or research work to existing owners. This discovery pass must not execute Revenue workloads through a generic federation worker: model-backed experiments stay behind the HRL resource governor, qualified routing and compliance gates. Report unavailable tiers or provider-binding drift as exact blockers and seek eligible deterministic work. Revenue remains unknown until supported by real receipts; never equate a proposed opportunity or prototype with profit.",
+      "evidence_root": "/Users/mikedemott/HermesRevenueLab"
     }
   ],
   "project_boards": {
