@@ -35,6 +35,7 @@ from .github_client import (
     PullRequestMergeState,
     ReviewState,
 )
+from .worktree_capacity import control_capacity_admission
 from .ledger import FeedbackLedger, LedgerStateError
 from .policy import (
     PR_REPAIR_ATTRIBUTION_PREFIX,
@@ -144,7 +145,8 @@ class RepairController:
         self._github = github
         self._kanban = kanban
         self._local_git = local_git or PooledLocalGitRepository(
-            ledger, ledger.path.parent / "worktree-pool"
+            ledger, ledger.path.parent / "worktree-pool",
+            capacity=control_capacity_admission(),
         )
         self._clock = clock or (lambda: datetime.now(UTC))
         self._control_home = Path(control_home or ledger.path.parent.parent).resolve()

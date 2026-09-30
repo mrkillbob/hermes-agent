@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import os
 import sys
+from contextlib import nullcontext
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -38,6 +39,8 @@ from .policy import (
     pr_repair_attribution_line,
     pr_repair_attribution_required,
 )
+
+from .worktree_capacity import WorktreeCapacityAdmission, control_capacity_admission
 
 MAX_ADMISSIONS_PER_SCAN = 128
 # The subprocess boundary is globally serialized across profiles, but keeping
@@ -300,7 +303,9 @@ def _prepare_receipt_worktree_with_overflow(
     try:
         return local_git.prepare_receipt_worktree(repository, receipt)
     except WorktreePoolExhausted:
-        return LocalGitRepository(overflow_root).prepare_receipt_worktree(
+        return LocalGitRepository(
+            overflow_root, capacity=getattr(local_git, "_capacity", None)
+        ).prepare_receipt_worktree(
             repository, receipt
         )
 
@@ -498,6 +503,8 @@ class LocalGitRepository:
         self,
         worktree_root: Path | GitCommandRunner | None = None,
         runner: GitCommandRunner | None = None,
+        *,
+        capacity: WorktreeCapacityAdmission | None = None,
     ) -> None:
         # Preserve the small injected-runner construction used by older callers.
         if worktree_root is not None and not isinstance(worktree_root, (str, Path)):
@@ -509,44 +516,47 @@ class LocalGitRepository:
             worktree_root or Path.cwd() / ".github-pr-feedback-worktrees"
         )
         self._runner = runner or SubprocessGitRunner()
+        self._capacity = capacity
 
     def prepare_receipt_worktree(
         self, path: Path, receipt: FeedbackReceipt
     ) -> PreparedWorktree:
         if not _SHA.fullmatch(receipt.head_sha):
             raise ValueError("head SHA is not a full Git object ID")
-        self._ensure_exact_head(path, receipt)
-
-        branch = self.prepare_receipt_branch(
-            path, receipt, object_already_verified=True
-        )
         workspace = (
             self._worktree_root
             / sha256("\x00".join(map(str, receipt.key)).encode("utf-8")).hexdigest()
         )
-        self._worktree_root.mkdir(parents=True, exist_ok=True)
-        if workspace.is_symlink():
-            raise RuntimeError(
-                "deterministic receipt worktree path must not be a symlink"
+        admission = self._capacity.reserve(workspace) if self._capacity else nullcontext()
+        with admission:
+            self._ensure_exact_head(path, receipt)
+
+            branch = self.prepare_receipt_branch(
+                path, receipt, object_already_verified=True
             )
-        if workspace.exists():
-            self._verify_worktree(workspace, receipt.head_sha)
-        else:
-            self._run(
-                [
-                    "git",
-                    "-C",
-                    str(path),
-                    "worktree",
-                    "add",
-                    "--quiet",
-                    str(workspace),
-                    branch,
-                ]
-            )
-            self._verify_worktree(workspace, receipt.head_sha)
-        self._link_governed_venv(path, workspace)
-        return PreparedWorktree(workspace.resolve(), branch, receipt.head_sha)
+            self._worktree_root.mkdir(parents=True, exist_ok=True)
+            if workspace.is_symlink():
+                raise RuntimeError(
+                    "deterministic receipt worktree path must not be a symlink"
+                )
+            if workspace.exists():
+                self._verify_worktree(workspace, receipt.head_sha)
+            else:
+                self._run(
+                    [
+                        "git",
+                        "-C",
+                        str(path),
+                        "worktree",
+                        "add",
+                        "--quiet",
+                        str(workspace),
+                        branch,
+                    ]
+                )
+                self._verify_worktree(workspace, receipt.head_sha)
+            self._link_governed_venv(path, workspace)
+            return PreparedWorktree(workspace.resolve(), branch, receipt.head_sha)
 
     @staticmethod
     def _preserve_workspace_venv(workspace: Path) -> bool:
@@ -767,61 +777,63 @@ class LocalGitRepository:
             raise ValueError("head SHA is not a full Git object ID")
         if not repository.strip() or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", lane):
             raise ValueError("maintenance workspace identity is invalid")
-        self._run(
-            [
-                "git",
-                "-C",
-                str(repository_path),
-                "cat-file",
-                "-e",
-                f"{head_sha}^{{commit}}",
-            ]
-        )
         digest = sha256(f"{repository}\0{head_sha}\0{lane}".encode("utf-8")).hexdigest()
-        branch = f"hermes/release-maintenance/{digest[:20]}"
-        current = self._run(
-            [
-                "git",
-                "-C",
-                str(repository_path),
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                f"refs/heads/{branch}^{{commit}}",
-            ],
-            missing_ok=True,
-        ).strip()
-        if current and current.casefold() != head_sha.casefold():
-            raise RuntimeError("maintenance branch collides with another commit")
-        if not current:
-            self._run(["git", "-C", str(repository_path), "branch", branch, head_sha])
         workspace = self._worktree_root / f"maintenance-{digest}"
-        self._worktree_root.mkdir(parents=True, exist_ok=True)
-        if workspace.is_symlink():
-            raise RuntimeError("maintenance worktree path must not be a symlink")
-        created = False
-        if not workspace.exists():
+        admission = self._capacity.reserve(workspace) if self._capacity else nullcontext()
+        with admission:
             self._run(
                 [
                     "git",
                     "-C",
                     str(repository_path),
-                    "worktree",
-                    "add",
-                    "--quiet",
-                    str(workspace),
-                    branch,
+                    "cat-file",
+                    "-e",
+                    f"{head_sha}^{{commit}}",
                 ]
             )
-            created = True
-        if created:
-            from hermes_cli.worktree_environment import bootstrap_worktree_environments
+            branch = f"hermes/release-maintenance/{digest[:20]}"
+            current = self._run(
+                [
+                    "git",
+                    "-C",
+                    str(repository_path),
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    f"refs/heads/{branch}^{{commit}}",
+                ],
+                missing_ok=True,
+            ).strip()
+            if current and current.casefold() != head_sha.casefold():
+                raise RuntimeError("maintenance branch collides with another commit")
+            if not current:
+                self._run(["git", "-C", str(repository_path), "branch", branch, head_sha])
+            self._worktree_root.mkdir(parents=True, exist_ok=True)
+            if workspace.is_symlink():
+                raise RuntimeError("maintenance worktree path must not be a symlink")
+            created = False
+            if not workspace.exists():
+                self._run(
+                    [
+                        "git",
+                        "-C",
+                        str(repository_path),
+                        "worktree",
+                        "add",
+                        "--quiet",
+                        str(workspace),
+                        branch,
+                    ]
+                )
+                created = True
+            if created:
+                from hermes_cli.worktree_environment import bootstrap_worktree_environments
 
-            bootstrap_worktree_environments(
-                Path(repository_path), workspace, environment_names=(".venv",)
-            )
-        self._verify_worktree(workspace, head_sha)
-        return workspace.resolve()
+                bootstrap_worktree_environments(
+                    Path(repository_path), workspace, environment_names=(".venv",)
+                )
+            self._verify_worktree(workspace, head_sha)
+            return workspace.resolve()
 
     def _verify_worktree(self, workspace: Path, expected_sha: str) -> None:
         top = self._run(
@@ -932,6 +944,7 @@ class PooledLocalGitRepository:
         owner_pid: Callable[[], int] | None = None,
         clock: Callable[[], datetime] | None = None,
         lease_timeout: timedelta = DEFAULT_WORKTREE_POOL_LEASE,
+        capacity: WorktreeCapacityAdmission | None = None,
     ) -> None:
         if slot_count < 1:
             raise ValueError("slot_count must be positive")
@@ -940,6 +953,7 @@ class PooledLocalGitRepository:
             worktree_root or Path.cwd() / ".github-pr-feedback-worktree-pool"
         )
         self._runner = runner or SubprocessGitRunner()
+        self._capacity = capacity
         self._slot_count = slot_count
         self._owner_pid = owner_pid or os.getpid
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -951,7 +965,6 @@ class PooledLocalGitRepository:
     ) -> PreparedWorktree:
         if not _SHA.fullmatch(receipt.head_sha):
             raise ValueError("head SHA is not a full Git object ID")
-        self._ensure_exact_head(path, receipt)
 
         now = self._clock()
         owner_pid = self._owner_pid()
@@ -969,7 +982,11 @@ class PooledLocalGitRepository:
             if lease is None:
                 continue
             try:
-                workspace = self._prepare_slot(path, slot_id, receipt, namespace=namespace)
+                candidate = self._slot_path(receipt, slot_id, namespace)
+                admission = self._capacity.reserve(candidate) if self._capacity else nullcontext()
+                with admission:
+                    self._ensure_exact_head(path, receipt)
+                    workspace = self._prepare_slot(path, slot_id, receipt, namespace=namespace)
             except WorktreePoolSlotDirty:
                 self._ledger.finish_worktree_slot(lease)
                 continue
@@ -1049,6 +1066,10 @@ class PooledLocalGitRepository:
             )
             released += 1
         return released
+
+    def _slot_path(self, receipt: FeedbackReceipt, slot_id: int, namespace: str) -> Path:
+        repository_key = sha256(receipt.repository.casefold().encode("utf-8")).hexdigest()[:16]
+        return self._worktree_root / f"repo-{repository_key}" / f"source-{namespace}" / f"slot-{slot_id}"
 
     def _prepare_slot(
         self,
@@ -1240,7 +1261,8 @@ class ScanController:
         self._github = github
         self._kanban = kanban
         self._local_git = local_git or PooledLocalGitRepository(
-            ledger, ledger.path.parent / "worktree-pool"
+            ledger, ledger.path.parent / "worktree-pool",
+            capacity=control_capacity_admission(),
         )
         default_control_home = (
             ledger.path.parent.parent
