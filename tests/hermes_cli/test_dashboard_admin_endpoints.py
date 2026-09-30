@@ -30,7 +30,7 @@ def test_gateway_start_uses_manual_run_when_no_service_is_installed(monkeypatch)
 
     result = asyncio.run(ops.start_gateway())
 
-    assert spawned == {"command": ["gateway", "run"], "name": "gateway-start"}
+    assert spawned == {"command": ["-p", "default", "gateway", "run"], "name": "gateway-start"}
     assert result == {"ok": True, "pid": 123, "name": "gateway-start"}
 
 
@@ -438,7 +438,8 @@ class TestWebhookEndpoints:
             "restart_action": "gateway-restart",
             "restart_pid": 4242,
         }
-        assert restart_calls == [(["gateway", "restart"], "gateway-restart")]
+        # The default home is named explicitly: a bare child would re-read the sticky active_profile.
+        assert restart_calls == [(["-p", "default", "gateway", "restart"], "gateway-restart")]
         assert load_config()["platforms"]["webhook"]["enabled"] is True
         assert self.client.get("/api/webhooks").json()["enabled"] is True
 

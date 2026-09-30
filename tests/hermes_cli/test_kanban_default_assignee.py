@@ -123,10 +123,10 @@ def test_generated_task_with_removed_profile_uses_default_fallback(
     automated producers receive the configured fallback.
     """
     kb, _home = isolated_kanban_home
-    from hermes_cli import profiles
+    from hermes_cli import profiles, kanban_db_connect as kbc, kanban_db_dispatch as kbd
 
     monkeypatch.setattr(profiles, "profile_exists", lambda name: name == "default")
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
         task_id = kb.create_task(
             conn,
@@ -135,8 +135,8 @@ def test_generated_task_with_removed_profile_uses_default_fallback(
             created_by="auto-decomposer",
         )
 
-    with kb.connect_closing() as conn:
-        res = kb.dispatch_once(
+    with kbc.connect_closing() as conn:
+        res = kbd.dispatch_once(
             conn,
             spawn_fn=_fake_spawn,
             dry_run=False,

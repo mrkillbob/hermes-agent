@@ -66,6 +66,18 @@ interface RpcEnvelope {
   params?: { type?: string; payload?: unknown };
 }
 
+// Auto-redial budget for the JSON-RPC sidecar (#95951). After this many
+// bounded-backoff attempts the manual Reconnect affordance stays the only
+// path, mirroring the events feed's give-up contract.
+const SIDE_CAR_MAX_RECONNECT_ATTEMPTS = 5;
+
+// Surfaced once when the redial budget is exhausted. Only this module may
+// clear it (on the next successful open), matching how the events feed
+// owns its own banner messages.
+const SIDE_CAR_GAVE_UP_MESSAGE =
+  "gateway sidecar disconnected — gave up after " +
+  `${SIDE_CAR_MAX_RECONNECT_ATTEMPTS} attempts, use Reconnect`;
+
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "idle",
   connecting: "connecting",
@@ -116,13 +128,12 @@ export function ChatSidebar({
   onDashboardNewSessionRequest,
   onSessionTitleChange,
 }: ChatSidebarProps) {
-  // `version` bumps on reconnect; gw is derived so we never call setState
-  // for it inside an effect (React 19's set-state-in-effect rule). The
-  // counter is the dependency on purpose — it's not read in the memo body,
-  // it's the signal that says "rebuild the client".
-  const [version, setVersion] = useState(0);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const gw = useMemo(() => new GatewayClient(), [version]);
+  // `version` recreates the clients for an explicit reconnect or scope change.
+  const [version, setVersion] = useState(0)
+  const gw = useMemo(() => new GatewayClient(), [version])
+  // The sidecar retry budget survives each redial-triggered effect rebuild.
+  const sidecarRedialAttemptRef = useRef(0)
+  const sidecarGaveUpRef = useRef(false)
 
   const [state, setState] = useState<ConnectionState>("idle");
   const [info, setInfo] = useState<SessionInfo>({});
@@ -179,11 +190,14 @@ export function ChatSidebar({
       prevScopeKey.current = scopeKey;
       return;
     }
-    if (prevScopeKey.current === scopeKey) return;
-    prevScopeKey.current = scopeKey;
-    setError(null);
-    setVersion((v) => v + 1);
-  }, [scopeKey]);
+    if (prevScopeKey.current === scopeKey) return
+    prevScopeKey.current = scopeKey
+    setError(null)
+    // Fresh scope, fresh sidecar redial budget (#95951).
+    sidecarRedialAttemptRef.current = 0
+    sidecarGaveUpRef.current = false
+    setVersion((v) => v + 1)
+  }, [scopeKey])
 
   useEffect(() => {
     let cancelled = false;
@@ -208,6 +222,57 @@ export function ChatSidebar({
       }
     });
 
+    // Auto-redial after a transient drop (#95951): a dashboard service
+    // restart closes the sidecar's WebSocket with 1012, and GatewayClient
+    // deliberately delegates reconnect policy to this connection owner.
+    // Bounded exponential backoff — the same shape the PTY pane uses —
+    // capped at SIDE_CAR_MAX_RECONNECT_ATTEMPTS; after that the manual
+    // Reconnect affordance stays the only path. A successful open resets
+    // the counter; unmount or a scope switch (version bump) cancels the
+    // pending timer because this effect tears down with the old client.
+    let redialTimer: ReturnType<typeof setTimeout> | null = null;
+    const offRedial = gw.onState((s) => {
+      if (s === "open") {
+        sidecarRedialAttemptRef.current = 0;
+        if (sidecarGaveUpRef.current) {
+          sidecarGaveUpRef.current = false;
+          setError((current) =>
+            current === SIDE_CAR_GAVE_UP_MESSAGE ? null : current,
+          );
+        }
+        return;
+      }
+      if (s !== "closed" && s !== "error") {
+        return;
+      }
+      if (cancelled || redialTimer) {
+        return;
+      }
+      // The attempt counter lives in a ref: each redial rebuilds the client
+      // and re-runs this effect, so a closure-local counter would reset and
+      // the budget would never exhaust (#95951).
+      if (sidecarRedialAttemptRef.current >= SIDE_CAR_MAX_RECONNECT_ATTEMPTS) {
+        // Mirror the events feed's give-up contract: say so once, then the
+        // manual Reconnect affordance stays the only path. Cleared again if
+        // a later connection does open (manual reconnect followed by a
+        // within-budget drop).
+        if (!sidecarGaveUpRef.current) {
+          sidecarGaveUpRef.current = true;
+          setError((current) => current ?? SIDE_CAR_GAVE_UP_MESSAGE);
+        }
+        return;
+      }
+      const attempt = sidecarRedialAttemptRef.current;
+      sidecarRedialAttemptRef.current += 1;
+      const delayMs = Math.min(250 * 2 ** attempt, 3000);
+      redialTimer = setTimeout(() => {
+        redialTimer = null;
+        if (!cancelled) {
+          setVersion((v) => v + 1);
+        }
+      }, delayMs);
+    });
+
     // Create the sidecar session so the gateway surfaces session-scoped
     // signals (connection state, credential warnings). It's independent of the
     // PTY pane's session by design. The model picker no longer rides this
@@ -228,13 +293,17 @@ export function ChatSidebar({
       });
 
     return () => {
-      cancelled = true;
-      offState();
-      offSessionInfo();
-      offError();
-      gw.close();
-    };
-    // `profile` is read from render; scope changes bump `version` → new `gw`.
+      cancelled = true
+      if (redialTimer) {
+        clearTimeout(redialTimer)
+        redialTimer = null
+      }
+      offRedial()
+      offState()
+      offSessionInfo()
+      offError()
+      gw.close()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gw]);
 
