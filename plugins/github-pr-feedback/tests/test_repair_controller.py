@@ -1012,7 +1012,7 @@ def test_scoped_repair_dispatch_does_not_read_or_dispatch_other_prs(tmp_path, mo
     monkeypatch.setattr(cli, "_load_policy_from_context", lambda ctx: configured)
     monkeypatch.setattr(cli, "_github_client", lambda policy: ScopedGitHub())
     monkeypatch.setattr(cli, "KanbanSubprocessClient", lambda: kanban)
-    monkeypatch.setattr(repair_controller, "PooledLocalGitRepository", lambda *args: LocalGit())
+    monkeypatch.setattr(repair_controller, "PooledLocalGitRepository", lambda *args, **kwargs: LocalGit())
     parser = argparse.ArgumentParser()
     cli.setup_cli(None, parser)
     args = parser.parse_args(["dispatch-repair", "--repository", "acme/widgets",

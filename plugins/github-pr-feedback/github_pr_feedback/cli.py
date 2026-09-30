@@ -75,6 +75,7 @@ from .release_maintenance import (
     maintenance_worktree_path,
 )
 from .post_merge import PostMergeExecutor
+from .worktree_capacity import WorktreeCapacityRejected, control_capacity_admission
 
 try:
     from hermes_constants import get_default_hermes_root
@@ -1498,7 +1499,10 @@ def _run_release_maintenance_scan(
         ledger,
         github or _github_client(policy),
         kanban or KanbanSubprocessClient(),
-        workspaces or LocalGitRepository(ledger.path.parent / "maintenance-worktrees"),
+        workspaces or LocalGitRepository(
+            ledger.path.parent / "maintenance-worktrees",
+            capacity=control_capacity_admission(),
+        ),
         now=now,
         control_home=control_home or get_default_hermes_root(),
         board=policy.board or "maintenance",
@@ -2761,7 +2765,7 @@ def _review_required_task(
     ).hexdigest()
     # Materialize a verified exact-head worktree so the reviewer sees the
     # precise commit being reviewed rather than the main clone's HEAD.
-    git = local_git or LocalGitRepository()
+    git = local_git or LocalGitRepository(capacity=control_capacity_admission())
     try:
         workspace = git.prepare_maintenance_worktree(
             target.local_path,
@@ -2770,6 +2774,8 @@ def _review_required_task(
             "review-required",
         )
         repository_path = workspace
+    except WorktreeCapacityRejected:
+        raise
     except Exception:
         # Fall back to the main clone path if worktree preparation fails;
         # degraded (but not broken) behaviour is better than no task at all.
