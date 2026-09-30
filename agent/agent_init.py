@@ -1110,7 +1110,35 @@ def _init_fallback_chain(agent, fallback_model):
             print(f"🔄 Fallback chain ({len(chain)} providers): " + " → ".join(labels))
 
 
+def _requires_direct_kanban_tools(agent) -> bool:
+    """Protected workers use tool results with supported provenance bindings.
+
+    Programmatic execute_code aggregates lose their individual producer proofs.
+    Keep them out of the worker scope, including protected fallback routes;
+    ordinary interactive and exclusively local sessions retain their scope.
+    """
+    if os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1":
+        return True
+    if not str(os.environ.get("HERMES_KANBAN_TASK") or "").strip():
+        return False
+    from agent.llm_egress_runtime import provider_uses_egress_firewall
+
+    providers = [getattr(agent, "provider", None)]
+    providers.extend(
+        entry.get("provider") for entry in (getattr(agent, "_fallback_chain", None) or [])
+        if isinstance(entry, dict)
+    )
+    return any(provider_uses_egress_firewall(provider) for provider in providers)
+
+
 def _load_tools(agent, enabled_toolsets, disabled_toolsets):
+    direct_worker_tools = _requires_direct_kanban_tools(agent)
+    if direct_worker_tools:
+        disabled_toolsets = list(disabled_toolsets or [])
+        if "code_execution" not in disabled_toolsets:
+            disabled_toolsets.append("code_execution")
+        # Snapshot refresh, tool_search and runtime dispatch read this scope.
+        agent.disabled_toolsets = disabled_toolsets
     # A multiplexed gateway may have switched HERMES_HOME since model_tools was imported;
     # make sure this profile's plugins are discovered before the tool snapshot.
     try:
@@ -1133,6 +1161,8 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     # A finite -q run has no later session to learn for: no skill authoring tool (agent/oneshot_footprint.py).
     from agent.oneshot_footprint import prune_oneshot_tools
     agent.tools = prune_oneshot_tools(agent.tools or [])
+    if direct_worker_tools:
+        agent.tools = [tool for tool in agent.tools if tool["function"]["name"] != "execute_code"]
     from tools.connectors.turn import side_agent_tool_drops
     drops = side_agent_tool_drops(agent)
     if drops:
@@ -1147,6 +1177,13 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     agent._kanban_worker_guidance = (
         KANBAN_GUIDANCE if owned_kanban_task() and "kanban_show" in agent.valid_tool_names else ""
     )
+    if direct_worker_tools and agent._kanban_worker_guidance:
+        agent._kanban_worker_guidance += (
+            "\nUse direct read_file, search_files, terminal, patch and write_file calls. "
+            "Run Python through terminal with the assigned workspace Python. "
+            "Programmatic execute_code aggregates lack the direct source/action proof "
+            "required for remote worker replay.\n"
+        )
     if agent.quiet_mode:
         return
     if agent.tools:

@@ -108,11 +108,14 @@ def test_scratch_kanban_projection_does_not_require_git_receipts() -> None:
 
 def test_source_kanban_projection_preserves_git_provenance_checks() -> None:
     import json
-    from agent.llm_egress_classifier import _project_bound_kanban_show
+    from agent.llm_egress_classifier import _GIT_HEAD_MATCH_CODE, _project_bound_kanban_show
 
     payload = {"task": {"status": "running", "workspace_kind": "dir"},
                "protected_task_spec": {"version": "v1", "title": "Repair source", "body": "Fix."}}
     rendered = _project_bound_kanban_show(json.dumps(payload)).text
     assert "git status --short --branch" in rendered
-    assert "git rev-parse HEAD" in rendered
-    assert "preserve preexisting" in rendered
+    instruction = json.loads(rendered.split("\n", 1)[1])["worker_instruction"]
+    assert _GIT_HEAD_MATCH_CODE in instruction
+    assert "exit code 0 verifies the match" in rendered
+    assert "Do not create or read a temporary HEAD receipt" in rendered
+    assert "Preserve preexisting" in rendered

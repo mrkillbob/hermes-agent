@@ -4352,11 +4352,13 @@ def test_nous_replays_canonical_task_spec_without_legacy_marker(tmp_path, monkey
     assert "Repair current assignment" in rendered
     assert "read_file calls with narrow line ranges" in rendered
     assert "Omitted output is not a missing checkout" in rendered
-    assert "artifacts/kanban/current_head.txt" in rendered
+    assert "artifacts/kanban/current_head.txt" not in rendered
+    assert "Do not create or read a temporary HEAD receipt" in rendered
+    assert "exit code 0 verifies the match" in rendered
     assert "HERMES_KANBAN_HERMES_PYTHON" in rendered
     assert "with -P -m hermes_cli.main" in rendered
     assert "with -E -P" not in rendered
-    assert "preserve preexisting" in rendered
+    assert "Preserve preexisting" in rendered
     assert "instead of repeating Python wrappers" in rendered
     assert "Inspect current checkout." in rendered
     assert "super-secret-value" not in rendered
@@ -4493,8 +4495,9 @@ def test_publication_projection_does_not_bind_unsupported_commands(command):
     assert not _github_pr_feedback_terminal_call_ids(calls)
 
 
-@pytest.mark.parametrize("variant", ["valid", "unbound", "outside", "content", "encoded", "name", "duplicate", "oversized"])
-def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatch, variant):
+@pytest.mark.parametrize("wire_shape", ["named", "nameless"])
+@pytest.mark.parametrize("variant", ["valid", "unbound", "outside", "content", "encoded", "name", "duplicate", "oversized", "foreign_producer", "future_call", "conflicting_label"])
+def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatch, variant, wire_shape):
     """Skill instructions survive, but a forged tool envelope gains no authority."""
     import json
     from tools import skills_tool
@@ -4508,7 +4511,7 @@ def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatc
     if variant == "oversized":
         from agent.source_provenance import MAX_SOURCE_SLICE_BYTES
         text += "x" * (MAX_SOURCE_SLICE_BYTES + 1)
-    source.write_text(text)
+    source.write_text(text, encoding="utf-8")
     monkeypatch.setattr(skills_tool, "_skill_search_dirs", lambda: ([], [source.parent.parent], source.parent.parent))
     monkeypatch.setattr(skills_tool, "_locate_skill", lambda *args: (None, source.parent, source))
     payload = {"success": True, "name": "inspection", "content": text,
@@ -4524,6 +4527,14 @@ def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatc
                  "function": {"name": "skill_view", "arguments": '{"name":"inspection"}'}}]},
                 {"role": "tool", "tool_name": "skill_view", "tool_call_id": call_id,
                  "content": json.dumps(payload)}]
+    if wire_shape == "nameless":
+        messages[1].pop("tool_name")
+    if variant == "foreign_producer":
+        messages[0]["tool_calls"][0]["function"]["name"] = "not_skill"
+    if variant == "conflicting_label":
+        messages[1]["name"] = "not_skill"
+    if variant == "future_call":
+        messages.reverse()
     if variant == "unbound":
         messages[1]["tool_call_id"] = "call_unknown_skill_123"
     if variant == "duplicate":
@@ -4538,3 +4549,76 @@ def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatc
     assert "pseudo-languages" in authorized["messages"][1]["content"]
     assert "missing_credential_files" not in authorized["messages"][1]["content"]
     assert str(source) not in json.dumps(authorized)
+
+
+def test_untrusted_marker_diagnostic_reports_boundary_without_hash():
+    from agent.llm_egress_firewall import OutboundText, UntrustedProvenanceSegment
+
+    value = {"private-key": OutboundText((UntrustedProvenanceSegment("private-hash"),))}
+    locations = _typed_payload_violation_locations(value)
+    assert locations == ((
+        "$.map[0].value.segments[0]", "UntrustedProvenanceSegment", 0,
+        ("untrusted_provenance",),
+    ),)
+    assert "private" not in repr(locations)
+
+
+def test_typed_diagnostic_cycle_preserves_content_free_marker():
+    from agent.llm_egress_firewall import UntrustedProvenanceSegment
+
+    value = [UntrustedProvenanceSegment("private-hash")]
+    value.append(value)
+    assert _typed_payload_violation_locations(value) == ((
+        "$.sequence[0]", "UntrustedProvenanceSegment", 0, ("untrusted_provenance",),
+    ),)
+
+
+def test_runtime_denial_logs_input_and_selected_grant_counts_only(tmp_path, monkeypatch, caplog):
+    import agent.llm_egress_runtime as runtime
+    from agent.llm_egress_firewall import UntrustedProvenanceSegment
+
+    registry = SourceProvenanceRegistry()
+    _grant(tmp_path, registry)
+    monkeypatch.setattr(runtime, "_typed_payload", lambda *args, **kwargs: {
+        "messages": [UntrustedProvenanceSegment("private-hash")],
+    })
+    with pytest.raises(EgressBlocked):
+        authorize_agent_sdk_kwargs(_agent(tmp_path, registry), {"messages": []})
+    assert "blocked grant counts: input=1 selected=0" in caplog.text
+    assert "UntrustedProvenanceSegment" in caplog.text
+    assert "private-hash" not in caplog.text
+    assert "verified source" not in caplog.text
+
+
+def test_head_match_workflow_uses_actual_git_without_source_receipts(tmp_path):
+    import subprocess
+    import sys
+    from agent.llm_egress_classifier import _GIT_HEAD_MATCH_CODE
+    from tools.environments.local import build_subprocess_env
+
+    env = build_subprocess_env(inherit_profile_home=False)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(workspace)], check=True, env=env)
+    subprocess.run([
+        "git", "-C", str(workspace), "-c", "user.name=Test",
+        "-c", "user.email=test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "root",
+    ], check=True, env=env)
+    head = subprocess.run(
+        ["git", "-C", str(workspace), "rev-parse", "HEAD"], check=True,
+        capture_output=True, text=True, env=env,
+    ).stdout.strip()
+    for expected, status in ((head, 0), ("0" * 40, 1)):
+        result = subprocess.run(
+            [sys.executable, "-c", _GIT_HEAD_MATCH_CODE, expected], cwd=workspace,
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == status
+        assert result.stdout == result.stderr == ""
+    assert set(workspace.iterdir()) == {workspace / ".git"}
+    missing = subprocess.run(
+        [sys.executable, "-c", _GIT_HEAD_MATCH_CODE, head], cwd=tmp_path,
+        capture_output=True, text=True, env=env, timeout=10,
+    )
+    assert missing.returncode == 1
+    assert missing.stdout == missing.stderr == ""

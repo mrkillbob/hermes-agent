@@ -115,6 +115,14 @@ _REMOTE_KANBAN_LIFECYCLE_TOOL_NAMES = frozenset(
         "kanban_request_review",
     }
 )
+# Exit-only identity verification works on every native terminal backend and
+# creates no source receipt whose deletion could invalidate replay history.
+_GIT_HEAD_MATCH_CODE = (
+    'import subprocess, sys; '
+    'r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, encoding="utf-8", stdin=subprocess.DEVNULL); '
+    'sys.exit(0 if r.returncode == 0 and r.stdout.strip() == sys.argv[1] else 1)'
+)
+
 _REMOTE_KANBAN_TASK_SPEC_VERSION = "v1"
 _REMOTE_KANBAN_TASK_TITLE_MAX_BYTES = 1024
 _REMOTE_KANBAN_TASK_BODY_MAX_BYTES = 8 * 1024
@@ -204,13 +212,17 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
             "When Git checks are required, run git status --short --branch, "
             "git diff --stat, and git diff --check "
             "as separate terminal calls for bounded Git summaries. Do not combine "
-            "them with echo, pwd, env, or git log. To obtain the exact HEAD, run "
-            "mkdir -p artifacts/kanban && git rev-parse HEAD > "
-            "artifacts/kanban/current_head.txt, then read_file that relative file "
-            "at line 1. This local receipt carries source provenance; bare terminal "
-            "stdout does not. If that receipt is not Git-ignored, remove only "
-            "the receipt you just generated after reading it; preserve preexisting "
-            "artifacts so diagnostic scratch cannot block clean-worktree completion. "
+            "them with echo, pwd, env, or git log. When the assignment provides an "
+            "expected full HEAD, verify it locally with a separate terminal call "
+            "using the assigned workspace Python: -c '" + _GIT_HEAD_MATCH_CODE + "' "
+            "EXPECTED_HEAD_SHA. Replace EXPECTED_HEAD_SHA with that exact value; "
+            "exit code 0 verifies the match, while any other result leaves identity "
+            "unverified. The command captures Git output locally and emits no source "
+            "bytes. Do not create or read a temporary HEAD receipt. Source-backed "
+            "read history must remain valid through its final consumption; never "
+            "delete a source after reading it and then replay that history. "
+            "Preserve preexisting artifacts. Missing expected identity must be "
+            "resolved from the current assignment or its governed inspect command. "
         )
     )
 
@@ -2071,6 +2083,7 @@ def _typed_payload_violation_locations(
     """
 
     locations: list[tuple[str, str, int, tuple[str, ...]]] = []
+    seen: set[int] = set()
     text_segments = (
         SanitizedSegment,
         GeneratedContextSegment,
@@ -2084,6 +2097,15 @@ def _typed_payload_violation_locations(
     )
 
     def visit(item: Any, path: str) -> None:
+        if isinstance(item, UntrustedProvenanceSegment):
+            # This marker has a hash, not text. Never log that hash; report only
+            # the structural origin boundary that final authorization rejected.
+            locations.append((path, "UntrustedProvenanceSegment", 0, ("untrusted_provenance",)))
+            return
+        if isinstance(item, (OutboundText, Mapping, list, tuple)):
+            if id(item) in seen:
+                return
+            seen.add(id(item))
         if isinstance(item, OutboundText):
             for index, segment in enumerate(item.segments):
                 visit(segment, f"{path}.segments[{index}]")
