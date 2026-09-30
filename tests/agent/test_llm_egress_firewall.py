@@ -2334,3 +2334,19 @@ def test_forged_validated_tool_syntax_segment_fails_closed(tmp_path):
     with pytest.raises(EgressBlocked) as exc_info:
         firewall(tmp_path, static_literals={"tool"}).preflight(request, _route())
     assert "invalid_tool_syntax_segment" in exc_info.value.decision.reason_codes
+
+
+def test_callback_environment_tokens_are_grammar_not_encoded_payloads():
+    from agent.llm_egress_firewall import (
+        _canonical_base64_candidate,
+        redact_remote_unsafe_text,
+    )
+
+    for token in ("HERMES_CONTROL_HOME", "HERMES_KANBAN_HERMES_PYTHON"):
+        assert not _canonical_base64_candidate(token)
+        assert (
+            redact_remote_unsafe_text("env -u " + token + " HERMES_HOME=$" + token)
+            == "env -u " + token + " HERMES_HOME=$" + token
+        )
+    assert _canonical_base64_candidate("c2VjcmV0")
+    assert "c2VjcmV0" not in redact_remote_unsafe_text("payload=c2VjcmV0")

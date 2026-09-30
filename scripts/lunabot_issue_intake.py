@@ -21,7 +21,8 @@ After a created or reused verified issue, follow the existing bounded repair -> 
 
 def active_intake(tasks: list[dict]) -> dict | None:
     return next((task for task in tasks
-                 if task.get("assignee") == PROFILE
+                 if (task.get("assignee") == PROFILE
+                     or task.get("created_by") == "lunabot-failure-scan")
                  and task.get("title") == TITLE
                  and task.get("status") not in {"done", "archived"}), None)
 
@@ -32,8 +33,7 @@ def create_argv(hermes: str, project: str, now: float) -> list[str]:
             "--body", BODY, "--assignee", PROFILE, "--project", project,
             "--idempotency-key", f"lunabot-failure-scan:{int(now) // 14400}",
             "--max-runtime", "12m", "--max-retries", "2",
-            "--model", "meituan/longcat-2.5-preview:free", "--provider", "nous",
-            "--reasoning", "none", "--created-by", "lunabot-failure-scan", "--json"]
+            "--created-by", "lunabot-failure-scan", "--json"]
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -47,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
                           "project": args.project, "no_agent": True, "github_write": False}))
         return 0
     result = subprocess.run([args.hermes, "kanban", "--board", BOARD, "list", "--json"],
-                            capture_output=True, text=True, timeout=60, check=True)
+                            capture_output=True, text=True, encoding="utf-8", errors="replace",
+                            timeout=60, check=True)
     tasks = json.loads(result.stdout)
     if isinstance(tasks, dict):
         tasks = tasks["tasks"]
@@ -58,7 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "reused", "task_id": existing["id"],
                           "task_status": existing["status"], "board": BOARD}))
         return 0
-    result = subprocess.run(command, capture_output=True, text=True, timeout=90, check=True)
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                            timeout=90, check=True)
     created = json.loads(result.stdout)
     task_id = created.get("task_id") or created.get("id")
     if not task_id and isinstance(created.get("task"), dict):

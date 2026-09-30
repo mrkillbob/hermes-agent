@@ -207,7 +207,7 @@ def _body(root: Path, packet: dict, evidence: dict) -> str:
     template_path = root / ".github/ISSUE_TEMPLATE/hermes-worker-test-failure.yml"
     if not template_path.is_file() or template_path.stat().st_size > 32_768:
         raise PublicationError("required worker issue template is unavailable")
-    template = yaml.safe_load(template_path.read_text())
+    template = yaml.safe_load(template_path.read_text(encoding="utf-8-sig"))
     if (
         not isinstance(template, dict)
         or {row.get("id") for row in template.get("body", [])} != _TEMPLATE_IDS
@@ -247,7 +247,7 @@ def publish_issue(
 ) -> dict:
     if packet_path.stat().st_size > 16_384:
         raise PublicationError("packet exceeds the bounded evidence budget")
-    packet = json.loads(packet_path.read_text())
+    packet = json.loads(packet_path.read_text(encoding="utf-8-sig"))
     if (
         not isinstance(packet, dict)
         or set(packet) not in (_FIELDS, _FIELDS - {"worktree"})

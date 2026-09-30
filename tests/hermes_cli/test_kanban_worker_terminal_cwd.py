@@ -16,6 +16,7 @@ from __future__ import annotations
 import subprocess
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -201,3 +202,68 @@ def test_python_workspace_without_interpreter_never_spawns(monkeypatch, tmp_path
     (workspace / "pyproject.toml").write_text("[project]\nname='fixture'\n")
     with pytest.raises(RuntimeError, match="no executable"):
         _capture_spawn_env(kb, monkeypatch, str(workspace))
+
+
+def test_control_callback_imports_dispatcher_source_from_unrelated_workspace(
+    tmp_path, monkeypatch
+):
+    from hermes_cli.kanban_worker_environment import bind_worker_environment
+
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    (workspace / "hermes_cli.py").write_text(
+        "raise RuntimeError('task source imported')\n"
+    )
+    monkeypatch.setattr(sys, "executable", os.path.realpath(sys.executable))
+    dependency_paths = [path for path in sys.path if "site-packages" in path]
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": os.pathsep.join(dependency_paths),
+    }
+    bind_worker_environment(env, str(workspace))
+    result = subprocess.run(
+        [env["HERMES_KANBAN_HERMES_PYTHON"], "-P", "-m", "hermes_cli.main", "--help"],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    stripped = subprocess.run(
+        [
+            env["HERMES_KANBAN_HERMES_PYTHON"],
+            "-E",
+            "-P",
+            "-m",
+            "hermes_cli.main",
+            "--help",
+        ],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert stripped.returncode != 0
+    assert "No module named" in stripped.stderr
+    # The credential-free bare interpreter reaches the real PM bootstrap;
+    # this fixture deliberately has no committed managed installation.
+    assert "No module named 'hermes_cli'" not in result.stderr
+    assert "no dependency environment is committed" in result.stderr
+    owner = subprocess.run(
+        [
+            env["HERMES_KANBAN_HERMES_PYTHON"],
+            "-P",
+            "-c",
+            "import hermes_cli; print(hermes_cli.__file__)",
+        ],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert owner.returncode == 0, owner.stderr
+    assert owner.stdout.strip() == str(
+        Path(__file__).resolve().parents[2] / "hermes_cli/__init__.py"
+    )

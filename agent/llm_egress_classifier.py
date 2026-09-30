@@ -226,8 +226,10 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
             "read_file calls with narrow line ranges; these bind exact source grants. "
             + workspace_instruction
             + "For GitHub feedback callbacks use the dispatcher-provided "
-            "HERMES_KANBAN_HERMES_PYTHON interpreter with -E -P -m hermes_cli.main "
-            "and the receipt's shared HERMES_HOME; never substitute project python3 "
+            "HERMES_KANBAN_HERMES_PYTHON interpreter with -P -m hermes_cli.main "
+            "and the receipt's shared HERMES_HOME. Preserve the dispatcher-bound "
+            "PYTHONPATH; do not use -E or -I, which discard that source binding. "
+            "Never substitute project python3 "
             "or an expired absolute interpreter pin from an older task body. "
             "A nonzero callback is a bounded failure: stop and record its exact "
             "error instead of repeating Python wrappers. "

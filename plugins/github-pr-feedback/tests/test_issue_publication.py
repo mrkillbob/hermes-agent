@@ -34,8 +34,8 @@ def packet(tmp_path, monkeypatch):
         "body:\n" + "".join(f"  - id: {field}\n" for field in publication._TEMPLATE_IDS)
     )
     (root / "tests").mkdir()
-    (root / "tests/test_pure.py").write_text("def test_contract():\n    assert False\n")
-    (root / "owner.py").write_text("VALUE = 1\n")
+    (root / "tests/test_pure.py").write_text("def test_contract():\n    assert False\n", encoding="utf-8")
+    (root / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(
         [
@@ -56,7 +56,7 @@ def packet(tmp_path, monkeypatch):
         ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
     ).strip()
     (root / ".venv/bin").mkdir(parents=True)
-    (root / ".venv/bin/python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    (root / ".venv/bin/python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
     (root / ".venv/bin/python").chmod(0o700)
     subprocess.run(
         ["git", "-C", str(root), "config", "status.showUntrackedFiles", "no"],
@@ -74,7 +74,7 @@ def packet(tmp_path, monkeypatch):
         "profile": "lunabot-issue-reporter",
     }
     path = tmp_path / "packet.json"
-    path.write_text(json.dumps(data))
+    path.write_text(json.dumps(data), encoding="utf-8")
     return (
         path,
         data,
@@ -206,7 +206,7 @@ def test_publication_requires_verified_failure_and_never_republishes(
         )
     if case == "missing_worktree":
         data.pop("worktree")
-        path.write_text(json.dumps(data))
+        path.write_text(json.dumps(data), encoding="utf-8")
     if case == "head_changes_before_write":
 
         def changing_head(*_):
@@ -300,7 +300,7 @@ def test_publication_requires_verified_failure_and_never_republishes(
 def test_packet_rejects_unsupported_scope_and_payload_before_client(packet, change):
     path, data, policy = packet
     data.update(change)
-    path.write_text(json.dumps(data))
+    path.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError):
         publication.publish_issue(
             policy,
