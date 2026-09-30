@@ -223,3 +223,47 @@ def test_model_caused_codes_stay_on_the_provider_layer_and_runtime_codes_on_gate
               for c in ("truncated", "empty_response", "invalid_response", "session_busy", "loop_error")}
     assert layers["truncated"] == layers["empty_response"] == layers["invalid_response"] == LAYER_PROVIDER
     assert layers["session_busy"] == layers["loop_error"] == LAYER_GATEWAY
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_local_privacy_denial_ends_once_without_fallback_or_outage_copy(wrapped):
+    from agent.llm_egress_firewall import EgressBlocked
+    from agent.turn_api_error import settle_unrecovered_error
+
+    error = (RuntimeError("LLM egress blocked: untrusted_provenance,base64_payload")
+             if wrapped else EgressBlocked(SimpleNamespace(
+                 reason_codes=("untrusted_provenance", "base64_payload"))))
+    classified = classify_api_error(error, provider="nous")
+
+    class Agent(_Agent):
+        provider = "nous"
+        _fallback_chain = ("another-provider",)
+
+        def _try_activate_fallback(self, **kwargs):
+            pytest.fail("local privacy denial attempted fallback")
+
+        def _summarize_api_error(self, error):
+            return "RAW_PRIVATE_PAYLOAD"
+
+    verdict = settle_unrecovered_error(
+        Agent(), api_error=error, classified=classified,
+        _retry=SimpleNamespace(restart_with_redirected_messages=False),
+        status_code=None, error_msg=str(error), is_context_length_error=False,
+        is_rate_limited=False, _is_zai_coding_overload=False, _provider="nous", _base="",
+        _model="model", messages=[], api_messages=[], api_kwargs=None,
+        active_system_prompt="stable", conversation_history=None, approx_tokens=10,
+        retry_count=1, max_retries=3, compression_attempts=0, api_call_count=1,
+    )
+    assert verdict.action == "return"
+    result = verdict.result
+    assert result["failure_reason"] == "egress_policy_blocked"
+    assert result["failure_retryable"] is False
+    assert result["egress_reason_codes"] == ["untrusted_provenance", "base64_payload"]
+    text = result["final_response"]
+    assert "local privacy policy" in text.casefold()
+    assert not any(value in text for value in (
+        "RAW_PRIVATE_PAYLOAD", "Nous Portal", "temporarily unavailable", "/model", "fallback"))
+    assert "RAW_PRIVATE_PAYLOAD" not in result["error"]
+    surface = build_error_surface_from_result(result, provider="nous")
+    assert surface["layer"] == LAYER_GATEWAY
+    assert surface["retryable"] is False

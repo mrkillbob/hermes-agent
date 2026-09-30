@@ -87,3 +87,32 @@ def test_typed_payload_preserves_anthropic_tool_protocol_ids_without_trusting_co
     assert tool_result["tool_use_id"].text == opaque_id
     assert isinstance(tool_result["content"], SanitizedSegment)
     assert tool_result["content"].text == "ordinary result"
+
+
+def test_scratch_kanban_projection_does_not_require_git_receipts() -> None:
+    import json
+    from agent.llm_egress_classifier import _project_bound_kanban_show
+
+    payload = {
+        "task": {"status": "running", "workspace_kind": "scratch"},
+        "protected_task_spec": {"version": "v1", "title": "Research intake",
+                                "body": "Complete RESEARCH_LAB_IDLE if evidence is unavailable."},
+    }
+    rendered = _project_bound_kanban_show(json.dumps(payload)).text
+    assert "scratch workspace" in rendered
+    assert "git status --short --branch" not in rendered
+    assert "git rev-parse HEAD" not in rendered
+    assert "RESEARCH_LAB_IDLE" in rendered
+    assert "Research intake" in rendered
+
+
+def test_source_kanban_projection_preserves_git_provenance_checks() -> None:
+    import json
+    from agent.llm_egress_classifier import _project_bound_kanban_show
+
+    payload = {"task": {"status": "running", "workspace_kind": "dir"},
+               "protected_task_spec": {"version": "v1", "title": "Repair source", "body": "Fix."}}
+    rendered = _project_bound_kanban_show(json.dumps(payload)).text
+    assert "git status --short --branch" in rendered
+    assert "git rev-parse HEAD" in rendered
+    assert "preserve preexisting" in rendered

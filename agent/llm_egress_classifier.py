@@ -184,14 +184,19 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
             }
         )
 
-    projection = {
-        "task": projected_task,
-        "worker_instruction": (
-            "Use the dispatcher-assigned current workspace with relative paths. "
-            "Absolute paths and generic terminal stdout are deliberately omitted "
-            "from protected replay. Do not rediscover the workspace with pwd, env, "
-            "directory scans, or guessed cd paths. For source evidence use direct "
-            "read_file calls with narrow line ranges; these bind exact source grants. "
+    if task.get("workspace_kind") in {"scratch", "dir", "git"}:
+        projected_task["workspace_kind"] = task["workspace_kind"]
+    workspace_instruction = (
+        "This is a scratch workspace, which need not be a Git repository. "
+        "Do not run Git status, diff, log, fetch, or HEAD receipt commands here. "
+        "Use the current title and body above as the assignment; absence of a "
+        "checkout or omitted historical output is not missing task context. "
+        "Use bounded Kanban projections and narrow relative artifact reads. "
+        "If the assignment permits an IDLE outcome when evidence is unavailable, "
+        "complete with that exact evidence gap and no invented findings or children. "
+        "Do not repeat a failed diagnostic or guess external paths. "
+        if task.get("workspace_kind") == "scratch"
+        else (
             "Run git status --short --branch, git diff --stat, and git diff --check "
             "as separate terminal calls for bounded Git summaries. Do not combine "
             "them with echo, pwd, env, or git log. To obtain the exact HEAD, run "
@@ -201,7 +206,21 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
             "stdout does not. If that receipt is not Git-ignored, remove only "
             "the receipt you just generated after reading it; preserve preexisting "
             "artifacts so diagnostic scratch cannot block clean-worktree completion. "
-            "For GitHub feedback callbacks use the dispatcher-provided "
+        )
+    )
+
+    projection = {
+        "task": projected_task,
+        "worker_instruction": (
+            "Use the dispatcher-assigned current workspace with relative paths. "
+            "Absolute paths and generic terminal stdout are deliberately omitted "
+            "from protected replay. Display placeholders such as <private-path> "
+            "are not executable filenames; never pass them to cat, read_file, or cd. "
+            "Do not rediscover the workspace with pwd, env, "
+            "directory scans, or guessed cd paths. For source evidence use direct "
+            "read_file calls with narrow line ranges; these bind exact source grants. "
+            + workspace_instruction
+            + "For GitHub feedback callbacks use the dispatcher-provided "
             "HERMES_KANBAN_HERMES_PYTHON interpreter with -E -P -m hermes_cli.main "
             "and the receipt's shared HERMES_HOME; never substitute project python3 "
             "or an expired absolute interpreter pin from an older task body. "
@@ -1332,7 +1351,12 @@ def _typed_payload_mapping_structured(
         return True
     if is_structured_result and is_github_pr_feedback_terminal_result:
         typed[key] = GeneratedContextSegment(
-            _github_pr_feedback_terminal_result(structured_text or "")
+            _github_pr_feedback_terminal_result(
+                structured_text or "",
+                action=getattr(
+                    state['github_pr_feedback_terminal_call_ids'], 'actions', {}
+                ).get(state['output_call_id']),
+            )
         )
         return True
     if is_structured_result and is_terminal_replay_result:
@@ -1650,7 +1674,12 @@ def _typed_payload_mapping_scalar_arguments(
         and isinstance(item, str)
     ):
         typed[key] = GeneratedContextSegment(
-            _github_pr_feedback_terminal_result(item)
+            _github_pr_feedback_terminal_result(
+                item,
+                action=getattr(
+                    state['github_pr_feedback_terminal_call_ids'], 'actions', {}
+                ).get(state['output_call_id']),
+            )
         )
         return True
     if (

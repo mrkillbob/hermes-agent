@@ -8,6 +8,7 @@ import shlex
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
+from types import MappingProxyType
 from urllib.parse import parse_qs, urlsplit
 
 from agent.redact import redact_sensitive_text
@@ -1504,6 +1505,8 @@ def _segment_read_file_presentation(
 _GITHUB_PR_FEEDBACK_TERMINAL_SUBCOMMANDS = frozenset(
     {
         "inspect-pr",
+        "publish-issue",
+        "doctor",
         "complete-feedback",
         "retire-feedback",
         "submit-review",
@@ -1651,35 +1654,110 @@ def _pytest_terminal_call_ids(value: Any) -> frozenset[str]:
     return frozenset(recognized)
 
 
+class _FeedbackTerminalCallIds(frozenset):
+    """Set-compatible call bindings with immutable per-call command identity."""
+
+    def __new__(cls, actions: Mapping[str, str]):
+        value = super().__new__(cls, actions)
+        value.actions = MappingProxyType(dict(actions))
+        return value
+
+
+def _exact_publication_terminal_argv(
+    tokens: list[str], index: int, action: str
+) -> bool:
+    if any(
+        any(char in token for char in ";|&`\n\r") or "$(" in token for token in tokens
+    ):
+        return False
+    prefix = tokens[:index]
+    launcher = Path(prefix[-1]).name == "hermes" or prefix[-1] == "<private-path>"
+    module = (
+        len(prefix) == 3
+        and Path(prefix[0]).name in {"python", "python3"}
+        and prefix[1:] == ["-m", "hermes_cli.main"]
+    )
+    direct = len(prefix) == 1 and launcher
+    scoped = (
+        launcher
+        and prefix[0] == "env"
+        and len(prefix) >= 3
+        and all(
+            re.fullmatch(r"HERMES_(?:HOME|KANBAN_BOARD)=[^=]+", value)
+            for value in prefix[1:-1]
+        )
+    )
+    if not (module or direct or scoped):
+        return False
+    rest = tokens[index + 2 :]
+    if action == "doctor":
+        return not rest
+    values: dict[str, str] = {}
+    position = 0
+    while position < len(rest):
+        flag = rest[position]
+        if flag == "--dry-run":
+            if flag in values:
+                return False
+            values[flag] = "true"
+            position += 1
+            continue
+        if (
+            flag not in {"--repository", "--packet", "--expected-stable-head"}
+            or flag in values
+            or position + 1 >= len(rest)
+        ):
+            return False
+        values[flag] = rest[position + 1]
+        position += 2
+    packet = PurePosixPath(values.get("--packet", ""))
+    return (
+        values.get("--repository") == "mrkillbob/luna-bot"
+        and re.fullmatch(r"[0-9a-f]{40}", values.get("--expected-stable-head", ""))
+        is not None
+        and str(packet).startswith("artifacts/")
+        and not packet.is_absolute()
+        and ".." not in packet.parts
+        and packet.suffix == ".json"
+    )
+
+
 def _github_pr_feedback_terminal_call_ids(value: Any) -> frozenset[str]:
     """Recognize governed PR-feedback terminal commands with JSON status output."""
 
-    recognized: set[str] = set()
+    recognized: dict[str, str] = {}
 
     def is_hermes_launcher_token(token: str) -> bool:
         return Path(token).name == "hermes" or token == "<private-path>"
 
-    def command_is_pr_feedback(arguments: Any) -> bool:
+    def command_is_pr_feedback(arguments: Any) -> str | None:
         try:
             parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
             command = parsed.get("command") if isinstance(parsed, Mapping) else None
             tokens = shlex.split(command) if isinstance(command, str) else []
         except (TypeError, ValueError, json.JSONDecodeError):
-            return False
+            return None
         for index, token in enumerate(tokens):
             if (
                 token == "github-pr-feedback"
                 and index > 0
                 and (
-                    tokens[max(0, index - 2):index] == ["-m", "hermes_cli.main"]
+                    tokens[max(0, index - 2) : index] == ["-m", "hermes_cli.main"]
                     or is_hermes_launcher_token(tokens[index - 1])
                 )
             ):
-                return (
-                    index + 1 < len(tokens)
-                    and tokens[index + 1] in _GITHUB_PR_FEEDBACK_TERMINAL_SUBCOMMANDS
-                )
-        return False
+                if index + 1 >= len(tokens):
+                    return None
+                action = tokens[index + 1]
+                if action not in _GITHUB_PR_FEEDBACK_TERMINAL_SUBCOMMANDS:
+                    return None
+                if action in {
+                    "publish-issue",
+                    "doctor",
+                } and not _exact_publication_terminal_argv(tokens, index, action):
+                    return None
+                return action
+        return None
 
     def visit(item: Any) -> None:
         if isinstance(item, Mapping):
@@ -1689,15 +1767,21 @@ def _github_pr_feedback_terminal_call_ids(value: Any) -> frozenset[str]:
                 if isinstance(direct_function, Mapping)
                 else item.get("name")
             )
-            if item.get("type") in {"function", "function_call"} and direct_name == "terminal":
+            if (
+                item.get("type") in {"function", "function_call"}
+                and direct_name == "terminal"
+            ):
                 arguments = (
                     direct_function.get("arguments")
                     if isinstance(direct_function, Mapping)
                     else item.get("arguments")
                 )
                 call_id = item.get("call_id") or item.get("id")
-                if command_is_pr_feedback(arguments) and isinstance(call_id, str):
-                    recognized.update(tool_result_id_variants(call_id))
+                action = command_is_pr_feedback(arguments)
+                if action is not None and isinstance(call_id, str):
+                    recognized.update({
+                        variant: action for variant in tool_result_id_variants(call_id)
+                    })
             for child in item.values():
                 visit(child)
         elif isinstance(item, (list, tuple)):
@@ -1705,7 +1789,7 @@ def _github_pr_feedback_terminal_call_ids(value: Any) -> frozenset[str]:
                 visit(child)
 
     visit(value)
-    return frozenset(recognized)
+    return _FeedbackTerminalCallIds(recognized)
 
 
 def _github_api_paginate_terminal_call_limits(value: Any) -> dict[str, int]:
@@ -2123,7 +2207,73 @@ def _project_git_review_summary_terminal_result(text: str) -> str | None:
     )
 
 
-def _github_pr_feedback_terminal_result(output: str) -> str:
+def _publication_terminal_projection(
+    candidate: Mapping[str, Any], *, action: str, exit_code: int | None
+) -> str:
+    """Replay scalar worker outcomes, never issue text or doctor configuration."""
+    safe: dict[str, Any] = {}
+    statuses = (
+        {"ready", "degraded"}
+        if action == "doctor"
+        else {"created", "duplicate", "competing_pr", "idle", "validated", "rejected"}
+    )
+    status = candidate.get("status")
+    if isinstance(status, str) and status in statuses:
+        safe["status"] = status
+    if action == "publish-issue":
+        if candidate.get("repository") == "mrkillbob/luna-bot":
+            safe["repository"] = candidate["repository"]
+        number = candidate.get("number")
+        if type(number) is int and 0 < number < 2**31:
+            safe["number"] = number
+        for key in ("github_accessed", "reproduction_executed"):
+            if type(candidate.get(key)) is bool:
+                safe[key] = candidate[key]
+        url = candidate.get("url")
+        if isinstance(url, str) and re.fullmatch(
+            r"https://github\.com/mrkillbob/luna-bot/issues/[1-9][0-9]{0,9}", url
+        ):
+            safe["url"] = url
+        marker = candidate.get("marker")
+        if isinstance(marker, str) and re.fullmatch(
+            r"<!-- hermes-worker-failure:v1 sha256=[0-9a-f]{64} -->", marker
+        ):
+            safe["marker"] = marker
+        error = candidate.get("error_class")
+        if isinstance(error, str) and error in {
+            "PublicationError",
+            "ValueError",
+            "OSError",
+            "GitHubClientError",
+            "CalledProcessError",
+            "FileNotFoundError",
+            "JSONDecodeError",
+        }:
+            safe["error_class"] = error
+        reason = candidate.get("reason")
+        if (
+            isinstance(reason, str)
+            and len(reason) <= 160
+            and re.fullmatch(r"[A-Za-z0-9 _;:.-]+", reason)
+            and redact_remote_unsafe_text(redact_sensitive_text(reason, force=True))
+            == reason
+        ):
+            safe["reason"] = reason
+    return json.dumps(
+        {
+            "terminal_result": "github_pr_feedback",
+            "exit_code": exit_code
+            if type(exit_code) is int and -255 <= exit_code <= 255
+            else None,
+            "raw_output": "omitted_from_remote_replay",
+            "json": safe,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _github_pr_feedback_terminal_result(output: str, *, action: str | None = None) -> str:
     """Replay bounded JSON status from governed PR-feedback commands."""
 
     def safe_failure_excerpt(value: Any) -> str | None:
@@ -2168,6 +2318,10 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if isinstance(candidate, Mapping):
+            if action in {"publish-issue", "doctor"}:
+                return _publication_terminal_projection(
+                    candidate, action=action, exit_code=exit_code
+                )
             payload = {}
             for key, value in candidate.items():
                 if key not in _GITHUB_PR_FEEDBACK_TERMINAL_RESULT_KEYS:
@@ -2185,6 +2339,8 @@ def _github_pr_feedback_terminal_result(output: str) -> str:
                 if len(value) <= limit:
                     payload[str(key)] = value
             break
+    if action in {"publish-issue", "doctor"}:
+        return _publication_terminal_projection({}, action=action, exit_code=exit_code)
     if failure_excerpt is None and exit_code not in (None, 0) and payload is None:
         # Terminal backends merge stderr into output. Retain only recognizable
         # launch diagnostics, never arbitrary failed-command stdout/source.

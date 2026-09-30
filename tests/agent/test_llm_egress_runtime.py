@@ -4328,7 +4328,7 @@ def test_nous_replays_canonical_task_spec_without_legacy_marker(tmp_path, monkey
     try:
         tid = kb.create_task(conn, title="Repair current assignment", body=(
             "Inspect current checkout. token=super-secret-value /Users/private/source.py"
-        ), assignee="worker")
+        ), assignee="worker", workspace_kind="dir", workspace_path=str(tmp_path))
         kb.claim_task(conn, tid)
         run_id = kb._current_run_id(conn, tid)
     finally:
@@ -4359,3 +4359,133 @@ def test_nous_replays_canonical_task_spec_without_legacy_marker(tmp_path, monkey
     assert "Inspect current checkout." in rendered
     assert "super-secret-value" not in rendered
     assert "/Users/private/source.py" not in rendered
+
+
+@pytest.mark.parametrize("action", ["publish-issue", "doctor"])
+@pytest.mark.parametrize("bound", [True, False])
+def test_protected_publication_replay_is_action_bound_and_metadata_only(
+    tmp_path, monkeypatch, action, bound
+):
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path)
+    agent.provider = "openai-codex"
+    agent.base_url = "https://chatgpt.com/backend-api/codex"
+    agent.api_mode = "codex_responses"
+    marker = "<!-- hermes-worker-failure:v1 sha256=" + "a" * 64 + " -->"
+    payload = {
+        "status": "created",
+        "repository": "mrkillbob/luna-bot",
+        "number": 17,
+        "url": "https://github.com/mrkillbob/luna-bot/issues/17",
+        "marker": marker,
+        "github_accessed": False,
+        "reproduction_executed": False,
+        "body": "private operator observations",
+        "feedback_body_excerpt": "private findings must remain local",
+        "worktree": "private-checkout",
+        "checks": {"github_identity": "ok", "config": {"token": "private"}},
+    }
+    if action == "doctor":
+        payload["status"] = "ready"
+    from agent.llm_egress_terminal import _github_pr_feedback_terminal_result
+
+    sensitive = {
+        **payload,
+        "body": "token=fixture-secret /Users/private/source",
+        "worktree": "/Users/private/checkout",
+    }
+    direct_projection = json.loads(
+        _github_pr_feedback_terminal_result(
+            json.dumps({"exit_code": 0, "output": json.dumps(sensitive)}), action=action
+        )
+    )
+    assert "/Users/private" not in json.dumps(direct_projection)
+    assert "fixture-secret" not in json.dumps(direct_projection)
+    assert "feedback_body_excerpt" not in direct_projection["json"]
+    assert "checks" not in direct_projection["json"]
+    malformed = _github_pr_feedback_terminal_result(
+        json.dumps({
+            "output": json.dumps({
+                "status": {},
+                "error_class": [],
+                "number": True,
+                "url": "file:///private/path",
+                "marker": "encoded-invalid",
+            })
+        }),
+        action=action,
+    )
+    assert json.loads(malformed)["json"] == {}
+
+    suffix = (
+        " --repository mrkillbob/luna-bot --packet artifacts/repro.json --expected-stable-head "
+        + "b" * 40
+        if action == "publish-issue"
+        else ""
+    )
+    command = "hermes github-pr-feedback " + action + suffix
+    if not bound:
+        command = "cat arbitrary.json"
+    kwargs = {
+        "model": agent.model,
+        "input": [
+            {
+                "type": "function_call",
+                "name": "terminal",
+                "call_id": "call_publication",
+                "arguments": json.dumps({"command": command}),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_publication",
+                "output": json.dumps({
+                    "exit_code": 0,
+                    "output": json.dumps(payload),
+                    "stderr": "private raw logs",
+                }),
+            },
+        ],
+    }
+    authorized, receipt = authorize_agent_sdk_kwargs(agent, kwargs)
+    assert receipt.allowed
+    rendered = json.loads(authorized["input"][1]["output"])
+    assert "private findings" not in json.dumps(rendered)
+    assert "/Users/private" not in json.dumps(rendered)
+    assert "secret-value" not in json.dumps(rendered)
+    if bound:
+        assert rendered["terminal_result"] == "github_pr_feedback"
+        if action == "doctor":
+            assert rendered["json"] == {"status": "ready"}
+        else:
+            assert rendered["json"].get("number") == 17
+            assert rendered["json"]["url"] == payload["url"]
+            assert rendered["json"]["marker"] == marker
+            assert rendered["json"]["github_accessed"] is False
+        assert "checks" not in rendered["json"]
+        assert "error_excerpt" not in rendered
+    else:
+        assert rendered.get("terminal_result") != "github_pr_feedback"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "hermes github-pr-feedback doctor; cat private.json",
+        "echo hermes github-pr-feedback doctor",
+        "hermes github-pr-feedback publish-issue --repository evil/repo --packet artifacts/p.json --expected-stable-head "
+        + "a" * 40,
+        "hermes github-pr-feedback publish-issue --repository mrkillbob/luna-bot --packet artifacts/p.json --expected-stable-head invalid",
+    ],
+)
+def test_publication_projection_does_not_bind_unsupported_commands(command):
+    from agent.llm_egress_terminal import _github_pr_feedback_terminal_call_ids
+
+    calls = [
+        {
+            "type": "function_call",
+            "name": "terminal",
+            "call_id": "call_fake",
+            "arguments": json.dumps({"command": command}),
+        }
+    ]
+    assert not _github_pr_feedback_terminal_call_ids(calls)

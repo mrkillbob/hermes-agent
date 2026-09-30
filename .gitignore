@@ -321,3 +321,6 @@ native/fts5_cjk/*.so
 /pm/.lock.json.lock
 
 apps/desktop/.dist-build*
+
+# Isolated worktree development environments
+/.agent-venvs/
