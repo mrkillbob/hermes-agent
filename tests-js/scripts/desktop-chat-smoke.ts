@@ -128,7 +128,7 @@ export function composerClickPosition(editor: Element): ComposerClickPosition | 
 }
 
 export interface PointerSample {
-  x: number; y: number; requestedX: number; requestedY: number; withinEditor: boolean
+  type: string; x: number; y: number; requestedX: number; requestedY: number; withinEditor: boolean
 }
 
 /** Confirm a uniform input-transport scale from delivered events, never from host/DPI guesses. */
@@ -159,7 +159,7 @@ export async function clickComposer(composer: Locator, trial: boolean, timeoutMs
       const target = event.target instanceof Element ? event.target : null
       const rect = el.getBoundingClientRect()
 
-      samples.push({ x: event.clientX, y: event.clientY,
+      samples.push({ type: event.type, x: event.clientX, y: event.clientY,
         requestedX: rect.x + position.x, requestedY: rect.y + position.y,
         withinEditor: target !== null && el.contains(target) })
 
@@ -219,7 +219,12 @@ export async function clickComposer(composer: Locator, trial: boolean, timeoutMs
       if (!delivered?.withinEditor || Math.abs(delivered.x - target.x) > 2
         || Math.abs(delivered.y - target.y) > 2) { return false }
 
-      if (!trial) { await mouse.click(corrected.x, corrected.y) }
+      if (!trial) {
+        await mouse.click(corrected.x, corrected.y)
+        const down = await pointer.evaluate(record => record.samples.at(-1))
+
+        if (down?.type !== 'mousedown' || !down.withinEditor) { return false }
+      }
 
       return true
     }, { timeout: timeoutMs, message: 'Composer must accept a normal click at a visible input point' }).toBe(true)

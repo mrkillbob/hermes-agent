@@ -56,11 +56,37 @@ test('remeasures a click point after layout changes without swallowing a closed-
 })
 
 test('accepts only repeated uniform pointer transport mismatches', () => {
-  const sample = { x: 592, y: 239, requestedX: 533.65, requestedY: 215.19, withinEditor: false }
+  const sample = { type: 'mousemove', x: 592, y: 239, requestedX: 533.65, requestedY: 215.19, withinEditor: false }
 
   expect(pointerTransportScale([sample, sample])).toBeCloseTo(0.9, 2)
   expect(pointerTransportScale([sample])).toBeNull()
   expect(pointerTransportScale([sample, { ...sample, requestedY: 190 }])).toBeNull()
   expect(pointerTransportScale([{ ...sample, requestedX: sample.x, requestedY: sample.y },
     { ...sample, requestedX: sample.x, requestedY: sample.y }])).toBeNull()
+})
+
+test('rejects a corrected click intercepted after the verified hover', async () => {
+  const initial = { type: 'mousemove', x: 100 / 0.9, y: 100 / 0.9, requestedX: 100, requestedY: 100, withinEditor: false }
+  const record = { samples: [initial, initial], setPosition: vi.fn(), stop: vi.fn() }
+  const observer = { evaluate: (fn: (value: typeof record) => unknown) => Promise.resolve(fn(record)), dispose: vi.fn() }
+  let covered = false
+  const move = vi.fn(async () => { record.samples.push({ ...initial, x: 100, y: 100, withinEditor: true }) })
+
+  const click = vi.fn(async () => {
+    covered = true
+    record.samples.push({ ...initial, type: 'mousedown', x: 100, y: 100, withinEditor: false })
+  })
+
+  const composer = {
+    evaluate: vi.fn(async (fn, offset) => fn === composerClickPosition ? covered ? null : { x: 10, y: 5 }
+      : offset ? { x: 100, y: 100 } : {}),
+    evaluateHandle: vi.fn().mockResolvedValue(observer),
+    click: vi.fn().mockRejectedValue(new errors.TimeoutError('scaled transport')),
+    boundingBox: vi.fn().mockResolvedValue({}),
+    page: () => ({ mouse: { move, click } }),
+  } as unknown as Locator
+
+  await expect(clickComposer(composer, false, 300)).rejects.toThrow('Composer must accept a normal click')
+  expect(move).toHaveBeenCalledTimes(1)
+  expect(click).toHaveBeenCalledTimes(1)
 })
