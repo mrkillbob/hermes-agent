@@ -1,7 +1,10 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 
-import { FleetStatusbar, fleetStatusbarCopy, formatThroughput, groupFleetNodes, metricIsFresh } from './fleet-status'
+import * as fleetApi from './api'
+
+import { FleetStatusPanel, FleetStatusbar, fleetStatusbarCopy, formatThroughput, groupFleetNodes, metricIsFresh } from './fleet-status'
 
 describe('federated fleet status metrics', () => {
   it('aggregates profile measurements without double-counting tokens', () => {
@@ -115,4 +118,22 @@ describe('federated fleet status metrics', () => {
     expect(button.textContent).toContain('Kanban 1')
     expect(button.getAttribute('title')).toBeNull()
   })
+})
+
+it('shows a sanitized unavailable state on rejection and recovers when refreshed', async () => {
+  const query = vi.spyOn(fleetApi, 'fetchFleetStatus')
+    .mockRejectedValueOnce(new Error('timeout Authorization: Bearer private-test-marker'))
+    .mockResolvedValue({ enabled: true, reachable: true, runners: [], tasks: [] })
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  render(<QueryClientProvider client={client}><FleetStatusPanel /></QueryClientProvider>)
+  expect(await screen.findByText('Coordinator unavailable')).toBeTruthy()
+  expect(screen.getByText('Could not reach the coordinator. Refresh to try again.')).toBeTruthy()
+  expect(screen.queryByText('Connecting to the shared coordinator…')).toBeNull()
+  expect(document.body.textContent).not.toContain('private-test-marker')
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh runner pool' }))
+  await waitFor(() => expect(screen.getByText('0/0 computers online')).toBeTruthy())
+  expect(query).toHaveBeenCalledTimes(2)
+  client.clear()
+  cleanup()
+  query.mockRestore()
 })
