@@ -6,9 +6,11 @@ are made.
 """
 
 from hashlib import sha256
+import faulthandler
 import io
 import json
 import logging
+import sys
 import threading
 import time
 import uuid
@@ -62,6 +64,17 @@ def _mock_plugin_discovery(monkeypatch):
     # Tool definitions are supplied by these unit fixtures. Scanning every
     # bundled plugin again for each isolated test home adds no coverage.
     monkeypatch.setattr("hermes_cli.plugins.discover_plugins", lambda: None)
+
+
+@pytest.fixture()
+def _stream_recovery_diagnostics():
+    # Write outside pytest's per-test capture so a file-timeout kill retains
+    # the blocked threads in the canonical runner's subprocess output.
+    faulthandler.dump_traceback_later(30, file=sys.__stderr__)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 @pytest.fixture()
@@ -6564,7 +6577,7 @@ class TestStreamingApiCall:
         assert resp.choices[0].finish_reason == "length"
         agent.stream_delta_callback.assert_not_called()
 
-    def test_run_conversation_retries_stream_error_finish_rate_limit(self, agent):
+    def test_run_conversation_retries_stream_error_finish_rate_limit(self, _stream_recovery_diagnostics, agent):
         first_attempt = iter([
             _make_chunk(content=_provider_sse_429_text()),
             _make_chunk(finish_reason="error_finish"),
@@ -6578,9 +6591,10 @@ class TestStreamingApiCall:
         agent._persist_session = lambda *args, **kwargs: None
         agent._save_trajectory = lambda *args, **kwargs: None
 
-        import agent.conversation_loop as _conversation_loop
         import agent.retry_utils as _retry_utils
 
+        # Only remove retry delays. Patching the shared time.sleep also changes
+        # the live streaming worker and its reconnect/cleanup scheduling.
         with (
             patch.object(_retry_utils, "jittered_backoff", return_value=0.0),
             patch.object(
@@ -6588,7 +6602,6 @@ class TestStreamingApiCall:
                 "adaptive_rate_limit_backoff",
                 return_value=(0.0, None),
             ),
-            patch.object(_conversation_loop.time, "sleep", return_value=None),
         ):
             result = agent.run_conversation("hello")
 
