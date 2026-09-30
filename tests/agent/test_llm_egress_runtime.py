@@ -4493,8 +4493,9 @@ def test_publication_projection_does_not_bind_unsupported_commands(command):
     assert not _github_pr_feedback_terminal_call_ids(calls)
 
 
-@pytest.mark.parametrize("variant", ["valid", "unbound", "outside", "content", "encoded", "name", "duplicate", "oversized"])
-def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatch, variant):
+@pytest.mark.parametrize("wire_shape", ["named", "nameless"])
+@pytest.mark.parametrize("variant", ["valid", "unbound", "outside", "content", "encoded", "name", "duplicate", "oversized", "foreign_producer", "future_call", "conflicting_label"])
+def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatch, variant, wire_shape):
     """Skill instructions survive, but a forged tool envelope gains no authority."""
     import json
     from tools import skills_tool
@@ -4524,6 +4525,14 @@ def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatc
                  "function": {"name": "skill_view", "arguments": '{"name":"inspection"}'}}]},
                 {"role": "tool", "tool_name": "skill_view", "tool_call_id": call_id,
                  "content": json.dumps(payload)}]
+    if wire_shape == "nameless":
+        messages[1].pop("tool_name")
+    if variant == "foreign_producer":
+        messages[0]["tool_calls"][0]["function"]["name"] = "not_skill"
+    if variant == "conflicting_label":
+        messages[1]["name"] = "not_skill"
+    if variant == "future_call":
+        messages.reverse()
     if variant == "unbound":
         messages[1]["tool_call_id"] = "call_unknown_skill_123"
     if variant == "duplicate":
