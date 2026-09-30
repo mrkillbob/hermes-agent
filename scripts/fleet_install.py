@@ -28,6 +28,9 @@ def build_runner_bundle(output: str | Path, source_root: str | Path | None = Non
         archive.writestr("__main__.py", "from fleet_runner import main\nraise SystemExit(main())\n")
         archive.write(root / "scripts" / "fleet_runner.py", "fleet_runner.py")
         archive.write(root / "hermes_cli" / "__init__.py", "hermes_cli/__init__.py")
+        # urllib_security resolves TLS through agent.ssl_verify; retain its package imports.
+        for module in ("__init__.py", "jiter_preload.py", "ssl_verify.py"):
+            archive.write(root / "agent" / module, f"agent/{module}")
         for module in _BUNDLE_MODULES:
             archive.write(root / "hermes_cli" / module, f"hermes_cli/{module}")
     return output_path
