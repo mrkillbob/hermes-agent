@@ -3,8 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { describe, expect, it, vi } from 'vitest'
 
 import * as fleetApi from './api'
-
-import { FleetStatusPanel, FleetStatusbar, fleetStatusbarCopy, formatThroughput, groupFleetNodes, metricIsFresh } from './fleet-status'
+import { FleetStatusbar, FleetStatusPanel, fleetStatusbarCopy, formatThroughput, groupFleetNodes, metricIsFresh } from './fleet-status'
 
 describe('federated fleet status metrics', () => {
   it('aggregates profile measurements without double-counting tokens', () => {
