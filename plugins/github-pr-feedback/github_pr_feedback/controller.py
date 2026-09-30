@@ -549,6 +549,55 @@ class LocalGitRepository:
         return PreparedWorktree(workspace.resolve(), branch, receipt.head_sha)
 
     @staticmethod
+    def _preserve_workspace_venv(workspace: Path) -> bool:
+        """Preserve an existing isolated environment only after a prefix probe."""
+        workspace_root = workspace.resolve(strict=True)
+        destination = workspace / ".venv"
+        try:
+            target = destination.resolve(strict=True)
+        except FileNotFoundError:
+            return False
+        owned = (
+            not destination.is_symlink() and target == workspace_root / ".venv"
+        ) or (
+            target != workspace_root / ".agent-venvs"
+            and target.is_relative_to(workspace_root / ".agent-venvs")
+        )
+        if not owned:
+            return False
+        python = target / "bin/python"
+        if not target.is_dir() or not python.is_file():
+            raise RuntimeError("workspace-owned virtualenv has no usable Python")
+        try:
+            probe = subprocess.run(
+                [str(python), "-I", "-c",
+                 "import json,sys; print(json.dumps({'prefix':sys.prefix,"
+                 "'base_prefix':sys.base_prefix,"
+                 "'version':'.'.join(map(str,sys.version_info[:3]))}))"],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=10, cwd=workspace_root,
+            )
+            payload = json.loads(probe.stdout)
+            if (probe.returncode != 0
+                    or Path(payload["prefix"]).resolve(strict=True) != target
+                    or Path(payload["base_prefix"]).resolve(strict=True) == target
+                    or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", payload["version"]) is None):
+                raise ValueError("interpreter prefix or version is invalid")
+            pin_path = workspace_root / ".python-version"
+            if pin_path.is_file():
+                pin = pin_path.read_text(encoding="utf-8-sig").strip()
+                if re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", pin) is None:
+                    raise ValueError("worktree Python version pin is invalid")
+                actual = payload["version"]
+                if not (actual == pin or (pin.count(".") == 1 and actual.startswith(pin + "."))):
+                    raise ValueError("interpreter does not match the worktree Python pin")
+        except (OSError, subprocess.TimeoutExpired, KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("workspace-owned virtualenv validation failed") from error
+        if destination.resolve(strict=True) != target:
+            raise RuntimeError("workspace-owned virtualenv changed during validation")
+        return True
+
+    @staticmethod
     def _link_governed_venv(repository: Path, workspace: Path) -> None:
         """Expose one verified project-local environment to an exact-head worktree."""
 
@@ -557,6 +606,8 @@ class LocalGitRepository:
         from .worktree_venv import select_environment
 
         destination = workspace / ".venv"
+        if LocalGitRepository._preserve_workspace_venv(workspace):
+            return
         managed_venv_root = (repository_root.parent / "venvs").resolve(strict=False)
         governed_roots = (_LUNABOT_ROOT / ".venv", managed_venv_root)
         source = select_environment(repository, workspace, (repository_root, *governed_roots))
@@ -3604,11 +3655,28 @@ def non_actionable_feedback_reason(policy: PluginPolicy, feedback: Feedback, *, 
     if (
         feedback.kind == "issue_comment"
         and feedback.reviewer.login.casefold() == owner_login.casefold()
-        and re.match(
-            r"^(?:#{1,6}\s+)?(?:Refactor checkpoint:\s*|Implementation update\s*[—-]\s*)"
-            r"`[0-9a-f]{7,40}`(?:[^\n]*)\n",
-            feedback.body.strip(),
-            flags=re.IGNORECASE,
+        and (
+            re.match(
+                r"^(?:#{1,6}\s+)?(?:Refactor checkpoint:\s*|Implementation update\s*[—-]\s*)"
+                r"`[0-9a-f]{7,40}`(?:[^\n]*)\n",
+                feedback.body.strip(),
+                flags=re.IGNORECASE,
+            )
+            or (
+                len(feedback.body) < MAX_FEEDBACK_BODY_CHARS
+                and re.match(
+                    r"^(?:#{1,6}\s+)?Structural correction and handoff\s*\n",
+                    feedback.body.strip(),
+                    flags=re.IGNORECASE,
+                )
+                and re.search(r"`[^`\n]+\.py` is [0-9,]+ lines\b", feedback.body)
+                and re.search(
+                    r"`docs/superpowers/handoffs/[A-Za-z0-9_./-]+\.md`", feedback.body
+                )
+                and "pytest remains deferred until production refactoring is complete"
+                in feedback.body.casefold()
+                and "pr remains draft" in feedback.body.casefold()
+            )
         )
         and not re.search(
             r"\[P[0-3]\]|\b(?:please|must|need(?:s)? to|request(?:ed)?|regression|bug)\b",

@@ -35,6 +35,7 @@ LAYER_DISK = "disk"
 # (cut-off output, empty or broken reply) stay on the provider layer, where the
 # clients' per-code copy names the real fix (`continue`, smaller steps, /retry).
 _REASON_TO_LAYER = {
+    "egress_policy_blocked": LAYER_GATEWAY,
     "auth": LAYER_AUTH, "auth_permanent": LAYER_AUTH, "billing": LAYER_BILLING, "billing_unverified": LAYER_BILLING,
     "loop_error": LAYER_GATEWAY, "interpreter_shutdown": LAYER_GATEWAY, "session_busy": LAYER_GATEWAY,
     "truncated": LAYER_PROVIDER, "empty_response": LAYER_PROVIDER, "invalid_response": LAYER_PROVIDER,
@@ -52,6 +53,7 @@ _FREE_TIER_RETRYABLE_KINDS = {"rate_limited", "at_capacity", "outage"}
 # only: current backends stamp the classifier's verdict in ``failure_retryable``.
 # Kept in sync with ``classify_api_error``'s retryable=False verdicts.
 _NON_RETRYABLE_REASONS = {
+    "egress_policy_blocked",
     "auth", "auth_permanent", "billing", "billing_unverified", "content_policy_blocked",
     "provider_policy_blocked", "model_not_found", "format_error", "ssl_cert_verification",
     "context_overflow", "interpreter_shutdown", "upstream_blocked",

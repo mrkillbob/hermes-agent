@@ -4694,3 +4694,25 @@ def test_scan_resolution_guard_blocks_recurrence_and_resolution_races(
     assert [task.evidence["feedback_id"] for task in kanban.tasks] == (
         [] if resolved_on_revalidation else ["2"])
     ledger.close()
+
+
+@pytest.mark.parametrize("variant", ["checkpoint", "foreign", "request", "generic", "missing_evidence", "oversized"])
+def test_owner_structural_handoff_is_context_but_requests_remain_actionable(variant) -> None:
+    from github_pr_feedback.controller import non_actionable_feedback_reason
+
+    body = '### Structural correction and handoff\n\nThe current state is not acceptance-ready. `execution_legacy.py` is 4,610 lines, 386 above the 4,224-line start of this continuation. The phase-2 typed-owner slice also reduced one function while increasing aggregate production LOC; it is not a net-size reduction. I will not represent either change as solving the root monolith.\n\nThe next implementation step is to remove a concrete existing behavior body from `execution_legacy.py` into an already-existing domain owner, migrate callers, and compare both root and aggregate sizes. No further standalone owner should be introduced unless it replaces a substantial behavior body and leaves no old copy. Pytest remains deferred until production refactoring is complete; no installer changes.\n\nHandoff details are being committed in `docs/superpowers/handoffs/2026-09-22-pr1943-execution-refactor.md`. PR remains draft.'
+    reviewer = "owner"
+    if variant == "foreign":
+        reviewer = "reviewer"
+    elif variant == "request":
+        body += "\n[P1] Please fix the regression before merging."
+    elif variant == "generic":
+        body = "### Structural correction and handoff\n\nContinue this work."
+    elif variant == "missing_evidence":
+        body = body.replace("`execution_legacy.py` is 4,610 lines", "The work is incomplete")
+    elif variant == "oversized":
+        body += "x" * MAX_FEEDBACK_BODY_CHARS
+    item = feedback("checkpoint", reviewer=reviewer, body=body)
+    actual = non_actionable_feedback_reason(SimpleNamespace(github_identity=None), item,
+                                           owner_login="owner")
+    assert actual == ("self_progress_checkpoint" if variant == "checkpoint" else None)

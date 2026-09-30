@@ -423,6 +423,14 @@ def nonretryable_copy(
     classified: Any, *, provider: Any, model: Any, summary: str, prefix_suggestion: Optional[str] = None,
 ) -> str:
     """Chat copy for a terminal non-retryable rejection (auth, model missing, TLS, generic 4xx)."""
+    if classified.reason == FailoverReason.egress_policy_blocked:
+        codes = classified.error_context.get("egress_reason_codes", ("policy_denied",))
+        return (
+            "Hermes blocked this request under its local privacy policy before contacting the model. "
+            "The blocked request was not retried or sent to another provider. "
+            "Use approved, bounded source evidence or sanitized input before trying again."
+            "\n\nReason codes: " + ", ".join(codes)
+        )
     label = provider_label_for(provider)
     if getattr(classified, "is_auth", False):
         from agent.error_surface import auth_kind

@@ -872,6 +872,51 @@ class GitHubClient:
         self._actions_enabled_cache[repository] = (enabled, now)
         return enabled
 
+    def issue_publication_landscape(self, repository: str):
+        """Fully paginate all issues (open and closed) and every open PR."""
+        repository = _validated_repository(repository)
+        if repository != "mrkillbob/luna-bot":
+            raise GitHubClientError("issue publication is restricted to Luna")
+        issues = self._read_pages(f"repos/{repository}/issues?state=all&per_page=100")
+        pulls = self._read_pages(f"repos/{repository}/pulls?state=open&per_page=100")
+        return tuple(row for row in issues if "pull_request" not in row), pulls
+
+    def create_verified_luna_issue(
+        self, repository: str, *, expected_stable_head: str, title: str, body: str
+    ):
+        """Fixed private Luna endpoint; callers must supply governed verified evidence."""
+        repository = _validated_repository(repository)
+        if repository != "mrkillbob/luna-bot":
+            raise GitHubClientError("issue publication is restricted to Luna")
+        if self.viewer_login() != "mrkillbobbot" or not self.repository_is_private(
+            repository
+        ):
+            raise GitHubClientError("private Luna bot publication identity required")
+        expected_stable_head = _validated_sha(expected_stable_head)
+        if self.get_branch_head(repository, "stable") != expected_stable_head:
+            raise GitHubClientError(
+                "stable head changed immediately before issue write"
+            )
+        title = _bounded_text(title, "title", 256)
+        body = _bounded_text(body, "body", 16_384, allow_newlines=True)
+        payload = self._json([
+            "gh",
+            "api",
+            f"repos/{repository}/issues",
+            "--method",
+            "POST",
+            "--raw-field",
+            f"title={title}",
+            "--raw-field",
+            f"body={body}",
+        ])
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(payload.get("number"), int)
+            or not isinstance(payload.get("html_url"), str)
+        ):
+            raise GitHubClientError("issue create response was invalid")
+        return payload
     def repository_is_private(self, repository: str) -> bool:
         payload = self._read_object(f"repos/{_validated_repository(repository)}")
         private = payload.get("private")

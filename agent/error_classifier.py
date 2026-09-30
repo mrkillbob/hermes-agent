@@ -954,11 +954,69 @@ def _by_status(c: _Ctx) -> Optional[Verdict]:
     return _STATUS_HANDLERS[status](c) if status in _STATUS_HANDLERS else default
 
 
-# Stage order: plugin hooks → the provider's own profile hook → provider-specific special cases →
+# Only canonical, metadata-only local denial messages may survive an RPC wrapper.
+# This is a diagnostic taxonomy, not a policy permission list.
+_LOCAL_EGRESS_REASON_CODES = frozenset({
+    'base64_payload', 'exact_secret_detected', 'exact_secret_scan_failed',
+    'grant_binding_mismatch', 'invalid_anthropic_thinking_replay',
+    'invalid_codex_reasoning_replay', 'invalid_display_path', 'invalid_generated_context_key',
+    'invalid_generated_context_segment', 'invalid_literal_segment', 'invalid_request_key',
+    'invalid_source_grant', 'invalid_source_presentation', 'invalid_source_segment',
+    'invalid_tool_syntax_segment', 'invalid_typed_request_root', 'missing_request_identity',
+    'non_finite_number', 'payload_digest_mismatch', 'policy_denied', 'policy_digest_mismatch',
+    'private_absolute_path', 'private_path_scan_failed', 'receipt_unavailable',
+    'redaction_failed', 'request_identity_mismatch', 'sanitized_bytes_exceeded',
+    'sanitized_segment_bytes_exceeded', 'sanitized_segment_forbidden', 'secret_detected',
+    'sensitive_path', 'serialization_failed', 'serialized_bytes_exceeded',
+    'source_bytes_in_literal', 'source_bytes_in_sanitized_segment', 'source_grant_unbound',
+    'source_hash_mismatch', 'source_path_not_canonical', 'source_policy_unavailable',
+    'source_range_mismatch', 'source_segment_grant_mismatch', 'source_segment_not_text',
+    'source_unavailable', 'static_literal_not_allowed', 'token_cap_exceeded',
+    'typed_request_required', 'unknown_destination', 'untrusted_provenance',
+    'untyped_request_value'
+})
+
+
+def _local_egress_denial(c: _Ctx) -> Optional[Verdict]:
+    """Local privacy enforcement precedes provider hooks and transport recovery."""
+    from agent.llm_egress_firewall import EgressBlocked
+
+    if isinstance(c.error, EgressBlocked):
+        raw_codes = getattr(c.error.decision, "reason_codes", ())
+        codes = tuple(dict.fromkeys(
+            code for code in raw_codes
+            if isinstance(code, str) and code in _LOCAL_EGRESS_REASON_CODES
+        ))[:16] if isinstance(raw_codes, (tuple, list)) else ()
+        codes = codes or ("policy_denied",)
+    else:
+        if c.status_code is not None:
+            return None
+        text = str(c.error)
+        if len(text) > 512:
+            return None
+        match = re.fullmatch(
+            r"LLM egress blocked: ([a-z][a-z0-9_]{0,63}(?:,[a-z][a-z0-9_]{0,63}){0,15})",
+            text,
+        )
+        if match is None:
+            return None
+        codes = tuple(match.group(1).split(","))
+        if not all(code in _LOCAL_EGRESS_REASON_CODES for code in codes):
+            return None
+        codes = tuple(dict.fromkeys(codes))
+    return _v(
+        _R.egress_policy_blocked, retryable=False, should_compress=False,
+        should_rotate_credential=False, should_fallback=False,
+        message="Local privacy policy blocked the request: " + ",".join(codes),
+        error_context={"egress_reason_codes": codes},
+    )
+
+
+# Stage order: local privacy denial → plugin hooks → the provider's own profile hook → provider-specific special cases →
 # HTTP status → MoA shapes → structured error code → message patterns → SSL → disconnect +
 # large session → transport types → unknown (retryable with backoff).
 _STAGES: Sequence[Callable[[_Ctx], Optional[Verdict]]] = (
-    _plugin_verdict, _profile_verdict, _provider_special_cases, _by_status, _moa_special_cases,
+    _local_egress_denial, _plugin_verdict, _profile_verdict, _provider_special_cases, _by_status, _moa_special_cases,
     _by_error_code, _by_message, _by_transport,
 )
 

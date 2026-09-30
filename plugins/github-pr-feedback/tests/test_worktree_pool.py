@@ -696,3 +696,49 @@ def test_missing_matching_environment_does_not_link_wrong_interpreter(tmp_path):
     with pytest.raises(RuntimeError, match='matches Python'):
         LocalGitRepository._link_governed_venv(repo, workspace)
     assert not (workspace / '.venv').is_symlink()
+
+
+@pytest.mark.parametrize("layout", ["managed", "real", "managed_no_pin", "minor_pin", "outside", "invalid_prefix", "wrong_pin", "invalid_pin", "escaped_root"])
+def test_worktree_owned_environment_is_preserved_only_when_valid(tmp_path, layout) -> None:
+    import sys
+    import venv
+
+    repo = initialized_repository(tmp_path)
+    make_governed_venv(repo)
+    workspace = initialized_repository(tmp_path / "target")
+    destination = workspace / ".venv"
+    if layout == "real":
+        environment = destination
+    elif layout in {"outside", "escaped_root"}:
+        environment = tmp_path / "outside" / "environment"
+    else:
+        environment = workspace / ".agent-venvs" / "maintenance"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    if layout == "escaped_root":
+        (workspace / ".agent-venvs").symlink_to(environment.parent, target_is_directory=True)
+    if layout != "real":
+        destination.symlink_to(environment, target_is_directory=True)
+    if layout == "invalid_prefix":
+        python = environment / "bin/python"
+        python.unlink()
+        python.symlink_to(sys.executable)
+        # A missing pyvenv.cfg makes this a directory containing a base Python,
+        # rather than an interpreter whose prefix belongs to this environment.
+        (environment / "pyvenv.cfg").unlink()
+    if layout != "managed_no_pin":
+        pin = ".".join(map(str, sys.version_info[:3]))
+        if layout == "wrong_pin":
+            pin = "0.0.0"
+        elif layout == "invalid_pin":
+            pin = "python-latest"
+        elif layout == "minor_pin":
+            pin = ".".join(map(str, sys.version_info[:2]))
+        (workspace / ".python-version").write_text(pin, encoding="utf-8")
+    original = os.readlink(destination) if destination.is_symlink() else None
+    if layout in {"managed", "real", "managed_no_pin", "minor_pin"}:
+        LocalGitRepository._link_governed_venv(repo, workspace)
+    else:
+        with pytest.raises(RuntimeError):
+            LocalGitRepository._link_governed_venv(repo, workspace)
+    assert destination.resolve(strict=True) == environment.resolve(strict=True)
+    assert (os.readlink(destination) if destination.is_symlink() else None) == original
