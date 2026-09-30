@@ -161,6 +161,26 @@ class WorktreeCapacityAdmission:
         except (OSError, sqlite3.Error):
             raise _reject("registry unavailable; protected") from None
 
+    def is_unregistered_existing(self, workspace_path: Path) -> bool:
+        """Read-only selection hint; final reserve remains the admission authority.
+
+        Only an exact canonical existing directory with no registry row can be
+        skipped as preserved legacy work. Unknown metadata/schema and aliases
+        reject. Registered uncertain/allocating paths are never classified as
+        legacy, so their ordinary reserve failures remain hard gates.
+        """
+        target, ancestor, device = _target(workspace_path)
+        identity = unicodedata.normalize("NFC", str(target)).casefold()
+        with closing(self._connect()) as db:
+            for (registered,) in db.execute(
+                "SELECT path FROM reservations WHERE device=?", (device,)
+            ):
+                if (registered != str(target)
+                        and unicodedata.normalize("NFC", registered).casefold() == identity):
+                    raise _reject("case or Unicode path alias protected")
+            row = db.execute("SELECT 1 FROM reservations WHERE path=?", (str(target),)).fetchone()
+            return row is None and target == ancestor
+
     def reserve(self, workspace_path: Path) -> WorktreeCapacityHandle:
         target, ancestor, device = _target(workspace_path)
         db = self._connect()
