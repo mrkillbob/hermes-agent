@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { type ConsoleMessage, expect, type Locator, type Page } from '@playwright/test'
+import { type ConsoleMessage, errors, expect, type Locator, type Page } from '@playwright/test'
 import { z } from 'zod'
 
 import { validateMockUrl } from './mock-provider-config.ts'
@@ -102,6 +102,154 @@ export async function readMockPrompts(mockUrl: string): Promise<string[]> {
   return z.object({ receivedPrompts: z.array(z.string()) }).parse(await response.json()).receivedPrompts
 }
 
+export interface ComposerClickPosition { x: number; y: number }
+
+/** Read-only hit testing also handles an editor clipped by a historical pane. */
+export function composerClickPosition(editor: Element): ComposerClickPosition | null {
+  const rect = editor.getBoundingClientRect()
+  const left = Math.max(0, rect.left)
+  const right = Math.min(window.innerWidth, rect.right)
+  const top = Math.max(0, rect.top)
+  const bottom = Math.min(window.innerHeight, rect.bottom)
+
+  if (right <= left || bottom <= top) { return null }
+
+  for (const yFraction of [0.5, 0.25, 0.75, 0.1, 0.9]) {
+    for (const xFraction of [0.5, 0.25, 0.75, 0.1, 0.9]) {
+      const x = left + (right - left) * xFraction
+      const y = top + (bottom - top) * yFraction
+      const hit = document.elementFromPoint(x, y)
+
+      if (hit && editor.contains(hit)) { return { x: x - rect.left, y: y - rect.top } }
+    }
+  }
+
+  return null
+}
+
+export interface PointerSample {
+  type: string; x: number; y: number; requestedX: number; requestedY: number; withinEditor: boolean
+}
+
+/** Confirm a uniform input-transport scale from delivered events, never from host/DPI guesses. */
+export function pointerTransportScale(samples: PointerSample[]): number | null {
+  if (samples.length < 2) { return null }
+
+  const scales = samples.flatMap(sample => [sample.requestedX / sample.x, sample.requestedY / sample.y])
+  const scale = scales.reduce((sum, value) => sum + value, 0) / scales.length
+
+  if (!Number.isFinite(scale) || scale <= 0 || Math.abs(scale - 1) < 0.02
+    || scales.some(value => !Number.isFinite(value) || Math.abs(value - scale) > 0.02)) { return null }
+
+  return scale
+}
+
+export async function clickComposer(composer: Locator, trial: boolean, timeoutMs = 120_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastClickFailure: string | undefined
+  let lastPosition: ComposerClickPosition | null = null
+
+  const pointer = await composer.evaluateHandle(el => {
+    const samples: PointerSample[] = []
+    let position: ComposerClickPosition | null = null
+
+    const observe = (event: MouseEvent) => {
+      if (position === null) { return }
+
+      const target = event.target instanceof Element ? event.target : null
+      const rect = el.getBoundingClientRect()
+
+      samples.push({ type: event.type, x: event.clientX, y: event.clientY,
+        requestedX: rect.x + position.x, requestedY: rect.y + position.y,
+        withinEditor: target !== null && el.contains(target) })
+
+      if (samples.length > 4) { samples.shift() }
+    }
+
+    window.addEventListener('mousemove', observe, true)
+    window.addEventListener('mousedown', observe, true)
+
+    return { samples, setPosition: (next: ComposerClickPosition) => { position = next }, stop: () => {
+      window.removeEventListener('mousemove', observe, true)
+      window.removeEventListener('mousedown', observe, true)
+    } }
+  })
+
+  try {
+    await expect.poll(async () => {
+      const position = await composer.evaluate(composerClickPosition)
+
+      lastPosition = position
+
+      if (position === null) { return false }
+      await pointer.evaluate((record, next) => record.setPosition(next), position)
+
+      try {
+        // Startup layout and scrolling can invalidate a point; remeasure bounded attempts.
+        await composer.click({ trial, position, timeout: Math.min(2000, Math.max(1, deadline - Date.now())) })
+
+        return true
+      } catch (error) {
+        if (!(error instanceof errors.TimeoutError)) { throw error }
+        lastClickFailure = error.message
+      }
+
+      // Historical Windows Electron delivers CDP mouse coordinates divided by window zoom.
+      // Correct only an observed uniform mismatch, then verify a delivered hover hits the editor.
+      const scale = pointerTransportScale(await pointer.evaluate(record => record.samples))
+
+      if (scale === null) { return false }
+
+      const target = await composer.evaluate((el, offset) => {
+        const rect = el.getBoundingClientRect()
+        const x = rect.x + offset.x
+        const y = rect.y + offset.y
+        const hit = document.elementFromPoint(x, y)
+
+        return hit && el.contains(hit) ? { x, y } : null
+      }, position)
+
+      if (target === null) { return false }
+      const mouse = composer.page().mouse
+      const corrected = { x: target.x * scale, y: target.y * scale }
+
+      await mouse.move(corrected.x, corrected.y)
+      const delivered = await pointer.evaluate(record => record.samples.at(-1))
+
+      if (!delivered?.withinEditor || Math.abs(delivered.x - target.x) > 2
+        || Math.abs(delivered.y - target.y) > 2) { return false }
+
+      if (!trial) {
+        await mouse.click(corrected.x, corrected.y)
+        const down = await pointer.evaluate(record => record.samples.at(-1))
+
+        if (down?.type !== 'mousedown' || !down.withinEditor) { return false }
+      }
+
+      return true
+    }, { timeout: timeoutMs, message: 'Composer must accept a normal click at a visible input point' }).toBe(true)
+  } catch (error) {
+    if (lastClickFailure === undefined) { throw error }
+
+    const geometry = await composer.evaluate(el => {
+      const rect = el.getBoundingClientRect()
+
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+        viewport: { width: innerWidth, height: innerHeight }, devicePixelRatio }
+    })
+
+    const box = await composer.boundingBox()
+    const events = await pointer.evaluate(record => record.samples)
+
+    throw new Error(`${(error as Error).message}\nLast normal click: ${lastClickFailure}`
+      + `\nClick geometry: ${JSON.stringify({ position: lastPosition, dom: geometry, playwright: box, events })}`)
+  } finally {
+    // A closed page cannot run diagnostic cleanup; it already discarded these listeners.
+    await pointer.evaluate(record => record.stop()).catch(() => {})
+    await pointer.dispose()
+  }
+}
+
 export async function waitForChatReady(page: Page, timeoutMs = 120_000): Promise<Locator> {
   // The visible editor is a contentEditable div. assistant-ui also renders an
   // aria-hidden, sr-only <textarea> that carries the composer binding: it is
@@ -119,8 +267,7 @@ export async function waitForChatReady(page: Page, timeoutMs = 120_000): Promise
   try {
     await composer.waitFor({ state: 'visible', timeout: timeoutMs })
     await expect(composer).toBeEditable({ timeout: timeoutMs })
-    // Trial input checks hit testing, not merely a non-zero box behind the boot overlay.
-    await composer.click({ trial: true, timeout: timeoutMs })
+    await clickComposer(composer, true, timeoutMs)
   } catch (error) {
     throw new Error(`${(error as Error).message} -- composer not interactable `
       + `(composer-root=${await root.count()}, contenteditable=${await root.locator('[contenteditable]').count()}): `
@@ -251,7 +398,8 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
     if (expectCommit) { assertChatCommit(identity, expectCommit, options.provenanceCommit) }
     const beforeIds = (await readTranscript(page)).map((message: TranscriptMessage): string => message.id)
     const before = (await observe()).length
-    await composer.click()
+    await clickComposer(composer, false)
+    await expect(composer).toBeFocused()
     // The app persists its composer draft across launches, so a checkpoint that
     // types on top of a restored draft can submit the PREVIOUS checkpoint's text
     // (proved: the update window's turn carried the root checkpoint's prompt) and

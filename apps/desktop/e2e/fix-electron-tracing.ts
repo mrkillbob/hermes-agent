@@ -24,13 +24,14 @@
  *
  * Pinned dependency: this file reaches into Playwright internals (_playwright,
  * _allContexts, _context) that have no public contract. @playwright/test is
- * pinned exact (=1.58.2 in package.json) so a bump can't silently break the
+ * pinned exact (=1.62.1 in package.json) so a bump can't silently break the
  * monkeypatch. When bumping, re-verify these private symbols still exist on
  * the Electron / PlaywrightInternal classes and that tracing still merges.
  */
 
-import { _electron as electron, type BrowserContext } from '@playwright/test'
 import * as crypto from 'node:crypto'
+
+import { type BrowserContext, _electron as electron } from '@playwright/test'
 
 const electronContexts = new Set<BrowserContext>()
 const originalLaunch = electron.launch.bind(electron)
@@ -44,10 +45,13 @@ electron.launch = async (options: any) => {
   // Patch _allContexts so the test runner sees the electron context
   // (didFinishTest cleanup → _stopTracing → stopChunk → merge into trace.zip).
   const pw = (electron as any)._playwright as any
+
   if (pw && !pw.__electronTracingPatched) {
     pw.__electronTracingPatched = true
     const original = pw._allContexts.bind(pw)
-    pw._allContexts = () => [...original(), ...electronContexts]
+    // Electron can begin closing before its context emits close. A new test
+    // must not ask that dead connection to start another trace chunk.
+    pw._allContexts = () => [...original(), ...Array.from(electronContexts).filter(context => !context.isClosed())]
   }
 
   // Start tracing — mirrors ArtifactsRecorder.didCreateBrowserContext.
@@ -64,6 +68,7 @@ electron.launch = async (options: any) => {
   // in _allContexts(). Since we already started, redirect to startChunk
   // to avoid "Tracing has been already started" errors.
   const tracing = ctx.tracing as any
+
   tracing.start = async (opts: any) => {
     return tracing.startChunk(opts)
   }
