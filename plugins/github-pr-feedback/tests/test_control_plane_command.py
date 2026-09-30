@@ -4,6 +4,7 @@ import subprocess
 import os
 import venv
 from pathlib import Path
+from tools.environments.local import build_subprocess_env
 
 from github_pr_feedback.controller import _governed_command_prefix
 
@@ -31,7 +32,7 @@ def test_control_plane_command_ignores_worktree_module_shadow(tmp_path):
     # operation; --version is sufficient to identify module resolution.
     result = subprocess.run(
         ["/bin/sh", "-c", command + " --version"], cwd=workspace,
-        env={**os.environ, "HERMES_KANBAN_HERMES_PYTHON": str(python)},
+        env=build_subprocess_env(scrub_secrets=False, inherit_profile_home=False, extra={"HERMES_KANBAN_HERMES_PYTHON": str(python)}),
         capture_output=True, text=True, timeout=20,
     )
     assert result.returncode == 0, result.stderr
