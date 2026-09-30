@@ -82,6 +82,7 @@ def test_real_worker_discovery_enforces_control_home_receipt(tmp_path, monkeypat
         # from its manifest using this worker's actual opt-in configuration.
         plugins.discover_plugins(force=True)
         result = json.loads(kanban_tools._handle_complete({"task_id": tid, "summary": "Tests passed"}))
+        # Control-plane receipt binding is mandatory even when worker hooks are disabled.
         assert result.get("ok") is not True
         assert "unacknowledged feedback dispatch" in result["error"]
         with kbc.connect() as connection:

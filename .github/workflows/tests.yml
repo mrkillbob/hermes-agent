@@ -99,9 +99,9 @@ jobs:
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: test_durations.json
-          key: test-durations-never-exact
+          key: test-durations-unit-never-exact
           restore-keys: |
-            test-durations-
+            test-durations-unit-
 
       - name: Run tests
         # Per-file isolation via scripts/run_tests.sh: each test file runs
@@ -150,7 +150,7 @@ jobs:
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: test_durations.json
-          key: test-durations-${{ github.run_id }}
+          key: test-durations-unit-${{ github.run_id }}
 
   e2e:
     # Keep the process-heavy suite in one job, as upstream does. The fork
@@ -323,7 +323,7 @@ jobs:
 
       - name: Set up Node
         # `hermes update` builds the web UI / TUI workspaces.
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 26
           cache: npm

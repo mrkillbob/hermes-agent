@@ -609,6 +609,9 @@ def test_audit_produced_actions_disabled_receipt_is_merge_eligible(
         def get_branch_head(self, repository: str, branch: str) -> str:
             return BASE_SHA
 
+        def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+            return self.list_feedback(repository, number)
+
     github = HintGitHub()
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
 

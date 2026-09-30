@@ -625,6 +625,8 @@ def recover_after_classification(
     strip → Anthropic OAuth 1M-beta disable → per-provider 401 credential refresh →
     format-recovery strips.
     Returns ``(retry_now, recovered_with_pool)``; the latter feeds the Nous rate-limit guard."""
+    if classified.reason == FailoverReason.egress_policy_blocked:
+        return False, False
     from agent.conversation_loop import _is_nous_inference_route
 
     if _recover_welcome_tier(agent, classified, _retry):
@@ -949,6 +951,7 @@ def _welcome_outage_copy(base_url: Any, classified: Any, *, anonymous: bool = Fa
 
 # Terminal status label per non-retryable reason (default names the HTTP status).
 _NONRETRYABLE_LABELS = {
+    FailoverReason.egress_policy_blocked: "Hermes local privacy policy blocked this request",
     FailoverReason.content_policy_blocked: "The provider's safety filter refused this request",
     FailoverReason.upstream_blocked: "A firewall/CDN in front of the provider blocked this request",
     FailoverReason.ssl_cert_verification: "The provider's security certificate could not be verified",
@@ -987,7 +990,10 @@ def nonretryable_client_error_result(
     agent._flush_status_buffer()
     # Summarize once: Cloudflare/proxy HTML pages and raw provider bodies must be
     # collapsed here or they leak verbatim via the ``error`` field.
-    _nonretryable_summary = agent._summarize_api_error(api_error)
+    _nonretryable_summary = (
+        classified.message if classified.reason == FailoverReason.egress_policy_blocked
+        else agent._summarize_api_error(api_error)
+    )
     _plabel = provider_label_for(provider)
     _label = _NONRETRYABLE_LABELS.get(classified.reason, f"{_plabel} rejected the request and retrying won't help")
     agent._emit_diagnostic_status(f"❌ {_label}: {_nonretryable_summary}")
@@ -1088,6 +1094,8 @@ def nonretryable_client_error_result(
         "failure_reason": classified.reason.value,
         "failure_retryable": bool(classified.retryable),
     })
+    if classified.reason == FailoverReason.egress_policy_blocked:
+        result["egress_reason_codes"] = list(classified.error_context.get("egress_reason_codes", ()))
     if _keep_partial:
         result["partial"] = True
     _stamp_limit_reset(result, agent, api_error)

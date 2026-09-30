@@ -647,6 +647,11 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     """Attach the plugin's command tree to the host-created parser."""
 
     subcommands = parser.add_subparsers(dest="github_pr_feedback_action", required=True)
+    publication = subcommands.add_parser("publish-issue", help="Publish one verified private Luna unit failure")
+    publication.add_argument("--repository", required=True, choices=["mrkillbob/luna-bot"])
+    publication.add_argument("--packet", required=True)
+    publication.add_argument("--expected-stable-head", required=True)
+    publication.add_argument("--dry-run", action="store_true")
     scan = subcommands.add_parser("scan", help="Read and dispatch newly admitted feedback")
     scan.add_argument(
         "--repository",
@@ -838,6 +843,9 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
 
 def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     action = getattr(args, "github_pr_feedback_action", None)
+    if action == "publish-issue":
+        from .cli_issue_publication import handle_publish_issue
+        return handle_publish_issue(ctx, args)
     if action == "scan":
         return _scan(ctx, args)
     if action == "historical-merged-scan":

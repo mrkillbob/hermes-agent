@@ -146,6 +146,19 @@ class ProfileCanonicalSession(Result):
     message_count: int = 0
 
 
+class ProfileFederationRole(Result):
+    """Governed identity fields exposed by the profile roster."""
+
+    role_id: str | None = None
+    display_name: str | None = None
+    department: str | None = None
+    authority: str | None = None
+    schedule: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    toolsets: list[str] = Field(default_factory=list)
+    handoffs: list[str] = Field(default_factory=list)
+
+
 class ProfileRow(Result):
     """One roster row; the session fields are present only with ``include_sessions``."""
 
@@ -165,6 +178,7 @@ class ProfileRow(Result):
     ui_meta_revisions: dict[str, int] = Field(default_factory=dict)
     ui_meta: dict[str, JsonValue] | None = None
     has_avatar: bool = False
+    federation_role: ProfileFederationRole | None = None
 
 
 class ProfilesListParams(ProfileParams):

@@ -623,7 +623,7 @@ def test_provider_terminal_parser_keeps_current_session_egress_denial(
 def test_provider_egress_crash_is_terminal_needs_attention(
     kanban_home, monkeypatch,
 ):
-    """A blocked payload routes the task to intake for provider repair."""
+    """A local privacy denial preserves task ownership and waits for correction."""
     import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     import hermes_cli.kanban_db_dispatch as _hermes_cli_kanban_db_dispatch
     import hermes_cli.kanban_db as _kb
@@ -635,7 +635,8 @@ def test_provider_egress_crash_is_terminal_needs_attention(
 
     with _hermes_cli_kanban_db_connect.connect() as conn:
         host = _kb._claimer_id().split(":", 1)[0]
-        task_id = kb.create_task(conn, title="egress", assignee="a")
+        task_id = kb.create_task(conn, title="egress", body="Keep original scope", assignee="a",
+            model_override="approved-model", provider_override="nous")
         kb.claim_task(conn, task_id, claimer=f"{host}:egress")
         conn.execute(
             "UPDATE tasks SET worker_pid=? WHERE id=?",
@@ -646,11 +647,17 @@ def test_provider_egress_crash_is_terminal_needs_attention(
 
         crashed = _hermes_cli_kanban_db_dispatch.detect_crashed_workers(conn)
         task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)
 
+    assert not any(event.kind == "routed_to_repair_profile" for event in events)
     assert task_id in crashed
     assert task is not None
-    assert task.status in ("ready", "triage")
-    assert task.assignee == "task-intake-router"
+    assert task.status == "blocked"
+    assert task.assignee == "a"
+    assert task.body == "Keep original scope"
+    assert task.model_override == "approved-model"
+    assert task.provider_override == "nous"
+    assert task.last_failure_error == "provider egress blocked: LLM egress blocked: base64_payload"
 
 
 def test_known_provider_egress_denial_is_terminal_needs_attention(
@@ -683,8 +690,8 @@ def test_known_provider_egress_denial_is_terminal_needs_attention(
 
     assert task_id in crashed
     assert task is not None
-    assert task.status in ("ready", "triage")
-    assert task.assignee == "task-intake-router"
+    assert task.status == "blocked"
+    assert task.assignee == "a"
 
 
 def test_provider_unsupported_thinking_crash_is_terminal_needs_attention(

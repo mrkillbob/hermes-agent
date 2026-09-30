@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
-_LOCAL_KANBAN_PROVIDERS = frozenset({"ollama", "ollama-launch", "local"})
+_LOCAL_KANBAN_PROVIDERS = frozenset({"ollama", "ollama-launch", "local", "llamacpp", "llama.cpp", "llama-cpp"})
 
 
 def prepare_worker_route(task, profile_home, env):

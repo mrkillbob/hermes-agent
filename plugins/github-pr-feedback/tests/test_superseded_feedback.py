@@ -132,6 +132,9 @@ class FakeGitHub:
         self.resolves.append((repository, number, comment_id, expected_head_sha))
         return True
 
+    def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+        return self.list_feedback(repository, number)
+
 
 def thread(*, resolved: bool = False) -> ReviewThread:
     return ReviewThread("PRRT_exact", "42", HEAD, resolved)

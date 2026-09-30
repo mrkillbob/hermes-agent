@@ -1129,7 +1129,8 @@ def _classify_dead_worker_exit(
             return _DeadWorker(
                 kind, code, error, "needs_attention",
                 {"pid": pid, "claimer": claimer, "exit_code": code,
-                 "failure_class": failure_class, "terminal_provider": True},
+                 "failure_class": failure_class, "terminal_provider": True,
+                 **({"privacy_reason": error} if failure_class == "provider_egress_blocked" else {})},
                 terminal_provider=True,
             )
     if kind == "clean_exit":
@@ -1316,6 +1317,23 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                     "claimer": claimer,
                     "protocol_violations": streak,
                     "protocol_violation_limit": violation_limit,
+                },
+            )
+        elif dead.event_payload.get("failure_class") == "provider_egress_blocked":
+            # A proven local policy denial cannot be repaired by changing the
+            # worker role or provider. Hold the original task for correction;
+            # only retain the parser's bounded reason, never appended output.
+            tripped = _record_task_failure(
+                conn, tid,
+                error=dead.event_payload["privacy_reason"],
+                outcome="crashed",
+                force_trip=True,
+                release_claim=False,
+                end_run=False,
+                event_payload_extra={
+                    "pid": pid, "claimer": claimer,
+                    "failure_class": "provider_egress_blocked",
+                    "local_privacy_denial": True,
                 },
             )
         elif dead.terminal_provider:

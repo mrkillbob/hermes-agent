@@ -184,21 +184,56 @@ def _project_bound_kanban_show(value: str) -> GeneratedContextSegment:
             }
         )
 
-    projection = {
-        "task": projected_task,
-        "worker_instruction": (
-            "Use the dispatcher-assigned current workspace with relative paths. "
-            "Absolute paths and generic terminal stdout are deliberately omitted "
-            "from protected replay. Do not rediscover the workspace with pwd, env, "
-            "directory scans, or guessed cd paths. For source evidence use direct "
-            "read_file calls with narrow line ranges; these bind exact source grants. "
-            "Run git status --short --branch, git diff --stat, and git diff --check "
+    if task.get("workspace_kind") in {"scratch", "dir", "git"}:
+        projected_task["workspace_kind"] = task["workspace_kind"]
+    workspace_instruction = (
+        "This is a scratch workspace, which need not be a Git repository. "
+        "Do not run Git status, diff, log, fetch, or HEAD receipt commands here. "
+        "Use the current title and body above as the assignment; absence of a "
+        "checkout or omitted historical output is not missing task context. "
+        "Use bounded Kanban projections and narrow relative artifact reads. "
+        "If the assignment permits an IDLE outcome when evidence is unavailable, "
+        "complete with that exact evidence gap and no invented findings or children. "
+        "Do not repeat a failed diagnostic or guess external paths. "
+        if task.get("workspace_kind") == "scratch"
+        else (
+            "A directory workspace need not be a Git repository. Run Git checks "
+            "only when the assignment requires a bound repository; stop after "
+            "the first result saying this is not a Git repository; record that gap. "
+            "For read-only discovery use the assigned relative evidence first. "
+            "When Git checks are required, run git status --short --branch, "
+            "git diff --stat, and git diff --check "
             "as separate terminal calls for bounded Git summaries. Do not combine "
             "them with echo, pwd, env, or git log. To obtain the exact HEAD, run "
             "mkdir -p artifacts/kanban && git rev-parse HEAD > "
             "artifacts/kanban/current_head.txt, then read_file that relative file "
             "at line 1. This local receipt carries source provenance; bare terminal "
-            "stdout does not. Omitted output is not a missing checkout. Use a "
+            "stdout does not. If that receipt is not Git-ignored, remove only "
+            "the receipt you just generated after reading it; preserve preexisting "
+            "artifacts so diagnostic scratch cannot block clean-worktree completion. "
+        )
+    )
+
+    projection = {
+        "task": projected_task,
+        "worker_instruction": (
+            "Use the dispatcher-assigned current workspace with relative paths. "
+            "Absolute paths and generic terminal stdout are deliberately omitted "
+            "from protected replay. Display placeholders such as <private-path> "
+            "are not executable filenames; never pass them to cat, read_file, or cd. "
+            "Do not rediscover the workspace with pwd, env, "
+            "directory scans, or guessed cd paths. For source evidence use direct "
+            "read_file calls with narrow line ranges; these bind exact source grants. "
+            + workspace_instruction
+            + "For GitHub feedback callbacks use the dispatcher-provided "
+            "HERMES_KANBAN_HERMES_PYTHON interpreter with -P -m hermes_cli.main "
+            "and the receipt's shared HERMES_HOME. Preserve the dispatcher-bound "
+            "PYTHONPATH; do not use -E or -I, which discard that source binding. "
+            "Never substitute project python3 "
+            "or an expired absolute interpreter pin from an older task body. "
+            "A nonzero callback is a bounded failure: stop and record its exact "
+            "error instead of repeating Python wrappers. "
+            "Omitted output is not a missing checkout. Use a "
             "supported projection or narrow local receipt rather than repeating "
             "a successful diagnostic. Preserve the existing assignment and patch, "
             "reserve time for an explicit Kanban terminal action, and report only "
@@ -379,6 +414,13 @@ def _untrusted_content_digest(value: Any) -> str:
 def _typed_payload(value: Any, grant_texts: Sequence[tuple[str, SourceGrant]], used_grants: dict[str, SourceGrant], **kwargs: Any) -> Any:
     """Classify a payload through the scalar, mapping, or sequence path."""
 
+    if isinstance(value, SourceBoundSegment):
+        for _, grant in grant_texts:
+            digest = source_grant_digest(grant)
+            if digest == value.source_grant_digest:
+                used_grants[digest] = grant
+                return value
+        return UntrustedProvenanceSegment(sha256(b"unbound-source-segment").hexdigest())
     if isinstance(value, str):
         return _typed_payload_string(value, grant_texts, used_grants, **kwargs)
     if isinstance(value, (list, tuple)):
@@ -840,6 +882,9 @@ def _typed_payload_mapping_item(
     state: Mapping[str, Any], key: Any, item: Any, typed: dict[Any, Any]
 ) -> None:
     """Classify one mapping field while keeping projection families isolated."""
+    if key in {"content", "output"} and isinstance(item, SourceBoundSegment):
+        typed[key] = _typed_payload(item, state["grant_texts"], state["used_grants"])
+        return
     value = state['value']
     grant_texts = state['grant_texts']
     used_grants = state['used_grants']
@@ -1323,7 +1368,12 @@ def _typed_payload_mapping_structured(
         return True
     if is_structured_result and is_github_pr_feedback_terminal_result:
         typed[key] = GeneratedContextSegment(
-            _github_pr_feedback_terminal_result(structured_text or "")
+            _github_pr_feedback_terminal_result(
+                structured_text or "",
+                action=getattr(
+                    state['github_pr_feedback_terminal_call_ids'], 'actions', {}
+                ).get(state['output_call_id']),
+            )
         )
         return True
     if is_structured_result and is_terminal_replay_result:
@@ -1641,7 +1691,12 @@ def _typed_payload_mapping_scalar_arguments(
         and isinstance(item, str)
     ):
         typed[key] = GeneratedContextSegment(
-            _github_pr_feedback_terminal_result(item)
+            _github_pr_feedback_terminal_result(
+                item,
+                action=getattr(
+                    state['github_pr_feedback_terminal_call_ids'], 'actions', {}
+                ).get(state['output_call_id']),
+            )
         )
         return True
     if (

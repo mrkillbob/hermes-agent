@@ -1919,6 +1919,7 @@ export interface ProfileRow {
   ui_meta_revisions?: Record<string, number>
   ui_meta?: Record<string, unknown> | null
   has_avatar?: boolean
+  federation_role?: ProfileFederationRole | null
 }
 /** Newest human-facing session of a profile (``_latest_profile_session_rows``). */
 export interface ProfileSessionPreview {
@@ -1946,6 +1947,17 @@ export interface ProfileCanonicalSession {
   started_at?: number
   last_active?: number
   message_count?: number
+}
+/** Governed identity fields exposed by the profile roster. */
+export interface ProfileFederationRole {
+  role_id?: string | null
+  display_name?: string | null
+  department?: string | null
+  authority?: string | null
+  schedule?: string | null
+  skills?: string[]
+  toolsets?: string[]
+  handoffs?: string[]
 }
 /** ``clone_from`` omitted = fresh profile + bundled skills; ``mirror_credentials`` defaults on so a headless bot has a provider. */
 export interface ProfilesCreateParams {

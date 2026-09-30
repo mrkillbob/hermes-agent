@@ -1275,6 +1275,9 @@ def test_inspect_pr_projects_requested_feedback_excerpt(
             assert number == 17
             return (feedback,)
 
+        def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+            return self.list_feedback(repository, number)
+
     monkeypatch.setattr("github_pr_feedback.cli.GitHubClient", FakeGitHub)
 
     exit_code = _inspect_pr(
@@ -2491,6 +2494,9 @@ def test_real_hermes_discovers_temp_profile_plugin_and_dry_scan_never_invokes_gh
         {
             "HERMES_HOME": str(profile),
             "HOME": str(tmp_path / "home"),
+            # This checks installed CLI behavior in an empty profile, not
+            # cold-runtime installation into that deliberately isolated home.
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
             "PATH": f"{fake_bin}:{environment.get('PATH', '')}",
         }
     )
@@ -2508,6 +2514,8 @@ def test_real_hermes_discovers_temp_profile_plugin_and_dry_scan_never_invokes_gh
     )
 
     assert completed.returncode == 0, completed.stderr
+    assert "completing source-update dependencies" not in completed.stderr
+    assert "Installing Python dependencies" not in completed.stderr
     assert json.loads(completed.stdout) == {"created": 0, "skipped": {}, "status": "ok"}
     assert marker.exists() is False
 
@@ -2524,7 +2532,14 @@ def test_real_hermes_registers_the_fixed_card_as_blocked_dir_workspace_without_s
     workspace = tmp_path / "exact-head-worktree"
     workspace.mkdir()
     environment = build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
-    environment.update({"HERMES_HOME": str(profile), "HOME": str(tmp_path / "home")})
+    # Keep cold-runtime installation outside this installed-CLI contract.
+    environment.update(
+        {
+            "HERMES_HOME": str(profile),
+            "HOME": str(tmp_path / "home"),
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
+        }
+    )
     for name in (
         "GH_TOKEN",
         "GITHUB_TOKEN",
@@ -2544,6 +2559,8 @@ def test_real_hermes_registers_the_fixed_card_as_blocked_dir_workspace_without_s
         timeout=30,
     )
     assert board.returncode == 0, board.stderr
+    assert "completing source-update dependencies" not in board.stderr
+    assert "Installing Python dependencies" not in board.stderr
     task = replace(kanban_task(), repository_path=workspace)
     argv = _kanban_create_argv(task)
 
@@ -2558,6 +2575,8 @@ def test_real_hermes_registers_the_fixed_card_as_blocked_dir_workspace_without_s
     )
 
     assert created.returncode == 0, created.stderr
+    assert "completing source-update dependencies" not in created.stderr
+    assert "Installing Python dependencies" not in created.stderr
     payload = json.loads(created.stdout)
     assert payload["status"] == "blocked"
     assert payload["workspace_kind"] == "dir"
@@ -2972,6 +2991,9 @@ def test_failed_audit_handoff_dispatches_the_typed_receipt_before_completion(
         def post_issue_comment(self, _repository: str, _pr_number: int, _body: str):
             return None
 
+        def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+            return self.list_feedback(repository, number)
+
     class Runner:
         def __init__(self, _github: object, _ledger: object) -> None:
             pass
@@ -3104,6 +3126,9 @@ def test_audit_handoff_exception_renders_retryable_reason(
 
         def post_issue_comment(self, _repository: str, _pr_number: int, _body: str):
             return None
+
+        def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+            return self.list_feedback(repository, number)
 
     class Ledger:
         def has_pending_mutation(self, repository: str, pr_number: int) -> bool:
@@ -3357,12 +3382,18 @@ class _FakeGitHubComments:
     def post_issue_comment(self, repository: str, number: int, body: str) -> None:
         self.posted.append((repository, number, body))
 
+    def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+        return self.list_feedback(repository, number)
+
 
 class _FakeGitHubCommentsUnavailable(_FakeGitHubComments):
     def list_feedback(self, repository: str, number: int):
         from github_pr_feedback.github_client import GitHubClientError
 
         raise GitHubClientError("boom")
+
+    def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+        return self.list_feedback(repository, number)
 
 
 def _repair_receipt(repository: str = "mrkillbob/luna-bot") -> FeedbackReceipt:
@@ -3580,6 +3611,9 @@ class _FakeGitHubCodex(_FakeGitHubComments):
 
     def list_feedback(self, repository: str, number: int):
         return self._codex_feedback
+
+    def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+        return self.list_feedback(repository, number)
 
 
 def test_retrigger_codex_review_does_not_post_duplicate_requests() -> None:

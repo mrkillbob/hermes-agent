@@ -148,6 +148,9 @@ class FakeGitHub:
         self.feedback_calls.append((repository, number))
         return self.feedback
 
+    def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+        return self.list_feedback(repository, number)
+
     def get_pull_request(self, repository: str, number: int) -> PullRequest:
         self.current_calls.append((repository, number))
         if number == self.current.number:
@@ -4611,3 +4614,105 @@ def test_scan_suppresses_owner_checkpoints_but_keeps_actual_requests(tmp_path: P
         assert result.created == 1
         assert kanban.tasks[0].evidence["feedback_id"] == case
     ledger.close()
+
+
+@pytest.mark.parametrize("body,actionable", [
+    ("> AI code review — automated review for reference; please use your judgment.\n\nReviewed current head `abc1234` — no blocking or non-blocking issues found.", False),
+    ("> AI code review — automated review for reference; please use your judgment.\n\nNo findings — bounded tests passed.", False),
+    ("> AI code review — automated review for reference; please use your judgment.\n\nNo findings on correctness. However [P1] fix the missing gate.", True),
+    ("@Enough1122 Please review the current upstream PR head for correctness, regressions, and merge readiness. This request is specifically for your AI review; do not route it to Codex.", False),
+    ("@Enough1122 Please review the current upstream PR head. This request is specifically for your AI review; fix the missing gate.", True),
+])
+def test_scan_distinguishes_advisory_reports_and_review_requests_from_repairs(tmp_path: Path, body: str, actionable: bool) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    github = FakeGitHub(admitted_pull_request(sha), (feedback("report", body=body, reviewer="owner"),))
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    kanban = RecordingKanban()
+    result = ScanController(policy, ledger, github, kanban, RecordingLocalGit()).scan()
+    assert result.created == int(actionable)
+    ledger.close()
+
+
+def test_scan_ignores_owner_conflict_refresh_receipt(tmp_path: Path) -> None:
+    local_path, sha = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    body = "Conflict refresh completed at exact head `6a7059c92b9b`. Current upstream main was composed with a merge commit. Fresh verification: 20 focused tests passed. No upstream merge performed. Hosted CI remains the verification gate."
+    github = FakeGitHub(admitted_pull_request(sha), (feedback("refresh", body=body, reviewer="owner"),))
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    result = ScanController(policy, ledger, github, RecordingKanban(), RecordingLocalGit()).scan()
+    assert result.created == 0
+    assert result.skipped["self_resolution_receipt"] == 1
+    ledger.close()
+
+
+@pytest.mark.parametrize("resolved_on_revalidation", [False, True, "unavailable"])
+def test_scan_resolution_guard_blocks_recurrence_and_resolution_races(
+    tmp_path: Path, resolved_on_revalidation: bool
+) -> None:
+    from github_pr_feedback.github_client import GitHubClient
+
+    local_path, head = initialized_repository(tmp_path)
+    policy = configured_policy(local_path, not_before="2026-08-24T00:00:00Z")
+    pull = admitted_pull_request(head)
+    old = replace(feedback("1"), kind="review_comment")
+    active = replace(feedback("2"), kind="review_comment")
+
+    class Runner:
+        def __init__(self):
+            self.snapshots = 0
+
+        def run(self, argv):
+            query = next(value[6:] for value in argv if value.startswith("query="))
+            if query == GitHubClient.RESOLUTION_HEAD_QUERY:
+                return json.dumps({"data": {"repository": {"pullRequest": {"headRefOid": head}}}})
+            self.snapshots += 1
+            if resolved_on_revalidation == "unavailable" and self.snapshots > 1:
+                return json.dumps({"errors": [{"message": "coverage unavailable"}]})
+            nodes = [{"id": str(identity), "isResolved": resolved, "comments": {
+                "nodes": [{"databaseId": identity}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+                for identity, resolved in ((1, True), (2, bool(resolved_on_revalidation) and self.snapshots > 1))]
+            return json.dumps({"data": {"repository": {"pullRequest": {
+                "headRefOid": head, "reviewThreads": {"nodes": nodes,
+                "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}})
+
+    class GuardedGitHub(FakeGitHub, GitHubClient):
+        list_actionable_feedback = GitHubClient.list_actionable_feedback
+        _review_resolution_snapshot = GitHubClient._review_resolution_snapshot
+
+    github = GuardedGitHub(pull, (old, active))
+    github._runner = Runner()
+    # GitHubClient's transport normally owns an interprocess gate; this local
+    # fixture exercises the real parser/filter with an in-memory transport.
+    github._json = lambda argv: json.loads(github._runner.run(argv))
+    kanban = RecordingKanban()
+    ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
+    scanner = ScanController(policy, ledger, github, kanban, RecordingLocalGit())
+    result = scanner.scan()
+    assert result.created == (0 if resolved_on_revalidation else 1)
+    assert [task.evidence["feedback_id"] for task in kanban.tasks] == (
+        [] if resolved_on_revalidation else ["2"])
+    ledger.close()
+
+
+@pytest.mark.parametrize("variant", ["checkpoint", "foreign", "request", "generic", "missing_evidence", "oversized"])
+def test_owner_structural_handoff_is_context_but_requests_remain_actionable(variant) -> None:
+    from github_pr_feedback.controller import non_actionable_feedback_reason
+
+    body = '### Structural correction and handoff\n\nThe current state is not acceptance-ready. `execution_legacy.py` is 4,610 lines, 386 above the 4,224-line start of this continuation. The phase-2 typed-owner slice also reduced one function while increasing aggregate production LOC; it is not a net-size reduction. I will not represent either change as solving the root monolith.\n\nThe next implementation step is to remove a concrete existing behavior body from `execution_legacy.py` into an already-existing domain owner, migrate callers, and compare both root and aggregate sizes. No further standalone owner should be introduced unless it replaces a substantial behavior body and leaves no old copy. Pytest remains deferred until production refactoring is complete; no installer changes.\n\nHandoff details are being committed in `docs/superpowers/handoffs/2026-09-22-pr1943-execution-refactor.md`. PR remains draft.'
+    reviewer = "owner"
+    if variant == "foreign":
+        reviewer = "reviewer"
+    elif variant == "request":
+        body += "\n[P1] Please fix the regression before merging."
+    elif variant == "generic":
+        body = "### Structural correction and handoff\n\nContinue this work."
+    elif variant == "missing_evidence":
+        body = body.replace("`execution_legacy.py` is 4,610 lines", "The work is incomplete")
+    elif variant == "oversized":
+        body += "x" * MAX_FEEDBACK_BODY_CHARS
+    item = feedback("checkpoint", reviewer=reviewer, body=body)
+    actual = non_actionable_feedback_reason(SimpleNamespace(github_identity=None), item,
+                                           owner_login="owner")
+    assert actual == ("self_progress_checkpoint" if variant == "checkpoint" else None)

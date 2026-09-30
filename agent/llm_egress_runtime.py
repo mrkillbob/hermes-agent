@@ -79,7 +79,7 @@ from agent.llm_egress_terminal import (
 )
 from agent.message_sanitization import tool_result_id_variants
 from agent.redact import redact_sensitive_text
-from agent.source_provenance import DEFAULT_POLICY_DIGEST, SourceProvenanceRegistry
+from agent.source_provenance import DEFAULT_POLICY_DIGEST, SourceProvenanceError, SourceProvenanceRegistry
 
 
 # Timeout is a non-content SDK control. Header/query values remain in the
@@ -139,6 +139,100 @@ _PRIVATE_PATH_IN_TEXT = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+def _prepare_bound_skill_source_results(
+    body: Mapping[str, Any], registry: SourceProvenanceRegistry,
+    identity: tuple[str, str, str, str],
+) -> Mapping[str, Any]:
+    """Replay exact local skill instructions, never a tool-supplied envelope.
+
+    Only a preceding unique skill_view call may authorize the trusted local
+    resolver's bounded source file. No source path from the result is trusted.
+    Preprocessed/linked/plugin results without this proof remain fail-closed.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return body
+    from tools.skills_tool import _locate_skill, _skill_lookup_path_error, _skill_search_dirs
+
+    all_ids = [call.get("id") for message in messages if isinstance(message, Mapping)
+               and message.get("role") == "assistant"
+               for call in (message.get("tool_calls", ()) or ()) if isinstance(call, Mapping)]
+    duplicates = {item for item in all_ids if isinstance(item, str) and all_ids.count(item) > 1}
+    calls: dict[str, Mapping[str, Any] | None] = {}
+    seen: set[str] = set()
+    projected = []
+    for message in messages:
+        if not isinstance(message, Mapping):
+            projected.append(message)
+            continue
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls", ()) or ():
+                if not isinstance(call, Mapping):
+                    continue
+                call_id = call.get("id")
+                function = call.get("function")
+                if not isinstance(call_id, str):
+                    continue
+                if call_id in seen:
+                    calls[call_id] = None
+                    continue
+                seen.add(call_id)
+                if isinstance(function, Mapping) and function.get("name") == "skill_view":
+                    try:
+                        args = json.loads(function.get("arguments", ""))
+                    except (TypeError, ValueError):
+                        args = None
+                    calls[call_id] = args if isinstance(args, Mapping) else None
+        if message.get("role") != "tool" or message.get("tool_name") != "skill_view":
+            projected.append(message)
+            continue
+        copied = dict(message)
+        raw = message.get("content")
+        # A content-free marker forces the existing final provenance gate to
+        # reject every mismatch without leaking tool bytes or local paths.
+        copied["content"] = UntrustedProvenanceSegment(
+            sha256(str(raw).encode("utf-8")).hexdigest()
+        )
+        try:
+            args = calls.get(message.get("tool_call_id"))
+            if not isinstance(args, Mapping) or args.get("file_path") or message.get("tool_call_id") in duplicates:
+                raise ValueError("unbound_skill")
+            name = args.get("name")
+            if not isinstance(name, str) or ":" in name or _skill_lookup_path_error(name):
+                raise ValueError("unsupported_skill")
+            payload = json.loads(raw) if isinstance(raw, str) else None
+            if not isinstance(payload, Mapping) or payload.get("success") is not True or payload.get("name") != name:
+                raise ValueError("invalid_result")
+            project_dirs, all_dirs, _ = _skill_search_dirs()
+            error, _, source = _locate_skill(name, None, project_dirs, all_dirs)
+            if error is not None or source is None:
+                raise ValueError("missing_source")
+            source = Path(source)
+            if Path(str(payload.get("_source_path", ""))).absolute() != source.absolute():
+                raise ValueError("source_mismatch")
+            from agent.source_provenance import MAX_SOURCE_SLICE_BYTES
+            if source.stat().st_size > MAX_SOURCE_SLICE_BYTES:
+                raise ValueError("source_too_large")
+            with source.open("rb") as handle:
+                data = handle.read(MAX_SOURCE_SLICE_BYTES + 1)
+            if len(data) > MAX_SOURCE_SLICE_BYTES:
+                raise ValueError("source_too_large")
+            text = data.decode("utf-8")
+            result_text = payload.get("content")
+            if not isinstance(result_text, str) or not result_text or result_text not in text:
+                raise ValueError("content_mismatch")
+            grant = registry.issue_file_slice(
+                path=source, line_start=1, line_end=len(text.splitlines()), content=data,
+                session_id=identity[0], turn_id=identity[1], request_id=identity[2],
+                policy_digest=identity[3],
+            )
+            copied["content"] = SourceBoundSegment(source_grant_digest(grant))
+        except (OSError, ValueError, TypeError, UnicodeError, SourceProvenanceError):
+            pass
+        projected.append(copied)
+    return {**body, "messages": projected}
 
 
 def _sanitize_protected_kanban_body(value: Any) -> Any:
@@ -634,6 +728,12 @@ def authorize_agent_sdk_kwargs(
         or DEFAULT_POLICY_DIGEST
     )
     registry = getattr(agent, "_source_provenance_registry", None)
+    if protected_kanban_remote and isinstance(registry, SourceProvenanceRegistry):
+        classification_body = _prepare_bound_skill_source_results(
+            classification_body, registry,
+            (session_id, turn_id, request_id, policy_digest),
+        )
+        body = _sanitize_protected_kanban_body(classification_body)
     grants = (
         registry.grants_for_request(request_id)
         if isinstance(registry, SourceProvenanceRegistry)

@@ -2199,3 +2199,39 @@ def test_nous_invalid_request_without_quota_signal_stays_fatal():
     ), provider="nous", model="meituan/longcat-2.5-preview:free")
     assert result.reason == FailoverReason.format_error
     assert result.retryable is False
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_local_privacy_denial_precedes_provider_hooks_without_recovery(monkeypatch, wrapped):
+    import agent.error_classifier as classifier
+    from agent.llm_egress_firewall import EgressBlocked
+
+    error = (RuntimeError("LLM egress blocked: untrusted_provenance,base64_payload")
+             if wrapped else EgressBlocked(SimpleNamespace(
+                 reason_codes=("untrusted_provenance", "base64_payload"))))
+    monkeypatch.setattr(classifier, "_STAGES", tuple(
+        (lambda _: pytest.fail("provider hook reached"))
+        if stage.__name__ == "_plugin_verdict" else stage
+        for stage in classifier._STAGES
+    ))
+    actual = classifier.classify_api_error(error, provider="nous")
+    assert actual.reason == FailoverReason.egress_policy_blocked
+    assert not any((actual.retryable, actual.should_compress,
+                    actual.should_rotate_credential, actual.should_fallback))
+    assert actual.error_context["egress_reason_codes"] == (
+        "untrusted_provenance", "base64_payload")
+
+
+@pytest.mark.parametrize("error, expected", [
+    (MockAPIError("Provider internal server error", status_code=500), FailoverReason.server_error),
+    (MockAPIError("Quota exceeded", status_code=429), FailoverReason.billing),
+    (TimeoutError("network timeout"), FailoverReason.timeout),
+    (MockAPIError("LLM egress blocked: untrusted_provenance", status_code=500), FailoverReason.server_error),
+    (RuntimeError("Provider said: LLM egress blocked: untrusted_provenance"), FailoverReason.unknown),
+    (RuntimeError("LLM egress blocked: made_up_reason"), FailoverReason.unknown),
+    (RuntimeError("LLM egress blocked: untrusted_provenance\nraw request payload"), FailoverReason.unknown),
+])
+def test_provider_errors_are_not_reclassified_as_local_privacy_denials(error, expected):
+    actual = classify_api_error(error, provider="nous")
+    assert actual.reason == expected
+    assert "egress_reason_codes" not in actual.error_context

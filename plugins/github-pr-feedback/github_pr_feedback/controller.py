@@ -65,6 +65,7 @@ _SELF_RESOLUTION_PREFIXES = (
     "fixed in ",
     "fixed both ",
     "fixed the ",
+    "conflict refresh completed at exact head ",
     "base refresh:",
     "base refresh ",
     "base refresh for this pr:",
@@ -139,7 +140,9 @@ class GitHubReader(Protocol):
         self, repository: str, owner_login: str
     ) -> tuple[PullRequest, ...]: ...
 
-    def list_feedback(self, repository: str, number: int) -> tuple[Feedback, ...]: ...
+    def list_actionable_feedback(
+        self, repository: str, number: int, *, expected_head_sha: str
+    ) -> tuple[Feedback, ...]: ...
 
     def get_pull_request(self, repository: str, number: int) -> PullRequest: ...
 
@@ -546,6 +549,55 @@ class LocalGitRepository:
         return PreparedWorktree(workspace.resolve(), branch, receipt.head_sha)
 
     @staticmethod
+    def _preserve_workspace_venv(workspace: Path) -> bool:
+        """Preserve an existing isolated environment only after a prefix probe."""
+        workspace_root = workspace.resolve(strict=True)
+        destination = workspace / ".venv"
+        try:
+            target = destination.resolve(strict=True)
+        except FileNotFoundError:
+            return False
+        owned = (
+            not destination.is_symlink() and target == workspace_root / ".venv"
+        ) or (
+            target != workspace_root / ".agent-venvs"
+            and target.is_relative_to(workspace_root / ".agent-venvs")
+        )
+        if not owned:
+            return False
+        python = target / "bin/python"
+        if not target.is_dir() or not python.is_file():
+            raise RuntimeError("workspace-owned virtualenv has no usable Python")
+        try:
+            probe = subprocess.run(
+                [str(python), "-I", "-c",
+                 "import json,sys; print(json.dumps({'prefix':sys.prefix,"
+                 "'base_prefix':sys.base_prefix,"
+                 "'version':'.'.join(map(str,sys.version_info[:3]))}))"],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=10, cwd=workspace_root,
+            )
+            payload = json.loads(probe.stdout)
+            if (probe.returncode != 0
+                    or Path(payload["prefix"]).resolve(strict=True) != target
+                    or Path(payload["base_prefix"]).resolve(strict=True) == target
+                    or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", payload["version"]) is None):
+                raise ValueError("interpreter prefix or version is invalid")
+            pin_path = workspace_root / ".python-version"
+            if pin_path.is_file():
+                pin = pin_path.read_text(encoding="utf-8-sig").strip()
+                if re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", pin) is None:
+                    raise ValueError("worktree Python version pin is invalid")
+                actual = payload["version"]
+                if not (actual == pin or (pin.count(".") == 1 and actual.startswith(pin + "."))):
+                    raise ValueError("interpreter does not match the worktree Python pin")
+        except (OSError, subprocess.TimeoutExpired, KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("workspace-owned virtualenv validation failed") from error
+        if destination.resolve(strict=True) != target:
+            raise RuntimeError("workspace-owned virtualenv changed during validation")
+        return True
+
+    @staticmethod
     def _link_governed_venv(repository: Path, workspace: Path) -> None:
         """Expose one verified project-local environment to an exact-head worktree."""
 
@@ -554,6 +606,8 @@ class LocalGitRepository:
         from .worktree_venv import select_environment
 
         destination = workspace / ".venv"
+        if LocalGitRepository._preserve_workspace_venv(workspace):
+            return
         managed_venv_root = (repository_root.parent / "venvs").resolve(strict=False)
         governed_roots = (_LUNABOT_ROOT / ".venv", managed_venv_root)
         source = select_environment(repository, workspace, (repository_root, *governed_roots))
@@ -1537,14 +1591,23 @@ class ScanController:
                         if ci_base_reason == "base_refresh_required":
                             base_refresh_pending = True
                         continue
-                    if not self._ledger.was_actioned_on_any_head(receipt):
-                        feedback_pending = True
                     if self._ledger.was_actioned_on_any_head(receipt):
                         skipped["already_actioned"] += 1
                         continue
                     if attempted >= MAX_ADMISSIONS_PER_SCAN:
+                        feedback_pending = True
                         skipped["admission_cap"] += 1
                         continue
+                    if feedback.kind == "review_comment":
+                        github_errors = skipped["github_error"]
+                        revalidated = self._revalidate(receipt, skipped)
+                        if revalidated is None:
+                            # Uncertain coverage cannot clear the feedback gate.
+                            if skipped["github_error"] > github_errors:
+                                feedback_pending = True
+                            continue
+                        feedback, _, _ = revalidated
+                    feedback_pending = True
                     claimed_at = self._clock()
                     lease = _claim_with_orphan_recovery(
                         self._ledger,
@@ -1788,8 +1851,8 @@ class ScanController:
         """Read one PR's independent feedback and canonical identity off-ledger."""
 
         try:
-            feedback_items = self._github.list_feedback(
-                repository, pull_request.number
+            feedback_items = self._github.list_actionable_feedback(
+                repository, pull_request.number, expected_head_sha=pull_request.head_sha
             )
             current = (
                 self._github.get_pull_request(repository, pull_request.number)
@@ -1824,8 +1887,8 @@ class ScanController:
                 )
                 if checks.actions_enabled and not checks.billing_blocked:
                     return "github_ci_enabled"
-            feedback_items = self._github.list_feedback(
-                current.base_repository, current.number
+            feedback_items = self._github.list_actionable_feedback(
+                current.base_repository, current.number, expected_head_sha=current.head_sha
             )
         except Exception:  # noqa: BLE001 - uncertain readiness must fail closed.
             return "github_error"
@@ -2226,8 +2289,8 @@ class ScanController:
             current = self._github.get_pull_request(
                 receipt.repository, receipt.pr_number
             )
-            feedback_items = self._github.list_feedback(
-                receipt.repository, receipt.pr_number
+            feedback_items = self._github.list_actionable_feedback(
+                receipt.repository, receipt.pr_number, expected_head_sha=receipt.head_sha
             )
         except Exception:  # noqa: BLE001 - an adapter failure must not admit work.
             skipped["github_error"] += 1
@@ -2282,57 +2345,7 @@ class ScanController:
                 return "before_not_before"
         except (AttributeError, ValueError):
             return "invalid_feedback_timestamp"
-        if _is_non_actionable_review_container(feedback):
-            return "non_actionable_review_container"
-        if _is_advisory_lgtm_report(feedback):
-            return "advisory_lgtm_report"
-        if _is_codex_review_summary_tracker(feedback):
-            return "codex_review_summary_tracker"
-        if is_codex_review_request(feedback.body):
-            return "codex_review_request"
-        if (
-            feedback.reviewer.login.casefold() == owner_login.casefold()
-            and _CI_RECEIPT_MARKER.search(feedback.body) is not None
-        ):
-            # The deterministic local-CI publisher owns this marker.  Suppress
-            # it independently of a profile-local ledger: workers may record
-            # the receipt under their profile while the global scanner reads
-            # the comment from the shared GitHub account.
-            return "self_ci_receipt"
-        if (
-            feedback.kind == "issue_comment"
-            and feedback.reviewer.login.casefold() == owner_login.casefold()
-            and re.match(
-                r"^(?:#{1,6}\s+)?(?:Refactor checkpoint:\s*|Implementation update\s*[—-]\s*)"
-                r"`[0-9a-f]{7,40}`(?:[^\n]*)\n",
-                feedback.body.strip(),
-                flags=re.IGNORECASE,
-            )
-            and not re.search(
-                r"\[P[0-3]\]|\b(?:please|must|need(?:s)? to|request(?:ed)?|regression|bug)\b",
-                feedback.body,
-                flags=re.IGNORECASE,
-            )
-        ):
-            return "self_progress_checkpoint"
-        if _is_self_resolution_receipt(feedback, owner_login=owner_login):
-            return "self_resolution_receipt"
-        identity = self._policy.github_identity
-        if (
-            identity is not None
-            and feedback.reviewer.login.casefold() == identity.expected_login.casefold()
-            and feedback.kind in {"issue_comment", "review_comment"}
-            and len(feedback.body) < MAX_FEEDBACK_BODY_CHARS
-            and re.search(
-                r"<!--\s*pr-maintenance-receipt:v1\s+status=completed\s+"
-                r"kind=\w+\s+head=[0-9a-f]{40,64}\s*-->",
-                feedback.body,
-            ) is not None
-        ):
-            # Governed automation has a separate identity from the PR owner.
-            # Its completion receipts must not become new repair requests.
-            return "self_resolution_receipt"
-        return None
+        return non_actionable_feedback_reason(self._policy, feedback, owner_login=owner_login)
 
     def _ci_feedback_base_reason(
         self,
@@ -2845,19 +2858,22 @@ def _is_advisory_lgtm_report(feedback: Feedback) -> bool:
     if feedback.kind not in {"issue_comment", "review_comment", "review"}:
         return False
     body = " ".join(feedback.body.casefold().split())
-    return (
-        "automated review for reference; please use your judgment" in body
-        and re.search(r"\bverdict\s*:\s*lgtm\b", body) is not None
+    reference_report = "automated review for reference; please use your judgment" in body
+    legacy_verdict = (
+        re.search(r"\bverdict\s*:\s*lgtm\b", body) is not None
         and "non-blocking:" in body
-        and not any(
-            marker in body
-            for marker in (
-                "changes requested",
-                "action required",
-                "blocking finding",
-                "must be fixed",
-                "needs to be fixed",
-            )
+    )
+    no_findings_report = (
+        feedback.kind == "issue_comment"
+        and re.search(r"\bno (?:blocking or non-blocking issues found|findings(?:\s|[—:,.]))", body)
+        is not None
+    )
+    return reference_report and (legacy_verdict or no_findings_report) and not any(
+        marker in body
+        for marker in (
+            "changes requested", "action required", "blocking finding", "must be fixed",
+            "needs to be fixed", "[p1]", "[p2]", "p1 badge", "p2 badge",
+            "however", "except", "please fix", "recommend", "blocker remains",
         )
     )
 
@@ -3608,3 +3624,82 @@ def _scan_result(
         ),
         local_ci_catalogue_deferred=local_ci_catalogue_deferred,
     )
+
+def non_actionable_feedback_reason(policy: PluginPolicy, feedback: Feedback, *, owner_login: str) -> str | None:
+    """Classify advisory feedback consistently at intake and dispatch retirement."""
+    if _is_non_actionable_review_container(feedback):
+        return "non_actionable_review_container"
+    if _is_advisory_lgtm_report(feedback):
+        return "advisory_lgtm_report"
+    if _is_codex_review_summary_tracker(feedback):
+        return "codex_review_summary_tracker"
+    if (
+        feedback.kind == "issue_comment"
+        and feedback.reviewer.login.casefold() == owner_login.casefold()
+        and re.match(r"^@[A-Za-z0-9_-]+\s+Please review the current upstream PR head\b", feedback.body)
+        and "specifically for your AI review" in feedback.body
+        and not re.search(r"\[P[0-3]\]|\b(?:fix|repair|regression|bug)\b", feedback.body, re.IGNORECASE)
+    ):
+        return "self_review_request"
+    if is_codex_review_request(feedback.body):
+        return "codex_review_request"
+    if (
+        feedback.reviewer.login.casefold() == owner_login.casefold()
+        and _CI_RECEIPT_MARKER.search(feedback.body) is not None
+    ):
+        # The deterministic local-CI publisher owns this marker.  Suppress
+        # it independently of a profile-local ledger: workers may record
+        # the receipt under their profile while the global scanner reads
+        # the comment from the shared GitHub account.
+        return "self_ci_receipt"
+    if (
+        feedback.kind == "issue_comment"
+        and feedback.reviewer.login.casefold() == owner_login.casefold()
+        and (
+            re.match(
+                r"^(?:#{1,6}\s+)?(?:Refactor checkpoint:\s*|Implementation update\s*[—-]\s*)"
+                r"`[0-9a-f]{7,40}`(?:[^\n]*)\n",
+                feedback.body.strip(),
+                flags=re.IGNORECASE,
+            )
+            or (
+                len(feedback.body) < MAX_FEEDBACK_BODY_CHARS
+                and re.match(
+                    r"^(?:#{1,6}\s+)?Structural correction and handoff\s*\n",
+                    feedback.body.strip(),
+                    flags=re.IGNORECASE,
+                )
+                and re.search(r"`[^`\n]+\.py` is [0-9,]+ lines\b", feedback.body)
+                and re.search(
+                    r"`docs/superpowers/handoffs/[A-Za-z0-9_./-]+\.md`", feedback.body
+                )
+                and "pytest remains deferred until production refactoring is complete"
+                in feedback.body.casefold()
+                and "pr remains draft" in feedback.body.casefold()
+            )
+        )
+        and not re.search(
+            r"\[P[0-3]\]|\b(?:please|must|need(?:s)? to|request(?:ed)?|regression|bug)\b",
+            feedback.body,
+            flags=re.IGNORECASE,
+        )
+    ):
+        return "self_progress_checkpoint"
+    if _is_self_resolution_receipt(feedback, owner_login=owner_login):
+        return "self_resolution_receipt"
+    identity = policy.github_identity
+    if (
+        identity is not None
+        and feedback.reviewer.login.casefold() == identity.expected_login.casefold()
+        and feedback.kind in {"issue_comment", "review_comment"}
+        and len(feedback.body) < MAX_FEEDBACK_BODY_CHARS
+        and re.search(
+            r"<!--\s*pr-maintenance-receipt:v1\s+status=completed\s+"
+            r"kind=\w+\s+head=[0-9a-f]{40,64}\s*-->",
+            feedback.body,
+        ) is not None
+    ):
+        # Governed automation has a separate identity from the PR owner.
+        # Its completion receipts must not become new repair requests.
+        return "self_resolution_receipt"
+    return None

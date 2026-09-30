@@ -67,3 +67,130 @@ def test_revenue_snapshot_excludes_payloads_and_preserves_unavailable_tiers(tmp_
     assert packet["guarded_receipts_verified"] is False
     assert "PRIVATE_PAYLOAD" not in text
     assert str(source) not in text
+
+
+
+def test_discovery_dispatch_seeds_relative_metadata_without_private_source_probes(
+    tmp_path, monkeypatch
+):
+    import json
+    import sqlite3
+    from pathlib import Path
+    import scripts.federation_discovery as discovery
+    from hermes_cli import kanban_db
+    from agent.llm_egress_firewall import content_free_violation_locations
+
+    root = tmp_path / "source"
+    config = root / "configs/federation"
+    config.mkdir(parents=True)
+    spec = {
+        "board": "default",
+        "project_boards": {"hermes-agent": "default"},
+        "max_active": 2,
+        "max_dispatches": 1,
+        "instructions": "Use a 10-minute discovery budget within the 15-minute worker limit. Keep at most two active children; count blocked children. Do not merge, deploy, spend, publish, or install dependencies.",
+        "departments": [
+            {
+                "id": "engineering",
+                "assignee": "architecture-steward",
+                "project": "hermes-agent",
+                "title": "Engineering",
+                "brief": "Read /Users/private/source/AGENTS.md and inspect private payloads.",
+            }
+        ],
+    }
+    (config / "discovery.json").write_text(json.dumps(spec))
+    (config / "roles.json").write_text(
+        json.dumps({
+            "departments": [
+                {
+                    "roles": [
+                        {
+                            "id": "architecture-steward",
+                            "authority": "advisory",
+                            "schedule": "on_demand",
+                            "handoffs": ["coding-expert"],
+                        }
+                    ]
+                }
+            ]
+        })
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db = tmp_path / "board.db"
+    connection = sqlite3.connect(db)
+    connection.execute("CREATE TABLE task_links (parent_id TEXT, child_id TEXT)")
+    connection.close()
+    tasks = [
+        {
+            "id": f"t_{i:08x}",
+            "status": "done",
+            "assignee": "coding-expert",
+            "created_at": i,
+            "body": "PRIVATE_PAYLOAD " + "c2VjcmV0" * 20,
+            "workspace_path": "/Users/private/checkout",
+        }
+        for i in range(35)
+    ]
+    created = []
+
+    def command(_hermes, *argv):
+        if "list" in argv:
+            return tasks
+        created.append(argv)
+        return {"id": "t_ffffffff"}
+
+    monkeypatch.setattr(
+        discovery, "__file__", str(root / "scripts/federation_discovery.py")
+    )
+    monkeypatch.setattr(discovery, "run", command)
+    monkeypatch.setattr(discovery.tempfile, "mkdtemp", lambda **_: str(workspace))
+    monkeypatch.setattr(kanban_db, "kanban_db_path", lambda _: db)
+    monkeypatch.setattr(
+        discovery.sys,
+        "argv",
+        ["federation_discovery.py", "--hermes", "fake", "--apply"],
+    )
+    discovery.main()
+    argv = created[0]
+    body = argv[argv.index("--body") + 1]
+    assert "/Users/" not in body and str(root) not in body
+    assert "discovery-evidence.json" in body and "IDLE" in body
+    assert (
+        "10-minute" in body
+        and "two active children" in body
+        and "blocked children" in body
+    )
+    assert argv[argv.index("--workspace") + 1] == "dir:" + str(workspace)
+    assert argv[argv.index("--max-runtime") + 1] == "15m"
+    packet_text = (workspace / "discovery-evidence.json").read_text()
+    packet = json.loads(packet_text)
+    assert len(packet["task_census"]) == 20
+    assert packet["assigned_role"]["name"] == "architecture steward"
+    assert packet["assigned_role"]["authority"] == "advisory"
+    assert packet["external_evidence_verified"] is False
+    assert "PRIVATE_PAYLOAD" not in packet_text and "/Users/" not in packet_text
+    assert not list(content_free_violation_locations(packet))
+
+
+def test_missing_discovery_registry_is_an_explicit_idle_evidence_gap(tmp_path):
+    import json
+    from scripts.federation_discovery import discovery_body, seed_discovery_evidence
+
+    source = tmp_path / "missing-source"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    seed_discovery_evidence(
+        source,
+        workspace,
+        {"id": "engineering", "assignee": "architecture-steward", "board": "default"},
+        [],
+    )
+    packet = json.loads((workspace / "discovery-evidence.json").read_text())
+    assert packet["assigned_role"]["unverified"] == "registry unavailable"
+    assert packet["external_evidence_verified"] is False
+    assert "IDLE" in discovery_body(
+        {"instructions": "Preserve budgets."}, {"active_children": []}
+    )
+    assert str(source) not in json.dumps(packet)

@@ -138,6 +138,9 @@ class CanonicalFakeGitHub:
             ),
         )
 
+    def list_actionable_feedback(self, repository, number, *, expected_head_sha):
+        return self.list_feedback(repository, number)
+
 
 class RecordingKanban:
     def __init__(self) -> None:
