@@ -391,7 +391,13 @@ def _repair_body(task, finding: WatchdogFinding, run_id: int) -> str:
         "Evidence:\n"
         f"{evidence}\n\n"
         "Find and repair the underlying worker/tooling/profile/config cause. Run "
-        "focused verification, then complete this repair card with a factual "
+        "focused verification. Start with one bounded check of the assigned workspace "
+        "and its interpreter; use the host's native command syntax. A missing "
+        "optional receipt is not a broken checkout: do not invent or repeatedly "
+        "probe artifact paths. Never execute a redacted path from captured logs. "
+        "After two failed probes of the same cause, stop probing and record the "
+        "verified blocker for operator recovery rather than repeating a command "
+        "cycle. Then complete this repair card only with a factual "
         "receipt. Do not complete or merge the original task."
     )
 
