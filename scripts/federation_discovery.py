@@ -56,6 +56,34 @@ def run(hermes, *args):
     return json.loads(result.stdout)
 
 
+
+def seed_revenue_evidence(source: Path, workspace: Path) -> None:
+    """Keep bounded readiness facts in the scratch workspace, not private payloads."""
+    packet = {"observed_at": datetime.now(timezone.utc).isoformat(), "configs": {}}
+    for name in ("model_routing_policy", "cron_fleet"):
+        config = source / "config" / (name + ".json")
+        try:
+            payload = json.loads(config.read_text(encoding="utf-8-sig"))
+            if name == "model_routing_policy":
+                facts = {tier: {"status": value.get("status")}
+                         for tier, value in payload["tiers"].items()}
+            else:
+                facts = {key: {"enabled": value.get("enabled"), "tier": value.get("tier")}
+                         for key, value in payload["jobs"].items()}
+            packet["configs"][name] = {"facts": facts}
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            packet["configs"][name] = {"unverified": type(error).__name__}
+    packet["guarded_receipts_verified"] = False
+    packet["instructions"] = (
+        "Read this bounded readiness snapshot first. Unavailable tiers are intentional gates. "
+        "It is not benchmark promotion, demand evidence, or permission to execute workloads. "
+        "Without a current guarded receipt and a reproduced defect, finish IDLE, name the "
+        "evidence gap, and create no child. Do not search unrelated worktrees or raw logs. "
+        "Reserve the final two minutes for a terminal Kanban result."
+    )
+    (workspace / "readiness-evidence.json").write_text(json.dumps(packet, indent=2), encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--hermes', required=True)
@@ -94,6 +122,19 @@ def main():
                 + spec['instructions'] + '\nExisting active children: ' + ', '.join(department['active_children'])
                 + '\n\nDepartment assignment: ' + department['brief'])
         workspace = tempfile.mkdtemp(prefix='hermes-discovery-' + department['id'] + '-')
+        if department['id'] == 'revenue_lab' and department.get('evidence_root'):
+            seed_revenue_evidence(Path(department['evidence_root']), Path(workspace))
+            body = (
+                'Run a read-only revenue readiness audit from readiness-evidence.json in this '
+                'workspace. The producer has collected only tier and job availability facts. '
+                'Do not load raw profile logs, private opportunity payloads, or unrelated project '
+                'trees. Unavailable tiers are intentional; do not bypass benchmark, governor, '
+                'compliance or approval gates. Admit a child only for a reproduced defect with '
+                'current guarded evidence, and reuse an existing owner. If that evidence is '
+                'absent, complete IDLE with the exact gap and no children. Spend at most five '
+                'minutes on evidence and reserve two minutes for kanban_complete. No workloads, '
+                'publication, spending, or outside contact are authorized by this discovery task.'
+            )
         result = run(args.hermes, 'kanban', '--board', department['board'], 'create',
                      department['task_title'],
                      '--body', body, '--assignee', department['assignee'],

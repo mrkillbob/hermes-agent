@@ -24,7 +24,7 @@ def test_classifier_fetch_retries_without_decoding_failed_responses(tmp_path, re
     encoded = base64.b64encode(b"classifier contents\n").decode()
     gh = bin_dir / "gh"
     gh.write_text(
-        "#!/bin/bash\n"
+        "#!/usr/bin/env bash\n"
         'echo "$*" >> "$CALLS"\n'
         'if [ ! -f "$FAILED" ] || [ "$RECOVER" = false ]; then\n'
         '  touch "$FAILED"\n'
@@ -36,7 +36,7 @@ def test_classifier_fetch_retries_without_decoding_failed_responses(tmp_path, re
     )
     gh.chmod(0o755)
     sleep = bin_dir / "sleep"
-    sleep.write_text("#!/bin/bash\nexit 0\n")
+    sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
     sleep.chmod(0o755)
     calls = tmp_path / "calls"
     env = {

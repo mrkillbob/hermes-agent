@@ -42,3 +42,28 @@ def test_department_routes_to_its_project_board_and_keeps_cross_board_ownership(
     assert {item["project"]: item["board"] for item in planned} == spec["project_boards"]
     existing = [dict(id="old", status="blocked", created_by="federation-discovery-arts", assignee="artist")]
     assert [item["project"] for item in plan_discovery(spec, existing, "2026-09-23")] == ["trading"]
+
+
+def test_revenue_snapshot_excludes_payloads_and_preserves_unavailable_tiers(tmp_path):
+    import json
+    from scripts.federation_discovery import seed_revenue_evidence
+
+    source = tmp_path / "source"
+    config = source / "config"
+    config.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (config / "model_routing_policy.json").write_text(json.dumps({
+        "tiers": {"coding": {"status": "unavailable", "token": "PRIVATE_PAYLOAD"}}
+    }))
+    (config / "cron_fleet.json").write_text(json.dumps({
+        "jobs": {"coding": {"enabled": False, "tier": "coding", "prompt": "PRIVATE_PAYLOAD"}}
+    }))
+    seed_revenue_evidence(source, workspace)
+    text = (workspace / "readiness-evidence.json").read_text()
+    packet = json.loads(text)
+    assert packet["configs"]["model_routing_policy"]["facts"]["coding"]["status"] == "unavailable"
+    assert packet["configs"]["cron_fleet"]["facts"]["coding"]["enabled"] is False
+    assert packet["guarded_receipts_verified"] is False
+    assert "PRIVATE_PAYLOAD" not in text
+    assert str(source) not in text
