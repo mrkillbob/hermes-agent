@@ -17,7 +17,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { _electron, type ElectronApplication, expect, type Page } from '@playwright/test'
+import { _electron, type ElectronApplication, expect, type Page, test } from '@playwright/test'
 
 import { type CoreSandbox, type ProcInfo, providerConfigYaml, sandboxProcesses } from '../core/harness'
 import { type ScriptedProvider, startScriptedProvider } from '../core/provider'
@@ -453,6 +453,39 @@ export function updateLogLines(facts: InstallFacts, offset = 0): string {
     .join('\n')
 }
 
+async function attachUpdateRendererState(launched: LaunchedApp, phase: string, rendererErrorCount: number): Promise<void> {
+  // Structural metadata only: never attach renderer text, screenshots, URLs or error messages.
+  let deadline: ReturnType<typeof setTimeout> | undefined
+
+  const snapshot = await Promise.race([launched.page.evaluate(() => {
+    const desktop = (window as unknown as { hermesDesktop?: { updates?: unknown } }).hermesDesktop
+
+    const buttons = [...document.querySelectorAll('button')].filter(button =>
+      /^update now$/i.test(button.textContent?.trim() ?? '')
+    )
+
+    return {
+      desktopBridgeAvailable: Boolean(desktop),
+      updateBridgeAvailable: Boolean(desktop?.updates),
+      dialogs: document.querySelectorAll('[role="dialog"]').length,
+      updateButtons: buttons.length,
+      updateButtonsDisabled: buttons.filter(button => button.disabled).length
+    }
+  }).catch(() => null), new Promise<null>(resolve => {
+    deadline = setTimeout(() => resolve(null), 2_000)
+  })]).finally(() => clearTimeout(deadline))
+
+  await test.info().attach(`update-renderer-${phase}`, {
+    contentType: 'application/json',
+    body: Buffer.from(JSON.stringify({
+      pageClosed: launched.page.isClosed(),
+      rendererErrorCount,
+      snapshotAvailable: snapshot !== null,
+      ...(snapshot !== null ? snapshot : {})
+    }, null, 2))
+  })
+}
+
 /**
  * Click the About panel's "Update now" and wait until the app either quits for
  * the hand-off or logs why it did not. The final assertion is gated on the
@@ -464,15 +497,32 @@ export async function clickUpdateNowAndExpectHandoff(launched: LaunchedApp, fact
   launched.app.process().once('exit', () => {
     quit = true
   })
-  await launched.page
-    .getByRole('button', { name: /^update now$/i })
-    .first()
-    .click()
-  await waitFor(
-    'the app to quit for the update hand-off, or to log why it did not',
-    () => quit || /\[updates\] .*(fail|cancel|refus|could not|already running)/i.test(updateLogLines(facts, offset)),
-    { timeout: 120_000, explain: () => diagnostics(facts, launched.logTail()) }
-  )
+  let rendererErrorCount = 0
+
+  const onRendererError = () => { rendererErrorCount += 1 }
+
+  launched.page.on('pageerror', onRendererError)
+
+  try {
+    await attachUpdateRendererState(launched, 'before-click', rendererErrorCount)
+    await launched.page
+      .getByRole('button', { name: /^update now$/i })
+      .first()
+      .click()
+    await attachUpdateRendererState(launched, 'after-click', rendererErrorCount)
+    await waitFor(
+      'the app to quit for the update hand-off, or to log why it did not',
+      () => quit || /\[updates\] .*(fail|cancel|refus|could not|already running)/i.test(updateLogLines(facts, offset)),
+      { timeout: 120_000, explain: () => diagnostics(facts, launched.logTail()) }
+    )
+  } catch (error) {
+    await attachUpdateRendererState(launched, 'handoff-failure', rendererErrorCount)
+
+    throw error
+  } finally {
+    launched.page.off('pageerror', onRendererError)
+  }
+
   await gatedOn(KNOWN.preflightPython, () => {
     expect(
       quit,
