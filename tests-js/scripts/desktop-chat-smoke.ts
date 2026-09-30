@@ -102,6 +102,42 @@ export async function readMockPrompts(mockUrl: string): Promise<string[]> {
   return z.object({ receivedPrompts: z.array(z.string()) }).parse(await response.json()).receivedPrompts
 }
 
+export interface ComposerClickPosition { x: number; y: number }
+
+/** Read-only hit testing also handles an editor clipped by a historical pane. */
+export function composerClickPosition(editor: Element): ComposerClickPosition | null {
+  const rect = editor.getBoundingClientRect()
+  const left = Math.max(0, rect.left)
+  const right = Math.min(window.innerWidth, rect.right)
+  const top = Math.max(0, rect.top)
+  const bottom = Math.min(window.innerHeight, rect.bottom)
+
+  if (right <= left || bottom <= top) { return null }
+
+  for (const yFraction of [0.5, 0.25, 0.75, 0.1, 0.9]) {
+    for (const xFraction of [0.5, 0.25, 0.75, 0.1, 0.9]) {
+      const x = left + (right - left) * xFraction
+      const y = top + (bottom - top) * yFraction
+      const hit = document.elementFromPoint(x, y)
+
+      if (hit && editor.contains(hit)) { return { x: x - rect.left, y: y - rect.top } }
+    }
+  }
+
+  return null
+}
+
+async function clickComposer(composer: Locator, trial: boolean, timeoutMs = 120_000): Promise<void> {
+  let position: ComposerClickPosition | null = null
+
+  await expect.poll(async () => {
+    position = await composer.evaluate(composerClickPosition)
+
+    return position !== null
+  }, { timeout: timeoutMs, message: 'Composer must have a visible, unobstructed input point' }).toBe(true)
+  await composer.click({ trial, position: position!, timeout: timeoutMs })
+}
+
 export async function waitForChatReady(page: Page, timeoutMs = 120_000): Promise<Locator> {
   // The visible editor is a contentEditable div. assistant-ui also renders an
   // aria-hidden, sr-only <textarea> that carries the composer binding: it is
@@ -119,9 +155,7 @@ export async function waitForChatReady(page: Page, timeoutMs = 120_000): Promise
   try {
     await composer.waitFor({ state: 'visible', timeout: timeoutMs })
     await expect(composer).toBeEditable({ timeout: timeoutMs })
-    // Empty historical editors have no intrinsic line box: hit-test their
-    // padding rather than the collapsed center. This still rejects boot overlays.
-    await composer.click({ trial: true, position: { x: 2, y: 2 }, timeout: timeoutMs })
+    await clickComposer(composer, true, timeoutMs)
   } catch (error) {
     throw new Error(`${(error as Error).message} -- composer not interactable `
       + `(composer-root=${await root.count()}, contenteditable=${await root.locator('[contenteditable]').count()}): `
@@ -252,7 +286,7 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
     if (expectCommit) { assertChatCommit(identity, expectCommit, options.provenanceCommit) }
     const beforeIds = (await readTranscript(page)).map((message: TranscriptMessage): string => message.id)
     const before = (await observe()).length
-    await composer.click({ position: { x: 2, y: 2 } })
+    await clickComposer(composer, false)
     await expect(composer).toBeFocused()
     // The app persists its composer draft across launches, so a checkpoint that
     // types on top of a restored draft can submit the PREVIOUS checkpoint's text
