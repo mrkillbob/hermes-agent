@@ -144,6 +144,7 @@ def _branch_tip(repository: str | None, branch: str, root: Path, git: str,
     # A successful empty ref advertisement alone proves a branch was deleted.
     # GitHub 404 can also mean a private repository: it must not heal a branch.
     failure = None
+    api_throttled = False
     if repository:
         from hermes_cli.github_api import describe_github_failure, github_token
         try:
@@ -152,11 +153,18 @@ def _branch_tip(repository: str | None, branch: str, root: Path, git: str,
         except Exception as exc:
             sha = None
             failure = describe_github_failure(exc, authenticated=github_token() is not None)
+            api_throttled = isinstance(exc, urllib.error.HTTPError) and (
+                exc.code == 429 or (
+                    exc.code == 403 and (exc.headers or {}).get("X-RateLimit-Remaining") == "0"
+                )
+            )
         if _is_full_sha(sha):
             return sha, False, None
         if failure is None:
             failure = "api.github.com returned no commit for the branch."
-        if branch == "main" and remote == "origin":
+        # A rate-limited REST API does not prevent the same read-only Git
+        # advertisement. Keep other main-branch API failures fail-closed.
+        if branch == "main" and remote == "origin" and not api_throttled:
             return None, False, failure
     result = _git_run(["ls-remote", "--exit-code", "--heads", remote, f"refs/heads/{branch}"],
                       cwd=root, git=git, timeout=10)
