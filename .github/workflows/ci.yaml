@@ -86,8 +86,23 @@ jobs:
           set -euo pipefail
           for path in .github/actions/detect-changes/action.yml scripts/ci/classify_changes.py; do
             mkdir -p "$(dirname "$path")"
-            gh api "repos/${CLASSIFIER_REPOSITORY}/contents/${path}?ref=${CLASSIFIER_REF}" --jq .content \
-              | base64 --decode > "$path"
+            # GitHub can throttle even authenticated requests. Decode only a
+            # successful response so an API error cannot become action source.
+            response="$(mktemp)"
+            trap 'rm -f "$response"' EXIT
+            for attempt in 1 2 3; do
+              if gh api "repos/${CLASSIFIER_REPOSITORY}/contents/${path}?ref=${CLASSIFIER_REF}" --jq .content > "$response"; then
+                break
+              fi
+              if [ "$attempt" = 3 ]; then
+                echo "::error::Classifier fetch failed after 3 attempts: $path"
+                exit 1
+              fi
+              echo "::warning::Classifier fetch failed (attempt $attempt); retrying in 10s"
+              sleep 10
+            done
+            base64 --decode < "$response" > "$path"
+            rm -f "$response"
           done
       - name: Detect affected areas
         id: classify
