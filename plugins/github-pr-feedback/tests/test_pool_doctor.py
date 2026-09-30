@@ -8,6 +8,8 @@ import sqlite3
 import tempfile
 import unittest
 
+from tools.environments.local import build_subprocess_env
+
 from github_pr_feedback.pool_doctor import classify, inventory, read_ledger
 
 
@@ -145,7 +147,10 @@ class PoolDoctorTests(unittest.TestCase):
                  "--pool-root", str(root), "--ledger", str(root / "missing.sqlite3"),
                  "--evidence", str(evidence)],
                 check=True, capture_output=True, text=True,
-                env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+                env=build_subprocess_env(
+                    inherit_profile_home=False,
+                    extra={"PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+                ),
             )
             self.assertFalse(json.loads(result.stdout)["destructive_actions_supported"])
 
