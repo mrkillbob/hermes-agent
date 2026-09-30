@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { type ConsoleMessage, expect, type Locator, type Page } from '@playwright/test'
+import { type ConsoleMessage, errors, expect, type Locator, type Page } from '@playwright/test'
 import { z } from 'zod'
 
 import { validateMockUrl } from './mock-provider-config.ts'
@@ -127,15 +127,26 @@ export function composerClickPosition(editor: Element): ComposerClickPosition | 
   return null
 }
 
-async function clickComposer(composer: Locator, trial: boolean, timeoutMs = 120_000): Promise<void> {
-  let position: ComposerClickPosition | null = null
+export async function clickComposer(composer: Locator, trial: boolean, timeoutMs = 120_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
 
   await expect.poll(async () => {
-    position = await composer.evaluate(composerClickPosition)
+    const position = await composer.evaluate(composerClickPosition)
 
-    return position !== null
-  }, { timeout: timeoutMs, message: 'Composer must have a visible, unobstructed input point' }).toBe(true)
-  await composer.click({ trial, position: position!, timeout: timeoutMs })
+    if (position === null) { return false }
+
+    try {
+      // Startup layout and Playwright's scrolling can invalidate this point.
+      // Bound each attempt so the next one measures the current editor geometry.
+      await composer.click({ trial, position, timeout: Math.min(2000, Math.max(1, deadline - Date.now())) })
+
+      return true
+    } catch (error) {
+      if (!(error instanceof errors.TimeoutError)) { throw error }
+
+      return false
+    }
+  }, { timeout: timeoutMs, message: 'Composer must accept a normal click at a visible input point' }).toBe(true)
 }
 
 export async function waitForChatReady(page: Page, timeoutMs = 120_000): Promise<Locator> {

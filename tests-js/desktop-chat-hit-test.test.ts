@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
+import { errors, type Locator } from '@playwright/test'
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { composerClickPosition } from './scripts/desktop-chat-smoke.ts'
+import { clickComposer, composerClickPosition } from './scripts/desktop-chat-smoke.ts'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -35,4 +36,20 @@ test('refuses an editor completely covered by a boot overlay', () => {
   Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => overlay })
 
   expect(composerClickPosition(editor)).toBeNull()
+})
+
+test('remeasures a click point after layout changes without swallowing a closed-page error', async () => {
+  const evaluate = vi.fn().mockResolvedValueOnce({ x: 30, y: 4 }).mockResolvedValue({ x: 70, y: 8 })
+  const click = vi.fn().mockRejectedValueOnce(new errors.TimeoutError('old point moved')).mockResolvedValue(undefined)
+  const composer = { evaluate, click } as unknown as Locator
+
+  await clickComposer(composer, true, 2000)
+  expect(click.mock.calls.map(([options]) => options.position)).toEqual([{ x: 30, y: 4 }, { x: 70, y: 8 }])
+  expect(click.mock.calls.every(([options]) => options.trial && !options.force)).toBe(true)
+
+  const closed = new Error('Target page has been closed')
+
+  click.mockReset().mockRejectedValue(closed)
+  await expect(clickComposer(composer, false, 2000)).rejects.toThrow('Target page has been closed')
+  expect(click).toHaveBeenCalledTimes(1)
 })
