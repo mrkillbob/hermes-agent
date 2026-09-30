@@ -4352,11 +4352,13 @@ def test_nous_replays_canonical_task_spec_without_legacy_marker(tmp_path, monkey
     assert "Repair current assignment" in rendered
     assert "read_file calls with narrow line ranges" in rendered
     assert "Omitted output is not a missing checkout" in rendered
-    assert "artifacts/kanban/current_head.txt" in rendered
+    assert "artifacts/kanban/current_head.txt" not in rendered
+    assert "Do not create or read a temporary HEAD receipt" in rendered
+    assert "exit code 0 verifies the match" in rendered
     assert "HERMES_KANBAN_HERMES_PYTHON" in rendered
     assert "with -P -m hermes_cli.main" in rendered
     assert "with -E -P" not in rendered
-    assert "preserve preexisting" in rendered
+    assert "Preserve preexisting" in rendered
     assert "instead of repeating Python wrappers" in rendered
     assert "Inspect current checkout." in rendered
     assert "super-secret-value" not in rendered
@@ -4586,3 +4588,37 @@ def test_runtime_denial_logs_input_and_selected_grant_counts_only(tmp_path, monk
     assert "UntrustedProvenanceSegment" in caplog.text
     assert "private-hash" not in caplog.text
     assert "verified source" not in caplog.text
+
+
+def test_head_match_workflow_uses_actual_git_without_source_receipts(tmp_path):
+    import subprocess
+    import sys
+    from agent.llm_egress_classifier import _GIT_HEAD_MATCH_CODE
+    from tools.environments.local import build_subprocess_env
+
+    env = build_subprocess_env(inherit_profile_home=False)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(workspace)], check=True, env=env)
+    subprocess.run([
+        "git", "-C", str(workspace), "-c", "user.name=Test",
+        "-c", "user.email=test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "root",
+    ], check=True, env=env)
+    head = subprocess.run(
+        ["git", "-C", str(workspace), "rev-parse", "HEAD"], check=True,
+        capture_output=True, text=True, env=env,
+    ).stdout.strip()
+    for expected, status in ((head, 0), ("0" * 40, 1)):
+        result = subprocess.run(
+            [sys.executable, "-c", _GIT_HEAD_MATCH_CODE, expected], cwd=workspace,
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+        assert result.returncode == status
+        assert result.stdout == result.stderr == ""
+    assert set(workspace.iterdir()) == {workspace / ".git"}
+    missing = subprocess.run(
+        [sys.executable, "-c", _GIT_HEAD_MATCH_CODE, head], cwd=tmp_path,
+        capture_output=True, text=True, env=env, timeout=10,
+    )
+    assert missing.returncode == 1
+    assert missing.stdout == missing.stderr == ""
