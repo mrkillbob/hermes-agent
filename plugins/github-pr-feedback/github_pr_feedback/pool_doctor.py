@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 from typing import Any
 
 _REPO = re.compile(r"repo-[0-9a-f]{16}\Z")
@@ -69,6 +70,18 @@ def classify(lease: dict[str, Any] | None, evidence: dict[str, Any],
     return reasons
 
 
+def _is_link(path: Path) -> bool:
+    """Do not traverse symlinks or Windows reparse points, including junctions."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
 def _children(path: Path) -> list[Path]:
     # Fixed three-level metadata walk; no worktree contents or link traversal.
     with os.scandir(path) as entries:
@@ -81,21 +94,21 @@ def inventory(root: Path, ledger: dict[str, Any],
     rows: list[dict[str, Any]] = []
     issues: list[str] = []
     by_id = {row["slot_id"]: row for row in ledger.get("rows", [])}
-    if root.is_symlink():
+    if _is_link(root):
         return {"slots": [], "generations": [], "issues": ["pool_root_symlink"],
                 "destructive_actions_supported": False}
     try:
         for repository in _children(root):
             if not _REPO.fullmatch(repository.name):
                 continue
-            if repository.is_symlink() or not repository.is_dir():
+            if _is_link(repository) or not repository.is_dir():
                 issues.append("repository_not_traversed:" + repository.name)
                 continue
             for source in _children(repository):
                 match = _SOURCE.fullmatch(source.name)
                 if not match:
                     continue
-                if source.is_symlink() or not source.is_dir():
+                if _is_link(source) or not source.is_dir():
                     issues.append("source_not_traversed:" + source.name)
                     continue
                 namespace = match.group(1)
@@ -109,8 +122,8 @@ def inventory(root: Path, ledger: dict[str, Any],
                     lease = by_id.get(ledger_id)
                     reasons = classify(lease, proof,
                                        ledger_available=ledger.get("available") is True,
-                                       symlink=path.is_symlink())
-                    if slot_id >= 16 or (not path.is_symlink() and not path.is_dir()):
+                                       symlink=_is_link(path))
+                    if slot_id >= 16 or (not _is_link(path) and not path.is_dir()):
                         reasons.append("unexpected_slot_layout")
                     identity = proof.get("source_identity")
                     if not isinstance(identity, str) or sha256(identity.encode()).hexdigest()[:16] != namespace:
@@ -118,7 +131,7 @@ def inventory(root: Path, ledger: dict[str, Any],
                     venv = path / ".venv"
                     # A slot symlink must not lead even a metadata probe outside root.
                     venv_target = None
-                    if not path.is_symlink() and venv.is_symlink():
+                    if not _is_link(path) and _is_link(venv):
                         venv_target = os.readlink(venv)
                     size = proof.get("logical_bytes")
                     if type(size) is not int or size < 0:
@@ -166,7 +179,7 @@ def main() -> None:
     parser.add_argument("--evidence", type=Path,
                         help="Explicit owner-collected proof keyed by exact slot path; no probing")
     args = parser.parse_args()
-    evidence = json.loads(args.evidence.read_text()) if args.evidence else {}
+    evidence = json.loads(args.evidence.read_text(encoding="utf-8-sig")) if args.evidence else {}
     print(json.dumps(inventory(args.pool_root, read_ledger(args.ledger), evidence), indent=2))
 
 

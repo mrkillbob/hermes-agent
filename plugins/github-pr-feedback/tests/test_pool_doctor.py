@@ -1,4 +1,8 @@
 import hashlib
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -14,6 +18,22 @@ def proof():
             "config_reference": False, "process_reference": False,
             "board_statuses": ["done"], "lease_binding_resolved": True,
             "logical_bytes": 123, "source_identity": "/source"}
+
+
+def make_directory_link(path, target):
+    if os.name == "nt":
+        # Native directory junctions require no symlink privilege or elevation.
+        subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(path), str(target)],
+                       check=True, capture_output=True, text=True)
+    else:
+        path.symlink_to(target, target_is_directory=True)
+
+
+def remove_directory_link(path):
+    if os.name == "nt":
+        os.rmdir(path)
+    else:
+        path.unlink()
 
 
 class PoolDoctorTests(unittest.TestCase):
@@ -83,19 +103,19 @@ class PoolDoctorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "pool"; slot, lid = self.make_slot(root, "/source")
             outside = Path(temp) / "outside"; outside.mkdir()
-            (slot / ".venv").symlink_to(outside, target_is_directory=True)
+            make_directory_link(slot / ".venv", outside)
             snap = {"available": True, "rows": [{"slot_id": lid, "status": "free"}]}
             result = inventory(root, snap)
             self.assertEqual(result["slots"][0]["venv_link_target"], str(outside))
             self.assertIsNone(result["slots"][0]["logical_bytes"])
             # Replace the whole slot with a link; never inspect its contents.
-            (slot / ".venv").unlink(); slot.rmdir(); slot.symlink_to(outside, target_is_directory=True)
+            remove_directory_link(slot / ".venv"); slot.rmdir(); make_directory_link(slot, outside)
             result = inventory(root, snap, {str(slot): proof()})
             self.assertIn("symlink_not_traversed", result["slots"][0]["protection_reasons"])
             self.assertIsNone(result["slots"][0]["venv_link_target"])
-            (root / ("repo-" + "b" * 16)).symlink_to(outside, target_is_directory=True)
+            make_directory_link(root / ("repo-" + "b" * 16), outside)
             self.assertTrue(inventory(root, snap)["issues"])
-            alias = Path(temp) / "alias"; alias.symlink_to(root, target_is_directory=True)
+            alias = Path(temp) / "alias"; make_directory_link(alias, root)
             self.assertEqual(inventory(alias, snap)["issues"], ["pool_root_symlink"])
 
     def test_ambiguous_namespace_ledger_identity_is_protected_globally(self):
@@ -114,6 +134,20 @@ class PoolDoctorTests(unittest.TestCase):
                                {str(slot): proof()})
             self.assertIn("source_identity_hash_unresolved", result["slots"][0]["protection_reasons"])
             self.assertIn("inventory_incomplete", inventory(root / "missing", {"available": False})["issues"])
+
+    def test_cli_reads_utf8_bom_evidence_without_locale_assumptions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            evidence = root / "evidence.json"
+            evidence.write_bytes(b"\xef\xbb\xbf{}")
+            result = subprocess.run(
+                [sys.executable, "-m", "github_pr_feedback.pool_doctor",
+                 "--pool-root", str(root), "--ledger", str(root / "missing.sqlite3"),
+                 "--evidence", str(evidence)],
+                check=True, capture_output=True, text=True,
+                env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+            )
+            self.assertFalse(json.loads(result.stdout)["destructive_actions_supported"])
 
 
 if __name__ == "__main__":
