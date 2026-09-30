@@ -2493,6 +2493,9 @@ def test_real_hermes_discovers_temp_profile_plugin_and_dry_scan_never_invokes_gh
         {
             "HERMES_HOME": str(profile),
             "HOME": str(tmp_path / "home"),
+            # This checks installed CLI behavior in an empty profile, not
+            # cold-runtime installation into that deliberately isolated home.
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
             "PATH": f"{fake_bin}:{environment.get('PATH', '')}",
         }
     )
@@ -2510,6 +2513,8 @@ def test_real_hermes_discovers_temp_profile_plugin_and_dry_scan_never_invokes_gh
     )
 
     assert completed.returncode == 0, completed.stderr
+    assert "completing source-update dependencies" not in completed.stderr
+    assert "Installing Python dependencies" not in completed.stderr
     assert json.loads(completed.stdout) == {"created": 0, "skipped": {}, "status": "ok"}
     assert marker.exists() is False
 
@@ -2526,7 +2531,14 @@ def test_real_hermes_registers_the_fixed_card_as_blocked_dir_workspace_without_s
     workspace = tmp_path / "exact-head-worktree"
     workspace.mkdir()
     environment = os.environ.copy()
-    environment.update({"HERMES_HOME": str(profile), "HOME": str(tmp_path / "home")})
+    # Keep cold-runtime installation outside this installed-CLI contract.
+    environment.update(
+        {
+            "HERMES_HOME": str(profile),
+            "HOME": str(tmp_path / "home"),
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
+        }
+    )
     for name in (
         "GH_TOKEN",
         "GITHUB_TOKEN",
@@ -2546,6 +2558,8 @@ def test_real_hermes_registers_the_fixed_card_as_blocked_dir_workspace_without_s
         timeout=30,
     )
     assert board.returncode == 0, board.stderr
+    assert "completing source-update dependencies" not in board.stderr
+    assert "Installing Python dependencies" not in board.stderr
     task = replace(kanban_task(), repository_path=workspace)
     argv = _kanban_create_argv(task)
 
@@ -2560,6 +2574,8 @@ def test_real_hermes_registers_the_fixed_card_as_blocked_dir_workspace_without_s
     )
 
     assert created.returncode == 0, created.stderr
+    assert "completing source-update dependencies" not in created.stderr
+    assert "Installing Python dependencies" not in created.stderr
     payload = json.loads(created.stdout)
     assert payload["status"] == "blocked"
     assert payload["workspace_kind"] == "dir"
