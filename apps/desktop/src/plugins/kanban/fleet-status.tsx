@@ -119,7 +119,7 @@ function fleetCopy(status: FleetStatusResponse | undefined): string {
 }
 
 export function FleetStatusPanel() {
-  const { data, isFetching, refetch } = useQuery({
+  const { data, error, isFetching, refetch } = useQuery({
     queryKey: FLEET_STATUS_KEY,
     queryFn: fetchFleetStatus,
     refetchInterval: 5_000,
@@ -127,13 +127,23 @@ export function FleetStatusPanel() {
     staleTime: 2_000
   })
 
-  const nodes = useMemo(() => groupFleetNodes(data?.runners ?? []), [data?.runners])
+  const status: FleetStatusResponse | undefined = error
+    ? {
+        enabled: true,
+        reachable: false,
+        error: 'Could not reach the coordinator. Refresh to try again.',
+        runners: [],
+        tasks: []
+      }
+    : data
+
+  const nodes = useMemo(() => groupFleetNodes(status?.runners ?? []), [status?.runners])
   const activeTasks = useMemo(
-    () => (data?.tasks ?? []).filter(task => task.status === 'pending' || task.status === 'running'),
-    [data?.tasks]
+    () => (status?.tasks ?? []).filter(task => task.status === 'pending' || task.status === 'running'),
+    [status?.tasks]
   )
 
-  if (data && !data.enabled) {
+  if (status && !status.enabled) {
     return null
   }
 
@@ -148,10 +158,10 @@ export function FleetStatusPanel() {
         <span
           className={cn(
             'rounded-full px-1.5 py-px text-[0.625rem] tabular-nums',
-            data?.reachable ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'
+            status?.reachable ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'
           )}
         >
-          {fleetCopy(data)}
+          {fleetCopy(status)}
         </span>
         <Button
           aria-label="Refresh runner pool"
@@ -165,9 +175,9 @@ export function FleetStatusPanel() {
         </Button>
       </div>
 
-      {!data?.reachable ? (
+      {!status?.reachable ? (
         <p className="text-[0.6875rem] text-(--ui-text-tertiary)">
-          {data?.error ?? 'Connecting to the shared coordinator…'}
+          {status?.error ?? 'Connecting to the shared coordinator…'}
         </p>
       ) : (
         <>
