@@ -132,6 +132,30 @@ export async function clickComposer(composer: Locator, trial: boolean, timeoutMs
   let lastClickFailure: string | undefined
   let lastPosition: ComposerClickPosition | null = null
 
+  const pointer = await composer.evaluateHandle(el => {
+    const samples: unknown[] = []
+
+    const observe = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null
+      const rect = el.getBoundingClientRect()
+
+      samples.push({ type: event.type, x: event.clientX, y: event.clientY,
+        target: target?.getAttribute('data-slot') ?? target?.tagName,
+        withinEditor: target !== null && el.contains(target),
+        editor: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } })
+
+      if (samples.length > 4) { samples.shift() }
+    }
+
+    window.addEventListener('mousemove', observe, true)
+    window.addEventListener('mousedown', observe, true)
+
+    return { samples, stop: () => {
+      window.removeEventListener('mousemove', observe, true)
+      window.removeEventListener('mousedown', observe, true)
+    } }
+  })
+
   try {
     await expect.poll(async () => {
     const position = await composer.evaluate(composerClickPosition)
@@ -165,9 +189,14 @@ export async function clickComposer(composer: Locator, trial: boolean, timeoutMs
     })
 
     const box = await composer.boundingBox()
+    const events = await pointer.evaluate(record => record.samples)
 
     throw new Error(`${(error as Error).message}\nLast normal click: ${lastClickFailure}`
-      + `\nClick geometry: ${JSON.stringify({ position: lastPosition, dom: geometry, playwright: box })}`)
+      + `\nClick geometry: ${JSON.stringify({ position: lastPosition, dom: geometry, playwright: box, events })}`)
+  } finally {
+    // A closed page cannot run diagnostic cleanup; it already discarded these listeners.
+    await pointer.evaluate(record => record.stop()).catch(() => {})
+    await pointer.dispose()
   }
 }
 
