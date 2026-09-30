@@ -119,7 +119,7 @@ _REMOTE_KANBAN_LIFECYCLE_TOOL_NAMES = frozenset(
 # creates no source receipt whose deletion could invalidate replay history.
 _GIT_HEAD_MATCH_CODE = (
     'import subprocess, sys; '
-    'r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True); '
+    'r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, encoding="utf-8", stdin=subprocess.DEVNULL); '
     'sys.exit(0 if r.returncode == 0 and r.stdout.strip() == sys.argv[1] else 1)'
 )
 
