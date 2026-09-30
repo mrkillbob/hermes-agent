@@ -2,7 +2,7 @@
 import { errors, type Locator } from '@playwright/test'
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { clickComposer, composerClickPosition } from './scripts/desktop-chat-smoke.ts'
+import { clickComposer, composerClickPosition, pointerTransportScale } from './scripts/desktop-chat-smoke.ts'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -53,4 +53,14 @@ test('remeasures a click point after layout changes without swallowing a closed-
   click.mockReset().mockRejectedValue(closed)
   await expect(clickComposer(composer, false, 2000)).rejects.toThrow('Target page has been closed')
   expect(click).toHaveBeenCalledTimes(1)
+})
+
+test('accepts only repeated uniform pointer transport mismatches', () => {
+  const sample = { x: 592, y: 239, requestedX: 533.65, requestedY: 215.19, withinEditor: false }
+
+  expect(pointerTransportScale([sample, sample])).toBeCloseTo(0.9, 2)
+  expect(pointerTransportScale([sample])).toBeNull()
+  expect(pointerTransportScale([sample, { ...sample, requestedY: 190 }])).toBeNull()
+  expect(pointerTransportScale([{ ...sample, requestedX: sample.x, requestedY: sample.y },
+    { ...sample, requestedX: sample.x, requestedY: sample.y }])).toBeNull()
 })

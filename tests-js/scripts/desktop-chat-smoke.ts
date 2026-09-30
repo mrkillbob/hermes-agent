@@ -127,22 +127,41 @@ export function composerClickPosition(editor: Element): ComposerClickPosition | 
   return null
 }
 
+export interface PointerSample {
+  x: number; y: number; requestedX: number; requestedY: number; withinEditor: boolean
+}
+
+/** Confirm a uniform input-transport scale from delivered events, never from host/DPI guesses. */
+export function pointerTransportScale(samples: PointerSample[]): number | null {
+  if (samples.length < 2) { return null }
+
+  const scales = samples.flatMap(sample => [sample.requestedX / sample.x, sample.requestedY / sample.y])
+  const scale = scales.reduce((sum, value) => sum + value, 0) / scales.length
+
+  if (!Number.isFinite(scale) || scale <= 0 || Math.abs(scale - 1) < 0.02
+    || scales.some(value => !Number.isFinite(value) || Math.abs(value - scale) > 0.02)) { return null }
+
+  return scale
+}
+
 export async function clickComposer(composer: Locator, trial: boolean, timeoutMs = 120_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   let lastClickFailure: string | undefined
   let lastPosition: ComposerClickPosition | null = null
 
   const pointer = await composer.evaluateHandle(el => {
-    const samples: unknown[] = []
+    const samples: PointerSample[] = []
+    let position: ComposerClickPosition | null = null
 
     const observe = (event: MouseEvent) => {
+      if (position === null) { return }
+
       const target = event.target instanceof Element ? event.target : null
       const rect = el.getBoundingClientRect()
 
-      samples.push({ type: event.type, x: event.clientX, y: event.clientY,
-        target: target?.getAttribute('data-slot') ?? target?.tagName,
-        withinEditor: target !== null && el.contains(target),
-        editor: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } })
+      samples.push({ x: event.clientX, y: event.clientY,
+        requestedX: rect.x + position.x, requestedY: rect.y + position.y,
+        withinEditor: target !== null && el.contains(target) })
 
       if (samples.length > 4) { samples.shift() }
     }
@@ -150,7 +169,7 @@ export async function clickComposer(composer: Locator, trial: boolean, timeoutMs
     window.addEventListener('mousemove', observe, true)
     window.addEventListener('mousedown', observe, true)
 
-    return { samples, stop: () => {
+    return { samples, setPosition: (next: ComposerClickPosition) => { position = next }, stop: () => {
       window.removeEventListener('mousemove', observe, true)
       window.removeEventListener('mousedown', observe, true)
     } }
@@ -158,30 +177,56 @@ export async function clickComposer(composer: Locator, trial: boolean, timeoutMs
 
   try {
     await expect.poll(async () => {
-    const position = await composer.evaluate(composerClickPosition)
+      const position = await composer.evaluate(composerClickPosition)
 
-    lastPosition = position
+      lastPosition = position
 
-    if (position === null) { return false }
+      if (position === null) { return false }
+      await pointer.evaluate((record, next) => record.setPosition(next), position)
 
-    try {
-      // Startup layout and Playwright's scrolling can invalidate this point.
-      // Bound each attempt so the next one measures the current editor geometry.
-      await composer.click({ trial, position, timeout: Math.min(2000, Math.max(1, deadline - Date.now())) })
+      try {
+        // Startup layout and scrolling can invalidate a point; remeasure bounded attempts.
+        await composer.click({ trial, position, timeout: Math.min(2000, Math.max(1, deadline - Date.now())) })
+
+        return true
+      } catch (error) {
+        if (!(error instanceof errors.TimeoutError)) { throw error }
+        lastClickFailure = error.message
+      }
+
+      // Historical Windows Electron delivers CDP mouse coordinates divided by window zoom.
+      // Correct only an observed uniform mismatch, then verify a delivered hover hits the editor.
+      const scale = pointerTransportScale(await pointer.evaluate(record => record.samples))
+
+      if (scale === null) { return false }
+
+      const target = await composer.evaluate((el, offset) => {
+        const rect = el.getBoundingClientRect()
+        const x = rect.x + offset.x
+        const y = rect.y + offset.y
+        const hit = document.elementFromPoint(x, y)
+
+        return hit && el.contains(hit) ? { x, y } : null
+      }, position)
+
+      if (target === null) { return false }
+      const mouse = composer.page().mouse
+      const corrected = { x: target.x * scale, y: target.y * scale }
+
+      await mouse.move(corrected.x, corrected.y)
+      const delivered = await pointer.evaluate(record => record.samples.at(-1))
+
+      if (!delivered?.withinEditor || Math.abs(delivered.x - target.x) > 2
+        || Math.abs(delivered.y - target.y) > 2) { return false }
+
+      if (!trial) { await mouse.click(corrected.x, corrected.y) }
 
       return true
-    } catch (error) {
-      if (!(error instanceof errors.TimeoutError)) { throw error }
-
-      lastClickFailure = error.message
-
-      return false
-    }
     }, { timeout: timeoutMs, message: 'Composer must accept a normal click at a visible input point' }).toBe(true)
   } catch (error) {
     if (lastClickFailure === undefined) { throw error }
 
-    const geometry = await composer.evaluate((el) => {
+    const geometry = await composer.evaluate(el => {
       const rect = el.getBoundingClientRect()
 
       return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
