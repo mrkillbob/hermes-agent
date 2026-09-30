@@ -847,7 +847,13 @@ class CanonicalMergeEvidenceSource:
                 feedback.feedback_id,
                 pull.head_sha,
             )
-            if _ci_receipt_feedback_reason(self._ledger, receipt, feedback.body) is not None:
+            if _ci_receipt_feedback_reason(
+                self._ledger,
+                receipt,
+                feedback.body,
+                feedback=feedback,
+                canonical_head=canonical_pull.head_sha,
+            ) is not None:
                 continue
             admission = policy.admit(
                 canonical_pull, feedback.reviewer, receipt, is_bot=feedback.is_bot

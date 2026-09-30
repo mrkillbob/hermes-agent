@@ -4716,3 +4716,138 @@ def test_owner_structural_handoff_is_context_but_requests_remain_actionable(vari
     actual = non_actionable_feedback_reason(SimpleNamespace(github_identity=None), item,
                                            owner_login="owner")
     assert actual == ("self_progress_checkpoint" if variant == "checkpoint" else None)
+
+
+@pytest.mark.parametrize(
+    "author,bot,marker,repository,pr,reported,head,expected",
+    [
+        (
+            "github-actions[bot]",
+            True,
+            "hermes-ci-review-bot",
+            "mrkillbob/hermes-agent",
+            159,
+            "4" * 40,
+            "2" * 40,
+            "stale_ci_feedback",
+        ),
+        (
+            "github-actions[bot]",
+            True,
+            "hermes-ci-review-bot",
+            "mrkillbob/hermes-agent",
+            159,
+            "2" * 40,
+            "2" * 40,
+            None,
+        ),
+        (
+            "mrkillbob",
+            False,
+            "hermes-ci-review-bot",
+            "mrkillbob/hermes-agent",
+            159,
+            "4" * 40,
+            "2" * 40,
+            None,
+        ),
+        (
+            "github-actions[bot]",
+            True,
+            "other-ci-bot",
+            "mrkillbob/hermes-agent",
+            159,
+            "4" * 40,
+            "2" * 40,
+            None,
+        ),
+        (
+            "github-actions[bot]",
+            True,
+            "hermes-ci-review-bot",
+            "other/project",
+            159,
+            "4" * 40,
+            "2" * 40,
+            None,
+        ),
+        (
+            "github-actions[bot]",
+            True,
+            "hermes-ci-review-bot",
+            "mrkillbob/hermes-agent",
+            160,
+            "4" * 40,
+            "2" * 40,
+            None,
+        ),
+        (
+            "github-actions[bot]",
+            True,
+            "hermes-ci-review-bot",
+            "mrkillbob/hermes-agent",
+            159,
+            "44cbda1",
+            "2" * 40,
+            None,
+        ),
+        (
+            "github-actions[bot]",
+            True,
+            "hermes-ci-review-bot",
+            "mrkillbob/hermes-agent",
+            159,
+            "4" * 40,
+            None,
+            None,
+        ),
+    ],
+)
+@pytest.mark.parametrize("verb", ["ran", "running"])
+def test_managed_hosted_ci_feedback_binds_trusted_author_and_exact_head(
+    author,
+    bot,
+    marker,
+    repository,
+    pr,
+    reported,
+    head,
+    expected,
+    verb,
+):
+    body = (
+        f"<!-- {marker} -->\n# ci review\n"
+        f"<sub>{verb} on [{reported[:7]}](https://github.com/{repository}/pull/{pr}/commits/{reported}) — current CI</sub>\n"
+        "## ❌ Job failures\n### Python tests / Run tests slice 20/24\nJob failed."
+    )
+    feedback = Feedback(
+        "issue_comment",
+        "5902049847",
+        Reviewer(author, None),
+        body,
+        datetime.now(UTC),
+        bot,
+    )
+    receipt = FeedbackReceipt(
+        "mrkillbob/hermes-agent", 159, "issue_comment", "5902049847", "2" * 40
+    )
+    assert (
+        _ci_receipt_feedback_reason(
+            object(), receipt, body, feedback=feedback, canonical_head=head
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("prefix", ["> ", "    ", "## ❌ Job failures\n"])
+def test_managed_ci_nested_commit_reference_remains_actionable(prefix):
+    body = ("<!-- hermes-ci-review-bot -->\n# ci review\n" + prefix
+            + "<sub>ran on [4444444](https://github.com/mrkillbob/hermes-agent/pull/159/commits/"
+            + "4" * 40 + ")</sub>\nJob failed.")
+    item = Feedback("issue_comment", "5902049847", Reviewer("github-actions[bot]", None),
+                    body, datetime.now(UTC), True)
+    receipt = FeedbackReceipt("mrkillbob/hermes-agent", 159, "issue_comment",
+                              "5902049847", "2" * 40)
+    assert _ci_receipt_feedback_reason(
+        object(), receipt, body, feedback=item, canonical_head="2" * 40
+    ) is None
