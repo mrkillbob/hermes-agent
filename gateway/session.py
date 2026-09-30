@@ -15,6 +15,7 @@ from typing import Callable, Dict, List, Optional, Any
 from .config import Platform, GatewayConfig, HomeChannel
 from .whatsapp_identity import canonical_whatsapp_identifier
 from gateway.session_persistence import SessionPersistenceMixin, _DB_UNPINNED
+from gateway.session_prompt_pin import SessionPromptPinMixin, sanitize_prompt_pin
 from gateway.session_recovery import SessionRecoveryMixin
 from gateway.session_lifecycle import SessionLifecycleMixin, _iso, _new_session_id, _now, _parse_iso
 from gateway.session_transcript import SessionTranscriptMixin
@@ -578,6 +579,12 @@ class SessionEntry:
     model_override: Optional[Dict[str, str]] = None
     cwd: Optional[str] = None
     conversation_worktree: Dict[str, str] = field(default_factory=dict)
+    # Profile owning the bot that received this lane's traffic (``RoutingIdentity.transport_profile``,
+    # "default" spelled out). The key namespace only says where the turn RUNS; after a restart this is
+    # what says which bot may deliver to it. None = unknown (row predates the field, or standalone).
+    transport_profile: Optional[str] = None
+    # Exact session-context/channel inputs from the last human turn.
+    prompt_pin: Optional[Dict[str, Any]] = None
 
     # Fields (de)serialized verbatim, in wire order (``from_dict`` reads them with
     # ``data.get(name, <dataclass default>)``), split around the three ISO-datetime/token keys.
@@ -610,6 +617,10 @@ class SessionEntry:
         if self.model_override:
             # Defence-in-depth against an unsanitized dict stored directly.
             result["model_override"] = sanitize_model_override(self.model_override)
+        if self.prompt_pin:
+            # Routing JSON must never preserve malformed pin state.
+            if pin := sanitize_prompt_pin(self.prompt_pin):
+                result["prompt_pin"] = pin
         if self.origin:
             result["origin"] = self.origin.to_dict()
         return result
@@ -649,13 +660,15 @@ class SessionEntry:
             transport_profile=data.get("transport_profile") if isinstance(data.get("transport_profile"), str) else None,
             last_resume_marked_at=_parse_iso(data.get("last_resume_marked_at")),
             active_turn_token=token, active_turn_started_at=started_at,
-            model_override=sanitize_model_override(data.get("model_override")), **plain,
+            model_override=sanitize_model_override(data.get("model_override")),
+            prompt_pin=sanitize_prompt_pin(data.get("prompt_pin")),
             cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else None,
             conversation_worktree={
                 str(key): str(value)
                 for key, value in (data.get("conversation_worktree") or {}).items()
                 if isinstance(key, str) and isinstance(value, str)
             } if isinstance(data.get("conversation_worktree"), dict) else {},
+            **plain,
         )
 
 
@@ -833,6 +846,7 @@ class AsyncSessionStore:
 
 class SessionStore(
     SessionPersistenceMixin, SessionRecoveryMixin, SessionLifecycleMixin, SessionTranscriptMixin,
+    SessionPromptPinMixin,
 ):
     """Session routing index + transcripts: SQLite (SessionDB), legacy JSONL fallback."""
 
@@ -1046,12 +1060,14 @@ class SessionStore(
     def get_or_create_session_and_switch(
         self, source: SessionSource, target_session_id: str, *,
         conversation_kind: str = "task", persisted_cwd: Optional[str] = None,
+        preserve_prompt_pin: bool = True,
     ) -> Optional[SessionEntry]:
         """Route and complete a handoff before releasing the routing flight."""
         def _switch(_entry: SessionEntry) -> SessionEntry:
             switched = self.switch_session(
                 _entry.session_key, target_session_id,
                 conversation_kind=conversation_kind, persisted_cwd=persisted_cwd,
+                preserve_prompt_pin=preserve_prompt_pin,
             )
             if switched is None:
                 raise RuntimeError(
@@ -1715,9 +1731,17 @@ class SessionStore(
     def switch_session(
         self, session_key: str, target_session_id: str, conversation_kind: str = "interactive",
         persisted_cwd: Optional[str] = None, expected_session_id: Optional[str] = None,
+        *, preserve_prompt_pin: bool = True,
     ) -> Optional[SessionEntry]:
         """Point a session key at an existing session ID (``/resume``): ends the current row and
-        reopens the target so resume matches the CLI."""
+        reopens the target so resume matches the CLI.
+
+        ``expected_session_id`` makes the repoint a compare-and-swap: ``None`` is returned when
+        the key no longer points at that session, so a caller that resolved against a snapshot
+        across an await (async-delegation re-pin) cannot overwrite a concurrent /new or /resume.
+        Prompt pins follow non-boundary repoints by default; /resume opts out explicitly because it
+        starts a different conversation on the same routing key.
+        """
         with self._lock:
             old_entry = self._entry_locked(session_key)
             if old_entry is None:
@@ -1732,6 +1756,10 @@ class SessionStore(
                 display_name=old_entry.display_name, platform=old_entry.platform,
                 chat_type=old_entry.chat_type, transport_profile=old_entry.transport_profile,
                 model_override=old_entry.model_override,
+                prompt_pin=(
+                    sanitize_prompt_pin(old_entry.prompt_pin)
+                    if preserve_prompt_pin and old_entry.prompt_pin is not None else None
+                ),
             )
         new_entry = candidate
         try:
@@ -1860,32 +1888,3 @@ def build_session_context(
         context.cwd = session_entry.cwd
         context.conversation_worktree = dict(session_entry.conversation_worktree)
     return context
-
-
-# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
-# Names external plugins imported from this module before the Sep 2026 decomposition.
-# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
-# The whole block is removed by reverting the commit that added it.
-from dataclasses import replace  # noqa: F401,E402
-import uuid  # noqa: F401,E402
-
-
-_PLUGIN_COMPAT_LAZY = {
-    'SessionResetPolicy': ('gateway.config', 'SessionResetPolicy'),
-    'TranscriptReadError': ('gateway.session_transcript', 'TranscriptReadError'),
-    'atomic_replace': ('utils', 'atomic_replace'),
-    'auto_continue_freshness_window': ('gateway.session_lifecycle', 'auto_continue_freshness_window'),
-    'extract_api_content_sidecar': ('agent.turn_context', 'extract_api_content_sidecar'),
-    'normalize_whatsapp_identifier': ('gateway.whatsapp_identity', 'normalize_whatsapp_identifier'),
-}
-
-
-def __getattr__(name):  # PEP 562 — lazy so no import cycles
-    target = _PLUGIN_COMPAT_LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-    from hermes_cli.plugin_compat import warn_once
-    warn_once(__name__, name, *target)
-    return getattr(importlib.import_module(target[0]), target[1])
-# ---- END PLUGIN-COMPAT ----

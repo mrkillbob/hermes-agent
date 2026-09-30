@@ -55,7 +55,8 @@ def _create_overridden(kb, conn, title, *, assignee="alpha", provider, model):
 
 def test_same_explicit_provider_model_is_capped(kanban_with_profiles):
     kb = kanban_with_profiles
-    with kb.connect_closing() as conn:
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
+    with kbc.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
         first = _create_overridden(
             kb, conn, "first", provider="ollama-launch", model="qwen3.6:27b"
@@ -64,7 +65,7 @@ def test_same_explicit_provider_model_is_capped(kanban_with_profiles):
             kb, conn, "second", provider="ollama-launch", model="qwen3.6:27b"
         )
 
-        result = kb.dispatch_once(
+        result = kbd.dispatch_once(
             conn,
             spawn_fn=lambda *_args, **_kwargs: os.getpid(),
             dry_run=True,
@@ -81,7 +82,8 @@ def test_same_explicit_provider_model_is_capped(kanban_with_profiles):
 def test_local_provider_model_uses_safe_default_cap(kanban_with_profiles, global_cap):
     """A global remote-friendly cap must not fan out a local model."""
     kb = kanban_with_profiles
-    with kb.connect_closing() as conn:
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
+    with kbc.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
         first = _create_overridden(
             kb, conn, "first", provider="ollama-launch", model="devstral-small-2:24b"
@@ -90,7 +92,7 @@ def test_local_provider_model_uses_safe_default_cap(kanban_with_profiles, global
             kb, conn, "second", provider="ollama-launch", model="devstral-small-2:24b"
         )
 
-        result = kb.dispatch_once(
+        result = kbd.dispatch_once(
             conn,
             spawn_fn=lambda *_args, **_kwargs: os.getpid(),
             dry_run=True,
@@ -105,7 +107,8 @@ def test_local_provider_model_uses_safe_default_cap(kanban_with_profiles, global
 
 def test_priority_runtime_local_cap_allows_two_local_workers(kanban_with_profiles):
     kb = kanban_with_profiles
-    with kb.connect_closing() as conn:
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
+    with kbc.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
         task_ids = [
             _create_overridden(
@@ -114,7 +117,7 @@ def test_priority_runtime_local_cap_allows_two_local_workers(kanban_with_profile
             for index in range(3)
         ]
 
-        result = kb.dispatch_once(
+        result = kbd.dispatch_once(
             conn,
             spawn_fn=lambda *_args, **_kwargs: os.getpid(),
             dry_run=True,
@@ -138,7 +141,8 @@ def test_per_model_override_tightens_below_the_global_cap(kanban_with_profiles):
     (provider, model) pair tighter than the global default without
     affecting any other model."""
     kb = kanban_with_profiles
-    with kb.connect_closing() as conn:
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
+    with kbc.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
         first = _create_overridden(
             kb, conn, "first", provider="ollama-launch", model="devstral-small-2:24b"
@@ -152,7 +156,7 @@ def test_per_model_override_tightens_below_the_global_cap(kanban_with_profiles):
             kb, conn, "third", provider="ollama-launch", model="qwen3.5:4b"
         )
 
-        result = kb.dispatch_once(
+        result = kbd.dispatch_once(
             conn,
             spawn_fn=lambda *_args, **_kwargs: os.getpid(),
             dry_run=True,
@@ -172,7 +176,8 @@ def test_different_provider_or_model_and_unoverridden_tasks_remain_independent(
     kanban_with_profiles,
 ):
     kb = kanban_with_profiles
-    with kb.connect_closing() as conn:
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
+    with kbc.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
         task_ids = [
             _create_overridden(
@@ -187,7 +192,7 @@ def test_different_provider_or_model_and_unoverridden_tasks_remain_independent(
             kb.create_task(conn, title="profile default", assignee="alpha"),
         ]
 
-        result = kb.dispatch_once(
+        result = kbd.dispatch_once(
             conn,
             spawn_fn=lambda *_args, **_kwargs: os.getpid(),
             dry_run=True,
@@ -201,6 +206,7 @@ def test_different_provider_or_model_and_unoverridden_tasks_remain_independent(
 def test_local_first_profile_routes_share_model_capacity(kanban_with_profiles):
     """Profile-selected local routes must count before the worker is spawned."""
     kb = kanban_with_profiles
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
     from pathlib import Path
 
     root = Path(__import__("os").environ["HERMES_HOME"])
@@ -220,12 +226,12 @@ fallback_model:
             encoding="utf-8",
         )
 
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
         first = kb.create_task(conn, title="first", assignee="alpha")
         second = kb.create_task(conn, title="second", assignee="beta")
 
-        result = kb.dispatch_once(
+        result = kbd.dispatch_once(
             conn,
             spawn_fn=lambda *_args, **_kwargs: os.getpid(),
             dry_run=True,
@@ -248,6 +254,7 @@ def test_profile_default_routes_share_model_capacity_without_local_first(
     flag governs a different concern (whether local routes are preferred
     at spawn), not whether concurrent usage is counted accurately."""
     kb = kanban_with_profiles
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
     from pathlib import Path
 
     root = Path(__import__("os").environ["HERMES_HOME"])
@@ -263,12 +270,12 @@ model:
             encoding="utf-8",
         )
 
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
         first = kb.create_task(conn, title="first", assignee="alpha")
         second = kb.create_task(conn, title="second", assignee="beta")
 
-        result = kb.dispatch_once(
+        result = kbd.dispatch_once(
             conn,
             spawn_fn=lambda *_args, **_kwargs: os.getpid(),
             dry_run=True,
@@ -298,6 +305,7 @@ def test_codex_primary_profile_is_not_miscounted_against_local_fallback(
     capacity with real local-only profiles, falsely capping unrelated
     ready work that was never going to touch Ollama at all."""
     kb = kanban_with_profiles
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
     from pathlib import Path
 
     root = Path(__import__("os").environ["HERMES_HOME"])
@@ -322,12 +330,12 @@ model:
         encoding="utf-8",
     )
 
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
         codex_task = kb.create_task(conn, title="codex primary", assignee="alpha")
         local_task = kb.create_task(conn, title="genuinely local", assignee="default")
 
-        result = kb.dispatch_once(
+        result = kbd.dispatch_once(
             conn,
             spawn_fn=lambda *_args, **_kwargs: os.getpid(),
             dry_run=True,
@@ -345,7 +353,8 @@ def test_terminal_or_reclaimed_task_releases_model_capacity(
     kanban_with_profiles, release
 ):
     kb = kanban_with_profiles
-    with kb.connect_closing() as conn:
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
+    with kbc.connect_closing() as conn:
         kb.create_board(slug="default", name="Test")
         first = _create_overridden(
             kb, conn, "first", provider="ollama-launch", model="qwen3.6:27b"
@@ -354,7 +363,7 @@ def test_terminal_or_reclaimed_task_releases_model_capacity(
             kb, conn, "second", provider="ollama-launch", model="qwen3.6:27b"
         )
 
-        initial = kb.dispatch_once(
+        initial = kbd.dispatch_once(
             conn,
             spawn_fn=lambda *_args, **_kwargs: os.getpid(),
             max_in_progress_per_model=1,
@@ -387,7 +396,7 @@ def test_terminal_or_reclaimed_task_releases_model_capacity(
                 )
             conn.execute("UPDATE tasks SET priority = 1 WHERE id = ?", (second,))
 
-        following = kb.dispatch_once(
+        following = kbd.dispatch_once(
             conn,
             spawn_fn=lambda *_args, **_kwargs: os.getpid(),
             max_in_progress_per_model=1,

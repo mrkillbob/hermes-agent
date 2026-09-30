@@ -81,23 +81,28 @@ def _existing_dir(raw: str, label: str) -> Path | None:
     return None
 
 
-def _resolve_configured_cwd(*, override_is_final: bool) -> Path | None:
+def _resolve_configured_cwd(
+    *, override_is_final: bool, include_session_override: bool = True,
+) -> Path | None:
     """Session override, then TERMINAL_CWD; each validated as a real directory.
 
     ``override_is_final``: a set-but-missing session override yields None
     instead of falling through to TERMINAL_CWD. Under a Kanban task, the
     override is constrained to the worker's assigned workspace first — a
     stale session cwd from a prior worktree must never leak into a new one.
+    ``include_session_override``: skip a session cwd known to be a launch artifact
+    while still consulting the active profile's TERMINAL_CWD.
     """
-    override = _SESSION_CWD.get()
-    override = "" if override is _UNSET else str(override).strip()
-    kanban_scoped = resolve_kanban_worker_cwd(override or None)
-    if kanban_scoped is not None:
-        return _existing_dir(kanban_scoped, "Kanban worker workspace")
-    if override:
-        p = _existing_dir(override, "configured working directory")
-        if p is not None or override_is_final:
-            return p
+    if include_session_override:
+        override = _SESSION_CWD.get()
+        override = "" if override is _UNSET else str(override).strip()
+        kanban_scoped = resolve_kanban_worker_cwd(override or None)
+        if kanban_scoped is not None:
+            return _existing_dir(kanban_scoped, "Kanban worker workspace")
+        if override:
+            p = _existing_dir(override, "configured working directory")
+            if p is not None or override_is_final:
+                return p
     raw = scope_terminal_cwd().strip()
     return _existing_dir(raw, "TERMINAL_CWD") if raw else None
 
@@ -160,8 +165,14 @@ def resolve_agent_cwd() -> Path:
     return _resolve_configured_cwd(override_is_final=False) or Path(os.getcwd())
 
 
-def resolve_context_cwd() -> Path | None:
+def resolve_context_cwd(*, include_session_override: bool = True) -> Path | None:
     """Configured cwd for context-file discovery, or None (build_context_files_prompt then falls back to the
     launch dir). An existing configured path is honored verbatim — including the Hermes source tree, a
-    legitimate workspace when developing Hermes; fallback-directory policy lives in the caller."""
-    return _resolve_configured_cwd(override_is_final=True)
+    legitimate workspace when developing Hermes; fallback-directory policy lives in the caller.
+
+    Launch-artifact callers can skip the session override while still honoring the active profile's
+    TERMINAL_CWD.
+    """
+    return _resolve_configured_cwd(
+        override_is_final=True, include_session_override=include_session_override,
+    )

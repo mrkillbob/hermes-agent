@@ -112,8 +112,11 @@ jobs:
               FAILED=1; echo "::endgroup::"; continue
             fi
 
-            # SUPPLY-CHAIN GATE: the pinned sha must be reachable in the repo.
-            if ! git -C "$CLONE_DIR" checkout --detach "$SHA"; then
+            # SUPPLY-CHAIN GATE: fetch the exact pin from the declared repo when
+            # it is no longer on an advertised branch (for example after rebase).
+            if ! git -C "$CLONE_DIR" checkout --detach "$SHA" &&
+               ! (git -C "$CLONE_DIR" fetch --depth=1 origin "$SHA" &&
+                  git -C "$CLONE_DIR" checkout --detach "$SHA"); then
               echo "::error file=$entry::pinned sha $SHA is not reachable in $REPO"
               FAILED=1; echo "::endgroup::"; continue
             fi
