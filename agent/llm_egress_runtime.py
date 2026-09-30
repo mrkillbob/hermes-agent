@@ -185,7 +185,13 @@ def _prepare_bound_skill_source_results(
                     except (TypeError, ValueError):
                         args = None
                     calls[call_id] = args if isinstance(args, Mapping) else None
-        if message.get("role") != "tool" or message.get("tool_name") != "skill_view":
+        # Chat-completions wire adapters omit the optional producer label.
+        # Infer only from an exact unique preceding call; never from payload.
+        bound_args = calls.get(message.get("tool_call_id"))
+        labels = (message.get("tool_name"), message.get("name"))
+        if message.get("role") != "tool" or not (
+            isinstance(bound_args, Mapping) or "skill_view" in labels
+        ):
             projected.append(message)
             continue
         copied = dict(message)
@@ -196,7 +202,9 @@ def _prepare_bound_skill_source_results(
             sha256(str(raw).encode("utf-8")).hexdigest()
         )
         try:
-            args = calls.get(message.get("tool_call_id"))
+            if any(label not in (None, "skill_view") for label in labels):
+                raise ValueError("conflicting_skill_producer")
+            args = bound_args
             if not isinstance(args, Mapping) or args.get("file_path") or message.get("tool_call_id") in duplicates:
                 raise ValueError("unbound_skill")
             name = args.get("name")
@@ -1003,6 +1011,10 @@ def authorize_agent_sdk_kwargs(
             grants=tuple(used_grants.values()),
         )
     except EgressBlocked:
+        logger.warning(
+            "LLM egress blocked grant counts: input=%d selected=%d",
+            len(grants), len(used_grants),
+        )
         typed_locations = _typed_payload_violation_locations(typed_body)
         if typed_locations:
             logger.warning(
