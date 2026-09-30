@@ -31,6 +31,11 @@ def _run_capacity_suite():
         "test_actual_symlink_ancestor_is_protected",
         "test_real_processes_case_unicode_alias_share_single_fence",
         "test_pooled_capacity_rejection_cannot_escape_into_overflow",
+        "test_unknown_first_slot_preserved_and_later_fresh_slot_admitted",
+        "test_candidate_created_after_selection_is_rejected_before_git",
+        "test_unknown_selection_does_not_mask_insufficient_space",
+        "test_real_git_unknown_first_slot_creates_exact_head_in_later_fresh_slot",
+        "test_real_concurrent_selectors_preserve_unknown_and_share_capacity",
     ):
         assert f"{name} PASSED" in output, output
 

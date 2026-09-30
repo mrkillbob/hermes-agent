@@ -971,6 +971,11 @@ class PooledLocalGitRepository:
         namespace = _pool_source_namespace(path)
         lease: WorktreeSlotLease | None = None
         for slot_id in range(self._slot_count):
+            candidate = self._slot_path(receipt, slot_id, namespace)
+            if self._capacity and self._capacity.is_unregistered_existing(candidate):
+                # Preserve unknown existing work without claiming its lease or
+                # touching Git. A later new slot still requires atomic reserve.
+                continue
             ledger_slot_id = _pool_ledger_slot(namespace, slot_id)
             lease = self._ledger.claim_worktree_slot(
                 ledger_slot_id,
@@ -982,7 +987,6 @@ class PooledLocalGitRepository:
             if lease is None:
                 continue
             try:
-                candidate = self._slot_path(receipt, slot_id, namespace)
                 admission = self._capacity.reserve(candidate) if self._capacity else nullcontext()
                 with admission:
                     self._ensure_exact_head(path, receipt)
