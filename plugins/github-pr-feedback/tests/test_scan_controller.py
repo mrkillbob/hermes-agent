@@ -1718,7 +1718,7 @@ def test_auto_dispatch_starts_an_admitted_exact_head_repair_ready_with_push_and_
     assert "still equals the expected receipt SHA" in task.instructions
     assert "complete-feedback" in task.instructions
     assert (
-        f"env -u _HERMES_GATEWAY HERMES_HOME='{control_home}' \"${{HERMES_KANBAN_HERMES_PYTHON:?dispatcher Hermes Python is required}}\" -E -P -m hermes_cli.main "
+        f"env -u _HERMES_GATEWAY HERMES_HOME='{control_home}' \"${{HERMES_KANBAN_HERMES_PYTHON:?dispatcher Hermes Python is required}}\" -P -m hermes_cli.main "
         "github-pr-feedback complete-feedback"
     ) in (
         task.instructions
@@ -1825,7 +1825,7 @@ def test_scan_dispatches_one_read_only_exact_head_ci_audit_when_actions_are_disa
     assert "process poll or wait" in task.instructions
     assert "do not run the audit command again" in task.instructions.casefold()
     assert (
-        f"env -u _HERMES_GATEWAY HERMES_HOME='{control_home}' \"${{HERMES_KANBAN_HERMES_PYTHON:?dispatcher Hermes Python is required}}\" -E -P -m hermes_cli.main "
+        f"env -u _HERMES_GATEWAY HERMES_HOME='{control_home}' \"${{HERMES_KANBAN_HERMES_PYTHON:?dispatcher Hermes Python is required}}\" -P -m hermes_cli.main "
         "github-pr-feedback audit-pr"
     ) in (
         task.instructions
