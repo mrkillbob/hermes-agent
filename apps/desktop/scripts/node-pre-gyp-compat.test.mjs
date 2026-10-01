@@ -38,7 +38,7 @@ test.skipIf(!getWindowsEntry && process.env.HERMES_REQUIRE_GET_WINDOWS !== '1')(
     assert.deepEqual(getWindowsManifest.binary.napi_versions, [9])
 
     const preGyp = requireFromGetWindows('@mapbox/node-pre-gyp')
-    const target = { target_platform: 'win32', target_arch: 'x64' }
+    const target = { target_platform: 'win32', target_arch: 'x64', target_libc: 'unknown' }
     const foundPath = preGyp.find(getWindowsPackagePath, { ...target })
     const revealText = execFileSync(
       process.execPath,
@@ -47,7 +47,8 @@ test.skipIf(!getWindowsEntry && process.env.HERMES_REQUIRE_GET_WINDOWS !== '1')(
         '--loglevel=silent',
         'reveal',
         '--target_platform=win32',
-        '--target_arch=x64'
+        '--target_arch=x64',
+        '--target_libc=unknown'
       ],
       { cwd: getWindowsRoot, encoding: 'utf8' }
     )
@@ -57,6 +58,7 @@ test.skipIf(!getWindowsEntry && process.env.HERMES_REQUIRE_GET_WINDOWS !== '1')(
     assert.equal(revealed.node_napi_label, 'napi-v9')
     assert.equal(revealed.target_platform, target.target_platform)
     assert.equal(revealed.target_arch, target.target_arch)
+    assert.equal(revealed.libc, target.target_libc)
     assert.equal(
       path.normalize(revealed.module),
       path.normalize(foundPath),

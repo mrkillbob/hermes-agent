@@ -6927,7 +6927,9 @@ class TestEmptySSEFrameTurnRecovery:
     non-JSON SSE data`` and the turn died after 3 identical streaming retries. The turn must
     instead complete on the automatic non-streaming retry."""
 
-    def test_turn_completes_on_the_non_streaming_retry(self, agent):
+    def test_turn_completes_on_the_non_streaming_retry(
+        self, _stream_recovery_diagnostics, agent
+    ):
         import httpx
         from openai import OpenAI, Stream
         from openai.types.chat import ChatCompletionChunk
