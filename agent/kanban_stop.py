@@ -139,8 +139,8 @@ def _tool_call_name(tc: Any) -> str:
 
 def session_called_kanban_terminal(messages: Iterable[dict] | None) -> bool:
     """True if this conversation has a successful terminal Kanban result."""
-    review_call_ids: set[str] = set()
-    review_tools = {"kanban_request_review", "kanban_request_changes"}
+    handoff_calls: dict[str, str] = {}
+    handoff_tools = _TERMINAL_KANBAN_TOOLS - {"kanban_complete", "kanban_block"}
     for msg in filter(lambda m: isinstance(m, dict), messages or ()):
         role = msg.get("role")
         if role == "assistant":
@@ -148,16 +148,17 @@ def session_called_kanban_terminal(messages: Iterable[dict] | None) -> bool:
                 name = _tool_call_name(tc)
                 if name in {"kanban_complete", "kanban_block"}:
                     return True
-                if name in review_tools:
+                if name in handoff_tools:
                     call_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
                     if call_id:
-                        review_call_ids.add(str(call_id))
+                        handoff_calls[str(call_id)] = name
         elif role == "tool":
             name = str(msg.get("name") or "")
             if name in {"kanban_complete", "kanban_block"}:
                 return True
-            if name in review_tools and (
-                not review_call_ids or str(msg.get("tool_call_id") or "") in review_call_ids
+            if name in handoff_tools and (
+                (not handoff_calls and name != "kanban_schedule")
+                or handoff_calls.get(str(msg.get("tool_call_id") or "")) == name
             ):
                 try:
                     payload = json.loads(msg.get("content") or "")
@@ -191,7 +192,7 @@ def successful_kanban_terminal_transition(
     except Exception:
         return False
 
-    terminal_ids: set[str] = set()
+    terminal_calls: dict[str, str] = {}
     for tool_call in tool_calls or []:
         if _tool_call_name(tool_call) not in _TERMINAL_KANBAN_TOOLS:
             continue
@@ -200,18 +201,15 @@ def successful_kanban_terminal_transition(
         else:
             call_id = getattr(tool_call, "id", None)
         if call_id:
-            terminal_ids.add(str(call_id))
-    if not terminal_ids:
+            terminal_calls[str(call_id)] = _tool_call_name(tool_call)
+    if not terminal_calls:
         return False
 
     for message in messages or []:
         if not isinstance(message, dict) or message.get("role") != "tool":
             continue
-        if str(message.get("tool_call_id") or "") not in terminal_ids:
-            continue
-        if str(message.get("name") or message.get("tool_name") or "") not in (
-            _TERMINAL_KANBAN_TOOLS
-        ):
+        called_name = terminal_calls.get(str(message.get("tool_call_id") or ""))
+        if called_name is None or str(message.get("name") or message.get("tool_name") or "") != called_name:
             continue
         content = message.get("content")
         if not isinstance(content, str):

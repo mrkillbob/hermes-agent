@@ -158,7 +158,7 @@ def _keyless_backend() -> Optional[str]:
 def _managed_web_search() -> bool:
     """True when web_search is on the managed Nous route: the stored ``nous`` selection, or a
     never-configured install whose autodetect lands on the gateway — the entitled Firecrawl gateway, or
-    free Perplexity fast search for any Nous identity when nothing else is configured (search-only: the
+    free Perplexity fast search for a registered Nous identity when nothing else is configured (search-only: the
     extract ladder is untouched). A stored vendor selection never is."""
     if _configured_backend("search_backend"):
         return False
@@ -169,7 +169,8 @@ def _managed_web_search() -> bool:
     if backend == "firecrawl":
         return not (_has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL")) and _is_tool_gateway_ready()
     from tools.managed_tool_gateway import peek_nous_access_token, resolve_free_search_gateway
-    return backend is None and resolve_free_search_gateway(token_reader=peek_nous_access_token) is not None
+    # An installed keyless package is a fallback, not an explicit user selection or credential.
+    return backend in {None, "ddgs"} and resolve_free_search_gateway(token_reader=peek_nous_access_token) is not None
 
 
 def _get_search_backend() -> str:
