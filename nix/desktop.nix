@@ -66,6 +66,7 @@ let
       "apps/desktop"
       "apps/shared"
       "scripts/build/desktop.mjs"
+      "scripts/build/get-windows-compiler.cjs"
       "scripts/build/freshness.mjs"
       "scripts/build/frontend-common.mjs"
       # product-identity.cjs resolves the channel request through the

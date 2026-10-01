@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,6 +26,7 @@ function fixture() {
     workspaces: ['apps/desktop'],
     devDependencies: { 'node-gyp': 'file:vendor/node-gyp' },
     dependencies: { unrelated: 'file:vendor/unrelated' },
+    allowScripts: { 'file:vendor/get-windows': true, 'file:vendor/unrelated': true },
     engines: { node: '>=22', npm: '>=10' }
   })
   json(join(source, 'apps/desktop/package.json'), {
@@ -68,7 +70,9 @@ function fixture() {
 }
 
 function selected(source, name) {
-  return JSON.parse(readFileSync(join(source, 'vendor', name, 'selected.json')))
+  const consumer = name === 'get-windows' ? join(source, 'apps/desktop/package.json') : join(source, 'package.json')
+  const manifest = createRequire(consumer).resolve(`${name}/package.json`)
+  return JSON.parse(readFileSync(join(dirname(manifest), 'selected.json')))
 }
 
 // These dependency-free suppliers have no executable Windows addon. The required
