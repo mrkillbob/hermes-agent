@@ -15,6 +15,7 @@ context-gathering git path Hermes runs neutralizes every sink. They use a real
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ from hermes_cli._subprocess_compat import (
     NO_DRIVER_DIFF_FLAGS,
     harden_git_argv,
     noninteractive_git_env,
+    noninteractive_repo_git_env,
 )
 
 _HAS_GIT = shutil.which("git") is not None
@@ -254,11 +256,212 @@ def _evil_filter(marker: str, name: str = "evil") -> str:
             f'\tclean = touch \'{marker}.clean\'; cat\n\trequired = true\n')
 
 
-def _evil_include(condition):
+def _evil_include(condition, nested: bool = False):
     def config(repo: Path, marker: str) -> str:
         (repo / ".git" / "evil.inc").write_text(_evil_filter(marker))
-        return f'[includeIf "{condition(repo)}"]\n\tpath = evil.inc\n'
+        target = "evil.inc"
+        if nested:
+            (repo / ".git" / "outer.inc").write_text("[include]\n\tpath = evil.inc\n")
+            target = "outer.inc"
+        return f'[includeIf "{condition(repo)}"]\n\tpath = {target}\n'
     return config
+
+
+def _credential_include(repo: Path, marker: str) -> str:
+    (repo / ".git" / "creds.inc").write_text("[http]\n\textraheader = x\n")
+    return f'[includeIf "gitdir:{(repo / ".git").as_posix()}"]\n\tpath = creds.inc\n'
+
+
+def _literal_path_include(value: str):
+    def config(repo: Path, marker: str) -> str:
+        target = repo / ".git" / value
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_evil_filter(marker), encoding="utf-8")
+        return f'[includeIf "onbranch:safe"]\n\tpath = {value}\n'
+    return config
+
+
+def _git_path_value(value: str, env: dict) -> str:
+    """Git's own path expansion, from stdin only; no user config is read or written."""
+    probe = subprocess.run(
+        ["git", "config", "--file", "-", "--type=path", "--get", "probe.path"],
+        input=f'[probe]\n\tpath = {value}\n', capture_output=True, text=True,
+        check=True, timeout=5, env=env)
+    return probe.stdout.rstrip("\r\n")
+
+
+def test_conditional_include_runtime_prefix_is_refused_before_worktree_effects(tmp_path):
+    from hermes_cli import kanban_db_workspace as kw
+
+    prefix = Path(_git_path_value("%(prefix)/sentinel", _CLEAN_GIT_ENV)).parent
+    if not prefix.is_absolute():
+        pytest.skip("this git does not support runtime-prefix path interpolation")
+    include = tmp_path / "evil.inc"
+    marker = (tmp_path / "PREFIX").as_posix()
+    include.write_text(_evil_filter(marker), encoding="utf-8")
+    value = "%(prefix)/" + os.path.relpath(include, prefix.resolve()).replace(os.sep, "/")
+    normalized = Path(_git_path_value(value, _CLEAN_GIT_ENV))
+    assert normalized.resolve() == include.resolve() and normalized.is_file()
+    repo = _make_filter_repo(
+        tmp_path, "README filter=evil\n",
+        lambda _r, _m: f'[includeIf "onbranch:safe"]\n\tpath = {value}\n', marker)
+    # Python's expansion sees a missing literal directory while Git finds the
+    # existing filter config when the worktree's new branch activates this include.
+    assert not (repo / ".git" / os.path.expanduser(value)).exists()
+    assert noninteractive_repo_git_env(repo) is None
+    result = kw._git(repo, "worktree", "add", "-b", "safe", str(tmp_path / "wt"), "HEAD", timeout=30)
+    assert (result.returncode, result.stderr) == (1, FILTER_DISCOVERY_FAILED)
+    assert not (tmp_path / "wt").exists()
+    assert list(tmp_path.glob("PREFIX.*")) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows disallows these trailing path characters")
+@pytest.mark.parametrize("suffix,refused", [("\n", True), ("\r", True), (" ", False)],
+                         ids=["trailing_lf", "trailing_cr", "trailing_space"])
+def test_conditional_include_top_level_path_is_not_lossily_trimmed(tmp_path, suffix, refused):
+    from hermes_cli import kanban_db_workspace as kw
+
+    marker = (tmp_path / "TOPLEVEL").as_posix()
+    repo = _make_filter_repo(tmp_path, "README filter=evil\n", _evil_include(lambda r: "onbranch:safe"), marker)
+    renamed = repo.with_name(repo.name + suffix)
+    repo.rename(renamed)
+    repo = renamed
+    assert (repo / ".git" / "evil.inc").is_file()
+    env = noninteractive_repo_git_env(repo)
+    if refused:
+        assert env is None
+        result = kw._git(repo, "worktree", "add", "-b", "safe", str(tmp_path / "wt"), "HEAD", timeout=30)
+        assert (result.returncode, result.stderr) == (1, FILTER_DISCOVERY_FAILED)
+        assert not (tmp_path / "wt").exists()
+    else:
+        assert env is not None
+        result = kw._git(repo, "worktree", "add", "-b", "safe", str(tmp_path / "wt"), "HEAD", timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "wt" / "README").read_text(encoding="utf-8") == "hi\n"
+    assert list(tmp_path.glob("TOPLEVEL.*")) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX filenames can contain invalid UTF-8 bytes")
+def test_conditional_include_invalid_utf8_filename_is_refused_before_worktree_effects(tmp_path):
+    from hermes_cli import kanban_db_workspace as kw
+
+    marker = (tmp_path / "BYTES").as_posix()
+    repo = _make_filter_repo(tmp_path, "README filter=evil\n", lambda _r, _m: "", marker)
+    target = os.fsencode(repo / ".git") + b"/evil-\xff.inc"
+    try:
+        with open(target, "wb") as fh:
+            fh.write(_evil_filter(marker).encode())
+    except OSError as exc:
+        if exc.errno != errno.EILSEQ:
+            raise
+        # APFS refuses invalid UTF-8 names. Still exercise Git's raw invalid record;
+        # filesystems accepting byte filenames exercise the existing-target bypass too.
+    else:
+        assert os.path.isfile(target)
+    with open(repo / ".git" / "config", "ab") as fh:
+        fh.write(b'[includeIf "onbranch:safe"]\n\tpath = evil-\xff.inc\n')
+    raw = subprocess.run(
+        ["git", "-C", str(repo), "config", "--includes", "--show-origin", "-z", "--get-regexp", "includeif.*path"],
+        capture_output=True, check=True, timeout=5, env=_CLEAN_GIT_ENV)
+    assert b"evil-\xff.inc" in raw.stdout
+    assert noninteractive_repo_git_env(repo) is None
+    result = kw._git(repo, "worktree", "add", "-b", "safe", str(tmp_path / "wt"), "HEAD", timeout=30)
+    assert (result.returncode, result.stderr) == (1, FILTER_DISCOVERY_FAILED)
+    assert not (tmp_path / "wt").exists()
+    assert list(tmp_path.glob("BYTES.*")) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows disallows CR/LF path characters")
+@pytest.mark.parametrize("part,control", [("value", "\r"), ("value", "\n"),
+                                         ("origin", "\r"), ("origin", "\n"), ("key", "\r")])
+def test_conditional_include_control_characters_are_refused_before_record_decoding(tmp_path, part, control):
+    from hermes_cli import kanban_db_workspace as kw
+
+    marker = (tmp_path / "RECORD").as_posix()
+
+    def config(repo, _marker):
+        include = repo / ".git" / ("part" + control + "evil.inc" if part == "value" else "evil.inc")
+        include.write_text(_evil_filter(marker), encoding="utf-8")
+        condition = "onbranch:safe" if part != "key" else "gitdir:/future/part" + control + "/.git"
+        value = include.name.replace("\n", "\\n")
+        conditional = f'[includeIf "{condition}"]\n\tpath = "{value}"\n'
+        if part == "origin":
+            origin = tmp_path / ("part" + control + "origin.inc")
+            origin.write_text(f'[includeIf "onbranch:safe"]\n\tpath = "{include.as_posix()}"\n', encoding="utf-8")
+            value = origin.as_posix().replace("\n", "\\n")
+            return f'[include]\n\tpath = "{value}"\n'
+        return conditional
+
+    repo = _make_filter_repo(tmp_path, "README filter=evil\n", config, marker)
+    raw = subprocess.run(
+        ["git", "-C", str(repo), "config", "--includes", "--show-origin", "-z", "--get-regexp", "includeif.*path"],
+        capture_output=True, check=True, timeout=5, env=_CLEAN_GIT_ENV)
+    assert control.encode() in raw.stdout
+    assert noninteractive_repo_git_env(repo) is None
+    result = kw._git(repo, "worktree", "add", "-b", "safe", str(tmp_path / "wt"), "HEAD", timeout=30)
+    assert (result.returncode, result.stderr) == (1, FILTER_DISCOVERY_FAILED)
+    assert not (tmp_path / "wt").exists()
+    assert list(tmp_path.glob("RECORD.*")) == []
+
+
+def test_nested_conditional_include_control_key_is_refused_before_name_classification(tmp_path):
+    from hermes_cli import kanban_db_workspace as kw
+
+    marker = (tmp_path / "NESTED").as_posix()
+
+    def config(repo, _marker):
+        (repo / ".git" / "evil.inc").write_text(_evil_filter(marker), encoding="utf-8")
+        (repo / ".git" / "outer.inc").write_text(
+            '[includeIf "gitdir:/future/part\rcarriage/.git"]\n\tpath = evil.inc\n', encoding="utf-8")
+        return '[includeIf "onbranch:safe"]\n\tpath = outer.inc\n'
+
+    repo = _make_filter_repo(tmp_path, "README filter=evil\n", config, marker)
+    raw = subprocess.run(
+        ["git", "config", "--file", str(repo / ".git" / "outer.inc"), "--name-only", "-z",
+         "--get-regexp", "includeif.*path"],
+        capture_output=True, check=True, timeout=5, env=_CLEAN_GIT_ENV)
+    assert b"part\rcarriage" in raw.stdout
+    assert noninteractive_repo_git_env(repo) is None
+    result = kw._git(repo, "worktree", "add", "-b", "safe", str(tmp_path / "wt"), "HEAD", timeout=30)
+    assert (result.returncode, result.stderr) == (1, FILTER_DISCOVERY_FAILED)
+    assert not (tmp_path / "wt").exists()
+    assert list(tmp_path.glob("NESTED.*")) == []
+
+
+def test_conditional_home_include_uses_the_effective_child_home(tmp_path):
+    home = tmp_path / "child-home"
+    home.mkdir()
+    marker = (tmp_path / "HOME-FILTER").as_posix()
+    include = home / "evil.inc"
+    include.write_text(_evil_filter(marker), encoding="utf-8")
+    env = {**_CLEAN_GIT_ENV, "HOME": str(home)}
+    assert Path(_git_path_value("~/evil.inc", env)) == include
+    assert Path(os.path.expanduser("~/evil.inc")) != include
+    repo = _make_filter_repo(
+        tmp_path, "README filter=evil\n",
+        lambda _r, _m: '[includeIf "onbranch:safe"]\n\tpath = ~/evil.inc\n', marker)
+    hardened = noninteractive_repo_git_env(repo, env)
+    assert hardened is not None
+    values = {hardened[f"GIT_CONFIG_KEY_{i}"]: hardened[f"GIT_CONFIG_VALUE_{i}"]
+              for i in range(int(hardened["GIT_CONFIG_COUNT"]))}
+    assert values["filter.evil.smudge"] == values["filter.evil.clean"] == ""
+    assert values["filter.evil.required"] == "false"
+    # Exercise the real hardened child with that same effective HOME.
+    result = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-b", "safe", str(tmp_path / "wt"), "HEAD"],
+        capture_output=True, text=True, timeout=30, env=hardened)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "wt" / "README").read_text(encoding="utf-8") == "hi\n"
+    assert list(tmp_path.glob("HOME-FILTER.*")) == []
+
+
+def _include_flood(repo: Path, marker: str) -> str:
+    """More include targets than discovery reads on every hardened call."""
+    sections = []
+    for i in range(17):
+        (repo / ".git" / f"inc{i}").write_text("")
+        sections.append(f'[includeIf "onbranch:b{i}"]\n\tpath = inc{i}\n')
+    return "".join(sections)
 
 
 @pytest.mark.parametrize("attrs, config, refused", [
@@ -266,10 +469,21 @@ def _evil_include(condition):
     pytest.param("README filter=Evil\n",
                  lambda r, m: '[filter "evil"]\n\tsmudge = cat\n\tclean = cat\n' + _evil_filter(m, "Evil"),
                  False, id="case_collision"),
-    pytest.param("README filter=evil\n", _evil_include(lambda r: "onbranch:safe"), True, id="onbranch_include"),
+    pytest.param("README filter=evil\n", _evil_include(lambda r: "onbranch:safe"), False, id="onbranch_include"),
     pytest.param("README filter=evil\n",
-                 _evil_include(lambda r: f"gitdir:{(r / '.git' / 'worktrees').as_posix()}/"), True,
+                 _evil_include(lambda r: f"gitdir:{(r / '.git' / 'worktrees').as_posix()}/"), False,
                  id="gitdir_include"),
+    # Git only interpolates a leading %(prefix)/, so these are literal paths.
+    pytest.param("README filter=evil\n", _literal_path_include("%(prefix)"), False, id="bare_prefix_literal"),
+    pytest.param("README filter=evil\n", _literal_path_include("a/%(prefix)/evil.inc"), False, id="infix_prefix_literal"),
+    pytest.param("README filter=evil\n", _literal_path_include("%(bogus)/evil.inc"), False, id="unknown_token_literal"),
+    pytest.param("README filter=evil\n", _literal_path_include("$HOME/evil.inc"), False, id="dollar_home_literal"),
+    # An include inside an include target is not walked again: refuse.
+    pytest.param("README filter=evil\n", _evil_include(lambda r: "onbranch:safe", nested=True), True,
+                 id="nested_include"),
+    # The actions/checkout credential include: a target with no filters must not block the repo.
+    pytest.param("README filter=evil\n", _credential_include, False, id="credential_include"),
+    pytest.param("README filter=evil\n", _include_flood, True, id="include_flood"),
     pytest.param("README filter=evil\n",
                  lambda r, m: "".join(f'[filter "f{i}"]\n\tclean = cat\n' for i in range(300)), True,
                  id="filter_flood"),
@@ -281,10 +495,10 @@ def test_repo_named_filters_never_run_from_kanban_gc_or_hints(tmp_path, attrs, c
     """A filter driver is named by ``.gitattributes``, so the fixed env pins cannot reach it:
     ``worktree add`` runs its smudge command and ``status`` its clean command. Subsection names are
     case-sensitive, so ``[filter "Evil"]`` must be neutralized next to a benign ``[filter "evil"]``.
-    Discovery that cannot be trusted refuses the git call: any ``includeIf`` (``onbranch:`` matches the
-    new branch, ``gitdir:`` the ``.git/worktrees/<name>`` dir of ``worktree add``) loads filters
-    discovery never saw, a huge filter inventory would overflow the argv/env limit (E2BIG), and a
-    config git cannot parse yields no trustworthy inventory at all."""
+    An ``includeIf`` target is read whatever its condition (``onbranch:`` matches the new branch,
+    ``gitdir:`` the ``.git/worktrees/<name>`` dir of ``worktree add``), so its filters are neutralized
+    too. Discovery that cannot be trusted refuses the git call: an include nested in an include
+    target, a huge filter inventory (argv/env E2BIG), or a config git cannot parse."""
     from hermes_cli import kanban_db_workspace as kw
     from hermes_cli import worktree_gc
     from tools.async_delegation_recovery_hints import git_state_hint
@@ -297,6 +511,9 @@ def test_repo_named_filters_never_run_from_kanban_gc_or_hints(tmp_path, attrs, c
         assert sorted(p.name for p in tmp_path.glob("FILTER.*")) == []
         return
 
+    # git prints repo-local origins relative to the top level, so discovery from a subdirectory must agree.
+    (repo / "sub").mkdir()
+    assert noninteractive_repo_git_env(repo / "sub") == noninteractive_repo_git_env(repo)
     kw._ensure_git_worktree(repo, tmp_path / "wt", "safe")
     assert (tmp_path / "wt" / "README").read_text() == "hi\n"
     (repo / "README").write_text("hi\n")  # same size, new mtime: status must re-hash it

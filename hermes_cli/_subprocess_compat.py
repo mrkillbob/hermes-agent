@@ -470,11 +470,18 @@ def noninteractive_git_env(base: "Mapping[str, str] | None" = None) -> dict[str,
 
 
 _FILTER_COMMAND_KEY = re.compile(r"^filter\..+\.(?:clean|smudge|process)$", re.IGNORECASE)
-# Any ``includeIf`` is evaluated against the CURRENT checkout: ``onbranch:`` against the current
-# branch, ``gitdir:`` against the current git dir (``.git/worktrees/<name>`` during ``worktree add``),
-# so the spawned git can load filters this discovery never saw; refuse rather than half-harden.
+# ``includeIf`` is evaluated against the CURRENT checkout: ``onbranch:`` against the current branch,
+# ``gitdir:`` against the current git dir (``.git/worktrees/<name>`` during ``worktree add``), so
+# the spawned git can load an include this discovery's ``--includes`` skipped. Every include target
+# is therefore read directly, whatever its condition, and its filter names are neutralized too.
 # Global/system config is already /dev/null, so only repo-local includes reach this.
 _INCLUDE_IF_KEY = re.compile(r"^includeif\..*\.path$", re.IGNORECASE)
+# Any include (conditional or not) inside an include target: discovery does not walk it twice.
+_INCLUDE_KEY = re.compile(r"^include(?:if\..*)?\.path$", re.IGNORECASE)
+# `git config --get-regexp` pattern for the keys discovery reads (filter commands and includes).
+_DISCOVERY_KEYS_REGEXP = r"^(filter\..*\.(clean|smudge|process)|include\.path|includeif\..*\.path)$"
+# Each include target costs one bounded spawn on every hardened git call; refuse past this many.
+_MAX_INCLUDE_TARGETS = 16
 # Each discovered key costs two env entries; a repo with tens of thousands of filters would make
 # every spawn fail with E2BIG ("Argument list too long"), so refuse past a generous cap.
 _MAX_FILTER_KEYS = 256
@@ -498,25 +505,95 @@ def noninteractive_repo_git_env(
     env = noninteractive_git_env(base)
     # bounded_probe_run, not subprocess.run: Windows' post-timeout communicate() can deadlock and
     # a bare spawn flashes a console. (Not bounded_git_probe: rc 1 = "no filters" is a verdict.)
+    # One probe lists the filter keys and the include paths with their origin file: -z --show-origin
+    # yields "file:<origin>", "<key>\n<value>" pairs.
     proc = bounded_probe_run(
-        [
-            "git", "-C", str(cwd), "config", "--includes", "--name-only", "-z",
-            "--get-regexp", r"^(filter\..*\.(clean|smudge|process)|includeif\..*\.path)$",
-        ],
-        timeout=2, env=env,
+        ["git", "-C", str(cwd), "config", "--includes", "--show-origin", "-z", "--get-regexp",
+         _DISCOVERY_KEYS_REGEXP],
+        timeout=2, errors="strict", env=env,
     )
     if proc is None or proc.returncode not in (0, 1):
         return None
+    names: list[str] = []
+    targets: set[Path] = set()
+    toplevel: "Path | None" = None
+    fields = proc.stdout.split("\0")
+    for origin, entry in zip(fields[0::2], fields[1::2]):
+        # A conditional include key can itself contain a decoded CR. Refuse ambiguous
+        # records before partitioning, which would otherwise hide the include's key.
+        if entry.startswith("includeif.") and (entry.count("\n") != 1 or "\r" in entry):
+            return None
+        key, _, value = entry.partition("\n")
+        if not _INCLUDE_IF_KEY.fullmatch(key):
+            names.append(key)
+            continue
+        if not origin.startswith("file:"):
+            return None
+        # Probe text decoding normalizes CR to LF. Such paths cannot be resolved faithfully.
+        if "\n" in origin or "\r" in origin or "\n" in value or "\r" in value:
+            return None
+        # Git expands its runtime prefix, which Python's path expansion does not know.
+        if value.startswith("%(prefix)/"):
+            return None
+        origin_path = Path(origin[len("file:"):])
+        if not origin_path.is_absolute():
+            # git prints repo-local origins relative to the worktree top level, not to *cwd*; with a
+            # caller-set GIT_DIR/GIT_WORK_TREE they are relative to something else, so refuse.
+            if env.get("GIT_DIR") or env.get("GIT_WORK_TREE"):
+                return None
+            if toplevel is None:
+                top = bounded_probe_run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                                        timeout=2, errors="strict", env=env)
+                if top is None or top.returncode != 0:
+                    return None
+                top_value = top.stdout.rstrip("\r\n")  # a checkout path may end in a space
+                if "\n" in top_value or "\r" in top_value:
+                    return None
+                toplevel = Path(top_value)
+                # Trailing CR/LF can have been lost to text decoding or record trimming. Confirm
+                # that the parsed root still names the directory containing the actual caller.
+                try:
+                    if (not toplevel.is_absolute() or not toplevel.is_dir()
+                            or not Path(cwd).resolve().is_relative_to(toplevel.resolve())):
+                        return None
+                except (OSError, ValueError):
+                    return None
+            origin_path = toplevel / origin_path
+        # Git expands bare-home tilde paths using the child environment, not Python's ambient HOME.
+        if value == "~" or value.startswith("~/"):
+            home = env.get("HOME")
+            if home is None:
+                return None
+            expanded = home + value[1:]
+        else:
+            expanded = os.path.expanduser(value)
+        # A relative include path resolves against the directory of the config file naming it.
+        target = (origin_path.parent / expanded).resolve()
+        if target in targets or not target.exists():
+            continue  # already read, or missing (git skips a missing include file)
+        if not target.is_file() or len(targets) >= _MAX_INCLUDE_TARGETS:
+            return None  # a FIFO/device/directory, or too many targets to read on every call
+        targets.add(target)
+        probe = bounded_probe_run(
+            ["git", "config", "--file", str(target), "--name-only", "-z", "--get-regexp", _DISCOVERY_KEYS_REGEXP],
+            timeout=2, errors="strict", env=env,
+        )
+        if probe is None or probe.returncode not in (0, 1):
+            return None
+        found = probe.stdout.split("\0")
+        # An include inside an include target would need the same walk again; refuse instead.
+        # Check the canonical section prefix too: decoded CR in a subsection can defeat the regex.
+        if any(name.startswith("includeif.") or _INCLUDE_KEY.fullmatch(name) for name in found):
+            return None
+        names.extend(found)
 
     keys: list[str] = []
     required: list[str] = []
     seen: set[str] = set()
-    # Dedup on the exact name ``--name-only`` prints: git lowercases section and variable but keeps
-    # the subsection's case, and ``[filter "Evil"]`` is a different driver from ``[filter "evil"]``.
-    for raw in proc.stdout.split("\0"):
+    # Dedup on the exact key name git prints: section and variable lowercased, subsection case kept,
+    # and ``[filter "Evil"]`` is a different driver from ``[filter "evil"]``.
+    for raw in names:
         key = raw.strip()
-        if _INCLUDE_IF_KEY.fullmatch(key):
-            return None
         if not key or key in seen or not _FILTER_COMMAND_KEY.fullmatch(key):
             continue
         seen.add(key)
