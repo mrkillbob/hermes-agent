@@ -205,6 +205,41 @@ def test_failed_or_non_worker_terminal_call_does_not_stop_execution(
     ) is False
 
 
+@pytest.mark.parametrize("content,receipt_id,receipt_name,accepted", [
+    ('{"ok": true}', "schedule-current", "kanban_schedule", True),
+    ('{"ok": false, "error": "stale run"}', "schedule-current", "kanban_schedule", False),
+    ("scheduled", "schedule-current", "kanban_schedule", False),
+    ('{"ok": "true"}', "schedule-current", "kanban_schedule", False),
+    ('{"ok": true}', "schedule-old", "kanban_schedule", False),
+    ('{"ok": true}', "schedule-current", "kanban_request_review", False),
+    (None, "schedule-current", "kanban_schedule", False),
+])
+def test_schedule_handoff_requires_successful_correlated_receipt(
+    clear_kanban_env, content, receipt_id, receipt_name, accepted,
+):
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_schedule")
+    tool_calls = [{"id": "schedule-current", "function": {"name": "kanban_schedule", "arguments": "{}"}}]
+    messages = [{"role": "assistant", "tool_calls": tool_calls}]
+    if content is not None:
+        messages.append({"role": "tool", "name": receipt_name, "tool_call_id": receipt_id, "content": content})
+
+    assert session_called_kanban_terminal(messages) is accepted
+    assert (build_kanban_stop_nudge(messages=messages) is None) is accepted
+    assert successful_kanban_terminal_transition(messages=messages, tool_calls=tool_calls) is accepted
+
+
+@pytest.mark.parametrize("include_call", [False, True])
+def test_schedule_result_without_correlatable_call_does_not_suppress_nudge(clear_kanban_env, include_call):
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_schedule")
+    messages = []
+    if include_call:
+        messages.append({"role": "assistant", "tool_calls": [{"function": {"name": "kanban_schedule"}}]})
+    messages.append({"role": "tool", "name": "kanban_schedule", "tool_call_id": "unknown", "content": '{"ok": true}'})
+
+    assert session_called_kanban_terminal(messages) is False
+    assert build_kanban_stop_nudge(messages=messages) is not None
+
+
 def test_exhausted_nudges_handoff_useful_output_to_review(
     clear_kanban_env, monkeypatch
 ):

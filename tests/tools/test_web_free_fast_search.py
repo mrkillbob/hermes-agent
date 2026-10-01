@@ -102,10 +102,13 @@ def test_zero_credit_portal_identity_autodetects_free_fast_search(monkeypatch, t
 
     state = _nous_state(EXHAUSTED, "oauth")
     _write_home(tmp_path / "home", monkeypatch, nous_state=state)
+    # Installed keyless packages must not preempt the registered search-only route.
+    monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
     # Premise: the paid-tool gate is closed for this identity and stays closed for extract.
     assert managed_nous_tools_enabled() is False
     assert web_tools.check_firecrawl_api_key() is False
     assert web_tools._get_extract_backend() != "perplexity"
+    assert web_tools._get_search_backend() == "perplexity"
 
     result = _search()
 
@@ -210,6 +213,7 @@ def test_free_fast_search_failure_skips_paid_firecrawl_but_keeps_keyless_rescue(
     (_nous_state(ANON, "anonymous"), {"nous": {"guest": False}}),
     (None, {}),
     (_nous_state(EXHAUSTED, "oauth"), {"web": {"search_backend": "exa"}}),
+    (_nous_state(EXHAUSTED, "oauth"), {"web": {"search_backend": "ddgs"}}),
 ])
 def test_free_fast_search_needs_a_usable_identity_and_no_explicit_selection(monkeypatch, tmp_path, gateway_server, state, config):
     from tools import web_tools
@@ -218,6 +222,17 @@ def test_free_fast_search_needs_a_usable_identity_and_no_explicit_selection(monk
 
     assert web_tools._managed_web_search() is False
     assert web_tools._get_search_backend() != "perplexity"
+
+
+def test_explicit_search_credentials_beat_free_fast_search(monkeypatch, tmp_path):
+    from tools import web_tools
+
+    _write_home(tmp_path / "home", monkeypatch, nous_state=_nous_state(EXHAUSTED, "oauth"))
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
+
+    assert web_tools._get_search_backend() == "tavily"
+    assert web_tools._managed_web_search() is False
 
 
 def test_direct_perplexity_key_beats_free_fast_search(monkeypatch, tmp_path, gateway_server):
