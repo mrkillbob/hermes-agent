@@ -9,6 +9,8 @@ import { pathToFileURL } from 'node:url'
 
 import { test } from 'vitest'
 
+import { getWindowsCompilerEnvironment } from './stage-native-deps.mjs'
+
 const requireFromDesktop = createRequire(import.meta.url)
 
 function resolveGetWindowsEntry() {
@@ -34,6 +36,21 @@ test.skipIf(!getWindowsEntry && process.env.HERMES_REQUIRE_GET_WINDOWS !== '1')(
     const preGypManifest = JSON.parse(fs.readFileSync(path.join(preGypRoot, 'package.json'), 'utf8'))
 
     assert.equal(preGypManifest.version, '2.0.3', 'exercise the exact supplier selected for get-windows')
+    const compilerEnv = getWindowsCompilerEnvironment(getWindowsRoot, { npm_config_node_gyp: '/untrusted/compiler' })
+    const preGypRequire = createRequire(preGypEntry)
+    assert.equal(preGypRequire.resolve('node-gyp/bin/node-gyp.js'), compilerEnv.npm_config_node_gyp)
+    assert.equal(requireFromGetWindows.resolve('node-gyp/bin/node-gyp.js'), compilerEnv.npm_config_node_gyp)
+    const compilerOutput = execFileSync(
+      process.execPath,
+      [
+        '-e',
+        'require(process.argv[1]).run_gyp(["--version"], {}, error => { if (error) throw error })',
+        path.join(preGypRoot, 'lib/util/compile.js')
+      ],
+      { cwd: getWindowsRoot, env: compilerEnv, encoding: 'utf8', timeout: 15_000 }
+    )
+    assert.match(compilerOutput, /v13\.0\.2/)
+
     assert.equal(getWindowsManifest.version, '9.3.0')
     assert.deepEqual(getWindowsManifest.binary.napi_versions, [9])
 
@@ -162,9 +179,13 @@ test.runIf(process.platform === 'win32' && process.env.HERMES_VERIFY_GET_WINDOWS
     const port = unavailable.address().port
     await new Promise((resolve, reject) => unavailable.close(error => (error ? reject(error) : resolve())))
     const mirrorKey = `npm_config_${manifest.binary.module_name.replace('-', '_')}_binary_host_mirror`
-    const env = { ...process.env, [mirrorKey]: `https://127.0.0.1:${port}/` }
+    const env = getWindowsCompilerEnvironment(packageRoot, {
+      ...process.env,
+      [mirrorKey]: `https://127.0.0.1:${port}/`
+    })
     const output = runCli(['install', '--fallback-to-build'], env)
     assert.match(output, /falling back to source compile/)
+    assert.match(output, /using node-gyp@13\.0\.2/)
     assertLoads()
   },
   660_000

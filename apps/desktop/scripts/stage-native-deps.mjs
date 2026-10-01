@@ -628,6 +628,18 @@ export function stageGetWindowsInto(
   return destRoot
 }
 
+export function getWindowsCompilerEnvironment(srcRoot, env = process.env) {
+  const compilerPath = require.resolve('node-gyp/bin/node-gyp.js', { paths: [srcRoot] })
+  const manifest = JSON.parse(readFileSync(resolve(compilerPath, '../../package.json'), 'utf8'))
+  if (manifest.version !== '13.0.2') {
+    throw new Error(`[stage-native-deps] unsupported get-windows source compiler: ${manifest.version}`)
+  }
+  return {
+    ...Object.fromEntries(Object.entries(env).filter(([key]) => !/^npm_config_node_gyp$/i.test(key))),
+    npm_config_node_gyp: compilerPath
+  }
+}
+
 export function installGetWindowsNativeBinding(
   srcRoot,
   { resolveInstaller, spawn = spawnSync } = {}
@@ -648,7 +660,8 @@ export function installGetWindowsNativeBinding(
 
   const result = spawn(process.execPath, [installerPath, 'install', '--fallback-to-build'], {
     cwd: srcRoot,
-    stdio: 'inherit'
+    stdio: 'inherit',
+    env: getWindowsCompilerEnvironment(srcRoot)
   })
   if (result.error) {
     throw new Error(

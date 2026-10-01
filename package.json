@@ -42,7 +42,8 @@
     "eslint-plugin-unused-imports": "4.4.1",
     "globals": "17.7.0",
     "ip-address": "10.7.2",
-    "typescript-eslint": "8.64.0"
+    "typescript-eslint": "8.64.0",
+    "node-gyp": "13.0.2"
   },
   "overrides": {
     "@electron/osx-sign": {
@@ -65,14 +66,15 @@
     "tar": "7.5.22",
     "@xmldom/xmldom": "0.9.12",
     "get-windows@9.3.0": {
-      "@mapbox/node-pre-gyp": "2.0.3"
+      "@mapbox/node-pre-gyp": "2.0.3",
+      "node-gyp": "13.0.2"
     },
     "app-builder-lib@27.0.0-alpha.6": {
       "plist@3.1.0": "3.1.1"
     }
   },
   "engines": {
-    "node": "^22.22.0 || ^24.11.0 || >=26.0.0",
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0",
     "npm": "<11.10.0 || >=11.17.0"
   },
   "allowScripts": {

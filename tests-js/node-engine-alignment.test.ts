@@ -28,8 +28,8 @@ function nodeRange(manifest: Manifest): string {
 }
 
 test.each([
-  ['22.22.0', true], ['22.23.1', true], ['24.11.0', true], ['24.18.2', true], ['26.0.0', true],
-  ['22.21.1', false], ['23.0.0', false], ['24.0.0', false], ['24.10.9', false], ['25.2.1', false], ['26.0.0-rc.1', false],
+  ['22.22.2', true], ['22.23.1', true], ['24.15.0', true], ['24.18.2', true], ['26.0.0', true],
+  ['22.21.1', false], ['22.22.0', false], ['22.22.1', false], ['24.11.0', false], ['24.14.9', false], ['23.0.0', false], ['24.0.0', false], ['24.10.9', false], ['25.2.1', false], ['26.0.0-rc.1', false],
 ] as const)('workspace Node policy for %s is %s', (version: string, accepted: boolean): void => {
   for (const manifest of [root, desktop]) {
     assert.equal(semver.satisfies(version, nodeRange(manifest)), accepted)
@@ -63,4 +63,12 @@ test('exact independently managed Node and npm satisfy all declared lockfile eng
 test('lockfile workspace engine mirrors match their manifests', (): void => {
   assert.deepEqual(lock.packages[''].engines, root.engines)
   assert.deepEqual(lock.packages['apps/desktop'].engines, desktop.engines)
+})
+
+
+test('source-build compiler engine contract agrees with the workspace minimums', (): void => {
+  const compiler = lock.packages['node_modules/node-gyp']
+  assert.ok(compiler, 'source compiler must be present in the locked graph')
+  assert.equal(nodeRange(compiler), nodeRange(root))
+  assert.equal(nodeRange(compiler), nodeRange(desktop))
 })
