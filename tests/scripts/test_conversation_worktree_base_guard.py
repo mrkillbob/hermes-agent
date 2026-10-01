@@ -198,9 +198,9 @@ def test_real_manager_bootstrap_pins_claim_and_repairs_only_proven_copied_hooks(
     "missing-pin", "wrong-pin", "foreign-source", "missing-proof", "source-drift",
     "config-drift", "custom-hook", "global-hook", "hook-bytes", "hook-symlink",
     "missing-source-hook", "missing-claim", "config-lock", "cas-drift", "skip-other-repository",
-    "creation-head-drift", "creation-config-drift", "local-hook", "config-symlink", "command-hook",
+    "creation-head-drift", "creation-config-drift", "local-hook", "config-symlink", "command-hook", "post-replace-lock",
 ])
-def test_guard_refuses_unproven_hook_repair_and_retains_identity(workspace, tmp_path, monkeypatch, fault):
+def test_guard_preserves_identity_and_concurrent_or_unproven_hook_settings(workspace, tmp_path, monkeypatch, fault):
     repository, source, remote, destination = workspace
     with SessionDB(tmp_path / "state.db") as db:
         manager = ConversationWorktreeManager(ConversationWorktreePolicy(
@@ -254,6 +254,15 @@ def test_guard_refuses_unproven_hook_repair_and_retains_identity(workspace, tmp_
 
         monkeypatch.setattr(guard, "_command", conflicting_writer)
 
+    def post_replace_lock():
+        replace = guard.os.replace
+
+        def next_writer(source_path, destination_path):
+            replace(source_path, destination_path)
+            Path(source_path).write_bytes(b"next writer")
+
+        monkeypatch.setattr(guard.os, "replace", next_writer)
+
     def command_hook():
         monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
         monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
@@ -280,6 +289,7 @@ def test_guard_refuses_unproven_hook_repair_and_retains_identity(workspace, tmp_
         "missing-claim": lambda: metadata(root, "hermes-conversation-owner-v1").unlink(),
         "config-lock": lambda: config.with_name(config.name + ".lock").write_bytes(b"other writer"),
         "cas-drift": cas_drift,
+        "post-replace-lock": post_replace_lock,
         "command-hook": command_hook,
         "skip-other-repository": skip_other,
     }
@@ -289,16 +299,19 @@ def test_guard_refuses_unproven_hook_repair_and_retains_identity(workspace, tmp_
         assert not metadata(root, "hermes-conversation-config-inheritance-v1.json").exists()
     before = config.read_bytes()
     head, branch = git(root, "rev-parse", "HEAD"), git(root, "branch", "--show-current")
-    if fault == "skip-other-repository":
+    if fault in {"skip-other-repository", "post-replace-lock"}:
         assert guard.main(args) == 0
     else:
         with pytest.raises((RuntimeError, OSError)):
             guard.main(args)
     assert git(root, "rev-parse", "HEAD") == head
     assert git(root, "branch", "--show-current") == branch
-    assert not metadata(root, "calls.json").exists()
+    assert metadata(root, "calls.json").exists() == (fault == "post-replace-lock")
     if fault == "cas-drift":
         assert config.read_bytes() == before + b"\n[fixture]\n\tchanged = true\n"
+    elif fault == "post-replace-lock":
+        assert git(root, "config", "--worktree", "core.hooksPath") == ".githooks"
+        assert config.with_name(config.name + ".lock").read_bytes() == b"next writer"
     else:
         assert config.read_bytes() == before
     if fault == "config-lock":

@@ -203,8 +203,9 @@ def _repair_inherited_hooks(checkout: Path) -> None:
             destination.flush()
             os.fsync(destination.fileno())
         os.replace(lock, child_config)
-    finally:
+    except BaseException:
         lock.unlink(missing_ok=True)
+        raise
     if _hook_setting(checkout) != ("worktree", f"file:{child_config}", ".githooks"):
         raise RuntimeError("repaired hook setting did not resolve inside the child")
 
