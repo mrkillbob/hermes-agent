@@ -15,6 +15,19 @@ on:
         description: Run the unit-test matrix
         type: boolean
         default: true
+      # The E2E jobs below are slow lanes (scripts/ci/classify_changes.py).
+      # ci.yaml passes the classifier's answer; a caller that passes nothing
+      # gets every job.
+      e2e:
+        description: Run the e2e job (tests/e2e except the upgrade suite).
+        type: boolean
+        required: false
+        default: true
+      e2e_upgrade:
+        description: Run the e2e-upgrade shards (tests/e2e/core/upgrade).
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: read
@@ -34,7 +47,7 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
       - name: Generate test matrix
         id: matrix
@@ -46,16 +59,16 @@ jobs:
     name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
     needs: generate
     if: inputs.run_unit
-    # NousResearch's 96-core runner is private to that repository. Fork PRs
+    # NousResearch's 32-core runner is private to that repository. Fork PRs
     # keep using standard hosted runners and the slice matrix above.
-    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-96-core' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.generate.outputs.matrix) }}
     timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 60 }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
       - name: Install ripgrep (prebuilt binary)
         run: |
@@ -96,7 +109,7 @@ jobs:
         # file is absent on a fresh runner and the scaler is inert.
         # Exact key never matches (run_id differs); restore-keys picks the
         # most recent cache saved by a main push. PRs read, only main writes.
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: test_durations.json
           key: test-durations-unit-never-exact
@@ -113,30 +126,8 @@ jobs:
           scripts/run_tests.sh
         env:
           HERMES_TEST_SLICE: ${{ matrix.slice.index }}/${{ inputs.slice_count }}
-          # This is the maximum number of test FILES that run together.
-          # run_tests_parallel.py starts one pytest subprocess for each file
-          # from a single ThreadPoolExecutor, so this value IS the limit. The
-          # upstream runner has 96 cores; public hosted runners have 4.
-          #
-          # Measured on this runner (96-core EPYC 7763, 377GB). Whole suite,
-          # two repetitions for each value. See run 32549672063:
-          #
-          #     workers   x cores   mean
-          #        48       0.5x    138s
-          #        96       1.0x    126s   <- fastest
-          #       144       1.5x    132s
-          #       192       2.0x    132s
-          #       240       2.5x    140s
-          #       288       3.0x    142s
-          #
-          # One worker for each core wins. The curve is shallow: 126s to 142s
-          # across a 6x range. The suite has sufficient concurrency at this
-          # size. The remaining time is the slowest files plus the setup.
-          # Workers above the core count only add contention.
-          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '96' || '4' }}
-          # Match upstream's 10-minute per-file headroom on public fork runners
-          # too. Large files can exceed five minutes under shared-runner load
-          # even when all collected tests pass.
+          # Bound file concurrency to the available runner; preserve full fork slices.
+          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '32' || '4' }}
           HERMES_TEST_FILE_TIMEOUT: "600"
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
@@ -147,12 +138,13 @@ jobs:
         # Only green first-attempt durations are written by the runner, so
         # a hang on main cannot ratchet its own bound upward.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('test_durations.json') != ''
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: test_durations.json
           key: test-durations-unit-${{ github.run_id }}
 
   e2e:
+    if: inputs.e2e
     # Keep the process-heavy suite in one job, as upstream does. The fork
     # cannot access NousResearch's private runner groups, but one hosted runner
     # avoids multiplying dependency setup and flooding the fork's runner quota.
@@ -160,7 +152,7 @@ jobs:
     timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
       - name: Set up locked Python, Node and test dependencies
         # toolchain: all puts PM's locked Node in the runner's PM store, not
@@ -256,19 +248,20 @@ jobs:
           key: test-durations-e2e-${{ github.run_id }}
 
   e2e-upgrade-plan:
-    if: inputs.e2e_mode == 'full'
     # One e2e-upgrade shard per suite directory: the files directly under
     # tests/e2e/core/upgrade ("core") plus every subdirectory that holds
     # test_*.py (pm, git, handoff, network, hosts, ...). A new suite
     # directory gets its own shard without editing this file, and no shard
     # carries the whole tree's wall time against the 60-minute timeout.
+    # Skipping this job skips every e2e-upgrade shard with it.
+    if: inputs.e2e_upgrade
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           sparse-checkout: tests/e2e/core/upgrade
       - name: List suite directories
@@ -287,7 +280,7 @@ jobs:
           echo "shards=$shards" | tee -a "$GITHUB_OUTPUT"
 
   e2e-upgrade:
-    if: inputs.e2e_mode == 'full'
+    if: inputs.e2e_upgrade
     # tests/e2e/core/upgrade: a real N-1 -> HEAD `hermes update` (clean,
     # autostash, killed mid-pull / mid-deps, offline), fresh-process import and
     # entrypoint smoke, the config round-trip property matrix, and the lane
@@ -306,7 +299,7 @@ jobs:
         shard: ${{ fromJSON(needs.e2e-upgrade-plan.outputs.shards) }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           # Upgrade E2E tests build a shared local bare origin and exercise real
           # full-history clones from it. A blob-filtered checkout leaves promised
@@ -323,7 +316,7 @@ jobs:
 
       - name: Set up Node
         # `hermes update` builds the web UI / TUI workspaces.
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # 7.0.0
         with:
           node-version: 26
           cache: npm

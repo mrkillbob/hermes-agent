@@ -1,4 +1,4 @@
-import { type OwnerScope, ownerScoped } from '@/api/client'
+import { type OwnerScope, ownerScoped, type ResolvedOwner } from '@/api/client'
 import { getApiRequestConnection, getApiRequestProfile, hermesApi } from '@/hermes'
 
 /**
@@ -29,6 +29,9 @@ export interface DirectSttConfig {
   language: null | string
   /** Seconds the gateway allows one transcription request (`stt.openai.timeout`); absent on older backends. */
   timeout_s?: null | number
+  /** Silence-hallucination contract the relay path applies (`is_whisper_hallucination`);
+   *  absent on older backends — a matching transcript is still returned as-is then. */
+  hallucination_filter?: null | { phrases: string[]; repeat_regex: string }
 }
 
 export interface DirectTtsConfig {
@@ -73,9 +76,6 @@ export interface VoiceClientScope {
 // ---------------------------------------------------------------------------
 
 const CONFIG_TTL_MS = 60_000
-// Per-request cap on a direct STT upload; the gateway's stt timeout is not part of the
-// client config, so this mirrors its 60s default rather than hanging dictation forever.
-const STT_REQUEST_TIMEOUT_MS = 60_000
 
 let cached: { key: string; at: number; config: VoiceClientConfig } | null = null
 let inflight: { key: string; promise: Promise<null | VoiceClientConfig>; token: symbol } | null = null
@@ -109,8 +109,33 @@ export function clearVoiceClientConfigCache(): void {
 
 export async function fetchVoiceClientConfig(scope?: VoiceClientScope): Promise<null | VoiceClientConfig> {
   const owner = scope ? canonicalScope(scope) : undefined
-  const key = scopeKey(owner)
 
+  return owner
+    ? fetchVoiceClientConfigFor(owner)
+    : loadVoiceClientConfig(scopeKey(), () =>
+        hermesApi<VoiceConfigResponse>({ ...ownerScoped(undefined), path: '/api/audio/voice-config' })
+      )
+}
+
+/** The config for an owner resolved once for a whole voice operation: the
+ *  lookup cannot drift to whatever scope is ambient by the time it runs. */
+export async function fetchVoiceClientConfigFor(owner: ResolvedOwner): Promise<null | VoiceClientConfig> {
+  return loadVoiceClientConfig(`${owner.connectionId || 'local'}::${owner.profile || 'default'}`, () =>
+    // Config warm-up stays off the foreground dial slot, even for a pinned owner.
+    window.hermesDesktop.api<VoiceConfigResponse>({
+      ...(owner.connectionId ? { connectionId: owner.connectionId } : {}),
+      ...(owner.profile ? { profile: owner.profile } : {}),
+      path: '/api/audio/voice-config'
+    })
+  )
+}
+
+type VoiceConfigResponse = { ok: boolean } & VoiceClientConfig
+
+async function loadVoiceClientConfig(
+  key: string,
+  fetchConfig: () => Promise<VoiceConfigResponse>
+): Promise<null | VoiceClientConfig> {
   if (cached && cached.key === key && Date.now() - cached.at < CONFIG_TTL_MS) {
     return cached.config
   }
@@ -123,14 +148,7 @@ export async function fetchVoiceClientConfig(scope?: VoiceClientScope): Promise<
 
   const promise = (async () => {
     try {
-      // Voice config is a background fetch; it must not carry priority:'foreground',
-      // which would consume the pool's foreground dial slot on every refresh (#111651).
-      // When pinned to an explicit owner: spread connectionId+profile directly.
-      // When ambient: ownerScoped(undefined) resolves the ambient profile without priority.
-      const response = await hermesApi<{ ok: boolean } & VoiceClientConfig>({
-        ...(owner ? { connectionId: owner.connectionId, profile: owner.profile } : ownerScoped(undefined)),
-        path: '/api/audio/voice-config'
-      })
+      const response = await fetchConfig()
 
       if (!response?.ok || !response.stt || !response.tts) {
         return null
@@ -222,6 +240,42 @@ export function sttTimeoutSeconds(stt: Pick<DirectSttConfig, 'timeout_s'>): numb
 }
 
 /**
+ * The relay path's Whisper-silence filter (`is_whisper_hallucination`,
+ * tools/voice_mode_transcript.py): empty, an exact known hallucination
+ * (lowercased, trailing `.!` stripped), or repetitive filler like
+ * "Thank you. Thank you." A client-direct transcript must agree with a
+ * relayed one instead of submitting "thank you" on silence as a real turn.
+ * No filter on the config (older backend) → the transcript passes through.
+ */
+export function isSttSilenceHallucination(
+  transcript: string,
+  filter: DirectSttConfig['hallucination_filter']
+): boolean {
+  if (!filter) {
+    return false
+  }
+
+  const cleaned = transcript.trim().toLowerCase()
+
+  if (!cleaned) {
+    return true
+  }
+
+  // Trailing `.!` only — the relay strips `cleaned.rstrip('.!')`, so an
+  // internal period (`thank. you`) stays internal and the transcript stays
+  // a real turn on both paths, never just one.
+  if (filter.phrases.includes(cleaned.replace(/[.!]+$/, ''))) {
+    return true
+  }
+
+  try {
+    return new RegExp(filter.repeat_regex, 'i').test(cleaned)
+  } catch {
+    return false
+  }
+}
+
+/**
  * `fetch` with the STT deadline. A slow or wedged endpoint otherwise keeps the
  * dictation UI in "transcribing" forever — the browser applies no timeout of
  * its own to a POST that never answers.
@@ -230,11 +284,12 @@ async function sttFetch(stt: DirectSttConfig, url: string, init: RequestInit): P
   const seconds = sttTimeoutSeconds(stt)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), seconds * 1000)
+  const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
 
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    return await fetch(url, { ...init, signal })
   } catch (error) {
-    if (controller.signal.aborted) {
+    if (controller.signal.aborted && signal.reason === controller.signal.reason) {
       throw new Error(`Transcription timed out after ${seconds}s (${stt.provider} did not answer)`)
     }
 
@@ -249,7 +304,8 @@ async function sttFetch(stt: DirectSttConfig, url: string, init: RequestInit): P
  * when the profile's provider isn't client-callable — the caller relays.
  * Provider REJECTIONS throw: the configured provider said no, and silently
  * re-running the same request through the gateway would just fail again
- * slower and hide the real error.
+ * slower and hide the real error. `owner` pins the provider config to the
+ * recording's owner (resolved when the mic opened); omitted → the active scope.
  */
 function throwIfVoiceRequestAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
@@ -259,10 +315,10 @@ function throwIfVoiceRequestAborted(signal: AbortSignal | undefined): void {
 
 export async function transcribeAudioClientDirect(
   audio: Blob,
-  scope?: VoiceClientScope,
+  owner?: ResolvedOwner,
   signal?: AbortSignal
 ): Promise<null | string> {
-  const config = await fetchVoiceClientConfig(scope)
+  const config = await (owner ? fetchVoiceClientConfigFor(owner) : fetchVoiceClientConfig())
   throwIfVoiceRequestAborted(signal)
   const stt = config?.stt
 
@@ -288,14 +344,18 @@ export async function transcribeAudioClientDirect(
       method: 'POST',
       headers: { Authorization: `Bearer ${stt.api_key}` },
       body: form,
-      signal: signal ?? AbortSignal.timeout(STT_REQUEST_TIMEOUT_MS)
+      signal
     })
 
     if (!response.ok) {
       throw new Error(`${stt.provider} STT error (HTTP ${response.status}): ${await providerErrorText(response)}`)
     }
 
-    return transcriptFromOpenAiMultipartBody(await response.text())
+    const transcript = transcriptFromOpenAiMultipartBody(await response.text())
+
+    // Silence hallucination ("thank you" on quiet audio): treat as silence,
+    // exactly like the relay endpoint, instead of submitting a phantom turn.
+    return isSttSilenceHallucination(transcript, stt.hallucination_filter) ? '' : transcript
   }
 
   if (stt.wire === 'xai-stt') {
@@ -311,7 +371,7 @@ export async function transcribeAudioClientDirect(
       method: 'POST',
       headers: { Authorization: `Bearer ${stt.api_key}` },
       body: form,
-      signal: signal ?? AbortSignal.timeout(STT_REQUEST_TIMEOUT_MS)
+      signal
     })
 
     if (!response.ok) {
@@ -319,8 +379,10 @@ export async function transcribeAudioClientDirect(
     }
 
     const result = (await response.json()) as { text?: string }
+    const transcript = (result.text || '').trim()
 
-    return (result.text || '').trim()
+    // Silence hallucination: same contract as the relay endpoint.
+    return isSttSilenceHallucination(transcript, stt.hallucination_filter) ? '' : transcript
   }
 
   if (stt.wire === 'elevenlabs-stt') {
@@ -339,7 +401,7 @@ export async function transcribeAudioClientDirect(
       method: 'POST',
       headers: { 'xi-api-key': stt.api_key },
       body: form,
-      signal: signal ?? AbortSignal.timeout(STT_REQUEST_TIMEOUT_MS)
+      signal
     })
 
     if (!response.ok) {
@@ -347,8 +409,10 @@ export async function transcribeAudioClientDirect(
     }
 
     const result = (await response.json()) as { text?: string }
+    const transcript = (result.text || '').trim()
 
-    return (result.text || '').trim()
+    // Silence hallucination: same contract as the relay endpoint.
+    return isSttSilenceHallucination(transcript, stt.hallucination_filter) ? '' : transcript
   }
 
   return null

@@ -138,6 +138,14 @@ def _usage_timestamp(rec: dict[str, Any]) -> Optional[int]:
 def build_skill_nodes(skill_roots: list[tuple[str, Path]]) -> dict[str, SkillNode]:
     usage = _load_usage()
     nodes: dict[str, SkillNode] = {}
+    # Tag skills mounted from skills.external_dirs so the journey graph can keep them out of
+    # learning milestones (#108032): a mount is configured, not learned. Path-based (the common
+    # symlink into the profile tree resolves to the external root), so a local copy of the same
+    # name still classifies as its own source.
+    try:
+        from agent.skill_utils import is_external_skill_path
+    except Exception:
+        is_external_skill_path = None  # type: ignore[assignment]
     for source, root in skill_roots:
         for skill_md in root.rglob("SKILL.md") if root.exists() else ():
             if _SKIP_PARTS.intersection(skill_md.parts):
@@ -156,8 +164,13 @@ def build_skill_nodes(skill_roots: list[tuple[str, Path]]) -> dict[str, SkillNod
                 continue
             rec, cat, parts = usage.get(name, {}), _fm_field(fm, "category"), skill_md.parts  # …/skills/<category>/<skill>/SKILL.md
             usage_ts = next((ts for ts in (_to_int_ts(rec.get(k)) for k in _USAGE_TS_KEYS) if ts is not None), None)
+            # Local variable: never overwrite `source` — the loop variable must keep its
+            # per-root value for the NEXT skill in the same root, or every skill yielded
+            # after the first external mount inherits "external" (ext4 hash order can
+            # interleave a symlinked mount before a local skill in one root).
+            node_source = "external" if (is_external_skill_path is not None and is_external_skill_path(skill_md)) else source
             nodes[name] = SkillNode(
-                name=name, category=str(cat) if cat else parts[-3] if len(parts) >= 3 else "general", source=source,
+                name=name, category=str(cat) if cat else parts[-3] if len(parts) >= 3 else "general", source=node_source,
                 timestamp=usage_ts or _to_int_ts(skill_md.stat().st_mtime),
                 use_count=int(rec.get("use_count", 0) or 0), state=str(rec.get("state", "active") or "active"),
                 created_by=rec.get("created_by"), pinned=bool(rec.get("pinned", False)), related=_related(fm),
@@ -253,7 +266,7 @@ def _tokenize(text: str) -> set[str]:
 
 def _memory_skill_edges(memory_cards: list[dict[str, Any]], skills: list[SkillNode]) -> list[tuple[str, str]]:
     edges: list[tuple[str, str]] = []
-    skill_meta = [(s, _tokenize(s.name), s.name.lower()) for s in skills]
+    skill_meta = [(s.name, _tokenize(s.name), s.name.lower()) for s in skills]
     for idx, card in enumerate(memory_cards):
         text = f"{card.get('title', '')}\n{card.get('body', '')}".lower()
         text_tokens = _tokenize(text)
@@ -345,6 +358,11 @@ def _shared_edges(
     return sorted(edges)
 
 
+def _has_learning_signal(node: SkillNode) -> bool:
+    """Profile-created, taught, or used skills; configured mounts are not learning."""
+    return node.source != "external" and (node.created_by in {"agent", "learn"} or node.use_count > 0)
+
+
 def build_learning_graph() -> dict[str, Any]:
     """Full payload for the desktop learning panel.
 
@@ -357,7 +375,7 @@ def build_learning_graph() -> dict[str, Any]:
     learned_skills = {
         name: node
         for name, node in all_skills.items()
-        if node.source != "base" and (node.created_by == "agent" or node.use_count > 0)
+        if node.source != "base" and _has_learning_signal(node)
     }
     skill_edges = build_edges(learned_skills)
     memory_cards = _memory_cards()

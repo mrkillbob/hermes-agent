@@ -26,7 +26,13 @@ import {
 } from './selection'
 import { registerTerminalContextMenu } from './terminal-context-menu'
 import { prepareTerminalFontFamily } from './terminal-font'
-import { closeTerminal, redrawAllTerminals, registerWebglRefresh, updateTerminalRestoreCwd, updateTerminalReviveBuffer } from './terminals'
+import {
+  closeTerminal,
+  redrawAllTerminals,
+  registerWebglRefresh,
+  updateTerminalRestoreCwd,
+  updateTerminalReviveBuffer
+} from './terminals'
 import { useTerminalFontController } from './use-terminal-font'
 
 // How many scrollback lines to serialize for relaunch restore. Mirrors VS Code's
@@ -839,7 +845,22 @@ export function useTerminalSession({
             void terminalApi.write(sessionId, '\x12')
           }
         },
-        selectAll: () => term.selectAll()
+        selectAll: () => term.selectAll(),
+        // The close-tab chord main claimed over this terminal is the shell's
+        // word erase: re-deliver the ^W byte instead of closing the pane
+        // (#65457). False when the session is gone, so the caller closes.
+        wordErase: () => {
+          hasSessionActivityRef.current = true
+          const sessionId = sessionIdRef.current
+
+          if (!sessionId) {
+            return false
+          }
+
+          void terminalApi.write(sessionId, '\x17')
+
+          return true
+        }
       })
     )
 
@@ -947,6 +968,16 @@ export function useTerminalSession({
     // picks the wrong row count, the shell boots at that size, then the real font
     // loads -> refit -> SIGWINCH -> the shell reprints its prompt lower, leaving
     // stale blank rows (and a stray selection) above it.
+    let mounted = false
+    let mountWatchFrame = 0
+
+    const cancelMountWatch = () => {
+      if (mountWatchFrame) {
+        window.cancelAnimationFrame(mountWatchFrame)
+        mountWatchFrame = 0
+      }
+    }
+
     const mount = () => {
       if (disposed || !host.isConnected) {
         return
@@ -954,6 +985,7 @@ export function useTerminalSession({
 
       term.open(host)
       mountedRef.current = true
+      mounted = true
       term.focus()
 
       // WebGL renderer matches the dashboard ChatPage path; xterm's default DOM
@@ -994,6 +1026,37 @@ export function useTerminalSession({
       () => !disposed && host.isConnected
     ).then(fontFamily => {
       if (!fontFamily) {
+        // The pane shell can render this host before it's connected to the
+        // document (inactive keep-alive tab, a remount race, a reload
+        // mid-render) — isCurrent() above goes false at an await boundary and
+        // this used to return silently: the pane stayed blank forever, with
+        // no spawn attempt and no log line (#118004). Poll frames until the
+        // host connects, then retry the wait+mount exactly once; a host that
+        // never connects (or a dispose before then) stops the watch.
+        const watchForHost = () => {
+          if (disposed || mounted) {
+            return
+          }
+
+          if (host.isConnected) {
+            void prepareTerminalFontFamily(
+              () => latestFontFamilyRef.current,
+              () => !disposed && host.isConnected
+            ).then(next => {
+              if (next && !disposed && !mounted && host.isConnected) {
+                term.options.fontFamily = next
+                mount()
+              }
+            })
+
+            return
+          }
+
+          mountWatchFrame = window.requestAnimationFrame(watchForHost)
+        }
+
+        mountWatchFrame = window.requestAnimationFrame(watchForHost)
+
         return
       }
 
@@ -1004,6 +1067,7 @@ export function useTerminalSession({
     return () => {
       disposed = true
       mountedRef.current = false
+      cancelMountWatch()
       cleanup.forEach(run => run())
       fitRef.current = null
 

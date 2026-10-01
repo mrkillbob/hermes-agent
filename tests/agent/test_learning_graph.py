@@ -182,3 +182,31 @@ def test_invalid_shared_catalog_config_preserves_local_graph(tmp_path, monkeypat
     assert any(node["label"] == "Local lesson" for node in graph["nodes"])
     assert graph["shared_catalog"]["nodes"] == 0
     assert graph["shared_catalog"]["diagnostics"] == ["vault_dir_not_absolute"]
+
+
+def test_tied_memory_skill_scores_have_string_targets_and_serializable_graph(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+
+    home = tmp_path / ".hermes"
+    (home / "memories").mkdir(parents=True)
+    (home / "memories" / "MEMORY.md").write_text("alpha workflow beta workflow", encoding="utf-8")
+    names = ("alpha-workflow", "beta-workflow")
+    for name in names:
+        skill = home / "skills" / name / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text(f"---\nname: {name}\n---\nA learned workflow.\n", encoding="utf-8")
+    (home / "skills" / ".usage.json").write_text(
+        json.dumps({name: {"created_by": "agent"} for name in names}), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    token = set_hermes_home_override(home)
+    try:
+        graph = learning_graph.build_learning_graph()
+    finally:
+        reset_hermes_home_override(token)
+
+    memory_edges = [edge for edge in graph["edges"] if edge["source"].startswith("memory:")]
+    assert [edge["target"] for edge in memory_edges] == list(names)
+    assert all(isinstance(edge["target"], str) for edge in memory_edges)
+    assert json.loads(json.dumps(graph))["edges"] == graph["edges"]

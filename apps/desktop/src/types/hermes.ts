@@ -59,6 +59,8 @@ export interface AudioSttLeaseResponse {
   leases: null | number
   /** Warm-up outcome: `loaded` | `cached` | `noop` | `error`. Release carries no action. */
   action?: string
+  /** Whether the configured engine was actually warmed (`noop` for cloud providers carries false). */
+  warmed?: boolean
   provider?: string
   error?: string
 }
@@ -500,6 +502,7 @@ export interface HermesConfig {
     auto_tts?: boolean
     stop_phrases?: unknown
     thinking_sound?: unknown
+    barge_in?: unknown
     barge_in_threshold_multiplier?: unknown
     silence_duration?: unknown
   }
@@ -1174,8 +1177,9 @@ export interface SkillInfo {
   name: string
   /** Total observed activity (use + view + patch). Absent on older backends. */
   usage?: number
-  /** 'agent' = learned/local (editable), 'bundled' = ships with Hermes, 'hub' = installed. */
-  provenance?: 'agent' | 'bundled' | 'hub'
+  /** 'agent' = learned/local (editable), 'bundled' = ships with Hermes, 'hub' = installed,
+   * 'external' = mounted from skills.external_dirs (externally authored, still editable). */
+  provenance?: 'agent' | 'bundled' | 'external' | 'hub'
 }
 
 /** One entry of the built-in optional-skills catalog (optional-skills/ in the

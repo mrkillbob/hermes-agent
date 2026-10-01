@@ -1929,6 +1929,7 @@ export interface ProfileSessionPreview {
   started_at?: number
   last_active?: number
   message_count?: number
+  live_message_count?: number | null
 }
 /** Newest kanban/tool worker row, so rosters can show a profile as working. */
 export interface ProfileWorkerSession {
@@ -1947,6 +1948,7 @@ export interface ProfileCanonicalSession {
   started_at?: number
   last_active?: number
   message_count?: number
+  live_message_count?: number | null
 }
 /** Governed identity fields exposed by the profile roster. */
 export interface ProfileFederationRole {
@@ -3158,6 +3160,7 @@ export interface SessionListRow {
   preview?: string
   started_at?: number
   message_count?: number
+  live_message_count?: number | null
   source?: string
 }
 export interface SessionMostRecentParams {
@@ -3688,6 +3691,7 @@ export interface CommandsCatalogResult {
 export interface CommandCatalogMeta {
   argument_mode?: ArgumentMode | null
   desktop?: string | null
+  desktop_subcommands?: string[] | null
 }
 export type ArgumentMode = 'options' | 'text' | 'mixed'
 export interface CommandCategory {
@@ -4732,6 +4736,14 @@ export interface SessionReclaimedPayload {
   stored_session_id: string
   reason: string
 }
+/** ``session_lifecycle._announce_cancelled_gateway_approvals`` (broadcast). One frame for every pending approval dropped by an interrupt / reap / teardown (#106678) — the deny-resolve is silent without it, so a reconnecting client's prompt looks lost rather than cancelled. ``cancelled_count`` is the number of dropped entries; ``request_ids`` omits empty/missing ids, so the two can disagree when an entry has no request_id. */
+export interface ApprovalCancelledPayload {
+  session_id: string
+  stored_session_id: string
+  reason: string
+  cancelled_count: number
+  request_ids: string[]
+}
 export interface SessionControlUpdatePayload {
   control: SessionControlSnapshot
 }
@@ -5742,6 +5754,8 @@ export const SERVER_REQUEST_METHODS = [
 export interface BackendGatewayEventMap {
   /** Output chunk from an agent-owned background process. */
   'agent.terminal.output': TerminalOutputPayload
+  /** Pending gateway approvals were dropped by interrupt/reap/teardown; the wait resolved as deny (not a user refusal). */
+  'approval.cancelled': ApprovalCancelledPayload
   /** A /background side agent finished. */
   'background.complete': SideAgentCompletePayload
   /** Device-flow URL + code for the billing scope step-up; the client opens the browser. */
@@ -5892,6 +5906,7 @@ export interface BackendGatewayEventMap {
 export type BackendGatewayEventName = keyof BackendGatewayEventMap
 export const GATEWAY_EVENT_TYPES = [
   'agent.terminal.output',
+  'approval.cancelled',
   'background.complete',
   'billing.step_up.verification',
   'bot_relay.outbox.pending',
