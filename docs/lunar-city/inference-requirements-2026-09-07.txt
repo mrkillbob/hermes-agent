@@ -52,5 +52,5 @@ tqdm==4.70.0
 transformers==5.10.1
 trimesh==4.12.2
 typing-extensions==4.16.0
-urllib3==2.7.0
+urllib3==2.8.0
 zipp==4.1.0
