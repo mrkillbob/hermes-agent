@@ -50,26 +50,29 @@ class TestScanSkillCommands:
         import agent.skill_commands as sc_mod
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
-        profile = tmp_path / "profile"
-        profile_skills = profile / "skills"
-        profile.mkdir()
-        _make_skill(profile_skills, "profile-only")
+        profiles = [tmp_path / "profile-a", tmp_path / "profile-b"]
+        for profile, name in zip(profiles, ["profile-a-only", "profile-b-only"]):
+            profile.mkdir()
+            _make_skill(profile / "skills", name)
 
         with (
-            patch.object(sc_mod, "_skill_commands", {}),
-            patch.object(sc_mod, "_skill_commands_platform", None),
-            patch.object(sc_mod, "_skill_commands_home", None),
+            patch.object(sc_mod, "_skill_commands_by_key", {}),
             patch.object(skills_tool_module, "_get_disabled_skill_names", return_value=set()),
             patch("agent.skill_utils.get_external_skills_dirs", return_value=[]),
             patch("agent.skill_utils.get_project_skills_dirs", return_value=[]),
         ):
-            token = set_hermes_home_override(profile)
-            try:
-                commands = scan_skill_commands()
-            finally:
-                reset_hermes_home_override(token)
-
-        assert "/profile-only" in commands
+            for profile, expected, absent in [
+                (profiles[0], "/profile-a-only", "/profile-b-only"),
+                (profiles[1], "/profile-b-only", "/profile-a-only"),
+                (profiles[0], "/profile-a-only", "/profile-b-only"),
+            ]:
+                token = set_hermes_home_override(profile)
+                try:
+                    commands = sc_mod.get_skill_commands()
+                finally:
+                    reset_hermes_home_override(token)
+                assert expected in commands
+                assert absent not in commands
 
 
     def test_loads_skill_invocation_from_symlinked_skill_dir(self, tmp_path):
@@ -119,8 +122,7 @@ class TestScanSkillCommands:
         with (
             patch("tools.skills_tool.SKILLS_DIR", tmp_path),
             patch("tools.skills_tool._get_disabled_skill_names", side_effect=_disabled_skills),
-            patch.object(sc_mod, "_skill_commands", {}),
-            patch.object(sc_mod, "_skill_commands_platform", None),
+            patch.object(sc_mod, "_skill_commands_by_key", {}),
         ):
             _make_skill(tmp_path, "shared")
             _make_skill(tmp_path, "telegram-only")
@@ -183,8 +185,7 @@ class TestScanSkillCommands:
         with (
             patch("tools.skills_tool.SKILLS_DIR", tmp_path),
             patch("tools.skills_tool._get_disabled_skill_names", side_effect=_disabled_skills),
-            patch.object(sc_mod, "_skill_commands", {}),
-            patch.object(sc_mod, "_skill_commands_platform", None),
+            patch.object(sc_mod, "_skill_commands_by_key", {}),
         ):
             _make_skill(tmp_path, "shared")
             _make_skill(tmp_path, "telegram-only")
@@ -245,9 +246,7 @@ class TestScanSkillCommands:
 
         with (
             patch("tools.skills_tool.SKILLS_DIR", empty_local_dir),
-            patch.object(sc_mod, "_skill_commands", {}),
-            patch.object(sc_mod, "_skill_commands_platform", None),
-            patch.object(sc_mod, "_skill_commands_home", None),
+            patch.object(sc_mod, "_skill_commands_by_key", {}),
         ):
             token = set_hermes_home_override(profile_a)
             try:
@@ -284,9 +283,7 @@ class TestScanSkillCommands:
         (profile_b / "config.yaml").write_text("{}\n", encoding="utf-8")
 
         with (
-            patch.object(sc_mod, "_skill_commands", {}),
-            patch.object(sc_mod, "_skill_commands_platform", None),
-            patch.object(sc_mod, "_skill_commands_home", None),
+            patch.object(sc_mod, "_skill_commands_by_key", {}),
         ):
             token = set_hermes_home_override(profile_b)
             try:
@@ -323,8 +320,7 @@ class TestScanSkillCommands:
         with (
             patch("tools.skills_tool.SKILLS_DIR", tmp_path),
             patch("tools.skills_tool._get_disabled_skill_names", side_effect=_disabled_skills),
-            patch.object(sc_mod, "_skill_commands", {}),
-            patch.object(sc_mod, "_skill_commands_platform", None),
+            patch.object(sc_mod, "_skill_commands_by_key", {}),
         ):
             _make_skill(tmp_path, "shared")
             _make_skill(tmp_path, "telegram-only")
@@ -338,7 +334,7 @@ class TestScanSkillCommands:
             bare_commands = dict(get_skill_commands())
 
             assert "/telegram-only" in bare_commands
-            assert sc_mod._skill_commands_platform is None
+            # Platform cache is multi-slot now — just verify rescans happened
 
 
     # -- core-command collision guard (#31204 / #53450) ---------------------
@@ -494,7 +490,14 @@ class TestScanSkillCommands:
         observed_sizes = []
 
         def observing_parse(content):
-            observed_sizes.append(len(skill_commands_module._skill_commands))
+            # Cache is now _skill_commands_by_key; count skill commands in the cached map (for this identity)
+            key = (
+                skill_commands_module._resolve_skill_commands_platform(),
+                skill_commands_module._resolve_skill_commands_home(),
+                skill_commands_module._resolve_skill_commands_project(),
+            )
+            cached_map = skill_commands_module._skill_commands_by_key.get(key, {})
+            observed_sizes.append(len(cached_map))
             return real_parse(content)
 
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path), patch(

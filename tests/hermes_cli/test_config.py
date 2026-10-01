@@ -394,6 +394,85 @@ class TestSaveAndLoadRoundtrip:
         assert config_path.read_text(encoding="utf-8") == original
         assert list((tmp_path / "backups" / "config").glob("config.yaml.corrupt.*"))
 
+    def test_atomic_config_write_refuses_partial_state_instead_of_wiping_config(self, tmp_path):
+        """A partial dict is not a full-state replacement: preserve the existing document."""
+        from hermes_cli.config import atomic_config_write
+
+        config_path = tmp_path / "config.yaml"
+        original = {f"k{i}": i for i in range(99)}
+        config_path.write_text(yaml.safe_dump(original), encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match="would lose settings omitted"):
+            atomic_config_write(config_path, {"skills": {"disabled": ["a"]}})
+
+        assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == original
+
+    def test_atomic_config_write_refuses_nested_omissions_with_same_top_level_keys(self, tmp_path):
+        """Completeness is recursive: keeping the root names must not hide sibling deletion."""
+        from hermes_cli.config import atomic_config_write
+
+        config_path = tmp_path / "config.yaml"
+        original = {
+            "plugins": {"enabled": ["guard"], "disabled": [], "config": {"guard": {"mode": "strict"}}},
+            "model": {"default": "gpt-5"},
+        }
+        config_path.write_text(yaml.safe_dump(original), encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match=r"plugins\.(enabled|config)"):
+            atomic_config_write(
+                config_path,
+                {"plugins": {"disabled": ["legacy"]}, "model": {"default": "gpt-5"}},
+            )
+
+        assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == original
+
+    def test_atomic_config_write_replacement_paths_authorize_only_exact_subtrees(self, tmp_path):
+        import copy
+        from hermes_cli.config import atomic_config_write
+
+        path = tmp_path / "config.yaml"
+        raw = {
+            "mcp_servers": {
+                "legacy": {"command": "legacy", "disabled": True},
+                "legacy.other": {"command": "other"},
+            },
+            "custom_setting": {"keep": True},
+        }
+        path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        desired = copy.deepcopy(raw)
+        desired["mcp_servers"]["legacy"].pop("disabled")
+        desired["mcp_servers"]["legacy"]["enabled"] = True
+        allowed = (("mcp_servers", "legacy"),)
+        atomic_config_write(path, desired, allowed_replacement_paths=allowed)
+        assert yaml.safe_load(path.read_text(encoding="utf-8")) == desired
+        before = path.read_bytes()
+
+        for omitted in ("custom_setting", "legacy.other"):
+            incomplete = copy.deepcopy(desired)
+            if omitted == "custom_setting":
+                incomplete.pop(omitted)
+            else:
+                incomplete["mcp_servers"].pop(omitted)
+            with pytest.raises(RuntimeError, match="would lose settings omitted by this write"):
+                atomic_config_write(path, incomplete, allowed_replacement_paths=allowed)
+            assert path.read_bytes() == before
+
+    def test_atomic_config_replace_makes_delete_by_omission_explicit(self, tmp_path):
+        """Full-state owners can still deliberately prune keys without a count-based heuristic."""
+        from hermes_cli.config import atomic_config_replace
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"model": {"default": "gpt-5"}, "plugins": {"enabled": ["guard"]}}),
+            encoding="utf-8",
+        )
+
+        replacement = {"model": {"default": "gpt-5"}}
+        atomic_config_replace(config_path, replacement)
+
+        assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == replacement
+
+
 class TestLoadEnvInlineComments:
     def test_unquoted_hash_is_a_comment_quoted_hash_is_data(self, tmp_path):
         """load_env is the one dotenv reader (agent.secret_scope.load_env_file): an unquoted ` #...` tail

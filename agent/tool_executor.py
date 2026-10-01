@@ -31,6 +31,7 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
+from agent.pruned_tool_arguments import _context_pruned_argument_paths
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.inline_tool_executors import (
     INLINE_TOOL_EXECUTORS,
@@ -45,7 +46,6 @@ from agent.tool_dispatch_helpers import (
     _is_multimodal_tool_result,
     _multimodal_text_summary,
     _append_subdir_hint_to_multimodal,
-    _context_pruned_argument_paths,
     _plan_tool_batch_segments,
     make_tool_result_message,
 )
@@ -416,8 +416,11 @@ def _unwrap_tool_search_call(
             # in the batch dispatcher, not against a synthetic registry name.
             return function_name, function_args, None
         if underlying not in _tool_search_scoped_names(agent):
+            # Session-gated GUI tools name their missing surface (#120413);
+            # anything else keeps the generic block.
             return function_name, function_args, (
-                f"'{underlying}' is not available in this session. Use tool_search to find tools you can call."
+                _ts.out_of_scope_reason(underlying)
+                or f"'{underlying}' is not available in this session. Use tool_search to find tools you can call."
             )
         # Validate before unwrapping: the generic bridge hides the concrete
         # parameter schema from provider-native tool-call validation.

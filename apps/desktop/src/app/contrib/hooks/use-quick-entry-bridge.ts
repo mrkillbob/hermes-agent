@@ -5,6 +5,7 @@ import {
   QUICK_TARGET_CURRENT,
   QUICK_TARGET_NEW,
   type QuickEntrySessionOption,
+  type QuickEntrySubmitResult,
   setQuickEntrySubmitHandler
 } from '@/store/quick-entry'
 import { $gatewayState, $sessions } from '@/store/session'
@@ -12,13 +13,55 @@ import { sessionTileDelegate } from '@/store/session-states'
 import { isAuxiliaryWindow } from '@/store/windows'
 
 interface QuickEntryBridgeParams {
-  startFreshSessionDraft: () => void
-  submitText: (text: string) => Promise<unknown> | unknown
+  submitText: (text: string, options?: QuickEntryDispatchOptions) => Promise<boolean> | boolean
+  submitTextToNewSession: (
+    text: string,
+    owner?: string,
+    options?: QuickEntryDispatchOptions
+  ) => Promise<{ runtimeSessionId: string; sessionId: string }>
+}
+
+interface QuickEntryDispatchOptions {
+  onAccepted?: (identity: QuickEntryAcceptedIdentity) => void
+  /** Fired before the gateway RPC, whose failure may not prove non-acceptance. */
+  onDispatched?: () => void
+}
+
+/** Exact session identity that accepted a prompt (runtime + durable stored id). */
+interface QuickEntryAcceptedIdentity {
+  runtimeSessionId: string
+  storedSessionId: null | string
 }
 
 // The picker is a capture aid, not a session browser — a handful of recent
 // rows is the whole point.
 const QUICK_ENTRY_SESSION_OPTIONS = 5
+
+/**
+ * `submitText` resolves false when a pre-submit guard declines the prompt
+ * without throwing (for example, while the target is busy). That is a failed
+ * delivery, not an acknowledgement of success.
+ */
+export function quickEntrySubmitAck(
+  submitted: boolean,
+  identity?: null | QuickEntryAcceptedIdentity
+): QuickEntrySubmitResult {
+  if (!submitted && !identity) {
+    return {
+      code: 'submit-rejected',
+      message: 'The prompt was not accepted.',
+      ok: false,
+      retryable: true
+    }
+  }
+
+  // An accepted prompt names the session that accepted it. A submit that
+  // resolved true without an identity callback (slash commands, which never
+  // reach prompt.submit) still acknowledges, but claims no backend session.
+  return identity
+    ? { ok: true, runtimeSessionId: identity.runtimeSessionId, sessionId: identity.storedSessionId }
+    : { ok: true }
+}
 
 function sessionOptions(): QuickEntrySessionOption[] {
   return $sessions
@@ -50,23 +93,58 @@ function sessionOptions(): QuickEntrySessionOption[] {
  * secondary session window must not also claim the global capture channel, or
  * one keystroke would send N prompts.
  */
-export function useQuickEntryBridge({ startFreshSessionDraft, submitText }: QuickEntryBridgeParams): void {
+export function useQuickEntryBridge({ submitText, submitTextToNewSession }: QuickEntryBridgeParams): void {
   const submitTextRef = useRef(submitText)
   submitTextRef.current = submitText
-  const startFreshRef = useRef(startFreshSessionDraft)
-  startFreshRef.current = startFreshSessionDraft
+  const submitNewRef = useRef(submitTextToNewSession)
+  submitNewRef.current = submitTextToNewSession
 
   useEffect(() => {
     if (isAuxiliaryWindow()) {
       return
     }
 
-    setQuickEntrySubmitHandler(({ target, text }) => {
+    setQuickEntrySubmitHandler(async ({ correlationId, target, text }) => {
+      let acknowledged = false
+
+      const ack = (result: QuickEntrySubmitResult) => {
+        if (acknowledged) {
+          return
+        }
+
+        acknowledged = true
+        window.hermesDesktop?.quickEntry.ackSubmit(correlationId, result)
+      }
+
+      let acceptedIdentity: null | QuickEntryAcceptedIdentity = null
+      let promptDispatched = false
+      const progress: QuickEntryDispatchOptions = {
+        onAccepted: identity => {
+          acceptedIdentity = identity
+        },
+        onDispatched: () => {
+          promptDispatched = true
+        }
+      }
+      const failed = (error: unknown): QuickEntrySubmitResult =>
+        acceptedIdentity
+          ? quickEntrySubmitAck(true, acceptedIdentity)
+          : {
+              code: 'submit-failed',
+              message: error instanceof Error ? error.message : String(error),
+              ok: false,
+              retryable: !promptDispatched
+            }
+
       if (target === QUICK_TARGET_NEW) {
-        // Same as the user clicking New Chat and typing: fresh draft, then the
-        // normal submit creates the backend session.
-        startFreshRef.current()
-        void submitTextRef.current(text)
+        // Create and submit as one route-neutral operation so drift cannot
+        // orphan the new session (#85590).
+        try {
+          const created = await submitNewRef.current(text, correlationId, progress)
+          ack({ ok: true, runtimeSessionId: created.runtimeSessionId, sessionId: created.sessionId })
+        } catch (error) {
+          ack(failed(error))
+        }
 
         return
       }
@@ -77,17 +155,68 @@ export function useQuickEntryBridge({ startFreshSessionDraft, submitText }: Quic
         const delegate = sessionTileDelegate()
 
         if (delegate) {
-          void delegate
-            .resumeTile(target)
-            .then(runtimeId => delegate.submitToSession(runtimeId, text))
-            // A dead/undeliverable target must not swallow the prompt.
-            .catch(() => void submitTextRef.current(text))
+          let promptDispatched = false
+
+          try {
+            const runtimeId = await delegate.resumeTile(target)
+            promptDispatched = true
+            const accepted = await delegate.submitToSession(runtimeId, text)
+
+            if (accepted.storedSessionId !== target) {
+              // The backend accepted the prompt, but the accepted runtime is not
+              // bound to the requested stored session (or the binding is
+              // unprovable). Never report success for a session this request
+              // did not prove it used.
+              ack({
+                code: 'submit-identity-mismatch',
+                message: 'The prompt was accepted by a different session than the one requested.',
+                ok: false,
+                retryable: false
+              })
+
+              return
+            }
+
+            ack({ ok: true, runtimeSessionId: accepted.runtimeSessionId, sessionId: accepted.storedSessionId })
+          } catch (error) {
+            if (promptDispatched) {
+              ack({
+                code: 'submit-failed',
+                message: 'The selected session prompt was dispatched, but backend acceptance is unknown.',
+                ok: false,
+                retryable: false
+              })
+
+              return
+            }
+
+            ack(failed(error))
+          }
 
           return
         }
+
+        ack({
+          code: 'submit-unavailable',
+          message: 'The selected session submit path is unavailable.',
+          ok: false,
+          retryable: true
+        })
+        return
       }
 
-      void submitTextRef.current(text)
+      try {
+        const submitted = await submitTextRef.current(text, progress)
+        ack(
+          acceptedIdentity
+            ? quickEntrySubmitAck(true, acceptedIdentity)
+            : !submitted && promptDispatched
+              ? failed('The prompt was dispatched, but backend acceptance is unknown.')
+              : quickEntrySubmitAck(submitted)
+        )
+      } catch (error) {
+        ack(failed(error))
+      }
     })
 
     const dispose = initQuickEntryBridge()

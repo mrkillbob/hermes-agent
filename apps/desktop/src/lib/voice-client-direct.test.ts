@@ -6,6 +6,8 @@ import {
   clearVoiceClientConfigCache,
   type DirectTtsConfig,
   fetchVoiceClientConfig,
+  fetchVoiceClientConfigFor,
+  isSttSilenceHallucination,
   synthesizeSpeechClientDirect,
   transcribeAudioClientDirect,
   transcriptFromOpenAiMultipartBody
@@ -76,6 +78,22 @@ describe('fetchVoiceClientConfig', () => {
     expect(api).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps captured null owner halves off ambient routing and foreground priority', async () => {
+    const api = mockDesktopApi({ ok: true, stt: directStt, tts: relay })
+    setApiRequestConnection('other-gateway')
+    setApiRequestProfile('other-profile')
+
+    await fetchVoiceClientConfigFor({ connectionId: null, profile: null })
+    await fetchVoiceClientConfigFor({ connectionId: 'owner-gateway', profile: 'owner-profile' })
+
+    expect(api.mock.calls[0][0]).toEqual({ path: '/api/audio/voice-config' })
+    expect(api.mock.calls[1][0]).toEqual({
+      connectionId: 'owner-gateway',
+      path: '/api/audio/voice-config',
+      profile: 'owner-profile'
+    })
+  })
+
   it('resolves null on an older backend without the endpoint', async () => {
     Object.defineProperty(window, 'hermesDesktop', {
       configurable: true,
@@ -95,6 +113,51 @@ describe('transcribeAudioClientDirect', () => {
     Reflect.deleteProperty(window, 'hermesDesktop')
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
+  })
+
+  it('honors cancellation after captured-owner config resolves without uploading audio', async () => {
+    const api = mockDesktopApi({ ok: true, stt: directStt, tts: relay })
+    setApiRequestConnection('other-gateway')
+    setApiRequestProfile('other-profile')
+    const controller = new AbortController()
+    controller.abort()
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      transcribeAudioClientDirect(new Blob(['x']), { connectionId: 'owner-gateway', profile: null }, controller.signal)
+    ).rejects.toThrow('Voice transcription was aborted')
+    expect(api.mock.calls[0][0]).toEqual({ connectionId: 'owner-gateway', path: '/api/audio/voice-config' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('cancels an upload already in progress with the caller abort reason', async () => {
+    vi.useFakeTimers()
+
+    try {
+      mockDesktopApi({ ok: true, stt: directStt, tts: relay })
+      const controller = new AbortController()
+      const reason = new DOMException('Recording was cancelled', 'AbortError')
+      const fetchMock = vi.fn(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+          })
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      const pending = transcribeAudioClientDirect(new Blob(['x']), undefined, controller.signal)
+      pending.catch(() => {})
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchMock).toHaveBeenCalledOnce()
+
+      controller.abort(reason)
+      const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+      expect(init.signal?.aborted).toBe(true)
+      await expect(pending).rejects.toBe(reason)
+    } finally {
+      await vi.runAllTimersAsync()
+      vi.useRealTimers()
+    }
   })
 
   it('POSTs multipart to the provider and returns the transcript', async () => {
@@ -154,6 +217,84 @@ describe('transcribeAudioClientDirect', () => {
 
     expect(await transcribeAudioClientDirect(new Blob(['x']))).toBeNull()
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('treats a Whisper silence hallucination like the relay path: silence, not a turn (#126708)', async () => {
+    const filter = {
+      phrases: ['thank you', 'bye', 'you', 'the end'],
+      repeat_regex: '^(?:thank you|thanks|bye|you|ok|okay|the end|[.,!\\s])+$'
+    }
+
+    mockDesktopApi({ ok: true, stt: { ...directStt, hallucination_filter: filter }, tts: relay })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('Thank you.', { status: 200 }))
+    )
+    expect(await transcribeAudioClientDirect(new Blob(['x']))).toBe('')
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('OK. OK. OK.', { status: 200 }))
+    )
+    expect(await transcribeAudioClientDirect(new Blob(['x']))).toBe('')
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('The end', { status: 200 }))
+    )
+    expect(await transcribeAudioClientDirect(new Blob(['x']))).toBe('')
+
+    // A real utterance passes through untouched, and an older backend without
+    // the filter never drops a transcript.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('Thanks, that fixed it', { status: 200 }))
+    )
+    expect(await transcribeAudioClientDirect(new Blob(['x']))).toBe('Thanks, that fixed it')
+
+    // Older backend: no hallucination_filter on the config → pass-through.
+    clearVoiceClientConfigCache()
+    mockDesktopApi({ ok: true, stt: directStt, tts: relay })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('Thank you.', { status: 200 }))
+    )
+    expect(await transcribeAudioClientDirect(new Blob(['x']))).toBe('Thank you.')
+  })
+
+  it('isSttSilenceHallucination mirrors the relay contract', () => {
+    const filter = {
+      phrases: ['thank you', 'bye', 'you'],
+      repeat_regex: '^(?:thank you|thanks|bye|you|ok|okay|the end|[.,!\\s])+$'
+    }
+
+    // Known hallucination, case/punctuation-insensitive.
+    expect(isSttSilenceHallucination('Thank you!', filter)).toBe(true)
+    // Repetitive filler.
+    expect(isSttSilenceHallucination('ok ok ok', filter)).toBe(true)
+    // Empty = silence.
+    expect(isSttSilenceHallucination('   ', filter)).toBe(true)
+    // A genuine short utterance is NOT a hallucination.
+    expect(isSttSilenceHallucination('OK, do it', filter)).toBe(false)
+    // No filter (older backend) → never drop.
+    expect(isSttSilenceHallucination('Thank you.', null)).toBe(false)
+  })
+
+  it('strips only trailing .! like the relay rstrip — internal punctuation is a real turn', () => {
+    const filter = {
+      phrases: ['thank you', 'bye', 'you', 'the end'],
+      repeat_regex: '^(?:thank you|thanks|bye|you|ok|okay|the end|[.,!\\\\s])+$'
+    }
+
+    // Internal punctuation survives the strip, so `thank. you` is not the
+    // phrase `thank you` — the relay keeps it as a real turn, and the
+    // client-direct path must agree (wire parity).
+    expect(isSttSilenceHallucination('thank. you', filter)).toBe(false)
+    expect(isSttSilenceHallucination('Than-k you. thank! you', filter)).toBe(false)
+
+    // Trailing punctuation is still stripped the way `rstrip('.!')` does.
+    expect(isSttSilenceHallucination('Thank you.!', filter)).toBe(true)
+    expect(isSttSilenceHallucination('The end...', filter)).toBe(true)
   })
 
   it('surfaces provider rejections instead of silently relaying', async () => {

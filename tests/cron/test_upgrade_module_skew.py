@@ -29,16 +29,20 @@ import cron.{store}
 
 _OCCURRENCES_SKEW_SCRIPT = """
 from datetime import datetime, timedelta, timezone
+import os, socket, subprocess, sys
 import cron.jobs as jobs
 
 # Model a daemon that loaded cron.jobs before these constants existed, then
 # lazy-loads the newer occurrences module from disk during a due scan.
-for name in ("FIRE_CLAIM_SKEW_SECONDS", "FIRE_CLAIM_TTL_SECONDS"):
+for name in ("FIRE_CLAIM_SKEW_SECONDS", "FIRE_CLAIM_TTL_SECONDS", "_fire_claim_owner_is_dead"):
     delattr(jobs, name)
 
 from cron.occurrences import completed_occurrence, unclaimed_pending_slot
 
 assert not completed_occurrence({"id": "job"}, "2026-01-01T00:00:00+00:00")
+now = datetime.now(timezone.utc)
+assert unclaimed_pending_slot({"id": "once", "schedule": {"kind": "once"}}, now) is None
+assert unclaimed_pending_slot({"id": "bad", "pending_slot": {}}, now) is None
 
 # A slot stamped by another owner whose lease has lapsed is restored: the TTL comparison runs.
 now = datetime.now(timezone.utc)
@@ -46,6 +50,15 @@ stale = (now - timedelta(hours=1)).isoformat()
 job = {"id": "job", "schedule": {"kind": "interval"},
        "pending_slot": {"scheduled_at": stale, "at": stale, "by": "other-machine"}}
 assert unclaimed_pending_slot(job, now) == stale
+fresh = now.isoformat()
+job["pending_slot"] = {"scheduled_at": fresh, "at": fresh, "by": "other-machine:1"}
+assert unclaimed_pending_slot(job, now) is None  # remote owner may be alive
+job["pending_slot"]["by"] = f"{socket.gethostname()}:{os.getpid()}:other-acquisition"
+assert unclaimed_pending_slot(job, now) is None  # live same-host owner is fenced
+child = subprocess.Popen([sys.executable, "-c", "pass"])
+child.wait(timeout=10)
+job["pending_slot"]["by"] = f"{socket.gethostname()}:{child.pid}"
+assert unclaimed_pending_slot(job, now) == fresh  # proved-dead owner is recovered immediately
 """
 
 
@@ -63,7 +76,8 @@ def test_lazy_cron_stores_import_against_pre_upgrade_sqlite_util(store):
     assert result.returncode == 0, result.stderr
 
 
-def test_occurrences_resolve_fire_claim_constants_without_cached_jobs_exports():
+def test_occurrences_resolve_fire_claim_liveness_without_cached_jobs_exports(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     repo_root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
         [sys.executable, "-c", _OCCURRENCES_SKEW_SCRIPT],

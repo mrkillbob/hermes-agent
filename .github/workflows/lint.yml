@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           # Two commits keep the PR merge base (or HEAD~1 for pushes) available.
           # The exact PR base SHA comes from the event payload below; fetching
@@ -142,7 +142,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
       - uses: ./.github/actions/setup-pm
         with:
@@ -170,7 +170,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
       - uses: ./.github/actions/setup-pm
         with:
@@ -192,7 +192,7 @@ jobs:
         run: python scripts/check_no_tmp_literals.py
 
       # config.yaml is hand-edited and commented; a PyYAML dump of it destroys every comment
-      # (#92554, regressed repeatedly). All writers go through hermes_cli.config.atomic_config_write.
+      # (#92554, regressed repeatedly). All writers go through the hermes_cli.config writer seam.
       - name: Forbid config.yaml writers that bypass the comment-preserving writer
         run: python scripts/check_config_yaml_writers.py
 

@@ -126,7 +126,10 @@ def _canon(value: Any) -> str:
 
 
 def _toggle_on(host, key: str) -> list[dict[str, Any]]:
-    result = host.rpc.call("plugins.manage", {"action": "toggle", "key": key, "enable": True}, timeout=180)
+    try:
+        result = host.rpc.call("plugins.manage", {"action": "toggle", "key": key, "enable": True}, timeout=180)
+    except AssertionError as exc:
+        raise AssertionError(f"{exc}\nhost stderr:\n{host.cap.stderr[-2000:]}") from exc
     assert result.get("ok") and not result.get("unchanged"), result
     return ((result.get("activation") or {}).get("live_now") or {}).get("mcp_servers") or []
 

@@ -187,7 +187,10 @@ describe('clarify request stream hydration', () => {
       }
     ])
 
-    clarifyRequest({ questions: [{ choices: ['Approve', 'Reject'], qid: 'q0', question: 'Continue?' }], request_id: 'req-pending' })
+    clarifyRequest({
+      questions: [{ choices: ['Approve', 'Reject'], qid: 'q0', question: 'Continue?' }],
+      request_id: 'req-pending'
+    })
 
     const messages = stream.state().messages
     const part = clarifyParts()[0]
@@ -343,9 +346,7 @@ describe('clarify request stream hydration', () => {
 
     clarifyRequest({ questions: [{ choices: ['a', 'b'], qid: 'q0', question: 'Pick' }], request_id: 'req-live' })
 
-    act(() =>
-      stream.handleEvent({ payload: { running: false }, session_id: SID, type: 'session.info' })
-    )
+    act(() => stream.handleEvent({ payload: { running: false }, session_id: SID, type: 'session.info' }))
 
     expect($clarifyRequests.get()[SID]?.requestId).toBe('req-live')
 

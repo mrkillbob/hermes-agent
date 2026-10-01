@@ -86,3 +86,82 @@ def test_configure_toggle_is_what_the_runtime_resolver_and_describe_see(profile_
     assert not any("disabled" in entry for entry in on_disk.values())
     assert enabled_mcp_server_names({"mcp_servers": on_disk}) == {"keep", "legacy"}
     assert _described() == {"keep": True, "drop": False, "legacy": True}
+
+
+def test_configure_replaces_legacy_mcp_flags_without_canonicalizing_unrelated_settings(profile_dir, monkeypatch):
+    """An editor toggle deliberately deletes the legacy flag, preserving raw profile data."""
+    import copy
+    from hermes_cli import config
+    from hermes_cli.tools_config import enabled_mcp_server_names
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    monkeypatch.setenv("PROFILE_MCP_TEST_TOKEN", "synthetic-token")
+    raw = {
+        "mcp_servers": {
+            "legacy": {"command": "legacy", "disabled": True, "env": {"TOKEN": "${PROFILE_MCP_TEST_TOKEN}"}},
+            "other": {"command": "other", "enabled": True},
+        },
+        "custom_setting": {"empty": {}, "template": "${PROFILE_MCP_TEST_TOKEN}"},
+        "compression": {"extra_body": {}},
+        "plugins": {"entries": {"untouched": {"settings": None}}},
+    }
+    path = profile_dir / "config.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    expected = copy.deepcopy(raw)
+    expected["mcp_servers"]["legacy"].pop("disabled")
+    expected["mcp_servers"]["legacy"]["enabled"] = True
+    expected["mcp_servers"]["other"]["enabled"] = False
+
+    result = _call("profiles.configure", {"enabled_mcp_servers": ["legacy"]})
+    assert result["applied"]["mcp_servers"] is True
+    assert yaml.safe_load(path.read_text(encoding="utf-8")) == expected
+    assert _described() == {"legacy": True, "other": False}
+    token = set_hermes_home_override(profile_dir)
+    try:
+        loaded = config.load_config()
+        assert enabled_mcp_server_names(loaded) == {"legacy"}
+        assert loaded["mcp_servers"]["legacy"]["env"]["TOKEN"] == "synthetic-token"
+    finally:
+        reset_hermes_home_override(token)
+
+
+def test_configure_section_replacement_still_refuses_managed_keys(profile_dir, monkeypatch):
+    from hermes_cli import config
+
+    monkeypatch.setattr(config, "is_managed", lambda: False)
+    monkeypatch.setattr(config.managed_scope, "is_key_managed", lambda key: key == "mcp_servers")
+    _write_mcp(profile_dir, {"legacy": {"command": "legacy", "disabled": True}})
+    path = profile_dir / "config.yaml"
+    before = path.read_bytes()
+
+    result = _call("profiles.configure", {"enabled_mcp_servers": ["legacy"]})
+    assert result["applied"]["mcp_servers"] is False
+    assert path.read_bytes() == before
+
+
+def test_configure_section_replacement_refuses_to_erase_concurrent_unrelated_setting(profile_dir, monkeypatch):
+    """Section replacement cannot authorize loss outside that section's tuple path."""
+    import copy
+    from hermes_cli import config
+
+    path = profile_dir / "config.yaml"
+    raw = {"mcp_servers": {"legacy": {"command": "legacy", "disabled": True}}}
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    latest = copy.deepcopy(raw)
+    latest["custom_setting"] = {"keep": "concurrent writer"}
+    latest_bytes = yaml.safe_dump(latest).encode("utf-8")
+    real_read = config.require_readable_config_before_write
+    captured = False
+
+    def add_setting_after_snapshot(config_path=None):
+        nonlocal captured
+        snapshot = real_read(config_path)
+        if Path(config_path or config.get_config_path()) == path and not captured:
+            captured = True
+            path.write_bytes(latest_bytes)
+        return snapshot
+
+    monkeypatch.setattr(config, "require_readable_config_before_write", add_setting_after_snapshot)
+    result = _call("profiles.configure", {"enabled_mcp_servers": ["legacy"]})
+    assert result["applied"]["mcp_servers"] is False
+    assert path.read_bytes() == latest_bytes

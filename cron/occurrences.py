@@ -82,9 +82,6 @@ def unclaimed_pending_slot(job, now):
     THIS process on a job not running here is orphaned (dispatch refused). A stamp by another
     process is honoured while that owner may still be alive within the fire-claim lease — a
     second live gateway on the same store is mid-dispatch, not dead."""
-    from cron.constants import FIRE_CLAIM_TTL_SECONDS
-    from cron.jobs import _claim_is_live, _fire_claim_owner_is_dead, _job_running_in_this_process, _machine_id
-
     pending = job.get("pending_slot")
     if not isinstance(pending, dict):
         return None
@@ -95,6 +92,11 @@ def unclaimed_pending_slot(job, now):
         datetime.fromisoformat(slot)
     except ValueError:
         return None
+    # Validate non-recurring/malformed records before touching cached state.
+    from cron.claim_owner import _fire_claim_owner_is_dead
+    from cron.constants import FIRE_CLAIM_TTL_SECONDS
+    from cron.jobs import _claim_is_live, _job_running_in_this_process, _machine_id
+
     if _job_running_in_this_process(str(job.get("id", ""))):
         return None
     if (

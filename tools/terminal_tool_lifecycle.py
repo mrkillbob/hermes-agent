@@ -152,7 +152,7 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     try:
         from tools.process_registry import process_registry
         for task_id in list(_last_activity.keys()):
-            if process_registry.has_active_processes(task_id):
+            if process_registry.has_active_processes_in_environment(task_id):
                 _last_activity[task_id] = current_time
     except ImportError:
         pass

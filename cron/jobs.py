@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover - non-Windows
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from hermes_constants import get_hermes_home, named_profile_home
+from cron.claim_owner import _fire_claim_owner_is_dead
 from cron.constants import CLAIM_TTL_INACTIVITY_HEADROOM, FIRE_CLAIM_SKEW_SECONDS, FIRE_CLAIM_TTL_SECONDS
 from cron.env_settings import cron_env_setting
 from typing import Optional, Dict, List, Any, Callable, Set, Tuple, Union, Collection
@@ -2423,28 +2424,6 @@ def _claim_is_live(claim: Any, now: datetime, ttl_seconds: float) -> bool:
         return False
     claimed_at = _parse_aware(claim["at"])
     return claimed_at is not None and 0 <= _elapsed_seconds(now, claimed_at) < ttl_seconds
-
-
-def _fire_claim_owner_is_dead(claim: Any) -> bool:
-    """Return true only for a same-host claim whose recorded PID is gone."""
-    if not isinstance(claim, dict):
-        return False
-    owner = str(claim.get("by") or "")
-    host, separator, rest = owner.partition(":")
-    if not separator or not rest:
-        return False
-    import socket
-    if host != socket.gethostname():
-        return False
-    pid_text = rest.split(":", 1)[0]
-    if not pid_text.isdigit() or int(pid_text) <= 0:
-        return False
-    try:
-        from gateway.status import _pid_exists
-
-        return not _pid_exists(int(pid_text))
-    except (ImportError, ValueError, TypeError):
-        return False
 
 
 _REARM_RECURRING_ERROR = (
