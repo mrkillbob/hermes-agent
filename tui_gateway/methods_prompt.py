@@ -436,24 +436,27 @@ def _row_ids_of(messages) -> set:
     return {row_id for message in messages if isinstance((row_id := _message_row_id(message)), int)}
 
 
+def _truncation_survivor_history(history, resolved):
+    """Use the same survivor boundary for detached validation and the admitted cut."""
+    durable_prefix = resolved[3] if len(resolved) > 3 else None
+    if durable_prefix is not None:
+        # A repaired carrier can contain several physical rows. Keep the rows
+        # strictly before the durable target, including the carrier's earlier half.
+        return [message.copy() for message in durable_prefix]
+    from agent.context_compressor import history_before_user_originated_turn
+    truncated, _ = history_before_user_originated_turn(history, resolved[1])
+    return truncated
+
+
 def _truncate_history_for_submit(rid, sid, session, params, requested_rebind_ids):
     """Rewind/regenerate cut under ``history_lock``: ``(err, survivor_fields)``; the fields
     are the client rowId-rebind payload."""
     history = _history_without_ephemeral_scaffolding(session.get("history", []))
     resolved = _resolve_truncation_ordinal(rid, sid, session, params, history)
-    ordinal, cut_index, err = resolved[0], resolved[1], resolved[2]
-    durable_prefix = resolved[3] if len(resolved) > 3 else None
+    ordinal, err = resolved[0], resolved[2]
     if err is not None:
         return err, {}
-    from agent.context_compressor import history_before_user_originated_turn
-    if durable_prefix is not None:
-        # Durable-boundary cut: the target row is physically present but merged into
-        # a repaired live carrier; the physical rows strictly before it are the
-        # survivors — the carrier's earlier half stays, the absorbed target and
-        # everything after it are replaced by the submitted turn.
-        truncated, _live_view = [message.copy() for message in durable_prefix], None
-    else:
-        truncated, _live_view = history_before_user_originated_turn(history, cut_index)
+    truncated = _truncation_survivor_history(history, resolved)
     # Second gate: ordinal 0 would DELETE every durable row; wiping needs its own opt-in.
     if not truncated and history and not is_truthy_value(params.get("confirm_empty_truncate")):
         logger.warning(
@@ -651,12 +654,10 @@ def _validate_truncation_before_materializing(rid, sid, session, params):
     # Row-id healing is allowed during the actual cut, but a rejected submit must
     # not mutate a live draft while it is still unpersisted.
     snapshot = [dict(message) if isinstance(message, dict) else message for message in history]
-    _ordinal, cut_index, err = _resolve_truncation_ordinal(
-        rid, sid, session, params, snapshot)
-    if err is not None:
+    resolved = _resolve_truncation_ordinal(rid, sid, session, params, snapshot)
+    if (err := resolved[2]) is not None:
         return err
-    from agent.context_compressor import history_before_user_originated_turn
-    truncated, _ = history_before_user_originated_turn(snapshot, cut_index)
+    truncated = _truncation_survivor_history(snapshot, resolved)
     if not truncated and snapshot and not is_truthy_value(params.get("confirm_empty_truncate")):
         return _err(
             rid, 4028,

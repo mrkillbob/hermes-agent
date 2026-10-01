@@ -2261,6 +2261,7 @@ cli:
   clarify:
     bell_context: "澄清"
     label: "澄清"
+    timed_out_locked_answers: "（澄清在 {timeout} 秒后超时——已返回锁定的答案）"
   connect:
     bell_context: "连接设置"
     cannot_restart: "此连接无法再次启动。请取消后重新向代理发起请求。"

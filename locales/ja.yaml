@@ -2261,6 +2261,7 @@ cli:
   clarify:
     bell_context: "確認"
     label: "確認"
+    timed_out_locked_answers: "（確認は {timeout} 秒でタイムアウトしました — 確定済みの回答を返しました）"
   connect:
     bell_context: "接続のセットアップ"
     cannot_restart: "この接続は再開できません。キャンセルして、エージェントにもう一度依頼してください。"

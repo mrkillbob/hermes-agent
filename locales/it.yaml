@@ -2261,6 +2261,7 @@ cli:
   clarify:
     bell_context: "chiarimento"
     label: "Chiarimento"
+    timed_out_locked_answers: "(chiarimento scaduto dopo {timeout}s — restituite le risposte bloccate)"
   connect:
     bell_context: "configurazione connessione"
     cannot_restart: "Questa connessione non può essere riavviata. Annulla e chiedi di nuovo all'agente."

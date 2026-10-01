@@ -2261,6 +2261,7 @@ cli:
   clarify:
     bell_context: "esclarecimento"
     label: "Esclarecer"
+    timed_out_locked_answers: "(esclarecimento expirou após {timeout}s — respostas travadas retornadas)"
   connect:
     bell_context: "configuração de conexão"
     cannot_restart: "Esta conexão não pode ser iniciada novamente. Cancele e peça ao agente de novo."

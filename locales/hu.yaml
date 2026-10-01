@@ -2278,6 +2278,7 @@ cli:
   clarify:
     bell_context: "pontosítás"
     label: "Pontosítás"
+    timed_out_locked_answers: "(a pontosítás {timeout} mp után lejárt — a rögzített válaszok visszaküldve)"
   connect:
     bell_context: "kapcsolat beállítása"
     cannot_restart: "Ezt a kapcsolatot nem lehet újraindítani. Szakítsd meg, és kérd újra az ügynöktől."

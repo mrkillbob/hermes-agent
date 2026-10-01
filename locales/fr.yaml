@@ -2534,6 +2534,7 @@ cli:
   clarify:
     bell_context: "clarification"
     label: "Clarification"
+    timed_out_locked_answers: "(clarification expirée après {timeout} s — réponses verrouillées renvoyées)"
   connect:
     bell_context: "configuration de connexion"
     cannot_restart: "Cette connexion ne peut pas être relancée. Annulez et redemandez à l'agent."
