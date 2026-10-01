@@ -5,6 +5,7 @@ pieces. The OpenAI client and tool loading are mocked so no network calls
 are made.
 """
 
+from contextlib import contextmanager
 from hashlib import sha256
 import faulthandler
 import io
@@ -19,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from agent.codex_responses_adapter import _normalize_codex_response
 
@@ -64,6 +66,19 @@ def _mock_plugin_discovery(monkeypatch):
     # Tool definitions are supplied by these unit fixtures. Scanning every
     # bundled plugin again for each isolated test home adds no coverage.
     monkeypatch.setattr("hermes_cli.plugins.discover_plugins", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _mock_model_metadata_catalog(monkeypatch):
+    # These tests exercise the agent, not live catalog discovery. Constructors
+    # and the metadata prewarm thread also use this transport.
+    @contextmanager
+    def catalog(url, **kwargs):
+        yield httpx.Response(
+            200, json={"data": []}, request=httpx.Request("GET", url)
+        )
+
+    monkeypatch.setattr("agent.model_metadata_http.stream", catalog)
 
 
 @pytest.fixture()
@@ -6107,7 +6122,7 @@ def test_aiagent_uses_copilot_acp_client():
 
 def test_quiet_spinner_allowed_with_explicit_print_fn(agent):
     agent._print_fn = lambda *_a, **_kw: None
-    with patch.object(run_agent.sys.stdout, "isatty", return_value=False):
+    with patch.object(run_agent.sys, "stdout", io.StringIO()):
         assert agent._should_start_quiet_spinner() is True
 
 

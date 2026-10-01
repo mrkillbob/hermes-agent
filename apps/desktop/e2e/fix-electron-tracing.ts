@@ -40,7 +40,12 @@ electron.launch = async (options: any) => {
   const app = await originalLaunch(options)
   const ctx = (app as any)._context as BrowserContext
   electronContexts.add(ctx)
-  ctx.once('close', () => electronContexts.delete(ctx))
+  const removeContext = () => electronContexts.delete(ctx)
+  ctx.once('close', removeContext)
+  // Native app.quit() emits ElectronApplication's close event before the
+  // BrowserContext close event necessarily reaches Playwright. Do not expose
+  // that dead app's context to the next test's tracing setup in the gap.
+  app.once('close', removeContext)
 
   // Patch _allContexts so the test runner sees the electron context
   // (didFinishTest cleanup → _stopTracing → stopChunk → merge into trace.zip).

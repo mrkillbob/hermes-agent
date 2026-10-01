@@ -37,7 +37,8 @@ def real_uv() -> str | None:
 
 
 def git(*args: str, cwd: Path, check: bool = True, env: dict | None = None) -> str:
-    cp = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True,
+    cp = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                        text=True, encoding="utf-8", errors="replace",
                         env=env or {**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     if check and cp.returncode != 0:
         raise AssertionError(f"git {args} failed in {cwd}: {cp.stderr}")
@@ -74,16 +75,21 @@ def publish_commit(origin: Path, scratch: Path, message: str, files: dict[str, s
         shutil.rmtree(work)
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_AUTHOR_NAME": "e2e", "GIT_AUTHOR_EMAIL": "e2e@example.invalid",
            "GIT_COMMITTER_NAME": "e2e", "GIT_COMMITTER_EMAIL": "e2e@example.invalid"}
-    git("clone", "-q", "--shared", "--no-checkout", "-b", "main", str(origin), str(work), cwd=scratch, env=env)
-    git("reset", "-q", "main", cwd=work, env=env)
-    for rel, text in files.items():
-        p = work / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8")
-        git("add", "--", rel, cwd=work, env=env)
-    git("commit", "-q", "-m", message, cwd=work, env=env)
-    git("push", "-q", "origin", "HEAD:main", cwd=work, env=env)
-    return git("rev-parse", "HEAD", cwd=work)
+    # A transport clone can repack the entire origin even with --shared.
+    # This publisher owns the local origin; borrow its object store directly.
+    git("worktree", "add", "--detach", "--no-checkout", str(work), "main", cwd=origin, env=env)
+    try:
+        git("reset", "-q", "HEAD", cwd=work, env=env)
+        for rel, text in files.items():
+            p = work / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+            git("add", "--", rel, cwd=work, env=env)
+        git("commit", "-q", "-m", message, cwd=work, env=env)
+        git("push", "-q", str(origin), "HEAD:main", cwd=work, env=env)
+        return git("rev-parse", "HEAD", cwd=work)
+    finally:
+        git("worktree", "remove", "--force", str(work), cwd=origin, env=env)
 
 
 @dataclass
@@ -115,7 +121,7 @@ class Sandbox:
 
         facts = self.hermes_home / "installs" / install_key(self.checkout) / "facts.json"
         assert facts.is_file(), f"installer did not publish PM facts at {facts}"
-        selected = json.loads(facts.read_text(encoding="utf-8"))["packages"]["venv"]["environment"]
+        selected = json.loads(facts.read_text(encoding="utf-8-sig"))["packages"]["venv"]["environment"]
         python = Path(selected) / "bin" / "python"
         assert python.is_file(), f"selected PM Python missing: {python}"
         return str(python)
@@ -217,7 +223,7 @@ def cron_jobs(profile_home: Path) -> list[dict]:
     f = profile_home / "cron" / "jobs.json"
     if not f.exists():
         return []
-    data = json.loads(f.read_text(encoding="utf-8"))
+    data = json.loads(f.read_text(encoding="utf-8-sig"))
     items = data.get("jobs", data) if isinstance(data, dict) else data
     return [j for j in items if isinstance(j, dict)]
 
