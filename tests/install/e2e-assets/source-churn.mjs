@@ -5,8 +5,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-export function normalizeInstallerChurn(root) {
-  const git = (args, options = {}) => execFileSync('git', ['-C', root, ...args], options);
+export function normalizeInstallerChurn(root, gitExecutable = 'git') {
+  const git = (args, options = {}) => execFileSync(gitExecutable, ['-C', root, ...args], options);
   const status = git(['status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' });
   if (!status.trim()) return;
   const entries = git(['ls-files', '--stage', '-z'], { encoding: 'utf8' }).split('\0').filter(Boolean);
@@ -69,6 +69,6 @@ export function normalizeInstallerChurn(root) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  try { normalizeInstallerChurn(path.resolve(process.argv[2])); }
+  try { normalizeInstallerChurn(path.resolve(process.argv[2]), process.argv[3]); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }

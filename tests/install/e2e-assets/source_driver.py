@@ -19,7 +19,7 @@ def desktop_outputs(root: Path) -> list[Path]:
     return [path for pattern in (
         "release/*/resources/app.asar.unpacked/dist",
         "release/mac*/Hermes.app/Contents/Resources/app.asar.unpacked/dist",
-    ) for path in desktop.glob(pattern)]
+    ) for path in desktop.glob(pattern) if not any(part.endswith(".bak") for part in path.relative_to(desktop).parts)]
 
 
 def verify_products(root: Path, desktop: str, node: Path | None = None) -> None:
@@ -34,7 +34,8 @@ def verify_products(root: Path, desktop: str, node: Path | None = None) -> None:
         executables = [path for pattern in (
             "release/*/Hermes.exe", "release/*/Hermes", "release/*/hermes",
             "release/mac*/Hermes.app/Contents/MacOS/Hermes",
-        ) for path in app.glob(pattern) if path.is_file() and path.stat().st_size]
+        ) for path in app.glob(pattern) if not any(part.endswith(".bak") for part in path.relative_to(app).parts)
+            and path.is_file() and path.stat().st_size]
         if not executables:
             raise RuntimeError("desktop executable is missing or empty")
     if node is None:
