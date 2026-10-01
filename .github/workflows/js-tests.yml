@@ -85,3 +85,28 @@ jobs:
       # nothing.
       - name: Run all workspace checks
         run: node .github/scripts/run-workspace-checks.mjs --shard '${{ matrix.shard }}/5'
+
+  native-installer:
+    name: Native installer (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-latest, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up locked Node tooling
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: node
+      - name: Install locked native test tooling without lifecycle scripts
+        run: npm ci --workspace apps/desktop --workspace tests-js --include-workspace-root --include=dev --ignore-scripts --no-audit --no-fund
+      - name: Qualify native supplier and preserved staging contracts
+        working-directory: apps/desktop
+        env:
+          HERMES_REQUIRE_GET_WINDOWS: '1'
+          HERMES_VERIFY_GET_WINDOWS_NATIVE: '1'
+        run: node ../../node_modules/vitest/vitest.mjs run --project electron scripts/node-pre-gyp-compat.test.mjs scripts/prepared-native-deps.test.mjs scripts/stage-native-deps.test.mjs e2e/fix-electron-tracing.unit.test.ts --maxWorkers=2

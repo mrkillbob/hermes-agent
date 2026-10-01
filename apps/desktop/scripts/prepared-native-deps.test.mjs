@@ -34,7 +34,7 @@ test('native consumption copies admitted modules and helpers, rejecting changed 
     const selection = { source, nativeDeps: out, platform: 'linux', arch: 'x64', nativeToolchain: 'compiler-a' }
     const record = () => native.recordNativeInputs({ ...selection, out })
     record()
-    assert.equal(native.readNativeInputs(selection), out)
+    assert.equal(native.readNativeInputs(selection), fs.realpathSync(out))
     assert.throws(() => native.readNativeInputs({ ...selection, nativeToolchain: 'compiler-b' }), /run preparation again/)
     await beforePack({ appOutDir: '', electronPlatformName: 'linux', arch: 1, packager: { projectDir: app } })
     const destination = path.join(app, 'dist/node_modules')
@@ -50,7 +50,7 @@ test('native consumption copies admitted modules and helpers, rejecting changed 
     fs.appendFileSync(header, '\n/* changed gesture */\n')
     assert.throws(() => native.readNativeInputs(selection), /run preparation again/)
     fs.writeFileSync(header, originalHeader)
-    assert.equal(native.readNativeInputs(selection), out)
+    assert.equal(native.readNativeInputs(selection), fs.realpathSync(out))
     fs.writeFileSync(path.join(out, helper), 'corrupt helper')
     assert.throws(() => native.copyNativeInputs({ ...selection, out: destination }), /run preparation again/)
     assert.equal(fs.readFileSync(copiedHelper, 'utf8'), 'helper fixture')

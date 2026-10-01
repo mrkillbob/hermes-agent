@@ -11,7 +11,7 @@
     "tests-js"
   ],
   "scripts": {
-    "postinstall": "echo '✅ Node dependencies installed. Run: python run_agent.py --help'",
+    "postinstall": "echo '\u2705 Node dependencies installed. Run: python run_agent.py --help'",
     "install:root": "npm install --workspaces=false",
     "install:web": "npm install --workspace web",
     "install:tui": "npm install --workspace ui-tui",
@@ -64,6 +64,9 @@
     "postcss": "8.5.23",
     "tar": "7.5.22",
     "@xmldom/xmldom": "0.9.12",
+    "get-windows@9.3.0": {
+      "@mapbox/node-pre-gyp": "2.0.3"
+    },
     "app-builder-lib@27.0.0-alpha.6": {
       "plist@3.1.0": "3.1.1"
     }
