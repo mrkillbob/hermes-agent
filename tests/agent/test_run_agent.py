@@ -6107,7 +6107,7 @@ def test_aiagent_uses_copilot_acp_client():
 
 def test_quiet_spinner_allowed_with_explicit_print_fn(agent):
     agent._print_fn = lambda *_a, **_kw: None
-    with patch.object(run_agent.sys.stdout, "isatty", return_value=False):
+    with patch.object(run_agent.sys, "stdout", io.StringIO()):
         assert agent._should_start_quiet_spinner() is True
 
 
