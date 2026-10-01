@@ -2158,6 +2158,7 @@ def require_readable_config_before_write(config_path: Optional[Path] = None) -> 
 
 def _omitted_config_paths(
     existing: Dict[str, Any], proposed: Dict[str, Any], prefix: Tuple[str, ...] = (),
+    *, allowed_replacement_paths: Tuple[Tuple[str, ...], ...] = (),
 ) -> List[str]:
     """Mapping paths that *proposed* would delete by omission from *existing*.
 
@@ -2169,13 +2170,18 @@ def _omitted_config_paths(
     omitted: List[str] = []
     for key, old_value in existing.items():
         path = (*prefix, str(key))
+        # Only an exact tuple path authorizes replacement of this subtree. A
+        # dotted sibling name or omission of its parent never inherits authority.
+        if path in allowed_replacement_paths:
+            continue
         if key not in proposed:
             omitted.append(".".join(path))
             continue
         new_value = proposed[key]
         if isinstance(old_value, dict):
             if isinstance(new_value, dict):
-                omitted.extend(_omitted_config_paths(old_value, new_value, path))
+                omitted.extend(_omitted_config_paths(
+                    old_value, new_value, path, allowed_replacement_paths=allowed_replacement_paths))
             elif old_value:
                 omitted.append(".".join(path))
     return omitted
@@ -2183,6 +2189,7 @@ def _omitted_config_paths(
 
 def _write_config_state(
     config_path: Path, data: Dict[str, Any], *, allow_omissions: bool,
+    allowed_replacement_paths: Tuple[Tuple[str, ...], ...] = (),
     extra_content_on_create: Optional[str] = None,
 ) -> None:
     """Shared comment-preserving config writer; omission policy is selected by the public wrapper."""
@@ -2191,7 +2198,7 @@ def _write_config_state(
     _refuse_failed_read(config_path, data)
     if not allow_omissions:
         existing = require_readable_config_before_write(config_path)
-        omitted = _omitted_config_paths(existing, data)
+        omitted = _omitted_config_paths(existing, data, allowed_replacement_paths=allowed_replacement_paths)
         if omitted:
             shown = ", ".join(omitted[:12])
             if len(omitted) > 12:
@@ -2209,15 +2216,18 @@ def _write_config_state(
 
 def atomic_config_write(
     config_path: Path, data: Dict[str, Any], *, extra_content_on_create: Optional[str] = None,
+    allowed_replacement_paths: Tuple[Tuple[str, ...], ...] = (),
 ) -> None:
     """Persist config without allowing an incomplete mapping to delete existing settings.
 
-    Values explicitly present in *data* may change, but every existing mapping path must remain.
+    Values explicitly present in *data* may change, but every existing mapping path must remain
+    outside explicitly authorized ``allowed_replacement_paths`` subtrees (exact tuple paths).
     Use ``atomic_config_replace`` for a deliberate full-state replacement where omitted keys are
     meant to be deleted. Both paths retain the unreadable-file guard and ruamel comment preservation.
     """
     _write_config_state(
-        config_path, data, allow_omissions=False, extra_content_on_create=extra_content_on_create)
+        config_path, data, allow_omissions=False, allowed_replacement_paths=allowed_replacement_paths,
+        extra_content_on_create=extra_content_on_create)
 
 
 def atomic_config_replace(

@@ -764,7 +764,9 @@ def _configure_cfg_sections(profile_dir, params, applied) -> None:
             updates[("mcp_servers",)] = mcp_cfg
         if updates:
             try:
-                _write_raw_config_values(updates)
+                # These sections are the editor's complete desired state, including
+                # removal of legacy MCP disabled flags. Consent remains additive.
+                _write_raw_config_values(updates, replace_sections=True)
                 for key in ("skills", "toolsets", "mcp_servers"):
                     if (key == "skills" and isinstance(params.get("disabled_skills"), list)) or \
                        (key == "toolsets" and isinstance(params.get("enabled_toolsets"), list)) or \

@@ -618,31 +618,55 @@ def test_live_dm_runner_retry_never_reexecutes_failed_claim(tmp_path, monkeypatc
     owner = dict(profile_home=str(target), session_id="bot", lease_id="lease", live_session_id="live")
     monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: owner)
     monkeypatch.setattr(bot_mode_dm, "_LIVE_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(bot_mode_dm, "_LIVE_WAIT_MAX_SECONDS", 5)
     monkeypatch.setattr(live, "_POLL_SECONDS", 0.01)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("must not launch a model turn"))
     dm_file = tmp_path / "message.txt"
     dm_file.write_text("hello", encoding="utf-8")
     argv = ["hermes", "-p", "researcher"]
 
-    def fail_later():
-        time.sleep(0.05)
-        claimed = live.claim_pending_delivery(target, owner)
-        assert claimed is not None
-        live.complete_delivery(target, claimed["delivery_id"], status="failed", error="HTTP 429 rate limit")
+    admitted = threading.Event()
+    consumer_waiting = threading.Event()
+    thread_errors = []
+    real_deliver = live.deliver_to_live_owner
 
-    failing = threading.Thread(target=fail_later)
+    def deliver_and_signal(*args, **kwargs):
+        assert consumer_waiting.wait(timeout=5), "failure consumer did not start"
+        record = real_deliver(*args, **kwargs)
+        admitted.set()  # the mailbox receipt is now durable, however slow admission was
+        return record
+
+    monkeypatch.setattr(live, "deliver_to_live_owner", deliver_and_signal)
+
+    def fail_after_admission():
+        try:
+            consumer_waiting.set()
+            assert admitted.wait(timeout=5), "live delivery was never admitted"
+            claimed = live.claim_pending_delivery(target, owner)
+            assert claimed is not None
+            live.complete_delivery(target, claimed["delivery_id"], status="failed", error="HTTP 429 rate limit")
+        except BaseException as error:
+            thread_errors.append(error)
+
+    failing = threading.Thread(target=fail_after_admission, daemon=True)
     failing.start()
     try:
-        assert bot_mode_dm._run_delivery(argv, str(dm_file), stdin_file=False) == 1
+        exit_code = bot_mode_dm._run_delivery(argv, str(dm_file), stdin_file=False)
     finally:
-        failing.join(timeout=2)
+        failing.join(timeout=5)
+        assert not failing.is_alive(), "failure consumer did not finish"
+        if thread_errors:
+            raise thread_errors[0]
+    assert exit_code == 1
     first = json.loads(capsys.readouterr().out)
     assert first["status"] == "failed"
+    first_receipt = live.read_delivery_result(target, first["delivery_id"])
     monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: None)
     assert bot_mode_dm._run_delivery(argv, str(dm_file), stdin_file=False) == 1
     failed = json.loads(capsys.readouterr().out)
     assert failed["status"] == "failed"
     assert failed["delivery_id"] == first["delivery_id"]
+    assert live.read_delivery_result(target, first["delivery_id"]) == first_receipt
     assert dm_file.read_text(encoding="utf-8") == "hello"
 
 

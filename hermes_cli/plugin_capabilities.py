@@ -158,8 +158,14 @@ def _child_dict(parent: dict, key: str) -> dict:
     return child
 
 
-def _write_raw_config_values(updates: Mapping[Tuple[str, ...], Any]) -> None:
-    """Change several settings in one locked, atomic raw-config mutation."""
+def _write_raw_config_values(
+    updates: Mapping[Tuple[str, ...], Any], *, replace_sections: bool = False,
+) -> None:
+    """Change selected raw settings atomically; section deletion requires explicit intent.
+
+    Consent/plugin mutations keep the omission guard. Profile editors replacing
+    complete sections opt in so legacy keys deliberately omitted there are removed.
+    """
     from hermes_cli import config as config_mod
 
     with config_mod._CONFIG_LOCK:
@@ -187,8 +193,11 @@ def _write_raw_config_values(updates: Mapping[Tuple[str, ...], Any]) -> None:
                 value, entry.get(path[-1]), loaded_entry)
         from hermes_cli.observability.shared_metrics_disabled import recording_raw_config_write
         config_mod.ensure_hermes_home()
-        # Plugin mutations add or set leaves; they never authorize deletion by omission.
-        recording_raw_config_write(config_path, raw, config_mod.atomic_config_write)
+        writer = config_mod.atomic_config_write
+        if replace_sections:
+            from functools import partial
+            writer = partial(writer, allowed_replacement_paths=tuple(updates))
+        recording_raw_config_write(config_path, raw, writer)
         config_mod._secure_file(config_path)
         config_mod._RAW_CONFIG_CACHE.pop(str(config_path), None)
         config_mod._LOAD_CONFIG_CACHE.pop(str(config_path), None)

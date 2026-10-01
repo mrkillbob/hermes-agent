@@ -426,6 +426,37 @@ class TestSaveAndLoadRoundtrip:
 
         assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == original
 
+    def test_atomic_config_write_replacement_paths_authorize_only_exact_subtrees(self, tmp_path):
+        import copy
+        from hermes_cli.config import atomic_config_write
+
+        path = tmp_path / "config.yaml"
+        raw = {
+            "mcp_servers": {
+                "legacy": {"command": "legacy", "disabled": True},
+                "legacy.other": {"command": "other"},
+            },
+            "custom_setting": {"keep": True},
+        }
+        path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        desired = copy.deepcopy(raw)
+        desired["mcp_servers"]["legacy"].pop("disabled")
+        desired["mcp_servers"]["legacy"]["enabled"] = True
+        allowed = (("mcp_servers", "legacy"),)
+        atomic_config_write(path, desired, allowed_replacement_paths=allowed)
+        assert yaml.safe_load(path.read_text(encoding="utf-8")) == desired
+        before = path.read_bytes()
+
+        for omitted in ("custom_setting", "legacy.other"):
+            incomplete = copy.deepcopy(desired)
+            if omitted == "custom_setting":
+                incomplete.pop(omitted)
+            else:
+                incomplete["mcp_servers"].pop(omitted)
+            with pytest.raises(RuntimeError, match="would lose settings omitted by this write"):
+                atomic_config_write(path, incomplete, allowed_replacement_paths=allowed)
+            assert path.read_bytes() == before
+
     def test_atomic_config_replace_makes_delete_by_omission_explicit(self, tmp_path):
         """Full-state owners can still deliberately prune keys without a count-based heuristic."""
         from hermes_cli.config import atomic_config_replace
