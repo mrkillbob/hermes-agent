@@ -5,11 +5,12 @@ import { createServer } from 'node:net'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { test } from 'vitest'
 
 import { getWindowsCompilerEnvironment } from './stage-native-deps.mjs'
+import { desktopInstallNodeOptions, npmCommand, prepareNodeDependencies } from '../../../scripts/build/node-deps.mjs'
 
 const requireFromDesktop = createRequire(import.meta.url)
 
@@ -161,8 +162,14 @@ test.runIf(process.platform === 'win32' && process.env.HERMES_VERIFY_GET_WINDOWS
       )
     }
 
+    const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+    const prepared = { source, workspaces: ['apps/desktop', 'tests-js'], env: process.env, reuse: true, install: false }
+    // The preceding canonical CI preparation published its receipt only after
+    // loading this real binding. Reuse must verify it again without reinstalling.
+    prepareNodeDependencies(prepared)
     runCli(['clean'])
     assert.equal(fs.existsSync(binding), false)
+    assert.throws(() => prepareNodeDependencies(prepared), /ENOENT|required|Required/)
     runCli(['install', '--fallback-to-build=false'])
     assertLoads()
 
@@ -179,14 +186,34 @@ test.runIf(process.platform === 'win32' && process.env.HERMES_VERIFY_GET_WINDOWS
     const port = unavailable.address().port
     await new Promise((resolve, reject) => unavailable.close(error => (error ? reject(error) : resolve())))
     const mirrorKey = `npm_config_${manifest.binary.module_name.replace('-', '_')}_binary_host_mirror`
-    const env = getWindowsCompilerEnvironment(packageRoot, {
-      ...process.env,
-      [mirrorKey]: `https://127.0.0.1:${port}/`
-    })
-    const output = runCli(['install', '--fallback-to-build'], env)
+    const env = { ...process.env, [mirrorKey]: `https://127.0.0.1:${port}/` }
+    const [node, npm] = npmCommand({ env })
+    // Exercise npm's real dependency lifecycle, which replaces the inherited
+    // compiler. Only the installer-scoped preload repairs that selection.
+    const result = spawnSync(
+      node,
+      [
+        npm,
+        'rebuild',
+        'get-windows',
+        '--foreground-scripts',
+        `--node-options=${desktopInstallNodeOptions(source, { env })}`
+      ],
+      {
+        cwd: source,
+        env,
+        encoding: 'utf8',
+        timeout: 300_000,
+        maxBuffer: 4 * 1024 * 1024
+      }
+    )
+    assert.ifError(result.error)
+    const output = `${result.stdout}\n${result.stderr}`
+    assert.equal(result.status, 0, output)
     assert.match(output, /falling back to source compile/)
     assert.match(output, /using node-gyp@13\.0\.2/)
     assertLoads()
+    prepareNodeDependencies(prepared)
   },
   660_000
 )

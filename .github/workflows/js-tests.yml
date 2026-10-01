@@ -103,10 +103,17 @@ jobs:
         with:
           toolchain: node
       - name: Install locked native test tooling without lifecycle scripts
+        if: matrix.runner != 'windows-2025'
         run: npm ci --workspace apps/desktop --workspace tests-js --include-workspace-root --include=dev --ignore-scripts --no-audit --no-fund
+      - name: Prepare Windows dependencies through the canonical Desktop installer
+        if: matrix.runner == 'windows-2025'
+        env:
+          npm_config_foreground_scripts: 'true'
+        run: node scripts/build/node-deps.mjs --source . --workspace apps/desktop --workspace tests-js --reuse
       - name: Qualify native supplier and preserved staging contracts
         working-directory: apps/desktop
         env:
           HERMES_REQUIRE_GET_WINDOWS: '1'
           HERMES_VERIFY_GET_WINDOWS_NATIVE: '1'
+          npm_config_foreground_scripts: 'true'
         run: node ../../node_modules/vitest/vitest.mjs run --project electron scripts/node-pre-gyp-compat.test.mjs scripts/prepared-native-deps.test.mjs scripts/stage-native-deps.test.mjs e2e/fix-electron-tracing.unit.test.ts --maxWorkers=2
