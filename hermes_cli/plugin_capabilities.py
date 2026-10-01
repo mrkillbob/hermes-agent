@@ -185,7 +185,10 @@ def _write_raw_config_values(updates: Mapping[Tuple[str, ...], Any]) -> None:
                 loaded_entry = loaded_entry.get(segment)
             entry[path[-1]] = config_mod._preserve_env_ref_templates(
                 value, entry.get(path[-1]), loaded_entry)
-        config_mod._write_user_config(config_path, raw)
+        from hermes_cli.observability.shared_metrics_disabled import recording_raw_config_write
+        config_mod.ensure_hermes_home()
+        # Plugin mutations add or set leaves; they never authorize deletion by omission.
+        recording_raw_config_write(config_path, raw, config_mod.atomic_config_write)
         config_mod._secure_file(config_path)
         config_mod._RAW_CONFIG_CACHE.pop(str(config_path), None)
         config_mod._LOAD_CONFIG_CACHE.pop(str(config_path), None)

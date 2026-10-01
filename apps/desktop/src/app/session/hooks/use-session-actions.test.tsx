@@ -94,8 +94,10 @@ import {
   $sessionTiles,
   clearAllSessionStates,
   dropSessionState,
+  foregroundSessionScopes,
   knownOwnerForSession,
   publishSessionState,
+  releaseSessionOwnerHold,
   requestForOwnedSession,
   sessionTileOwnerRoute
 } from '@/store/session-states'
@@ -108,6 +110,11 @@ import { deferred } from '../../../test/deferred'
 import { NEW_CHAT_ROUTE, sessionRoute } from '../../routes'
 import type { ClientSessionState } from '../../types'
 
+import {
+  pinnedOwnerCount,
+  pinnedStoredSessionIdsForOwner,
+  releaseStoredSessionPins
+} from './session-context-drift'
 import { applySessionInfoStatePatch, sessionInfoStatePatch } from './use-message-stream/utils'
 import { captureSteeringSession } from './use-prompt-actions/steering-session'
 import { useSessionActions } from './use-session-actions'
@@ -162,7 +169,7 @@ type HarnessHandle = Pick<
   | 'removeSession'
   | 'selectSidebarItem'
   | 'startFreshSessionDraft'
->
+> & Pick<ReturnType<typeof useSessionActions>, 'submitTextToNewSession'>
 
 function storedSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -186,6 +193,8 @@ function storedSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
 function Harness({
   activeSessionId = null,
   activeSessionIdRef: activeSessionIdRefOverride,
+  getRouteToken: getRouteTokenOverride,
+  getRoutedStoredSessionId = () => null,
   navigate = vi.fn(),
   onReady,
   requestGateway,
@@ -196,6 +205,8 @@ function Harness({
 }: {
   activeSessionId?: null | string
   activeSessionIdRef?: MutableRefObject<null | string>
+  getRouteToken?: () => string
+  getRoutedStoredSessionId?: () => null | string
   navigate?: ReturnType<typeof vi.fn>
   onReady: (handle: HarnessHandle) => void
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
@@ -216,8 +227,8 @@ function Harness({
     busyRef: ref(false),
     creatingSessionRef: ref(false),
     ensureSessionState: () => ({}) as ClientSessionState,
-    getRouteToken: () => 'token',
-    getRoutedStoredSessionId: () => null,
+    getRouteToken: getRouteTokenOverride ?? (() => 'token'),
+    getRoutedStoredSessionId,
     navigate: navigate as never,
     requestGateway,
     resetViewSync: vi.fn(),
@@ -1052,6 +1063,288 @@ describe('startFreshSessionDraft', () => {
 
     expect(revealTreePane).toHaveBeenCalledWith('workspace')
     expect($terminalTakeover.get()).toBe(true)
+  })
+})
+
+describe('submitTextToNewSession pin release', () => {
+  beforeEach(() => {
+    releaseStoredSessionPins('corr-1')
+    releaseStoredSessionPins('owner-a')
+    releaseStoredSessionPins('owner-b')
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it('captures the draft owner for create compatibility and the exact accepted runtime through navigation failure', async () => {
+    const route = { connectionId: 'draft-remote', mode: 'remote' as const, profile: 'draft-profile' }
+    const previousTree = $projectTree.get()
+    const previousScope = $projectScope.get()
+    const previousCwd = $currentCwd.get()
+    const previousWorkspace = $newChatWorkspaceTarget.get()
+    const previousRoute = $newChatRoute.get()
+    const previousProfile = $newChatProfile.get()
+    const release = vi.fn()
+    vi.mocked(retainGatewayForAgent).mockResolvedValue(release)
+    const calls: Array<{ method: string; params: Record<string, unknown> | undefined }> = []
+    vi.mocked(requestGatewayForAgent).mockImplementation(async (connection, profile, method, params) => {
+      expect([connection, profile]).toEqual([route.connectionId, route.profile])
+      calls.push({ method, params })
+      if (method === 'session.create') {
+        $newChatRoute.set({ connectionId: 'different-remote', mode: 'remote', profile: 'different-profile' })
+        if (params && 'cwd_explicit' in params) {
+          throw new Error('invalid params for session.create: cwd_explicit: unknown field')
+        }
+        return { session_id: 'rt-draft', stored_session_id: 'st-draft' } as never
+      }
+      expect(getSessionOwnerHint('st-draft')).toEqual(route)
+      return {} as never
+    })
+    const ambient = vi.fn(async () => {
+      throw new Error('focused owner must not receive the draft prompt')
+    })
+    const navigate = vi.fn(() => {
+      expect(foregroundSessionScopes()).toContain(registryBackendScopeKey(route.connectionId, route.profile))
+      throw new Error('local navigation failed')
+    })
+    const onAccepted = vi.fn()
+    const onDispatched = vi.fn()
+    let handle: HarnessHandle | null = null
+    $newChatRoute.set(route)
+    $newChatProfile.set(route.profile)
+    $projectTree.set([{ id: 'quick-draft-project', label: 'Quick draft', path: '/draft/workspace', repos: [], sessionCount: 0 }])
+    $projectScope.set('quick-draft-project')
+    setCurrentCwd('/draft/workspace')
+    setNewChatWorkspaceTarget('/draft/workspace')
+    try {
+      render(<Harness navigate={navigate} onReady={value => (handle = value)} requestGateway={ambient as never} />)
+      await waitFor(() => expect(handle).not.toBeNull())
+      await act(async () => {
+        await expect(
+          handle!.submitTextToNewSession('quick draft', 'corr-draft', { onAccepted, onDispatched })
+        ).rejects.toThrow('local navigation failed')
+      })
+      expect(calls.map(call => call.method)).toEqual(['session.create', 'session.create', 'prompt.submit'])
+      expect(calls[0].params).toHaveProperty('cwd_explicit')
+      expect(calls[1].params).not.toHaveProperty('cwd_explicit')
+      expect(calls[2].params).toEqual({ session_id: 'rt-draft', text: 'quick draft' })
+      expect(onDispatched).toHaveBeenCalledOnce()
+      expect(onAccepted).toHaveBeenCalledWith({ runtimeSessionId: 'rt-draft', storedSessionId: 'st-draft' })
+      expect($sessions.get().find(session => session.id === 'st-draft')).toMatchObject({
+        connection_id: route.connectionId,
+        profile: route.profile
+      })
+      expect(ambient).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledOnce()
+      expect(pinnedStoredSessionIdsForOwner('corr-draft').size).toBe(0)
+    } finally {
+      releaseSessionOwnerHold('st-draft')
+      $newChatRoute.set(previousRoute)
+      $newChatProfile.set(previousProfile)
+      $projectTree.set(previousTree)
+      $projectScope.set(previousScope)
+      setCurrentCwd(previousCwd)
+      setNewChatWorkspaceTarget(previousWorkspace)
+      vi.mocked(requestGatewayForAgent).mockReset()
+    }
+  })
+
+  it('releases the pin at the terminal transition instead of on ticks', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.create') {
+        return { session_id: RUNTIME_SESSION_ID, stored_session_id: 'stored-quick-entry' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+
+    render(
+      <Harness
+        getRoutedStoredSessionId={() => 'stored-other'}
+        onReady={value => (handle = value)}
+        requestGateway={requestGateway}
+      />
+    )
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    await act(async () => {
+      await handle!.submitTextToNewSession('quick entry', 'corr-1')
+    })
+
+    expect(pinnedStoredSessionIdsForOwner('corr-1').size).toBe(0)
+  })
+
+  it('concurrent new-session submissions keep distinct owner pins', async () => {
+    const observations: Array<{ promptOwner: 'owner-a' | 'owner-b'; ownerA: string[]; ownerB: string[] }> = []
+    const runtimeOwner = new Map<string, 'owner-a' | 'owner-b'>()
+
+    const storedByOwner = {
+      'owner-a': 'stored-owner-a',
+      'owner-b': 'stored-owner-b'
+    } as const
+
+    let createCount = 0
+    const releaseCreates = deferred<void>()
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.create') {
+        createCount += 1
+
+        const owner = params?.model === 'model-owner-a' ? 'owner-a' : 'owner-b'
+        const runtimeSessionId = `runtime-${owner}`
+        runtimeOwner.set(runtimeSessionId, owner)
+
+        if (createCount < 2) {
+          await releaseCreates.promise
+        }
+
+        return {
+          session_id: runtimeSessionId,
+          stored_session_id: storedByOwner[owner]
+        } as never
+      }
+
+      if (method === 'prompt.submit') {
+        const promptOwner = runtimeOwner.get(String(params?.session_id)) ?? 'owner-a'
+        observations.push({
+          promptOwner,
+          ownerA: [...pinnedStoredSessionIdsForOwner('owner-a')],
+          ownerB: [...pinnedStoredSessionIdsForOwner('owner-b')]
+        })
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+
+    render(
+      <Harness
+        getRoutedStoredSessionId={() => 'stored-other'}
+        onReady={value => (handle = value)}
+        requestGateway={requestGateway}
+      />
+    )
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    let first!: Promise<{ runtimeSessionId: string; sessionId: string }>
+    let second!: Promise<{ runtimeSessionId: string; sessionId: string }>
+    act(() => {
+      setCurrentModel('model-owner-a')
+      setCurrentModelSource('manual')
+      first = handle!.submitTextToNewSession('a', 'owner-a')
+      setCurrentModel('model-owner-b')
+      setCurrentModelSource('manual')
+      second = handle!.submitTextToNewSession('b', 'owner-b')
+      setCurrentModel('')
+      setCurrentModelSource('')
+    })
+
+    await waitFor(() => expect(createCount).toBe(2))
+
+    await act(async () => {
+      releaseCreates.resolve()
+      await Promise.all([first, second])
+    })
+
+    expect(observations).toHaveLength(2)
+    expect(observations.map(({ promptOwner }) => promptOwner).sort()).toEqual(['owner-a', 'owner-b'])
+
+    for (const observation of observations) {
+      const ownPins = observation.promptOwner === 'owner-a' ? observation.ownerA : observation.ownerB
+      const otherPins = observation[observation.promptOwner === 'owner-a' ? 'ownerB' : 'ownerA']
+
+      expect(ownPins).toContain(storedByOwner[observation.promptOwner])
+      expect(ownPins).not.toContain(
+        storedByOwner[observation.promptOwner === 'owner-a' ? 'owner-b' : 'owner-a']
+      )
+      expect(otherPins).not.toContain(storedByOwner[observation.promptOwner])
+    }
+
+    expect(pinnedOwnerCount()).toBe(0)
+  })
+
+  it('submits to the exact created runtime even when the route/selection never moved (#85590/#107773 race)', async () => {
+    // The Quick Entry new-session path is route-neutral: it never navigates
+    // before the submit, so the drift guard must see identical tokens across
+    // the seconds-long session.create round-trip and never abort its own
+    // first send.
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.create') {
+        return { session_id: 'runtime-quick', stored_session_id: 'stored-quick' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+
+    render(
+      <Harness
+        getRoutedStoredSessionId={() => 'stored-other'}
+        onReady={value => (handle = value)}
+        requestGateway={requestGateway}
+      />
+    )
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    const created = await handle!.submitTextToNewSession('quick entry text')
+
+    expect(created).toEqual({ runtimeSessionId: 'runtime-quick', sessionId: 'stored-quick' })
+    expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
+      session_id: 'runtime-quick',
+      text: 'quick entry text'
+    })
+  })
+
+  it('aborts the new-session submit when a genuine user switch lands mid-create', async () => {
+    // A real navigation to another chat between the create's start and its
+    // settle is drift: the minted session must not receive the prompt and the
+    // caller gets a retryable failure, not a silent misroute.
+    const createPending = deferred<Record<string, string>>()
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.create') {
+        return (await createPending.promise) as never
+      }
+
+      return {} as never
+    })
+
+    const selectedRef = { current: 'stored-original' as string | null }
+    let routeToken = 'route:a'
+    let handle: HarnessHandle | null = null
+
+    render(
+      <Harness
+        getRoutedStoredSessionId={() => 'stored-original'}
+        getRouteToken={() => routeToken}
+        onReady={value => (handle = value)}
+        requestGateway={requestGateway}
+        selectedStoredSessionIdRef={selectedRef}
+      />
+    )
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    let submit!: Promise<{ runtimeSessionId: string; sessionId: string }>
+    act(() => {
+      submit = handle!.submitTextToNewSession('misroute me')
+    })
+
+    // The user switches to a different chat while session.create is in flight.
+    routeToken = 'route:b'
+    selectedRef.current = 'stored-elsewhere'
+    createPending.resolve({ session_id: 'runtime-orphan', stored_session_id: 'stored-orphan' })
+
+    await expect(submit).rejects.toThrow(/destination changed mid-create/)
+
+    // The orphaned runtime never received the prompt.
+    const promptCalls = requestGateway.mock.calls.filter(([method]) => method === 'prompt.submit')
+    expect(promptCalls).toEqual([])
   })
 })
 

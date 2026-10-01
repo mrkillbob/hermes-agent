@@ -5,6 +5,7 @@ import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getLatestSessionMessages, getSession } from '@/hermes'
+import { en } from '@/i18n/en'
 import { textPart, toChatMessages } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $compactingSessions, setSessionCompacting } from '@/store/compaction'
@@ -2735,6 +2736,54 @@ describe('usePromptActions submit / queue drain semantics', () => {
     expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything())
     dropSessionState(RUNTIME_SESSION_ID)
   })
+
+  it('reports the exact accepted identity through onAccepted after a stale-runtime recovery', async () => {
+    const STORED_SESSION_ID = 'stored-db-xyz789'
+    const RECOVERED_SESSION_ID = 'rt-recovered-456'
+    let submitAttempts = 0
+    const onDispatched = vi.fn()
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'prompt.submit') {
+        submitAttempts += 1
+        expect(onDispatched).toHaveBeenCalledTimes(submitAttempts)
+
+        if (submitAttempts === 1) {
+          throw new Error('session not found')
+        }
+
+        return {} as never
+      }
+
+      if (method === 'session.resume') {
+        return { session_id: RECOVERED_SESSION_ID } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    const onAccepted = vi.fn()
+
+    const ok = await handle!.submitText('identity after wake', { onAccepted, onDispatched })
+
+    expect(ok).toBe(true)
+    expect(onDispatched).toHaveBeenCalledTimes(2)
+    expect(onAccepted).toHaveBeenCalledTimes(1)
+    expect(onAccepted).toHaveBeenCalledWith({
+      runtimeSessionId: RECOVERED_SESSION_ID,
+      storedSessionId: STORED_SESSION_ID
+    })
+  })
 })
 
 describe('usePromptActions redirectPrompt', () => {
@@ -3649,6 +3698,7 @@ describe('usePromptActions file attachment sync', () => {
       params: { session_id: RUNTIME_SESSION_ID, text: '@file:data/report.txt\n\nsummarize' }
     })
   })
+
 })
 
 describe('usePromptActions eager-upload races', () => {
@@ -6286,6 +6336,52 @@ describe('usePromptActions stale multi-window guard (#65047)', () => {
       'prompt.submit',
       { session_id: RUNTIME_SESSION_ID, text: 'send anyway' },
       1_800_000
+    )
+  })
+
+  it('refuses a slash command sent alongside an attachment instead of silently degrading to a chat message (#81798)', async () => {
+    // The attachment's refText gets prepended ahead of the typed text by
+    // buildContextText, so the merged wire text no longer starts with "/".
+    // Before the fix, submitText's attachment-count gate silently fell through
+    // to a normal prompt.submit — /goal (and every other slash command) with an
+    // attachment vanished into a regular chat message with no feedback.
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'slash.exec') {
+        throw new Error('slash.exec must never be called when an attachment is present')
+      }
+
+      if (method === 'prompt.submit') {
+        throw new Error('prompt.submit must never be called for a slash command')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    const ok = await handle!.submitText('/goal align with the handoff doc', {
+      attachments: [
+        {
+          id: 'file:handoff.md',
+          kind: 'file',
+          label: 'handoff.md',
+          path: '/Users/alice/handoff.md',
+          refText: '@file:`/Users/alice/handoff.md`'
+        }
+      ]
+    })
+
+    expect(ok).toBe(false)
+    expect(requestGateway).not.toHaveBeenCalled()
+    expect($notifications.get()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: en.desktop.slashCommandIgnoredBody })])
     )
   })
 })

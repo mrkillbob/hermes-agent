@@ -155,7 +155,7 @@ import type {
 
 import { navigateToWorkspacePage, NEW_CHAT_ROUTE, sessionRoute, SETTINGS_ROUTE } from '../../../routes'
 import type { ClientSessionState, SidebarNavItem } from '../../../types'
-import { sessionContextDrift } from '../session-context-drift'
+import { pinStoredSessionForOwner, releaseStoredSessionPins, sessionContextDrift } from '../session-context-drift'
 import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-resume'
 
 import { sessionCreateOverrideParams, type SessionCreateOverrides, type SessionSeedMessage } from './create-overrides'
@@ -967,6 +967,86 @@ export function useSessionActions({
       resetViewSync,
       selectedStoredSessionIdRef,
       updateSessionState
+    ]
+  )
+
+  const submitTextToNewSession = useCallback(
+    async (
+      text: string,
+      owner?: string,
+      options?: {
+        onDispatched?: () => void
+        onAccepted?: (identity: { runtimeSessionId: string; storedSessionId: string }) => void
+      }
+    ): Promise<{ runtimeSessionId: string; sessionId: string }> => {
+      const startingRouteToken = getRouteToken()
+      const startingSelectedStoredId = selectedStoredSessionIdRef.current
+      const capturedRoute = resolveNewChatOwnerRoute()
+      const capturedProfile = $newChatProfile.get() || normalizeProfileKey($activeGatewayProfile.get())
+      const params = await desktopSessionCreateParams(
+        resolveNewSessionCwd(),
+        capturedRoute,
+        capturedProfile,
+        isLegacyNewChatProfile(capturedProfile)
+      )
+      const releaseCreateLease = capturedRoute
+        ? await retainGatewayForAgent(capturedRoute.connectionId, capturedRoute.profile, {
+            spawnPriority: 'foreground'
+          })
+        : () => undefined
+      let pinOwner: string | undefined
+      try {
+        const created = await createGatewaySession(capturedRoute, params, requestGateway)
+        const stored = created.stored_session_id
+        if (!stored) {
+          throw new Error('The new session did not return a stored id.')
+        }
+        if (capturedRoute) {
+          setSessionOwnerHint(stored, capturedRoute)
+        }
+        const drift = sessionContextDrift({
+          startRouteToken: startingRouteToken,
+          nowRouteToken: getRouteToken(),
+          startSelectedStoredId: startingSelectedStoredId,
+          nowSelectedStoredId: selectedStoredSessionIdRef.current,
+          submitTargetStoredId: stored
+        })
+        if (drift) {
+          console.warn('[submit-drift-abort]', drift, { phase: 'quick-entry-new' })
+          throw new Error(`Quick Entry destination changed mid-create: ${drift}`)
+        }
+        pinOwner = owner ?? `new-session-${created.session_id}`
+        pinStoredSessionForOwner(pinOwner, stored)
+        markSessionCreatedThisRun(stored)
+        runtimeIdByStoredSessionIdRef.current.set(stored, created.session_id)
+        ensureSessionState(created.session_id, stored)
+        upsertOptimisticSession(created, stored, null, text.trim(), null, undefined, capturedRoute)
+        options?.onDispatched?.()
+        await requestForSessionProfile(capturedRoute, requestGateway, 'prompt.submit', {
+          session_id: created.session_id,
+          text
+        })
+        options?.onAccepted?.({ runtimeSessionId: created.session_id, storedSessionId: stored })
+        // Keep the accepted owner's socket until route publication takes over.
+        if (capturedRoute) {
+          holdSessionOwnerUntilForeground(stored, capturedRoute)
+        }
+        navigate(sessionRoute(stored), { replace: true })
+        return { runtimeSessionId: created.session_id, sessionId: stored }
+      } finally {
+        if (pinOwner) {
+          releaseStoredSessionPins(pinOwner)
+        }
+        releaseCreateLease()
+      }
+    },
+    [
+      ensureSessionState,
+      getRouteToken,
+      navigate,
+      requestGateway,
+      runtimeIdByStoredSessionIdRef,
+      selectedStoredSessionIdRef
     ]
   )
 
@@ -3311,6 +3391,7 @@ export function useSessionActions({
     resumeSession,
     selectSidebarItem,
     startFreshSessionDraft,
+    submitTextToNewSession,
     unarchiveSession
   }
 }

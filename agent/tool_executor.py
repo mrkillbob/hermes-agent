@@ -31,6 +31,7 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
+from agent.pruned_tool_arguments import _context_pruned_argument_paths
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.inline_tool_executors import (
     INLINE_TOOL_EXECUTORS,
@@ -45,7 +46,6 @@ from agent.tool_dispatch_helpers import (
     _is_multimodal_tool_result,
     _multimodal_text_summary,
     _append_subdir_hint_to_multimodal,
-    _context_pruned_argument_paths,
     _plan_tool_batch_segments,
     make_tool_result_message,
 )

@@ -50,26 +50,29 @@ class TestScanSkillCommands:
         import agent.skill_commands as sc_mod
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
-        profile = tmp_path / "profile"
-        profile_skills = profile / "skills"
-        profile.mkdir()
-        _make_skill(profile_skills, "profile-only")
+        profiles = [tmp_path / "profile-a", tmp_path / "profile-b"]
+        for profile, name in zip(profiles, ["profile-a-only", "profile-b-only"]):
+            profile.mkdir()
+            _make_skill(profile / "skills", name)
 
         with (
-            patch.object(sc_mod, "_skill_commands", {}),
-            patch.object(sc_mod, "_skill_commands_platform", None),
-            patch.object(sc_mod, "_skill_commands_home", None),
+            patch.object(sc_mod, "_skill_commands_by_key", {}),
             patch.object(skills_tool_module, "_get_disabled_skill_names", return_value=set()),
             patch("agent.skill_utils.get_external_skills_dirs", return_value=[]),
             patch("agent.skill_utils.get_project_skills_dirs", return_value=[]),
         ):
-            token = set_hermes_home_override(profile)
-            try:
-                commands = scan_skill_commands()
-            finally:
-                reset_hermes_home_override(token)
-
-        assert "/profile-only" in commands
+            for profile, expected, absent in [
+                (profiles[0], "/profile-a-only", "/profile-b-only"),
+                (profiles[1], "/profile-b-only", "/profile-a-only"),
+                (profiles[0], "/profile-a-only", "/profile-b-only"),
+            ]:
+                token = set_hermes_home_override(profile)
+                try:
+                    commands = sc_mod.get_skill_commands()
+                finally:
+                    reset_hermes_home_override(token)
+                assert expected in commands
+                assert absent not in commands
 
 
     def test_loads_skill_invocation_from_symlinked_skill_dir(self, tmp_path):

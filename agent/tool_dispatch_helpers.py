@@ -16,11 +16,10 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent.compression_marker import _COMPRESSION_MARKER_RE
 from agent.message_metadata import stamp_message_timestamp
+from agent.pruned_tool_arguments import _context_pruned_argument_paths
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
-    tool_may_have_side_effect,
 )
 from tools.threat_patterns import scan_for_threats
 
@@ -68,38 +67,6 @@ _DESTRUCTIVE_PATTERNS = re.compile(
 )
 # Output redirects that overwrite files (> but not >>)
 _REDIRECT_OVERWRITE = re.compile(r'[^>]>[^>]|^>[^>]')
-
-def _context_pruned_argument_paths(tool_name: str, args: Any) -> list[str]:
-    """Paths whose values contain model-visible context-compression artifacts.
-
-    The compressor's current marker carries numeric omitted/total counts. Match
-    that rendered shape rather than the prefix alone so Hermes can still edit
-    source/docs that mention the compression marker constant or its template.
-    Unknown/plugin/MCP tools stay effect-capable by default; known read-only
-    tools may inspect or quote compressed history.
-    """
-    if not tool_may_have_side_effect(tool_name):
-        return []
-
-    found: list[str] = []
-
-    def _walk(value: Any, path: str) -> None:
-        if isinstance(value, str):
-            if _COMPRESSION_MARKER_RE.search(value):
-                found.append(path)
-            return
-        if isinstance(value, dict):
-            for key, child in value.items():
-                key_text = str(key)
-                child_path = f"{path}.{key_text}" if key_text.isidentifier() else f"{path}[{key_text!r}]"
-                _walk(child, child_path)
-            return
-        if isinstance(value, (list, tuple)):
-            for index, child in enumerate(value):
-                _walk(child, f"{path}[{index}]")
-
-    _walk(args, "$")
-    return found
 
 
 def _is_destructive_command(cmd: str) -> bool:

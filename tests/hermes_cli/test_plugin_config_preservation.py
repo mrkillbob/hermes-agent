@@ -132,6 +132,40 @@ def test_capability_consent_is_atomic_when_consent_write_fails(tmp_path, monkeyp
     assert path.read_bytes() == before
 
 
+def test_capability_consent_refuses_to_erase_a_new_config_setting(tmp_path, monkeypatch):
+    """A consent snapshot cannot authorize deletion of a concurrent writer's setting."""
+    home = tmp_path / "profile"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(config, "is_managed", lambda: False)
+    path = home / "config.yaml"
+    raw = {"plugins": {"entries": {"example": {"keep": True}}}}
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    latest = copy.deepcopy(raw)
+    latest["custom_setting"] = {"keep": "concurrent writer"}
+    latest_bytes = yaml.safe_dump(latest).encode("utf-8")
+    real_read = config.require_readable_config_before_write
+    captured = False
+
+    def add_setting_after_snapshot(config_path=None):
+        nonlocal captured
+        snapshot = real_read(config_path)
+        if not captured:
+            captured = True
+            path.write_bytes(latest_bytes)
+        return snapshot
+
+    monkeypatch.setattr(config, "require_readable_config_before_write", add_setting_after_snapshot)
+    from hermes_cli.plugin_capabilities import plugin_capability_granted, record_consent
+
+    capabilities = ["tools.override", "llm.model_override"]
+    with pytest.raises(RuntimeError, match="would lose settings omitted by this write"):
+        record_consent("example", capabilities, capabilities)
+
+    assert path.read_bytes() == latest_bytes
+    assert all(not plugin_capability_granted("example", cap) for cap in capabilities)
+
+
 def test_raw_config_write_refreshes_last_known_good_fallback(tmp_path, monkeypatch):
     home = tmp_path / "profile"
     home.mkdir()
