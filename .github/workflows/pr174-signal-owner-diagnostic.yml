@@ -1,0 +1,169 @@
+name: Bounded Linux signal-owner diagnostic
+on:
+  push:
+    branches: [diagnostics/pr174-signal-owner-3001396]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: 3001396a66473aed393842d225e5591cc30a3072
+          persist-credentials: false
+      - name: Stop unless installed nonprivileged child tracing is permitted
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git rev-parse HEAD)" = 3001396a66473aed393842d225e5591cc30a3072
+          test "$(id -u)" -ne 0
+          test -x /usr/bin/strace
+          /usr/bin/strace -I 1 -q -e trace=none -e signal=none -- /usr/bin/true
+          mkdir "$RUNNER_TEMP/signal-diagnostic"
+          git rev-parse HEAD > "$RUNNER_TEMP/signal-diagnostic/source-head.txt"
+          sha256sum tests/agent/test_run_agent.py agent/chat_completion_helpers.py agent/relay_llm.py scripts/run_tests.sh scripts/run_tests_parallel.py uv.lock pyproject.toml /usr/bin/strace > "$RUNNER_TEMP/signal-diagnostic/source-tool-hashes.txt"
+          /usr/bin/strace -V | head -n 1 > "$RUNNER_TEMP/signal-diagnostic/strace-version.txt"
+          if test -r /proc/sys/kernel/yama/ptrace_scope; then
+            cat /proc/sys/kernel/yama/ptrace_scope > "$RUNNER_TEMP/signal-diagnostic/ptrace-scope.txt"
+          fi
+      - name: Set up the existing frozen test toolchain with caches disabled
+        uses: ./.github/actions/setup-pm
+        with:
+          packages: ripgrep
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+          archive-inputs: 'false'
+          cache: 'false'
+          cache-python: 'false'
+          cache-node: 'false'
+          save-tools-cache: 'false'
+          save-python-cache: 'false'
+          save-node-cache: 'false'
+      - name: Prepare numeric-only trace projector and native metadata
+        run: |
+          set -euo pipefail
+          umask 077
+          "$HERMES_PYTHON" -c 'import platform,sys; print(sys.version); print(platform.platform()); assert sys.version_info[:3] == (3,14,7)' > "$RUNNER_TEMP/signal-diagnostic/native-versions.txt"
+          cat > "$RUNNER_TEMP/signal-projector.py" <<'PROJECTOR'
+          """Project only numeric process/signal metadata; never store raw strace lines."""
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          PREFIX = re.compile(r"^\s*(?:\[pid\s+)?(\d+)\]?\s+(\d+\.\d+)\s+(.*)$")
+          SPAWN = re.compile(r"^(?:(clone3?|fork|vfork)\(|<\.\.\. (clone3?|fork|vfork) resumed>)")
+          RESULT = re.compile(r"\s=\s(-?\d+)(?:\s|$)")
+          CALL = re.compile(r"^(kill|tkill|tgkill)\((-?\d+),\s*(?:(-?\d+),\s*)?(SIG[A-Z0-9]+|0)\)")
+          DELIVERY = re.compile(r"^--- (SIGTERM|SIGKILL) \{")
+          EXIT = re.compile(r"^\+\+\+ killed by (SIGTERM|SIGKILL)")
+          BUDGET = {False: 8 * 1024 * 1024, True: 2 * 1024 * 1024}
+
+
+          def project(raw):
+              match = PREFIX.match(raw)
+              if match is None:
+                  return None
+              pid, timestamp, body = int(match[1]), match[2], match[3]
+              base = {"pid": pid, "timestamp": timestamp}
+              call = CALL.match(body)
+              if call:
+                  name, first, second, sig = call.groups()
+                  result = RESULT.search(body)
+                  return {**base, "kind": "signal_call", "syscall": name,
+                          "target": int(first), "target_tid": int(second) if second else None,
+                          "signal": sig, "result": int(result[1]) if result else None}
+              delivery = DELIVERY.match(body)
+              if delivery:
+                  sender = re.search(r"\bsi_pid=(\d+)", body)
+                  uid = re.search(r"\bsi_uid=(\d+)", body)
+                  code = re.search(r"\bsi_code=(SI_USER|SI_TKILL|SI_KERNEL)\b", body)
+                  return {**base, "kind": "signal_delivery", "signal": delivery[1],
+                          "sender_pid": int(sender[1]) if sender else None,
+                          "sender_uid": int(uid[1]) if uid else None,
+                          "code": code[1] if code else None}
+              killed = EXIT.match(body)
+              if killed:
+                  return {**base, "kind": "signal_exit", "signal": killed[1]}
+              spawn = SPAWN.match(body)
+              result = RESULT.search(body)
+              if spawn and result and int(result[1]) > 0:
+                  return {**base, "kind": "spawn", "syscall": spawn[1] or spawn[2],
+                          "child_pid": int(result[1])}
+              return None
+
+
+          def main():
+              totals = {False: 0, True: 0}
+              dropped = oversized = 0
+              with Path(sys.argv[1]).open("w", encoding="utf-8", buffering=1) as saved:
+                  while True:
+                      raw = sys.stdin.readline(8193)
+                      if not raw:
+                          break
+                      if len(raw) == 8193 and not raw.endswith("\n"):
+                          oversized += 1
+                          while raw and not raw.endswith("\n"):
+                              raw = sys.stdin.readline(8193)
+                          continue
+                      event = project(raw)
+                      if event is None:
+                          continue
+                      critical = event.get("signal") in {"SIGTERM", "SIGKILL"}
+                      line = json.dumps(event, separators=(",", ":")) + "\n"
+                      size = len(line.encode("utf-8"))
+                      if totals[critical] + size > BUDGET[critical]:
+                          dropped += 1
+                          continue
+                      totals[critical] += size
+                      saved.write(line)
+                      print(line, end="", flush=True)
+                  summary = json.dumps({"kind": "capture_summary", "bytes": sum(totals.values()),
+                                        "budget_dropped_events": dropped, "oversized_lines": oversized,
+                                        "truncated": bool(dropped or oversized)}) + "\n"
+                  saved.write(summary)
+                  print(summary, end="", flush=True)
+
+
+          if __name__ == "__main__":
+              main()
+          PROJECTOR
+          sha256sum "$RUNNER_TEMP/signal-projector.py" > "$RUNNER_TEMP/signal-diagnostic/projector-hash.txt"
+      - name: Trace one unchanged full test file and stream sanitized signal metadata
+        env:
+          HERMES_TEST_WORKERS: '1'
+          HERMES_TEST_FILE_RETRIES: '0'
+          HERMES_TEST_FILE_TIMEOUT: '600'
+        run: |
+          set -uo pipefail
+          umask 077
+          capture="$RUNNER_TEMP/signal-diagnostic"
+          mkfifo -m 600 "$capture/trace.pipe"
+          "$HERMES_PYTHON" "$RUNNER_TEMP/signal-projector.py" "$capture/signal-events.jsonl" < "$capture/trace.pipe" &
+          projector_pid=$!
+          /usr/bin/strace -I 1 -f -ttt -q -e trace=kill,tkill,tgkill,clone,clone3,fork,vfork -e signal=SIGTERM,SIGKILL -o "$capture/trace.pipe" -- scripts/run_tests.sh tests/agent/test_run_agent.py -vv -s -o faulthandler_timeout=30 &
+          tracer_pid=$!
+          "$HERMES_PYTHON" -c 'import json,os,sys; print(json.dumps({"kind":"own_step_processes","shell_pid":int(sys.argv[1]),"shell_parent_pid":int(sys.argv[2]),"tracer_pid":int(sys.argv[3]),"projector_pid":int(sys.argv[4]),"shell_pgid":os.getpgid(int(sys.argv[1])),"metadata_pid":os.getpid(),"uid":os.getuid()}),flush=True)' "$$" "$PPID" "$tracer_pid" "$projector_pid" | tee "$capture/own-processes.json"
+          wait "$tracer_pid"
+          result=$?
+          wait "$projector_pid"
+          projector_result=$?
+          rm "$capture/trace.pipe"
+          printf '{"test_exit":%d,"projector_exit":%d}\n' "$result" "$projector_result" > "$capture/completion.json"
+          if test "$projector_result" -ne 0; then
+            exit "$projector_result"
+          fi
+          exit "$result"
+      - name: Preserve sanitized numeric signal evidence only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr174-signal-owner-3001396
+          path: |
+            ${{ runner.temp }}/signal-diagnostic/*.json
+            ${{ runner.temp }}/signal-diagnostic/*.jsonl
+            ${{ runner.temp }}/signal-diagnostic/*.txt
+          retention-days: 7
+          if-no-files-found: warn
