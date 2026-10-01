@@ -68,8 +68,12 @@ import subprocess
 import sys
 
 _FRONTEND = ("ui-tui/", "web/", "apps/")  # TS typecheck-matrix packages
-# Shipped page outside those packages, exercised by the desktop Electron suite.
-_FRONTEND_FILES = {"scripts/desktop-update/ui.html"}
+# Inputs outside those packages exercised by the desktop Electron suite.
+_FRONTEND_FILES = {
+    "scripts/desktop-update/ui.html",
+    # Desktop update seed.py imports this fixture to publish its release.
+    "tests/e2e/core/upgrade/_install_helpers.py",
+}
 _ROOT_NPM = {"package.json", "package-lock.json"}  # shifts every package's tree
 _DOCKER_META = ("docker/", ".hadolint.yml", "Dockerfile") # docker setup
 _NIX_PATHS = ("nix/",) # nix files
