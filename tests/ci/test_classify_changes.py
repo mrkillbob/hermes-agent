@@ -87,6 +87,10 @@ CASES = {
     "dep manifest → python": (["pyproject.toml"], _lanes(python=True, scan=True, deps=True, uv_lock=True, desktop_updater=True)),
     "uv.lock → python": (["uv.lock"], _lanes(python=True, uv_lock=True)),
     "ts package → frontend": (["apps/desktop/src/app.tsx"], _lanes(frontend=True)),
+    "desktop release fixture → python + frontend": (
+        ["tests/e2e/core/upgrade/_install_helpers.py"],
+        _lanes(python=True, python_prod=False, frontend=True, scan=True),
+    ),
     # Python scripts inside the desktop package also need the Python lint and
     # test lanes; the `apps/` prefix alone does not make a file frontend-only.
     "python script under frontend package → python + frontend": (
@@ -327,7 +331,7 @@ _REPO = Path(__file__).resolve().parents[2]
 
 def _yaml(rel: str) -> dict:
     yaml = pytest.importorskip("hermes_yaml")
-    return yaml.safe_load((_REPO / rel).read_text(encoding="utf-8"))
+    return yaml.safe_load((_REPO / rel).read_text(encoding="utf-8-sig"))
 
 
 def test_every_lane_reaches_the_composite_action():
