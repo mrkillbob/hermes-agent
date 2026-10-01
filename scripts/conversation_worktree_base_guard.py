@@ -177,6 +177,8 @@ def _repair_inherited_hooks(checkout: Path) -> None:
         handle.write(original)
         handle.flush()
         os.fsync(handle.fileno())
+    owned_lock = lock.lstat()
+    lock_identity = (owned_lock.st_dev, owned_lock.st_ino)
     try:
         backup = child_config.with_name(f"hermes-hook-repair-{uuid.uuid4().hex}.backup")
         with backup.open("xb") as destination:
@@ -189,6 +191,8 @@ def _repair_inherited_hooks(checkout: Path) -> None:
         ])
         with lock.open("rb") as replacement:
             os.fsync(replacement.fileno())
+        owned_lock = lock.lstat()
+        lock_identity = (owned_lock.st_dev, owned_lock.st_ino)
         if (
             child_config.read_bytes() != original or source_config.read_bytes() != original
             or _git(source, "rev-parse", "HEAD") != proof["source_head"]
@@ -204,7 +208,15 @@ def _repair_inherited_hooks(checkout: Path) -> None:
             os.fsync(destination.fileno())
         os.replace(lock, child_config)
     except BaseException:
-        lock.unlink(missing_ok=True)
+        # An interrupt can arrive after rename committed. Preserve any lock
+        # acquired by a successor, even when replacement never returned.
+        try:
+            current_lock = lock.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if (current_lock.st_dev, current_lock.st_ino) == lock_identity:
+                lock.unlink()
         raise
     if _hook_setting(checkout) != ("worktree", f"file:{child_config}", ".githooks"):
         raise RuntimeError("repaired hook setting did not resolve inside the child")
