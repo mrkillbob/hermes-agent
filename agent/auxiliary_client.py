@@ -1413,8 +1413,12 @@ class _CodexCompletionsAdapter:
         # calls as `function_call` items and tool results as `function_call_output` items with a valid
         # call_id, so every Responses path normalizes tool history identically and cannot drift.
         from agent.codex_responses_adapter import (
-            _chat_messages_to_responses_input, _classify_responses_issuer,
-            _responses_tools, _wire_model_identity, classify_responses_route,
+            _chat_messages_to_responses_input,
+            _classify_responses_issuer,
+            _responses_tools,
+            _role_message_item,
+            _wire_model_identity,
+            classify_responses_route,
         )
         from agent.transports.codex import _alias_wire_tools
         model = kwargs.get("model", self._model)
@@ -1463,7 +1467,7 @@ class _CodexCompletionsAdapter:
         resp_kwargs: Dict[str, Any] = {
             # Codex only knows the base slug; strip the Hermes ``-900k`` picker suffix.
             "model": wire_model, "instructions": instructions,
-            "input": input_items or [{"role": "user", "content": ""}], "store": False,
+            "input": input_items or [_role_message_item("user", "")], "store": False,
         }
         # Forward the chat.completions timeout; otherwise a Codex stream can sit behind a
         # dead-looking CLI until the user force-interrupts.

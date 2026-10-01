@@ -269,3 +269,32 @@ def test_truncation_detection_semantics():
     assert event_replay.is_truncated("s1", 5)
     # Unknown session: nothing evicted, nothing truncated.
     assert not event_replay.is_truncated("nope", 0)
+
+
+def test_rpc_reconnect_replays_pending_request_until_its_answer(monkeypatch):
+    """An unanswered prompt survives a missed wire frame and disappears after settlement."""
+    from tui_gateway import server, server_requests
+
+    written, outcomes = [], []
+    monkeypatch.setattr(server_requests, "_write", written.append)
+    monkeypatch.setattr(server_requests, "_emit", lambda *args: None)
+    monkeypatch.setattr(server_requests, "_answerable", lambda sid: True)
+    server_requests.reset_for_tests()
+    settle = server_requests.send_async("sudo", "reconnect", {"command": "echo test"}, outcomes.append)
+    try:
+        reply = server.handle_request({"id": "replay", "method": "session.events.since",
+                                       "params": {"session_id": "reconnect", "last_seen": 0}})
+        assert reply["result"]["open_requests"] == [
+            {k: written[0][k] for k in ("id", "method", "params")}
+        ]
+        other = server.handle_request({"id": "other", "method": "session.events.since",
+                                       "params": {"session_id": "other", "last_seen": 0}})
+        assert other["result"]["open_requests"] == []
+        assert server_requests.resolve_response({"id": written[0]["id"], "result": {"value": "answer"}})
+        replay = server.handle_request({"id": "done", "method": "session.events.since",
+                                        "params": {"session_id": "reconnect", "last_seen": 0}})
+        assert replay["result"]["open_requests"] == []
+        assert outcomes == [{"value": "answer"}]
+    finally:
+        settle("test cleanup")
+        server_requests.reset_for_tests()

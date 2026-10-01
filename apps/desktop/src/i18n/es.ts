@@ -1517,7 +1517,8 @@ export const esOverrides = {
       fileReadMaxChars: 'Máximo de caracteres que Hermes puede leer en una solicitud de archivo.',
       approvals: {
         mode: 'Cómo maneja Hermes los comandos que necesitan aprobación explícita.',
-        timeout: 'Cuánto esperan los prompts de aprobación antes de vencer.'
+        timeout:
+          'Cuánto esperan los prompts de aprobación en plataformas de mensajería antes de vencer. La app y la terminal esperan hasta que respondas.'
       },
       security: {
         redactSecrets: 'Oculta secretos detectados del contenido visible para el modelo cuando sea posible.'
@@ -4045,6 +4046,8 @@ export const esOverrides = {
       reveal: 'Revelar en carpeta',
       copyPath: 'Copiar ruta',
       removeFromSidebar: 'Ocultar de la barra lateral',
+      createdInPreviousContext:
+        'El proyecto se creó en la conexión o el perfil anterior. Vuelve allí; no se escribió IDEA.md.',
       createFailed: 'No se pudo crear el proyecto',
       staleBackend:
         'Actualiza el backend de Hermes para crear proyectos: tu backend es más antiguo que esta aplicación de escritorio (Configuración → Actualizaciones → Backend).',
@@ -5264,6 +5267,7 @@ export const esOverrides = {
     editing: 'Edición',
     unsavedChanges: 'Cambios no guardados',
     saveFailed: message => `No se pudo guardar: ${message}`,
+    saveScopeChanged: 'Vuelve a la conexión y al perfil originales para guardar este borrador.',
     diskChangedTitle: 'Archivo cambiado en el disco',
     diskChangedBody:
       'Este archivo cambió desde que lo abriste. ¿Quieres sobrescribirlo con tu versión o descartar tus cambios y recargar?',
@@ -5460,6 +5464,7 @@ export const esOverrides = {
       branchNewChat: 'Ramificar en chat nuevo',
       react: 'Reaccionar',
       dismissError: 'Descartar error',
+      responseStopped: 'Respuesta detenida',
       errorLayers: {
         auth: 'Problema de inicio de sesión',
         billing: 'Créditos agotados',
@@ -5686,7 +5691,7 @@ export const esOverrides = {
     },
     approval: {
       gatewayDisconnected:
-        'Hermes está sin conexión ahora mismo. El comando sigue esperando tu respuesta (hasta que se agote el tiempo de aprobación). Reconéctate y vuelve a enviarla.',
+        'Hermes está sin conexión ahora mismo. El comando sigue esperando tu respuesta. Reconéctate y vuelve a enviarla.',
       sendFailed: 'No se pudo enviar tu respuesta',
       reconnect: 'Reconectar',
       timedOutSystemLine:
@@ -5715,6 +5720,8 @@ export const esOverrides = {
       skipped: 'Omitido',
       noAnswer: 'Sin respuesta',
       confirmAndContinueLabel: 'Confirmar y continuar',
+      singleSelectHint: 'Elige una',
+      multiSelectHint: 'Elige todas las que correspondan',
       questionProgress: (answered, total) => `${answered} de ${total} respondidas`,
       notDelivered:
         'Esta pregunta no llegó a la app, así que no se puede responder aquí. Pulsa Detener para terminar el turno y luego responde en el chat.'
