@@ -1,0 +1,56 @@
+name: Bounded Linux stream diagnostic
+on:
+  push:
+    branches: [diagnostics/pr174-empty-sse-3001396]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: 3001396a66473aed393842d225e5591cc30a3072
+          persist-credentials: false
+      - name: Verify source and create log directory
+        run: |
+          test "$(git rev-parse HEAD)" = 3001396a66473aed393842d225e5591cc30a3072
+          mkdir -p "$RUNNER_TEMP/stream-diagnostic"
+          git rev-parse HEAD > "$RUNNER_TEMP/stream-diagnostic/source-head.txt"
+          sha256sum tests/agent/test_run_agent.py agent/chat_completion_helpers.py agent/relay_llm.py uv.lock pyproject.toml > "$RUNNER_TEMP/stream-diagnostic/source-hashes.txt"
+      - name: Set up the existing locked test toolchain
+        uses: ./.github/actions/setup-pm
+        with:
+          packages: ripgrep
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+          save-tools-cache: 'false'
+          save-python-cache: 'false'
+      - name: Record native versions
+        run: |
+          "$HERMES_PYTHON" -c "import sys,platform,sqlite3; print(sys.version); print(platform.platform()); print(sqlite3.sqlite_version)" > "$RUNNER_TEMP/stream-diagnostic/native-versions.txt"
+      - name: Run preceding interrupt test then empty-frame recovery
+        env:
+          HERMES_TEST_WORKERS: '1'
+          HERMES_TEST_FILE_RETRIES: '0'
+          HERMES_TEST_FILE_TIMEOUT: '600'
+        run: |
+          set -o pipefail
+          scripts/run_tests.sh tests/agent/test_run_agent.py -k 'TestAnthropicInterruptHandler or TestEmptySSEFrameTurnRecovery' -vv -s -o faulthandler_timeout=30 --junitxml="$RUNNER_TEMP/stream-diagnostic/pair.xml" 2>&1 | tee "$RUNNER_TEMP/stream-diagnostic/pair.log"
+      - name: Run only the full file if the pair passes
+        env:
+          HERMES_TEST_WORKERS: '1'
+          HERMES_TEST_FILE_RETRIES: '0'
+          HERMES_TEST_FILE_TIMEOUT: '600'
+        run: |
+          set -o pipefail
+          scripts/run_tests.sh tests/agent/test_run_agent.py -vv -s -o faulthandler_timeout=30 --junitxml="$RUNNER_TEMP/stream-diagnostic/full-file.xml" 2>&1 | tee "$RUNNER_TEMP/stream-diagnostic/full-file.log"
+      - name: Preserve diagnostic output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr174-stream-diagnostic-3001396
+          path: ${{ runner.temp }}/stream-diagnostic
+          retention-days: 7
+          if-no-files-found: error
