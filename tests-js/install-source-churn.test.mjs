@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { afterEach, expect, test } from 'vitest';
 import { normalizeInstallerChurn } from '../tests/install/e2e-assets/source-churn.mjs';
@@ -60,7 +61,7 @@ test('uses the captured Git executable after a fresh installer removes Git from 
     .flatMap(dir => ['git', 'git.exe'].map(name => path.join(dir, name)))
     .find(file => fs.existsSync(file) && fs.statSync(file).isFile());
   expect(executable).toBeTruthy();
-  const helper = path.resolve('tests/install/e2e-assets/source-churn.mjs');
+  const helper = fileURLToPath(new URL('../tests/install/e2e-assets/source-churn.mjs', import.meta.url));
   execFileSync(process.execPath, [helper, root, executable], { env: { ...process.env, PATH: '' } });
   expect(git(['status', '--porcelain', '--untracked-files=all'])).toBe('');
 });
