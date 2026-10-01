@@ -136,6 +136,17 @@ def test_real_manager_bootstrap_pins_claim_and_repairs_only_proven_copied_hooks(
         def remote_moves_after_claim(record):
             assert record.base_commit == selected
             later.append(advance(repository))
+            if mode == "lunabot":
+                root = Path(record.worktree_path)
+                common = Path(record.repo_common_dir)
+                import hashlib
+                digest = hashlib.sha256(str(root).encode()).hexdigest()
+                for path in (
+                    metadata(root, "hermes-conversation-config-inheritance-v1.json"),
+                    metadata(root, "hermes-conversation-owner-v1"),
+                    common / "hermes-conversation-owner-claims-v1" / f"{digest}.json",
+                ):
+                    path.write_text("\ufeff" + path.read_text(encoding="utf-8-sig"), encoding="utf-8")
             bootstrap(record)
 
         manager._run_bootstrap = remote_moves_after_claim
@@ -146,7 +157,7 @@ def test_real_manager_bootstrap_pins_claim_and_repairs_only_proven_copied_hooks(
         }
         assert first.base_commit == selected == git(first.path, "rev-parse", "HEAD")
         assert db.get_conversation_worktree("pinned").state == "ready"
-        proof = json.loads(metadata(first.path, "hermes-conversation-config-inheritance-v1.json").read_text())
+        proof = json.loads(metadata(first.path, "hermes-conversation-config-inheritance-v1.json").read_text(encoding="utf-8-sig"))
         assert proof["source_head"] == source_head and proof["base_commit"] == selected
         if mode == "lunabot":
             assert git(first.path, "config", "--worktree", "core.hooksPath") == ".githooks"
@@ -161,6 +172,10 @@ def test_real_manager_bootstrap_pins_claim_and_repairs_only_proven_copied_hooks(
         else:
             receipt = json.loads(metadata(first.path, guard.RECEIPT).read_text())
             assert receipt["base_sha"] == selected
+            receipt_path = metadata(first.path, guard.RECEIPT)
+            receipt_path.write_text("\ufeff" + receipt_path.read_text(encoding="utf-8-sig"), encoding="utf-8")
+            with profile_home(home_a):
+                bootstrap(db.get_conversation_worktree("pinned"))
             assert metadata(first.path, "config.worktree").read_bytes() == source_config
         manager._run_bootstrap = bootstrap
         with SessionDB(home_b / "state.db") as db_b, profile_home(home_b):

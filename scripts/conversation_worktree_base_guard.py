@@ -87,7 +87,7 @@ def _require_clean(checkout: Path) -> None:
 def _record_base(checkout: Path, expected: dict[str, object]) -> None:
     receipt = _metadata_path(checkout, RECEIPT)
     if receipt.exists():
-        stored = json.loads(receipt.read_text(encoding="utf-8"))
+        stored = json.loads(receipt.read_text(encoding="utf-8-sig"))
         if not isinstance(stored, Mapping) or any(stored.get(key) != value for key, value in expected.items()):
             raise RuntimeError("stored base receipt differs from pinned creation identity")
         return
@@ -149,7 +149,7 @@ def _repair_inherited_hooks(checkout: Path) -> None:
     registered = _git(source, "worktree", "list", "--porcelain", "-z").split("\0")
     if any(f"worktree {path}" not in registered for path in (source, checkout)):
         raise RuntimeError("source or child is not a registered worktree")
-    proof = json.loads(_metadata_path(checkout, "hermes-conversation-config-inheritance-v1.json").read_text())
+    proof = json.loads(_metadata_path(checkout, "hermes-conversation-config-inheritance-v1.json").read_text(encoding="utf-8-sig"))
     required = {
         "owner": "conversation-worktree-manager", "worktree_path": str(checkout),
         "repo_common_dir": str(common), "source_worktree": str(source),
@@ -167,44 +167,44 @@ def _repair_inherited_hooks(checkout: Path) -> None:
         _metadata_path(checkout, "hermes-conversation-owner-v1"),
         common / "hermes-conversation-owner-claims-v1" / f"{digest}.json",
     )
-    if any(json.loads(path.read_text()) != ownership for path in claims):
+    if any(json.loads(path.read_text(encoding="utf-8-sig")) != ownership for path in claims):
         raise RuntimeError("config inheritance is missing exact durable manager ownership")
     original = child_config.read_bytes()
     if source_config.read_bytes() != original or hashlib.sha256(original).hexdigest() != proof.get("config_sha256"):
         raise RuntimeError("copied worktree configuration has changed since creation")
     lock = child_config.with_name(child_config.name + ".lock")
     with lock.open("xb") as handle:
-        try:
-            handle.write(original)
-            handle.flush()
-            os.fsync(handle.fileno())
-            backup = child_config.with_name(f"hermes-hook-repair-{uuid.uuid4().hex}.backup")
-            with backup.open("xb") as destination:
-                destination.write(original)
-                destination.flush()
-                os.fsync(destination.fileno())
-            _command(checkout, [
-                "git", "config", "--file", str(lock), "--fixed-value", "--replace-all",
-                "core.hooksPath", ".githooks", old_value,
-            ])
-            with lock.open("rb") as replacement:
-                os.fsync(replacement.fileno())
-            if (
-                child_config.read_bytes() != original or source_config.read_bytes() != original
-                or _git(source, "rev-parse", "HEAD") != proof["source_head"]
-            ):
-                raise RuntimeError("worktree configuration changed during hook repair; preserving it")
-            _tracked_hook(source)
-            _tracked_hook(checkout)
-            audit = {**dict(proof), "old_hooks_path": old_value, "new_hooks_path": ".githooks",
-                     "backup": str(backup), "hook_blob": child_blob}
-            with backup.with_suffix(".json").open("x", encoding="utf-8") as destination:
-                json.dump(audit, destination, sort_keys=True)
-                destination.flush()
-                os.fsync(destination.fileno())
-            os.replace(lock, child_config)
-        finally:
-            lock.unlink(missing_ok=True)
+        handle.write(original)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        backup = child_config.with_name(f"hermes-hook-repair-{uuid.uuid4().hex}.backup")
+        with backup.open("xb") as destination:
+            destination.write(original)
+            destination.flush()
+            os.fsync(destination.fileno())
+        _command(checkout, [
+            "git", "config", "--file", str(lock), "--fixed-value", "--replace-all",
+            "core.hooksPath", ".githooks", old_value,
+        ])
+        with lock.open("rb") as replacement:
+            os.fsync(replacement.fileno())
+        if (
+            child_config.read_bytes() != original or source_config.read_bytes() != original
+            or _git(source, "rev-parse", "HEAD") != proof["source_head"]
+        ):
+            raise RuntimeError("worktree configuration changed during hook repair; preserving it")
+        _tracked_hook(source)
+        _tracked_hook(checkout)
+        audit = {**dict(proof), "old_hooks_path": old_value, "new_hooks_path": ".githooks",
+                 "backup": str(backup), "hook_blob": child_blob}
+        with backup.with_suffix(".json").open("x", encoding="utf-8") as destination:
+            json.dump(audit, destination, sort_keys=True)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(lock, child_config)
+    finally:
+        lock.unlink(missing_ok=True)
     if _hook_setting(checkout) != ("worktree", f"file:{child_config}", ".githooks"):
         raise RuntimeError("repaired hook setting did not resolve inside the child")
 
