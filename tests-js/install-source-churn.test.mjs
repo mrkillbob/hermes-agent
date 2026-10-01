@@ -52,3 +52,15 @@ test('refuses modified contributor content without deleting it', () => {
   expect(git(['status', '--porcelain'])).not.toBe('');
   expect(fs.existsSync(path.join(root, '.git/info/sparse-checkout'))).toBe(false);
 });
+
+
+test('uses the captured Git executable after a fresh installer removes Git from PATH', () => {
+  const { root, git } = fixture();
+  const executable = process.env.PATH.split(path.delimiter)
+    .flatMap(dir => ['git', 'git.exe'].map(name => path.join(dir, name)))
+    .find(file => fs.existsSync(file) && fs.statSync(file).isFile());
+  expect(executable).toBeTruthy();
+  const helper = path.resolve('tests/install/e2e-assets/source-churn.mjs');
+  execFileSync(process.execPath, [helper, root, executable], { env: { ...process.env, PATH: '' } });
+  expect(git(['status', '--porcelain', '--untracked-files=all'])).toBe('');
+});

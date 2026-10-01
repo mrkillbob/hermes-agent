@@ -4,7 +4,7 @@
 //
 // Run the current CI checkout's entrypoint with its locked driver deps:
 //
-//   node <this file> <path-to-Hermes.exe> <proof-dir> <old-sha> [--native-handoff]
+//   node <this file> <path-to-Hermes.exe> <proof-dir> <old-sha> <target-sha|--native-handoff>
 // --native-handoff leaves the native UIA caller in charge of clicking Update.
 //
 // Exit codes: 0 = update hand-off started and the app quit (the detached
@@ -21,15 +21,17 @@ const fs = require('node:fs')
 const { _electron } = require('@playwright/test')
 const { prepareWindowForInput } = require('./window-input.cjs')
 const { observeProcessClose } = require('./process-close.cjs')
+const { prepareSourceBranchEnvironment, installSourceBranchProbe } = require('./source-branch-probe.cjs')
 const { pickAppWindow, openAbout, readManualUpdateCommand, waitForUpdate } = require('./update-ui.cjs')
 
 const exePath = process.argv[2]
 const proofDir = process.argv[3]
 const oldSha = process.argv[4]
 const nativeHandoff = process.argv[5] === '--native-handoff'
+const targetSha = nativeHandoff ? null : process.argv[5]
 
-if (!exePath || !proofDir || !oldSha || !process.env.HERMES_E2E_MOCK_URL) {
-  console.error('usage: node drive-update.cjs <Hermes.exe> <proof-dir> <old-sha> [--native-handoff]; HERMES_E2E_MOCK_URL required')
+if (!exePath || !proofDir || !oldSha || (!nativeHandoff && !targetSha) || !process.env.HERMES_E2E_MOCK_URL) {
+  console.error('usage: node drive-update.cjs <Hermes.exe> <proof-dir> <old-sha> <target-sha|--native-handoff>; HERMES_E2E_MOCK_URL required')
   process.exit(1)
 }
 
@@ -65,6 +67,9 @@ async function main() {
   const origin = nativeHandoff ? 'bundled' : 'source'
   const root = nativeHandoff ? path.join(path.dirname(exePath), 'resources', 'agent-payload') : path.join(process.env.HERMES_HOME, 'hermes-agent')
   const launchEnv = isolateUpdateWindowEnvironment(updateWindowEnvironment(process.env, root, origin))
+  if (!nativeHandoff) {
+    prepareSourceBranchEnvironment(root, targetSha, process.env.HERMES_E2E_REAL_GIT, process.env, launchEnv)
+  }
   const userData = launchEnv.HERMES_DESKTOP_USER_DATA_DIR
   log(`launching ${exePath}`)
 
@@ -78,6 +83,7 @@ async function main() {
     env: launchEnv,
     timeout: 120_000
   })
+  if (!nativeHandoff) await installSourceBranchProbe(app)
   const child = app.process()
 
   const waitForProcessClose = observeProcessClose(child)

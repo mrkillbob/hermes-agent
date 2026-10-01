@@ -628,7 +628,7 @@ function Clear-HistoricalInstallerChurn {
     # identical index/HEAD blobs. Undo only that installer-generated state in
     # this disposable clone; any other change still fails, listed.
     # porcelain=v2: Invoke-Git trims output, which would eat v1's leading " M".
-    & $DriverNode (Join-Path $AssetsDir "source-churn.mjs") $InstallDir
+    & $DriverNode (Join-Path $AssetsDir "source-churn.mjs") $InstallDir $script:RealGitExe
     Assert-True ($LASTEXITCODE -eq 0) "verified only installer-generated contributor and launcher churn"
     $lines = @((Invoke-Git @("-C", $InstallDir, "-c", "core.quotepath=false", "status", "--porcelain=v2", "--untracked-files=all")) -split "\r?\n" |
         Where-Object { $_ })
@@ -1141,7 +1141,7 @@ function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try {
-            & $node $driver $desktopExe $proof (Read-State).old 2>&1 |
+            & $node $driver $desktopExe $proof (Read-State).old $TargetSha 2>&1 |
                 ForEach-Object { Write-Host "  $_" }
             $driveExit = $LASTEXITCODE
         } finally {
