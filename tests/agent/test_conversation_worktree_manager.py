@@ -15,7 +15,7 @@ from agent.conversation_worktree import (
     ConversationWorktreeError,
     ConversationWorktreeManager,
 )
-from agent.conversation_worktree_policy import ConversationWorktreePolicy
+from agent.conversation_worktree_policy import ConversationCreationBasePolicy, ConversationWorktreePolicy
 from hermes_state import SessionDB
 
 
@@ -853,3 +853,227 @@ def test_stale_ready_record_cannot_adopt_foreign_worktree(repo, db, tmp_path):
         owner.resolve_existing_session("foreign")
     assert not owner.inspect_cleanup("foreign", active_session_bound=False).allowed
     assert foreign.is_dir()
+
+
+@pytest.mark.parametrize("mutation", ["head", "branch", "owner"])
+def test_bootstrap_must_preserve_creation_identity_before_ready(repo, db, tmp_path, mutation):
+    worktree_manager = manager(repo, db, tmp_path)
+
+    def mutate_during_bootstrap(record):
+        path = Path(record.worktree_path)
+        if mutation == "head":
+            git(path, "-c", "user.name=fixture", "-c", "user.email=fixture@invalid",
+                "commit", "--allow-empty", "-m", "bootstrap changed identity")
+        elif mutation == "branch":
+            git(path, "checkout", "-b", "unexpected-bootstrap-branch")
+        else:
+            marker = Path(git(path, "rev-parse", "--git-path", "hermes-conversation-owner-v1"))
+            if not marker.is_absolute():
+                marker = path / marker
+            marker.unlink()
+
+    worktree_manager._run_bootstrap = mutate_during_bootstrap
+    with pytest.raises(ConversationWorktreeError):
+        worktree_manager.bind_new_root_session("bootstrap-mutated", conversation_kind="interactive")
+    record = db.get_conversation_worktree("bootstrap-mutated")
+    assert record is not None
+    assert record.state != "ready"
+    assert Path(record.worktree_path).is_dir()
+
+
+@pytest.fixture
+def governed_remote(repo, tmp_path):
+    remote = tmp_path / "remote.git"
+    git(tmp_path, "clone", "--bare", str(repo), str(remote))
+    git(repo, "remote", "add", "origin", str(remote))
+    git(repo, "push", "origin", "HEAD:refs/heads/stable")
+    return remote
+
+
+def advance_remote(repo, remote, tmp_path):
+    updater = tmp_path / f"updater-{len(list(tmp_path.glob('updater-*')))}"
+    git(tmp_path, "clone", "--branch", "stable", str(remote), str(updater))
+    git(updater, "-c", "user.name=fixture", "-c", "user.email=fixture@invalid",
+        "commit", "--allow-empty", "-m", "advance governed base")
+    git(updater, "push", "origin", "stable")
+    return git(updater, "rev-parse", "HEAD")
+
+
+def test_governed_base_is_pinned_before_claim_and_next_root_refreshes(repo, governed_remote, db, tmp_path):
+    source_head = git(repo, "rev-parse", "HEAD")
+    first_target = advance_remote(repo, governed_remote, tmp_path)
+    worktree_manager = manager(repo, db, tmp_path, create_timeout=10,
+        creation_base=ConversationCreationBasePolicy("origin", "stable", str(governed_remote)))
+    advanced = []
+
+    def move_remote_after_claim(record):
+        assert record.base_commit == first_target
+        assert git(Path(record.worktree_path), "rev-parse", "HEAD") == first_target
+        advanced.append(advance_remote(repo, governed_remote, tmp_path))
+
+    worktree_manager._run_bootstrap = move_remote_after_claim
+    first = worktree_manager.bind_new_root_session("first-pinned", conversation_kind="interactive")
+    assert first.base_commit == first_target
+    assert git(first.path, "rev-parse", "HEAD") == first_target
+    assert git(repo, "rev-parse", "HEAD") == source_head
+    worktree_manager._run_bootstrap = lambda record: None
+    second = worktree_manager.bind_new_root_session("second-pinned", conversation_kind="interactive")
+    assert second.base_commit == advanced[0]
+    assert git(second.path, "rev-parse", "HEAD") == advanced[0]
+    assert worktree_manager.bind_new_root_session("first-pinned", conversation_kind="interactive").base_commit == first_target
+
+
+@pytest.mark.parametrize("fault", ["wrong-remote", "missing-branch", "timeout"])
+def test_governed_base_failure_does_not_claim_or_create(repo, governed_remote, db, tmp_path, fault):
+    worktree_manager = manager(repo, db, tmp_path, create_timeout=10,
+        creation_base=ConversationCreationBasePolicy("origin", "missing" if fault == "missing-branch" else "stable",
+                                                   "different-repository" if fault == "wrong-remote" else str(governed_remote)))
+    if fault == "timeout":
+        original = worktree_manager._run_git
+
+        def timed_out(cwd, args, timeout, phase):
+            if args[0] == "fetch":
+                raise ConversationWorktreeError("git command timed out", phase=phase)
+            return original(cwd, args, timeout, phase)
+
+        worktree_manager._run_git = timed_out
+    with pytest.raises(ConversationWorktreeError):
+        worktree_manager.bind_new_root_session("unclaimed", conversation_kind="interactive")
+    assert db.get_conversation_worktree("unclaimed") is None
+    assert not (tmp_path / "conversation-worktrees").exists()
+
+
+def test_existing_claim_wins_over_newly_resolved_governed_base(repo, governed_remote, db, tmp_path):
+    worktree_manager = manager(repo, db, tmp_path, create_timeout=10,
+        creation_base=ConversationCreationBasePolicy("origin", "stable", str(governed_remote)))
+    original_head = git(repo, "rev-parse", "HEAD")
+    newer = advance_remote(repo, governed_remote, tmp_path)
+    original_resolver = worktree_manager._resolve_governed_creation_base
+
+    def resolve_while_another_owner_claims(source):
+        assert original_resolver(source) == newer
+        path, branch = worktree_manager._expected_identity("claim-winner")
+        db.claim_conversation_worktree(root_session_id="claim-winner", worktree_path=str(path),
+            branch=branch, base_commit=original_head,
+            repo_common_dir=git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+            source_worktree=str(repo))
+        return newer
+
+    worktree_manager._resolve_governed_creation_base = resolve_while_another_owner_claims
+    result = worktree_manager.bind_new_root_session("claim-winner", conversation_kind="interactive")
+    assert result.base_commit == original_head
+    assert git(result.path, "rev-parse", "HEAD") == original_head
+
+
+def test_cleanup_waiting_for_bootstrap_does_not_block_readiness(repo, db, tmp_path):
+    owner = manager(repo, db, tmp_path, create_timeout=2)
+    bootstrap_started = threading.Event()
+    cleanup_waiting = threading.Event()
+    release_bootstrap = threading.Event()
+    errors = []
+    results = []
+    original_root_lock = owner._root_lock
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def observed_root_lock(common_dir, root_id):
+        if threading.current_thread().name == "cleanup":
+            cleanup_waiting.set()
+        with original_root_lock(common_dir, root_id):
+            yield
+
+    owner._root_lock = observed_root_lock
+
+    def bootstrap(record):
+        bootstrap_started.set()
+        assert release_bootstrap.wait(2)
+
+    owner._run_bootstrap = bootstrap
+
+    def bind():
+        try:
+            results.append(owner.bind_new_root_session("race", conversation_kind="interactive"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def cleanup():
+        try:
+            results.append(owner.remove_after_explicit_request("race", active_session_bound=True))
+        except BaseException as exc:
+            errors.append(exc)
+
+    starter = threading.Thread(target=bind)
+    remover = threading.Thread(target=cleanup, name="cleanup")
+    starter.start()
+    assert bootstrap_started.wait(2)
+    remover.start()
+    try:
+        assert cleanup_waiting.wait(2)
+    finally:
+        release_bootstrap.set()
+        starter.join(4)
+        remover.join(4)
+    assert not starter.is_alive() and not remover.is_alive()
+    assert errors == []
+    assert len(results) == 2
+    assert db.get_conversation_worktree("race").state == "ready"
+
+
+def test_governed_acquisition_does_not_consume_shared_tracking_ref(repo, governed_remote, db, tmp_path):
+    owner = manager(repo, db, tmp_path, create_timeout=10,
+        creation_base=ConversationCreationBasePolicy("origin", "stable", str(governed_remote)))
+    expected = advance_remote(repo, governed_remote, tmp_path)
+    stale = git(repo, "rev-parse", "HEAD")
+    original = owner._run_git
+
+    def competing_tracking_ref(cwd, args, timeout, phase):
+        result = original(cwd, args, timeout, phase)
+        if args[0] == "fetch":
+            git(repo, "update-ref", "refs/remotes/origin/stable", stale)
+        return result
+
+    owner._run_git = competing_tracking_ref
+    assert owner._resolve_governed_creation_base(repo) == expected
+    assert git(repo, "for-each-ref", "refs/hermes/conversation-bases") == ""
+
+
+def test_failed_fetch_cleans_only_its_owned_partial_ref(repo, governed_remote, db, tmp_path):
+    owner = manager(repo, db, tmp_path, create_timeout=10,
+        creation_base=ConversationCreationBasePolicy("origin", "stable", str(governed_remote)))
+    preserved_ref = "refs/hermes/conversation-bases/preserved-other-owner"
+    head = git(repo, "rev-parse", "HEAD")
+    git(repo, "update-ref", preserved_ref, head)
+    original = owner._run_git
+
+    def fail_after_fetch(cwd, args, timeout, phase):
+        result = original(cwd, args, timeout, phase)
+        if args[0] == "fetch":
+            raise ConversationWorktreeError("fetch interrupted after ref write", phase=phase)
+        return result
+
+    owner._run_git = fail_after_fetch
+    with pytest.raises(ConversationWorktreeError, match="fetch interrupted"):
+        owner.bind_new_root_session("partial-fetch", conversation_kind="interactive")
+    assert db.get_conversation_worktree("partial-fetch") is None
+    assert git(repo, "for-each-ref", "--format=%(refname)", "refs/hermes/conversation-bases") == preserved_ref
+    assert git(repo, "rev-parse", preserved_ref) == head
+
+
+def test_ref_cleanup_timeout_preserves_primary_fetch_failure(repo, governed_remote, db, tmp_path, caplog):
+    owner = manager(repo, db, tmp_path, create_timeout=10,
+        creation_base=ConversationCreationBasePolicy("origin", "stable", str(governed_remote)))
+    original = owner._run_git
+
+    def fail_fetch_and_cleanup(cwd, args, timeout, phase):
+        if args[0] == "fetch":
+            raise ConversationWorktreeError("primary fetch failure", phase=phase)
+        if args[:2] == ["update-ref", "-d"]:
+            raise ConversationWorktreeError("cleanup timeout", phase=phase)
+        return original(cwd, args, timeout, phase)
+
+    owner._run_git = fail_fetch_and_cleanup
+    with pytest.raises(ConversationWorktreeError, match="primary fetch failure"):
+        owner.bind_new_root_session("cleanup-timeout", conversation_kind="interactive")
+    assert db.get_conversation_worktree("cleanup-timeout") is None
+    assert "creation_ref_cleanup_failed" in caplog.text

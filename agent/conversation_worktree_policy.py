@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import math
+import re
 from numbers import Real
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,15 @@ from typing import Any
 
 class ConversationWorktreePolicyError(ValueError):
     """Raised when conversation worktree configuration is unsafe or incomplete."""
+
+
+@dataclass(frozen=True)
+class ConversationCreationBasePolicy:
+    """An explicitly governed remote branch selected before a new claim."""
+
+    remote: str
+    branch: str
+    expected_remote_url: str
 
 
 @dataclass(frozen=True)
@@ -26,6 +36,7 @@ class ConversationWorktreePolicy:
     create_timeout: float = 60.0
     retain_until_explicit_cleanup: bool = True
     legacy_location: bool = False
+    creation_base: ConversationCreationBasePolicy | None = None
 
 
 _BRANCH_FORBIDDEN = frozenset(" ~^:?*[\\")
@@ -113,6 +124,28 @@ def _bootstrap_command(section: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _creation_base(section: Mapping[str, object]) -> ConversationCreationBasePolicy | None:
+    value = section.get("creation_base")
+    if value is None:
+        return None
+    required = {"remote", "branch", "expected_remote_url"}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ConversationWorktreePolicyError("creation_base requires remote, branch and expected_remote_url")
+    if any(not isinstance(value[key], str) or not value[key] for key in required):
+        raise ConversationWorktreePolicyError("creation_base fields must be non-empty strings")
+    remote = value["remote"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", remote):
+        raise ConversationWorktreePolicyError("creation_base.remote must be a safe remote name")
+    try:
+        branch = _branch_prefix({"branch_prefix": value["branch"]})
+    except ConversationWorktreePolicyError as exc:
+        raise ConversationWorktreePolicyError("creation_base.branch must be a safe branch name") from exc
+    expected = value["expected_remote_url"]
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in expected):
+        raise ConversationWorktreePolicyError("creation_base.expected_remote_url contains control characters")
+    return ConversationCreationBasePolicy(remote, branch, expected)
+
+
 def resolve_conversation_worktree_policy(config: Mapping[str, object]) -> ConversationWorktreePolicy:
     """Resolve top-level policy, falling back to desktop.conversation_worktree."""
     if not isinstance(config, Mapping):
@@ -150,4 +183,5 @@ def resolve_conversation_worktree_policy(config: Mapping[str, object]) -> Conver
         create_timeout=_positive_timeout(section, "create_timeout", 60.0),
         retain_until_explicit_cleanup=retain_until_explicit_cleanup,
         legacy_location=legacy_location,
+        creation_base=_creation_base(section),
     )

@@ -471,6 +471,14 @@ class ConversationWorktreeManager:
             )
         record = existing
         try:
+            # Network acquisition precedes the metadata lock. The returned OID,
+            # never a later mutable-ref read, is the candidate for a NEW claim.
+            # A concurrently established record always wins inside the lock.
+            selected_base = (
+                self._resolve_governed_creation_base(source)
+                if existing is None and self._policy.creation_base is not None
+                else None
+            )
             with self._repository_lock(source_common_dir):
                 record = self._db.get_conversation_worktree(root_session_id) or record
                 if record is not None and record.state == "ready":
@@ -488,7 +496,7 @@ class ConversationWorktreeManager:
                     existing=record,
                 )
                 if record is None:
-                    base_commit = self._git_stdout(
+                    base_commit = selected_base or self._git_stdout(
                         source, ["rev-parse", "HEAD"], "identity"
                     )
                     try:
@@ -534,7 +542,16 @@ class ConversationWorktreeManager:
                 self._require_recoverable_record(record)
                 self._validate_new_worktree(record)
                 self._run_bootstrap(record)
-                ready = self._db.mark_conversation_worktree_ready(root_session_id)
+                # Successful process exit cannot authorize a changed checkout.
+                # Keep the exact claimed creation identity until ready; normal
+                # descendant work and renames remain governed by ready recovery.
+                with self._repository_lock(source_common_dir):
+                    self._validate_new_worktree(record)
+                    if not self._exact_owner_claims_present(record):
+                        raise ConversationWorktreeError(
+                            "bootstrap changed conversation worktree ownership", phase="validate"
+                        )
+                    ready = self._db.mark_conversation_worktree_ready(root_session_id)
                 binding = self._binding_from_record(ready)
                 self._event("conversation_worktree.ready", root_session_id=root_session_id)
                 return binding
@@ -667,8 +684,10 @@ class ConversationWorktreeManager:
                 raise ConversationWorktreeError(
                     "durable conversation repository identity is unavailable", phase="identity"
                 )
-            with self._repository_lock(source_common_dir):
-                with self._root_lock(source_common_dir, root_session_id):
+            # Global nested lock order is root, then repository. Waiting for
+            # this root must not block readiness from acquiring metadata.
+            with self._root_lock(source_common_dir, root_session_id):
+                with self._repository_lock(source_common_dir):
                     current = self._db.get_conversation_worktree(root_session_id)
                     if current is None:
                         verdict = CleanupVerdict(False, ("unknown",))
@@ -985,6 +1004,52 @@ class ConversationWorktreeManager:
         text = " ".join(text.split()) or "git worktree remove failed"
         return text[:_LEASE_MESSAGE_LIMIT]
 
+    def _resolve_governed_creation_base(self, source: Path) -> str:
+        base = self._policy.creation_base
+        if base is None:
+            raise ConversationWorktreeError("governed creation base is not configured", phase="policy")
+        args = ["remote", "get-url", base.remote]
+        if self._git_stdout(source, args, "creation_base") != base.expected_remote_url:
+            raise ConversationWorktreeError("creation remote identity mismatch", phase="creation_base")
+        # Each acquisition owns its ref: concurrent fetches cannot replace the
+        # commit between acquisition and resolution. Never consume FETCH_HEAD
+        # or a shared tracking ref as this caller's creation authority.
+        ref = f"refs/hermes/conversation-bases/{uuid.uuid4().hex}"
+        commit = None
+        try:
+            self._git_stdout(
+                source,
+                ["fetch", "--no-tags", "--no-write-fetch-head", base.remote,
+                 f"refs/heads/{base.branch}:{ref}"],
+                "creation_base",
+            )
+            if self._git_stdout(source, args, "creation_base") != base.expected_remote_url:
+                raise ConversationWorktreeError(
+                    "creation remote identity changed", phase="creation_base"
+                )
+            commit = self._git_stdout(
+                source, ["rev-parse", "--verify", f"{ref}^{{commit}}"], "creation_base"
+            )
+            return commit
+        finally:
+            # This unique namespace belongs only to this acquisition. A failed
+            # cleanup cannot turn an acquisition failure into a successful claim.
+            delete_args = ["update-ref", "-d", ref]
+            if commit is not None:
+                delete_args.append(commit)
+            try:
+                cleanup = self._run_git(
+                    source, delete_args, self._policy.create_timeout, "creation_base"
+                )
+            except ConversationWorktreeError:
+                logger.warning("conversation_worktree.creation_ref_cleanup_failed phase=creation_base")
+            else:
+                if cleanup.returncode != 0:
+                    logger.warning(
+                        "conversation_worktree.creation_ref_cleanup_failed phase=creation_base status=%s",
+                        cleanup.returncode,
+                    )
+
     def _source_repository_identity(self) -> tuple[Path, Path]:
         source = self._policy.source_worktree
         if source is None:
@@ -1149,7 +1214,12 @@ class ConversationWorktreeManager:
                 phase="recovery",
             )
         else:
-            self._create_worktree(source, record)
+            try:
+                self._create_worktree(source, record)
+            except OSError as exc:
+                raise ConversationWorktreeError(
+                    "conversation creation metadata could not be persisted", phase="create"
+                ) from exc
 
     def _ensure_git_worktree_locked(
         self, source: Path, record: ConversationWorktreeRecord
@@ -1305,6 +1375,15 @@ class ConversationWorktreeManager:
                 str(path), record.base_commit,
             ]
         )
+        source_config = Path(self._git_stdout(
+            source, ["rev-parse", "--path-format=absolute", "--git-path", "config.worktree"], "create"
+        ))
+        inherited_config = (
+            source_config.read_bytes()
+            if source_config.is_file() and not source_config.is_symlink()
+            else None
+        )
+        source_head = self._git_stdout(source, ["rev-parse", "HEAD"], "create")
         self._git_stdout(
             source,
             add_args,
@@ -1317,6 +1396,30 @@ class ConversationWorktreeManager:
         bootstrap_worktree_environments(source, path, environment_names=(".venv",))
         self._validate_new_worktree(record)
         self._ensure_owner_marker(record)
+        # Git may copy worktree-local configuration during add. Only a new
+        # allocation can attest that origin; retries must never invent proof.
+        child_config = Path(self._git_stdout(
+            path, ["rev-parse", "--path-format=absolute", "--git-path", "config.worktree"], "create"
+        ))
+        if (
+            inherited_config is not None
+            and child_config.is_file()
+            and not child_config.is_symlink()
+            and child_config.read_bytes() == inherited_config
+            and source_config.read_bytes() == inherited_config
+            and self._git_stdout(source, ["rev-parse", "HEAD"], "create") == source_head
+        ):
+            receipt = child_config.parent / "hermes-conversation-config-inheritance-v1.json"
+            with receipt.open("x", encoding="utf-8") as handle:
+                json.dump({
+                    **self._owner_payload(record),
+                    "base_commit": record.base_commit,
+                    "source_worktree": str(source.resolve()),
+                    "source_head": source_head,
+                    "config_sha256": hashlib.sha256(inherited_config).hexdigest(),
+                }, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
 
     def _validate_new_worktree(self, record: ConversationWorktreeRecord) -> None:
         path = Path(record.worktree_path)
@@ -1523,6 +1626,13 @@ class ConversationWorktreeManager:
             if IS_WINDOWS
             else {"process_group": 0}
         )
+        from tools.environments.local import served_profile_child_env
+
+        environment = served_profile_child_env()
+        environment.update({
+            "HERMES_CONVERSATION_BASE_COMMIT": record.base_commit,
+            "HERMES_CONVERSATION_SOURCE_WORKTREE": str(record.source_worktree or ""),
+        })
         try:
             process = subprocess.Popen(
                 list(self._policy.bootstrap_command),
@@ -1533,6 +1643,7 @@ class ConversationWorktreeManager:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=environment,
                 **popen_kwargs,
             )
         except OSError as exc:

@@ -225,3 +225,30 @@ def test_resolved_policy_is_immutable(tmp_path):
     assert policy.create_timeout == 30.0
     with pytest.raises(AttributeError):
         policy.enabled = False
+
+
+def test_explicit_creation_base_policy_is_typed_and_opt_in(tmp_path):
+    config = {"conversation_worktree": {
+        "enabled": True, "source_worktree": str(tmp_path / "source"),
+        "worktree_root": str(tmp_path / "children"),
+        "creation_base": {"remote": "origin", "branch": "stable",
+                          "expected_remote_url": "https://example.invalid/owner/repo.git"},
+    }}
+    result = resolve_conversation_worktree_policy(config)
+    assert result.creation_base.remote == "origin"
+    assert result.creation_base.branch == "stable"
+    assert result.creation_base.expected_remote_url == "https://example.invalid/owner/repo.git"
+    del config["conversation_worktree"]["creation_base"]
+    assert resolve_conversation_worktree_policy(config).creation_base is None
+
+
+@pytest.mark.parametrize("value", [
+    True, {}, {"remote": "origin"},
+    {"remote": "--upload-pack=bad", "branch": "stable", "expected_remote_url": "repo"},
+    {"remote": "origin", "branch": "../stable", "expected_remote_url": "repo"},
+    {"remote": "origin", "branch": "stable", "expected_remote_url": "repo\nsecret"},
+    {"remote": "origin", "branch": "stable", "expected_remote_url": "repo", "unknown": True},
+])
+def test_creation_base_rejects_incomplete_or_unsafe_configuration(value):
+    with pytest.raises(ConversationWorktreePolicyError, match="creation_base"):
+        resolve_conversation_worktree_policy({"conversation_worktree": {"creation_base": value}})
