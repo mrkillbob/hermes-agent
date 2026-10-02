@@ -2705,7 +2705,7 @@ def _dispatch_once_locked(
         row_assignee = recover_generated_assignee(conn, row, default_assignee, dry_run=dry_run, result=result)
         if row_assignee in {"task-orchestrator", "task-intake-router", "intake-router"}:
             row_assignee = route_orchestrator_task(
-                conn, row, dry_run=dry_run, result=result,
+                conn, row, dry_run=dry_run, result=result, board=board,
             )
             if not row_assignee:
                 continue

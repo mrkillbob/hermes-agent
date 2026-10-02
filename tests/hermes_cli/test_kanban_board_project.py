@@ -107,3 +107,43 @@ def test_create_task_explicit_scratch_beats_board(fresh_home, tmp_path):
         assert (default.workspace_kind, default.project_id) == ("worktree", proj_id)
     finally:
         conn.close()
+
+
+class _Routed:
+    routed_to_specialist: list = []
+
+
+def _scratch_intake_task(conn, repo, board, body):
+    tid = kb.create_task(
+        conn, title="Verify market data authority freshness", body=body,
+        assignee="task-intake-router", workspace_kind="scratch", board=board,
+    )
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+    return tid, row
+
+
+def test_routing_anchors_scratch_task_that_names_the_project_repo(fresh_home, tmp_path):
+    """A routed specialist must be able to read the repo path its card names."""
+    from hermes_cli.kanban_worker_routing import route_orchestrator_task
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pdb.connect_closing() as pconn:
+        proj_id = pdb.create_project(pconn, name="Widget", primary_path=str(repo))
+    kb.create_board("scoped", name="Scoped", project_id=proj_id)
+    conn = kbc.connect(board="scoped")
+    try:
+        tid, row = _scratch_intake_task(
+            conn, repo, "scoped", f"Stale market data authority freshness in {repo}/scripts/run.sh")
+        assert route_orchestrator_task(conn, row, dry_run=False, result=_Routed(), board="scoped") == (
+            "market-data-authority-auditor"
+        )
+        task = kb.get_task(conn, tid)
+        assert (task.project_id, task.workspace_kind) == (proj_id, "worktree")
+        assert task.workspace_path and task.branch_name
+
+        tid2, row2 = _scratch_intake_task(conn, repo, "scoped", "Stale market data authority freshness, no paths")
+        route_orchestrator_task(conn, row2, dry_run=False, result=_Routed(), board="scoped")
+        assert kb.get_task(conn, tid2).workspace_kind == "scratch"
+    finally:
+        conn.close()

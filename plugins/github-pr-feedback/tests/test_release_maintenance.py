@@ -77,6 +77,15 @@ class Kanban:
     def __init__(self) -> None:
         self.tasks = []
         self.by_key: dict[str, str] = {}
+        self.statuses: dict[str, str] = {}
+        self.archived: list[str] = []
+
+    def task_status(self, board: str, task_id: str) -> str | None:
+        return self.statuses.get(task_id, "blocked")
+
+    def archive_task(self, board: str, task_id: str) -> None:
+        self.archived.append(task_id)
+        self.statuses[task_id] = "archived"
 
     def create_or_get_task(self, task) -> str:
         if task.idempotency_key in self.by_key:
@@ -350,3 +359,24 @@ def test_maintenance_workspaces_are_distinct_and_pinned_to_the_exact_head(
             text=True,
         ).stdout.strip()
         assert actual == head
+
+
+def test_advancing_base_head_archives_unfinished_cards_for_the_old_head(
+    tmp_path: Path,
+) -> None:
+    """A card pinned to a superseded head can never record a receipt, so it must not stay blocked."""
+
+    github = GitHub()
+    kanban = Kanban()
+    controller(tmp_path, github=github, kanban=kanban, now=NOW).scan()
+    controller(
+        tmp_path, github=github, kanban=kanban, now=NOW + timedelta(seconds=901)
+    ).scan()
+    old_ids = set(kanban.by_key.values())
+    kanban.statuses["task-1"] = "done"
+
+    github.head = "b" * 40
+    controller(tmp_path, github=github, kanban=kanban, now=NOW + timedelta(seconds=1000)).scan()
+    controller(tmp_path, github=github, kanban=kanban, now=NOW + timedelta(seconds=2000)).scan()
+
+    assert set(kanban.archived) == old_ids - {"task-1"}

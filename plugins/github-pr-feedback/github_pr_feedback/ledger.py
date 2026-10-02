@@ -339,6 +339,15 @@ class FeedbackLedger:
             )
             """)
         self._connection.execute("""
+            CREATE TABLE IF NOT EXISTS maintenance_tasks (
+                repository TEXT NOT NULL,
+                head_sha TEXT NOT NULL,
+                board TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                PRIMARY KEY (repository, head_sha, board, task_id)
+            )
+            """)
+        self._connection.execute("""
             CREATE TABLE IF NOT EXISTS maintenance_receipts (
                 repository TEXT NOT NULL,
                 head_sha TEXT NOT NULL,
@@ -630,6 +639,40 @@ class FeedbackLedger:
                 (*identity, observed_at.isoformat()),
             )
         return observed_at
+
+    def record_maintenance_task(
+        self, repository: str, head_sha: str, board: str, task_id: str
+    ) -> None:
+        """Remember a maintenance card so it can be retired when its head is superseded."""
+
+        with self._transaction():
+            self._connection.execute(
+                "INSERT OR IGNORE INTO maintenance_tasks "
+                "(repository, head_sha, board, task_id) VALUES (?, ?, ?, ?)",
+                (repository, head_sha, board, task_id),
+            )
+
+    def superseded_maintenance_tasks(
+        self, repository: str, head_sha: str
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Return (head_sha, board, task_id) rows recorded for any other head."""
+
+        rows = self._connection.execute(
+            "SELECT head_sha, board, task_id FROM maintenance_tasks "
+            "WHERE repository = ? AND head_sha != ? ORDER BY head_sha, task_id",
+            (repository, head_sha),
+        ).fetchall()
+        return tuple((row[0], row[1], row[2]) for row in rows)
+
+    def forget_maintenance_task(
+        self, repository: str, head_sha: str, board: str, task_id: str
+    ) -> None:
+        with self._transaction():
+            self._connection.execute(
+                "DELETE FROM maintenance_tasks WHERE repository = ? AND head_sha = ? "
+                "AND board = ? AND task_id = ?",
+                (repository, head_sha, board, task_id),
+            )
 
     def record_maintenance_receipt(
         self,
