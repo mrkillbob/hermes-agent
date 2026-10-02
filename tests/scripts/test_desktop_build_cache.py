@@ -85,7 +85,8 @@ def test_keys_follow_dependency_inputs_not_checkout_or_release_identity(tmp_path
     assert describe_cache(source, cache, "desktop-production") == first
 
     for relative in ("apps/editor/package.json", "package-lock.json", "pm/lock.json", "uv.lock",
-                     "scripts/build/node-deps.mjs", "apps/desktop/scripts/stage-native-deps.mjs",
+                     "scripts/build/node-deps.mjs", "scripts/build/get-windows-compiler.cjs",
+                     "apps/desktop/scripts/stage-native-deps.mjs",
                      "scripts/bundles/desktop_prepare.py", "scripts/bundles/native_prepared.py",
                      "apps/desktop/scripts/prepared-native-deps.mjs", "pm/build_operations.py"):
         path = source / relative

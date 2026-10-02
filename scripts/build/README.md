@@ -68,7 +68,14 @@ node scripts/build/node-deps.mjs --source /work/source \
 locked path or package name. The provider deduplicates the selection and runs
 one root `npm ci` operation. It includes root dependencies, development
 dependencies, and optional dependencies. It checks Node/npm against the root
-`engines` declarations. npm lifecycle scripts remain enabled.
+`engines` declarations. npm lifecycle scripts remain enabled. When Desktop is
+selected, the provider loads a tracked get-windows compiler selector only inside
+the npm installation subprocess, preserving effective Node options and unrelated
+package compilers. The selector and options are part of the preparation receipt.
+Required Windows x64 bindings must contain PE bytes and load with the expected
+native exports before fresh or reused preparation is accepted. Unsupported optional
+targets keep their existing behavior. Bare npm install/ci is outside this Desktop
+compiler guarantee; use `npm run install:desktop` or this provider.
 
 The prepared source needs these inputs:
 

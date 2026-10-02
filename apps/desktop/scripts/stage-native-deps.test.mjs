@@ -9,6 +9,7 @@ import { buildHudModifierMonitor } from '../scripts/build-hud-modifier-monitor.m
 import {
   findHalfInstalledGetWindowsDir,
   installGetWindowsNativeBinding,
+  getWindowsCompilerEnvironment,
   stageGetWindows,
   stageGetWindowsInto,
   stageNodePtyInto,
@@ -64,7 +65,7 @@ function makeFakeUnixTerminal(srcRoot) {
 
 // ─── optional native helper tests ───────────────────────────────────
 
-test('a missing Linux HUD toolchain leaves no empty package directories', () => {
+test('an unavailable or cross-target Linux HUD helper leaves no empty package directories', () => {
   const tmp = fs.mkdtempSync(join(os.tmpdir(), 'hermes-hud-'))
   const warnings = []
   const originalWarn = console.warn
@@ -73,7 +74,11 @@ test('a missing Linux HUD toolchain leaves no empty package directories', () => 
     const distDir = join(tmp, 'dist')
     assert.equal(buildHudModifierMonitor({ source: join(tmp, 'missing-source'), distDir, platform: 'linux', arch: 'x64' }), null)
     assert.equal(existsSync(join(distDir, 'native')), false)
-    assert.match(warnings.join('\n'), /desktop packaging continues/)
+    const expectedWarning =
+      process.platform === 'linux' && process.arch === 'x64'
+        ? /desktop packaging continues/
+        : /linux-x64 needs a native build; modifier tap unavailable for this target/
+    assert.match(warnings.join('\n'), expectedWarning)
   } finally {
     console.warn = originalWarn
     fs.rmSync(tmp, { recursive: true, force: true })
@@ -568,20 +573,18 @@ test('get-windows native install invokes node-pre-gyp directly from the package 
   const tmp = fs.mkdtempSync(join(os.tmpdir(), 'hermes-stage-'))
   try {
     const srcRoot = join(tmp, 'get-windows')
-    const installer = join(
-      srcRoot,
-      'node_modules',
-      '@mapbox',
-      'node-pre-gyp',
-      'bin',
-      'node-pre-gyp'
-    )
+    const installer = join(srcRoot, 'node_modules', '@mapbox', 'node-pre-gyp', 'bin', 'node-pre-gyp')
     fs.mkdirSync(path.dirname(installer), { recursive: true })
     fs.writeFileSync(
       join(srcRoot, 'node_modules', '@mapbox', 'node-pre-gyp', 'package.json'),
       JSON.stringify({ name: '@mapbox/node-pre-gyp', version: '1.0.11' })
     )
     fs.writeFileSync(installer, '')
+    const compilerRoot = join(srcRoot, 'node_modules', 'node-gyp')
+    const compiler = join(compilerRoot, 'bin', 'node-gyp.js')
+    fs.mkdirSync(path.dirname(compiler), { recursive: true })
+    fs.writeFileSync(join(compilerRoot, 'package.json'), JSON.stringify({ name: 'node-gyp', version: '13.0.2' }))
+    fs.writeFileSync(compiler, '')
 
     const calls = []
     installGetWindowsNativeBinding(srcRoot, {
@@ -595,23 +598,45 @@ test('get-windows native install invokes node-pre-gyp directly from the package 
       {
         command: process.execPath,
         args: [fs.realpathSync(installer), 'install', '--fallback-to-build'],
-        options: { cwd: srcRoot, stdio: 'inherit' }
+        options: { cwd: srcRoot, stdio: 'inherit', env: calls[0].options.env }
       }
     ])
+    assert.equal(calls[0].options.env.npm_config_node_gyp, fs.realpathSync(compiler))
+    const env = getWindowsCompilerEnvironment(srcRoot, { NPM_CONFIG_NODE_GYP: '/wrong/compiler', sentinel: 'kept' })
+    assert.equal(env.npm_config_node_gyp, fs.realpathSync(compiler))
+    assert.equal(env.NPM_CONFIG_NODE_GYP, undefined)
+    assert.equal(env.sentinel, 'kept')
+    fs.writeFileSync(join(compilerRoot, 'package.json'), JSON.stringify({ name: 'node-gyp', version: '12.4.0' }))
+    assert.throws(() => getWindowsCompilerEnvironment(srcRoot), /unsupported.*12\.4\.0/)
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
 })
 
 test('get-windows native install surfaces node-pre-gyp failure', () => {
-  assert.throws(
-    () =>
-      installGetWindowsNativeBinding('C:\\fake\\get-windows', {
-        resolveInstaller: () => 'C:\\fake\\node-pre-gyp',
-        spawn: () => ({ status: 1 })
-      }),
-    /native installer exited with 1/
-  )
+  const tmp = fs.mkdtempSync(join(os.tmpdir(), 'hermes-stage-'))
+  try {
+    const srcRoot = join(tmp, 'get-windows')
+    const installer = join(srcRoot, 'node_modules', '@mapbox', 'node-pre-gyp', 'bin', 'node-pre-gyp')
+    fs.mkdirSync(path.dirname(installer), { recursive: true })
+    fs.writeFileSync(installer, '')
+    const compilerRoot = join(srcRoot, 'node_modules', 'node-gyp')
+    const compiler = join(compilerRoot, 'bin', 'node-gyp.js')
+    fs.mkdirSync(path.dirname(compiler), { recursive: true })
+    fs.writeFileSync(join(compilerRoot, 'package.json'), JSON.stringify({ name: 'node-gyp', version: '13.0.2' }))
+    fs.writeFileSync(compiler, '')
+
+    assert.throws(
+      () =>
+        installGetWindowsNativeBinding(srcRoot, {
+          resolveInstaller: () => installer,
+          spawn: () => ({ status: 1 })
+        }),
+      /native installer exited with 1/
+    )
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
 })
 
 test('staging refuses a get-windows version the lib/windows.js rewrite was not verified against', () => {

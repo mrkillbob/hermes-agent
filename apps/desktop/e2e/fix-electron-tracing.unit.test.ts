@@ -20,11 +20,12 @@ async function launchTrackedContext() {
     tracing: { start, startChunk: vi.fn().mockResolvedValue(undefined) }
   })
 
-  electron.launch.mockResolvedValue({ _context: context })
+  const app = Object.assign(new EventEmitter(), { _context: context })
+  electron.launch.mockResolvedValue(app)
   await import('./fix-electron-tracing')
   await electron.launch({})
 
-  return { context, start, beginClose: () => { closing = true } }
+  return { app, context, start, beginClose: () => { closing = true } }
 }
 
 test('does not hand a closing context to the next test before its close event arrives', async () => {
@@ -32,6 +33,14 @@ test('does not hand a closing context to the next test before its close event ar
 
   expect(electron._playwright._allContexts()).toContain(context)
   beginClose()
+  expect(electron._playwright._allContexts()).not.toContain(context)
+})
+
+test('does not hand a quit Electron app context to the next test before context close arrives', async () => {
+  const { app, context } = await launchTrackedContext()
+
+  expect(electron._playwright._allContexts()).toContain(context)
+  app.emit('close')
   expect(electron._playwright._allContexts()).not.toContain(context)
 })
 
