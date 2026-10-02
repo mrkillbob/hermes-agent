@@ -349,6 +349,10 @@ def test_direct_runtime_records_without_enabling_a_plugin(direct_runtime, tmp_pa
         interrupted=False,
         turn_exit_reason="text_response(stop)",
     )
+    # The daily package is cut by the first export that runs. Let the one the task
+    # close scheduled finish before the session closes, so the package holds exactly the
+    # task's metrics instead of racing the session-summary rows.
+    _join_export_workers()
     lifecycle.finalize_session(session_id=base["session_id"])
 
     starts = [event for event in direct_runtime.events if event[0] == "llm.call"]
@@ -957,6 +961,7 @@ def test_real_binding_aggregates_tool_and_approval_timeouts(
     )
     lifecycle.finalize_session(session_id=base["session_id"])
 
+    _join_export_workers()
     root = tmp_path / "hermes-home" / "telemetry" / "shared_metrics"
     snapshot = SharedMetricsStore(
         root / "metrics.sqlite3",
