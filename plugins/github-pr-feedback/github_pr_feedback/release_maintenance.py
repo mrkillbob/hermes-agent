@@ -108,7 +108,27 @@ class ReleaseMaintenanceController:
                 "degraded", None, 0, ("canonical_state_unavailable",)
             )
 
+    def _create(self, head_sha: str, task: KanbanTask) -> None:
+        task_id = self._kanban.create_or_get_task(task)
+        self._ledger.record_maintenance_task(
+            self._policy.repository, head_sha, self._board, task_id
+        )
+
+    def _retire_superseded(self, head_sha: str) -> None:
+        """Archive unfinished cards for older heads; they can never record a receipt."""
+
+        for old_head, board, task_id in self._ledger.superseded_maintenance_tasks(
+            self._policy.repository, head_sha
+        ):
+            status = self._kanban.task_status(board, task_id)
+            if status not in (None, "done", "archived"):
+                self._kanban.archive_task(board, task_id)
+            self._ledger.forget_maintenance_task(
+                self._policy.repository, old_head, board, task_id
+            )
+
     def _dispatch_for_head(self, head_sha: str) -> MaintenanceScanResult:
+        self._retire_superseded(head_sha)
         receipts = self._ledger.maintenance_receipts(self._policy.repository, head_sha)
         final = receipts.get(FINAL_LANE)
         if final is not None:
@@ -117,7 +137,7 @@ class ReleaseMaintenanceController:
             task = self._repair_task(
                 head_sha, FINAL_LANE, final, assignee=self._policy.assignee
             )
-            self._kanban.create_or_get_task(task)
+            self._create(head_sha, task)
             return MaintenanceScanResult("repairing", head_sha, 1, (FINAL_LANE,))
 
         tasks_created = 0
@@ -126,14 +146,15 @@ class ReleaseMaintenanceController:
         for lane in self._policy.lanes:
             receipt = receipts.get(lane.name)
             if receipt is None:
-                self._kanban.create_or_get_task(self._audit_task(head_sha, lane))
+                self._create(head_sha, self._audit_task(head_sha, lane))
                 tasks_created += 1
                 missing_lanes.append(lane.name)
             elif receipt.status != "passed":
-                self._kanban.create_or_get_task(
+                self._create(
+                    head_sha,
                     self._repair_task(
                         head_sha, lane.name, receipt, assignee=lane.assignee
-                    )
+                    ),
                 )
                 tasks_created += 1
                 failed_lanes.append(lane.name)
@@ -145,7 +166,7 @@ class ReleaseMaintenanceController:
             return MaintenanceScanResult(
                 "auditing", head_sha, tasks_created, tuple(missing_lanes)
             )
-        self._kanban.create_or_get_task(self._final_task(head_sha))
+        self._create(head_sha, self._final_task(head_sha))
         return MaintenanceScanResult("verifying", head_sha, 1)
 
     def _workspace(self, head_sha: str, lane: str) -> Path:

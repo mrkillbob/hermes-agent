@@ -188,7 +188,7 @@ def recover_generated_assignee(conn, row, default_assignee, *, dry_run, result):
     return default_assignee
 
 
-def route_orchestrator_task(conn, row, *, dry_run: bool, result) -> Optional[str]:
+def route_orchestrator_task(conn, row, *, dry_run: bool, result, board: Optional[str] = None) -> Optional[str]:
     """Hand a routed task to its repair owner before any worker is spawned."""
     if row["assignee"] not in {"task-orchestrator", "task-intake-router", "intake-router"}:
         return row["assignee"]
@@ -222,6 +222,7 @@ def route_orchestrator_task(conn, row, *, dry_run: bool, result) -> Optional[str
                     })
         return None
     if not dry_run:
+        _anchor_scratch_task_to_board_project(conn, row["id"], body, board)
         with kb.write_txn(conn):
             changed = conn.execute(
                 "UPDATE tasks SET assignee = ?, consecutive_failures = 0, "
@@ -236,3 +237,45 @@ def route_orchestrator_task(conn, row, *, dry_run: bool, result) -> Optional[str
                 })
     result.routed_to_specialist.append((row["id"], profile))
     return profile
+
+
+def _anchor_scratch_task_to_board_project(conn, task_id: str, body: Optional[str], board: Optional[str]) -> bool:
+    """Give a routed scratch task its board's project worktree when its body needs that repo.
+
+    Intake cards are created as scratch, but a specialist cannot read the
+    absolute repo path the body names from an empty scratch dir; it retries the
+    same failing read until the tool guardrail halts it. Tasks whose body names
+    no path inside the project repo stay scratch (explicit scratch is honoured).
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_project_link import resolve_project_link
+    from hermes_cli.kanban_worktree_policy import project_worktree_path
+
+    task = conn.execute(
+        "SELECT title, workspace_kind, project_id FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if task is None or task["workspace_kind"] != "scratch" or task["project_id"]:
+        return False
+    try:
+        board_project = (kb._board_meta_for(board).get("project_id") or "").strip()
+    except Exception:
+        return False
+    if not board_project:
+        return False
+    project_id, project, repo, kind = resolve_project_link(conn, board_project, None, "scratch", None)
+    if project is None or kind != "worktree" or not repo:
+        return False
+    if repo.rstrip("/") + "/" not in (body or ""):
+        return False
+    path = str(project_worktree_path(Path(repo), task_id))
+    branch = kb._project_branch_name(project, task_id, task["title"])
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET project_id = ?, workspace_kind = 'worktree', workspace_path = ?, "
+            "branch_name = ? WHERE id = ? AND workspace_kind = 'scratch' AND project_id IS NULL",
+            (project_id, path, branch, task_id),
+        )
+        kb._append_event(conn, task_id, "workspace_anchored_to_project", {
+            "project_id": project_id, "workspace_path": path, "reason": "body references project repo",
+        })
+    return True
