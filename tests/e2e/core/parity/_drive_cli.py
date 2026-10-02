@@ -34,10 +34,16 @@ def _run_cli(ph: ParityHome, *args: str) -> subprocess.CompletedProcess:
 def drive_oneshot(ph: ParityHome, srv: FakeLLMServer, prompt: str) -> DriveResult:
     proc = _run_cli(ph, "-z", prompt)
     assert proc.returncode == 0, f"hermes -z exited {proc.returncode}: {proc.stderr[-2000:]}"
-    return DriveResult(final_text=proc.stdout.strip(), toolset="hermes-cli")
+    return DriveResult(
+        final_text=proc.stdout.strip(), toolset="hermes-cli",
+        extra={"exit_code": proc.returncode, "stderr_tail": proc.stderr},
+    )
 
 
 def drive_chat_q(ph: ParityHome, srv: FakeLLMServer, prompt: str) -> DriveResult:
     proc = _run_cli(ph, "chat", "-q", prompt, "-Q")
     assert proc.returncode == 0, f"hermes chat -q exited {proc.returncode}: {proc.stderr[-2000:]}"
-    return DriveResult(final_text=proc.stdout.strip(), toolset="hermes-cli")
+    return DriveResult(
+        final_text=proc.stdout.strip(), toolset="hermes-cli",
+        extra={"exit_code": proc.returncode, "stderr_tail": proc.stderr},
+    )
