@@ -81,15 +81,11 @@ def _mock_model_metadata_catalog(monkeypatch):
     monkeypatch.setattr("agent.model_metadata_http.stream", catalog)
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture()
 def _stream_recovery_diagnostics():
-    # Write outside pytest's per-test capture so a file-timeout kill retains
-    # the blocked threads in the canonical runner's subprocess output.
-    faulthandler.dump_traceback_later(20, repeat=True, file=sys.__stderr__)
-    try:
-        yield
-    finally:
-        faulthandler.cancel_dump_traceback_later()
+    # Whole-test diagnostics are provided by pytest's faulthandler_timeout,
+    # which also covers setup and teardown rather than only the call fixture.
+    yield
 
 
 @pytest.fixture()
