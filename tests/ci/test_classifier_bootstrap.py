@@ -10,7 +10,11 @@ from ruamel.yaml import YAML
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PATHS = (".github/actions/detect-changes/action.yml", "scripts/ci/classify_changes.py")
+PATHS = (
+    ".github/actions/detect-changes/action.yml",
+    "scripts/ci/classify_changes.py",
+    "scripts/ci/platform_test_scope.py",
+)
 
 
 @pytest.mark.parametrize("recover", [True, False])
@@ -57,14 +61,18 @@ def test_classifier_fetch_retries_without_decoding_failed_responses(tmp_path, re
         timeout=10,
     )
     requests = calls.read_text().splitlines()
+    expected = [
+        f"api repos/owner/repo/contents/{path}?ref={'a' * 40} --jq .content"
+        for path in PATHS
+    ]
     assert all(f"?ref={'a' * 40}" in request for request in requests)
     assert "base64:" not in result.stderr
     if recover:
         assert result.returncode == 0, result.stderr
-        assert len(requests) == 3
+        assert requests == [expected[0], *expected]
         for path in PATHS:
             assert (tmp_path / path).read_bytes() == b"classifier contents\n"
     else:
         assert result.returncode != 0
-        assert len(requests) == 3
+        assert requests == [expected[0]] * 3
         assert not any((tmp_path / path).exists() for path in PATHS)

@@ -1,11 +1,12 @@
 """The release workflow's dependency graph enforces publication ordering."""
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from ruamel.yaml import YAML
 
-from tests.ci.desktop_release_roles import gate
+from tests.ci.desktop_release_roles import evaluate, gate
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -138,10 +139,46 @@ def test_claim_flags_remove_exactly_the_jobs_the_gate_expects_skipped():
         assert set(gated) <= set(needs_of(name)), name
 
 
-def test_all_applicable_ci_jobs_are_aggregated_and_desktop_e2e_stays_deferred():
+def test_all_applicable_ci_jobs_are_aggregated_and_desktop_e2e_stays_deferred(tmp_path):
     jobs = workflow("ci.yaml")["jobs"]
     checks = {name for name, job in jobs.items() if "uses" in job}
-    assert checks <= set(jobs["all-checks-pass"]["needs"])
+    required = set(jobs["all-checks-pass"]["needs"])
+    advisory = {name: jobs[name] for name in checks
+                if jobs[name].get("with", {}).get("platform_scope") == "windows"}
+    native_scopes = {"./.github/workflows/tests-os.yml": "macos",
+                     "./.github/workflows/bootstrap-installer.yml": "posix"}
+    assert len(advisory) == len(native_scopes)
+    assert {job["uses"] for job in advisory.values()} == set(native_scopes)
+    # Any unaggregated shared check or additional advisory caller still fails.
+    assert checks - required == set(advisory)
+    policy = next(step for step in jobs["detect"]["steps"] if step.get("id") == "platform-policy")
+    for index, (repository, release, ref_type, optional) in enumerate([
+        ("mrkillbob/hermes-agent", "false", "branch", True),
+        ("mrkillbob/hermes-agent", "true", "branch", False),
+        ("mrkillbob/hermes-agent", "false", "tag", False),
+        ("NousResearch/hermes-agent", "false", "branch", False),
+        ("another/hermes-agent", "false", "branch", False),
+    ]):
+        output = tmp_path / f"policy-{index}"
+        result = subprocess.run(
+            ["bash", "-c", policy["run"]], cwd=ROOT, capture_output=True,
+            text=True, timeout=10, env={**os.environ,
+                "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
+                "POLICY_REPOSITORY": repository, "POLICY_RELEASE": release,
+                "POLICY_REF_TYPE": ref_type, "GITHUB_OUTPUT": str(output)},
+        )
+        assert result.returncode == 0, result.stderr
+        outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        needs = {"detect": {"result": "success", "outputs": {
+            **outputs, "python": "true", "bootstrap": "true"}}}
+        for job in advisory.values():
+            assert gate(job["if"], {}, needs) == optional
+            counterpart = [jobs[name] for name in checks & required
+                           if jobs[name]["uses"] == job["uses"]]
+            assert len(counterpart) == 1
+            assert gate(counterpart[0]["if"], {}, needs)
+            scope = evaluate(counterpart[0]["with"]["platform_scope"], {}, needs)
+            assert scope == (native_scopes[job["uses"]] if optional else "all")
     assert not gate(jobs["e2e-desktop"]["if"], {}, {})
     assert "workflow_call" in workflow("ci.yaml")["on"]
 
