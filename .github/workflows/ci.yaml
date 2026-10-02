@@ -80,6 +80,9 @@ jobs:
       ci_review: ${{ steps.classify.outputs.ci_review }}
       ci_review_files: ${{ steps.classify.outputs.ci_review_files }}
       event_name: ${{ github.event_name }}
+      os_tests_scope: ${{ steps.platform-policy.outputs.os_tests_scope }}
+      bootstrap_tests_scope: ${{ steps.platform-policy.outputs.bootstrap_tests_scope }}
+      advisory_windows: ${{ steps.platform-policy.outputs.advisory_windows }}
     steps:
       - name: Fetch the diff classifier at this event's SHA
         env:
@@ -88,7 +91,7 @@ jobs:
           CLASSIFIER_REF: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          for path in .github/actions/detect-changes/action.yml scripts/ci/classify_changes.py; do
+          for path in .github/actions/detect-changes/action.yml scripts/ci/classify_changes.py scripts/ci/platform_test_scope.py; do
             mkdir -p "$(dirname "$path")"
             # GitHub can throttle even authenticated requests. Decode only a
             # successful response so an API error cannot become action source.
@@ -133,6 +136,17 @@ jobs:
                   output.write(f'{lane}={value}\n')
           PY
 
+      - name: Select native platform test policy
+        id: platform-policy
+        env:
+          POLICY_REPOSITORY: ${{ github.repository }}
+          POLICY_RELEASE: ${{ inputs.release }}
+          POLICY_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          python3 scripts/ci/platform_test_scope.py policy \
+            --repository "$POLICY_REPOSITORY" --release "$POLICY_RELEASE" \
+            --ref-type "$POLICY_REF_TYPE"
+
   # ─────────────────────────────────────────────────────────────────────
   # Lane-gated sub-workflows. Each runs in parallel after detect finishes.
   # Skipped workflows (if condition is false) don't spin up runners.
@@ -164,15 +178,29 @@ jobs:
   # the OS-marked tests it collects are skipped there by design (see the
   # `_OS_MARKS` comment in tests/conftest.py) — this is where they run.
   # Same `python` lane gate: if no Python changed, neither runs.
+  # Only this fork's non-release Windows-native results are advisory.
+  # Shared tests/runners and the upstream/release matrix stay unchanged.
   tests-os:
     name: OS-specific tests
     needs: detect
     if: needs.detect.outputs.python == 'true'
     uses: ./.github/workflows/tests-os.yml
     with:
+      platform_scope: ${{ needs.detect.outputs.os_tests_scope }}
       # The Windows lane spawns the real desktop-update hand-off script
       # (tests/test_desktop_update_windows_*.py) only when that surface
       # changed; unit-level platforms("windows") tests always run.
+      desktop_updater: ${{ needs.detect.outputs.desktop_updater == 'true' }}
+      e2e: ${{ github.repository != 'NousResearch/hermes-agent' || needs.detect.outputs.e2e == 'true' }}
+      e2e_upgrade: ${{ github.repository != 'NousResearch/hermes-agent' || needs.detect.outputs.e2e_upgrade == 'true' }}
+
+  tests-windows-advisory:
+    name: Windows-only tests (advisory)
+    needs: detect
+    if: needs.detect.outputs.python == 'true' && needs.detect.outputs.advisory_windows == 'true'
+    uses: ./.github/workflows/tests-os.yml
+    with:
+      platform_scope: windows
       desktop_updater: ${{ needs.detect.outputs.desktop_updater == 'true' }}
       e2e: ${{ github.repository != 'NousResearch/hermes-agent' || needs.detect.outputs.e2e == 'true' }}
       e2e_upgrade: ${{ github.repository != 'NousResearch/hermes-agent' || needs.detect.outputs.e2e_upgrade == 'true' }}
@@ -207,6 +235,16 @@ jobs:
     # are platforms("windows") pytest files and run in tests-os.
     if: needs.detect.outputs.bootstrap == 'true'
     uses: ./.github/workflows/bootstrap-installer.yml
+    with:
+      platform_scope: ${{ needs.detect.outputs.bootstrap_tests_scope }}
+
+  bootstrap-windows-advisory:
+    name: Windows-only bootstrap installer (advisory)
+    needs: detect
+    if: needs.detect.outputs.bootstrap == 'true' && needs.detect.outputs.advisory_windows == 'true'
+    uses: ./.github/workflows/bootstrap-installer.yml
+    with:
+      platform_scope: windows
 
   e2e-desktop:
     name: Desktop E2E
@@ -365,7 +403,9 @@ jobs:
   #   the deferred Desktop E2E (e2e-desktop) may skip. The OSV scan's
   #   findings are advisory, but its execution is required.
   #
-  # Branch protection should require ONLY this check.
+  # Branch protection should require ONLY this check. The separately
+  # named Windows-native advisory callers keep their real results visible
+  # without joining these required dependencies. Shared checks stay required.
   #
   # Outputs ``needs-json`` — a compact ``{job_name: result}`` dict — so
   # the live comment poller can list failed jobs in the PR comment.

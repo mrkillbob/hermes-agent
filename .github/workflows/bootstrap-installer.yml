@@ -10,16 +10,38 @@ name: Bootstrap installer
 
 on:
   workflow_call:
+    inputs:
+      platform_scope:
+        description: 'Native test scope: all (default), posix, or windows.'
+        type: string
+        required: false
+        default: all
 
 permissions:
   contents: read
 
 concurrency:
-  group: bootstrap-installer-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
+  group: bootstrap-installer-${{ inputs.platform_scope }}-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
+  plan:
+    name: Validate bootstrap test scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_posix: ${{ steps.plan.outputs.run_posix }}
+      run_windows: ${{ steps.plan.outputs.run_windows }}
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - id: plan
+        env:
+          PLATFORM_SCOPE: ${{ inputs.platform_scope }}
+        run: python3 scripts/ci/platform_test_scope.py plan --workflow bootstrap --scope "$PLATFORM_SCOPE"
+
   posix:
+    needs: plan
+    if: needs.plan.outputs.run_posix == 'true'
     name: install.sh protocol + small fresh-install E2E
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -127,6 +149,8 @@ jobs:
         run: bash scripts/run_tests.sh tests/scripts/test_fresh_source_install.py -q -j 1
 
   windows:
+    needs: plan
+    if: needs.plan.outputs.run_windows == 'true'
     name: install.ps1 protocol surface
     runs-on: windows-latest
     timeout-minutes: 10
