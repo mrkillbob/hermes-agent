@@ -1,4 +1,4 @@
-name: PR181 bounded Linux diagnostics
+name: PR181 bounded Linux parity diagnostics
 
 # Diagnostic-only branch. This workflow is not a PR qualification or a release lane.
 on:
@@ -26,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "187c90614ba5b3cd83a837b19a5f873c2307f2e2"
+          test "$(git rev-parse HEAD^)" = "f9e3a18f7da33a93d4151f72fa48ae77052e300a"
           git diff --name-only HEAD^ HEAD
 
       - name: Set up the locked toolchain and test dependencies
@@ -40,18 +40,7 @@ jobs:
           save-python-cache: 'false'
           save-node-cache: 'false'
 
-      - name: Agent file with stream-recovery stack diagnostics
-        run: scripts/run_tests.sh tests/agent/test_run_agent.py -vv
-        env:
-          HERMES_TEST_WORKERS: '1'
-          HERMES_TEST_FILE_TIMEOUT: '600'
-          HERMES_TEST_FILE_RETRIES: '0'
-          OPENAI_API_KEY: ''
-          OPENROUTER_API_KEY: ''
-          NOUS_API_KEY: ''
-
       - name: Entrypoint parity with CLI child stderr
-        if: always() && steps.setup.outcome == 'success'
         run: scripts/run_tests.sh tests/e2e/core/parity/test_entrypoint_parity.py -vv
         env:
           HERMES_TEST_WORKERS: '1'
