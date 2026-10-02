@@ -158,6 +158,8 @@ Chat turns show their session key, model and current tool; cron jobs show the jo
 
 Wedged work does not hold the restart: a chat turn idle past `agent.gateway_timeout`, or a cron run older than the scheduler's in-flight allowance (`max(2 × the job's interval, cron.inflight_max_minutes)`, 30 minutes by default), is excluded from the wait and interrupted by the restart instead.
 
+Work that outlives the gateway does not hold the restart either: a cron run already handed to a worker in its own systemd scope (`systemd-run --user --scope`, the normal case on a systemd install) keeps running when the gateway stops, and its result is delivered from the durable queue by whichever gateway comes up next — so the restart proceeds instead of waiting up to the full cap. A worker that could not get its own scope (no reachable user D-Bus session, see `cron.require_restart_safe_scope`) stays in the gateway's cgroup and is still awaited, because the restart would kill it mid-run.
+
 ### Missing Windows updater files
 
 If the maintained updater script is missing (for example after antivirus quarantine), the legacy update forwarder fails instead of reporting a successful hand-off. Repair the installation and review the security software's quarantine report before retrying; do not disable antivirus protection. Before reporting success, the maintained updater checks the CLI import, Windows executable header, ASAR header and packaged main entry, readable renderer HTML with a local module entry, initial module files, and current build stamp. These are minimum artifact checks, not a full dependency audit or an application/backend launch test. Missing Python is reported before waiting for Desktop shutdown; dependency repair is still allowed to run as part of the update. Electron checks maintained handoff prerequisites before stopping backends when that layout is present; genuine legacy-flat updater layouts remain supported, so not every missing updater file is detected before backend shutdown.
@@ -203,6 +205,23 @@ git -C "$repo" rev-list --objects --missing=error --all >/dev/null && echo compl
 ```powershell
 git -C $repo rev-list --objects --missing=print --all | Where-Object { $_.StartsWith('?') } | ForEach-Object { $_.Substring(1) } | git -C $repo fetch -q --no-tags --stdin origin
 git -C $repo rev-list --objects --missing=error --all | Out-Null; $LASTEXITCODE   # 0 = complete
+```
+
+### `.git` keeps growing in a partial clone
+
+The installer's checkout is a partial clone: git downloads trees and blobs on demand, and each
+on-demand download is written as its own small pack. `hermes update` and `hermes update --check`
+fold them back together with `git gc --auto` (git's own `gc.autoPackLimit`, 50 by default), so a
+healthy checkout pays a no-op. They also set `maintenance.auto`, `gc.writeCommitGraph` and
+`fetch.writeCommitGraph` to `false` in that checkout, because a commit-graph write over commits the
+graph has not seen yet downloads every one of their trees. Leave those settings alone, and leave
+`gc.auto` at its default: `gc.auto=0` stops the fold. The first fold on a checkout that has
+piled up thousands of packs is a full repack and can take several minutes; the update says so
+before it starts, and if the fold runs past 20 minutes it stops and prints the command below.
+To fold by hand (with Hermes closed):
+
+```bash
+git -C "$repo" -c gc.writeCommitGraph=false gc --auto
 ```
 
 ### Updating against a non-default branch: `--branch`

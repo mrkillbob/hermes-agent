@@ -43,7 +43,8 @@ def test_native_scope_preserves_full_coverage_and_rejects_invalid_scope(tmp_path
     mac_rows = json.loads(mac["matrix"])["include"]
     win_rows = json.loads(windows["matrix"])["include"]
     assert full_rows == mac_rows + win_rows
-    assert mac_rows and {row["marker"] for row in mac_rows} == {"macos"}
+    assert {row["slice"] for row in mac_rows} == {"1/2", "2/2"}
+    assert {row["marker"] for row in mac_rows} == {"macos"}
     assert len(win_rows) == 2 and {row["marker"] for row in win_rows} == {"windows"}
     assert mac["run_windows"] == "false" and windows["run_windows"] == "true"
     assert all(row.get("runner") for row in full_rows)

@@ -8,7 +8,8 @@ import json
 import os
 
 OS_TESTS = (
-    {"name": "macOS-only tests", "runner": "macos-latest", "marker": "macos"},
+    {"name": "macOS-only tests (1/2)", "runner": "macos-latest", "marker": "macos", "slice": "1/2"},
+    {"name": "macOS-only tests (2/2)", "runner": "macos-latest", "marker": "macos", "slice": "2/2"},
     {"name": "Windows-only tests", "runner": "windows-latest-32-core",
      "fork_runner": "windows-2025", "marker": "windows"},
     {"name": "Windows-only tests (arm64)", "runner": "windows-latest-32-arm-core",
