@@ -475,7 +475,7 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- System state: OS, CPU, memory, disk, ports, processes → use terminal\n"
     "- File contents, sizes, line counts → use read_file, search_files, or terminal\n"
     "- Git history, branches, diffs → use terminal\n"
-    "- Current facts (weather, news, versions) → use an available web lookup tool\n"
+    "- Current facts (weather, news, versions) → use an appropriate permitted retrieval/search tool\n"
     "Your memory and user profile describe the USER, not the system you are running on. The execution environment may "
     "differ from what the user profile says about their personal setup.\n"
     "</mandatory_tool_use>\n\n"
@@ -525,14 +525,38 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
 )
 
 
+# Each <mandatory_tool_use>/<act_dont_ask> line above named against the tool(s) it tells the model to reach
+# for. A line is dropped when none of its named tools are in the session's valid_tool_names, so a toolset
+# without terminal/execute_code/etc. isn't told to use them (#106506). The
+# web guidance stays generic (#39797), gated by the session's web capability.
+_EXECUTION_GUIDANCE_LINE_TOOLS = {
+    "- Arithmetic, math, calculations → use terminal or execute_code\n": {"terminal", "execute_code"},
+    "- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)\n": {"terminal"},
+    "- Current time, date, timezone → use terminal (e.g. date)\n": {"terminal"},
+    "- System state: OS, CPU, memory, disk, ports, processes → use terminal\n": {"terminal"},
+    "- File contents, sizes, line counts → use read_file, search_files, or terminal\n": {
+        "read_file",
+        "search_files",
+        "terminal",
+    },
+    "- Git history, branches, diffs → use terminal\n": {"terminal"},
+    "- Current facts (weather, news, versions) → use an appropriate permitted retrieval/search tool\n": {"web_search"},
+    "- 'What time is it?' → run `date` (don't guess)\n": {"terminal"},
+}
+
+
 def execution_guidance_text(valid_tool_names=None) -> str:
     """OPENAI_MODEL_EXECUTION_GUIDANCE for the session's toolset (cache-safe: the toolset is fixed per session).
 
-    Keep web capabilities generic so the shared execution block never names an unavailable tool.
+    Lines that tell the model to reach for a tool absent from the session's toolset would dangle, so they are
+    dropped.
     """
     text = OPENAI_MODEL_EXECUTION_GUIDANCE
-    if valid_tool_names is not None and "web_search" not in valid_tool_names:
-        text = text.replace("- Current facts (weather, news, versions) → use an available web lookup tool\n", "")
+    if valid_tool_names is not None:
+        valid_tool_names = set(valid_tool_names)
+        for line, tools in _EXECUTION_GUIDANCE_LINE_TOOLS.items():
+            if not tools & valid_tool_names:
+                text = text.replace(line, "")
     return text
 
 

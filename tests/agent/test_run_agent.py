@@ -1992,7 +1992,11 @@ class TestExecuteToolCalls:
         captured = io.StringIO()
         agent._print_fn = lambda *args, **kw: print(*args, file=captured, **kw)
 
-        with patch("run_agent.time.sleep", return_value=None):
+        # Remove only the provider retry delay. The shared time.sleep also
+        # schedules live terminal cleanup and streaming worker threads.
+        scheduler_sleep = time.sleep
+        with patch("agent.retry_utils.adaptive_rate_limit_backoff", return_value=(0.0, None)):
+            assert time.sleep is scheduler_sleep, "retry fixture changed process-wide scheduling"
             result = agent.run_conversation("hello")
 
         assert result["completed"] is True
@@ -6958,7 +6962,11 @@ class TestEmptySSEFrameTurnRecovery:
         warnings = []
         agent.status_callback = lambda kind, message: warnings.append((kind, message))
 
-        with patch("run_agent.time.sleep", return_value=None):
+        # Remove only the provider retry delay. The shared time.sleep also
+        # schedules live terminal cleanup and streaming worker threads.
+        scheduler_sleep = time.sleep
+        with patch("agent.retry_utils.adaptive_rate_limit_backoff", return_value=(0.0, None)):
+            assert time.sleep is scheduler_sleep, "retry fixture changed process-wide scheduling"
             result = agent.run_conversation("hello")
 
         assert result["completed"] is True

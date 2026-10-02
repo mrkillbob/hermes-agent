@@ -7402,9 +7402,15 @@ def test_prompt_submit_resolves_row_id_swallowed_by_plain_user_merge(monkeypatch
     def _fake_session_db(_session):
         yield fake_db
 
-    live = [
-        {k: v for k, v in message.items() if k != "_row_id"} for message in verbatim
-    ]
+    # Production cold resume materializes the live history from the DB with
+    # repair_alternation=True (server._load_resume_transcript), stamps kept:
+    # rows 303/304 collapse into ONE live carrier at 303, so 304 has no live
+    # user ordinal. The un-repaired DB read finds 304 as physical ordinal 2,
+    # but the live list only has user ordinals 0/1 — resolution must map the
+    # DB row onto the repaired live carrier instead of trusting the same
+    # ordinal against a list that cannot have it.
+    live = copy.deepcopy(repaired)
+    assert live[2]["_row_id"] == 303
     server._sessions["plain-merge-sid"] = _session(history=list(live))
     monkeypatch.setattr(server, "_session_db", _fake_session_db)
     monkeypatch.setattr(server, "_get_db", lambda: fake_db)
@@ -7428,6 +7434,8 @@ def test_prompt_submit_resolves_row_id_swallowed_by_plain_user_merge(monkeypatch
         err = resp.get("error")
         assert err is None, err
         assert len(replaced) == 1
+        # The cut retains 303: deriving it from the physical durable prefix
+        # keeps the inner row boundary instead of collapsing the pair.
         assert [m["content"] for m in replaced[0][1]] == [
             "first",
             "reply 1",
@@ -7436,6 +7444,59 @@ def test_prompt_submit_resolves_row_id_swallowed_by_plain_user_merge(monkeypatch
         assert len(server._sessions["plain-merge-sid"]["history"]) == 3
     finally:
         server._sessions.pop("plain-merge-sid", None)
+
+
+def test_prompt_submit_preserves_first_row_when_rewinding_inside_first_merged_carrier(monkeypatch):
+    """The physical prefix is nonempty even when its repaired carrier has ordinal zero.
+
+    Pre-materialization validation must retain the first durable row rather than
+    demand confirmation to erase everything based on the merged live projection.
+    """
+    import contextlib
+    import copy
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    verbatim = [
+        {"_row_id": 401, "role": "user", "content": "first interrupted prompt"},
+        {"_row_id": 402, "role": "user", "content": "resend to edit"},
+    ]
+    repaired = copy.deepcopy(verbatim)
+    assert repair_message_sequence(None, repaired) == 1
+    assert len(repaired) == 1
+    replaced = []
+    db = _mk_merge_fake_db(verbatim, repaired, replaced)
+
+    @contextlib.contextmanager
+    def session_db(_session):
+        yield db
+
+    sid = "first-carrier-rewind"
+    server._sessions[sid] = _session(history=copy.deepcopy(repaired))
+    monkeypatch.setattr(server, "_session_db", session_db)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_start_inflight_turn", lambda *a, **kw: None)
+    try:
+        before = copy.deepcopy(server._sessions[sid]["history"])
+        params = {"session_id": sid, "text": "edited resend", "truncate_before_row_id": 402}
+        refused = server.handle_request({"id": "refuse", "method": "prompt.submit", "params": params})
+        assert refused["error"]["code"] == 4029
+        assert server._sessions[sid]["history"] == before and replaced == []
+
+        # Validation remains detached: resolving the absorbed row must not stamp
+        # the live carrier or write any DB rows before the admitted cut.
+        assert server._validate_truncation_before_materializing(
+            "validate", sid, server._sessions[sid], {**params, "confirm_truncate": True}) is None
+        assert server._sessions[sid]["history"] == before and replaced == []
+        response = server.handle_request({"id": "accept", "method": "prompt.submit",
+                                          "params": {**params, "confirm_truncate": True}})
+        assert "error" not in response, response
+        assert len(replaced) == 1
+        assert [row["_row_id"] for row in replaced[0][1]] == [401]
+        assert [row["content"] for row in replaced[0][1]] == ["first interrupted prompt"]
+        assert [row["content"] for row in server._sessions[sid]["history"]] == ["first interrupted prompt"]
+    finally:
+        server._sessions.pop(sid, None)
 
 
 def test_prompt_submit_row_id_ignores_platform_id_fallback(monkeypatch):
@@ -19969,7 +20030,12 @@ def test_restart_slash_worker_noop_without_worker(monkeypatch):
 def test_slash_exec_concurrent_first_use_spawns_single_worker(monkeypatch):
     """With eager pre-warm removed, slash.exec is the only spawn path — two
     concurrent worker-routed commands on a fresh session must not each fork a
-    full MCP-fleet worker. The per-session spawn lock serializes first use."""
+    full MCP-fleet worker. The per-session spawn lock serializes first use.
+
+    The probe is an unregistered command so it is not answered live, pending-input,
+    bundle, skill, or plugin — it falls through to the worker spawn (the path under
+    test). ``/context`` was the original probe but is now answered in-process for a
+    local session (the #93280 fix), so it no longer reaches the worker."""
     import time as _time
 
     spawned = []
@@ -19999,7 +20065,7 @@ def test_slash_exec_concurrent_first_use_spawns_single_worker(monkeypatch):
             {
                 "id": str(n),
                 "method": "slash.exec",
-                "params": {"command": "/context", "session_id": "race-spawn"},
+                "params": {"command": "/frobnicate-probe", "session_id": "race-spawn"},
             }
         )
         results.append(resp)
@@ -23419,3 +23485,93 @@ def test_named_profile_without_backend_stays_local_under_ssh_launch(monkeypatch,
     monkeypatch.setattr(server, "_profile_home", lambda name: home if name == "plain" else None)
 
     assert server._completion_cwd({"profile": "plain", "cwd": launch, "cwd_explicit": False}) == launch
+
+
+def test_session_branch_idempotency_key_dedupes_retry(monkeypatch, tmp_path):
+    """A retried session.branch with the SAME idempotency_key returns the SAME
+    child instead of a duplicate (#65410): a branch whose first response was
+    lost must not leave two children behind. The hit answers the SAME result
+    shape (title, parent, message_count) without re-copying the transcript."""
+
+    class ProfileDB:
+        def __init__(self, db_path=None):
+            pass
+
+        def get_session_title(self, _key):
+            return "parent"
+
+        def get_next_title_in_lineage(self, current):
+            return f"{current} (branch)"
+
+        def create_session(self, new_key, **kwargs):
+            pass
+
+        def append_messages_batch(self, session_id, messages, **kwargs):
+            return list(range(1, len(messages) + 1))
+
+        def set_session_title(self, key, title):
+            return True
+
+        def get_session(self, key):
+            return {"id": key, "cwd": str(tmp_path)}
+
+        def update_session_cwd(self, *a, **k):
+            return None
+
+        def close(self):
+            return None
+
+    class FakeAgent:
+        def __init__(self):
+            self.model = "test-model"
+            self.session_id = None
+
+    parent = {
+        "session_key": "parent-key",
+        "history": [{"role": "user", "content": "hi"}],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "cols": 80,
+        "profile_home": None,
+        "source": "tui",
+        "agent": FakeAgent(),
+        "created_at": 1.0,
+        "last_active": 1.0,
+        "cwd": str(tmp_path),
+    }
+    server._sessions["parent"] = parent
+    monkeypatch.setattr(server, "_get_db", lambda: ProfileDB())
+    monkeypatch.setattr("hermes_state_registry.acquire", ProfileDB)
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *a, **k: (None, None))
+    monkeypatch.setattr(server, "_make_agent", lambda *a, **k: FakeAgent())
+    monkeypatch.setattr(server, "_set_session_context", lambda *a, **k: {})
+    monkeypatch.setattr(server, "_clear_session_context", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
+    monkeypatch.setattr(server, "_session_cwd", lambda s: str(tmp_path))
+    monkeypatch.setattr(server, "_register_session_cwd", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_attach_worker", lambda *a, **k: None)
+    server._idempotency_keys.clear()
+    try:
+        params = {"session_id": "parent", "name": "forked", "idempotency_key": "branch-live-retry-1"}
+        first = server.handle_request({"id": "b1", "method": "session.branch", "params": dict(params)})
+        assert "result" in first, first
+        first_sid = first["result"]["session_id"]
+        first_key = first["result"]["stored_session_id"]
+        assert first["result"]["title"] == "forked"
+        assert first["result"]["parent"] == "parent-key"
+
+        # Client retries after a lost response: same key, same params.
+        second = server.handle_request({"id": "b2", "method": "session.branch", "params": dict(params)})
+        assert "result" in second, second
+        assert second["result"]["session_id"] == first_sid
+        assert second["result"]["stored_session_id"] == first_key
+        assert second["result"]["title"] == "forked"
+        assert second["result"]["parent"] == "parent-key"
+
+        # Only ONE child runtime exists besides the parent.
+        children = [sid for sid, s in server._sessions.items() if sid != "parent"]
+        assert len(children) == 1
+    finally:
+        for k in list(server._sessions):
+            server._sessions.pop(k, None)
+        server._idempotency_keys.clear()

@@ -337,16 +337,158 @@ def _create_overrides(params: dict) -> tuple:
     return model_override, reasoning_override, service_tier_override
 
 
+# Pending creators share a per-scope mutex until the full response succeeds. The
+# counted map drops idle mutexes; waiting/building never holds _sessions_lock.
+_session_idempotency_pending = {}
+_session_idempotency_pending_lock = __import__("threading").Lock()
+
+
+def _session_idempotency_home(home) -> str:
+    from hermes_constants import hermes_home_key
+    return hermes_home_key(home or get_process_hermes_home())
+
+
+def _session_idempotency_scope(params, home, operation, parent):
+    client_key = _str_param(params, "idempotency_key")
+    if not client_key:
+        return None
+    peer = current_transport() or _stdio_transport
+    if _transport_auth_user_id(peer) is not None:
+        identity = peer.auth_identity
+        authority = ("user", identity["provider"].strip(), identity["user_id"].strip())
+    else:
+        # Legacy-token peers have no authenticated user. Scope them to this
+        # transport; the record retains the peer so its id cannot be reused.
+        authority = ("stdio" if isinstance(peer, StdioTransport) else "legacy", id(peer))
+    return (_session_idempotency_home(home), authority, operation, parent or "", client_key)
+
+
+@contextlib.contextmanager
+def _session_idempotency_serialized(scope):
+    if scope is None:
+        yield
+        return
+    with _session_idempotency_pending_lock:
+        pending = _session_idempotency_pending.setdefault(scope, [threading.Lock(), 0])
+        pending[1] += 1
+    acquired = False
+    try:
+        pending[0].acquire()
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            pending[0].release()
+        with _session_idempotency_pending_lock:
+            pending[1] -= 1
+            if pending[1] == 0:
+                _session_idempotency_pending.pop(scope, None)
+
+
+def _session_idempotency_parent(parent, home, params):
+    """Canonical stored parent within the resolved profile (runtime ids/DB aliases)."""
+    if not parent:
+        return None
+    with _sessions_lock:
+        live = _sessions.get(parent)
+        if live is not None and _session_idempotency_home(live.get("profile_home")) == _session_idempotency_home(home):
+            return live["session_key"]
+    with _profile_db(params) as db:
+        if db is not None and callable(resolve := getattr(db, "resolve_session_id", None)):
+            return resolve(parent) or parent
+    return parent
+
+
+def _session_idempotency_record_matches(record, scope, owner) -> bool:
+    return (record.get("_session_idempotency_scope") == scope
+            and _session_idempotency_home(record.get("profile_home")) == scope[0]
+            and _session_auth_user_id(record) == owner
+            and (record.get("parent_session_id") or "") == scope[3])
+
+
+def _session_idempotency_cached(scope, owner):
+    if scope is None:
+        return None
+    with _sessions_lock:
+        now = time.time()
+        for key, (_, stamp) in list(_idempotency_keys.items()):
+            if now - stamp > _IDEMPOTENCY_KEY_TTL:
+                _idempotency_keys.pop(key, None)
+        entry = _idempotency_keys.get(scope)
+        if entry is not None:
+            sid, _ = entry
+            record = _sessions.get(sid)
+            if record is not None and _session_idempotency_record_matches(record, scope, owner):
+                _idempotency_keys[scope] = (sid, now)
+                return sid, record
+            _idempotency_keys.pop(scope, None)
+    return None
+
+
+def _session_idempotency_publish(scope, response, owner):
+    if scope is None or "result" not in response:
+        return
+    sid = response["result"]["session_id"]
+    with _sessions_lock:
+        record = _sessions.get(sid)
+        if record is None:
+            return  # closed before the response completed; never cache a missing record
+        record["_session_idempotency_scope"] = scope
+        record["_session_idempotency_transport"] = current_transport() or _stdio_transport
+        if _session_idempotency_record_matches(record, scope, owner):
+            _idempotency_keys[scope] = (sid, time.time())
+
+
+def _create_session_idempotent_hit(rid, params, sid, record, copy_parent_history):
+    with record["history_lock"]:
+        history = list(record["history"])
+    override = record.get("model_override") or {}
+    messages = _history_to_messages(history, profile_home=record.get("profile_home"))
+    return _ok(rid, {
+        "session_id": sid, "stored_session_id": record["session_key"], "message_count": len(messages),
+        **({"messages_omitted": True} if copy_parent_history else {"messages": messages}),
+        "info": {"model": override.get("model") if override else _session_default_model(record),
+                 **({"provider": override["provider"]} if override.get("provider") else {}),
+                 "tools": {}, "skills": {}, "cwd": record["cwd"], "branch": git_probe.branch(record["cwd"]),
+                 "project": _project_info_for_cwd(record["cwd"]), "lazy": True,
+                 "desktop_contract": DESKTOP_BACKEND_CONTRACT,
+                 "profile_name": _response_profile_name((params.get("profile") or "").strip() or None)}})
+
+
 def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> dict:
-    """``session.create``; ``copy_parent_history`` (``session.branch_stored``) reads the parent's
-    transcript server-side and omits it from the reply."""
-    # ``profile`` (app-global remote mode): stored so the build and every turn re-bind HERMES_HOME.
-    profile_home = _profile_home(profile := (params.get("profile") or "").strip() or None)
+    home = _profile_home((params.get("profile") or "").strip() or None)
     # Reject an incoherent model×provider pair BEFORE any state exists: minting it only defers the
     # failure to the first turn's provider 404 (#96817). Custom/unknown providers stay permissive.
     from .methods_session_model_guard import model_override_conflict
-    if conflict := model_override_conflict(params, _profile_build_scope(profile_home)):
+    if conflict := model_override_conflict(params, _profile_build_scope(home)):
         return _err(rid, -32602, conflict.pop("message"), conflict)
+    parent = _str_param(params, "parent_session_id") or None
+    if _str_param(params, "idempotency_key"):
+        parent = _session_idempotency_parent(parent, home, params)
+        params = {**params, "parent_session_id": parent}
+    scope = _session_idempotency_scope(params, home, "session.branch_stored" if copy_parent_history else "session.create", parent)
+    owner = _transport_auth_user_id(current_transport())
+    with _session_idempotency_serialized(scope):
+        if hit := _session_idempotency_cached(scope, owner):
+            return _create_session_idempotent_hit(rid, params, *hit, copy_parent_history)
+        created = []
+        try:
+            response = _create_session_once(rid, params, profile_home=home,
+                                            copy_parent_history=copy_parent_history, on_created=created.append)
+            _session_idempotency_publish(scope, response, owner)
+            return response
+        except BaseException:
+            for sid in created:
+                with contextlib.suppress(Exception):
+                    _close_session_by_id(sid, end_reason="session_create_failed")
+            raise
+
+
+def _create_session_once(rid, params: dict, *, profile_home, copy_parent_history: bool = False, on_created=None) -> dict:
+    """``session.create``; ``copy_parent_history`` (``session.branch_stored``) reads the parent's
+    transcript server-side and omits it from the reply."""
+    # ``profile`` (app-global remote mode): stored so the build and every turn re-bind HERMES_HOME.
+    profile = (params.get("profile") or "").strip() or None
     (sid, source), key = _new_runtime_ids(params), _new_session_key()
     history = _coerce_seed_history(params.get("messages"))
     # Branch: links back so list_sessions_rich keeps it visible and the sidebar nests it.
@@ -411,6 +553,8 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
             "slash_worker": None, "tool_progress_mode": _load_tool_progress_mode(), "tool_started_at": {},
             "auth_user_id": _transport_auth_user_id(current_transport()),
             "transport": current_transport() or _stdio_transport}
+        if on_created is not None:
+            on_created(sid)
         _register_session_cwd(_sessions[sid])
     if session_model_override:
         # A composer pick rides in as this override and beats model.default for the whole session;
@@ -2436,6 +2580,10 @@ def _build_branch_agent(session: dict, new_sid: str, new_key: str, history: list
         if new_sid in _sessions:
             _sessions[new_sid]["active_session_lease"] = None  # claimed lazily on the first turn
             _sessions[new_sid]["auth_user_id"] = _session_auth_user_id(session)
+            # The parent's STORED key: the idempotent-hit reply for a retried
+            # session.branch answers the same ``parent`` as the fresh path, and
+            # later readers (lineage, retry) get the linkage from the runtime.
+            _sessions[new_sid]["parent_session_id"] = session.get("session_key")
         return agent
     finally:
         if branch_owns_db and branch_db is not None:
@@ -2469,6 +2617,26 @@ def _branch_source_history(db, session: dict, old_key: str) -> list:
 
 
 def _branch_live(rid, params: dict, session: dict, *, omit_messages: bool = False) -> dict:
+    scope = _session_idempotency_scope(params, session.get("profile_home"),
+                                      "session.branch_whole" if omit_messages else "session.branch",
+                                      session["session_key"])
+    owner = _session_auth_user_id(session)  # branches retain the parent's creating identity
+    with _session_idempotency_serialized(scope):
+        if hit := _session_idempotency_cached(scope, owner):
+            return _ok(rid, _branch_idempotent_hit(*hit, omit_messages))
+        created = []
+        try:
+            response = _branch_live_once(rid, params, session, omit_messages=omit_messages, on_created=created.append)
+            _session_idempotency_publish(scope, response, owner)
+            return response
+        except BaseException:
+            for sid in created:
+                with contextlib.suppress(Exception):
+                    _close_session_by_id(sid, end_reason="branch_create_failed")
+            raise
+
+
+def _branch_live_once(rid, params: dict, session: dict, *, omit_messages: bool = False, on_created=None) -> dict:
     # Write into the parent's profile-scoped state.db; the launch handle would orphan rows.
     with _session_db(session) as db:
         if db is None:
@@ -2512,6 +2680,11 @@ def _branch_live(rid, params: dict, session: dict, *, omit_messages: bool = Fals
         if not _close_session_by_id(new_sid, end_reason="branch_create_failed") and conversation_root_lease is not None:
             conversation_root_lease.release()
         return _err(rid, 5000, f"agent init failed on branch: {e}")
+    if on_created is not None:
+        on_created(new_sid)
+    with _sessions_lock:
+        if new_sid in _sessions:
+            _sessions[new_sid]["branch_title"] = title
     response = {"session_id": new_sid, "stored_session_id": new_key, "title": title, "parent": old_key,
                 "message_count": len(history), "info": _session_info(agent, _sessions.get(new_sid))}
     if omit_messages:
@@ -2519,6 +2692,30 @@ def _branch_live(rid, params: dict, session: dict, *, omit_messages: bool = Fals
     else:
         response["messages"] = _history_to_messages(history, profile_home=session.get("profile_home"))
     return _ok(rid, response)
+
+
+def _branch_idempotent_hit(existing_sid: str, session: dict, omit_messages: bool) -> dict:
+    """The SAME result shape a fresh ``_branch_live`` returns for the existing child."""
+    history = session.get("history") or []
+    key = session.get("session_key") or ""
+    response = {"session_id": existing_sid, "stored_session_id": key,
+                "title": session.get("branch_title") or _branch_title_for(session),
+                "parent": session.get("parent_session_id"), "message_count": len(history),
+                "info": _fallback_session_info(session)}
+    if omit_messages:
+        response["messages_omitted"] = True
+    else:
+        response["messages"] = _history_to_messages(history, profile_home=session.get("profile_home"))
+    return response
+
+
+def _branch_title_for(session: dict) -> str:
+    """The child's persisted title from its stored row, best-effort."""
+    with contextlib.suppress(Exception):
+        with _session_db(session) as db:
+            if db is not None:
+                return db.get_session_title(session.get("session_key") or "") or ""
+    return ""
 
 
 @_session_method("session.branch", live=True)
@@ -2781,7 +2978,7 @@ def _(rid, params: dict) -> dict:
     frames = er.events_since(sid, last_seen)
     # ``epoch``: in-process seq — clients reset watermarks when this differs from gateway.ready's.
     return _ok(rid, {"events": frames, "latest_seq": er.latest_seq(sid), "truncated": er.is_truncated(sid, last_seen),
-                     "count": len(frames), "epoch": er.replay_epoch()})
+                     "count": len(frames), "epoch": er.replay_epoch(), "open_requests": _open_requests(sid)})
 
 
 @method("session.events.stats")

@@ -202,6 +202,7 @@ export function useQuickEntryBridge({ submitText, submitTextToNewSession }: Quic
           ok: false,
           retryable: true
         })
+
         return
       }
 

@@ -8,10 +8,13 @@ from pathlib import Path
 _SKEW_SCRIPT = """
 import sys
 import agent.tool_dispatch_helpers as cached
+import agent.compression_marker as cached_marker
 from agent.compression_marker import _COMPRESSION_MARKER_TEMPLATE
 
 # The daemon keeps N1 helpers while its lazy executor loads from the new tree.
 del cached._context_pruned_argument_paths
+del cached_marker._COMPRESSION_MARKER_ARTIFACT_RE
+sys.modules.pop("agent.pruned_tool_arguments", None)
 sys.modules.pop("agent.tool_executor", None)
 import agent.tool_executor as executor
 
@@ -20,6 +23,8 @@ arguments = {"batch": [{"content": "exact prefix " + marker}]}
 for tool in ("write_file", "plugin_custom_write", "mcp_unknown_write"):
     assert executor._context_pruned_argument_paths(tool, arguments) == ["$.batch[0].content"]
 assert executor._context_pruned_argument_paths("read_file", arguments) == []
+assert executor._context_pruned_argument_paths("write_file", {"content": marker[:marker.index(" of ")]}) == ["$.content"]
+assert executor._context_pruned_argument_paths("write_file", {"content": cached_marker._COMPRESSION_MARKER_PREFIX}) == []
 assert executor._context_pruned_argument_paths("write_file", {"content": "...[truncated]"}) == []
 """
 

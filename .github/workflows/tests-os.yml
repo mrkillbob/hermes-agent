@@ -29,6 +29,11 @@ name: OS-specific tests
 on:
   workflow_call:
     inputs:
+      platform_scope:
+        description: 'Native test scope: all (default), macos, or windows.'
+        type: string
+        required: false
+        default: all
       desktop_updater:
         description: >-
           Run the Windows desktop-update hand-off integration tests
@@ -60,11 +65,26 @@ permissions:
   contents: read
 
 concurrency:
-  group: tests-os-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
+  group: tests-os-${{ inputs.platform_scope }}-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
+  plan:
+    name: Validate native test scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      run_windows: ${{ steps.plan.outputs.run_windows }}
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - id: plan
+        env:
+          PLATFORM_SCOPE: ${{ inputs.platform_scope }}
+        run: python3 scripts/ci/platform_test_scope.py plan --workflow os --scope "$PLATFORM_SCOPE"
+
   os-tests:
+    needs: plan
     name: ${{ matrix.name }}
     # The 32-core Windows runners belong to the upstream organization. Use
     # native standard runners in the public fork so PR lanes can be scheduled.
@@ -72,20 +92,7 @@ jobs:
     timeout-minutes: ${{ matrix.timeout || 30 }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: macOS-only tests
-            runner: macos-latest
-            marker: macos
-          - name: Windows-only tests
-            runner: windows-latest-32-core
-            fork_runner: windows-2025
-            marker: windows
-          - name: Windows-only tests (arm64)
-            runner: windows-latest-32-arm-core
-            fork_runner: windows-11-arm
-            marker: windows
-            timeout: 60
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -209,7 +216,8 @@ jobs:
     # interpreter selection, non-ASCII profile paths and tool ACLs, partial-clone fetch and
     # venv holders. Its own workflow so wine2e-install/** pushes can run it alone.
     name: Windows install + update E2E
-    if: inputs.e2e_upgrade
+    needs: plan
+    if: needs.plan.outputs.run_windows == 'true' && inputs.e2e_upgrade
     uses: ./.github/workflows/windows-install-update-e2e.yml
 
   e2e-windows:
@@ -226,7 +234,8 @@ jobs:
     # Windows race that passes on retry is still a race. Tracked Windows bugs are strict
     # xfails (per-file KNOWN tables), so a fix turns this job red until the entry goes.
     name: Windows E2E (real processes)
-    if: inputs.e2e
+    needs: plan
+    if: needs.plan.outputs.run_windows == 'true' && inputs.e2e
     # The fork does not have access to the upstream 32-core label.  Use the hosted
     # Windows image so this job starts instead of remaining queued indefinitely.
     # The seven files are isolated subprocesses and historically finish in a few
