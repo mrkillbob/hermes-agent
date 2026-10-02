@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import sys
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 
@@ -14,10 +15,14 @@ def test_slash_worker_disables_conversation_worktree_management(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["slash_worker", "--session-key", "draft-key"])
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
 
+    cli_module = ModuleType("cli")
+    cli_type = MagicMock(return_value=MagicMock())
+    cli_module.HermesCLI = cli_type
+
     with (
         patch.object(slash_worker, "_start_parent_death_watchdog"),
         patch.object(slash_worker, "_prepare_slash_worker_runtime"),
-        patch.object(slash_worker, "HermesCLI", return_value=MagicMock()) as cli_type,
+        patch.dict(sys.modules, {"cli": cli_module}),
     ):
         slash_worker.main()
 
