@@ -105,7 +105,7 @@ CASES = {
     "ts package → frontend": (["apps/desktop/src/app.tsx"], _lanes(frontend=True)),
     "desktop release fixture → python + frontend": (
         ["tests/e2e/core/upgrade/_install_helpers.py"],
-        _lanes(python=True, python_prod=False, frontend=True, scan=True),
+        _lanes(python=True, python_prod=False, frontend=True, scan=True, e2e_upgrade=True),
     ),
     # Python scripts inside the desktop package also need the Python lint and
     # test lanes; the `apps/` prefix alone does not make a file frontend-only.

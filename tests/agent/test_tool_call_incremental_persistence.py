@@ -178,7 +178,8 @@ def test_run_conversation_flushes_assistant_tool_call_before_execution():
     assert result["final_response"] == "done"
 
 
-def test_kanban_worker_exits_after_durable_successful_completion(monkeypatch):
+@pytest.mark.parametrize("tool_name", ["kanban_complete", "kanban_block", "kanban_schedule"])
+def test_kanban_worker_exits_after_durable_successful_completion(monkeypatch, tool_name):
     """A completed worker must not make another provider call and keep working."""
     import tools.kanban_tools as kanban_tools
 
@@ -194,8 +195,8 @@ def test_kanban_worker_exits_after_durable_successful_completion(monkeypatch):
     monkeypatch.setattr(kanban_tools, "heartbeat_current_worker_from_env", lambda **kwargs: False)
     monkeypatch.setattr(kanban_tools, "inject_new_comments_from_env", lambda *args, **kwargs: False)
     agent = _make_agent()
-    agent.valid_tool_names.add("kanban_complete")
-    tool_call = _mock_tool_call(name="kanban_complete", call_id="complete-1")
+    agent.valid_tool_names.add(tool_name)
+    tool_call = _mock_tool_call(name=tool_name, call_id="terminal-1")
     agent.client.chat.completions.create.return_value = _mock_response(
         content="", finish_reason="tool_calls", tool_calls=[tool_call]
     )
@@ -211,9 +212,9 @@ def test_kanban_worker_exits_after_durable_successful_completion(monkeypatch):
     def _fake_execute(assistant_message, messages, effective_task_id, api_call_count=0):
         messages.append(
             make_tool_result_message(
-                "kanban_complete",
+                tool_name,
                 '{"ok": true, "task_id": "t_completed", "run_id": 715}',
-                "complete-1",
+                "terminal-1",
             )
         )
         # Match the real executor contract: the tool-result row is durable

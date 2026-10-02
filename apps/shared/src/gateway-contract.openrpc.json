@@ -28880,6 +28880,18 @@
             ],
             "default": null,
             "title": "Count"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
           }
         },
         "required": [
@@ -28989,6 +29001,18 @@
             ],
             "default": null,
             "title": "Cwd"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
           }
         },
         "required": [
@@ -29060,6 +29084,18 @@
             ],
             "default": null,
             "title": "Name"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
           }
         },
         "required": [
@@ -29950,6 +29986,18 @@
             "default": false,
             "title": "Follow Profile Config",
             "type": "boolean"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idempotency Key"
           }
         },
         "title": "SessionCreateParams",

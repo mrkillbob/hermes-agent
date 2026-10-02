@@ -27,6 +27,8 @@ const launchFlags: { localModels?: boolean; guestOnboarding?: boolean } | undefi
 // the built-in palette over the skin configured on this machine.
 const localSkin = ipcRenderer.sendSync('hermes:skin:local')
 
+import { unwrapExpectedNotFound } from './api-expected-404'
+
 contextBridge.exposeInMainWorld('hermesDesktop', {
   glassSupported: translucencySupport?.glass === true,
   translucencySupported: translucencySupport?.translucency === true,
@@ -235,8 +237,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     // Invoke returns the delivery result so the draft is not lost (#85590).
     submit: payload => ipcRenderer.invoke('hermes:quick-entry:submit', payload),
     // Main cannot invoke the primary renderer, so it receives this ack (#85590).
-    ackSubmit: (correlationId, result) =>
-      ipcRenderer.send('hermes:quick-entry:ack', { correlationId, result }),
+    ackSubmit: (correlationId, result) => ipcRenderer.send('hermes:quick-entry:ack', { correlationId, result }),
     dismiss: () => ipcRenderer.send('hermes:quick-entry:dismiss'),
     // Primary renderer → main → quick window: gateway connection state + the
     // recent-session options the target picker offers. Main caches the latest
@@ -337,7 +338,10 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     remember: name => ipcRenderer.invoke('hermes:profile:remember', name),
     set: name => ipcRenderer.invoke('hermes:profile:set', name)
   },
-  api: request => ipcRenderer.invoke('hermes:api', request),
+  // The handler resolves an expected 404 with a sentinel instead of rejecting
+  // (Electron logs a stack for every rejected invoke). Turn it back into the
+  // rejection the renderer expects — see electron/api-expected-404.ts.
+  api: request => ipcRenderer.invoke('hermes:api', request).then(unwrapExpectedNotFound),
   notify: payload => ipcRenderer.invoke('hermes:notify', payload),
   claimStartupLatency: () => ipcRenderer.invoke('hermes:startup-latency:claim'),
   requestMicrophoneAccess: () => ipcRenderer.invoke('hermes:requestMicrophoneAccess'),

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _GIT_TIMEOUT = 30
 
 
-def _run_git(args, cwd: str, timeout: int = _GIT_TIMEOUT):
+def _run_git(args, cwd: str, timeout: int = _GIT_TIMEOUT, env=None):
     """Run git capturing output; never raises on non-zero exit.
 
     :func:`noninteractive_git_env` (GHSA-7x36-8jrh-v4pw): this runs unattended against whatever
@@ -32,7 +32,7 @@ def _run_git(args, cwd: str, timeout: int = _GIT_TIMEOUT):
     """
     return subprocess.run(["git", *harden_git_argv(args)], cwd=cwd, capture_output=True,
                           text=True, encoding="utf-8", errors="replace", timeout=timeout,
-                          stdin=subprocess.DEVNULL, env=noninteractive_git_env())
+                          stdin=subprocess.DEVNULL, env=env or noninteractive_git_env())
 
 
 def local_backend_active() -> bool:
@@ -90,7 +90,13 @@ def create_subagent_worktree(parent_cwd: Optional[str], subagent_id: Optional[st
         base_ref, _label = resolve_worktree_base(repo_root, prefer_current_upstream=False)
         base = _run_git(["rev-parse", base_ref], cwd=repo_root)
         base_commit = base.stdout.strip() if base.returncode == 0 else ""
-        result = _run_git(["worktree", "add", str(wt_path), "-b", branch, base_ref], cwd=repo_root)
+        # The checkout runs the repo-named smudge filter; skip isolation when it cannot be neutralized.
+        from hermes_cli._subprocess_compat import noninteractive_repo_git_env
+        add_env = noninteractive_repo_git_env(repo_root)
+        if add_env is None:
+            logger.warning("subagent worktree: filter discovery failed; not creating a worktree")
+            return None
+        result = _run_git(["worktree", "add", str(wt_path), "-b", branch, base_ref], cwd=repo_root, env=add_env)
     except Exception as exc:
         logger.warning("subagent worktree: creation failed: %s", exc)
         return None
@@ -164,13 +170,18 @@ def finalize_subagent_worktree(info: Dict[str, str], *, prune: bool = True) -> D
     if not base_commit:
         return mark_worktree_payload_unproven(
             payload, "no base_commit recorded — commit count unmeasurable", unmeasured="commits")
+    # The status probe re-hashes files the child touched, which runs repo-named clean filters.
+    from hermes_cli._subprocess_compat import noninteractive_repo_git_env
+    probe_env = noninteractive_repo_git_env(path)
+    if probe_env is None:
+        return mark_worktree_payload_unproven(payload, "filter discovery failed", unmeasured="dirty")
     failed, unmeasured = [], []
     probes = (("commits", "rev-list", ["rev-list", "--count", f"{base_commit}..HEAD"],
                lambda s: int(s or 0)),
               ("dirty", "status", ["status", "--porcelain"], bool))
     try:
         for field, label, args, parse in probes:
-            res = _run_git(args, cwd=path)
+            res = _run_git(args, cwd=path, env=probe_env)
             if res.returncode == 0:
                 payload[field] = parse(res.stdout.strip())
             else:

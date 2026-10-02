@@ -1371,15 +1371,12 @@ class TestReadProcessCmdlinePsFallback:
 
     def test_ps_fallback_when_proc_unavailable(self, monkeypatch):
         monkeypatch.setattr(status.Path, "read_bytes", lambda self: (_ for _ in ()).throw(FileNotFoundError))
-        # psutil is an optional intermediate fallback. If installed, it can
-        # successfully return the real command line for this synthetic PID,
-        # preventing this test from reaching the ps fallback it intends to
-        # exercise.
-        monkeypatch.setitem(
-            sys.modules,
-            "psutil",
-            SimpleNamespace(Process=lambda pid: SimpleNamespace(cmdline=lambda: [])),
-        )
+        # psutil sits between /proc and ps; left real, it reads whatever process holds this pid on the
+        # host (CI saw `/usr/sbin/haveged` at 873) and ps is never reached.
+        def _no_such_process(pid):
+            raise ProcessLookupError(pid)
+
+        monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(Process=_no_such_process))
         monkeypatch.setattr(
             status.subprocess, "run",
             lambda args, **kwargs: SimpleNamespace(returncode=0, stdout="/usr/libexec/bluetoothuserd\n"),
