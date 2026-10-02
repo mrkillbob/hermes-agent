@@ -174,6 +174,7 @@ def build_parity_home(root: Path, base_url: str, *, grandchild: bool = True,
     cfg["mcp_single_query_discovery_timeout"] = 120
     # Keep turns hermetic and short: no title/aux model chatter decides anything here.
     cfg.setdefault("display", {})["compact"] = True
+    cfg["logging"] = {"level": "DEBUG"}
     cfg["updates"] = {"check": False}  # offline: no GitHub round-trip or git lazy fetch
     (hermes_home / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 

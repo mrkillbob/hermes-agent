@@ -1,4 +1,4 @@
-name: PR181 bounded Linux parity diagnostics
+name: PR181 bounded runtime diagnostics
 
 # Diagnostic-only branch. This workflow is not a PR qualification or a release lane.
 on:
@@ -26,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "f9e3a18f7da33a93d4151f72fa48ae77052e300a"
+          test "$(git rev-parse HEAD^)" = "dd20ee6f00865a7d1afbb2a706bf8a13b315db9a"
           git diff --name-only HEAD^ HEAD
 
       - name: Set up the locked toolchain and test dependencies
@@ -40,12 +40,42 @@ jobs:
           save-python-cache: 'false'
           save-node-cache: 'false'
 
-      - name: Entrypoint parity with CLI child stderr
-        run: scripts/run_tests.sh tests/e2e/core/parity/test_entrypoint_parity.py -vv
+      - name: Agent file with bounded per-case stacks and signal tracing
+        run: |
+          set -euo pipefail
+          trap 'echo "DIAGNOSTIC_SIGTERM $(date -u +%FT%TZ) shell_pid=$$"; exit 143' TERM
+          if command -v strace >/dev/null; then
+            timeout --signal=TERM --kill-after=10 150 strace -f -qq -e trace=none -e signal=SIGTERM,SIGKILL scripts/run_tests.sh tests/agent/test_run_agent.py -vv -s
+          else
+            echo 'strace unavailable; per-case stack diagnostics remain enabled'
+            timeout --signal=TERM --kill-after=10 150 scripts/run_tests.sh tests/agent/test_run_agent.py -vv -s
+          fi
         env:
           HERMES_TEST_WORKERS: '1'
-          HERMES_TEST_FILE_TIMEOUT: '600'
+          HERMES_TEST_FILE_TIMEOUT: '90'
           HERMES_TEST_FILE_RETRIES: '0'
           OPENAI_API_KEY: ''
           OPENROUTER_API_KEY: ''
           NOUS_API_KEY: ''
+
+      - name: Parity with the three overlapping lifecycle files
+        if: always() && steps.setup.outcome == 'success'
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10 400 scripts/run_tests.sh --files 'tests/e2e/core/mcp_plugins/test_plugin_activation.py:tests/e2e/core/parity/test_boot_contract.py:tests/e2e/core/parity/test_entrypoint_parity.py:tests/e2e/core/parity/test_mcp_lifecycle.py' -vv
+        env:
+          HERMES_TEST_WORKERS: '3'
+          HERMES_TEST_FILE_TIMEOUT: '300'
+          HERMES_TEST_FILE_RETRIES: '0'
+          OPENAI_API_KEY: ''
+          OPENROUTER_API_KEY: ''
+          NOUS_API_KEY: ''
+
+      - name: Report fixture-only parity observations
+        if: always() && steps.setup.outcome == 'success'
+        run: |
+          if test -f ci-diagnostics/parity-observations.json; then
+            cat ci-diagnostics/parity-observations.json
+          else
+            echo 'No complete parity observation artifact was returned'
+          fi

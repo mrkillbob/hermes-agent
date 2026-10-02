@@ -112,6 +112,8 @@ def _run_row(entrypoint: str, root: Path) -> Row:
         # picker-prewarm `gh auth token` orphaned by a fast host exit).
         row.other_survivors = describe_pids(wait_no_orphans(ph, timeout=10.0, mcp_only=False))
         row.cells = cells
+        agent_log = ph.hermes_home / "logs" / "agent.log"
+        diagnostic_log = agent_log.read_text(encoding="utf-8", errors="replace")[-16000:] if agent_log.exists() else ""
         stderr_tail = str(result.extra.get("stderr_tail", ""))
         log = result.extra.get("stderr_log")
         if log and Path(log).exists():
@@ -122,7 +124,8 @@ def _run_row(entrypoint: str, root: Path) -> Row:
             f"  surviving MCP-tree pids: {describe_pids(survivors)} (mcp pid log {pids})\n"
             f"  final text: {(result.final_text or '')[-300:]!r}\n"
             f"  host exit code: {result.extra.get('exit_code')}\n"
-            f"  host stderr tail: {stderr_tail[-1500:]}"
+            f"  host stderr tail: {stderr_tail[-1500:]}\n"
+            f"  fixture agent log: {diagnostic_log}"
         )
     except Exception as exc:  # noqa: BLE001 - reported per row
         row.error = f"{type(exc).__name__}: {exc}"[:4000]
@@ -144,6 +147,12 @@ def matrix(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Row]:
     with ThreadPoolExecutor(max_workers=len(DRIVERS), thread_name_prefix="parity") as pool:
         futures = {ep: pool.submit(_run_row, ep, roots[ep]) for ep in DRIVERS}
         rows = {ep: fut.result() for ep, fut in futures.items()}
+    diagnostics = Path("ci-diagnostics")
+    diagnostics.mkdir(exist_ok=True)
+    (diagnostics / "parity-observations.json").write_text(
+        json.dumps({ep: asdict(row) for ep, row in rows.items()}, indent=2) + "\n",
+        encoding="utf-8",
+    )
     out = os.environ.get("PARITY_TABLE_OUT")
     if out:
         with open(out, "a", encoding="utf-8") as fh:
