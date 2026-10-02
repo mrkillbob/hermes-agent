@@ -146,7 +146,11 @@ def _ensure_mcp_sdk() -> bool:
     global _JSONRPC_METHOD_NOT_FOUND
     if not _MCP_AVAILABLE:
         return False
-    if _MCP_SDK_IMPORT_ATTEMPTED or ClientSession is not None:
+    # ClientSession is bound before the transport symbols. Concurrent readers
+    # must join that import; preinstalled test doubles still bypass an idle lock.
+    if _MCP_SDK_IMPORT_ATTEMPTED or (
+        ClientSession is not None and not _MCP_SDK_IMPORT_LOCK.locked()
+    ):
         return _MCP_AVAILABLE
     with _MCP_SDK_IMPORT_LOCK:
         if _MCP_SDK_IMPORT_ATTEMPTED or ClientSession is not None:
