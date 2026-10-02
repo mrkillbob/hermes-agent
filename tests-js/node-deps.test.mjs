@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -46,7 +46,7 @@ test.each(['npm', 'npm-fixture'])('prepared npm discovers lib/%s without npm_exe
   delete env.npm_execpath
   const [selectedNode, cli] = npmCommand({ env })
   expect(selectedNode).toBe(node)
-  expect(cli).toBe(join(root, 'lib', directory, 'bin/npm-cli.js'))
+  expect(cli).toBe(join(realpathSync(root), 'lib', directory, 'bin/npm-cli.js'))
   const version = execFileSync(selectedNode, [cli, '--version'], { cwd: tmpdir(), env, encoding: 'utf8' }).trim()
   expect(version).toMatch(/^\d+\.\d+\.\d+/)
 })

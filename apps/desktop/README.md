@@ -85,10 +85,16 @@ shortcut helper. Prebuilt installers include it; no compiler is needed at runtim
 Want to hack on the app itself? Install workspace deps from the repo root once, then run the dev server from this directory:
 
 ```bash
-npm install          # from repo root — links apps/desktop, web, apps/shared
+npm run install:desktop  # from repo root — locked Desktop/TUI/web workspace union
 cd apps/desktop
 npm run dev          # Vite renderer + Electron, which boots the Python backend
 ```
+
+The canonical installer controls get-windows source compilation with node-gyp 13.0.2.
+Bare, unwrapped `npm install` or `npm ci` is outside this Desktop compiler guarantee:
+npm can replace the project compiler with its bundled version during dependency scripts.
+The installer verifies the actual Windows x64 binding before publishing or reusing
+a completed preparation receipt. Linux and Windows ARM64 keep their optional native behavior.
 
 Point the app at a specific source checkout, or sandbox it away from your real config:
 

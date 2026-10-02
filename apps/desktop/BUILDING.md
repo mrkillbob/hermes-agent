@@ -331,10 +331,11 @@ Prepare and activate the [PM developer environment](../../website/docs/reference
 first. Use Bash `source ./activate` or PowerShell `. .\activate.ps1`, and keep a
 separate development home. Activation supplies the toolchain, not `node_modules`.
 
-From the repository root:
+From the repository root, use the [canonical Desktop installer](README.md#development),
+which documents why bare npm installs do not preserve the compiler guarantee:
 
 ```sh
-npm ci
+npm run install:desktop
 npm run dev --workspace apps/desktop
 ```
 

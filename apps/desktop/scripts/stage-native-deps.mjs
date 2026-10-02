@@ -628,6 +628,9 @@ export function stageGetWindowsInto(
   return destRoot
 }
 
+const { getWindowsCompilerEnvironment } = require('../../../scripts/build/get-windows-compiler.cjs')
+export { getWindowsCompilerEnvironment }
+
 export function installGetWindowsNativeBinding(
   srcRoot,
   { resolveInstaller, spawn = spawnSync } = {}
@@ -648,7 +651,8 @@ export function installGetWindowsNativeBinding(
 
   const result = spawn(process.execPath, [installerPath, 'install', '--fallback-to-build'], {
     cwd: srcRoot,
-    stdio: 'inherit'
+    stdio: 'inherit',
+    env: getWindowsCompilerEnvironment(srcRoot)
   })
   if (result.error) {
     throw new Error(
