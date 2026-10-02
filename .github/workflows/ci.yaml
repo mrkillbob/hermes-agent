@@ -1,4 +1,4 @@
-name: PR181 bounded runtime diagnostics
+name: PR181 reviewed runtime repair diagnostics
 
 # Diagnostic-only branch. This workflow is not a PR qualification or a release lane.
 on:
@@ -26,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "b7d659555d4db527b875004d37793df0bede75d6"
+          test "$(git rev-parse HEAD^)" = "70d60377a9d8d6759a4bc857f5581977a1c46328"
           git diff --name-only HEAD^ HEAD
 
       - name: Set up the locked toolchain and test dependencies
@@ -45,6 +45,19 @@ jobs:
           set -euo pipefail
           trap 'echo "DIAGNOSTIC_SIGTERM $(date -u +%FT%TZ) shell_pid=$$"; exit 143' TERM
           timeout --signal=TERM --kill-after=10 180 scripts/run_tests.sh tests/agent/test_run_agent.py -vv -s -o faulthandler_timeout=20
+        env:
+          HERMES_TEST_WORKERS: '1'
+          HERMES_TEST_FILE_TIMEOUT: '120'
+          HERMES_TEST_FILE_RETRIES: '0'
+          OPENAI_API_KEY: ''
+          OPENROUTER_API_KEY: ''
+          NOUS_API_KEY: ''
+
+      - name: Reviewed SDK race and real entrypoint parity
+        if: always() && steps.setup.outcome == 'success'
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10 300 scripts/run_tests.sh --files 'tests/tools/test_mcp_sdk_import_race.py:tests/e2e/core/parity/test_entrypoint_parity.py' -vv
         env:
           HERMES_TEST_WORKERS: '1'
           HERMES_TEST_FILE_TIMEOUT: '120'

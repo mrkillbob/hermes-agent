@@ -1988,7 +1988,11 @@ class TestExecuteToolCalls:
         captured = io.StringIO()
         agent._print_fn = lambda *args, **kw: print(*args, file=captured, **kw)
 
-        with patch("run_agent.time.sleep", return_value=None):
+        # Remove only the provider retry delay. The shared time.sleep also
+        # schedules live terminal cleanup and streaming worker threads.
+        scheduler_sleep = time.sleep
+        with patch("agent.retry_utils.adaptive_rate_limit_backoff", return_value=(0.0, None)):
+            assert time.sleep is scheduler_sleep, "retry fixture changed process-wide scheduling"
             result = agent.run_conversation("hello")
 
         assert result["completed"] is True
@@ -6923,7 +6927,7 @@ class TestEmptySSEFrameTurnRecovery:
     non-JSON SSE data`` and the turn died after 3 identical streaming retries. The turn must
     instead complete on the automatic non-streaming retry."""
 
-    def test_turn_completes_on_the_non_streaming_retry(self, _stream_recovery_diagnostics, agent):
+    def test_turn_completes_on_the_non_streaming_retry(self, agent):
         import httpx
         from openai import OpenAI, Stream
         from openai.types.chat import ChatCompletionChunk
@@ -6952,7 +6956,11 @@ class TestEmptySSEFrameTurnRecovery:
         warnings = []
         agent.status_callback = lambda kind, message: warnings.append((kind, message))
 
-        with patch("run_agent.time.sleep", return_value=None):
+        # Remove only the provider retry delay. The shared time.sleep also
+        # schedules live terminal cleanup and streaming worker threads.
+        scheduler_sleep = time.sleep
+        with patch("agent.retry_utils.adaptive_rate_limit_backoff", return_value=(0.0, None)):
+            assert time.sleep is scheduler_sleep, "retry fixture changed process-wide scheduling"
             result = agent.run_conversation("hello")
 
         assert result["completed"] is True
