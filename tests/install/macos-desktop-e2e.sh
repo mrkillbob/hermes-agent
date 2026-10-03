@@ -120,6 +120,13 @@ arm_redirect() {
 }
 
 desktop_checkpoint() { # phase, expected commit, selected method
+  # Bootstrap/update may leave an automatically launched successor running.
+  # A second smoke instance would attach to its backend and cannot prove its
+  # own listener ownership. Close only this installed executable normally.
+  local installed_bin
+  installed_bin="$(find_installed_app)/Contents/MacOS/Hermes"
+  osascript -l JavaScript "$ASSETS/macos-app-quit.cjs" "$installed_bin" \
+    || fail "installed app did not close normally; no smoke launch attempted"
   source_build_env "$HERMES_E2E_NODE" "$ASSETS/source-desktop-smoke.mjs" \
     --root "$INSTALL_DIR" --home "$HERMES_HOME" --user-data "$HERMES_DESKTOP_USER_DATA_DIR" \
     --out "$LOG_DIR" --phase "$1" --expect-commit "$2" --desktop present --method "$3"
@@ -248,25 +255,6 @@ phase_install() {
   ok "hermes --version works: $(head -c 120 "$LOG_DIR/version-old.log" | tr -d '\n')"
   find_installed_app >/dev/null || fail "no installed Hermes.app after the dmg bootstrap"
   ok "installed app: $(find_installed_app)"
-  # The bootstrap can leave its launched app running. Preserve that handoff,
-  # then request normal Quit of only this installed binary before smoke owns it.
-  local installed_bin
-  installed_bin="$(find_installed_app)/Contents/MacOS/Hermes"
-  osascript -l JavaScript -e 'ObjC.import("AppKit"); function run(args) {
-    const apps = $.NSWorkspace.sharedWorkspace.runningApplications;
-    for (let i = 0; i < apps.count; i++) {
-      const app = apps.objectAtIndex(i);
-      if (app.executableURL && ObjC.unwrap(app.executableURL.path) === args[0]) {
-        if (!app.terminate) throw new Error("normal Quit refused");
-        // A historical app (v2026.7.1) that the bootstrap launched moments ago
-        // was seen not to finish quitting within 30s while its backend was
-        // still starting. Allow longer, but the quit must stay the normal one.
-        const deadline = Date.now() + 120000;
-        while (!app.terminated && Date.now() < deadline) delay(0.2);
-        if (!app.terminated) throw new Error("installed app did not quit normally");
-      }
-    }
-  }' "$installed_bin" || fail "installed app did not close normally; no smoke launch attempted"
   desktop_checkpoint old "$OLD_SHA" desktop-installer@latest
 }
 
