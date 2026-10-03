@@ -568,6 +568,7 @@ def _typed_payload_mapping(
             and (
                 value.get("role") == "tool"
                 or value.get("type") == "function_call_output"
+                or (require_terminal_provenance and value.get("type") == "tool_result")
             )
         )
         is_elided_kanban_tool_result = (

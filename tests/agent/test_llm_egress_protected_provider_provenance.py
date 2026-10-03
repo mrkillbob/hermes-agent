@@ -35,11 +35,19 @@ def _agent(tmp_path, *, provider="nous", api_mode="chat_completions"):
 
 
 @pytest.mark.parametrize(
-    "provider", ["openai-codex", "nous", "nous-portal", "nousresearch", "anthropic"]
+    "provider,protected_flag,transport,shape",
+    [
+        (provider, flag, transport, shape)
+        for provider in ["openai-codex", "nous", "nous-portal", "nousresearch", "anthropic"]
+        for flag in [None, "0", "1"]
+        for transport in ["chat", "responses"]
+        for shape in ["text", "text_block", "mapping"]
+    ] + [
+        ("anthropic", flag, "anthropic", shape)
+        for flag in [None, "0"]
+        for shape in ["text", "text_block", "mapping"]
+    ],
 )
-@pytest.mark.parametrize("protected_flag", [None, "0", "1"])
-@pytest.mark.parametrize("transport", ["chat", "responses"])
-@pytest.mark.parametrize("shape", ["text", "text_block", "mapping"])
 def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
     tmp_path, monkeypatch, provider, protected_flag, transport, shape
 ):
@@ -49,7 +57,7 @@ def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
     else:
         monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", protected_flag)
     raw = "def calculate_total(items):\n    return sum(items)\n"
-    block_type = "text" if transport == "chat" else "input_text"
+    block_type = "input_text" if transport == "responses" else "text"
     if shape == "text":
         output = raw
     elif shape == "text_block":
@@ -65,6 +73,16 @@ def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
                 {"id": call_id, "type": "function", "function": function}
             ]},
             {"role": "tool", "tool_call_id": call_id, content_key: output},
+        ]}
+    elif transport == "anthropic":
+        field, content_key = "messages", "content"
+        request = {field: [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": call_id, "name": "terminal", "input": {}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": call_id, "content": output}
+            ]},
         ]}
     else:
         field, content_key = "input", "output"
