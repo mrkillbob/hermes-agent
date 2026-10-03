@@ -125,8 +125,13 @@ desktop_checkpoint() { # phase, expected commit, selected method
   # own listener ownership. Close only this installed executable normally.
   local installed_bin
   installed_bin="$(find_installed_app)/Contents/MacOS/Hermes"
-  osascript -l JavaScript "$ASSETS/macos-app-quit.cjs" "$installed_bin" \
-    || fail "installed app did not close normally; no smoke launch attempted"
+  if ! osascript -l JavaScript "$ASSETS/macos-app-quit.cjs" "$installed_bin"; then
+    # Observe the ephemeral runner only after failure. Capture no window
+    # contents/argv/env and never dismiss a prompt or alter permissions.
+    "$HERMES_E2E_NODE" "$ASSETS/macos-network-prompt.cjs" "$installed_bin" \
+      > "$LOG_DIR/desktop-$1-quit-diagnostics.json" || true
+    fail "installed app did not close normally; no smoke launch attempted"
+  fi
   source_build_env "$HERMES_E2E_NODE" "$ASSETS/source-desktop-smoke.mjs" \
     --root "$INSTALL_DIR" --home "$HERMES_HOME" --user-data "$HERMES_DESKTOP_USER_DATA_DIR" \
     --out "$LOG_DIR" --phase "$1" --expect-commit "$2" --desktop present --method "$3"
