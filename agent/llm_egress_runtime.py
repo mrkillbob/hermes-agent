@@ -703,6 +703,8 @@ def _recognized_native_nonterminal_call_ids(body: Mapping[str, Any]) -> frozense
     calls: dict[str, str | None] = {}
     duplicates: set[str] = set()
     admitted: set[str] = set()
+    results: set[str] = set()
+    invalid: set[str] = set()
     messages = body.get("messages", [])
     if not isinstance(messages, (list, tuple)):
         return frozenset()
@@ -733,11 +735,16 @@ def _recognized_native_nonterminal_call_ids(body: Mapping[str, Any]) -> frozense
                     and tool_registry.get_entry(canonical) is not None
                     else None
                 )
-            elif message.get("role") == "user" and block.get("type") == "tool_result":
+            elif block.get("type") == "tool_result":
                 call_id = block.get("tool_use_id")
-                if isinstance(call_id, str) and calls.get(call_id) is not None:
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                if call_id in results or message.get("role") != "user" or calls.get(call_id) is None:
+                    invalid.add(call_id)
+                results.add(call_id)
+                if calls.get(call_id) is not None:
                     admitted.add(call_id)
-    return frozenset(admitted - duplicates)
+    return frozenset(admitted - duplicates - invalid)
 
 
 def authorize_agent_sdk_kwargs(

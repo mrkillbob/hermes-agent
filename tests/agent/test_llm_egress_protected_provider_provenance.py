@@ -142,7 +142,9 @@ def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
         (f"native:{name}:{binding}", output)
         for name in ["read_file", "mcp__read_file", "memory", "mcp__context_notes",
                      "tool_describe", "mcp__tool_describe", "unknown", "mcp__terminal"]
-        for binding in ["matching", "missing", "mismatched", "duplicate", "future"]
+        for binding in ["matching", "missing", "mismatched", "duplicate", "future",
+                        "orphan_then_matching", "repeated_result", "assistant_result",
+                        "list_id", "mapping_id", "zero_id"]
         for output in ["bounded local status: complete", "token=synthetic-secret-value"]
     ],
 )
@@ -163,7 +165,10 @@ def test_native_nonterminal_binding_and_existing_worker_admission_are_preserved(
         call = {"type": "tool_use", "id": "call_native", "name": name, "input": {}}
         result = {"type": "tool_result", "content": output}
         if binding != "missing":
-            result["tool_use_id"] = "other" if binding == "mismatched" else "call_native"
+            result["tool_use_id"] = {
+                "mismatched": "other", "list_id": ["call_native"],
+                "mapping_id": {"id": "call_native"}, "zero_id": 0,
+            }.get(binding, "call_native")
         calls = [call, dict(call)] if binding == "duplicate" else [call]
         messages = [
             {"role": "assistant", "content": calls},
@@ -171,6 +176,12 @@ def test_native_nonterminal_binding_and_existing_worker_admission_are_preserved(
         ]
         if binding == "future":
             messages.reverse()
+        elif binding == "orphan_then_matching":
+            messages.insert(0, {"role": "user", "content": [dict(result)]})
+        elif binding == "repeated_result":
+            messages.append({"role": "user", "content": [dict(result)]})
+        elif binding == "assistant_result":
+            messages.insert(0, {"role": "assistant", "content": [dict(result)]})
         request = {"messages": messages}
         callback = MagicMock(return_value="allowed")
         elided_read = name in {"read_file", "mcp__read_file", "mcp__context_notes"}

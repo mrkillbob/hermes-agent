@@ -908,7 +908,10 @@ def _typed_payload_mapping_item(
             state["is_recognized_tool_result"]
             or (
                 state["value"].get("type") == "tool_result"
-                and state["output_call_id"] not in state["native_nonterminal_call_ids"]
+                and (
+                    not isinstance(state["output_call_id"], str)
+                    or state["output_call_id"] not in state["native_nonterminal_call_ids"]
+                )
             )
             or (
                 not isinstance(state["output_call_id"], str)
