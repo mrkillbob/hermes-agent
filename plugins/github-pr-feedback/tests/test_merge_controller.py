@@ -24,6 +24,8 @@ from github_pr_feedback.github_client import (
     GitHubClientError,
     GitHubRequestGate,
     PullRequestMergeState,
+    RequiredCIGate,
+    ReadmeOnlyScope,
     RepositoryMergePolicy,
     ReviewState,
     SubprocessCommandRunner,
@@ -123,6 +125,66 @@ def eligible_snapshot(**overrides: object) -> MergeSnapshot:
     }
     values.update(overrides)
     return MergeSnapshot(**values)
+
+
+def test_actions_substitution_requires_proven_covered_change_scope() -> None:
+    gate = RequiredCIGate(71, 17, BASE_SHA, HEAD_SHA, NOW - timedelta(minutes=4),
+                          ".github/workflows/ci.yaml", (("Native coverage", 82, ("Run full suite",)),))
+    configured = replace(policy(), required_workflow_path=gate.workflow_path,
+                         required_workflow_jobs=(("Native coverage", ("Run full suite",)),))
+    # Passing Actions cannot waive potentially applicable uncovered validation.
+    snapshot = eligible_snapshot(ci_receipt=None, hosted_ci_gate=gate)
+    assert not evaluate_merge(configured, snapshot, now=NOW).eligible
+
+
+def test_exact_actions_gate_satisfies_ci_without_a_duplicate_local_receipt(tmp_path) -> None:
+    gate = RequiredCIGate(71, 17, BASE_SHA, HEAD_SHA, NOW - timedelta(minutes=4),
+                          ".github/workflows/ci.yaml", (("Native coverage", 82, ("Run full suite",)),))
+    configured = replace(policy(), actions_readme_only_base_sha=BASE_SHA, required_workflow_path=".github/workflows/ci.yaml",
+                         required_workflow_jobs=(("Native coverage", ("Run full suite",)),))
+    scope = ReadmeOnlyScope("acme/widgets", 17, BASE_SHA, HEAD_SHA, "d" * 40, "e" * 40)
+    snapshot = eligible_snapshot(ci_receipt=None, hosted_ci_gate=gate, readme_only_scope=scope)
+
+    for invalid in (None, replace(scope, repository="other/widgets"), replace(scope, pr_number=18),
+                    replace(scope, base_sha="f" * 40), replace(scope, head_sha="f" * 40),
+                    replace(scope, head_blob_sha=scope.base_blob_sha)):
+        assert "actions_coverage_scope_unproven" in evaluate_merge(
+            configured, replace(snapshot, readme_only_scope=invalid), now=NOW).blockers
+    assert not evaluate_merge(replace(configured, actions_readme_only_base_sha="f" * 40), snapshot, now=NOW).eligible
+    assert evaluate_merge(configured, snapshot, now=NOW).snapshot_digest != evaluate_merge(
+        configured, replace(snapshot, readme_only_scope=replace(scope, head_blob_sha="f" * 40)), now=NOW).snapshot_digest
+
+    assert evaluate_merge(configured, snapshot, now=NOW).eligible
+    for invalid in (
+        replace(gate, head_sha="c" * 40), replace(gate, base_sha="c" * 40),
+        replace(gate, pr_number=18), replace(gate, jobs=()),
+        replace(gate, completed_at=NOW - timedelta(hours=2)),
+        replace(gate, completed_at=NOW + timedelta(minutes=1)),
+    ):
+        assert not evaluate_merge(configured, replace(snapshot, hosted_ci_gate=invalid), now=NOW).eligible
+    assert not evaluate_merge(policy(), snapshot, now=NOW).eligible
+    assert not evaluate_merge(configured, replace(snapshot, review_state=ReviewState("CHANGES_REQUESTED", 1)), now=NOW).eligible
+    assert evaluate_merge(configured, snapshot, now=NOW).snapshot_digest != evaluate_merge(
+        configured, replace(snapshot, hosted_ci_gate=replace(gate, check_run_id=72)), now=NOW
+    ).snapshot_digest
+    ledger = enrolled_ledger(tmp_path)
+    github = RecordingGitHub([pr_state(state="CLOSED", merged=True, merge_commit_oid=MERGE_SHA)])
+    result = MergeController(configured, SnapshotSource([snapshot, snapshot]), github, ledger,
+                             owner="test", now=lambda: NOW).run(17)
+    assert result.receipt is not None
+    assert result.receipt.ci_receipt_id == gate.evidence_id
+    assert len(github.merge_calls) == 1
+    ledger.close()
+    assert not evaluate_merge(
+        configured,
+        replace(snapshot, check_state=CheckState(True, False, 2)),
+        now=NOW,
+    ).eligible
+    assert "ci_receipt_missing" in evaluate_merge(
+        configured,
+        replace(snapshot, hosted_ci_gate=None),
+        now=NOW,
+    ).blockers
 
 
 def enrolled_ledger(tmp_path: Path) -> FeedbackLedger:
@@ -872,8 +934,9 @@ def test_merge_write_state_rejects_disable_without_locking_unrelated_writers(
     ledger.close()
 
 
+@pytest.mark.parametrize("hosted_ci,scope_after_merge,combined_ci", [(False, True, False), (True, True, False), (True, False, False), (True, True, True), (True, False, True)])
 def test_verification_required_attempt_reconciles_canonical_merged_truth_without_rewrite(
-    tmp_path: Path,
+    tmp_path: Path, hosted_ci: bool, scope_after_merge: bool, combined_ci: bool,
 ) -> None:
     snapshot = eligible_snapshot()
     merged_snapshot = eligible_snapshot(
@@ -883,10 +946,30 @@ def test_verification_required_attempt_reconciles_canonical_merged_truth_without
             merge_commit_oid=MERGE_SHA,
         )
     )
+    selected = policy()
+    if hosted_ci:
+        gate = RequiredCIGate(71, 17, BASE_SHA, HEAD_SHA, NOW - timedelta(minutes=4),
+                              ".github/workflows/ci.yaml", (("Native coverage", 82, ("Run full suite",)),))
+        selected = replace(selected, actions_readme_only_base_sha=BASE_SHA, required_workflow_path=gate.workflow_path,
+                           required_workflow_jobs=(("Native coverage", ("Run full suite",)),))
+        snapshot = replace(snapshot, ci_receipt=None, hosted_ci_gate=gate,
+                           readme_only_scope=ReadmeOnlyScope("acme/widgets", 17, BASE_SHA, HEAD_SHA, "d" * 40, "e" * 40))
+        merged_snapshot = replace(merged_snapshot, ci_receipt=None, hosted_ci_gate=gate, readme_only_scope=snapshot.readme_only_scope if scope_after_merge else None)
     github = RecordingGitHub([GitHubClientError("readback unavailable")])
+    if combined_ci:
+        from test_supplementary_ci import reviewed_plan, targeted_receipt
+        from github_pr_feedback.github_client import ExactChangeScope
+        plan = replace(reviewed_plan(), actions_jobs=selected.required_workflow_jobs)
+        selected = replace(selected, actions_readme_only_base_sha=None, supplementary_plan=plan)
+        scope = ExactChangeScope("acme/widgets",17,BASE_SHA,HEAD_SHA,plan.changed_files)
+        receipt = targeted_receipt(plan)
+        snapshot = replace(snapshot, readme_only_scope=None, change_scope=scope,
+                           coverage_plan_digest=plan.digest, supplementary_receipt=receipt)
+        merged_snapshot = replace(merged_snapshot, readme_only_scope=None, change_scope=scope,
+            coverage_plan_digest=plan.digest, supplementary_receipt=receipt if scope_after_merge else None)
     ledger = enrolled_ledger(tmp_path)
     controller = MergeController(
-        policy(),
+        selected,
         SnapshotSource([snapshot, snapshot, merged_snapshot]),
         github,
         ledger,
@@ -899,6 +982,13 @@ def test_verification_required_attempt_reconciles_canonical_merged_truth_without
 
     assert ambiguous.receipt is None
     assert ambiguous.decision.blockers == ("merge_verification_required",)
+    if hosted_ci and not scope_after_merge:
+        assert reconciled.receipt is None
+        assert reconciled.decision.blockers == ("merge_verification_required",)
+        assert github.merge_calls == [("acme/widgets", 17, HEAD_SHA, "squash")]
+        assert ledger.merge_status_counts()["verification_required"] == 1
+        ledger.close()
+        return
     assert reconciled.receipt is not None
     assert reconciled.receipt.tested_head_sha == HEAD_SHA
     assert reconciled.receipt.merge_commit_oid == MERGE_SHA
@@ -1052,3 +1142,24 @@ def test_codex_clean_head_false_when_actionable_finding_present() -> None:
 
 def test_codex_clean_head_false_when_not_reviewed() -> None:
     assert _codex_clean_head((), HEAD_SHA) is False
+
+
+@pytest.mark.parametrize("case", ["valid", "missing", "stale", "failed", "unknown", "changed-plan", "missing-actions", "empty-known"])
+def test_combined_readiness_requires_actions_and_only_applicable_targeted_evidence(case):
+    from test_supplementary_ci import reviewed_plan, targeted_receipt
+    from github_pr_feedback.github_client import ExactChangeScope
+    plan = reviewed_plan([] if case == "empty-known" else None)
+    selected = replace(policy(), required_workflow_path=".github/workflows/ci.yaml", required_workflow_jobs=plan.actions_jobs, supplementary_plan=plan)
+    gate = RequiredCIGate(71,17,BASE_SHA,HEAD_SHA,NOW,".github/workflows/ci.yaml", (("Checks",82,("Run checks",)),))
+    receipt = None if case in {"missing", "empty-known"} else targeted_receipt(plan,
+        completed=NOW-timedelta(days=1) if case=="stale" else NOW,
+        status="failed" if case=="failed" else "passed")
+    scope = ExactChangeScope("acme/widgets",17,BASE_SHA,HEAD_SHA,plan.changed_files)
+    if case == "unknown": scope = replace(scope, changed_files=(("other.py","modified",None),))
+    snapshot = eligible_snapshot(ci_receipt=None, hosted_ci_gate=None if case=="missing-actions" else gate,
+        change_scope=scope, coverage_plan_digest="f"*64 if case=="changed-plan" else plan.digest,
+        supplementary_receipt=receipt)
+    result = evaluate_merge(selected,snapshot,now=NOW)
+    assert result.eligible == (case in {"valid", "empty-known"})
+    if case in {"unknown", "changed-plan"}: assert "coverage_applicability_unknown" in result.blockers
+    if case == "missing": assert "supplementary_receipt_missing" in result.blockers

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import pytest
 import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,8 @@ from github_pr_feedback.github_client import (
     CheckState,
     Feedback,
     PullRequestMergeState,
+    RequiredCIGate,
+    ReadmeOnlyScope,
     RepositoryMergePolicy,
     ReviewState,
 )
@@ -174,6 +177,7 @@ def configured_policy(
     repository: Path,
     *,
     report_only: bool = False,
+    hosted_ci: bool = False,
     actions_disabled_local_ci: bool = False,
     bot_identity: bool = False,
 ):
@@ -207,6 +211,8 @@ def configured_policy(
                 "report_only": report_only,
                 "allow_budget_exhausted_local_ci": actions_disabled_local_ci,
                 "post_merge": {"enabled": False},
+                **({"actions_readme_only_base_sha": BASE_SHA, "required_workflow_path": ".github/workflows/ci.yaml",
+                    "required_workflow_jobs": {"Native coverage": ["Run full suite"]}} if hosted_ci else {}),
             },
             **(
                 {
@@ -288,24 +294,48 @@ def prepare_receipt(
     )
 
 
+@pytest.mark.parametrize("hosted_ci,scope_proven", [(False, True), (True, True), (True, False)])
 def test_end_to_end_exact_head_receipt_selects_enabled_method_and_merges_once(
-    tmp_path: Path,
+    tmp_path: Path, hosted_ci: bool, scope_proven: bool,
 ) -> None:
     repository = tmp_path / "repository"
     subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
     ledger = FeedbackLedger(tmp_path / "ledger.sqlite3")
-    prepare_receipt(repository, ledger)
+    if hosted_ci:
+        manifest = repository / "tests/manifests/test_lanes.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('[lanes.unit]\nci_status = "required"\n', encoding="utf-8")
+        ledger.enroll_merge_pr("acme/widgets", 17, enrolled_at=datetime.now(UTC), enrolled_by="operator")
+    else:
+        prepare_receipt(repository, ledger)
     merged = replace(
         open_state(), state="CLOSED", merged=True, merge_commit_oid=MERGE_SHA
     )
     github = CanonicalFakeGitHub([open_state(), open_state(), merged])
+    if hosted_ci:
+        calls = []
+        gate = RequiredCIGate(71, 17, BASE_SHA, HEAD_SHA, datetime.now(UTC),
+                              ".github/workflows/ci.yaml", (("Native coverage", 82, ("Run full suite",)),))
+        def read_gate(*args):
+            calls.append(args)
+            return gate
+        github.get_required_ci_gate = read_gate
+        github.get_readme_only_scope = lambda *args: (ReadmeOnlyScope("acme/widgets", 17, BASE_SHA, HEAD_SHA, "d" * 40, "e" * 40) if scope_proven else None)
     kanban = RecordingKanban()
 
     payload = _run_merge_scan(
-        configured_policy(repository), ledger, github=github, kanban=kanban
+        configured_policy(repository, hosted_ci=hosted_ci), ledger, github=github, kanban=kanban
     )
 
     assert payload["status"] == "ok"
+    if hosted_ci and not scope_proven:
+        assert payload["merged"] == []
+        assert github.merge_calls == []
+        assert ledger.completed_merge_receipt("acme/widgets", 17) is None
+        assert kanban.tasks == []
+        assert "actions_coverage_scope_unproven" in payload["blocked"]["17"]
+        ledger.close()
+        return
     assert payload["merged"] == [
         {
             "pr_number": 17,
@@ -316,6 +346,11 @@ def test_end_to_end_exact_head_receipt_selects_enabled_method_and_merges_once(
     ]
     assert github.merge_calls == [("acme/widgets", 17, HEAD_SHA, "rebase")]
     assert kanban.tasks == []
+    if hosted_ci:
+        assert calls == [("acme/widgets", 17, BASE_SHA, HEAD_SHA,
+                          ".github/workflows/ci.yaml", (("Native coverage", ("Run full suite",)),))] * 2
+        assert ledger.latest_ci_receipt_for_head("acme/widgets", 17, HEAD_SHA) is None
+        assert ledger.completed_merge_receipt("acme/widgets", 17).ci_receipt_id == gate.evidence_id
     assert all("GH_TOKEN" not in str(field) for field in github.merge_calls[0])
     ledger.close()
 
@@ -529,4 +564,35 @@ def test_current_actionable_review_feedback_remains_merge_blocking(tmp_path: Pat
     assert payload["merged"] == []
     assert payload["blocked"] == {"17": ["feedback_unprocessed"]}
     assert github.merge_calls == []
+    ledger.close()
+
+
+@pytest.mark.parametrize("case", ["valid", "missing", "stale", "latest-failed", "unknown", "missing-actions", "empty-known"])
+def test_combined_cli_uses_real_typed_ledger_supplement_without_full_audit(tmp_path, case):
+    from test_supplementary_ci import reviewed_plan, targeted_receipt
+    from github_pr_feedback.github_client import ExactChangeScope
+    repository = tmp_path / "repository"
+    subprocess.run(["git","init","--quiet",str(repository)],check=True)
+    manifest=repository/"tests/manifests/test_lanes.toml";manifest.parent.mkdir(parents=True);manifest.write_text('[lanes.unit]\nci_status = "required"\n', encoding="utf-8")
+    ledger=FeedbackLedger(tmp_path/"ledger.sqlite3")
+    ledger.enroll_merge_pr("acme/widgets",17,enrolled_at=datetime.now(UTC),enrolled_by="operator")
+    plugin=configured_policy(repository,hosted_ci=True)
+    plan=reviewed_plan([] if case=="empty-known" else None)
+    selected=replace(plugin.merge_maintainer,actions_readme_only_base_sha=None,supplementary_plan=plan,required_workflow_jobs=plan.actions_jobs)
+    plugin=replace(plugin,merge_maintainer=selected,merge_maintainers=(selected,))
+    completed=datetime.now(UTC)-timedelta(seconds=3)
+    if case not in {"missing","empty-known"}:
+        ledger.record_ci_receipt(targeted_receipt(plan,completed=completed-timedelta(days=1) if case=="stale" else completed))
+    if case=="latest-failed":ledger.record_ci_receipt(targeted_receipt(plan,completed=completed+timedelta(seconds=1),status="failed"))
+    github=CanonicalFakeGitHub([open_state(),open_state(),replace(open_state(),state="CLOSED",merged=True,merge_commit_oid=MERGE_SHA)])
+    gate=RequiredCIGate(71,17,BASE_SHA,HEAD_SHA,completed,".github/workflows/ci.yaml", (("Checks",82,("Run checks",)),))
+    github.get_required_ci_gate=lambda *a: None if case=="missing-actions" else gate
+    scope=ExactChangeScope("acme/widgets",17,BASE_SHA,HEAD_SHA,plan.changed_files)
+    github.get_exact_change_scope=lambda *a: replace(scope,changed_files=(("other.py","modified",None),)) if case=="unknown" else scope
+    payload=_run_merge_scan(plugin,ledger,github=github,kanban=RecordingKanban())
+    assert bool(payload["merged"]) == (case in {"valid","empty-known"})
+    assert len(github.merge_calls) == (1 if case in {"valid","empty-known"} else 0)
+    if case=="valid":assert ledger.completed_merge_receipt("acme/widgets",17).supplementary_receipt_id == ledger.latest_ci_receipt("acme/widgets",17,HEAD_SHA,manifest_digest=plan.digest,not_before=completed).receipt_id
+    # No old manifest/full replay receipt was manufactured.
+    assert ledger.latest_ci_receipt("acme/widgets",17,HEAD_SHA,manifest_digest=hashlib.sha256(manifest.read_bytes()).hexdigest(),not_before=completed) is None
     ledger.close()

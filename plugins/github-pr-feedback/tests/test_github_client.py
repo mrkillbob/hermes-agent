@@ -1179,6 +1179,131 @@ def test_github_client_accepts_green_check_runs_with_neutral_empty_legacy_status
     assert runner.calls == [permissions_argv, checks_argv, statuses_argv]
 
 
+def test_github_client_reads_every_page_before_accepting_green_checks() -> None:
+    head = "a" * 40
+    permissions = ("gh", "api", "repos/acme/widgets/actions/permissions")
+    checks = f"repos/acme/widgets/commits/{head}/check-runs?per_page=100"
+    statuses = ("gh", "api", f"repos/acme/widgets/commits/{head}/status?per_page=100")
+    success = {"status": "completed", "conclusion": "success"}
+    runner = RecordingRunner({
+        permissions: {"enabled": True},
+        ("gh", "api", checks): {"total_count": 101, "check_runs": [success] * 100},
+        ("gh", "api", checks + "&page=2"): {
+            "total_count": 101, "check_runs": [success],
+        },
+        statuses: {"state": "pending", "statuses": []},
+    })
+
+    state = GitHubClient(runner).get_check_state("acme/widgets", head)
+
+    assert state == CheckState(actions_enabled=True, all_green=True, check_count=101)
+    assert ("gh", "api", checks + "&page=2") in runner.calls
+
+
+def test_required_actions_gate_binds_the_exact_pr_head_and_base() -> None:
+    head, base = "a" * 40, "b" * 40
+    path = f"repos/acme/widgets/commits/{head}/check-runs?check_name=Native%20coverage&per_page=100"
+    gate = {
+        "id": 71,
+        "name": "Native coverage",
+        "head_sha": head,
+        "details_url": "https://github.com/acme/widgets/actions/runs/91/job/82",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-08-25T11:55:00Z",
+        "app": {"slug": "github-actions"},
+        "pull_requests": [{
+            "number": 17,
+            "base": {"sha": base},
+            "head": {"sha": head},
+        }],
+    }
+    workflow = {
+        "id": 91, "run_attempt": 1,
+        "path": ".github/workflows/ci.yml",
+        "event": "pull_request",
+        "head_sha": head,
+        "status": "completed",
+        "conclusion": "success",
+        "run_started_at": "2026-08-25T11:50:00Z",
+        "pull_requests": gate["pull_requests"],
+    }
+    job = {"id": 82, "name": "Native coverage", "status": "completed",
+           "conclusion": "success", "head_sha": head,
+           "steps": [{"name": "Run full suite", "status": "completed", "conclusion": "success"}]}
+    job["check_run_url"] = "https://api.github.com/repos/acme/widgets/check-runs/71"
+    aggregate_job = {"id": 81, "name": "Other job"}
+    def read(candidate: dict[str, object], run: dict[str, object] = workflow,
+             coverage=job, aggregate=aggregate_job, extra_jobs=(), workflow_runs=None, listing_count=None):
+        jobs = [aggregate, coverage, *extra_jobs]
+        endpoint = "repos/acme/widgets/actions/runs/91/jobs?filter=latest&per_page=100"
+        pages = {( "gh", "api", endpoint + (f"&page={page}" if page > 1 else "")):
+                 {"total_count": len(jobs), "jobs": jobs[(page-1)*100:page*100]}
+                 for page in range(1, (len(jobs)+99)//100+1)}
+        listed = [run] if workflow_runs is None else workflow_runs
+        listing_endpoint = f"repos/acme/widgets/actions/workflows/ci.yml/runs?event=pull_request&head_sha={head}&per_page=100"
+        listings = {( "gh", "api", listing_endpoint + (f"&page={page}" if page > 1 else "")):
+                    {"total_count": len(listed) if listing_count is None else listing_count,
+                     "workflow_runs": listed[(page-1)*100:page*100]}
+                    for page in range(1, max(1, (len(listed)+99)//100)+1)}
+        runner = RecordingRunner({
+            **listings,
+            ("gh", "api", path): {"total_count": len(candidate) if isinstance(candidate, list) else 1,
+                                   "check_runs": candidate if isinstance(candidate, list) else [candidate]},
+            ("gh", "api", "repos/acme/widgets/actions/runs/91"): run,
+            **pages,
+        })
+        return GitHubClient(runner).get_required_ci_gate(
+            "acme/widgets", 17, base, head, ".github/workflows/ci.yml", (("Native coverage", ("Run full suite",)),),
+        )
+
+    accepted = read(gate)
+    assert accepted is not None
+    assert accepted.check_run_id == 71
+    # A newer workflow without an anchor must supersede the old green check.
+    for status, conclusion in (("queued", None), ("completed", "failure")):
+        assert read(gate, workflow_runs=[workflow, {**workflow, "id": 92,
+                    "status": status, "conclusion": conclusion}]) is None
+    assert read(gate, workflow_runs=[workflow, {**workflow, "id": 92}]) is None
+    assert read(gate, workflow_runs=[]) is None
+    with pytest.raises(GitHubClientError, match="discovery"):
+        read(gate, listing_count=1000)
+    with pytest.raises(GitHubClientError, match="discovery"):
+        read(gate, listing_count=2)
+    with pytest.raises(GitHubClientError, match="duplicate"):
+        read(gate, workflow_runs=[workflow, workflow])
+    with pytest.raises(GitHubClientError, match="PR identity"):
+        read(gate, workflow_runs=[workflow, {**workflow, "id": 92, "pull_requests": []}])
+    # Explicitly different PR/base cuts do not supply or supersede this cut.
+    unrelated = [{**workflow, "id": 92 + index, "pull_requests": [
+                 {"number": 18, "base": {"sha": base}, "head": {"sha": head}}]}
+                 for index in range(100)]
+    assert read(gate, workflow_runs=[*unrelated, workflow]) == accepted
+    # A rerun attempt must not borrow the prior attempt's old green anchor.
+    assert read(gate, {**workflow, "run_attempt": 2, "run_started_at": "2026-08-25T11:56:00Z"}) is None
+    assert read(gate, extra_jobs=[{"name": f"Other {index}", "id": index + 100}
+                                 for index in range(99)]) == accepted
+    assert accepted.jobs == (("Native coverage", 82, ("Run full suite",)),)
+    for conclusion in ("skipped", "neutral", "failure", "cancelled", None):
+        assert read(gate, coverage={**job, "conclusion": conclusion}) is None
+    assert read(gate, coverage={**job, "steps": []}) is None
+    assert read(gate, coverage={**job, "steps": [
+        {"name": "Checkout", "status": "completed", "conclusion": "success"},
+        {"name": "Run full suite", "status": "completed", "conclusion": "skipped"},
+    ]}) is None
+    assert read(gate, coverage={**job, "head_sha": "c" * 40}) is None
+    assert read(gate, coverage={**job, "check_run_url": "wrong"}) is None
+    assert read(gate, {**workflow, "event": "workflow_dispatch"}) is None
+    assert read(gate, {**workflow, "head_sha": "c" * 40}) is None
+    assert read([gate, {**gate, "id": 72, "status": "queued", "conclusion": None}]) is None
+    assert read({**gate, "conclusion": "failure"}) is None
+    assert read({**gate, "app": {"slug": "other-app"}}) is None
+    assert read(gate, {**workflow, "path": ".github/workflows/other.yml"}) is None
+    assert read({**gate, "pull_requests": [{
+        "number": 17, "base": {"sha": "c" * 40}, "head": {"sha": head},
+    }]}) is None
+
+
 def test_github_client_does_not_treat_missing_check_evidence_as_green() -> None:
     permissions_argv = ("gh", "api", "repos/acme/widgets/actions/permissions")
     checks_argv = (
@@ -1644,3 +1769,63 @@ def test_actionable_feedback_requires_complete_exact_head_resolution(failure) ->
         assert [(item.kind, item.feedback_id) for item in actual] == [
             ("review_comment", "2"), ("issue_comment", "4")]
         assert len(runner.calls) == 4
+
+
+def test_readme_scope_requires_complete_exact_cut_and_regular_modified_file() -> None:
+    base, head = "b" * 40, "a" * 40
+    base_blob, head_blob = "d" * 40, "e" * 40
+    comparison = {"status": "ahead", "behind_by": 0, "ahead_by": 1, "total_commits": 1,
+                  "base_commit": {"sha": base}, "merge_base_commit": {"sha": base},
+                  "commits": [{"sha": head}],
+                  "files": [{"filename": "README.md", "status": "modified", "sha": head_blob}]}
+    def tree(blob):
+        return {"truncated": False, "tree": [{"path": "README.md", "type": "blob", "mode": "100644", "sha": blob}]}
+    def read(compare=comparison, before=None, after=None):
+        runner = RecordingRunner({
+            ("gh", "api", f"repos/acme/widgets/compare/{base}...{head}?per_page=100"): compare,
+            ("gh", "api", f"repos/acme/widgets/git/trees/{base}"): tree(base_blob) if before is None else before,
+            ("gh", "api", f"repos/acme/widgets/git/trees/{head}"): tree(head_blob) if after is None else after,
+        })
+        return GitHubClient(runner).get_readme_only_scope("acme/widgets", 17, base, head)
+    accepted = read()
+    assert accepted is not None
+    assert (accepted.repository, accepted.pr_number, accepted.base_sha, accepted.head_sha,
+            accepted.base_blob_sha, accepted.head_blob_sha) == ("acme/widgets", 17, base, head, base_blob, head_blob)
+    for files in ([{**comparison["files"][0], "filename": "web/package.json"}],
+                  [*comparison["files"], {"filename": "src.py", "status": "modified"}],
+                  [{**comparison["files"][0], "status": "renamed", "previous_filename": "old.md"}],
+                  [{**comparison["files"][0], "status": "added"}],
+                  [{**comparison["files"][0], "sha": "f" * 40}]):
+        assert read({**comparison, "files": files}) is None
+    for key, value in (("status", "diverged"), ("base_commit", {"sha": head}),
+                       ("merge_base_commit", {"sha": head}), ("commits", [{"sha": base}])):
+        assert read({**comparison, key: value}) is None
+    for mode in ("100755", "120000", "160000"):
+        assert read(after={"truncated": False, "tree": [
+            {"path": "README.md", "type": "blob", "mode": mode, "sha": head_blob}]}) is None
+    assert read(after=tree(base_blob)) is None
+    for compare in ({**comparison, "files": []}, {**comparison, "total_commits": 100},
+                    {**comparison, "files": comparison["files"] * 300},
+                    {**comparison, "total_commits": 2}):
+        with pytest.raises(GitHubClientError, match="incomplete"):
+            read(compare)
+    with pytest.raises(GitHubClientError, match="provenance"):
+        read(after={"truncated": True, "tree": []})
+
+
+def test_canonical_code_scope_records_all_changed_paths_and_rename_provenance():
+    base,head="b"*40,"a"*40
+    endpoint=("gh","api",f"repos/acme/widgets/compare/{base}...{head}?per_page=100")
+    payload={"status":"ahead","ahead_by":1,"behind_by":0,"total_commits":1,
+             "base_commit":{"sha":base},"merge_base_commit":{"sha":base},"commits":[{"sha":head}],
+             "files":[{"filename":"web/new.ts","status":"renamed","previous_filename":"web/old.ts"},
+                      {"filename":"src/new.py","status":"added"}]}
+    client=lambda p: GitHubClient(RecordingRunner({endpoint:p})).get_exact_change_scope("acme/widgets",17,base,head)
+    proof=client(payload)
+    assert proof.changed_files == (("src/new.py","added",None),("web/new.ts","renamed","web/old.ts"))
+    for bad in ({**payload,"files":[]},{**payload,"total_commits":100},
+                {**payload,"files":payload["files"]*150},
+                {**payload,"merge_base_commit":{"sha":head}},
+                {**payload,"files":[{"filename":"../outside","status":"modified"}]},
+                {**payload,"files":[{"filename":"new","status":"renamed"}]}):
+        with pytest.raises(GitHubClientError):client(bad)

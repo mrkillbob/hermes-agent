@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
 import os
@@ -480,6 +481,46 @@ class CheckState:
     # steward must not spend a repair attempt on it and the merge maintainer
     # must never treat it as a transient red check to wait out.
     action_required: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ExactChangeScope:
+    repository: str
+    pr_number: int
+    base_sha: str
+    head_sha: str
+    changed_files: tuple[tuple[str, str, str | None], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReadmeOnlyScope:
+    """Canonical exact-cut proof of a root README-only regular-file change."""
+
+    repository: str
+    pr_number: int
+    base_sha: str
+    head_sha: str
+    base_blob_sha: str
+    head_blob_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class RequiredCIGate:
+    check_run_id: int
+    pr_number: int
+    base_sha: str
+    head_sha: str
+    completed_at: datetime
+    workflow_path: str
+    jobs: tuple[tuple[str, int, tuple[str, ...]], ...]
+
+    @property
+    def evidence_id(self) -> str:
+        # An Actions evidence identity, never a fabricated local command receipt.
+        return "github-actions:" + hashlib.sha256(json.dumps([
+            self.check_run_id, self.pr_number, self.base_sha, self.head_sha,
+            self.completed_at.isoformat(), self.workflow_path, self.jobs,
+        ], separators=(",", ":")).encode()).hexdigest()
 
 
 class GitHubClient:
@@ -1245,13 +1286,27 @@ class GitHubClient:
             if (
                 not isinstance(total_count, int)
                 or isinstance(total_count, bool)
+                or total_count > 500
                 or not isinstance(check_runs, list)
-                or total_count != len(check_runs)
-                or total_count >= 100
+                or len(check_runs) != min(total_count, 100)
                 or not isinstance(statuses, list)
                 or len(statuses) >= 100
                 or status_state not in {"success", "failure", "pending", "error"}
             ):
+                raise TypeError("check coverage is incomplete")
+            for page in range(2, (total_count + 99) // 100 + 1):
+                next_page = self._read_object(
+                    f"repos/{repository}/commits/{head_sha}/check-runs?per_page=100&page={page}"
+                )
+                next_runs = next_page["check_runs"]
+                if (
+                    next_page["total_count"] != total_count
+                    or not isinstance(next_runs, list)
+                    or len(next_runs) != min(100, total_count - len(check_runs))
+                ):
+                    raise TypeError("check coverage changed during pagination")
+                check_runs.extend(next_runs)
+            if len(check_runs) != total_count:
                 raise TypeError("check coverage is incomplete")
             check_green = all(
                 isinstance(run, dict)
@@ -1278,6 +1333,300 @@ class GitHubClient:
             billing_blocked=billing_blocked,
             action_required=action_required,
         )
+
+    def get_exact_change_scope(self, repository, pr_number, base_sha, head_sha):
+        """An immutable, bounded file set for reviewed per-cut applicability."""
+        from .supplementary_ci import _path
+        repository, pr_number = _validated_repository(repository), _positive_number(pr_number)
+        base_sha, head_sha = _validated_sha(base_sha), _validated_sha(head_sha)
+        payload = self._read_object(f"repos/{repository}/compare/{base_sha}...{head_sha}?per_page=100")
+        count, commits, files = payload.get("total_commits"), payload.get("commits"), payload.get("files")
+        if (not isinstance(count, int) or isinstance(count, bool) or not 1 <= count < 100
+                or not isinstance(commits, list) or len(commits) != count
+                or any(not isinstance(c, dict) for c in commits)
+                or not isinstance(files, list) or not 0 < len(files) < 300):
+            raise GitHubClientError("Exact changed-file applicability was incomplete")
+        if (not isinstance(payload.get("base_commit"), dict)
+                or not isinstance(payload.get("merge_base_commit"), dict)
+                or type(payload.get("ahead_by")) is not int or type(payload.get("behind_by")) is not int
+                or payload.get("status") != "ahead" or payload.get("ahead_by") != count
+                or payload.get("behind_by") != 0
+                or payload.get("base_commit", {}).get("sha") != base_sha
+                or payload.get("merge_base_commit", {}).get("sha") != base_sha
+                or commits[-1].get("sha") != head_sha):
+            raise GitHubClientError("Exact changed-file identity was unavailable")
+        result = []
+        try:
+            for row in files:
+                if not isinstance(row, dict):
+                    raise ValueError("invalid changed-file entry")
+                name, status, previous = _path(row.get("filename")), row.get("status"), row.get("previous_filename")
+                if status not in {"added", "modified", "removed", "renamed"} or (status == "renamed") != (previous is not None):
+                    raise ValueError("invalid changed-file rename/status")
+                result.append((name, status, _path(previous) if previous is not None else None))
+            if len({row[0] for row in result}) != len(result):
+                raise ValueError("duplicate changed-file entry")
+        except (TypeError, ValueError) as error:
+            raise GitHubClientError("Exact changed-file applicability was malformed") from error
+        return ExactChangeScope(repository, pr_number, base_sha, head_sha, tuple(sorted(result)))
+
+    def get_readme_only_scope(
+        self, repository: str, pr_number: int, base_sha: str, head_sha: str,
+    ) -> ReadmeOnlyScope | None:
+        """Bounded immutable comparison; unknown/mixed/renamed/mode changes block."""
+        repository = _validated_repository(repository)
+        pr_number = _positive_number(pr_number)
+        base_sha, head_sha = _validated_sha(base_sha), _validated_sha(head_sha)
+        comparison = self._read_object(
+            f"repos/{repository}/compare/{base_sha}...{head_sha}?per_page=100"
+        )
+        files, commits = comparison.get("files"), comparison.get("commits")
+        count = comparison.get("total_commits")
+        if (not isinstance(count, int) or isinstance(count, bool) or not 1 <= count < 100
+                or not isinstance(commits, list) or len(commits) != count
+                or not isinstance(files, list) or not 0 < len(files) < 300):
+            raise GitHubClientError("Actions-only change scope was incomplete")
+        if (comparison.get("status") != "ahead" or comparison.get("behind_by") != 0
+                or comparison.get("ahead_by") != count
+                or not isinstance(comparison.get("base_commit"), dict)
+                or comparison["base_commit"].get("sha") != base_sha
+                or not isinstance(comparison.get("merge_base_commit"), dict)
+                or comparison["merge_base_commit"].get("sha") != base_sha
+                or not isinstance(commits[-1], dict) or commits[-1].get("sha") != head_sha):
+            return None
+        if (len(files) != 1 or not isinstance(files[0], dict)
+                or files[0].get("filename") != "README.md"
+                or files[0].get("status") != "modified"
+                or files[0].get("previous_filename") is not None):
+            return None
+        blobs = []
+        for sha in (base_sha, head_sha):
+            tree = self._read_object(f"repos/{repository}/git/trees/{sha}")
+            entries = tree.get("tree")
+            if tree.get("truncated") is not False or not isinstance(entries, list):
+                raise GitHubClientError("Actions-only file provenance was incomplete")
+            matches = [entry for entry in entries if isinstance(entry, dict)
+                       and entry.get("path") == "README.md"]
+            if (len(matches) != 1 or matches[0].get("type") != "blob"
+                    or matches[0].get("mode") != "100644"):
+                return None
+            try:
+                blobs.append(_validated_sha(matches[0]["sha"]))
+            except (KeyError, TypeError, ValueError) as error:
+                raise GitHubClientError("Actions-only file identity was unavailable") from error
+        if files[0].get("sha") != blobs[1] or blobs[0] == blobs[1]:
+            return None
+        return ReadmeOnlyScope(repository, pr_number, base_sha, head_sha, *blobs)
+
+    def get_required_ci_gate(
+        self, repository: str, pr_number: int, base_sha: str, head_sha: str,
+        workflow_path: str, required_jobs: tuple[tuple[str, tuple[str, ...]], ...],
+    ) -> RequiredCIGate | None:
+        """Read the latest GitHub Actions quality gate for this exact PR cut."""
+        repository = _validated_repository(repository)
+        base_sha = _validated_sha(base_sha)
+        head_sha = _validated_sha(head_sha)
+        if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number < 1:
+            raise ValueError("PR number must be a positive integer")
+        if not re.fullmatch(r"\.github/workflows/[A-Za-z0-9_-]+\.ya?ml", workflow_path):
+            raise ValueError("Required CI workflow path is invalid")
+        if not required_jobs or any(not steps for _, steps in required_jobs):
+            raise ValueError("Required CI coverage jobs and workload steps must be explicit")
+        # An aggregate check may not exist yet in a newer workflow run. Discover
+        # runs independently before considering any prior successful anchor.
+        run_endpoint = (
+            f"repos/{repository}/actions/workflows/{quote(workflow_path.rsplit('/', 1)[1], safe='')}/runs?"
+            f"event=pull_request&head_sha={head_sha}&per_page=100"
+        )
+        listing = self._read_object(run_endpoint)
+        run_count, workflows = listing.get("total_count"), listing.get("workflow_runs")
+        if (not isinstance(run_count, int) or isinstance(run_count, bool)
+                or not 0 <= run_count < 1000 or not isinstance(workflows, list)
+                or len(workflows) != min(run_count, 100)):
+            raise GitHubClientError("Required CI workflow discovery was unavailable")
+        for page in range(2, (run_count + 99) // 100 + 1):
+            listing = self._read_object(f"{run_endpoint}&page={page}")
+            rows = listing.get("workflow_runs")
+            if (listing.get("total_count") != run_count or not isinstance(rows, list)
+                    or len(rows) != min(100, run_count - len(workflows))):
+                raise GitHubClientError("Required CI workflow discovery changed during pagination")
+            workflows.extend(rows)
+        matching_workflows = []
+        for workflow in workflows:
+            if not isinstance(workflow, dict):
+                raise GitHubClientError("Required CI workflow discovery was malformed")
+            if (workflow.get("path") != workflow_path
+                    or workflow.get("event") != "pull_request"
+                    or workflow.get("head_sha") != head_sha):
+                continue
+            prs = workflow.get("pull_requests")
+            if not isinstance(prs, list) or not prs:
+                raise GitHubClientError("Required CI workflow PR identity was unavailable")
+            if not any(isinstance(pr, dict) and pr.get("number") == pr_number
+                       and isinstance(pr.get("base"), dict) and pr["base"].get("sha") == base_sha
+                       and isinstance(pr.get("head"), dict) and pr["head"].get("sha") == head_sha
+                       for pr in prs):
+                continue
+            if any(not isinstance(workflow.get(key), int) or isinstance(workflow[key], bool)
+                   or workflow[key] < 1 for key in ("id", "run_attempt")):
+                raise GitHubClientError("Required CI workflow identity was unavailable")
+            matching_workflows.append(workflow)
+        if not matching_workflows:
+            return None
+        if len({run["id"] for run in matching_workflows}) != len(matching_workflows):
+            raise GitHubClientError("Required CI workflow discovery contained duplicate runs")
+        selected_workflow = max(matching_workflows, key=lambda run: run["id"])
+        if (selected_workflow.get("status") != "completed"
+                or selected_workflow.get("conclusion") != "success"):
+            return None
+        check_name = required_jobs[0][0]
+        payload = self._read_object(
+            f"repos/{repository}/commits/{head_sha}/check-runs?"
+            f"check_name={quote(check_name, safe='')}&per_page=100"
+        )
+        count, runs = payload.get("total_count"), payload.get("check_runs")
+        if (
+            not isinstance(count, int) or isinstance(count, bool)
+            or count >= 100 or not isinstance(runs, list) or len(runs) != count
+        ):
+            raise GitHubClientError("Required CI gate coverage was unavailable")
+        matching = []
+        for run in runs:
+            if not isinstance(run, dict):
+                raise GitHubClientError("Required CI gate was malformed")
+            if (
+                run.get("name") != check_name
+                or run.get("head_sha") != head_sha
+                or not isinstance(run.get("app"), dict)
+                or run["app"].get("slug") != "github-actions"
+            ):
+                continue
+            prs = run.get("pull_requests")
+            if not isinstance(prs, list):
+                raise GitHubClientError("Required CI gate PR identity was unavailable")
+            if not any(
+                isinstance(pr, dict)
+                and pr.get("number") == pr_number
+                and isinstance(pr.get("base"), dict)
+                and pr["base"].get("sha") == base_sha
+                and isinstance(pr.get("head"), dict)
+                and pr["head"].get("sha") == head_sha
+                for pr in prs
+            ):
+                continue
+            run_id = run.get("id")
+            if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1:
+                raise GitHubClientError("Required CI gate ID was unavailable")
+            matching.append(run)
+        if not matching:
+            return None
+        latest = max(matching, key=lambda run: run["id"])
+        if latest.get("status") != "completed" or latest.get("conclusion") != "success":
+            return None
+        try:
+            completed_at = datetime.fromisoformat(latest["completed_at"].replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError, KeyError) as error:
+            raise GitHubClientError("Required CI gate completion was unavailable") from error
+        if completed_at.tzinfo is None:
+            raise GitHubClientError("Required CI gate completion lacked a timezone")
+        details_url = latest.get("details_url")
+        details = re.fullmatch(
+            rf"https://github\.com/{re.escape(repository)}/actions/runs/([1-9][0-9]*)/job/([1-9][0-9]*)",
+            details_url if isinstance(details_url, str) else "",
+        )
+        if details is None:
+            raise GitHubClientError("Required CI gate run identity was unavailable")
+        if int(details.group(1)) != selected_workflow["id"]:
+            return None
+        workflow_endpoint = f"repos/{repository}/actions/runs/{selected_workflow['id']}"
+        workflow = self._read_object(workflow_endpoint)
+        if (workflow.get("id") != selected_workflow["id"]
+                or workflow.get("run_attempt") != selected_workflow["run_attempt"]):
+            return None
+        workflow_prs = workflow.get("pull_requests")
+        if (
+            workflow.get("path") != workflow_path
+            or workflow.get("event") != "pull_request"
+            or workflow.get("head_sha") != head_sha
+            or workflow.get("status") != "completed"
+            or workflow.get("conclusion") != "success"
+            or not isinstance(workflow_prs, list)
+            or not any(
+                isinstance(pr, dict)
+                and pr.get("number") == pr_number
+                and isinstance(pr.get("base"), dict)
+                and pr["base"].get("sha") == base_sha
+                and isinstance(pr.get("head"), dict)
+                and pr["head"].get("sha") == head_sha
+                for pr in workflow_prs
+            )
+        ):
+            return None
+        try:
+            started_at = datetime.fromisoformat(
+                workflow["run_started_at"].replace("Z", "+00:00")
+            )
+        except (AttributeError, TypeError, ValueError, KeyError) as error:
+            raise GitHubClientError("Required CI run start was unavailable") from error
+        if started_at.tzinfo is None or completed_at < started_at:
+            return None
+        # Request the latest attempt only. A green aggregate can permit skipped
+        # dependencies; the reviewed equivalent-coverage jobs must actually run.
+        endpoint = f"repos/{repository}/actions/runs/{details.group(1)}/jobs?filter=latest&per_page=100"
+        payload = self._read_object(endpoint)
+        count, jobs = payload.get("total_count"), payload.get("jobs")
+        if (not isinstance(count, int) or isinstance(count, bool) or not 0 <= count <= 1000
+                or not isinstance(jobs, list) or len(jobs) != min(count, 100)):
+            raise GitHubClientError("Required CI job coverage was unavailable")
+        for page in range(2, (count + 99) // 100 + 1):
+            payload = self._read_object(f"{endpoint}&page={page}")
+            next_jobs = payload.get("jobs")
+            if (payload.get("total_count") != count or not isinstance(next_jobs, list)
+                    or len(next_jobs) != min(100, count - len(jobs))):
+                raise GitHubClientError("Required CI job coverage changed during pagination")
+            jobs.extend(next_jobs)
+        if any(not isinstance(job, dict) for job in jobs):
+            raise GitHubClientError("Required CI job coverage was malformed")
+        aggregate_jobs = [job for job in jobs if str(job.get("id")) == details.group(2)]
+        if (len(aggregate_jobs) != 1 or aggregate_jobs[0].get("name") != check_name
+                or aggregate_jobs[0].get("check_run_url") !=
+                f"https://api.github.com/repos/{repository}/check-runs/{latest['id']}"):
+            return None
+        evidence = []
+        for name, required_steps in required_jobs:
+            matches = [job for job in jobs if job.get("name") == name]
+            if len(matches) != 1:
+                return None
+            job = matches[0]
+            steps = job.get("steps")
+            if (job.get("status") != "completed" or job.get("conclusion") != "success"
+                    or job.get("head_sha") != head_sha
+                    or not isinstance(job.get("id"), int) or isinstance(job["id"], bool)
+                    or job["id"] < 1 or not isinstance(steps, list) or not steps
+                    or not any(isinstance(step, dict) and step.get("status") == "completed"
+                               and step.get("conclusion") == "success" for step in steps)):
+                return None
+            for required_step in required_steps:
+                matches = [step for step in steps if isinstance(step, dict)
+                           and step.get("name") == required_step]
+                if (len(matches) != 1 or matches[0].get("status") != "completed"
+                        or matches[0].get("conclusion") != "success"):
+                    return None
+            evidence.append((name, job["id"], required_steps))
+        # Refuse an attempt that changed while its jobs were being inspected.
+        confirmed = self._read_object(workflow_endpoint)
+        identity_fields = ("id", "run_attempt", "path", "event", "head_sha", "status",
+                           "conclusion", "run_started_at", "pull_requests")
+        if any(confirmed.get(key) != workflow.get(key) for key in identity_fields):
+            return None
+        confirmed_listing = self._read_object(run_endpoint)
+        confirmed_runs = confirmed_listing.get("workflow_runs")
+        if (confirmed_listing.get("total_count") != run_count
+                or not isinstance(confirmed_runs, list)
+                or confirmed_runs != workflows[:100]):
+            return None
+        return RequiredCIGate(latest["id"], pr_number, base_sha, head_sha, completed_at,
+                              workflow_path, tuple(evidence))
 
     def _billing_blocked(
         self, repository: str, check_runs: list[dict[str, Any]]

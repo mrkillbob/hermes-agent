@@ -25,6 +25,9 @@ from .github_client import (
     GitHubClient,
     GitHubClientError,
     PullRequestMergeState,
+    RequiredCIGate,
+    ReadmeOnlyScope,
+    ExactChangeScope,
     RepositoryMergePolicy,
     ReviewState,
 )
@@ -48,6 +51,11 @@ class MergeSnapshot:
     intent_review_pending: bool = False
     codex_review_pending: bool = False
     actions_disabled_local_ci: ActionsDisabledLocalCIEvidence | None = None
+    hosted_ci_gate: RequiredCIGate | None = None
+    readme_only_scope: ReadmeOnlyScope | None = None
+    change_scope: ExactChangeScope | None = None
+    supplementary_receipt: CIAuditReceipt | None = None
+    coverage_plan_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +80,7 @@ class MergeReceipt:
     merge_commit_oid: str
     merged_at: datetime
     executor: str
+    supplementary_receipt_id: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -86,6 +95,7 @@ class MergeReceipt:
             "merge_commit_oid": self.merge_commit_oid,
             "merged_at": self.merged_at.isoformat(),
             "executor": self.executor,
+            "supplementary_receipt_id": self.supplementary_receipt_id,
         }
 
     @classmethod
@@ -102,6 +112,7 @@ class MergeReceipt:
             merge_commit_oid=str(payload["merge_commit_oid"]),
             merged_at=datetime.fromisoformat(str(payload["merged_at"])),
             executor=str(payload["executor"]),
+            supplementary_receipt_id=payload.get("supplementary_receipt_id"),
         )
 
 
@@ -306,6 +317,36 @@ def _allowed_merge_method(
     )
 
 
+def _combined_blockers(policy, snapshot, now):
+    from .supplementary_ci import SupplementaryPlan, supplementary_blockers
+    plan, pull = policy.supplementary_plan, snapshot.pull_request
+    if (not isinstance(plan, SupplementaryPlan)
+            or (plan.repository, plan.pr_number, plan.base_sha, plan.head_sha) !=
+               (policy.repository, pull.number, pull.base_sha, pull.head_sha)
+            or plan.actions_jobs != policy.required_workflow_jobs
+            or snapshot.coverage_plan_digest != plan.digest
+            or not isinstance(snapshot.change_scope, ExactChangeScope)
+            or not plan.matches(snapshot.change_scope)):
+        return ("coverage_applicability_unknown",)
+    return supplementary_blockers(plan, snapshot.supplementary_receipt, now=now,
+                                   max_age_seconds=policy.receipt_max_age_seconds)
+
+
+def _actions_scope_valid(policy: MergeMaintainerPolicy, snapshot: MergeSnapshot, *, now: datetime) -> bool:
+    if policy.supplementary_plan is not None:
+        return not _combined_blockers(policy, snapshot, now)
+    scope, pull = snapshot.readme_only_scope, snapshot.pull_request
+    return bool(
+        isinstance(scope, ReadmeOnlyScope)
+        and policy.actions_readme_only_base_sha == pull.base_sha
+        and scope.repository == policy.repository and scope.pr_number == pull.number
+        and scope.base_sha == pull.base_sha and scope.head_sha == pull.head_sha
+        and re.fullmatch(r"[0-9a-f]{40}", scope.base_blob_sha)
+        and re.fullmatch(r"[0-9a-f]{40}", scope.head_blob_sha)
+        and scope.base_blob_sha != scope.head_blob_sha
+    )
+
+
 def evaluate_merge(
     policy: MergeMaintainerPolicy, snapshot: MergeSnapshot, *, now: datetime
 ) -> MergeDecision:
@@ -337,7 +378,26 @@ def evaluate_merge(
         blockers.append("pull_request_conflicted")
     if pull.merge_state_status != "CLEAN":
         blockers.append("merge_state_not_clean")
-    if receipt is None:
+    if policy.required_workflow_path is not None:
+        if policy.supplementary_plan is not None:
+            blockers.extend(_combined_blockers(policy, snapshot, now))
+        elif not _actions_scope_valid(policy, snapshot, now=now):
+            blockers.append("actions_coverage_scope_unproven")
+        gate = snapshot.hosted_ci_gate
+        if gate is None:
+            blockers.append("ci_receipt_missing")
+        elif (
+            not policy.required_workflow_jobs
+            or gate.workflow_path != policy.required_workflow_path
+            or tuple((name, steps) for name, _, steps in gate.jobs) != policy.required_workflow_jobs
+            or gate.pr_number != pull.number or gate.base_sha != pull.base_sha
+            or gate.head_sha != pull.head_sha
+        ):
+            blockers.append("ci_identity_mismatch")
+        elif (gate.completed_at.tzinfo is None or gate.completed_at > now
+              or gate.completed_at < now - timedelta(seconds=policy.receipt_max_age_seconds)):
+            blockers.append("ci_receipt_stale")
+    elif receipt is None:
         blockers.append("ci_receipt_missing")
     else:
         if receipt.status != "passed":
@@ -430,6 +490,11 @@ def evaluate_merge(
         "checks_all_green": snapshot.check_state.all_green,
         "checks_action_required": snapshot.check_state.action_required,
         "checks_billing_blocked": snapshot.check_state.billing_blocked,
+        "actions_readme_only_scope_verified": _actions_scope_valid(policy, snapshot, now=now),
+        "actions_readme_only_reviewed_base": policy.actions_readme_only_base_sha,
+        "coverage_plan_digest": snapshot.coverage_plan_digest,
+        "supplementary_receipt_id": snapshot.supplementary_receipt.receipt_id if snapshot.supplementary_receipt else None,
+        "hosted_ci_evidence_id": snapshot.hosted_ci_gate.evidence_id if snapshot.hosted_ci_gate else None,
         "ci_receipt_id": receipt.receipt_id if receipt is not None else None,
         "ci_receipt_status": receipt.status if receipt is not None else None,
         "ci_manifest_digest": receipt.manifest_digest if receipt is not None else None,
@@ -627,12 +692,15 @@ class MergeController:
             author_login=second_snapshot.pull_request.author_login,
             base_branch=second_snapshot.pull_request.base_branch,
             tested_head_sha=second_snapshot.pull_request.head_sha,
-            ci_receipt_id=second_snapshot.ci_receipt.receipt_id,
+            ci_receipt_id=(second_snapshot.hosted_ci_gate.evidence_id
+                           if self._policy.required_workflow_path is not None
+                           else second_snapshot.ci_receipt.receipt_id),
             snapshot_digest=second.snapshot_digest,
             method=second.method,
             merge_commit_oid=readback.merge_commit_oid,
             merged_at=_aware_utc(self._now()),
             executor=self._owner,
+            supplementary_receipt_id=(second_snapshot.supplementary_receipt.receipt_id if second_snapshot.supplementary_receipt else None),
         )
         self._ledger.finish_merge_lease(
             lease,
@@ -650,6 +718,19 @@ class MergeController:
 
         pull = snapshot.pull_request
         ci_receipt = snapshot.ci_receipt
+        gate = snapshot.hosted_ci_gate
+        actions_valid = (
+            self._policy.required_workflow_path is not None and gate is not None
+            and _actions_scope_valid(self._policy, snapshot, now=self._now())
+            and bool(self._policy.required_workflow_jobs)
+            and gate.workflow_path == self._policy.required_workflow_path
+            and tuple((name, steps) for name, _, steps in gate.jobs) == self._policy.required_workflow_jobs
+            and gate.pr_number == lease.pr_number and gate.head_sha == lease.head_sha
+            and gate.base_sha == pull.base_sha and gate.completed_at.tzinfo is not None
+            and self._now() - timedelta(seconds=self._policy.receipt_max_age_seconds) <= gate.completed_at <= self._now()
+            and snapshot.check_state.actions_enabled and snapshot.check_state.all_green
+            and not snapshot.check_state.billing_blocked and not snapshot.check_state.action_required
+        )
         method = _allowed_merge_method(self._policy, snapshot.repository_merge_policy)
         if (
             not snapshot.repository_private
@@ -664,13 +745,16 @@ class MergeController:
             or pull.head_repository != self._policy.repository
             or pull.base_branch != self._policy.base_branch
             or method is None
-            or not isinstance(ci_receipt, CIAuditReceipt)
-            or ci_receipt.status != "passed"
-            or ci_receipt.identity.repository != lease.repository
-            or ci_receipt.identity.pr_number != lease.pr_number
-            or ci_receipt.identity.head_sha != lease.head_sha
-            or ci_receipt.identity.base_sha != pull.base_sha
-            or ci_receipt.manifest_digest != snapshot.manifest_digest
+            or (self._policy.required_workflow_path is not None and not actions_valid)
+            or (self._policy.required_workflow_path is None and (
+                not isinstance(ci_receipt, CIAuditReceipt)
+                or ci_receipt.status != "passed"
+                or ci_receipt.identity.repository != lease.repository
+                or ci_receipt.identity.pr_number != lease.pr_number
+                or ci_receipt.identity.head_sha != lease.head_sha
+                or ci_receipt.identity.base_sha != pull.base_sha
+                or ci_receipt.manifest_digest != snapshot.manifest_digest
+            ))
         ):
             return None
         digest = _snapshot_digest(snapshot, ci_receipt)
@@ -680,12 +764,13 @@ class MergeController:
             author_login=pull.author_login,
             base_branch=pull.base_branch,
             tested_head_sha=lease.head_sha,
-            ci_receipt_id=ci_receipt.receipt_id,
+            ci_receipt_id=gate.evidence_id if actions_valid else ci_receipt.receipt_id,
             snapshot_digest=digest,
             method=method,
             merge_commit_oid=pull.merge_commit_oid,
             merged_at=_aware_utc(self._now()),
             executor=self._owner,
+            supplementary_receipt_id=(snapshot.supplementary_receipt.receipt_id if snapshot.supplementary_receipt else None),
         )
         self._ledger.complete_verified_merge(
             lease, updated_at=self._now(), receipt=receipt
@@ -765,7 +850,33 @@ class CanonicalMergeEvidenceSource:
             and isinstance(receipt, CIAuditReceipt)
             else None
         )
+        hosted_ci_gate = None
+        readme_only_scope = None
+        change_scope = None
+        supplementary_receipt = None
+        coverage_plan_digest = None
+        if policy.supplementary_plan is not None:
+            plan = policy.supplementary_plan
+            coverage_plan_digest = plan.digest
+            change_scope = self._github.get_exact_change_scope(policy.repository, number, pull.base_sha, pull.head_sha)
+            if plan.matches(change_scope) and plan.commands:
+                supplementary_receipt = self._ledger.latest_ci_receipt(policy.repository, number, pull.head_sha,
+                    manifest_digest=plan.digest, not_before=datetime.min.replace(tzinfo=UTC))
+        if policy.required_workflow_path is not None:
+            if policy.actions_readme_only_base_sha == pull.base_sha:
+                readme_only_scope = self._github.get_readme_only_scope(
+                    policy.repository, number, pull.base_sha, pull.head_sha,
+                )
+            hosted_ci_gate = self._github.get_required_ci_gate(
+                policy.repository, number, pull.base_sha, pull.head_sha,
+                policy.required_workflow_path, policy.required_workflow_jobs,
+            )
         return MergeSnapshot(
+            hosted_ci_gate=hosted_ci_gate,
+            readme_only_scope=readme_only_scope,
+            change_scope=change_scope,
+            supplementary_receipt=supplementary_receipt,
+            coverage_plan_digest=coverage_plan_digest,
             repository_private=self._github.repository_is_private(policy.repository),
             pull_request=pull,
             branch_allowed=(
@@ -901,6 +1012,18 @@ def _snapshot_digest(
             "count": snapshot.check_state.check_count,
             "billing_blocked": snapshot.check_state.billing_blocked,
         },
+        "coverage_plan_digest": snapshot.coverage_plan_digest,
+        "supplementary_receipt": snapshot.supplementary_receipt.receipt_id if snapshot.supplementary_receipt else None,
+        "change_scope": ([snapshot.change_scope.repository, snapshot.change_scope.pr_number,
+                          snapshot.change_scope.base_sha, snapshot.change_scope.head_sha,
+                          snapshot.change_scope.changed_files] if snapshot.change_scope else None),
+        "hosted_ci_gate": snapshot.hosted_ci_gate.evidence_id if snapshot.hosted_ci_gate else None,
+        "readme_only_scope": (
+            [snapshot.readme_only_scope.repository, snapshot.readme_only_scope.pr_number,
+             snapshot.readme_only_scope.base_sha, snapshot.readme_only_scope.head_sha,
+             snapshot.readme_only_scope.base_blob_sha, snapshot.readme_only_scope.head_blob_sha]
+            if snapshot.readme_only_scope else None
+        ),
         "ci_receipt": receipt.receipt_id if receipt else None,
         "ci_mode": receipt.ci_mode if receipt else None,
         "manifest": snapshot.manifest_digest,
