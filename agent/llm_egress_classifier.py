@@ -906,6 +906,13 @@ def _typed_payload_mapping_item(
         and (
             state["is_recognized_tool_result"]
             or state["value"].get("type") == "tool_result"
+            or (
+                not isinstance(state["output_call_id"], str)
+                and (
+                    state["value"].get("role") == "tool"
+                    or state["value"].get("type") == "function_call_output"
+                )
+            )
         )
         and key in {"content", "output"}
     ):

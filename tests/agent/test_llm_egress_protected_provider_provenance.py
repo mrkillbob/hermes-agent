@@ -43,6 +43,12 @@ def _agent(tmp_path, *, provider="nous", api_mode="chat_completions"):
         for transport in ["chat", "responses"]
         for shape in ["text", "text_block", "mapping"]
     ] + [
+        (provider, flag, transport, shape, "missing")
+        for provider in ["openai-codex", "nous", "nous-portal", "nousresearch", "anthropic"]
+        for flag in [None, "0"]
+        for transport in ["chat", "responses"]
+        for shape in ["text", "text_block", "mapping"]
+    ] + [
         ("anthropic", flag, "anthropic", shape, binding)
         for flag in [None, "0"]
         for shape in ["text", "text_block", "mapping"]
@@ -94,6 +100,8 @@ def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
             {"id": call_id, "call_id": call_id, "type": "function", "function": function},
             {"type": "function_call_output", "call_id": call_id, content_key: output},
         ]}
+    if binding == "missing" and transport in {"chat", "responses"}:
+        request[field][1].pop("tool_call_id" if transport == "chat" else "call_id")
     callback = MagicMock(return_value="allowed")
     if protected_flag == "1":
         assert _dispatch_provider_request(
