@@ -73,8 +73,23 @@ async function execProbe(
   const run = () =>
     new Promise<void>((resolve, reject) => {
       const child = spawn(command, args, options)
-      child.once('error', reject)
+
+      // spawn's timeout only sends SIGTERM. A cooperative handler can leave
+      // this exact owned probe alive forever, preventing both close and retry.
+      // Give normal termination a grace period, then reap only this child.
+      const reapTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGKILL')
+        }
+      }, options.timeout + 1_000)
+
+      child.once('error', error => {
+        clearTimeout(reapTimer)
+        reject(error)
+      })
       child.once('close', (code, signal) => {
+        clearTimeout(reapTimer)
+
         // A timed-out probe may handle SIGTERM and exit zero; it is still a timeout.
         if (code === 0 && !child.killed) {
           resolve()
