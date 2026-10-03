@@ -145,7 +145,8 @@ def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
                      "tool_call", "mcp__tool_call", "unknown", "mcp__terminal"]
         for binding in ["matching", "missing", "mismatched", "duplicate", "future",
                         "orphan_then_matching", "repeated_result", "assistant_result",
-                        "list_id", "mapping_id", "zero_id"]
+                        "list_id", "mapping_id", "zero_id",
+                        "conflicting_tool_call_id", "conflicting_call_id"]
         for output in ["bounded local status: complete", "token=synthetic-secret-value"]
     ],
 )
@@ -183,6 +184,14 @@ def test_native_nonterminal_binding_and_existing_worker_admission_are_preserved(
             messages.append({"role": "user", "content": [dict(result)]})
         elif binding == "assistant_result":
             messages.insert(0, {"role": "assistant", "content": [dict(result)]})
+        elif binding in {"conflicting_tool_call_id", "conflicting_call_id"}:
+            messages[1]["content"] = [{
+                "type": "tool_result", "tool_use_id": "call_native",
+                "content": "bounded local status: complete",
+            }]
+            result["tool_use_id"] = "unknown"
+            result[binding.removeprefix("conflicting_")] = "call_native"
+            messages.append({"role": "user", "content": [result]})
         request = {"messages": messages}
         callback = MagicMock(return_value="allowed")
         allowed = (binding == "matching" and name not in {"tool_call", "mcp__tool_call", "unknown", "mcp__terminal"}

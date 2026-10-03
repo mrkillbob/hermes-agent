@@ -559,9 +559,9 @@ def _typed_payload_mapping(
             )
         )
         output_call_id = (
-            value.get("tool_call_id")
-            or value.get("call_id")
-            or value.get("tool_use_id")
+            value.get("tool_use_id")
+            if value.get("type") == "tool_result"
+            else value.get("tool_call_id") or value.get("call_id")
         )
         is_recognized_tool_result = (
             isinstance(output_call_id, str)
