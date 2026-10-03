@@ -11,6 +11,7 @@ import pytest
 
 from agent.chat_completion_helpers import _dispatch_provider_request
 from agent.llm_egress_firewall import EgressBlocked
+from agent.llm_egress_runtime import authorize_agent_sdk_kwargs
 
 
 def _agent(tmp_path, *, provider="nous", api_mode="chat_completions"):
@@ -91,3 +92,39 @@ def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
     callback.return_value = "local"
     assert _dispatch_provider_request(local, request, callback) == "local"
     callback.assert_called_once_with(request)
+
+
+@pytest.mark.parametrize(
+    "surface,output",
+    [
+        ("content", "def calculate_total(items):\n    return sum(items)\n"),
+        ("content", "PASS _SCHWAB_PARENT_SEED_ASSEMBLER line 5243"),
+        ("output", "https://github.com/acme/widget.git\nworking tree clean"),
+    ],
+)
+def test_existing_marked_custom_worker_admission_is_preserved(
+    tmp_path, monkeypatch, surface, output
+):
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    agent = _agent(tmp_path, provider="custom")
+    agent.base_url = "https://llm.example.test/v1"
+    call_id = "call_terminal123"
+    function = {"name": "terminal", "arguments": "{}"}
+    if surface == "content":
+        request = {"messages": [
+            {"role": "assistant", "tool_calls": [
+                {"id": call_id, "type": "function", "function": function}
+            ]},
+            {"role": "tool", "tool_call_id": call_id, "content": output},
+        ]}
+        field = "messages"
+    else:
+        request = {"input": [
+            {"id": call_id, "call_id": call_id, "type": "function", "function": function},
+            {"type": "function_call_output", "call_id": call_id, "output": output},
+        ]}
+        field = "input"
+    authorized, receipt = authorize_agent_sdk_kwargs(agent, request)
+    assert receipt.allowed
+    assert authorized[field][1][surface] == output
+    assert receipt.decision.source_segment_count == 0

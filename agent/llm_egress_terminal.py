@@ -92,7 +92,12 @@ _REMOTE_KANBAN_PROJECTION_ELISION = (
     "present in your worker context; do not request or repeat the raw board "
     "record remotely. Continue with the assigned work or use a lifecycle tool."
 )
-
+_VERIFIED_DIAGNOSTIC_ATOM = re.compile(
+    r"(?<![A-Za-z0-9_])(?:PASS|WARN|SUMMARY|REQUIREMENTS|AVAILABILITY|"
+    r"HANDLING|VERIFICATION|[0-9]{1,10}|0x[0-9a-fA-F]{1,16}|"
+    r"_?[A-Za-z][A-Za-z0-9]{0,63}(?:_[A-Za-z0-9]{1,64}){1,7})"
+    r"(?![A-Za-z0-9_])"
+)
 
 
 def _read_grant_text(grant: SourceGrant) -> str | None:
@@ -1373,11 +1378,52 @@ def _segment_protected_tool_result(
     used_grants: dict[str, SourceGrant],
     *,
     sanitized_cap: int,
-) -> UntrustedProvenanceSegment:
-    """Reject raw terminal fallback; bounded replay projectors run upstream."""
+    require_provenance: bool = False,
+) -> SanitizedSegment | SourceBoundSegment | OutboundText | UntrustedProvenanceSegment:
+    """Require provenance on ordinary protected routes, retaining worker policy.
 
-    del grant_texts, used_grants, sanitized_cap
-    return UntrustedProvenanceSegment(sha256(text.encode("utf-8")).hexdigest())
+    Marked workers keep their established bounded, source-aware non-source
+    admission and all final secret, encoding, path, size, and receipt scans.
+    The caller explicitly enables provenance denial for ordinary protected
+    provider sessions; raw terminal output never gains source authority.
+    """
+
+    if require_provenance:
+        return UntrustedProvenanceSegment(sha256(text.encode("utf-8")).hexdigest())
+
+    segments: list[SanitizedSegment | SourceBoundSegment | ValidatedToolSyntaxSegment] = []
+    cursor = 0
+    for match in _VERIFIED_DIAGNOSTIC_ATOM.finditer(text):
+        if match.start() > cursor:
+            prefix = _segment_text(
+                text[cursor : match.start()],
+                grant_texts,
+                used_grants,
+                sanitized_cap=sanitized_cap,
+                allow_line_split=True,
+            )
+            segments.extend(prefix.segments if isinstance(prefix, OutboundText) else (prefix,))
+        atom = validate_tool_syntax(match.group(0), "verified_diagnostic_atom")
+        segments.append(ValidatedToolSyntaxSegment(atom, "verified_diagnostic_atom"))
+        cursor = match.end()
+    if cursor < len(text):
+        suffix = _segment_text(
+            text[cursor:],
+            grant_texts,
+            used_grants,
+            sanitized_cap=sanitized_cap,
+            allow_line_split=True,
+        )
+        segments.extend(suffix.segments if isinstance(suffix, OutboundText) else (suffix,))
+    if not segments:
+        return _segment_text(
+            text,
+            grant_texts,
+            used_grants,
+            sanitized_cap=sanitized_cap,
+            allow_line_split=True,
+        )
+    return segments[0] if len(segments) == 1 else OutboundText(tuple(segments))
 
 
 def _segment_read_file_presentation(

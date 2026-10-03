@@ -448,6 +448,7 @@ def _typed_payload_string(
     sanitized_cap: int,
     field_name: str | None = None,
     protected_tool_content: bool = False,
+    require_terminal_provenance: bool = False,
     elide_kanban_tool_content: bool = False,
     kanban_attachment_tool_content: bool = False,
     protected_kanban_context: bool = False,
@@ -465,6 +466,7 @@ def _typed_payload_string(
             grant_texts,
             used_grants,
             sanitized_cap=sanitized_cap,
+            require_provenance=require_terminal_provenance,
         )
     if elide_kanban_tool_content:
         return _project_bound_kanban_show(value)
@@ -535,6 +537,7 @@ def _typed_payload_mapping(
     redact_terminal_arguments: bool = False,
     redact_readonly_tool_arguments: bool = False,
     protected_tool_content: bool = False,
+    require_terminal_provenance: bool = False,
     elide_kanban_tool_content: bool = False,
     kanban_attachment_tool_content: bool = False,
     protected_kanban_context: bool = False,
@@ -932,6 +935,7 @@ def _typed_payload_mapping_item(
     redact_terminal_arguments = state['redact_terminal_arguments']
     redact_readonly_tool_arguments = state['redact_readonly_tool_arguments']
     protected_tool_content = state['protected_tool_content']
+    require_terminal_provenance = state['require_terminal_provenance']
     elide_kanban_tool_content = state['elide_kanban_tool_content']
     kanban_attachment_tool_content = state['kanban_attachment_tool_content']
     protected_kanban_context = state['protected_kanban_context']
@@ -1095,6 +1099,7 @@ def _typed_payload_mapping_item(
         protected_tool_content=(
             is_recognized_tool_result and key in {"content", "output"}
         ),
+        require_terminal_provenance=require_terminal_provenance,
         elide_kanban_tool_content=(
             is_elided_kanban_tool_result and key in {"content", "output"}
         ),

@@ -939,6 +939,9 @@ def authorize_agent_sdk_kwargs(
         redact_terminal_arguments=(
             protected_kanban_remote and protected_provider_route
         ),
+        require_terminal_provenance=(
+            protected_provider_route and not protected_kanban_remote
+        ),
         protected_kanban_context=protected_remote_context,
         redact_generated_context=redact_protected_generated_context,
         allow_codex_reasoning_replay=(
