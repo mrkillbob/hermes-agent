@@ -8,6 +8,7 @@ import { isMain } from './utils.mjs'
 import { publishPackagingInputs } from './prepared-packaging.mjs'
 import { ensureWindowsBundleTools } from './windows-bundle-tools.mjs'
 import { prepareDmgbuild } from './prepare-dmgbuild.mjs'
+import { acquirePackagingInput } from './packaging-acquisition.mjs'
 
 /** @param {string} source @param {string} name @returns {string} */
 export function pinnedPackageRoot(source, name) {
@@ -86,9 +87,11 @@ async function acquirePackagingTools({ source, out, cache, target, formats, buil
   ])
   const resourcesDir = path.join(source, 'apps/desktop', config.directories?.buildResources || 'build')
   const [archive, archiveTool, iconTools] = await Promise.all([
-    electronGet.downloadElectronArtifactZip({ version: config.electronVersion, platformName: process.platform, arch: packagingTargetArch(target),
-      artifactName: 'electron', cacheDir: path.join(cache, 'electron') }),
-    sevenZip.getPath7za(), icons.getIconsToolsetPath(config.toolsets?.icons, resourcesDir),
+    acquirePackagingInput(`Electron ${config.electronVersion} archive for ${target}`, () =>
+      electronGet.downloadElectronArtifactZip({ version: config.electronVersion, platformName: process.platform, arch: packagingTargetArch(target),
+        artifactName: 'electron', cacheDir: path.join(cache, 'electron') })),
+    acquirePackagingInput('7zip tools', () => sevenZip.getPath7za()),
+    acquirePackagingInput('icon tools', () => icons.getIconsToolsetPath(config.toolsets?.icons, resourcesDir)),
   ])
   const electron = copyTool(archive, path.join(out, 'electron.zip'))
   /** @type {import('./prepared-packaging.mjs').PackagingToolsets} */
@@ -99,11 +102,12 @@ async function acquirePackagingTools({ source, out, cache, target, formats, buil
   let windows = null
   if (process.platform === 'win32') {
     const builder = await load('toolsets/winCodeSign.js')
-    const tools = await ensureWindowsBundleTools({ config, resourcesDir, signing: true, load: async () => builder, prepared: null })
+    const tools = await acquirePackagingInput('Windows SDK/signing tools', () =>
+      ensureWindowsBundleTools({ config, resourcesDir, signing: true, load: async () => builder, prepared: null }))
     const kitRoot = copyTool(path.dirname(path.dirname(tools.makeappx)), path.join(out, 'winCodeSign'))
     if (!tools.dlib || !tools.dotnetRoot) throw new Error('Windows preparation requires the ATS dlib and paired .NET runtime')
     fs.cpSync(path.dirname(tools.dlib), path.join(kitRoot, path.basename(path.dirname(tools.signtool))), { recursive: true })
-    const rcedit = await builder.getRceditBundle(config.toolsets?.winCodeSign, resourcesDir)
+    const rcedit = await acquirePackagingInput('Windows rcedit tools', () => builder.getRceditBundle(config.toolsets?.winCodeSign, resourcesDir))
     fs.copyFileSync(rcedit.x64, path.join(kitRoot, 'rcedit-x64.exe'))
     fs.copyFileSync(rcedit.x86, path.join(kitRoot, 'rcedit-x86.exe'))
     const kit = path.join(kitRoot, path.basename(path.dirname(tools.makeappx)))
