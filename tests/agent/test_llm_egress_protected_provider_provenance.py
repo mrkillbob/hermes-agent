@@ -141,7 +141,8 @@ def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
     ] + [
         (f"native:{name}:{binding}", output)
         for name in ["read_file", "mcp__read_file", "memory", "mcp__context_notes",
-                     "tool_describe", "mcp__tool_describe", "unknown", "mcp__terminal"]
+                     "tool_describe", "mcp__tool_describe", "tool_search", "mcp__tool_search",
+                     "tool_call", "mcp__tool_call", "unknown", "mcp__terminal"]
         for binding in ["matching", "missing", "mismatched", "duplicate", "future",
                         "orphan_then_matching", "repeated_result", "assistant_result",
                         "list_id", "mapping_id", "zero_id"]
@@ -159,7 +160,7 @@ def test_native_nonterminal_binding_and_existing_worker_admission_are_preserved(
         # The callback test isolates identity binding; E2E uses real registered
         # tools, source capture and the actual native transport.
         monkeypatch.setattr(tool_registry, "get_entry", lambda name: (
-            object() if name in {"read_file", "memory", "tool_describe", "terminal"} else None
+            object() if name in {"read_file", "memory", "terminal"} else None
         ))
         _, name, binding = surface.split(":")
         call = {"type": "tool_use", "id": "call_native", "name": name, "input": {}}
@@ -184,14 +185,11 @@ def test_native_nonterminal_binding_and_existing_worker_admission_are_preserved(
             messages.insert(0, {"role": "assistant", "content": [dict(result)]})
         request = {"messages": messages}
         callback = MagicMock(return_value="allowed")
-        elided_read = name in {"read_file", "mcp__read_file", "mcp__context_notes"}
-        allowed = (binding == "matching" and name not in {"unknown", "mcp__terminal"}
-                   and (not output.startswith("token=") or elided_read))
+        allowed = (binding == "matching" and name not in {"tool_call", "mcp__tool_call", "unknown", "mcp__terminal"}
+                   and not output.startswith("token="))
         if allowed:
             assert _dispatch_provider_request(_agent(tmp_path, provider="anthropic"), request, callback) == "allowed"
             callback.assert_called_once()
-            if output.startswith("token="):
-                assert output not in json.dumps(callback.call_args.args[0])
         else:
             with pytest.raises(EgressBlocked):
                 _dispatch_provider_request(_agent(tmp_path, provider="anthropic"), request, callback)

@@ -728,11 +728,23 @@ def _recognized_native_nonterminal_call_ids(body: Mapping[str, Any]) -> frozense
                     if isinstance(name, str) and name.startswith("mcp__")
                     else name
                 )
+                # Catalog bridges are handled outside the registry. Only
+                # these read-only bridges earn admission, never tool_call.
+                if (
+                    canonical == name
+                    and isinstance(name, str)
+                    and name.startswith("mcp__")
+                    and name[5:] in _REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES
+                ):
+                    canonical = name[5:]
                 calls[call_id] = (
                     canonical
                     if isinstance(canonical, str)
-                    and canonical != "terminal"
-                    and tool_registry.get_entry(canonical) is not None
+                    and canonical not in {"terminal", "tool_call"}
+                    and (
+                        canonical in _REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES
+                        or tool_registry.get_entry(canonical) is not None
+                    )
                     else None
                 )
             elif block.get("type") == "tool_result":
