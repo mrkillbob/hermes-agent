@@ -792,7 +792,7 @@ def authorize_agent_sdk_kwargs(
         sanitized_cap=sanitized_segment_cap,
         syntax_tool_call_ids=(
             _recognized_syntax_tool_call_ids(body)
-            if protected_kanban_remote
+            if protected_kanban_remote or protected_provider_route
             else frozenset()
         ),
         pytest_terminal_call_ids=(
