@@ -1693,3 +1693,44 @@ def test_agent_label_selection_cursor_persists_catalogue_progress(
 
     assert ledger.agent_label_selection_cursor("acme/widgets") == 3
     ledger.close()
+
+
+def test_actions_mode_requires_explicit_reviewed_readme_only_base(tmp_path: Path) -> None:
+    repository, deployment = tmp_path / "repository", tmp_path / "deployment"
+    initialize_git_worktree(repository)
+    initialize_git_worktree(deployment)
+    raw = enabled_merge_config(repository, deployment)
+    merge = raw["merge_maintainer"]
+    merge["required_workflow_path"] = ".github/workflows/ci.yaml"
+    merge["required_workflow_jobs"] = {"Documentation checks": ["Check docs"]}
+    for value in (None, "", "not-a-sha", "a" * 39, True):
+        merge["actions_readme_only_base_sha"] = value
+        with pytest.raises(ValueError, match="reviewed exact base"):
+            load_policy(raw)
+    merge["actions_readme_only_base_sha"] = "b" * 40
+    selected = load_policy(raw).merge_maintainer
+    assert selected is not None and selected.actions_readme_only_base_sha == "b" * 40
+    del merge["required_workflow_path"]
+    del merge["required_workflow_jobs"]
+    with pytest.raises(ValueError, match="reviewed exact base"):
+        load_policy(raw)
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_reviewed_code_cut_can_select_combined_actions_without_readme_restriction(tmp_path, invalid):
+    repository, deployment = tmp_path/"repository", tmp_path/"deployment"
+    initialize_git_worktree(repository); initialize_git_worktree(deployment)
+    raw = enabled_merge_config(repository, deployment)
+    merge=raw["merge_maintainer"]
+    merge.update(required_workflow_path=".github/workflows/ci.yaml",
+                 required_workflow_jobs={"Checks":["Run checks"]},
+                 supplementary_plan={"pr_number":17,"base_sha":"b"*40,"head_sha":"a"*40,
+                     "changed_files":[{"path":"web/src/app.ts","status":"modified"}],
+                     "commands":[{"id":"web-build","argv":["npm","run","build"],"cwd":"web"}]})
+    if invalid:
+        merge["actions_readme_only_base_sha"]="b"*40
+        with pytest.raises(ValueError, match="unambiguous"):load_policy(raw)
+    else:
+        selected=load_policy(raw).merge_maintainer
+        assert selected.supplementary_plan.head_sha == "a"*40
+        assert selected.actions_readme_only_base_sha is None

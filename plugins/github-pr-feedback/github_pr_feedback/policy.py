@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .supplementary_ci import SupplementaryPlan
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -396,6 +397,10 @@ class MergeMaintainerPolicy:
     post_merge: PostMergePolicy | None
     allow_budget_exhausted_local_ci: bool = False
     auto_enroll_owned_prs: bool = False
+    required_workflow_path: str | None = None
+    required_workflow_jobs: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    actions_readme_only_base_sha: str | None = None
+    supplementary_plan: SupplementaryPlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1046,6 +1051,10 @@ def _parse_merge_maintainer(
             "post_merge",
             "require_per_pr_enrollment",
             "auto_enroll_owned_prs",
+            "required_workflow_path",
+            "required_workflow_jobs",
+            "actions_readme_only_base_sha",
+            "supplementary_plan",
         }
         if set(raw) - allowed:
             raise ValueError("disabled merge_maintainer has unknown fields")
@@ -1061,7 +1070,7 @@ def _parse_merge_maintainer(
         "report_only",
         "post_merge",
     }
-    optional = {"allow_budget_exhausted_local_ci", "auto_enroll_owned_prs"}
+    optional = {"allow_budget_exhausted_local_ci", "auto_enroll_owned_prs", "required_workflow_path", "required_workflow_jobs", "actions_readme_only_base_sha", "supplementary_plan"}
     if not required.issubset(raw) or set(raw) - required - optional:
         raise ValueError("merge_maintainer has missing or unknown fields")
     repository = _repository(raw["repository"], "merge_maintainer repository")
@@ -1105,6 +1114,36 @@ def _parse_merge_maintainer(
     auto_enroll_owned_prs = raw.get("auto_enroll_owned_prs", False)
     if not isinstance(auto_enroll_owned_prs, bool):
         raise ValueError("auto_enroll_owned_prs must be a boolean")
+    required_workflow_path = raw.get("required_workflow_path")
+    if required_workflow_path is not None and (
+        not isinstance(required_workflow_path, str)
+        or re.fullmatch(r"\.github/workflows/[A-Za-z0-9_-]+\.ya?ml", required_workflow_path) is None
+    ):
+        raise ValueError("required_workflow_path must name one CI workflow YAML file")
+    required_workflow_jobs = raw.get("required_workflow_jobs", {})
+    if (
+        not isinstance(required_workflow_jobs, dict)
+        or any(not isinstance(job, str) or not job.strip() for job in required_workflow_jobs)
+        or any(not isinstance(steps, list) or not steps
+               or any(not isinstance(step, str) or not step.strip() for step in steps)
+               or len(set(steps)) != len(steps)
+               for steps in required_workflow_jobs.values())
+        or bool(required_workflow_path) != bool(required_workflow_jobs)
+    ):
+        raise ValueError("Actions CI substitution requires a workflow and coverage jobs with unique workload steps")
+    actions_readme_only_base_sha = raw.get("actions_readme_only_base_sha")
+    if (raw.get("supplementary_plan") is None and bool(required_workflow_path) != bool(actions_readme_only_base_sha)
+            or (actions_readme_only_base_sha is not None and (
+                not isinstance(actions_readme_only_base_sha, str)
+                or re.fullmatch(r"[0-9a-f]{40}", actions_readme_only_base_sha) is None))):
+        raise ValueError("Actions substitution requires a reviewed exact base SHA and is limited to root README.md changes")
+    supplementary_plan = None
+    if raw.get("supplementary_plan") is not None:
+        if not required_workflow_path or actions_readme_only_base_sha is not None:
+            raise ValueError("combined Actions coverage requires one unambiguous supplementary plan")
+        from .supplementary_ci import SupplementaryPlan
+        supplementary_plan = SupplementaryPlan.parse(repository, raw["supplementary_plan"],
+            tuple((job, tuple(steps)) for job, steps in required_workflow_jobs.items()))
     return MergeMaintainerPolicy(
         assignee=_nonempty_string(raw["assignee"], "merge_maintainer assignee"),
         repository=repository,
@@ -1116,6 +1155,10 @@ def _parse_merge_maintainer(
         post_merge=_parse_post_merge(raw["post_merge"], target=target),
         allow_budget_exhausted_local_ci=allow_budget_exhausted_local_ci,
         auto_enroll_owned_prs=auto_enroll_owned_prs,
+        actions_readme_only_base_sha=actions_readme_only_base_sha,
+        supplementary_plan=supplementary_plan,
+        required_workflow_path=required_workflow_path,
+        required_workflow_jobs=tuple((job, tuple(steps)) for job, steps in required_workflow_jobs.items()),
     )
 
 

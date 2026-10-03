@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
@@ -473,6 +473,68 @@ class LocalCIRunner:
             raise TypeError("actions_enabled_hint must be a boolean or None")
         self._actions_enabled_hint = actions_enabled_hint
         self._required_local_ci = required_local_ci
+
+    def run_supplementary(self, plan, worktree: Path) -> CIAuditReceipt | None:
+        """Execute only a trusted reviewed plan; never dispatch the full auditor."""
+        from .supplementary_ci import SupplementaryPlan, canonical_command
+        if not isinstance(plan, SupplementaryPlan):
+            raise TypeError("supplementary execution requires a typed reviewed plan")
+        if not plan.commands:
+            return None
+        identity = CIAuditIdentity(plan.repository, plan.pr_number, plan.base_sha, plan.head_sha)
+        started_at = _aware_now(self._now())
+        worktree = Path(worktree).resolve()
+        evidence = []
+        try:
+            if plan.runner_platform is not None and plan.runner_platform != sys.platform:
+                raise CIValidationError("supplementary native platform mismatch")
+            _require_identity(identity, self._github.get_merge_state(identity.repository, identity.pr_number))
+            if (self._inspector.head_sha(worktree) != identity.head_sha
+                    or not self._inspector.is_clean(worktree)
+                    or not plan.matches(self._github.get_exact_change_scope(
+                        identity.repository, identity.pr_number, identity.base_sha, identity.head_sha))):
+                raise CIValidationError("supplementary source/applicability mismatch")
+            initial_checks = self._check_state(identity.repository, identity.head_sha)
+            with tempfile.TemporaryDirectory(prefix="hermes-targeted-ci-") as temp_home:
+                environment = _isolated_ci_environment(Path(temp_home))
+                for command in plan.commands:
+                    try:
+                        argv, relative_cwd, canonical_tests = canonical_command(command.argv, command.cwd, source=worktree)
+                    except (TypeError, ValueError) as error:
+                        raise CIValidationError("invalid supplementary command identity") from error
+                    if argv != command.argv or relative_cwd != command.cwd:
+                        raise CIValidationError("supplementary plan command identity was not canonical")
+                    cwd = (worktree / relative_cwd).resolve()
+                    if not cwd.is_relative_to(worktree) or not cwd.is_dir():
+                        raise CIValidationError("supplementary cwd escaped source")
+                    result = self._commands.run(argv, cwd=cwd, env=environment,
+                                                timeout=_COMMAND_TIMEOUT_SECONDS)
+                    command_evidence = _command_evidence(argv, cwd, worktree, result)
+                    if canonical_tests:
+                        summary = re.search(r"Summary: \d+ files?, (\d+) tests passed, (\d+) failed(?:, (\d+) skipped)?", result.stdout)
+                        if (summary is None or int(summary[1]) == 0 or int(summary[2]) != 0
+                                or int(summary[3] or 0) != 0):
+                            command_evidence = replace(command_evidence, classification="environment-blocked")
+                    evidence.append(command_evidence)
+                    if result.returncode != 0 or result.timed_out:
+                        break
+            _require_identity(identity, self._github.get_merge_state(identity.repository, identity.pr_number))
+            if (self._inspector.head_sha(worktree) != identity.head_sha
+                    or not self._inspector.is_clean(worktree)
+                    or not plan.matches(self._github.get_exact_change_scope(
+                        identity.repository, identity.pr_number, identity.base_sha, identity.head_sha))):
+                raise CIValidationError("supplementary source changed during execution")
+            completed_at = _aware_now(self._now())
+            status = "passed" if len(evidence) == len(plan.commands) and all(
+                c.returncode == 0 and not c.timed_out and c.classification == "passed" for c in evidence) else "failed"
+            receipt = CIAuditReceipt(_receipt_id(identity, plan.digest, status, completed_at,
+                tuple(evidence), ci_mode=CI_MODE_STANDARD), identity, plan.digest, status,
+                started_at, completed_at, initial_checks, tuple(evidence))
+        except (CIValidationError, GitHubClientError) as error:
+            receipt = _failed_receipt(identity, plan.digest, started_at, _aware_now(self._now()),
+                                      error, commands=tuple(evidence))
+        self._ledger.record_ci_receipt(receipt)
+        return receipt
 
     def _check_state(self, repository: str, head_sha: str) -> CheckState:
         if self._required_local_ci:
@@ -1001,7 +1063,7 @@ def _command_evidence(
     argv: tuple[str, ...], cwd: Path, worktree: Path, result: CompletedCommand
 ) -> CommandEvidence:
     try:
-        relative_cwd = "." if cwd == worktree else str(cwd.relative_to(worktree))
+        relative_cwd = "." if cwd == worktree else cwd.relative_to(worktree).as_posix()
     except ValueError as error:
         raise CIValidationError("CI command escaped its worktree") from error
     classification = "passed"

@@ -2450,7 +2450,7 @@ def _run_merge_scan_for_policy(
     )
     for number in numbers:
         pull_request = open_by_number.get(number)
-        if number not in pending_set:
+        if number not in pending_set and merge_policy.required_workflow_path is None:
             assert pull_request is not None
             receipt = ledger.latest_ci_receipt(
                 merge_policy.repository,
