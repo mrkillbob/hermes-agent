@@ -92,10 +92,10 @@ dependencies = [
   # it out of the lazy-install path that exists only for the heavy matrix deps.
   "Markdown==3.10.2; python_version >= '3.14'",
   # Skills Hub (GitHub App JWT auth — optional, only needed for bot identity)
-  "PyJWT[crypto]==2.13.0; python_version >= '3.14'",  # PYSEC-2026-175/177/178/179
-  # urllib3 2.7.0 fixes GHSA-mf9v-mfxr-j63j (decompression-bomb bypass)
-  # and GHSA-qccp-gfcp-xxvc (header leak across origins).
-  "urllib3>=2.7.0,<3; python_version >= '3.14'",
+  "PyJWT[crypto]==2.15.0; python_version >= '3.14'",  # GHSA-42vr-xj54-vc7v, GHSA-2gx3-rcp4-g85q
+  # urllib3 2.8.0 bounds chunk framing and fixes deflate/proxy TLS handling
+  # (GHSA-vxq7-64xx-v4gw, GHSA-gh4c-6fx4-qh6g, GHSA-8988-9cw3-xx77).
+  "urllib3>=2.8.0,<3; python_version >= '3.14'",
   # PyJWT[crypto] pulls cryptography in transitively. Pin it here as well, so
   # that the WeCom and Weixin crypto paths cannot fall below the patched
   # version. 50.0.0 is the floor: it fixes CVE-2026-69247, a Bleichenbacher
@@ -613,6 +613,10 @@ default-groups = []
 # covers 3.14 only. Without this the lock must resolve every supported version,
 # where extras that only ever coexist on 3.14 (kittentts vs neutts) conflict.
 environments = ["python_version >= '3.14'"]
+constraint-dependencies = [
+  # PTB's optional webhooks server must include the request-parser fixes.
+  "tornado>=6.5.9,<7",
+]
 override-dependencies = [
   # discord.py's latest published version, 2.7.1, pins pynacl at <1.6. however, pynacl 1.5.0 has known vulnerabilities.
   # discord.py has updated pynacl to 1.6 on `main`, but has not yet published a patch release.

@@ -170,3 +170,68 @@ def test_jwks_client_sends_explicit_http_headers(monkeypatch):
     assert captured["url"] == url
     headers = captured["kwargs"].get("headers") or {}
     assert headers.get("Accept") and headers.get("User-Agent")
+
+
+def test_jwks_unknown_keys_are_bounded_and_rotation_recovers(rsa_keys, monkeypatch):
+    """Real JWKS fetches must resist refresh amplification without losing rotation.
+
+    Regression for the public PyJWT advisory GHSA-2gx3-rcp4-g85q.
+    """
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import jwt
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+    from plugins.cron_providers.chronos import verify as verify_mod
+
+    priv, pub = rsa_keys
+    public_jwk = jwt.algorithms.RSAAlgorithm.to_jwk(
+        load_pem_public_key(pub.encode()), as_dict=True
+    )
+    state = {"kid": "current", "fetches": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            state["fetches"] += 1
+            body = json.dumps({"keys": [{**public_jwk, "kid": state["kid"]}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    monkeypatch.setattr(verify_mod, "_JWK_CLIENTS", {})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/jwks"
+
+    def verify(kid):
+        token = jwt.encode(_base_claims(), priv, algorithm="RS256", headers={"kid": kid})
+        return verify_mod.verify_nas_fire_token(
+            token=token, expected_audience=AUD, jwks_or_key=url, issuer=ISS
+        )
+
+    try:
+        assert verify("current") is not None
+        for kid in ("unknown-a", "unknown-b", "unknown-c"):
+            assert verify(kid) is None
+        assert state["fetches"] == 1
+        assert verify("current") is not None
+
+        state["kid"] = "rotated"
+        assert verify("rotated") is None
+        assert state["fetches"] == 1
+        # Advance the clock, not the cache or the client's refresh policy.
+        after_cooldown = time.monotonic() + 31
+        monkeypatch.setattr("jwt.jwks_client.time.monotonic", lambda: after_cooldown)
+        assert verify("rotated") is not None
+        assert state["fetches"] == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
