@@ -92,7 +92,7 @@ def test_supplementary_plan_rejects_duplicate_full_replay(argv):
 def test_targeted_native_tests_cannot_turn_skips_into_coverage(tmp_path, outcome):
     import sys
     (tmp_path/"scripts").mkdir()
-    (tmp_path/"scripts/run_tests.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    (tmp_path/"scripts/run_tests.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     (tmp_path/"tests").mkdir()
     (tmp_path/"tests/test_native.py").write_text("def test_native(): pass\n", encoding="utf-8")
     plan = reviewed_plan([{"id":"native","argv":["bash","./scripts/run_tests.sh" if outcome.endswith("-alias") else "scripts/run_tests.sh","tests/test_native.py"],"cwd":"."}])
@@ -203,7 +203,7 @@ def test_native_windows_nested_cwd_real_producer_ledger_and_evaluator(tmp_path, 
 def test_canonical_runtime_resolution_rejects_unknown_or_escaping_file_identity(tmp_path,bad):
     from github_pr_feedback.supplementary_ci import canonical_command
     source=tmp_path/"source";(source/"scripts").mkdir(parents=True);(source/"tests").mkdir()
-    runner=source/"scripts/run_tests.sh";runner.write_text("#!/bin/bash\n", encoding="utf-8")
+    runner=source/"scripts/run_tests.sh";runner.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     target=source/"tests/test_native.py"
     if bad=="target-directory":target.mkdir()
     elif bad=="escaping-target":
