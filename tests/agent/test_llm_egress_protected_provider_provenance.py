@@ -35,21 +35,22 @@ def _agent(tmp_path, *, provider="nous", api_mode="chat_completions"):
 
 
 @pytest.mark.parametrize(
-    "provider,protected_flag,transport,shape",
+    "provider,protected_flag,transport,shape,binding",
     [
-        (provider, flag, transport, shape)
+        (provider, flag, transport, shape, "matching")
         for provider in ["openai-codex", "nous", "nous-portal", "nousresearch", "anthropic"]
         for flag in [None, "0", "1"]
         for transport in ["chat", "responses"]
         for shape in ["text", "text_block", "mapping"]
     ] + [
-        ("anthropic", flag, "anthropic", shape)
+        ("anthropic", flag, "anthropic", shape, binding)
         for flag in [None, "0"]
         for shape in ["text", "text_block", "mapping"]
+        for binding in ["matching", "mismatched", "missing"]
     ],
 )
 def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
-    tmp_path, monkeypatch, provider, protected_flag, transport, shape
+    tmp_path, monkeypatch, provider, protected_flag, transport, shape, binding
 ):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     if protected_flag is None:
@@ -75,13 +76,16 @@ def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
             {"role": "tool", "tool_call_id": call_id, content_key: output},
         ]}
     elif transport == "anthropic":
+        native_result = {"type": "tool_result", "content": output}
+        if binding != "missing":
+            native_result["tool_use_id"] = call_id if binding == "matching" else "unbound"
         field, content_key = "messages", "content"
         request = {field: [
             {"role": "assistant", "content": [
                 {"type": "tool_use", "id": call_id, "name": "terminal", "input": {}}
             ]},
             {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": call_id, "content": output}
+                native_result
             ]},
         ]}
     else:

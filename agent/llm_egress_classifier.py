@@ -903,7 +903,10 @@ def _typed_payload_mapping_item(
         return
     if (
         state["require_terminal_provenance"]
-        and state["is_recognized_tool_result"]
+        and (
+            state["is_recognized_tool_result"]
+            or state["value"].get("type") == "tool_result"
+        )
         and key in {"content", "output"}
     ):
         typed[key] = UntrustedProvenanceSegment(_untrusted_content_digest(item))
