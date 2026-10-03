@@ -34,7 +34,7 @@ test('diagnostics sample only the revalidated installed app and retain no window
 })
 
 test('changed identity, ambiguous targets, denied observation and budget expiry produce evidence without sampling or raw errors', async () => {
-  for (const scenario of ['changed', 'ambiguous', 'denied', 'expired']) {
+  for (const scenario of ['changed', 'ambiguous', 'fresh-ambiguous', 'denied', 'expired']) {
     const commands = []
     let observations = 0
     let time = 0
@@ -47,12 +47,12 @@ test('changed identity, ambiguous targets, denied observation and budget expiry 
         if (command === '/bin/ps') return processes
         assert.equal(command, '/usr/bin/osascript', 'a failed identity/deadline must never reach sample')
         observations++
-        const apps = scenario === 'ambiguous' ? [app, { ...app, pid: 201 }] :
+        const apps = scenario === 'ambiguous' || scenario === 'fresh-ambiguous' && observations === 2 ? [app, { ...app, pid: 201 }] :
           scenario === 'changed' && observations === 2 ? [{ ...app, executable: '/other/Hermes' }] : [app]
         return JSON.stringify({ ...snapshot, apps })
       },
     })
-    assert.equal(report.status, { changed: 'identity-changed', ambiguous: 'ambiguous-target', denied: 'observation-denied', expired: 'budget-expired' }[scenario])
+    assert.equal(report.status, { changed: 'identity-changed', ambiguous: 'ambiguous-target', 'fresh-ambiguous': 'ambiguous-target', denied: 'observation-denied', expired: 'budget-expired' }[scenario])
     assert.equal(commands.includes('/usr/bin/sample'), false)
     assert.ok(commands.length <= 3)
     assert.equal(JSON.stringify(report).includes('credential-sentinel'), false)

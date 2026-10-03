@@ -96,8 +96,9 @@ async function collectQuitEvidence(executable, { execute = executeNative, now = 
     if (apps.length !== 1) return { ...report, status: apps.length ? 'ambiguous-target' : 'target-absent' };
     const target = apps[0];
     const fresh = await observe();
-    const current = (fresh.apps || []).filter(app => app.pid === target.pid && app.executable === executable);
-    if (current.length !== 1 || table.get(target.pid)?.executable !== executable) {
+    const current = (fresh.apps || []).filter(app => app.executable === executable && Number.isSafeInteger(app.pid) && app.pid > 0);
+    if (current.length > 1) return { ...report, status: 'ambiguous-target' };
+    if (current.length !== 1 || current[0].pid !== target.pid || table.get(target.pid)?.executable !== executable) {
       return { ...report, status: 'identity-changed' };
     }
     report.target = { pid: target.pid, executable, finishedLaunching: Boolean(current[0].finishedLaunching), active: Boolean(current[0].active) };
