@@ -908,8 +908,23 @@ def _cmd_claim(args: argparse.Namespace) -> int:
                 return _err(f"no such task: {args.task_id}")
             return _err(f"cannot claim {args.task_id}: status={existing.status} "
                         f"lock={existing.claim_lock or '(none)'}")
-        workspace = kbw.resolve_workspace(task)
-        kbw.set_workspace_path(conn, task.id, str(workspace))
+        try:
+            if task.workspace_kind == "worktree":
+                workspace, branch = kbw._resolve_worktree_workspace(task)
+            else:
+                workspace = kbw.resolve_workspace(task)
+            kbw.set_workspace_path(conn, task.id, str(workspace))
+            if task.workspace_kind == "worktree":
+                kbw.set_branch_name(conn, task.id, branch)
+                kbw.set_worktree_base(conn, task.id, workspace, branch)
+        except Exception as exc:
+            kbd._record_task_failure(
+                conn, task.id, f"workspace: {exc}", outcome="spawn_failed",
+                release_claim=True, end_run=True,
+                expected_run_id=task.current_run_id,
+                expected_claim_lock=task.claim_lock,
+            )
+            return _err(f"cannot claim {task.id}: workspace: {exc}")
     print(f"Claimed {task.id}\nWorkspace: {workspace}")
     return 0
 

@@ -742,6 +742,9 @@ def set_worktree_base(
     ):
         raise RuntimeError(f"assigned Kanban worktree base is unavailable for {branch_name}")
     ref = base_ref.stdout.strip()
+    resolved = _git(
+        workspace, "rev-parse", "--verify", "--end-of-options", sha + "^{commit}", timeout=20,
+    )
     with _kb.write_txn(conn):
         row = conn.execute(
             "SELECT workspace_base_ref, workspace_base_sha FROM tasks WHERE id = ?",
@@ -757,6 +760,8 @@ def set_worktree_base(
             raise RuntimeError(
                 f"assigned Kanban worktree base cannot change for task {task_id}"
             )
+        if not ref or resolved.returncode != 0 or resolved.stdout.strip().lower() != sha:
+            raise RuntimeError(f"assigned Kanban worktree base is not a commit for {branch_name}")
         conn.execute(
             "UPDATE tasks SET workspace_base_ref = ?, workspace_base_sha = ? WHERE id = ?",
             (ref, sha, task_id),

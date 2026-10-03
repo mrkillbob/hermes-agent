@@ -2378,15 +2378,25 @@ def _dispatch_lane_task(
                 )
                 _kb._append_event(conn, claimed.id, "workspace_deferred", payload, run_id=run_id)
             return False
-    _kbw.set_workspace_path(conn, claimed.id, str(workspace))
-    if claimed.workspace_kind == "worktree":
-        assigned_branch = (
-            resolved_branch_name
-            or (claimed.branch_name or "").strip()
-            or f"wt/{claimed.id}"
-        )
-        _kbw.set_branch_name(conn, claimed.id, assigned_branch)
-        _kbw.set_worktree_base(conn, claimed.id, workspace, assigned_branch)
+    try:
+        _kbw.set_workspace_path(conn, claimed.id, str(workspace))
+        if claimed.workspace_kind == "worktree":
+            assigned_branch = (
+                resolved_branch_name
+                or (claimed.branch_name or "").strip()
+                or f"wt/{claimed.id}"
+            )
+            _kbw.set_branch_name(conn, claimed.id, assigned_branch)
+            _kbw.set_worktree_base(conn, claimed.id, workspace, assigned_branch)
+    except Exception as exc:
+        if _record_task_failure(
+            conn, claimed.id, f"workspace: {exc}",
+            outcome="spawn_failed", failure_limit=failure_limit,
+            release_claim=True, end_run=True,
+            expected_run_id=claimed.current_run_id, expected_claim_lock=claimed.claim_lock,
+        ):
+            result.auto_blocked.append(claimed.id)
+        return False
     _kbw._maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
     if lane == "review":
         # Force-load sdlc-review; the kanban lifecycle is already in every
