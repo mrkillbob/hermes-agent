@@ -1378,16 +1378,18 @@ def _segment_protected_tool_result(
     used_grants: dict[str, SourceGrant],
     *,
     sanitized_cap: int,
-) -> SanitizedSegment | SourceBoundSegment | OutboundText:
-    """Admit ordinary tool output without treating it as trusted source.
+    require_provenance: bool = False,
+) -> SanitizedSegment | SourceBoundSegment | OutboundText | UntrustedProvenanceSegment:
+    """Require provenance on ordinary protected routes, retaining worker policy.
 
-    Protected cloud workers need normal terminal results to make progress.
-    Provenance is therefore not a standalone deny reason for a matched tool
-    result: output takes the same bounded, source-aware path as other
-    non-source text. This does not grant source authority or bypass the final
-    secret, encoding, path, size, or receipt checks; unsafe output still fails
-    closed there.
+    Marked workers keep their established bounded, source-aware non-source
+    admission and all final secret, encoding, path, size, and receipt scans.
+    The caller explicitly enables provenance denial for ordinary protected
+    provider sessions; raw terminal output never gains source authority.
     """
+
+    if require_provenance:
+        return UntrustedProvenanceSegment(sha256(text.encode("utf-8")).hexdigest())
 
     segments: list[SanitizedSegment | SourceBoundSegment | ValidatedToolSyntaxSegment] = []
     cursor = 0

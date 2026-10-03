@@ -102,12 +102,17 @@ def test_signature_replayed_byte_exact_after_resume(rig_factory) -> None:
     """Turn 1 in one process, turn 2 in a fresh ``chat --resume`` process: the resumed request's
     history is the first process's transcript (same blocks, same signature bytes) plus the
     new user message; nothing is re-encoded by the state.db round trip."""
-    rig = rig_factory([
-        Reply([Thinking(THINK["A"], SIG["A"]), ToolUse("terminal", {"command": "echo resume-probe"})]),
+    rig = rig_factory([])
+    # Exercise real source provenance without making signature replay depend
+    # on admission of terminal stdout with no source grant.
+    probe = rig.project / "resume-probe.txt"
+    probe.write_text("resume probe status: ready", encoding="utf-8")
+    rig.srv.push(
+        Reply([Thinking(THINK["A"], SIG["A"]), ToolUse("read_file", {"path": str(probe)})]),
         Reply([Thinking(THINK["B"], SIG["B"]), Text("FIRST-ANSWER")]),
         Reply([Thinking(THINK["C"], SIG["C"]), Text("SECOND-ANSWER")]),
-    ])
-    first = rig.run("chat", "-q", "Run the probe command.", "-Q")
+    )
+    first = rig.run("chat", "-q", "Read the probe file.", "-Q")
     assert first.returncode == 0 and "FIRST-ANSWER" in first.stdout, first.stderr[-2000:]
     (session_id,) = rig.session_ids()
     second = rig.run("chat", "--resume", session_id, "-q", "And now?", "-Q")

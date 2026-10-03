@@ -448,6 +448,7 @@ def _typed_payload_string(
     sanitized_cap: int,
     field_name: str | None = None,
     protected_tool_content: bool = False,
+    require_terminal_provenance: bool = False,
     elide_kanban_tool_content: bool = False,
     kanban_attachment_tool_content: bool = False,
     protected_kanban_context: bool = False,
@@ -465,6 +466,7 @@ def _typed_payload_string(
             grant_texts,
             used_grants,
             sanitized_cap=sanitized_cap,
+            require_provenance=require_terminal_provenance,
         )
     if elide_kanban_tool_content:
         return _project_bound_kanban_show(value)
@@ -506,6 +508,7 @@ def _typed_payload_mapping(
     sanitized_cap: int,
     field_name: str | None = None,
     syntax_tool_call_ids: frozenset[str] = frozenset(),
+    native_nonterminal_call_ids: frozenset[str] = frozenset(),
     pytest_terminal_call_ids: frozenset[str] = frozenset(),
     elided_kanban_tool_call_ids: frozenset[str] = frozenset(),
     kanban_attachment_tool_call_ids: frozenset[str] = frozenset(),
@@ -535,6 +538,7 @@ def _typed_payload_mapping(
     redact_terminal_arguments: bool = False,
     redact_readonly_tool_arguments: bool = False,
     protected_tool_content: bool = False,
+    require_terminal_provenance: bool = False,
     elide_kanban_tool_content: bool = False,
     kanban_attachment_tool_content: bool = False,
     protected_kanban_context: bool = False,
@@ -555,9 +559,9 @@ def _typed_payload_mapping(
             )
         )
         output_call_id = (
-            value.get("tool_call_id")
-            or value.get("call_id")
-            or value.get("tool_use_id")
+            value.get("tool_use_id")
+            if value.get("type") == "tool_result"
+            else value.get("tool_call_id") or value.get("call_id")
         )
         is_recognized_tool_result = (
             isinstance(output_call_id, str)
@@ -565,6 +569,7 @@ def _typed_payload_mapping(
             and (
                 value.get("role") == "tool"
                 or value.get("type") == "function_call_output"
+                or (require_terminal_provenance and value.get("type") == "tool_result")
             )
         )
         is_elided_kanban_tool_result = (
@@ -897,12 +902,36 @@ def _typed_payload_mapping_item(
     if key in {"content", "output"} and isinstance(item, SourceBoundSegment):
         typed[key] = _typed_payload(item, state["grant_texts"], state["used_grants"])
         return
+    if (
+        state["require_terminal_provenance"]
+        and (
+            state["is_recognized_tool_result"]
+            or (
+                state["value"].get("type") == "tool_result"
+                and (
+                    not isinstance(state["output_call_id"], str)
+                    or state["output_call_id"] not in state["native_nonterminal_call_ids"]
+                )
+            )
+            or (
+                not isinstance(state["output_call_id"], str)
+                and (
+                    state["value"].get("role") == "tool"
+                    or state["value"].get("type") == "function_call_output"
+                )
+            )
+        )
+        and key in {"content", "output"}
+    ):
+        typed[key] = UntrustedProvenanceSegment(_untrusted_content_digest(item))
+        return
     value = state['value']
     grant_texts = state['grant_texts']
     used_grants = state['used_grants']
     sanitized_cap = state['sanitized_cap']
     field_name = state['field_name']
     syntax_tool_call_ids = state['syntax_tool_call_ids']
+    native_nonterminal_call_ids = state['native_nonterminal_call_ids']
     pytest_terminal_call_ids = state['pytest_terminal_call_ids']
     elided_kanban_tool_call_ids = state['elided_kanban_tool_call_ids']
     kanban_attachment_tool_call_ids = state['kanban_attachment_tool_call_ids']
@@ -932,6 +961,7 @@ def _typed_payload_mapping_item(
     redact_terminal_arguments = state['redact_terminal_arguments']
     redact_readonly_tool_arguments = state['redact_readonly_tool_arguments']
     protected_tool_content = state['protected_tool_content']
+    require_terminal_provenance = state['require_terminal_provenance']
     elide_kanban_tool_content = state['elide_kanban_tool_content']
     kanban_attachment_tool_content = state['kanban_attachment_tool_content']
     protected_kanban_context = state['protected_kanban_context']
@@ -1064,6 +1094,7 @@ def _typed_payload_mapping_item(
         sanitized_cap=sanitized_cap,
         field_name=key,
         syntax_tool_call_ids=syntax_tool_call_ids,
+        native_nonterminal_call_ids=native_nonterminal_call_ids,
         pytest_terminal_call_ids=pytest_terminal_call_ids,
         elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
         kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
@@ -1095,6 +1126,7 @@ def _typed_payload_mapping_item(
         protected_tool_content=(
             is_recognized_tool_result and key in {"content", "output"}
         ),
+        require_terminal_provenance=require_terminal_provenance,
         elide_kanban_tool_content=(
             is_elided_kanban_tool_result and key in {"content", "output"}
         ),
