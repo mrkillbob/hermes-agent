@@ -16,6 +16,7 @@ _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS = frozenset(
         "exact_secret_detected",
         "exact_secret_scan_failed",
         "grant_binding_mismatch",
+        "invalid_anthropic_thinking_replay",
         "invalid_codex_reasoning_replay",
         "invalid_display_path",
         "invalid_generated_context_key",

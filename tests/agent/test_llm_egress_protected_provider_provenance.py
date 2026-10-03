@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from hashlib import sha256
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -36,9 +37,10 @@ def _agent(tmp_path, *, provider="nous", api_mode="chat_completions"):
     "provider", ["openai-codex", "nous", "nous-portal", "nousresearch", "anthropic"]
 )
 @pytest.mark.parametrize("protected_flag", [None, "0", "1"])
-def test_protected_provider_denies_ungranted_terminal_output(
+def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
     tmp_path, monkeypatch, provider, protected_flag
 ):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     if protected_flag is None:
         monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
     else:
@@ -63,18 +65,29 @@ def test_protected_provider_denies_ungranted_terminal_output(
             },
         ],
     }
-    callback = MagicMock()
-    with pytest.raises(EgressBlocked) as exc_info:
-        _dispatch_provider_request(
+    callback = MagicMock(return_value="allowed")
+    if protected_flag == "1":
+        assert _dispatch_provider_request(
             _agent(tmp_path, provider=provider), request, callback
-        )
-    assert "untrusted_provenance" in exc_info.value.decision.reason_codes
-    callback.assert_not_called()
+        ) == "allowed"
+        projected = callback.call_args.args[0]["messages"][1]["content"]
+        assert json.loads(projected) == {
+            "terminal_result": "completed",
+            "exit_code": None,
+            "raw_output": "omitted_from_remote_replay",
+        }
+        assert request["messages"][1]["content"] not in projected
+    else:
+        with pytest.raises(EgressBlocked) as exc_info:
+            _dispatch_provider_request(
+                _agent(tmp_path, provider=provider), request, callback
+            )
+        assert "untrusted_provenance" in exc_info.value.decision.reason_codes
+        callback.assert_not_called()
 
+    callback.reset_mock()
     local = _agent(tmp_path, provider="ollama-launch")
     local.base_url = "http://127.0.0.1:11434/v1"
     callback.return_value = "local"
     assert _dispatch_provider_request(local, request, callback) == "local"
     callback.assert_called_once_with(request)
-
-

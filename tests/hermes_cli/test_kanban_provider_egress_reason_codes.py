@@ -11,7 +11,7 @@ from hermes_cli import kanban_provider_errors as provider_errors
 
 
 @pytest.mark.parametrize("reason", [
-    "unknown_destination", "grant_binding_mismatch", "source_grant_unbound",
+    "invalid_anthropic_thinking_replay", "unknown_destination", "grant_binding_mismatch", "source_grant_unbound",
     "invalid_tool_syntax_segment", "non_finite_number", "request_identity_mismatch",
     "sanitized_segment_forbidden", "untyped_request_value",
 ])
@@ -44,5 +44,3 @@ def test_provider_egress_parser_accepts_real_unknown_route_denial(tmp_path, monk
     expected = f"provider egress blocked: {exc_info.value}"
     assert provider_errors._provider_egress_error_text("task") == expected
     assert provider_errors._provider_terminal_error_text("task") == (expected, "provider_egress_blocked")
-
-
