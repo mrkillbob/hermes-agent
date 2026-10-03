@@ -27,6 +27,8 @@ export default defineConfig({
   timeout: 360_000,
   expect: { timeout: 60_000 },
   retries: 0,
+  /* A required lane must refuse a stray `.only` locally and in CI. */
+  forbidOnly: true,
   workers: process.env.CI ? 2 : 1,
   fullyParallel: false,
   reporter: [['list'], ['html', { open: 'never', outputFolder: '../../playwright-report/core' }]],
