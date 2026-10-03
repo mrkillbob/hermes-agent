@@ -900,6 +900,13 @@ def _typed_payload_mapping_item(
     if key in {"content", "output"} and isinstance(item, SourceBoundSegment):
         typed[key] = _typed_payload(item, state["grant_texts"], state["used_grants"])
         return
+    if (
+        state["require_terminal_provenance"]
+        and state["is_recognized_tool_result"]
+        and key in {"content", "output"}
+    ):
+        typed[key] = UntrustedProvenanceSegment(_untrusted_content_digest(item))
+        return
     value = state['value']
     grant_texts = state['grant_texts']
     used_grants = state['used_grants']

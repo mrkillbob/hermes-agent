@@ -38,46 +38,54 @@ def _agent(tmp_path, *, provider="nous", api_mode="chat_completions"):
     "provider", ["openai-codex", "nous", "nous-portal", "nousresearch", "anthropic"]
 )
 @pytest.mark.parametrize("protected_flag", [None, "0", "1"])
+@pytest.mark.parametrize("transport", ["chat", "responses"])
+@pytest.mark.parametrize("shape", ["text", "text_block", "mapping"])
 def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
-    tmp_path, monkeypatch, provider, protected_flag
+    tmp_path, monkeypatch, provider, protected_flag, transport, shape
 ):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     if protected_flag is None:
         monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
     else:
         monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", protected_flag)
-    request = {
-        "model": "test-model",
-        "messages": [
-            {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "call_terminal123",
-                        "type": "function",
-                        "function": {"name": "terminal", "arguments": "{}"},
-                    }
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "call_terminal123",
-                "content": "def calculate_total(items):\n    return sum(items)\n",
-            },
-        ],
-    }
+    raw = "def calculate_total(items):\n    return sum(items)\n"
+    block_type = "text" if transport == "chat" else "input_text"
+    if shape == "text":
+        output = raw
+    elif shape == "text_block":
+        output = [{"type": block_type, "text": raw}]
+    else:
+        output = {"text": raw}
+    call_id = "call_terminal123"
+    function = {"name": "terminal", "arguments": "{}"}
+    if transport == "chat":
+        field, content_key = "messages", "content"
+        request = {field: [
+            {"role": "assistant", "tool_calls": [
+                {"id": call_id, "type": "function", "function": function}
+            ]},
+            {"role": "tool", "tool_call_id": call_id, content_key: output},
+        ]}
+    else:
+        field, content_key = "input", "output"
+        request = {field: [
+            {"id": call_id, "call_id": call_id, "type": "function", "function": function},
+            {"type": "function_call_output", "call_id": call_id, content_key: output},
+        ]}
     callback = MagicMock(return_value="allowed")
     if protected_flag == "1":
         assert _dispatch_provider_request(
             _agent(tmp_path, provider=provider), request, callback
         ) == "allowed"
-        projected = callback.call_args.args[0]["messages"][1]["content"]
+        projected = callback.call_args.args[0][field][1][content_key]
+        if isinstance(projected, list):
+            projected = projected[0]["text"]
         assert json.loads(projected) == {
             "terminal_result": "completed",
             "exit_code": None,
             "raw_output": "omitted_from_remote_replay",
         }
-        assert request["messages"][1]["content"] not in projected
+        assert raw not in projected
     else:
         with pytest.raises(EgressBlocked) as exc_info:
             _dispatch_provider_request(
