@@ -92,9 +92,9 @@ def test_supplementary_plan_rejects_duplicate_full_replay(argv):
 def test_targeted_native_tests_cannot_turn_skips_into_coverage(tmp_path, outcome):
     import sys
     (tmp_path/"scripts").mkdir()
-    (tmp_path/"scripts/run_tests.sh").write_text("#!/bin/bash\n")
+    (tmp_path/"scripts/run_tests.sh").write_text("#!/bin/bash\n", encoding="utf-8")
     (tmp_path/"tests").mkdir()
-    (tmp_path/"tests/test_native.py").write_text("def test_native(): pass\n")
+    (tmp_path/"tests/test_native.py").write_text("def test_native(): pass\n", encoding="utf-8")
     plan = reviewed_plan([{"id":"native","argv":["bash","./scripts/run_tests.sh" if outcome.endswith("-alias") else "scripts/run_tests.sh","tests/test_native.py"],"cwd":"."}])
     plan = replace(plan, runner_platform="win32" if sys.platform != "win32" else "darwin") if outcome=="wrong-platform" else plan
     state=SimpleNamespace(repository=plan.repository,number=17,base_sha=plan.base_sha,head_sha=plan.head_sha,head_repository=plan.repository,state="OPEN",merged=False)
@@ -174,12 +174,12 @@ def test_native_windows_nested_cwd_real_producer_ledger_and_evaluator(tmp_path, 
     assert sys.platform=="win32"
     source=tmp_path/"source";source.mkdir()
     subprocess.run(["git","init","--quiet",str(source)],check=True)
-    target=source/"apps/desktop/value.txt";target.parent.mkdir(parents=True);target.write_text("before")
+    target=source/"apps/desktop/value.txt";target.parent.mkdir(parents=True);target.write_text("before", encoding="utf-8")
     def commit():
         subprocess.run(["git","-C",str(source),"add","."],check=True)
         subprocess.run(["git","-C",str(source),"-c","user.name=CI","-c","user.email=ci@example.invalid","commit","-qm","fixture"],check=True)
-        return subprocess.check_output(["git","-C",str(source),"rev-parse","HEAD"],text=True).strip()
-    base=commit();target.write_text("after");head=commit()
+        return subprocess.check_output(["git","-C",str(source),"rev-parse","HEAD"],text=True, encoding="utf-8", errors="replace").strip()
+    base=commit();target.write_text("after", encoding="utf-8");head=commit()
     plan=SupplementaryPlan.parse("acme/widgets",{"pr_number":17,"base_sha":base,"head_sha":head,
         "changed_files":[{"path":"apps/desktop/value.txt","status":"modified"}],
         "commands":[{"id":"nested","argv":[sys.executable,"-c","print('actual native command')"],"cwd":"apps/desktop"}],
@@ -203,13 +203,13 @@ def test_native_windows_nested_cwd_real_producer_ledger_and_evaluator(tmp_path, 
 def test_canonical_runtime_resolution_rejects_unknown_or_escaping_file_identity(tmp_path,bad):
     from github_pr_feedback.supplementary_ci import canonical_command
     source=tmp_path/"source";(source/"scripts").mkdir(parents=True);(source/"tests").mkdir()
-    runner=source/"scripts/run_tests.sh";runner.write_text("#!/bin/bash\n")
+    runner=source/"scripts/run_tests.sh";runner.write_text("#!/bin/bash\n", encoding="utf-8")
     target=source/"tests/test_native.py"
     if bad=="target-directory":target.mkdir()
     elif bad=="escaping-target":
-        outside=tmp_path/"outside.py";outside.write_text("pass\n");target.symlink_to(outside)
+        outside=tmp_path/"outside.py";outside.write_text("pass\n", encoding="utf-8");target.symlink_to(outside)
     elif bad=="runner-alias":
-        target.write_text("pass\n");(source/"scripts/alias.sh").symlink_to(runner)
+        target.write_text("pass\n", encoding="utf-8");(source/"scripts/alias.sh").symlink_to(runner)
     argv=("bash","scripts/alias.sh" if bad=="runner-alias" else "./scripts/run_tests.sh","tests/test_native.py")
     with pytest.raises(ValueError,match="canonical|focused|alias"):
         canonical_command(argv,".",source=source)

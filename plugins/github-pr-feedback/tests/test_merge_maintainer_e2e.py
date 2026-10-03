@@ -304,7 +304,7 @@ def test_end_to_end_exact_head_receipt_selects_enabled_method_and_merges_once(
     if hosted_ci:
         manifest = repository / "tests/manifests/test_lanes.toml"
         manifest.parent.mkdir(parents=True)
-        manifest.write_text('[lanes.unit]\nci_status = "required"\n')
+        manifest.write_text('[lanes.unit]\nci_status = "required"\n', encoding="utf-8")
         ledger.enroll_merge_pr("acme/widgets", 17, enrolled_at=datetime.now(UTC), enrolled_by="operator")
     else:
         prepare_receipt(repository, ledger)
@@ -573,7 +573,7 @@ def test_combined_cli_uses_real_typed_ledger_supplement_without_full_audit(tmp_p
     from github_pr_feedback.github_client import ExactChangeScope
     repository = tmp_path / "repository"
     subprocess.run(["git","init","--quiet",str(repository)],check=True)
-    manifest=repository/"tests/manifests/test_lanes.toml";manifest.parent.mkdir(parents=True);manifest.write_text('[lanes.unit]\nci_status = "required"\n')
+    manifest=repository/"tests/manifests/test_lanes.toml";manifest.parent.mkdir(parents=True);manifest.write_text('[lanes.unit]\nci_status = "required"\n', encoding="utf-8")
     ledger=FeedbackLedger(tmp_path/"ledger.sqlite3")
     ledger.enroll_merge_pr("acme/widgets",17,enrolled_at=datetime.now(UTC),enrolled_by="operator")
     plugin=configured_policy(repository,hosted_ci=True)
