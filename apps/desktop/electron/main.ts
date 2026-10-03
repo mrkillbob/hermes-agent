@@ -241,6 +241,7 @@ import {
 import { describeDevCdpDecision, resolveDevCdpPort } from './dev-cdp'
 import { ensureKanbanDispatcherReady } from './dispatcher-readiness'
 import { preReadyDockLaunchSteps } from './dock-launch-order'
+import { embedHostOrigin } from './embed-host'
 import { installEmbedReferer } from './embed-referer'
 import { createAmbientClaimArbiter } from './event-dedupe'
 import { openExternalUrl as externalOpen, type ExternalOpenDeps, reportPreOpenStatFailure } from './external-open'
@@ -417,7 +418,7 @@ import {
 import { wireOauthSessionResponse } from './oauth-session-response'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
-import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
+import { bundledPayload, installIdForRoot, type PayloadInfo, payloadPythonPath } from './payload-backend'
 import { petOverlayClickThrough, shouldPopInOnOverlayClosed } from './pet-overlay'
 import { placePetOverlay, registerPetOverlayIpc } from './pet-overlay-ipc'
 import {
@@ -449,6 +450,7 @@ import { readPreUpdateBackupEnabled } from './pre-update-backup-config'
 import { capturePreviewContents } from './preview-capture'
 import { onPreviewWatchOwnerDestroyed, sendPreviewFileChangedToOwner } from './preview-file-watch'
 import { hasClosePreviewFlag, previewGuestInputAction } from './preview-guest-escape'
+import { commandFocusedGuest, notePreviewGuestHidden } from './preview-guest-offscreen'
 import { PreviewReachRegistry } from './preview-reach'
 import { previewHttpUrlTarget } from './preview-url-target'
 import {
@@ -620,7 +622,7 @@ import {
   registerUpdateRelaunch,
   type RelaunchRegistration
 } from './updater/relaunch'
-import { startRelaunchWaiter } from './updater/relaunch-waiter'
+import { relaunchWaiterScript, startRelaunchWaiter } from './updater/relaunch-waiter'
 import { preflightStateDb } from './updater/state-db-preflight'
 import { createStoreStrategy } from './updater/store-client'
 import { isExternalVenvHolder, isHermesOwnedVenvDaemon } from './venv-holder-select'
@@ -1177,6 +1179,7 @@ if (IS_WINDOWS || process.platform === 'linux') {
 }
 
 ipcMain.handle('hermes:get-remote-display-reason', () => REMOTE_DISPLAY_REASON)
+ipcMain.handle('hermes:embed-host:origin', () => embedHostOrigin())
 
 // Keep the renderer's PROCESS priority normal while its windows are hidden —
 // a deprioritized renderer streams a live answer visibly slower once the
@@ -3852,12 +3855,11 @@ function createNativePackagedStrategy(
 
     const deps: ConstructorParameters<typeof AppInstallerStrategy>[0] = {
       python: payload.storePython,
-      // The checker ships inside the payload's repo snapshot (git archive of
-      // the committed tree): <payload>/<repo>/apps/desktop/scripts/.
-      script: path.join(payload.repoDir, 'apps', 'desktop', 'scripts', 'check-appinstaller-update.py'),
-      run: (python, script) =>
-        runAppInstallerChecker(python, script, {
-          env: { ...process.env, PYTHONPATH: payload.sitePackages },
+      // The checker is bundled core code, run with the payload python.
+      module: 'hermes_cli.windows_appinstaller_update',
+      run: (python, module) =>
+        runAppInstallerChecker(python, module, {
+          env: { ...process.env, PYTHONPATH: payloadPythonPath(payload) },
           onStderr: stderr => console.error(`[app-installer] checker stderr: ${stderr.slice(0, 400)}`)
         }),
       channel: resolveUpdaterChannelFromStamp(),
@@ -3887,7 +3889,7 @@ function createNativePackagedStrategy(
               processId: process.pid,
               processStartTimeMs: Math.round(Date.now() - process.uptime() * 1000),
               identityName: PRODUCT_IDENTITY.msixAppIdWithOrg,
-              scriptPath: path.join(payload.repoDir, 'apps', 'desktop', 'scripts', 'update-relaunch-waiter.ps1')
+              scriptPath: relaunchWaiterScript(process.resourcesPath)
             })
         })
     }
@@ -3902,8 +3904,8 @@ function createNativePackagedStrategy(
 
     return createStoreStrategy({
       python: payload.storePython,
-      script: path.join(payload.repoDir, 'apps', 'desktop', 'scripts', 'check-store-update.py'),
-      sitePackages: payload.sitePackages,
+      module: 'hermes_cli.windows_store_update',
+      pythonPath: payloadPythonPath(payload),
       env: process.env,
       windowHandle: () => (BrowserWindow.getFocusedWindow() ?? mainWindow)?.getNativeWindowHandle() ?? null,
       appVersion: app.getVersion(),
@@ -3918,7 +3920,7 @@ function createNativePackagedStrategy(
               processId: process.pid,
               processStartTimeMs: Math.round(Date.now() - process.uptime() * 1000),
               identityName: PRODUCT_IDENTITY.storeMsix!.identityName,
-              scriptPath: path.join(payload.repoDir, 'apps', 'desktop', 'scripts', 'update-relaunch-waiter.ps1'),
+              scriptPath: relaunchWaiterScript(process.resourcesPath),
               timeoutSeconds: 1860
             })
         })
@@ -6570,47 +6572,6 @@ function sendClosePreviewRequested() {
 }
 
 /**
- * Run a browser gesture on the guest page the user is actually in, if any.
- *
- * A `<webview>` guest is its own out-of-process webContents: pointer and focus
- * events inside the page never reach the host document, so NOTHING in the
- * renderer — not `document.activeElement`, not the layout tree's hover/focus
- * ladder — can see that the user is in there. Main can: Electron tracks the
- * focused webContents across processes, which is the definition of a runtime
- * fact it owns.
- *
- * Returns false when focus is in the app's own chrome, where the renderer is
- * the one that knows which pane is active.
- */
-function commandFocusedGuest(command: 'back' | 'forward' | 'reload'): boolean {
-  const focused = electronWebContents.getFocusedWebContents()
-
-  if (!focused || focused.isDestroyed() || focused.getType() !== 'webview') {
-    return false
-  }
-
-  const history = focused.navigationHistory
-
-  if (command === 'reload') {
-    focused.reload()
-  } else if (command === 'back') {
-    if (!history.canGoBack()) {
-      return true
-    }
-
-    history.goBack()
-  } else {
-    if (!history.canGoForward()) {
-      return true
-    }
-
-    history.goForward()
-  }
-
-  return true
-}
-
-/**
  * Ask the renderer to run a browser-navigation gesture on its focused preview
  * pane. `reload` also has an app-level fallback (reload the window); `back` and
  * `forward` mean nothing outside the browser, so the renderer just ignores them.
@@ -6618,7 +6579,7 @@ function commandFocusedGuest(command: 'back' | 'forward' | 'reload'): boolean {
 function sendPreviewNavCommand(command: 'back' | 'forward' | 'reload') {
   // The user is inside the page itself — main is the only party that can see
   // that, so act here and never round-trip.
-  if (commandFocusedGuest(command)) {
+  if (commandFocusedGuest(command, electronWebContents.getFocusedWebContents())) {
     return
   }
 
@@ -17176,6 +17137,16 @@ ipcMain.handle('hermes:profile:set', async (_event, name) => {
 
 ipcMain.on('hermes:previewShortcutActive', (_event, active) => {
   previewShortcutActive = Boolean(active)
+})
+
+// The host renderer reports which of its Browser guests are off screen (a
+// hidden session's kept-alive page), so focused-guest gestures skip them.
+ipcMain.on('hermes:preview-guest-hidden', (event, payload) => {
+  notePreviewGuestHidden(
+    event.sender,
+    electronWebContents.fromId(Number(payload?.webContentsId)),
+    Boolean(payload?.hidden)
+  )
 })
 
 ipcMain.on('hermes:f12ShortcutActive', (event, active) => {

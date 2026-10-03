@@ -141,7 +141,8 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: test_durations.json
-          key: test-durations-unit-${{ github.run_id }}
+          # Per-slice key preserves the duration updates from each matrix job.
+          key: test-durations-unit-${{ github.run_id }}-${{ matrix.slice.index }}
 
   e2e:
     if: inputs.e2e

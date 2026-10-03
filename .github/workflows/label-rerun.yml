@@ -45,6 +45,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
           set -uo pipefail
 
@@ -62,6 +63,14 @@ jobs:
           fi
 
           dispatch_fresh_ci() {
+            if ! CURRENT_HEAD=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid); then
+              echo "Could not inspect the current PR head; stopping instead of guessing."
+              return 1
+            fi
+            if [ "$CURRENT_HEAD" != "$HEAD_SHA" ]; then
+              echo "PR head moved to $CURRENT_HEAD; not dispatching CI for a superseded head."
+              return 0
+            fi
             if [ "$HEAD_REPO" != "$REPO" ]; then
               echo "Cannot dispatch a run for a head branch in a different repository."
               exit 1
@@ -107,6 +116,16 @@ jobs:
             fi
           fi
 
+          # Do not revive a superseded run and cancel CI for a newer head.
+          if ! CURRENT_HEAD=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid); then
+            echo "Could not inspect the current PR head; stopping instead of guessing."
+            exit 1
+          fi
+          if [ "$CURRENT_HEAD" != "$HEAD_SHA" ]; then
+            echo "PR head moved to $CURRENT_HEAD; not rerunning superseded run $RUN_ID."
+            exit 0
+          fi
+
           echo "Run completed. Checking whether GitHub created any jobs..."
           if ! JOB_COUNT=$(gh run view "$RUN_ID" --repo "$REPO" --json jobs --jq '.jobs | length' 2>/dev/null); then
             echo "Could not inspect the CI run's jobs; stopping instead of guessing."
@@ -136,6 +155,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
           set -uo pipefail
           for workflow in ci.yaml docker.yml nix.yml; do
@@ -155,6 +175,12 @@ jobs:
                 [ "$STATUS" = completed ] && break
                 sleep 5
               done
+            fi
+            # Same supersede guard as above: never rerun a run for an old head.
+            CURRENT_HEAD=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid || true)
+            if [ "$CURRENT_HEAD" != "$HEAD_SHA" ]; then
+              echo "PR head moved to $CURRENT_HEAD; not rerunning superseded $workflow run $RUN_ID."
+              exit 0
             fi
             if gh run rerun "$RUN_ID" --repo "$REPO"; then
               echo "$workflow: rerunning $RUN_ID"
