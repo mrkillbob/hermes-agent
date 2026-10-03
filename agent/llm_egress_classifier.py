@@ -508,6 +508,7 @@ def _typed_payload_mapping(
     sanitized_cap: int,
     field_name: str | None = None,
     syntax_tool_call_ids: frozenset[str] = frozenset(),
+    native_nonterminal_call_ids: frozenset[str] = frozenset(),
     pytest_terminal_call_ids: frozenset[str] = frozenset(),
     elided_kanban_tool_call_ids: frozenset[str] = frozenset(),
     kanban_attachment_tool_call_ids: frozenset[str] = frozenset(),
@@ -905,7 +906,10 @@ def _typed_payload_mapping_item(
         state["require_terminal_provenance"]
         and (
             state["is_recognized_tool_result"]
-            or state["value"].get("type") == "tool_result"
+            or (
+                state["value"].get("type") == "tool_result"
+                and state["output_call_id"] not in state["native_nonterminal_call_ids"]
+            )
             or (
                 not isinstance(state["output_call_id"], str)
                 and (
@@ -924,6 +928,7 @@ def _typed_payload_mapping_item(
     sanitized_cap = state['sanitized_cap']
     field_name = state['field_name']
     syntax_tool_call_ids = state['syntax_tool_call_ids']
+    native_nonterminal_call_ids = state['native_nonterminal_call_ids']
     pytest_terminal_call_ids = state['pytest_terminal_call_ids']
     elided_kanban_tool_call_ids = state['elided_kanban_tool_call_ids']
     kanban_attachment_tool_call_ids = state['kanban_attachment_tool_call_ids']
@@ -1086,6 +1091,7 @@ def _typed_payload_mapping_item(
         sanitized_cap=sanitized_cap,
         field_name=key,
         syntax_tool_call_ids=syntax_tool_call_ids,
+        native_nonterminal_call_ids=native_nonterminal_call_ids,
         pytest_terminal_call_ids=pytest_terminal_call_ids,
         elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
         kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,

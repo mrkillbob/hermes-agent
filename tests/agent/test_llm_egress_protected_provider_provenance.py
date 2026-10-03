@@ -138,11 +138,54 @@ def test_protected_provider_denies_raw_output_or_uses_bounded_worker_projection(
         ("content", "def calculate_total(items):\n    return sum(items)\n"),
         ("content", "PASS _SCHWAB_PARENT_SEED_ASSEMBLER line 5243"),
         ("output", "https://github.com/acme/widget.git\nworking tree clean"),
+    ] + [
+        (f"native:{name}:{binding}", output)
+        for name in ["read_file", "mcp__read_file", "memory", "mcp__context_notes",
+                     "tool_describe", "mcp__tool_describe", "unknown", "mcp__terminal"]
+        for binding in ["matching", "missing", "mismatched", "duplicate", "future"]
+        for output in ["bounded local status: complete", "token=synthetic-secret-value"]
     ],
 )
-def test_existing_marked_custom_worker_admission_is_preserved(
+def test_native_nonterminal_binding_and_existing_worker_admission_are_preserved(
     tmp_path, monkeypatch, surface, output
 ):
+    if surface.startswith("native:"):
+        from tools.registry import registry as tool_registry
+
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+        # The callback test isolates identity binding; E2E uses real registered
+        # tools, source capture and the actual native transport.
+        monkeypatch.setattr(tool_registry, "get_entry", lambda name: (
+            object() if name in {"read_file", "memory", "tool_describe", "terminal"} else None
+        ))
+        _, name, binding = surface.split(":")
+        call = {"type": "tool_use", "id": "call_native", "name": name, "input": {}}
+        result = {"type": "tool_result", "content": output}
+        if binding != "missing":
+            result["tool_use_id"] = "other" if binding == "mismatched" else "call_native"
+        calls = [call, dict(call)] if binding == "duplicate" else [call]
+        messages = [
+            {"role": "assistant", "content": calls},
+            {"role": "user", "content": [result]},
+        ]
+        if binding == "future":
+            messages.reverse()
+        request = {"messages": messages}
+        callback = MagicMock(return_value="allowed")
+        elided_read = name in {"read_file", "mcp__read_file", "mcp__context_notes"}
+        allowed = (binding == "matching" and name not in {"unknown", "mcp__terminal"}
+                   and (not output.startswith("token=") or elided_read))
+        if allowed:
+            assert _dispatch_provider_request(_agent(tmp_path, provider="anthropic"), request, callback) == "allowed"
+            callback.assert_called_once()
+            if output.startswith("token="):
+                assert output not in json.dumps(callback.call_args.args[0])
+        else:
+            with pytest.raises(EgressBlocked):
+                _dispatch_provider_request(_agent(tmp_path, provider="anthropic"), request, callback)
+            callback.assert_not_called()
+        return
     monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
     agent = _agent(tmp_path, provider="custom")
     agent.base_url = "https://llm.example.test/v1"

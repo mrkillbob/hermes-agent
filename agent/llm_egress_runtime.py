@@ -695,6 +695,51 @@ def _is_codex_responses_replay_body(body: Any) -> bool:
     return False
 
 
+def _recognized_native_nonterminal_call_ids(body: Mapping[str, Any]) -> frozenset[str]:
+    """Bind native result admission to unique preceding registered nonterminal calls."""
+    from agent.transports.anthropic import _unprefix_oauth_tool_name
+    from tools.registry import registry as tool_registry
+
+    calls: dict[str, str | None] = {}
+    duplicates: set[str] = set()
+    admitted: set[str] = set()
+    messages = body.get("messages", [])
+    if not isinstance(messages, (list, tuple)):
+        return frozenset()
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        content = message.get("content", [])
+        if not isinstance(content, (list, tuple)):
+            continue
+        for block in content:
+            if not isinstance(block, Mapping):
+                continue
+            if message.get("role") == "assistant" and block.get("type") == "tool_use":
+                call_id, name = block.get("id"), block.get("name")
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                if call_id in calls:
+                    duplicates.add(call_id)
+                canonical = (
+                    _unprefix_oauth_tool_name(name)
+                    if isinstance(name, str) and name.startswith("mcp__")
+                    else name
+                )
+                calls[call_id] = (
+                    canonical
+                    if isinstance(canonical, str)
+                    and canonical != "terminal"
+                    and tool_registry.get_entry(canonical) is not None
+                    else None
+                )
+            elif message.get("role") == "user" and block.get("type") == "tool_result":
+                call_id = block.get("tool_use_id")
+                if isinstance(call_id, str) and calls.get(call_id) is not None:
+                    admitted.add(call_id)
+    return frozenset(admitted - duplicates)
+
+
 def authorize_agent_sdk_kwargs(
     agent: Any,
     kwargs: Mapping[str, Any],
@@ -938,6 +983,11 @@ def authorize_agent_sdk_kwargs(
         ),
         redact_terminal_arguments=(
             protected_kanban_remote and protected_provider_route
+        ),
+        native_nonterminal_call_ids=(
+            _recognized_native_nonterminal_call_ids(body)
+            if protected_provider_route and not protected_kanban_remote
+            else frozenset()
         ),
         require_terminal_provenance=(
             protected_provider_route and not protected_kanban_remote
