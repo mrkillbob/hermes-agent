@@ -187,7 +187,8 @@ class Heartbeat:
         while not self._stop.is_set():
             method, params = self.calls[n % len(self.calls)]
             n += 1
-            self._inflight_since = time.monotonic()
+            started = time.monotonic()
+            self._inflight_since = started
             try:
                 self.latencies.append(self.gw.timed_call(method, params, timeout=self.per_call_timeout))
             except Exception as exc:  # recorded and asserted by the test
@@ -196,7 +197,10 @@ class Heartbeat:
                     return
             finally:
                 self._inflight_since = None
-            self._stop.wait(self.interval)
+            # The documented interval is between call starts, not an extra delay
+            # after each reply. A slow call consumes the interval; never catch up
+            # with a burst of missed polls or overlap requests.
+            self._stop.wait(max(0.0, self.interval - (time.monotonic() - started)))
 
     def __enter__(self) -> "Heartbeat":
         self._inflight_since: float | None = None
