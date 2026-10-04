@@ -215,7 +215,7 @@ def cmd_build_commit(args) -> None:
         if not branch:
             raise ValueError("could not resolve the repository default branch")
         command = dispatch_command(commit, repository, branch, bundle_env)
-        page = r2.public_url_for(r2.public_base_url(), r2.commit_page_key_for(commit))
+        page = r2.public_url_for(r2.public_base_url(repository=repository), r2.commit_page_key_for(commit))
         print(f"Building one-off bundle for commit {commit}")
         print(f"Builds will be available at: {page}.")
         print(f"Workflow command, running from {repository}@{branch}")

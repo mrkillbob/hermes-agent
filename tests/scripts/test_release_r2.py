@@ -812,3 +812,39 @@ def test_canonical_header_whitespace_is_collapsed():
         "PUT", "/p", "", {"host": "h", "Content-Type": "application/msix   extra\tvalue"}, "x"
     )
     assert "content-type:application/msix extra value" in canon
+
+
+def test_selected_fork_requires_one_explicit_archive_authority(monkeypatch):
+    from scripts.releases.versioning import published_channel_identity
+    monkeypatch.delenv("CLOUDFLARE_R2_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("R2_DISPOSABLE_RUN", raising=False)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "mrkillbob/hermes-agent")
+    for resolve in (public_base_url, channel_public_base):
+        with pytest.raises(ValueError, match="CLOUDFLARE_R2_PUBLIC_URL"):
+            resolve()
+        assert resolve("https://fork.example.invalid/releases") == "https://fork.example.invalid/releases"
+    # Selected repository remains binding even outside a workflow environment.
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    with pytest.raises(ValueError, match="CLOUDFLARE_R2_PUBLIC_URL"):
+        published_channel_identity("mrkillbob/hermes-agent", "stable")
+    monkeypatch.setenv("CLOUDFLARE_R2_PUBLIC_URL", "https://fork.example.invalid/releases")
+    assert public_base_url() == channel_public_base()
+
+
+def test_archive_prerequisites_report_all_missing_names_without_values(monkeypatch, capsys):
+    from scripts.releases.r2_scope import validate_archive_environment
+    required = ("CLOUDFLARE_R2_ACCOUNT_ID", "CLOUDFLARE_R2_ACCESS_KEY_ID", "CLOUDFLARE_R2_SECRET_ACCESS_KEY", "CLOUDFLARE_R2_BUCKET")
+    for name in required:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "mrkillbob/hermes-agent")
+    monkeypatch.delenv("CLOUDFLARE_R2_PUBLIC_URL", raising=False)
+    with pytest.raises(SystemExit) as failure:
+        validate_archive_environment()
+    assert failure.value.code == 2
+    output = capsys.readouterr().err
+    assert all(name in output for name in (*required, "CLOUDFLARE_R2_PUBLIC_URL"))
+    for name in required:
+        monkeypatch.setenv(name, "private-fixture-value")
+    monkeypatch.setenv("CLOUDFLARE_R2_PUBLIC_URL", "https://fork.example.invalid")
+    validate_archive_environment()
+    assert "private-fixture-value" not in capsys.readouterr().err

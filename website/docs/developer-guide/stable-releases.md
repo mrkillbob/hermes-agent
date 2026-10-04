@@ -473,3 +473,33 @@ rebuilding it. Native acceptance uses the same Python serializer, including its
 Signing and publication credentials stay in their protected job environments.
 The source CI call does not inherit deployment secrets. Configure the existing
 release-signing and container-publish environments before running this pipeline.
+
+## Fork archive authority
+
+A selected fork must provide `CLOUDFLARE_R2_PUBLIC_URL` (repository/environment
+variable) for release, channel and commit-build commands. The official Nous
+archive default applies to the official repository. The builder checks every
+required R2 input before archiving and reports unavailable field names together;
+a missing injected value does not distinguish an absent credential from an
+inaccessible environment. Credential values are never printed by that check.
+
+Source installations subscribe through the owning profile's `config.yaml`:
+
+```yaml
+updates:
+  source_feed_base_url: https://your-fork-archive.example
+```
+
+Configure the same public archive root the fork producer publishes. HTTPS is
+required except for loopback test servers. A selected fork without this setting
+refuses channel resolution; an explicit archive still must publish records for
+that exact repository and valid manifest digests. Only 404 from a configured
+archive permits the existing unpublished `main` branch fallback. Other failures
+never fall back to another host or repository. Each profile owns its setting;
+Electron checkout probes carry its `HERMES_HOME` to this same resolver. Signed
+bundled apps keep the `publicBase` embedded in their release request and retain
+existing signature and adoption checks.
+
+These source changes do not provision R2/signing inputs, publish a release or
+establish installed adoption. Validate those separately on exact CI, release and
+installed receipts after the source changes have passed locked CI and review.
