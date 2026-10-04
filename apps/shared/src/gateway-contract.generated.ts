@@ -787,6 +787,7 @@ export interface ModelOptionProvider {
 /** ``hermes_cli/inventory.py::_apply_capabilities``. */
 export interface ModelCapabilities {
   fast: boolean
+  ultrafast?: boolean
   reasoning: boolean
   can_disable_reasoning?: boolean | null
 }
@@ -1896,10 +1897,11 @@ export interface ProfilesListParams {
   profile?: string | null
   include_sessions?: boolean | string | null
 }
-/** ``bot_mode_protocol`` tells clients this backend injects the teammate protocol itself. */
+/** ``bot_mode_protocol`` tells clients this backend injects the teammate protocol itself; ``install_id`` (as on ``/api/status``) names the machine that answered. */
 export interface ProfilesListResult {
   profiles?: ProfileRow[]
   bot_mode_protocol?: boolean
+  install_id?: string
 }
 /** One roster row; the session fields are present only with ``include_sessions``. */
 export interface ProfileRow {
@@ -2975,6 +2977,7 @@ export interface SessionCreateParams {
   provider?: string | null
   reasoning_effort?: string | null
   fast?: boolean | null
+  service_tier?: string | null
   close_on_disconnect?: boolean
   hidden?: boolean
   room_plumbing?: boolean
@@ -3868,7 +3871,7 @@ export interface CronJobRow {
   last_run_at?: string | null
   last_status?: string | null
   last_delivery_error?: string | null
-  last_delivery_unverified?: boolean | null
+  last_delivery_unverified?: string[] | null
   last_fire_error?: string | null
   last_error?: string | null
   enabled?: boolean
@@ -4329,7 +4332,7 @@ export interface PluginServerRow {
   state: PluginServerState
   sentence: string
 }
-export type PluginServerState = 'connected' | 'app_not_running' | 'hermes_not_connected' | 'endpoint_unavailable' | 'no_interactive_session' | 'version_too_old' | 'missing_app' | 'unknown'
+export type PluginServerState = 'connected' | 'app_not_running' | 'hermes_not_connected' | 'endpoint_unavailable' | 'no_interactive_session' | 'version_too_old' | 'missing_app' | 'unsupported_gpu' | 'unknown'
 /** One ``config_schema`` key of a plugin manifest, rendered by the Plugins hub (``hermes_cli.plugins_settings.plugin_settings_fields``). ``secret`` fields carry no value: ``env`` names the ``.env`` variable and ``has_value`` whether it is set. */
 export interface PluginSettingField {
   key: string
