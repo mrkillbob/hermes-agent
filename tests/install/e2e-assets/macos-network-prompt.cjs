@@ -117,7 +117,7 @@ async function collectQuitEvidence(executable, { execute = executeNative, now = 
       return { ownerPid: Number(window.pid), windowId: Number(window.id), layer: Number(window.layer), bounds,
         ownerExecutable: allowedPath ? path : 'outside-observation-scope' };
     });
-    if (!matchesExecutable(executable) || initial.resolvedExecutable && initial.resolvedExecutable !== canonical) {
+    if (!matchesExecutable(executable) || initial.resolvedExecutable !== canonical) {
       return { ...report, status: 'identity-changed' };
     }
     const apps = (initial.apps || []).filter(app => Number.isSafeInteger(app.pid) && app.pid > 0 && matchesExecutable(app.executable));
@@ -127,7 +127,7 @@ async function collectQuitEvidence(executable, { execute = executeNative, now = 
     report.observedAt.revalidated = Number.isSafeInteger(fresh.observedAt) ? fresh.observedAt : now();
     const current = (fresh.apps || []).filter(app => Number.isSafeInteger(app.pid) && app.pid > 0 && matchesExecutable(app.executable));
     if (current.length > 1) return { ...report, status: 'ambiguous-target' };
-    if (!matchesExecutable(executable) || fresh.resolvedExecutable && fresh.resolvedExecutable !== canonical ||
+    if (!matchesExecutable(executable) || fresh.resolvedExecutable !== canonical ||
         current.length !== 1 || current[0].pid !== target.pid || !matchesExecutable(table.get(target.pid)?.executable)) {
       return { ...report, status: 'identity-changed' };
     }

@@ -11,11 +11,29 @@ const { collectQuitEvidence } = createRequire(import.meta.url)('../tests/install
 const executable = '/isolated/Hermes.app/Contents/MacOS/Hermes'
 const app = { pid: 200, executable, finishedLaunching: true, active: true }
 const snapshot = {
+  resolvedExecutable: executable,
   apps: [app, { pid: 999, executable: '/other/Hermes' }],
   windows: [{ pid: 300, id: 20, layer: 8, bounds: { X: 382, Y: 119, Width: 260, Height: 250 },
     title: 'credential-sentinel', env: 'credential-sentinel' }],
 }
 const processes = `100 1 /opt/hca/hosted-compute-agent\n200 100 ${executable}\n300 1 /System/Library/CoreServices/UserNotificationCenter.app/Contents/MacOS/UserNotificationCenter\n`
+
+test('failed native executable resolution declines sampling before accepting a target', async () => {
+  for (const failedObservation of [1, 2]) {
+    for (const resolvedExecutable of [null, undefined, '', '/other/Hermes.app/Contents/MacOS/Hermes']) {
+      const commands = []
+      let observations = 0
+      const report = await collectQuitEvidence(executable, { resolveExecutable: value => value, execute: async command => {
+        commands.push(command)
+        if (command === '/usr/bin/osascript') return JSON.stringify(++observations === failedObservation ? { ...snapshot, resolvedExecutable } : snapshot)
+        if (command === '/bin/ps') return processes
+        return 'Thread_1 com.apple.main-thread\n + CFRunLoopRun\n'
+      } })
+      assert.equal(report.status, 'identity-changed')
+      assert.equal(commands.includes('/usr/bin/sample'), false)
+    }
+  }
+})
 
 test.skipIf(process.platform === 'win32')('selected and physical file identities allow only the same revalidated executable', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-quit-identity-'))
@@ -33,7 +51,7 @@ test.skipIf(process.platform === 'win32')('selected and physical file identities
     fs.writeFileSync(other, 'non-executable fixture', { mode: 0o600 })
     for (const [appPath, psPath] of [[selected, canonical], [canonical, selected]]) {
       const report = await collectQuitEvidence(selected, { execute: async (command, args) => {
-        if (command === '/usr/bin/osascript') return JSON.stringify({ apps: [{ ...app, executable: appPath }, { ...app, pid: 201, executable: other }], windows: [] })
+        if (command === '/usr/bin/osascript') return JSON.stringify({ resolvedExecutable: canonical, apps: [{ ...app, executable: appPath }, { ...app, pid: 201, executable: other }], windows: [] })
         if (command === '/bin/ps') return `200 1 ${psPath}\n201 1 ${other}\n`
         assert.equal(command, '/usr/bin/sample'); assert.equal(args[0], '200')
         return 'Thread_1 com.apple.main-thread\n + CFRunLoopRun\n'
@@ -59,7 +77,7 @@ test.skipIf(process.platform === 'win32')('selected and physical file identities
         fs.unlinkSync(alias); fs.symlinkSync(path.join(root, 'other'), alias)
         return `200 1 ${canonical}\n`
       }
-      if (command === '/usr/bin/osascript') return JSON.stringify({ apps: [{ ...app, executable: canonical }], windows: [] })
+      if (command === '/usr/bin/osascript') return JSON.stringify({ resolvedExecutable: canonical, apps: [{ ...app, executable: canonical }], windows: [] })
       samples++; throw new Error('changed file identity must not be sampled')
     } })
     assert.equal(changed.status, 'identity-changed')

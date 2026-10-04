@@ -6,6 +6,17 @@ import { test, vi } from 'vitest'
 
 const helper = createRequire(import.meta.url)('../tests/install/e2e-assets/macos-app-quit.cjs')
 
+test('native executable resolution rejects an invalid physical identity', () => {
+  vi.stubGlobal('ObjC', { bindFunction() {} })
+  vi.stubGlobal('$', { NSMutableData: { dataWithLength: () => ({ mutableBytes: {} }) }, realpath: () => null })
+  try {
+    for (const result of [null, undefined, '', 'relative/Hermes']) {
+      $.realpath = () => result
+      assert.throws(() => helper.resolveExecutablePath('/isolated/Hermes'), /cannot resolve installed executable/)
+    }
+  } finally { vi.unstubAllGlobals() }
+})
+
 test.skipIf(process.platform !== 'darwin')('native quit waiting refreshes the main run loop before the next observation', async () => {
   assert.equal(typeof helper.waitForWorkspaceRefresh, 'function')
   // Execute the exported native adapter in its JXA runtime; no app is launched

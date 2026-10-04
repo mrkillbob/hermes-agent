@@ -41,7 +41,11 @@ function resolveExecutablePath(executable) {
   // Node realpath. The caller-owned buffer is macOS PATH_MAX (1024 bytes).
   ObjC.bindFunction('realpath', ['char *', ['char *', 'void *']]);
   var buffer = $.NSMutableData.dataWithLength(1024);
-  return $.realpath(executable, buffer.mutableBytes);
+  var physical = $.realpath(executable, buffer.mutableBytes);
+  if (typeof physical !== 'string' || physical.charAt(0) !== '/' || /[\r\n\0]/.test(physical)) {
+    throw new Error('cannot resolve installed executable');
+  }
+  return physical;
 }
 
 function run(args) {
