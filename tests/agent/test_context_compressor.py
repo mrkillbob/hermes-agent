@@ -201,23 +201,28 @@ class TestSummarizeToolResultRedactsLocalPaths:
 
     LOCAL_PATH = "/Users/example/project/secret-notes.txt"
 
-    def test_read_file_path_is_redacted(self):
-        args = json.dumps({"path": self.LOCAL_PATH, "offset": 1})
-        summary = _summarize_tool_result("read_file", args, "x" * 50)
+    @pytest.mark.parametrize("tool_name,args,payload,expected", [
+        ("read_file", {"path": LOCAL_PATH, "offset": 1}, {}, ("[read_file]",)),
+        ("write_file", {"path": LOCAL_PATH, "content": "line one\nline two"}, {}, ("wrote to",)),
+        ("search_files", {"pattern": "TODO", "path": LOCAL_PATH}, {"total_count": 3}, ("3 matches",)),
+        ("read_file", {"path": LOCAL_PATH}, {"error": f"File not found: {LOCAL_PATH}"}, ("FAILED: File not found:",)),
+        ("write_file", {"path": LOCAL_PATH}, {"error": f"Refusing to overwrite {LOCAL_PATH}: stale"},
+         ("FAILED: Refusing to overwrite",)),
+        ("patch", {"path": LOCAL_PATH}, {"error": f"Cannot patch {LOCAL_PATH}: stale"}, ("FAILED: Cannot patch",)),
+        ("terminal", {"command": f"cat {LOCAL_PATH}"},
+         {"error": "BLOCKED: The user has NOT consented", "status": "blocked"},
+         ("BLOCKED, not run", "did NOT consent", "do not retry")),
+    ])
+    def test_summary_paths_are_redacted_without_losing_outcome(self, tool_name, args, payload, expected, compressor):
+        content = json.dumps({**payload, "padding": "x" * 500})
+        messages = [{"role": "tool", "tool_call_id": "t1", "content": content}]
+        assert compressor._demote_tool_result_at(messages, 0, {"t1": (tool_name, json.dumps(args))}, 200)
+        summary = messages[0]["content"]
         assert self.LOCAL_PATH not in summary
         assert "<private-path>" in summary
-
-    def test_write_file_path_is_redacted(self):
-        args = json.dumps({"path": self.LOCAL_PATH, "content": "line one\nline two"})
-        summary = _summarize_tool_result("write_file", args, "")
-        assert self.LOCAL_PATH not in summary
-        assert "<private-path>" in summary
-
-    def test_search_files_path_is_redacted(self):
-        args = json.dumps({"pattern": "TODO", "path": self.LOCAL_PATH})
-        summary = _summarize_tool_result("search_files", args, json.dumps({"total_count": 3}))
-        assert self.LOCAL_PATH not in summary
-        assert "<private-path>" in summary
+        assert all(part in summary for part in expected)
+        if "FAILED" in summary or "BLOCKED" in summary:
+            assert "wrote to" not in summary and "ran `" not in summary
 
 
 class TestSummarizeToolResultSkillTools:
@@ -251,6 +256,68 @@ class TestSummarizeToolResultSkillTools:
         assert failed.startswith("[skills_list] FAILED: skills dir unreadable")
         # Control: skill_view really has a top-level ``name`` and keeps its stub.
         assert _summarize_tool_result("skill_view", json.dumps({"name": "github"}), "x" * 100) == "[skill_view] name=github (100 chars)"
+
+
+class TestSummarizeToolResultOutcome:
+    """A compaction stub must carry the outcome of the call (#131244): a refused ``read_file``, a
+    rate-limited ``web_search``, a dead cron run, a non-zero process exit or a failed MCP tool used to
+    compress into the same stub as the success it never was, and the post-compaction agent reported
+    the success."""
+
+    @staticmethod
+    def _stub(tool_name, args, payload):
+        return _summarize_tool_result(tool_name, json.dumps(args), json.dumps(payload))
+
+    @pytest.mark.parametrize("tool_name, args, payload, expected", [
+        ("read_file", {"path": "gone.py", "offset": 1}, {"error": "File not found: gone.py"},
+         "[read_file] read gone.py from line 1 (36 chars) FAILED: File not found: gone.py"),
+        ("web_search", {"query": "hermes"}, {"error": "rate limited"},
+         "[web_search] query='hermes' (25 chars result) FAILED: rate limited"),
+        ("memory", {"action": "add", "target": "a note"}, {"error": "unknown action"},
+         "[memory] add on a note FAILED: unknown action"),
+        ("text_to_speech", {}, {"error": "no voice available"},
+         "[text_to_speech] generated audio (31 chars) FAILED: no voice available"),
+        ("cronjob_manage", {"action": "create"}, {"success": False}, "[cronjob] create FAILED"),
+        ("cronjob_manage", {"action": "run"},
+         {"success": True, "job": {"execution_success": False, "execution_error": "agent exited with code 1"}},
+         "[cronjob] run FAILED: agent exited with code 1"),
+        ("process_manage", {"action": "poll", "session_id": "p1"},
+         {"status": "exited", "exit_code": 1, "completion_reason": "nonzero_exit"},
+         "[process] poll session=p1 FAILED: exit code 1"),
+        # Every MCP/plugin tool falls through to the generic stub.
+        ("some_mcp_tool", {"a": 1}, {"error": "boom"}, "[some_mcp_tool] a=1 (17 chars result) FAILED: boom"),
+        ("delegate_task", {"goal": "ship it"}, {"error": "Unknown action"},
+         "[delegate_task] 'ship it' (27 chars result) FAILED: Unknown action"),
+        # The stale-write guard refused: nothing was written, so the stub must not say "wrote to".
+        ("write_file", {"path": "a.md", "content": "line 1\nline 2"},
+         {"error": "Refusing to overwrite a.md: stale", "stale_write_blocked": True},
+         "[write_file] a.md FAILED: Refusing to overwrite a.md: stale"),
+    ])
+    def test_failed_call_stub_is_marked_failed(self, tool_name, args, payload, expected):
+        assert self._stub(tool_name, args, payload) == expected
+
+    @pytest.mark.parametrize("tool_name, args, payload, expected", [
+        ("web_search", {"query": "hermes"}, {"results": [{"title": "hit"}]},
+         "[web_search] query='hermes' (31 chars result)"),
+        ("write_file", {"path": "a.md", "content": "line 1\nline 2"}, {"bytes_written": 13},
+         "[write_file] wrote to a.md (2 lines)"),
+        ("text_to_speech", {}, {"success": True, "path": "/tmp/out.wav"}, "[text_to_speech] generated audio (41 chars)"),
+        # ``job`` carries stored state from earlier runs; only this call's outcome may mark the stub.
+        ("cronjob_manage", {"action": "poll"},
+         {"success": True, "job": {"error": "last run failed", "execution_success": True}}, "[cronjob] poll"),
+        ("process_manage", {"action": "poll", "session_id": "p1"}, {"status": "exited", "exit_code": 0},
+         "[process] poll session=p1"),
+        ("process_manage", {"action": "poll", "session_id": "p1"}, {"status": "running", "pid": 4242},
+         "[process] poll session=p1"),
+        # The agent's own kill and a run the scheduler is already firing are not failures.
+        ("process_manage", {"action": "poll", "session_id": "p1"},
+         {"status": "exited", "exit_code": -15, "completion_reason": "killed"}, "[process] poll session=p1"),
+        ("cronjob_manage", {"action": "run"},
+         {"success": True, "job": {"execution_skipped": "Already being fired by the scheduler; not run again."}},
+         "[cronjob] run SKIPPED: Already being fired by the scheduler; not run again."),
+    ])
+    def test_successful_call_stub_is_not_marked(self, tool_name, args, payload, expected):
+        assert self._stub(tool_name, args, payload) == expected
 
 
 class TestSummarizeToolResultClarify:
@@ -407,6 +474,78 @@ class TestSummarizeToolResultClarify:
         assert "Answer one" in summary
         assert "Choice A" in summary
         assert "Choice B" in summary
+
+
+def _refusals():
+    """Refused-call results from the real producers: the approval gate messages in their terminal
+    envelope, the write guard's raw ``BLOCKED:`` text, the workdir guard's ``status`` "blocked"
+    envelope (its error reads "Blocked:", not "BLOCKED"), a pending gateway approval, and a
+    successful kanban_block (``status`` "blocked" with no error, which is not a refusal). ``expected`` lists substrings the summary must
+    contain; empty means it must not read as refused."""
+    from tools import approval
+    from tools.kanban_tools import _ok
+    from tools.terminal_tool import _error_json
+    from tools.terminal_tool_guards import _validate_workdir
+
+    gate = approval._COMMAND_GATE
+    no_consent = ["BLOCKED, not run", "did NOT consent"]
+    return [
+        pytest.param("terminal", {"command": "rm -rf build"},
+                     _error_json(gate.cli_denied.format(description="", breaker=""), status="blocked"),
+                     no_consent, id="cli_denied"),
+        pytest.param("terminal", {"command": "rm -rf build"},
+                     _error_json(gate.transport_denied.format(breaker=""), status="blocked"),
+                     no_consent, id="transport_denied"),
+        pytest.param("terminal", {"command": "rm -rf build"},
+                     _error_json(gate.cli_timeout.format(breaker=""), status="blocked"),
+                     no_consent, id="cli_timeout"),
+        pytest.param("write_file", {"path": "AGENTS.md", "content": "a\nb"},
+                     "BLOCKED: write to protected agent-instruction file(s) (AGENTS.md) was denied "
+                     "by the user. The user has NOT consented to this write. Do NOT retry it or "
+                     "attempt the same edit via another path (terminal, execute_code, etc.).",
+                     no_consent, id="write_guard"),
+        pytest.param("terminal", {"command": "ls"},
+                     _error_json(_validate_workdir("a;b"), status="blocked"),
+                     ["BLOCKED, not run"], id="workdir_guard"),
+        pytest.param("terminal", {"command": "rm -rf build"},
+                     _error_json("", status="pending_approval"),
+                     ["awaiting the user's approval, not run"], id="pending_approval"),
+        pytest.param("kanban_block", {"reason": "need creds"},
+                     _ok(task_id="t_1", run_id=None, status="blocked", block_kind="needs_input"),
+                     [], id="kanban_block_ok"),
+    ]
+
+
+class TestSummarizeToolResultRefusals:
+    """A refused call must not be summarized as done ("ran ...", "wrote to ..."): that turns the
+    user's denial into a record of the action and drops the do-not-retry instruction."""
+
+    @pytest.mark.parametrize("tool_name,args,content,expected", _refusals())
+    def test_denial_summary_keeps_not_run_and_no_consent(self, tool_name, args, content, expected):
+        summary = _summarize_tool_result(tool_name, json.dumps(args), content)
+
+        assert all(part in summary for part in expected), summary
+        assert ("not run" in summary) == bool(expected), summary
+        assert "ran `" not in summary and "wrote to" not in summary
+        assert len(summary) <= _PRUNE_MIN_CHARS - 1
+
+    def test_prune_keeps_denial_across_passes(self, compressor):
+        tool_name, args, content, _ = _refusals()[0].values
+        assert len(content) > _PRUNE_MIN_CHARS
+        messages = [
+            {"role": "assistant", "tool_calls": [{"id": "t1", "type": "function",
+             "function": {"name": tool_name, "arguments": json.dumps(args)}}]},
+            {"role": "tool", "tool_call_id": "t1", "content": content},
+            {"role": "user", "content": "recent request"},
+            {"role": "assistant", "content": "recent response"},
+        ]
+
+        pruned, count = compressor._prune_old_tool_results(messages, protect_tail_count=2)
+        summary = pruned[1]["content"]
+
+        assert count == 1 and "BLOCKED, not run" in summary and "did NOT consent" in summary
+        pruned_again, _ = compressor._prune_old_tool_results(pruned, protect_tail_count=2)
+        assert pruned_again[1]["content"] == summary
 
 
 class TestShouldCompress:

@@ -128,17 +128,15 @@ def _build_preloaded_skills_prompt(skills: object = None) -> str | None:
     if not parsed_skills:
         return None
 
-    from agent.skill_commands import build_preloaded_skills_prompt
+    from agent.skill_commands import build_preloaded_skills_prompt, format_missing_skills
 
     skills_prompt, loaded_skills, missing_skills = build_preloaded_skills_prompt(parsed_skills)
     if missing_skills:
-        missing_display = ", ".join(missing_skills)
         if not loaded_skills:
-            raise ValueError(f"Unknown skill(s): {missing_display}")
+            raise ValueError(format_missing_skills(missing_skills))
         logging.warning(
-            "Unknown skill(s) requested, skipping: %s. Continuing with: %s. "
-            "List available skills with `hermes skills list`.",
-            missing_display,
+            "Skipping %s. Continuing with: %s. List available skills with `hermes skills list`.",
+            format_missing_skills(missing_skills),
             ", ".join(loaded_skills),
         )
     return skills_prompt or None
@@ -600,7 +598,7 @@ def _run_agent(
 
     # The try spans agent construction (not just ``chat``) so the store is always closed, even when
     # ``AIAgent(...)`` raises — the one-shot exit path hard-exits via os._exit and skips finalizers.
-    agent = None
+    agent = relay_session_id = None
     reopened_resume = False
     fallback_created = False
     try:
@@ -644,6 +642,9 @@ def _run_agent(
         agent.tool_gen_callback = None
 
         aux_before = _auxiliary_usage(session_db, resume_sid) if ledger else {}
+        # Relay keys the root conversation to the id at turn entry; compression may rotate
+        # agent.session_id mid-turn without opening a second root, so keep the entry id.
+        relay_session_id = getattr(agent, "session_id", None)
         result = agent.run_conversation(prompt, conversation_history=conversation_history or None)
         if ledger:
             _attach_auxiliary_usage(result, session_db, aux_before,
@@ -653,7 +654,7 @@ def _run_agent(
         if agent is None and (reopened_resume or fallback_created) and session_db is not None:
             _quietly("failed resumed session cleanup", lambda: session_db.end_session(
                 resume_sid, "oneshot_setup_failed"))
-        _close_agent(agent, session_db)
+        _close_agent(agent, session_db, relay_session_id)
 
 
 def _quietly(what: str, fn) -> None:
@@ -674,7 +675,7 @@ def _linger_for_background_completions() -> None:
     process_registry.wait_for_pending_completions(None)
 
 
-def _close_agent(agent, session_db) -> None:
+def _close_agent(agent, session_db, relay_session_id=None) -> None:
     """Teardown mirroring gateway/run.py:_cleanup_agent_resources (NOT cli.py:_run_cleanup):
     oneshot has no _active_agent_ref and the hard-exit path skips finalizers."""
     if agent is not None:
@@ -682,6 +683,14 @@ def _close_agent(agent, session_db) -> None:
         # close() kill_all()s the task and the dying parent owns the children's stdout pipes, so
         # exiting now destroys in-flight deliveries (e.g. Bot Mode handoff replies).
         _quietly("background completion wait", _linger_for_background_completions)
+        if relay_session_id:
+            # run_conversation ends the turn but keeps the Relay root resumable; one-shot has no
+            # next turn and os._exit skips atexit, so close the root (and fire on_session_finalize).
+            from hermes_cli.lifecycle import finalize_session
+
+            _quietly("session finalize", lambda: finalize_session(
+                session_id=relay_session_id, platform=getattr(agent, "platform", None) or "cli",
+                reason="shutdown"))
         session_messages = getattr(agent, "_session_messages", None)
         memory_args = (session_messages,) if isinstance(session_messages, list) else ()
         _quietly("memory/context cleanup", lambda: agent.shutdown_memory_provider(*memory_args))

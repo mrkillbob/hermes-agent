@@ -215,7 +215,8 @@ _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
 # open; bot_relay.* = a FULL one-turn agent conversation (600s); setup.* / session.active_list =
 # Desktop-polled and under GIL pressure block the WS read loop (false "needs setup", stalled
 # interrupts); voice.*/wake.* = SYNCHRONOUS faster-whisper install (300s); session.workspace.move =
-# git subprocess probes on an arbitrary (maybe slow) mount.
+# git subprocess probes on an arbitrary (maybe slow) mount; session.save = a full stored-session read + JSON
+# render (up to sessions.max_export_messages rows, ~0.8s at the default cap).
 _LONG_HANDLERS = frozenset({
     "session.foreign.list", "session.foreign.preview", "session.foreign.import",
     "billing.state", "subscription.state", "subscription.preview", "subscription.change",
@@ -229,7 +230,7 @@ _LONG_HANDLERS = frozenset({
     "projects.record_repos", "projects.for_cwd", "projects.tree", "projects.project_sessions",
     "setup.runtime_check", "setup.status", "free_tier.provision", "voice.toggle", "voice.record", "voice.tts", "wake.start",
     "wake.status", "session.active_list", "session.branch", "session.compress", "session.list",
-    "session.resume", "session.workspace.move", "shell.exec", "skills.manage", "slash.exec",
+    "session.resume", "session.save", "session.workspace.move", "shell.exec", "skills.manage", "slash.exec",
     "prompt.submit",
     "command.dispatch",  # /goal draft invokes the auxiliary model; never block the RPC reader
     "shared_metrics.set",  # consent reconcile waits on the metrics store's write lock
@@ -2751,9 +2752,6 @@ def _session_info(agent, session: dict | None = None) -> dict:
     if isinstance(reasoning_config, dict):
         # Disabled must differ from unset ("" = provider default) or the desktop loses "thinking off" after turn 1.
         reasoning_effort = "none" if reasoning_config.get("enabled") is False else str(reasoning_config.get("effort", "") or "")
-    reasoning_effort_wire = "" if reasoning_effort in {"", "none"} else (
-        "max" if reasoning_effort == "ultra" else reasoning_effort
-    )
     service_tier = getattr(agent, "service_tier", None) or mirror.get("service_tier") or ""
     # yolo ORs the same three sources check_all_command_guards() does (approvals.mode=off, the process
     # --yolo env, the per-session flag): the session flag alone would show "off" while config auto-approves.
@@ -2776,6 +2774,11 @@ def _session_info(agent, session: dict | None = None) -> dict:
         # Broadcast/resume callers need not be bound to this session's profile.
         with _profile_build_scope(sess.get("profile_home") or _hermes_home):
             provider = _runtime_model_config(agent).get("provider", provider)
+    from agent.reasoning_effort import clamp_effort, route_supported_efforts
+    reasoning_effort_wire = "" if reasoning_effort in {"", "none"} else clamp_effort(
+        reasoning_effort,
+        route_supported_efforts(pending_provider or provider, model, getattr(agent, "api_mode", None)),
+    )
     info: dict = {
         "model": model,
         "provider": pending_provider or provider,
@@ -3002,14 +3005,13 @@ def _startup_system_prompt(cfg: dict, task_id: str) -> str:
     startup_skills = _parse_tui_skills_env()
     if not startup_skills:
         return system_prompt
-    from agent.skill_commands import build_preloaded_skills_prompt
+    from agent.skill_commands import build_preloaded_skills_prompt, format_missing_skills
     skills_prompt, loaded_skills, missing_skills = build_preloaded_skills_prompt(startup_skills, task_id=task_id)
     if missing_skills:
-        missing_display = ", ".join(missing_skills)
         if not loaded_skills:
-            raise ValueError(f"Unknown skill(s): {missing_display}")
-        logger.warning("Unknown skill(s) requested, skipping: %s. Continuing with: %s. "
-                       "List available skills with `hermes skills list`.", missing_display, ", ".join(loaded_skills))
+            raise ValueError(format_missing_skills(missing_skills))
+        logger.warning("Skipping %s. Continuing with: %s. List available skills with `hermes skills list`.",
+                       format_missing_skills(missing_skills), ", ".join(loaded_skills))
     if skills_prompt:
         system_prompt = "\n\n".join(part for part in (system_prompt, skills_prompt) if part).strip()
     return system_prompt
