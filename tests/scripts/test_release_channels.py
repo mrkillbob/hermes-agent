@@ -482,7 +482,7 @@ def test_accepted_release_receipts_feed_the_protected_head_without_rebuilding(tm
         monkeypatch.setattr(channel_releases, "promote_stable_feeds", promote_stable_feeds)
         monkeypatch.setattr(channel_releases, "product_identity", lambda tag: dict(identity))
         monkeypatch.setattr(r2, "credentials", lambda: (pub.store.creds, url, "bucket"))
-        monkeypatch.setattr(r2, "public_base_url", lambda: base)
+        monkeypatch.setattr(r2, "public_base_url", lambda **_kwargs: base)
         def put(**kwargs):
             pub.store.put(kwargs["key"], __import__("pathlib").Path(kwargs["file"]).read_bytes())
         monkeypatch.setattr(r2, "put", put)

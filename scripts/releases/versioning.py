@@ -29,7 +29,7 @@ def published_channel_identity(repository: str, channel: str, *, base_url: str |
         raise ValueError("Expected a protected release channel")
     reader_type = reader_type or ChannelReader
     try:
-        resolved = reader_type(base_url or public_base_url(), repository=repository).resolve(channel)
+        resolved = reader_type(base_url or public_base_url(repository=repository), repository=repository).resolve(channel)
     except ChannelNotFound:
         return None
     if resolved.manifest is None:

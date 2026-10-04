@@ -506,12 +506,13 @@ def commit_prefix_for(commit: str) -> str:
 # Public download origin for object keys. CI supplies the authoritative
 # value as CLOUDFLARE_R2_PUBLIC_URL; the documented production origin is the
 # fallback so a local command can still name a page it is about to publish.
-DEFAULT_PUBLIC_URL = "https://hermes-assets.nousresearch.com"
+from scripts.releases.r2_scope import DEFAULT_PUBLIC_URL
 
 
-def public_base_url(explicit: str | None = None) -> str:
+def public_base_url(explicit: str | None = None, *, repository: str | None = None) -> str:
+    from scripts.releases.r2_scope import configured_public_root
     return R2Scope.configured().public_base(
-        explicit or os.environ.get("CLOUDFLARE_R2_PUBLIC_URL") or DEFAULT_PUBLIC_URL
+        configured_public_root(explicit, repository=repository)
     )
 
 
@@ -569,6 +570,8 @@ def required_env(name: str) -> str:
 def credentials() -> tuple[dict[str, str], str, str]:
     """(creds, base, bucket) from the R2 env vars. No secrets are printed."""
     R2Scope.configured()  # Fail closed on a malformed disposable lease.
+    from scripts.releases.r2_scope import validate_archive_environment
+    validate_archive_environment(public=False)
     creds = {
         "access_key_id": required_env("CLOUDFLARE_R2_ACCESS_KEY_ID"),
         "secret_key": required_env("CLOUDFLARE_R2_SECRET_ACCESS_KEY"),

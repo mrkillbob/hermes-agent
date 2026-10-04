@@ -2404,6 +2404,9 @@ DEFAULT_CONFIG = {
     },
 
     "updates": {
+        # Source channel archive for this profile. Forks require an explicit HTTPS origin;
+        # official installations use the documented Nous archive when empty.
+        "source_feed_base_url": "",
         # Passive version/banner checks only; explicit `hermes update --check` remains enabled.
         "check": True,
         # Pre-update backup. quick = snapshot small critical state (pairing JSONs, cron jobs,

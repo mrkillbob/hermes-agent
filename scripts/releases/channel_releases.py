@@ -203,7 +203,7 @@ def accepted_stable(publisher: ChannelPublisher, env: dict, tag: str, commit: st
 def stable_head_version(env: dict) -> str | None:
     """Return the protected stable head's source version, if one exists."""
     publisher = ChannelPublisher(R2ChannelStore(*r2.credentials()), env["GITHUB_REPOSITORY"],
-                                 r2.public_base_url(), authorize=lambda _action, _record: None)
+                                 r2.public_base_url(repository=env["GITHUB_REPOSITORY"]), authorize=lambda _action, _record: None)
     current = publisher._read(select_channel(publisher, "stable-release"))
     if current is None or current[0]["head"] is None:
         return None
@@ -228,7 +228,7 @@ def advance_stable(env: dict, release: dict, root: Path) -> dict:
     """Advance one published release from its immutable tag-scoped receipts."""
     creds, base, bucket = r2.credentials()
     store = R2ChannelStore(creds, base, bucket)
-    public_base = r2.public_base_url()
+    public_base = r2.public_base_url(repository=env["GITHUB_REPOSITORY"])
     key = f"releases/tag/{release['claim_tag']}/release-candidates.json"
     digest = hashlib.sha256(read_archive_bytes(key)).hexdigest()
     if digest != release.get("candidate_manifest_sha256"):
@@ -336,7 +336,7 @@ def publish_release(policy: str, env: dict, root: Path) -> dict:
     if env.get("R2_DISPOSABLE_RUN"):
         raise ChannelError("Disposable receiver builds cannot enter production release publication")
     publisher = ChannelPublisher(R2ChannelStore(*r2.credentials()), env["GITHUB_REPOSITORY"],
-                                 r2.public_base_url(), authorize=lambda action, record:
+                                 r2.public_base_url(repository=env["GITHUB_REPOSITORY"]), authorize=lambda action, record:
                                  admit_transaction(policy, env, require_published=True))
     name = select_channel(publisher, policy)
     identity = product_identity(payload_tag)

@@ -138,7 +138,7 @@ def configured_publisher(repository: str) -> ChannelPublisher:
         ])
         if actual_id != os.environ.get("GITHUB_REPOSITORY_ID"):
             raise ChannelError("Disposable namespace belongs to another repository")
-    base = channel_public_base()
+    base = channel_public_base(repository=repository)
     store = R2ChannelStore(*r2.credentials(), scope=scope)
 
     def verify_build(request: dict, manifest: dict) -> bool:

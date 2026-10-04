@@ -273,6 +273,16 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: python3 -m scripts.releases.dispatch_log
 
+      - name: Validate release archive configuration
+        if: inputs.disposable_run == '' && inputs.disposable_channel == '' && (inputs.release-phase == '' || inputs.release-phase == 'candidate')
+        env:
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
+          CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
+        run: python3 -c 'from scripts.releases.r2_scope import validate_archive_environment; validate_archive_environment()'
+
       - name: Archive every pinned input
         # Runner Python is intentional: the toolchain's upstream may be gone.
         # Same checkout contract the standalone archive job had: the tag ref

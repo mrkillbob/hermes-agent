@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> None:
     from scripts.releases.r2_scope import R2Scope, channel_public_base, require_run
     if args.disposable_run is not None:
         os.environ["R2_DISPOSABLE_RUN"] = require_run(args.disposable_run)
-    args.public_base = channel_public_base(args.public_base)
+    args.public_base = channel_public_base(args.public_base, repository=args.repository)
     request = read_request(args.build_id, args.request_sha256, args.public_base, args.repository)
     if args.command == "admit":
         values = admit(request, dict(os.environ))

@@ -69,7 +69,31 @@ def _resolve_channel(name: str, repository: str):
     """
     from hermes_cli.release_channels import ChannelReader
 
-    return ChannelReader(_PUBLIC_BASE, repository=repository).resolve(name)
+    return ChannelReader(source_feed_base(repository), repository=repository).resolve(name)
+
+
+def source_feed_base(repository: str) -> str:
+    """Resolve archive authority in the current profile, never at import time."""
+    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_cli.release_channels import ChannelError, public_base, validate_repository
+
+    validate_repository(repository)
+    try:
+        updates = load_user_config_effective(fail_closed=True).get("updates", {})
+    except Exception:
+        # Config parsing supports multiple YAML engines. No broken configuration
+        # may select a fallback feed or expose its contents in a delivery error.
+        raise ChannelError("Cannot read updates source feed configuration") from None
+    if not isinstance(updates, dict):
+        raise ChannelError("Invalid updates configuration")
+    configured = updates.get("source_feed_base_url", "")
+    if not isinstance(configured, str):
+        raise ChannelError("Invalid updates.source_feed_base_url")
+    if configured.strip():
+        return public_base(configured.strip())
+    if repository.casefold() != OFFICIAL_REPOSITORY.casefold():
+        raise ChannelError("Fork source updates require updates.source_feed_base_url")
+    return _PUBLIC_BASE
 
 
 def resolve_source_target(channel: str, git_cmd=None, cwd=None, *, repository=None) -> SourceTarget:
