@@ -213,8 +213,8 @@ def _prepare_bound_skill_source_results(
             payload = json.loads(raw) if isinstance(raw, str) else None
             if not isinstance(payload, Mapping) or payload.get("success") is not True or payload.get("name") != name:
                 raise ValueError("invalid_result")
-            project_dirs, all_dirs, _ = _skill_search_dirs()
-            error, _, source = _locate_skill(name, None, project_dirs, all_dirs)
+            roots, _ = _skill_search_dirs()
+            error, _, source = _locate_skill(name, None, roots)
             if error is not None or source is None:
                 raise ValueError("missing_source")
             source = Path(source)

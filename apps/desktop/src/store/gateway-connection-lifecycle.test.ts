@@ -18,6 +18,10 @@ import { LIVENESS_REPROBE_DELAY_MS } from '@/lib/gateway-liveness-policy'
 const gatewayMocks = vi.hoisted(() => {
   const instances: {
     close: ReturnType<typeof vi.fn>
+    offEvent: ReturnType<typeof vi.fn>
+    offRequest: ReturnType<typeof vi.fn>
+    offState: ReturnType<typeof vi.fn>
+    emitEvent: (event: unknown) => void
     request: ReturnType<typeof vi.fn>
     connectionState: string
   }[] = []
@@ -39,6 +43,15 @@ vi.mock('@/hermes', () => ({
   setApiRequestConnection: vi.fn(),
   HermesGateway: class {
     connectionState = 'closed'
+    eventListeners = new Set<(event: unknown) => void>()
+    offEvent = vi.fn(() => this.eventListeners.clear())
+    offRequest = vi.fn()
+    offState = vi.fn()
+    emitEvent = (event: unknown): void => {
+      for (const handler of this.eventListeners) {
+        handler(event)
+      }
+    }
     close = vi.fn(() => {
       this.connectionState = 'closed'
     })
@@ -49,10 +62,12 @@ vi.mock('@/hermes', () => ({
     request = vi.fn(async (_method: string, _params: Record<string, unknown>) => ({}))
     onEvent = vi.fn((handler: (event: unknown) => void) => {
       gatewayMocks.eventHandlers.push(handler)
+      this.eventListeners.add(handler)
 
-      return () => {}
+      return this.offEvent
     })
-    onState = vi.fn(() => () => {})
+    onRequest = vi.fn(() => this.offRequest)
+    onState = vi.fn(() => this.offState)
     constructor() {
       gatewayMocks.instances.push(this as never)
     }
@@ -866,15 +881,21 @@ describe('secondary stalled-dial budget', () => {
     reconnectSecondaryGateways()
     await vi.advanceTimersByTimeAsync(0)
 
-    // 20 polls inside ONE second of virtual time. The ladder's floor is 300ms,
-    // so a healthy scope dials at most a couple of times in that window; a
-    // storm dials once per poll.
+    // 20 polls inside ONE second of virtual time. How often the ladder itself
+    // dials depends on its full-jitter draws (a near-zero draw redials at once),
+    // so count only the dials a poll makes: timers never fire inside the awaited
+    // request, so every dial seen there is the poll's own, never the ladder's.
+    let pollDials = 0
+
     for (let index = 0; index < 20; index += 1) {
+      const before = getConnectionFor.mock.calls.length
       await requestGatewayForAgent('homelab', 'bot-a', 'session.control.read', {}).catch(() => undefined)
+      pollDials += getConnectionFor.mock.calls.length - before
       await vi.advanceTimersByTimeAsync(50)
     }
 
-    expect(getConnectionFor.mock.calls.length - dialsAfterOpen).toBeLessThanOrEqual(5)
+    expect(pollDials).toBe(0)
+    expect(getConnectionFor.mock.calls.length).toBeGreaterThan(dialsAfterOpen)
   })
 
   it('a foreground request still dials at once while background polls are cooling down (#121865)', async () => {
@@ -994,6 +1015,45 @@ describe('secondary stalled-dial budget', () => {
 })
 
 describe('cooperative pool retirement (supersedes #104871)', () => {
+  it.each(['parked', 'superseded'])('disposes a %s secondary once and releases its turn lease', async mode => {
+    const onEvent = vi.fn()
+    const touchBackend = vi.fn(async () => undefined)
+    let sharedPrimary = false
+    const getConnectionFor = vi.fn(async ({ connectionId, profile }: { connectionId: string; profile: string }) => ({
+      ...descriptorFor(connectionId, profile),
+      sharedPrimary
+    }))
+
+    configureGatewayRegistry({ onEvent } as never)
+    installDesktop({ getConnectionFor, touchBackend })
+    const release = await retainGatewayForSessionTurn('local', 'worker', 'session-1')
+    const socket = gatewayMocks.instances[0]
+    const event = { type: 'session.info', session_id: 'another-session', payload: {} }
+    socket.emitEvent(event)
+    expect(onEvent).toHaveBeenCalledOnce()
+    onEvent.mockClear()
+
+    if (mode === 'parked') {
+      expect(parkSecondariesForRetiredBackend('worker')).toEqual(['conn:local::worker'])
+      disposeSecondariesForConnection('local')
+    } else {
+      sharedPrimary = true
+      await openGatewayForAgent('local', 'worker')
+      expect(socket.close).not.toHaveBeenCalled()
+      release()
+    }
+
+    release()
+    disposeSecondariesForConnection('local')
+    expect(socket.close).toHaveBeenCalledOnce()
+    expect(socket.offEvent).toHaveBeenCalledOnce()
+    expect(socket.offRequest).toHaveBeenCalledOnce()
+    expect(socket.offState).toHaveBeenCalledOnce()
+    expect(touchBackend).toHaveBeenLastCalledWith('conn:local::worker', { activeTurn: false })
+    socket.emitEvent(event)
+    expect(onEvent).not.toHaveBeenCalled()
+  })
+
   it('a retired scope parks: no reconnect on socket drop and no redial from the wake/focus nudge; an explicit open re-arms it', async () => {
     vi.useFakeTimers()
 
