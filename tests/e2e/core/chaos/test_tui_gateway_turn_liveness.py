@@ -91,6 +91,7 @@ READY_TIMEOUT_S = 60.0
 SETTLE_TIMEOUT_S = 30.0
 EXIT_TIMEOUT_S = 30.0
 PARALLEL_CALLS = 8
+SCENARIO_WORKERS = 6
 HUNG_COMMAND = "sleep 3600"
 # The first turn pays the cold agent build (imports, tool registry): setup, not the
 # invariant under test, so it gets a budget sized for a box that is loaded 3x over.
@@ -434,7 +435,7 @@ def run_scenario(scn: Scenario, srv: FakeLLMServer, root: Path) -> dict[str, Any
         _reap(gw, tag)
 
 
-# ── pytest wiring: all scenarios run concurrently (one gateway each), asserted per test ──
+# ── pytest wiring: bounded scenario pool (one gateway each), asserted per test ──
 
 
 @pytest.fixture(scope="module")
@@ -444,7 +445,7 @@ def scenario_futures(request: pytest.FixtureRequest, tmp_path_factory: pytest.Te
         if isinstance(getattr(getattr(item, "callspec", None), "params", {}).get("scn"), Scenario)
     }
     with FakeLLMServer(responder) as srv, ThreadPoolExecutor(
-            max_workers=max(1, len(selected)), thread_name_prefix="chaos-tui") as pool:
+            max_workers=SCENARIO_WORKERS, thread_name_prefix="chaos-tui") as pool:
         futures: dict[str, Future] = {
             scn.id: pool.submit(run_scenario, scn, srv, tmp_path_factory.mktemp(scn.id))
             for scn in SCENARIOS if scn.id in selected
