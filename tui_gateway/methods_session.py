@@ -308,7 +308,7 @@ def _seed_branch_row(record: dict, key: str, parent_session_id: str, history: li
             if db is None:
                 return
             _persist_branch(db, key, parent_session_id, _branch_title(db, parent_session_id), history,
-                            source=source, cwd=record["cwd"],
+                            source=source, cwd=None if _is_remote_launch_cwd(record) else record["cwd"],
                             profile_name=profile_name_for_home(profile_home) or _current_profile_name(),
                             model=_session_default_model(record), compensate=True, title_source="derived", user_id=_session_auth_user_id(record))
             record["pending_title"] = None
@@ -1194,8 +1194,8 @@ def _(rid, params: dict) -> dict:
         _resume_follow_tip(ctx)
         if (resp := _resume_guard(ctx)) is not None:
             return resp
-        ctx.recorded_cwd = _str_param(ctx.found, "cwd")
-        ctx.profile_resume_cwd = ctx.recorded_cwd or _profile_configured_cwd(ctx.profile_home)
+        ctx.recorded_cwd = _resumable_stored_cwd(_str_param(ctx.found, "cwd"), ctx.profile_home)
+        ctx.profile_resume_cwd = ctx.recorded_cwd or _profile_workspace_cwd(ctx.profile_home)
         # Fast path: reuse a session live IN THIS PROFILE (never another profile's runtime).
         with _session_resume_lock:
             live = _find_live_session_by_key(ctx.target, ctx.profile_home)
@@ -2648,7 +2648,8 @@ def _branch_live_once(rid, params: dict, session: dict, *, omit_messages: bool =
             title = params.get("name", "") or _branch_title(db, old_key)
             home = session.get("profile_home")
             _persist_branch(db, new_key, old_key, title, history, source=source,
-                            cwd=conversation_worktree.get("path") or _session_cwd(session),
+                            cwd=conversation_worktree.get("path") or (
+                                None if _is_remote_launch_cwd(session) else _session_cwd(session)),
                             profile_name=profile_name_for_home(home) or _current_profile_name(),
                             model=_session_default_model(session), copy_fields=_BRANCH_COPY_FIELDS,
                             title_source="user" if params.get("name") else "derived",
