@@ -5408,7 +5408,8 @@ class TestCustomEndpointApiKeyInheritance:
                     client, _ = aux._get_cached_client("custom", "aux-model", base_url=aux_base_url, api_key=explicit_key)
                 finally:
                     aux.reset_runtime_main(token)
-                served.append(getattr(client, "api_key", None))
+                # OpenAI stores deferred credentials separately from its literal key snapshot.
+                served.append(getattr(client, "_api_key_provider" if callable(explicit_key) else "api_key", None))
         finally:
             aux.shutdown_cached_clients()
             aux.clear_runtime_main()
