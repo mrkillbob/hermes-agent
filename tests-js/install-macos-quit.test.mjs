@@ -7,11 +7,12 @@ import { test, vi } from 'vitest'
 const helper = createRequire(import.meta.url)('../tests/install/e2e-assets/macos-app-quit.cjs')
 
 test('native executable resolution rejects an invalid physical identity', () => {
+  const native = { NSMutableData: { dataWithLength: () => ({ mutableBytes: {} }) }, realpath: () => null }
   vi.stubGlobal('ObjC', { bindFunction() {} })
-  vi.stubGlobal('$', { NSMutableData: { dataWithLength: () => ({ mutableBytes: {} }) }, realpath: () => null })
+  vi.stubGlobal('$', native)
   try {
     for (const result of [null, undefined, '', 'relative/Hermes']) {
-      $.realpath = () => result
+      native.realpath = () => result
       assert.throws(() => helper.resolveExecutablePath('/isolated/Hermes'), /cannot resolve installed executable/)
     }
   } finally { vi.unstubAllGlobals() }
