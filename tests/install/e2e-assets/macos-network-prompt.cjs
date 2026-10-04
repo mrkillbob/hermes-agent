@@ -17,8 +17,12 @@ function run(args) {
     if (executable === args[0]) apps.push({ pid: Number(app.processIdentifier), executable: executable,
       finishedLaunching: Boolean(app.finishedLaunching), active: Boolean(app.active) });
   }
-  var raw = ObjC.deepUnwrap($.CGWindowListCopyWindowInfo(
-    $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, $.kCGNullWindowID));
+  // kCGNullWindowID is a C macro (0), unavailable in the JXA bridge. Convert
+  // the returned CFArrayRef to an Objective-C object before deep-unwrapping;
+  // outside a GUI session CoreGraphics can return NULL.
+  var windowList = ObjC.castRefToObject($.CGWindowListCopyWindowInfo(
+    $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, 0));
+  var raw = windowList.isNil() ? [] : ObjC.deepUnwrap(windowList);
   // Retain only geometry and owner IDs, never titles or other window content.
   var windows = (raw || []).slice(0, 6).map(function (w) {
     return { pid: w.kCGWindowOwnerPID, id: w.kCGWindowNumber, layer: w.kCGWindowLayer, bounds: w.kCGWindowBounds };

@@ -12,6 +12,15 @@ const snapshot = {
 }
 const processes = `100 1 /opt/hca/hosted-compute-agent\n200 100 ${executable}\n300 1 /System/Library/CoreServices/UserNotificationCenter.app/Contents/MacOS/UserNotificationCenter\n`
 
+test.skipIf(process.platform !== 'darwin')('native read-only observation reports an absent app without sampling it', async () => {
+  const report = await collectQuitEvidence(`/tmp/hermes-observer-absent-${process.pid}/Hermes.app/Contents/MacOS/Hermes`)
+  assert.equal(report.status, 'target-absent')
+  assert.ok(Array.isArray(report.visibleWindows))
+  assert.ok(report.visibleWindows.length <= 6)
+  assert.equal(report.target, undefined)
+  assert.equal(report.stack, undefined)
+}, 10000)
+
 test('diagnostics sample only the revalidated installed app and retain no window content or command arguments', async () => {
   const commands = []
   const report = await collectQuitEvidence(executable, {
