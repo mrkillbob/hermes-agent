@@ -178,25 +178,42 @@ def test_clone_all_never_writes_through_a_symlinked_source_env(home, tmp_path):
     assert "TELEGRAM_BOT_TOKEN" not in (profile_dir / ".env").read_text(encoding="utf-8")
 
 
-def test_clone_is_published_atomically_after_stripping(home, monkeypatch):
+@pytest.mark.parametrize("clone_all", [False, True])
+@pytest.mark.parametrize("fail_strip", [False, True])
+def test_clone_is_published_atomically_after_stripping(home, monkeypatch, clone_all, fail_strip):
     """The multiplexer enumerates ``profiles/`` while a clone is built; the final directory must not
     exist (and no listable profile may appear) until the channel strip has run."""
     from hermes_cli import profile_channels, profiles
     seen = {}
     real_strip = profile_channels.strip_channel_settings
+    source_env = (home / ".env").read_bytes()
+    source_config = (home / "config.yaml").read_bytes()
 
     def _observing_strip(profile_dir, **kw):
         seen["final_exists"] = (home / "profiles" / "bot2").exists()
         seen["served"] = [n for n, _ in profiles.profiles_to_serve(multiplex=True)]
         seen["work_dir_hidden"] = profile_dir.name.startswith(".")
-        return real_strip(profile_dir, **kw)
+        result = real_strip(profile_dir, **kw)
+        if fail_strip:
+            raise OSError("simulated channel-strip failure")
+        return result
 
     monkeypatch.setattr(profile_channels, "strip_channel_settings", _observing_strip)
-    profile_dir = create_profile("bot2", clone_config=True, no_alias=True)
+    options = {"clone_all": clone_all, "clone_config": not clone_all, "no_alias": True}
+    if fail_strip:
+        with pytest.raises(OSError, match="simulated channel-strip failure"):
+            create_profile("bot2", **options)
+        assert not (home / "profiles" / "bot2").exists()
+        assert [n for n, _ in profiles.profiles_to_serve(multiplex=True)] == ["default"]
+    else:
+        profile_dir = create_profile("bot2", **options)
+        assert profile_dir.is_dir()
+        assert [n for n, _ in profiles.profiles_to_serve(multiplex=True)] == ["default", "bot2"]
 
     assert seen == {"final_exists": False, "served": ["default"], "work_dir_hidden": True}
-    assert profile_dir.is_dir() and [n for n, _ in profiles.profiles_to_serve(multiplex=True)] == ["default", "bot2"]
     assert not [p for p in (home / "profiles").iterdir() if p.name.startswith(".")]
+    assert (home / ".env").read_bytes() == source_env
+    assert (home / "config.yaml").read_bytes() == source_config
 
 
 def test_clone_channels_refusal_lives_in_create_profile(home, monkeypatch):
@@ -218,12 +235,13 @@ _SHARED_ENV = (
     "GATEWAY_ALLOW_ALL_USERS=true\nGATEWAY_ALLOWED_USERS=1,2\n"
     "GATEWAY_RELAY_ID=gw-1\nGATEWAY_RELAY_SECRET=s\nGATEWAY_RELAY_DELIVERY_KEY=k\n"
     "WECOM_DM_POLICY=open\nSMS_WEBHOOK_PORT=8700\n"
-    "TWILIO_ACCOUNT_SID=AC1\nTWILIO_AUTH_TOKEN=tw\nTWILIO_PHONE_NUMBER=+1\n"
+    "TWILIO_ACCOUNT_SID=AC1\nTWILIO_AUTH_TOKEN=tw\nTWILIO_PHONE_NUMBER=+1\nTWILIO_ALLOWED_USERS=123\n"
     "EMAIL_ADDRESS=a@b\nEMAIL_PASSWORD=p\nEMAIL_SMTP_HOST=smtp\nEMAIL_IMAP_HOST=imap\nEMAIL_ALLOWED_USERS=x@y\n"
 )
 
 
-def test_ownership_inventory_strips_policy_relay_and_aliases_but_keeps_tool_credentials(home):
+@pytest.mark.parametrize("clone_all", [False, True])
+def test_ownership_inventory_strips_policy_relay_and_aliases_but_keeps_tool_credentials(home, clone_all):
     """Gateway-wide policy, relay identity and alias-prefixed keys are channel settings. TWILIO/EMAIL
     credentials are shared with tools: they leave with the channel only when the source's gateway would
     run that adapter (email here — complete creds, not disabled); an explicitly disabled channel means
@@ -234,7 +252,7 @@ def test_ownership_inventory_strips_policy_relay_and_aliases_but_keeps_tool_cred
                         "platforms": {"sms": {"enabled": False}}}),
         encoding="utf-8")
 
-    profile_dir = create_profile("bot3", clone_config=True, no_alias=True)
+    profile_dir = create_profile("bot3", clone_config=not clone_all, clone_all=clone_all, no_alias=True)
 
     keys = {line.split("=", 1)[0] for line in (profile_dir / ".env").read_text(encoding="utf-8").splitlines()
             if "=" in line and not line.startswith("#")}
@@ -272,24 +290,30 @@ _SHARED_PLUGIN_INIT = (
 
 
 @pytest.mark.parametrize(("enabled", "stripped"), [(False, False), (True, True)])
-def test_plugin_platform_shared_env_prefixes_follow_the_ownership_rule(home, enabled, stripped):
+@pytest.mark.parametrize("clone_from", [None, "source"])
+def test_plugin_platform_shared_env_prefixes_follow_the_ownership_rule(home, enabled, stripped, clone_from):
     """A plugin platform's ``shared_env_prefixes`` (Home Assistant's ``HASS_``) get the shared-with-tools
     rule: the keys leave with the channel only when the source runs that adapter."""
-    plugin = home / "plugins" / "sharedplat"
+    source = home / "profiles" / clone_from if clone_from else home
+    plugin = source / "plugins" / "sharedplat"
     plugin.mkdir(parents=True)
     (plugin / "plugin.yaml").write_text(_SHARED_PLUGIN_MANIFEST, encoding="utf-8")
     (plugin / "__init__.py").write_text(_SHARED_PLUGIN_INIT, encoding="utf-8")
-    (home / ".env").write_text("OPENAI_API_KEY=sk\nSHP_TOKEN=tool-token\nSHP_URL=http://x\n", encoding="utf-8")
-    (home / "config.yaml").write_text(
+    (source / ".env").write_text("OPENAI_API_KEY=sk\nSHP_TOKEN=tool-token\nSHP_URL=http://x\n", encoding="utf-8")
+    (source / "config.yaml").write_text(
         yaml.safe_dump({"model": {"default": "gpt-5", "provider": "openai"}, "plugins": {"enabled": ["sharedplat"]},
                         "platforms": {"sharedplat": {"enabled": enabled}}}),
         encoding="utf-8")
 
-    profile_dir = create_profile(f"shp{int(enabled)}", clone_config=True, no_alias=True)
+    source_env = (source / ".env").read_bytes()
+    source_config = (source / "config.yaml").read_bytes()
+    profile_dir = create_profile(f"shp{int(enabled)}", clone_from=clone_from, clone_config=True, no_alias=True)
 
     keys = {line.split("=", 1)[0] for line in (profile_dir / ".env").read_text(encoding="utf-8").splitlines()
             if "=" in line and not line.startswith("#")}
     assert keys == ({"OPENAI_API_KEY"} if stripped else {"OPENAI_API_KEY", "SHP_TOKEN", "SHP_URL"})
+    assert (source / ".env").read_bytes() == source_env
+    assert (source / "config.yaml").read_bytes() == source_config
 
 
 def test_clone_all_drops_directory_shaped_channel_state(home):

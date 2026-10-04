@@ -412,17 +412,11 @@ def _remove_entry(entry: Path) -> None:
 
 
 def strip_channel_settings(profile_dir: Path, *, include_state: bool, source_dir: Optional[Path] = None) -> Dict[str, List[str]]:
-    """Strip channel credentials/identity from a freshly cloned profile. ``include_state`` also
+    """Strip channel credentials/identity using the source's adapter ownership. ``include_state`` also
     drops the runtime state ``--clone-all`` copied. Returns ``{platform|"config"|"state": [what]}``."""
-    import shutil
     from hermes_cli.plugins_loader import _plugin_home_scope
     with _plugin_home_scope(source_dir or profile_dir):
-        index = ChannelKeyIndex()
-    preserve = set()
-    if not _platform_enabled_in_config(profile_dir / "config.yaml", "homeassistant"):
-        # HASS_TOKEN/HASS_URL are also the Home Assistant tool credentials. Keep them when the
-        # messaging adapter is disabled; tools_config.py treats the configured token as opt-in.
-        preserve.add("homeassistant")
+        index = ChannelKeyIndex(source_dir)
     stripped: Dict[str, List[str]] = dict(
         strip_channel_env_file(profile_dir / ".env", index)
     )

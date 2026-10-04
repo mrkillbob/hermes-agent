@@ -22,10 +22,10 @@ import { startRemoteBackend } from './remote-helpers'
 
 const REMOTE_ID = 'linuxhost'
 const REMOTE_LABEL = 'Linux host'
-// 13 local profiles + the remote's default square already crosses the
-// condensed threshold (13) before the roster enumerates the remote's others.
+// Each active gateway's 13 profiles + the at-rest default cross the threshold (13).
+// After the remote switch, This device is an on-demand launcher without a named roster.
 const LOCAL_NAMED = Array.from({ length: 12 }, (_, i) => `local${i + 1}`)
-const REMOTE_NAMED = ['inbox', 'research']
+const REMOTE_NAMED = ['inbox', 'research', ...Array.from({ length: 10 }, (_, i) => `remote${i + 1}`)]
 
 function seedProfiles(hermesHome: string, names: string[]): void {
   for (const name of names) {

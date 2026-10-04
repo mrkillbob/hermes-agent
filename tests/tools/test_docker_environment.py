@@ -841,25 +841,30 @@ def test_sandbox_dir_name_never_resolves_to_the_sandbox_root():
         assert not (set(name) & set(':/\\')), name
 
 
-def test_labels_attribute_populated_after_init(monkeypatch):
+@pytest.mark.parametrize("isolate_host_data", [False, True])
+def test_labels_attribute_populated_after_init(monkeypatch, isolate_host_data):
     """``self._labels`` must be set to the same key/value pairs that went onto
     docker run, so subsequent reuse / reaper paths can match without re-running
     the sanitizer or re-importing the profile module."""
     monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
     monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
-    _mock_subprocess_run(monkeypatch)
+    calls = _mock_subprocess_run(monkeypatch)
 
-    env = _make_dummy_env(task_id="abc")
+    env = _make_dummy_env(task_id="abc", isolate_host_data=isolate_host_data)
 
-    assert env._labels == {
+    run_cmd = next(cmd for cmd, _ in calls if isinstance(cmd, list) and cmd[1] == "run")
+    wire_labels = dict(run_cmd[i + 1].split("=", 1) for i, arg in enumerate(run_cmd) if arg == "--label")
+    assert env._labels == wire_labels
+    labels = dict(env._labels)
+    environment_label = labels.pop("hermes-environment")
+    assert labels == {
         "hermes-agent": "1",
         "hermes-task-id": "abc",
         "hermes-profile": "default",
         "hermes-egress": "off",
-        "hermes-host-data": "ambient",
-        "hermes-environment": env._labels["hermes-environment"],
+        "hermes-host-data": "isolated" if isolate_host_data else "ambient",
     }
-    assert env._labels["hermes-environment"]
+    assert re.fullmatch(r"[0-9a-f]{24}", environment_label)
 
 
 def test_isolated_container_reuse_is_label_partitioned(monkeypatch):
@@ -908,27 +913,6 @@ def test_symlinked_skills_tree_reuses_container_across_processes(monkeypatch, tm
     changed = dict(config, volumes=["volume-b:/workspace"])
     third = _make_dummy_env(**changed)
     assert third._labels["hermes-environment"] != first._labels["hermes-environment"]
-
-
-def test_labels_attribute_populated_after_init(monkeypatch):
-    """``self._labels`` must be set to the same key/value pairs that went onto
-    docker run, so subsequent reuse / reaper paths can match without re-running
-    the sanitizer or re-importing the profile module."""
-    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
-    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
-    _mock_subprocess_run(monkeypatch)
-
-    env = _make_dummy_env(task_id="abc")
-
-    labels = dict(env._labels)
-    environment_label = labels.pop("hermes-environment")
-    assert labels == {
-        "hermes-agent": "1",
-        "hermes-task-id": "abc",
-        "hermes-profile": "default",
-        "hermes-egress": "off",
-    }
-    assert re.fullmatch(r"[0-9a-f]{24}", environment_label)
 
 
 @pytest.mark.parametrize("changed_setting", ["image", "volumes", "hermes_home"])

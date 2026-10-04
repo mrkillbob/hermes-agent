@@ -5956,7 +5956,7 @@ def _borrowed_main_credential_key(provider: str, base_url: Optional[str], api_ke
         # This shape takes the runtime's endpoint and key even when an explicit key was passed.
         return (runtime.get("base_url", ""), _runtime_cache_discriminator("api_key", runtime.get("api_key", "")))
     # Same normalization as the client build, which treats a blank explicit key as keyless.
-    if _normalize_api_key(api_key):
+    if _explicit_api_key_value(api_key):
         return ()
     borrowed = _read_main_api_key_if_same_origin(_to_openai_base_url(base_url).strip())
     return (_runtime_cache_discriminator("api_key", borrowed),)

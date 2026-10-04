@@ -310,20 +310,14 @@ class GatewayProfileReconcileMixin:
             with _log_suppressed(logging.DEBUG, "memory-store release failed", exc_info=True):
                 from plugins.memory.holographic.store import MemoryStore
                 MemoryStore.release_all_under(home)
-            # The gateway process is a second holder the CLI-side delete cannot reach: its routed
-            # log files (logs/.__agent.lock, logs/.__errors.lock) and its scoped MCP servers'
-            # mcp-stderr.log handle live HERE, so unserve must release them in this process too
-            # (#130244) — the same two calls ``delete_profile`` makes for the deleting process.
-            # Both calls BLOCK (the log release stops/joins the QueueListener, which can be inside
-            # a ConcurrentRotatingFileHandler emit waiting on another process's rotation lock; the
-            # MCP shutdown waits on future.result for the MCP loop), so they run off the loop in a
-            # worker thread — otherwise every other served profile's events stall behind them.
+            # The gateway's routed log files are a second holder the CLI-side delete cannot
+            # reach (#130244). MCP handles were released before plugin eviction above; release
+            # these log handles after the remaining teardown hooks finish writing.
+            # The log release stops/joins the QueueListener, which can be inside a
+            # ConcurrentRotatingFileHandler emit waiting on another process's rotation lock,
+            # so run it off the loop to keep every other served profile's events moving.
             # ``asyncio.to_thread`` copies the context, so the surrounding
             # ``_profile_runtime_scope`` home/secret override stays visible in the worker.
-            with _log_suppressed(logging.DEBUG, "scoped MCP shutdown failed", exc_info=True):
-                from hermes_constants import hermes_home_key
-                from tools.mcp_tool_lifecycle import shutdown_mcp_servers
-                await asyncio.to_thread(shutdown_mcp_servers, scope=hermes_home_key(home))
             with _log_suppressed(logging.DEBUG, "profile log handler release failed", exc_info=True):
                 from hermes_logging import release_profile_log_handlers
                 await asyncio.to_thread(release_profile_log_handlers, home)

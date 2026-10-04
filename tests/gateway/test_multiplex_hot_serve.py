@@ -375,8 +375,10 @@ async def test_unserve_releases_gateway_held_log_and_mcp_handles(tmp_path, monke
             await runner._start_secondary_profile_adapters()
             mark_named_profile_deleted(gamma_dir)  # what ``delete_profile`` does before rmtree
             result = await runner.reconcile_served_profiles()
+            settled = await runner.reconcile_served_profiles()
 
         assert result["removed"] == ["gamma"]
+        assert settled["removed"] == []
         # The gateway-side scoped MCP servers (whose children write mcp-stderr.log) are stopped
         # for exactly the deleted profile's scope, never a sibling's.
         assert shutdowns == [hermes_home_key(gamma_dir)]

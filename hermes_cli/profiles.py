@@ -1468,26 +1468,29 @@ def create_profile(
         refusal = clone_channels_refusal(source_dir, clone_from or get_active_profile_name() or "default")
         if refusal:
             raise ValueError(refusal)
+        _refuse_clone_channels_from_live_multiplexer(
+            source_dir, clone_from or get_active_profile_name() or "default"
+        )
     clear_named_profile_deleted(profile_dir)
-    source_dir = None
-    if clone_from is not None or clone_all or clone_config:
-        source_dir = _resolve_clone_source(clone_from)
-        if clone_channels:
-            _refuse_clone_channels_from_live_multiplexer(
-                source_dir, clone_from or get_active_profile_name()
-            )
-    if clone_all and source_dir:
-        _clone_all_into(source_dir, profile_dir, canon)
-    else:
-        _bootstrap_profile_dir(profile_dir, source_dir, sync_imports=sync_imports)
-    _finish_profile_layout(
-        profile_dir, no_skills=no_skills, clone_all=clone_all, description=description,
-    )
-    if source_dir is not None and not clone_channels:
-        from hermes_cli.profile_channels import strip_channel_settings
-        stripped = strip_channel_settings(profile_dir, include_state=clone_all, source_dir=source_dir)
-        if stripped:
-            logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
+    # A live multiplexer must never discover copied bot credentials before their strip finishes.
+    staging = _clone_staging_dir(profile_dir)
+    try:
+        if clone_all and source_dir:
+            _clone_all_into(source_dir, staging, canon)
+        else:
+            _bootstrap_profile_dir(staging, source_dir, sync_imports=sync_imports)
+        if source_dir is not None and not clone_channels:
+            from hermes_cli.profile_channels import strip_channel_settings
+            stripped = strip_channel_settings(staging, include_state=clone_all, source_dir=source_dir)
+            if stripped:
+                logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
+        _finish_profile_layout(
+            staging, no_skills=no_skills, clone_all=clone_all, description=description,
+        )
+        os.rename(staging, profile_dir)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
 
     # Inside a container under s6, register the gateway as a runtime s6 service so
     # `hermes -p <profile> gateway start` supervises via `s6-svc -u` instead of a bare
