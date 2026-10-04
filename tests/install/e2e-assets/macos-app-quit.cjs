@@ -6,6 +6,7 @@ function quitInstalledApps(executable, options) {
   var requested = {};
   for (;;) {
     var apps = options.list().filter(function (app) { return app.executable === executable; });
+    var observedAt = options.now();
     if (!apps.length) {
       if (quietSince === null) quietSince = options.now();
       // The updater publishes its receipt before launching the successor.
@@ -22,28 +23,52 @@ function quitInstalledApps(executable, options) {
     if (options.now() >= deadline) {
       throw new Error('installed app did not quit normally: ' + apps.map(function (app) {
         return 'pid=' + app.pid + ' finishedLaunching=' + app.finishedLaunching + ' active=' + app.active;
-      }).join('; '));
+      }).join('; ') + ' observedAt=' + observedAt);
     }
     options.delay(0.2);
   }
 }
 
 // osascript -l JavaScript macos-app-quit.cjs /exact/installed/executable
+function waitForWorkspaceRefresh(seconds) {
+  // NSWorkspace's list and NSRunningApplication's dynamic state only refresh
+  // when the main run loop runs in a common mode. JXA delay does not do that.
+  $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(seconds));
+}
+
+function resolveExecutablePath(executable) {
+  // NSURL preserves aliases such as /var; use the same physical resolution as
+  // Node realpath. The caller-owned buffer is macOS PATH_MAX (1024 bytes).
+  ObjC.bindFunction('realpath', ['char *', ['char *', 'void *']]);
+  var buffer = $.NSMutableData.dataWithLength(1024);
+  var physical = $.realpath(executable, buffer.mutableBytes);
+  if (typeof physical !== 'string' || physical.charAt(0) !== '/' || /[\r\n\0]/.test(physical)) {
+    throw new Error('cannot resolve installed executable');
+  }
+  return physical;
+}
+
 function run(args) {
   if (args.length !== 1 || args[0].charAt(0) !== '/') throw new Error('expected one absolute installed executable');
   ObjC.import('AppKit');
-  quitInstalledApps(args[0], {
+  var selected = args[0];
+  var canonical = resolveExecutablePath(selected);
+  quitInstalledApps(canonical, {
     now: function () { return Date.now(); },
-    delay: function (seconds) { delay(seconds); },
+    delay: waitForWorkspaceRefresh,
     list: function () {
+      if (resolveExecutablePath(selected) !== canonical) throw new Error('installed executable changed during normal Quit');
       var nativeApps = $.NSWorkspace.sharedWorkspace.runningApplications;
       var apps = [];
       for (var i = 0; i < nativeApps.count; i++) {
         var app = nativeApps.objectAtIndex(i);
-        if (app.executableURL && !app.terminated) apps.push({
-          pid: Number(app.processIdentifier), executable: ObjC.unwrap(app.executableURL.path),
-          finishedLaunching: Boolean(app.finishedLaunching), active: Boolean(app.active), native: app
-        });
+        if (app.executableURL && !app.terminated) {
+          var executable = ObjC.unwrap(app.executableURL.path);
+          apps.push({
+            pid: Number(app.processIdentifier), executable: executable === selected ? canonical : executable,
+            finishedLaunching: Boolean(app.finishedLaunching), active: Boolean(app.active), native: app
+          });
+        }
       }
       return apps;
     },
@@ -51,4 +76,4 @@ function run(args) {
   });
 }
 
-if (typeof module !== 'undefined') module.exports = { quitInstalledApps, run };
+if (typeof module !== 'undefined') module.exports = { quitInstalledApps, run, waitForWorkspaceRefresh, resolveExecutablePath };
