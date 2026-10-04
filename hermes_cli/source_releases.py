@@ -78,7 +78,12 @@ def source_feed_base(repository: str) -> str:
     from hermes_cli.release_channels import ChannelError, public_base, validate_repository
 
     validate_repository(repository)
-    updates = load_user_config_effective(fail_closed=True).get("updates", {})
+    try:
+        updates = load_user_config_effective(fail_closed=True).get("updates", {})
+    except Exception:
+        # Config parsing supports multiple YAML engines. No broken configuration
+        # may select a fallback feed or expose its contents in a delivery error.
+        raise ChannelError("Cannot read updates source feed configuration") from None
     if not isinstance(updates, dict):
         raise ChannelError("Invalid updates configuration")
     configured = updates.get("source_feed_base_url", "")

@@ -85,6 +85,5 @@ def test_missing_or_invalid_fork_feed_fails_before_network(tmp_path, monkeypatch
         with pytest.raises(ChannelError):
             resolve_source_target("main", repository="mrkillbob/hermes-agent")
     (home / "config.yaml").write_text("updates: [broken")
-    import yaml
-    with pytest.raises(yaml.YAMLError):
+    with pytest.raises(ChannelError, match="configuration"):
         resolve_source_target("main", repository="mrkillbob/hermes-agent")

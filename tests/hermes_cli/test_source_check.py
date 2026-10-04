@@ -84,12 +84,15 @@ def installation(tmp_path, monkeypatch):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    monkeypatch.setattr(source_releases, "_PUBLIC_BASE", f"http://127.0.0.1:{server.server_port}")
+    from hermes_cli.config import atomic_config_write
+    atomic_config_write(home / "config.yaml", {
+        "updates": {"source_feed_base_url": f"http://127.0.0.1:{server.server_port}"},
+    })
     original = urllib.request.urlopen
 
     def local(request, *args, **kwargs):
         url = urlsplit(request.full_url)
-        assert url.hostname in {"api.github.com", "hermes-assets.nousresearch.com"}
+        assert url.hostname in {"api.github.com", "hermes-assets.nousresearch.com", "127.0.0.1"}
         rewritten = urllib.request.Request(
             f"http://127.0.0.1:{server.server_port}{url.path}" + (f"?{url.query}" if url.query else ""),
             headers=dict(request.header_items()))
@@ -189,7 +192,10 @@ def test_cache_force_expiry_and_passive_opt_out(installation, monkeypatch):
     clock[0] += 86401
     assert check()["behind"] == 0
     assert requests.count(url) == requests.count(MAIN_CHANNEL) == 4
-    (home / "config.yaml").write_text("updates: {check: false}")
+    from hermes_cli.config import atomic_config_write, require_readable_config_before_write
+    config = require_readable_config_before_write(home / "config.yaml")
+    config["updates"]["check"] = False
+    atomic_config_write(home / "config.yaml", config)
     assert check(passive=True)["behind"] is None
     assert check()["behind"] == 0
     assert requests.count(url) == requests.count(MAIN_CHANNEL) == 4
