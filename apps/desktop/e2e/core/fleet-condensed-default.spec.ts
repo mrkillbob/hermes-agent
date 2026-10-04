@@ -16,7 +16,14 @@ import * as path from 'node:path'
 
 import { expect, type Page, test } from '@playwright/test'
 
-import { coreAppEnv, createCoreSandbox, launchCoreApp, waitForInteractive, writeProviderHome } from './harness'
+import {
+  cleanupCoreSandboxes,
+  coreAppEnv,
+  createCoreSandbox,
+  launchCoreApp,
+  waitForInteractive,
+  writeProviderHome
+} from './harness'
 import { startScriptedProvider } from './provider'
 import { startRemoteBackend } from './remote-helpers'
 
@@ -130,7 +137,6 @@ test("the condensed fleet menu lists the active gateway's default on both sides 
     await app.close().catch(() => undefined)
     await remote.kill()
     await provider.close()
-    clientBox.cleanup()
-    remoteBox.cleanup()
+    await cleanupCoreSandboxes(clientBox, remoteBox)
   }
 })

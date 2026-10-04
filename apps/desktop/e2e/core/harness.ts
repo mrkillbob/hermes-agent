@@ -227,7 +227,7 @@ function readProc(pid: number): null | { environ: string; cmdline: string; ppid:
 
 /** Every live process whose environment carries this sandbox's HERMES_HOME (orphans included). */
 export function sandboxProcesses(sandbox: CoreSandbox): ProcInfo[] {
-  const needle = `HERMES_HOME=${sandbox.hermesHome}\0`
+  const needle = `HERMES_HOME=${sandbox.hermesHome}`
   const out: ProcInfo[] = []
 
   for (const entry of fs.readdirSync('/proc')) {
@@ -239,7 +239,7 @@ export function sandboxProcesses(sandbox: CoreSandbox): ProcInfo[] {
 
     const info = readProc(pid)
 
-    if (!info || !(info.environ + '\0').includes(needle)) {
+    if (!info || !info.environ.split('\0').includes(needle)) {
       continue
     }
 
@@ -252,6 +252,32 @@ export function sandboxProcesses(sandbox: CoreSandbox): ProcInfo[] {
   }
 
   return out
+}
+
+/** Stop test-owned survivors and wait for every home to be idle before removing any of them. */
+export async function cleanupCoreSandboxes(...sandboxes: CoreSandbox[]): Promise<void> {
+  // Gateway daemons intentionally outlive Desktop quit, but these isolated
+  // homes and every process carrying their HERMES_HOME belong to this test.
+  for (const sandbox of sandboxes) {
+    for (const proc of sandboxProcesses(sandbox)) {
+      try {
+        process.kill(proc.pid, 'SIGKILL')
+      } catch {
+        // An exited process may race the signal; the census below reports survivors.
+      }
+    }
+  }
+
+  await expect
+    .poll(
+      () => sandboxes.flatMap(sandbox => sandboxProcesses(sandbox).map(proc => ({ sandbox: sandbox.root, ...proc }))),
+      { timeout: 10_000, message: 'no test-owned sandbox process survives cleanup' }
+    )
+    .toEqual([])
+
+  for (const sandbox of sandboxes) {
+    sandbox.cleanup()
+  }
 }
 
 /**
