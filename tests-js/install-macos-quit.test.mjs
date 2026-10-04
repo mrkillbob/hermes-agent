@@ -1,8 +1,33 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { test, vi } from 'vitest'
 
 const helper = createRequire(import.meta.url)('../tests/install/e2e-assets/macos-app-quit.cjs')
+
+test.skipIf(process.platform !== 'darwin')('native quit waiting refreshes the main run loop before the next observation', async () => {
+  assert.equal(typeof helper.waitForWorkspaceRefresh, 'function')
+  // Execute the exported native adapter in its JXA runtime; no app is launched
+  // or terminated. A Foundation timer stands in for pending workspace updates.
+  const script = `ObjC.import('Foundation');
+${helper.waitForWorkspaceRefresh.toString()}
+var ticks = 0;
+ObjC.registerSubclass({ name: 'HermesQuitWaitTest', superclass: 'NSObject', methods: {
+  'tick:': { types: ['void', ['id']], implementation: function () { ticks++; } }
+} });
+function run() {
+  var target = $.HermesQuitWaitTest.alloc.init;
+  var timer = $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.05, target, 'tick:', null, false);
+  waitForWorkspaceRefresh(0.2);
+  timer.invalidate;
+  return JSON.stringify({ mainThread: Boolean($.NSThread.isMainThread), ticks: ticks });
+}`
+  const { stdout } = await promisify(execFile)('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script], {
+    timeout: 3000, killSignal: 'SIGKILL', maxBuffer: 65536, env: { PATH: '/usr/bin:/bin' },
+  })
+  assert.deepEqual(JSON.parse(stdout), { mainThread: true, ticks: 1 })
+}, 5000)
 
 function fixture(rows) {
   let time = 0
@@ -55,9 +80,13 @@ test('the JXA adapter sends normal terminate to the exact binary and re-reads it
     get terminate() { throw new Error('unrelated app must remain untouched') },
   }
   vi.spyOn(Date, 'now').mockImplementation(() => time)
-  vi.stubGlobal('delay', seconds => { time += seconds * 1000; if (time >= 400) app.terminated = true })
-  vi.stubGlobal('ObjC', { import() {}, unwrap: value => value })
-  vi.stubGlobal('$', { NSWorkspace: { sharedWorkspace: {
+  vi.stubGlobal('ObjC', { import() {}, bindFunction() {}, unwrap: value => value })
+  vi.stubGlobal('$', {
+    NSMutableData: { dataWithLength: () => ({ mutableBytes: {} }) },
+    realpath: path => path,
+    NSDate: { dateWithTimeIntervalSinceNow: seconds => time + seconds * 1000 },
+    NSRunLoop: { currentRunLoop: { runUntilDate: deadline => { time = deadline; if (time >= 400) app.terminated = true } } },
+    NSWorkspace: { sharedWorkspace: {
     get runningApplications() {
       const rows = [app, other]
       return { count: rows.length, objectAtIndex: i => rows[i] }
