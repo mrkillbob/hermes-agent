@@ -8,26 +8,26 @@ Check(condition, message) {
 }
 root := A_Args[1]
 DirCreate(root)
-log := root "\bootstrap-installer.log"
+bootstrapPath := root "\bootstrap-installer.log"
 try {
-    Check(!RequireBootstrapProgress(log), "missing log is pending")
-    FileAppend("INFO bootstrap complete`nERROR bootstrap FAILED stage=products error=old`n", log)
-    FileMove(log, root "\prior-attempt.log")
-    Check(!RequireBootstrapProgress(log), "preserved prior attempt cannot decide current run")
-    FileAppend("INFO manifest received`nWARN stderr: ERROR bootstrap FAILED in child output`n", log)
+    Check(!RequireBootstrapProgress(bootstrapPath), "missing log is pending")
+    FileAppend("INFO bootstrap complete`nERROR bootstrap FAILED stage=products error=old`n", bootstrapPath)
+    FileMove(bootstrapPath, root "\prior-attempt.log")
+    Check(!RequireBootstrapProgress(bootstrapPath), "preserved prior attempt cannot decide current run")
+    FileAppend("INFO manifest received`nWARN stderr: ERROR bootstrap FAILED in child output`n", bootstrapPath)
     ; The actual terminal marker starts with ERROR; child stderr is never one.
-    Check(!RequireBootstrapProgress(log), "progress and stderr remain pending")
-    FileAppend("INFO hermes_bootstrap_lib::bootstrap: bootstrap complete install_root=fixture`n", log)
-    FileAppend("2026-10-07T14:48:25.859Z ERROR hermes_bootstrap_lib::bootstrap: bootstrap FAILED stage=products error=probe timeout`n", log)
+    Check(!RequireBootstrapProgress(bootstrapPath), "progress and stderr remain pending")
+    FileAppend("INFO hermes_bootstrap_lib::bootstrap: bootstrap complete install_root=fixture`n", bootstrapPath)
+    FileAppend("2026-10-07T14:48:25.859Z ERROR hermes_bootstrap_lib::bootstrap: bootstrap FAILED stage=products error=probe timeout`n", bootstrapPath)
     failed := false
-    try RequireBootstrapProgress(log)
+    try RequireBootstrapProgress(bootstrapPath)
     catch Error as err {
         failed := InStr(err.Message, "stage=products") && InStr(err.Message, "probe timeout")
     }
     Check(failed, "current failure is immediate and contextual")
-    FileDelete(log)
-    FileAppend("INFO hermes_bootstrap_lib::bootstrap: bootstrap complete install_root=fixture`n", log)
-    Check(RequireBootstrapProgress(log), "current completion is retained")
+    FileDelete(bootstrapPath)
+    FileAppend("INFO hermes_bootstrap_lib::bootstrap: bootstrap complete install_root=fixture`n", bootstrapPath)
+    Check(RequireBootstrapProgress(bootstrapPath), "current completion is retained")
     Check(FileExist(root "\prior-attempt.log"), "old evidence is retained")
     FileAppend("bootstrap log state tests passed`n", root "\result.txt")
     try FileAppend("bootstrap log state tests passed`n", '*')
