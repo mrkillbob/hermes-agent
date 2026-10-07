@@ -16,10 +16,12 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
     holders = []
     ready = tmp_path / 'checkout-holder-ready'
     released = tmp_path / 'checkout-holder-released'
+    program = tmp_path / 'hermes_checkout_lock_holder.py'
+    program.write_text(_R6_CHECKOUT_HOLDER, encoding='utf-8')
 
     def hold_checkout(home: Path, install: Path) -> None:
         proc = subprocess.Popen(
-            [sys.executable, '-c', _R6_CHECKOUT_HOLDER, str(install / '.hermes-update.lock'),
+            [sys.executable, str(program), str(install / '.hermes-update.lock'),
              str(ready), str(home / 'logs/desktop-update-handoff.log'), str(released)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
