@@ -1,0 +1,52 @@
+name: Installer reporting regressions
+
+on:
+  push:
+    branches: ['installer-reporting/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reporting:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up locked Node and npm
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: node
+      - name: Exercise bounded npm probe and real configuration precedence
+        run: node --test scripts/build/node-options.test.mjs
+      - name: Exercise actual AutoHotkey terminal failure reader
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'AutoHotkey_2.0.19.zip'
+          Invoke-WebRequest 'https://github.com/AutoHotkey/AutoHotkey/releases/download/v2.0.19/AutoHotkey_2.0.19.zip' -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne '4e0d0e65655066a646a210951320feaef0729a3597177131adaec4066bef5869') { throw 'AutoHotkey archive integrity mismatch' }
+          $tools = Join-Path $env:RUNNER_TEMP 'installer-reporting-ahk'
+          Expand-Archive $zip -DestinationPath $tools
+          $harness = Join-Path $env:GITHUB_WORKSPACE 'tests/install/e2e-assets/bootstrap-log-state.test.ahk'
+          $fixture = Join-Path $env:RUNNER_TEMP 'installer-reporting-log-fixture'
+          $arguments = '/ErrorStdOut "{0}" "{1}"' -f $harness, $fixture
+          $proc = Start-Process (Join-Path $tools 'AutoHotkey64.exe') -ArgumentList $arguments `
+            -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'installer-reporting-stdout.log') `
+            -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'installer-reporting-stderr.log') -PassThru
+          $finished = $proc.WaitForExit(30000)
+          if (-not $finished) { Stop-Process -Id $proc.Id -Force }
+          foreach ($name in 'installer-reporting-stdout.log', 'installer-reporting-stderr.log') {
+            $log = Join-Path $env:RUNNER_TEMP $name
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+          }
+          if (-not $finished) { throw 'Log state regression exceeded 30 seconds' }
+          if ($proc.ExitCode -ne 0) { throw "Log state regression failed: $($proc.ExitCode)" }

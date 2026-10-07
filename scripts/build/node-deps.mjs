@@ -103,8 +103,14 @@ function desktopCompilerPreload(source, selected) {
 function installNodeOptions(node, npm, source, env, preload) {
   // Read only this effective setting through npm's own config precedence. Avoid
   // copying user config or replacing user preload/memory/debugging options.
-  const configured = execFileSync(node, [npm, 'config', 'get', 'node-options'],
-    { cwd: source, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 }).trim()
+  let configured
+  try {
+    configured = execFileSync(node, [npm, 'config', 'get', 'node-options'],
+      { cwd: source, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 }).trim()
+  } catch (cause) {
+    // Partial stdout is not an authoritative result, even if it says 'null'.
+    throw new Error('npm config get node-options failed (15-second limit); dependency preparation stopped', { cause })
+  }
   const existing = configured && configured !== 'null' ? configured : env.NODE_OPTIONS ?? ''
   if (typeof existing !== 'string') throw new Error('npm node-options must be a string')
   // Forward slashes avoid double-backslash ambiguity in Node's Windows option parser.

@@ -102,6 +102,8 @@ jobs:
         uses: ./.github/actions/setup-pm
         with:
           toolchain: node
+      - name: Check bounded npm configuration resolution
+        run: node --test scripts/build/node-options.test.mjs
       - name: Install locked native test tooling without lifecycle scripts
         if: matrix.runner != 'windows-2025'
         run: npm ci --workspace apps/desktop --workspace tests-js --include-workspace-root --include=dev --ignore-scripts --no-audit --no-fund
