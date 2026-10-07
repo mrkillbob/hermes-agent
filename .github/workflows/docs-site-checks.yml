@@ -25,8 +25,8 @@ jobs:
           command: npm ci
           working-directory: website
 
-      - name: Audit website dependencies
-        run: npm audit --audit-level=high
+      - name: Check Docusaurus Tinypool compatibility
+        run: node scripts/check-tinypool-compat.mjs
         working-directory: website
 
       - name: Install ascii-guard
@@ -62,4 +62,8 @@ jobs:
         # build runs in deploy-site.yml on push-to-main / release.
         # Same pattern Docusaurus uses internally (build:fast --locale en).
         run: npm run build:fast
+        working-directory: website
+
+      - name: Audit website dependencies
+        run: npm audit --audit-level=high
         working-directory: website
