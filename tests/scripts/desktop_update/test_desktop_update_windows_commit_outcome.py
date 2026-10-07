@@ -130,10 +130,34 @@ def test_a_result_that_cannot_be_published_leaves_no_tmp_file(tmp_path: Path) ->
     assert not list(home.glob('.hermes-update-result.json.*.tmp')), list(home.iterdir())
 
 
-_TIMED_CHECKOUT_HOLDER = """
+_R6_CHECKOUT_HOLDER = """
 import msvcrt, os, sys, time
-fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
-os.lseek(fd, 1 << 20, os.SEEK_SET)
-msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
-time.sleep(float(sys.argv[2]))
+from pathlib import Path
+lock, ready, log, released = map(Path, sys.argv[1:])
+fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
+try:
+    os.lseek(fd, 1 << 20, os.SEEK_SET)
+    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
+    ready.write_text('locked', encoding='utf-8')
+    deadline = time.monotonic() + 150
+    while True:
+        try:
+            seen = log.read_text(encoding='utf-8-sig')
+        except (FileNotFoundError, PermissionError):
+            seen = ''
+        if 'keeping the update marker' in seen:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('the hand-off never waited for the checkout lock')
+        time.sleep(0.05)
+    # finished_at has whole-second precision and the assertion allows one second;
+    # keep the wait observable to a stale pre-release result, even on a fast host.
+    time.sleep(2)
+    released_at = time.time()
+    os.close(fd)
+    fd = None
+    released.write_text(str(released_at), encoding='utf-8')
+finally:
+    if fd is not None:
+        os.close(fd)
 """

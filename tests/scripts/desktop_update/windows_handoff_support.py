@@ -89,7 +89,12 @@ def _op(home: Path, *args: str) -> tuple[int, str, str]:
 
 def _log(home: Path) -> str:
     path = home / 'logs/desktop-update-handoff.log'
-    return path.read_text(encoding='utf-8-sig') if path.exists() else ''
+    try:
+        return path.read_text(encoding='utf-8-sig') if path.exists() else ''
+    except PermissionError:
+        # Add-Content can briefly deny reads; the caller's existing poll deadline
+        # still requires the real log event before any ownership assertion passes.
+        return ''
 
 
 def _custodian(home: Path, handoff: int) -> str:
@@ -119,7 +124,7 @@ class _HeldLock:
 
 def _wait_for_log(home: Path, needle: str, timeout: int = 90) -> str:
     deadline = time.monotonic() + timeout
-    while needle not in _log(home):
-        assert time.monotonic() < deadline, f'{needle!r} never logged: {_log(home)}'
+    while needle not in (seen := _log(home)):
+        assert time.monotonic() < deadline, f'{needle!r} never logged: {seen}'
         time.sleep(0.1)
-    return _log(home)
+    return seen
