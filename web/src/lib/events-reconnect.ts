@@ -66,6 +66,14 @@ export function eventsRejectedMessage(code: number): string {
   return `events feed rejected (${code}) — reload the page`;
 }
 
+/** True only for the auth-close messages that require a page reload. */
+export function isEventsAuthRejectionMessage(message: string | null): boolean {
+  return (
+    message === eventsRejectedMessage(4401) ||
+    message === eventsRejectedMessage(4403)
+  );
+}
+
 export function eventsGaveUpMessage(): string {
   return `events feed disconnected — gave up after ${EVENTS_MAX_RECONNECT_ATTEMPTS} attempts, reload the page`;
 }
