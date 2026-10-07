@@ -50,6 +50,11 @@ ANON_SECRET_ENV = "HERMES_ANON_API_SECRET"
 # tier did not exist. ``guest_enabled`` is the only reader. Not a user preference: never written to
 # config.yaml or .env, never shown in setup. Deleted at GA together with this comment.
 GUEST_ONBOARDING_ENV = "HERMES_GUEST_ONBOARDING"
+# Preview cohort for the free tier's connector set, sent once on account creation so the account
+# service can record it on the account. Exactly "true" or "false" is sent as that boolean; anything
+# else (unset included) omits the field and the service applies its default. Self-reported and
+# baked into desktop bundles in plain text: the service must treat it as a preference, never proof.
+PREVIEW_FULL_CONNECTORS_ENV = "HERMES_PREVIEW_FULL_CONNECTORS"
 GUEST_MINT_TIMEOUT_SECONDS = 5.0
 # Copy shared by every surface that names the free tier (R-USR-1): never guest / anonymous / account.
 FREE_TIER_LABEL = "Nous · free tier"
@@ -57,21 +62,6 @@ FREE_TIER_LABEL = "Nous · free tier"
 # structured refusal copy: a transport outage has no actionable sign-in or route verdict.
 FREE_TIER_OUTAGE_COPY = ("The free model is having trouble responding right now. "
                          "Try sending your message again in a minute.")
-ANON_GATE_CLOSED = "anon_gate_closed"
-ANON_GATE_PAUSED = "anon_gate_paused"
-ANON_RATE_LIMITED = "anon_rate_limited"
-ANON_POW_REQUIRED = "anon_pow_required"
-ANON_ACCOUNT_LOCKED = "anon_account_locked"
-ANON_CREDENTIAL_DEAD = "anon_credential_dead"
-ANON_SERVER_ERROR = "anon_server_error"
-ANON_UNREACHABLE = "anon_unreachable"
-ANON_TERMINAL_CODES = frozenset({ANON_GATE_CLOSED, ANON_POW_REQUIRED, ANON_ACCOUNT_LOCKED})
-ANON_UNREACHABLE_CODES = frozenset({ANON_UNREACHABLE})
-ANON_FAILURE_COPY = {
-    ANON_GATE_CLOSED: "Nous free tier isn't available right now. Sign in with a Nous account to continue.",
-    ANON_POW_REQUIRED: "The Nous server asked for a proof of work, but that isn't implemented yet.",
-    ANON_ACCOUNT_LOCKED: "This Nous free-tier credential is no longer available. Sign in again.",
-}
 UPGRADE_HINT = "Run `hermes auth upgrade` to sign in with a Nous account, or /login inside a chat."
 FREE_TIER_NOT_SIGNED_IN = (
     "You're not signed in. Free inference and connectors are always on. "
@@ -86,9 +76,84 @@ class AnonCredentialDead(AuthError):
 
 
 def _anon_err(message: str, code: str, *, retry_after: Optional[float] = None) -> AuthError:
-    err = AuthError(message, code=code, retry_after=retry_after)
-    err.retryable = code not in ANON_TERMINAL_CODES  # type: ignore[attr-defined]
-    return err
+    """An ``AuthError`` for a free-tier failure *code*; terminal-ness is the code's (``ANON_TERMINAL_CODES``)."""
+    return AuthError(message, code=code, retry_after=retry_after, retryable=code not in ANON_TERMINAL_CODES)
+
+
+# --- Free-tier failure codes ------------------------------------------------------------------------
+#
+# Every way the account service (NAS) or the wire can refuse the free tier, as one ``AuthError.code``
+# each. Surfaces key their copy on the code; the message on the error is the surface-agnostic
+# fallback (no ``/login``, no ``hermes`` verb, no guest / anonymous / credential). ``retryable``
+# says whether a later attempt can succeed at all; ``retry_after`` is the wait the server named.
+#
+# What NAS actually sends (nous-account-service ``api/anonymous/gate.ts`` and the routes behind it):
+#   404 ``not_found``             the surface is not enabled on this deployment (terminal)
+#   503 ``temporarily_disabled``  the ops breaker is tripped (transient, no hint)
+#   429 ``temporarily_unavailable`` + Retry-After   per-address / per-credential limits
+#   428 ``pow_required`` / ``pow_invalid`` / ``pow_replayed``   proof-of-work enforced (not implemented here)
+#   428 ``challenge_required`` + ``challenges[]``   a browser challenge first (``anon_challenge``)
+#   403 ``signin_required`` / ``access_denied``     this client is refused without an account
+#   404 ``unknown_token``         the credential was reaped or claimed (re-mint)
+#   403 ``account_locked``        the account is locked (dead; never re-mint from it)
+#   401                           an outstanding JWT whose account is gone (re-mint)
+ANON_GATE_CLOSED = "anon_gate_closed"          # not enabled here: sign in, or another provider
+ANON_GATE_PAUSED = "anon_gate_paused"          # ops breaker: keep checking in the background
+ANON_RATE_LIMITED = "anon_rate_limited"        # too many sign-ups / exchanges: wait Retry-After
+ANON_POW_REQUIRED = "anon_pow_required"        # proof of work requested: deferred, sign in instead
+ANON_ACCOUNT_LOCKED = "anon_account_locked"    # dead, and no replacement is minted from it
+ANON_CREDENTIAL_DEAD = "anon_credential_dead"  # reaped or claimed: replaced silently, once
+ANON_UNREACHABLE = "anon_unreachable"          # timeout, DNS, refused connection
+ANON_SERVER_ERROR = "anon_server_error"        # 5xx, non-JSON, malformed success body
+ANON_CHALLENGE_REQUIRED = "anon_challenge_required"  # a browser check is still pending (``anon_challenge``)
+ANON_SIGNIN_REQUIRED = "anon_signin_required"  # refused without an account, or a 428 this version can't run
+# Codes a later attempt cannot fix (for this process / this version).
+ANON_TERMINAL_CODES = frozenset({
+    ANON_GATE_CLOSED, ANON_POW_REQUIRED, ANON_ACCOUNT_LOCKED, ANON_SIGNIN_REQUIRED})
+# Codes that mean the account service itself is not answering: a sign-in (which goes through the
+# same service) cannot help either, so surfaces offer "try again" / "another provider" only.
+ANON_UNREACHABLE_CODES = frozenset({ANON_UNREACHABLE, ANON_SERVER_ERROR})
+
+# Copy per code: what happened, then the one honest way forward. The free MODEL is never "off":
+# what is unavailable is using Hermes without signing in, and signing in is free.
+_SIGNIN_IS_FREE = "Signing in is free."
+ANON_FAILURE_COPY = {
+    ANON_GATE_CLOSED: f"This version can't be used without a Nous account. {_SIGNIN_IS_FREE}",
+    ANON_GATE_PAUSED: f"Using Hermes without signing in is paused for a moment. {_SIGNIN_IS_FREE}",
+    ANON_RATE_LIMITED: "Lots of people are getting started right now. Try again in {wait}. "
+                       "Signing in is free and skips the wait.",
+    ANON_POW_REQUIRED: "The Nous server asked for a proof of work, but that isn't implemented in your "
+                       "Agent yet. Sign in with a Nous account to continue.",
+    ANON_CHALLENGE_REQUIRED: "Finish the quick check in your browser, then try again.",
+    ANON_SIGNIN_REQUIRED: "Free guest access isn't available here. Sign in with a Nous account to continue.",
+    ANON_ACCOUNT_LOCKED: f"This session can't continue without signing in. {_SIGNIN_IS_FREE}",
+    ANON_CREDENTIAL_DEAD: "Your session ended. A new one starts on its own.",
+    ANON_UNREACHABLE: "The Nous service couldn't be reached. Check your internet connection and try again.",
+    ANON_SERVER_ERROR: "The Nous service had a hiccup. Try again in a moment.",
+}
+
+
+def friendly_wait(seconds: Any) -> str:
+    """A rounded, spoken duration for user copy: "a few seconds", "about a minute", "about 5 minutes",
+    "about an hour". Never a raw second count."""
+    try:
+        s = max(0.0, float(seconds or 0))
+    except (TypeError, ValueError):
+        s = 0.0
+    if s <= 15:
+        return "a few seconds"
+    if s < 90:
+        return "about a minute"
+    if s < 3600:
+        return f"about {int(round(s / 60))} minutes"
+    hours = int(round(s / 3600))
+    return "about an hour" if hours <= 1 else f"about {hours} hours"
+
+
+def anon_failure_copy(code: str, *, retry_after: Any = None) -> str:
+    """The surface-agnostic sentence for a free-tier failure *code* (``ANON_FAILURE_COPY``)."""
+    template = ANON_FAILURE_COPY.get(code) or ANON_FAILURE_COPY[ANON_SERVER_ERROR]
+    return template.format(wait=friendly_wait(retry_after if retry_after else 60))
 
 
 def guest_enabled() -> bool:
@@ -203,16 +268,9 @@ def classify_mint_exception(exc: BaseException) -> AuthError:
     return AuthError(str(exc), code=ANON_SERVER_ERROR)
 
 
-def anon_failure_copy(code: str, *, retry_after: Any = 0) -> str:
-    if code == ANON_GATE_CLOSED:
-        return "The Nous account service is not available right now. Sign in with a Nous account to continue."
-    if code == ANON_POW_REQUIRED:
-        return ANON_FAILURE_COPY[ANON_POW_REQUIRED]
-    if code == ANON_ACCOUNT_LOCKED:
-        return ANON_FAILURE_COPY[ANON_ACCOUNT_LOCKED]
-    if code in {ANON_RATE_LIMITED, ANON_GATE_PAUSED}:
-        return f"The Nous service is busy. Try again in {friendly_wait(retry_after)}."
-    return "Sign-in didn't finish. Try again whenever you're ready."
+def on_free_model(agent: Any, base_url: Any) -> bool:
+    """The request went to the free tier's host on a free-tier credential."""
+    return route_is_welcome_host(base_url) and is_anonymous_agent(agent)
 
 
 def anon_secret() -> str:
@@ -220,13 +278,34 @@ def anon_secret() -> str:
 
 
 def _anon_headers() -> Dict[str, str]:
-    headers = {"content-type": "application/json"}
+    from hermes_cli.anon_challenge import user_agent
+    headers = {"content-type": "application/json", "user-agent": user_agent()}
     if secret := anon_secret():
         headers[ANON_SECRET_HEADER] = secret
     return headers
 
 
-def _raise_for_anon_status(response: httpx.Response, *, action: str) -> Dict[str, Any]:
+# (status, NAS ``error``) -> (exception class, code). ``None`` matches any error string for that
+# status; an exact pair wins over the wildcard. Anything unlisted is a server error.
+_NAS_REFUSALS: Dict[tuple, tuple] = {
+    (404, "unknown_token"): (AnonCredentialDead, ANON_CREDENTIAL_DEAD),
+    (404, None): (AuthError, ANON_GATE_CLOSED),        # uniform with a nonexistent route, on purpose
+    (401, "invalid_shared_secret"): (AuthError, ANON_GATE_CLOSED),   # pre-launch NAS builds only
+    (401, None): (AnonCredentialDead, ANON_CREDENTIAL_DEAD),
+    (403, "account_locked"): (AnonCredentialDead, ANON_ACCOUNT_LOCKED),
+    (403, "anonymous_accounts_disabled"): (AuthError, ANON_GATE_PAUSED),   # pre-launch names
+    (403, "circuit_open"): (AuthError, ANON_GATE_PAUSED),
+    (428, None): (AuthError, ANON_POW_REQUIRED),
+    (429, None): (AuthError, ANON_RATE_LIMITED),
+    (503, "temporarily_disabled"): (AuthError, ANON_GATE_PAUSED),
+}
+# An endpoint-specific verdict: builds the error from the refusal's JSON body.
+_Verdict = Callable[[Dict[str, Any]], AuthError]
+
+
+def _raise_for_anon_status(
+    response: httpx.Response, *, action: str, overrides: Optional[Dict[tuple, _Verdict]] = None,
+) -> Dict[str, Any]:
     try:
         payload = response.json()
     except ValueError:
@@ -234,38 +313,36 @@ def _raise_for_anon_status(response: httpx.Response, *, action: str) -> Dict[str
     if not isinstance(payload, dict):
         payload = {}
     error = str(payload.get("error") or "")
-    if response.status_code in (200, 201):
+    status = response.status_code
+    if status in (200, 201):
         return payload
-    if response.status_code == 404 and error == "unknown_token":
-        raise AnonCredentialDead("Nous free-tier credential is no longer valid.", code=ANON_CREDENTIAL_DEAD)
-    if response.status_code == 401 and error == "invalid_shared_secret":
-        raise _anon_err("Nous free tier is not open on this portal.", ANON_GATE_CLOSED)
-    if response.status_code == 401:
-        raise AnonCredentialDead("Nous free-tier credential was revoked.", code=ANON_CREDENTIAL_DEAD)
-    if response.status_code == 429:
-        delay = _retry_after_seconds(response, 60.0)
-        raise _anon_err(f"Nous free tier is rate limited; try again in {friendly_wait(delay)}.",
-                        ANON_RATE_LIMITED, retry_after=delay)
-    if response.status_code == 403 and error in {"anonymous_accounts_disabled", "circuit_open"}:
-        raise _anon_err("Nous free tier is currently disabled.", ANON_GATE_CLOSED)
-    if response.status_code == 403 and error == "account_locked":
-        raise AnonCredentialDead("Nous free-tier credential is no longer valid.", code=ANON_ACCOUNT_LOCKED)
-    if response.status_code == 428 and error == "pow_required":
-        raise _anon_err("The Nous server asked for a proof of work, but that isn't implemented yet.",
-                        ANON_POW_REQUIRED)
-    if response.status_code == 503 and error == "temporarily_disabled":
-        raise _anon_err("Nous free tier is temporarily paused; try again shortly.", ANON_GATE_PAUSED)
-    if response.status_code == 404 and error == "not_found":
-        raise _anon_err("Nous free tier is not open on this portal. Sign in with a Nous account instead.",
-                        ANON_GATE_CLOSED)
-    detail = "hiccup" if response.status_code >= 500 or not error else error
-    raise _anon_err(f"Nous free tier {action} hit a server hiccup ({response.status_code}{': ' + detail}).",
-                    ANON_SERVER_ERROR)
+    if error.startswith("pow_"):
+        error = "pow_"  # pow_required / pow_invalid / pow_replayed are one verdict
+    # An endpoint's own verdicts (same keys as ``_NAS_REFUSALS``) win over the table.
+    if overrides:
+        build = overrides.get((status, error)) or overrides.get((status, None))
+        if build:
+            raise build(payload)
+    cls, code = (_NAS_REFUSALS.get((status, error)) or _NAS_REFUSALS.get((status, None))
+                 or ((AuthError, ANON_POW_REQUIRED) if error == "pow_" else (AuthError, ANON_SERVER_ERROR)))
+    if code == ANON_SERVER_ERROR:
+        logger.info("Nous free tier %s failed (%s%s)", action, status, f": {error}" if error else "")
+    retry_after = parse_retry_after_seconds(response.headers)
+    raise cls(anon_failure_copy(code, retry_after=retry_after), code=code, retry_after=retry_after,
+              retryable=code not in ANON_TERMINAL_CODES)
+
+
+def mint_request_body() -> Dict[str, Any]:
+    """The ``/api/anonymous/create`` body: ``{"preview_full_connectors": bool}`` when the env var is
+    exactly ``true`` / ``false``, else ``{}``."""
+    raw = (os.environ.get(PREVIEW_FULL_CONNECTORS_ENV) or "").strip()
+    return {"preview_full_connectors": raw == "true"} if raw in ("true", "false") else {}
 
 
 def mint_guest(client: httpx.Client, portal_base_url: str) -> Dict[str, Any]:
     """``POST /api/anonymous/create`` -> ``{user_id, org_id, token, idle_ttl_days}``. Token shown once."""
-    response = client.post(f"{portal_base_url.rstrip('/')}/api/anonymous/create", headers=_anon_headers(), json={})
+    response = client.post(
+        f"{portal_base_url.rstrip('/')}/api/anonymous/create", headers=_anon_headers(), json=mint_request_body())
     payload = _raise_for_anon_status(response, action="sign-up")
     token = payload.get("token")
     if not isinstance(token, str) or not token.startswith("anon_"):
@@ -273,16 +350,41 @@ def mint_guest(client: httpx.Client, portal_base_url: str) -> Dict[str, Any]:
     return payload
 
 
-def exchange_anon_jwt(client: httpx.Client, portal_base_url: str, anon_token: str) -> Dict[str, Any]:
+def exchange_anon_jwt(
+    client: httpx.Client, portal_base_url: str, anon_token: str, *, auth_state: Dict[str, Any],
+) -> Dict[str, Any]:
     """``POST /api/anonymous/token {token}`` -> ``{access_token, expires_in, inference_base_url, ...}``.
 
-    Raises :class:`AnonCredentialDead` on 404 ``unknown_token`` / 401 (reaped or claimed).
+    Raises :class:`AnonCredentialDead` on 404 ``unknown_token`` / 401 (reaped or claimed), and
+    :class:`~hermes_cli.anon_challenge.AnonChallengeRequired` (carrying what the status poll needs:
+    portal, credential, and the *auth_state* whose ``tls`` block the mint used) on a browser challenge.
     """
+    from hermes_cli import anon_challenge
     response = client.post(
-        f"{portal_base_url.rstrip('/')}/api/anonymous/token", headers=_anon_headers(), json={"token": anon_token})
-    payload = _raise_for_anon_status(response, action="token exchange")
+        f"{portal_base_url.rstrip('/')}/api/anonymous/token", headers=_anon_headers(),
+        json={"token": anon_token, "client": anon_challenge.client_info()})
+
+    def challenge(body: Dict[str, Any]) -> AuthError:
+        return anon_challenge.challenge_error(
+            body, portal_base_url=portal_base_url, anon_token=anon_token, auth_state=auth_state)
+
+    def signin(body: Dict[str, Any]) -> AuthError:
+        # Refused without an account, or a 428 this version has no primitive for: either way the
+        # honest way forward is a sign-in, in the service's own words when it sent some.
+        return anon_challenge.signin_required_error(body.get("message"))
+
+    def proof_of_work(_body: Dict[str, Any]) -> AuthError:
+        # The PoW verdict, kept out of the 428 sign-in catch-all below.
+        return _anon_err(ANON_FAILURE_COPY[ANON_POW_REQUIRED], ANON_POW_REQUIRED)
+
+    # The challenge gate sits on the token exchange only; every other endpoint keeps the table.
+    payload = _raise_for_anon_status(response, action="token exchange", overrides={
+        (428, "challenge_required"): challenge, (428, "pow_"): proof_of_work, (428, None): signin,
+        (403, "signin_required"): signin, (403, "access_denied"): signin})
     if not isinstance(payload.get("access_token"), str) or not payload["access_token"]:
-        raise _anon_err("Nous free tier token exchange returned no token.", "anon_server_error")
+        logger.info("Nous free tier token exchange returned no token")
+        raise _anon_err(ANON_FAILURE_COPY[ANON_SERVER_ERROR], ANON_SERVER_ERROR)
+    anon_challenge.note_optional_challenges(payload, portal_base_url)
     return payload
 
 
@@ -371,6 +473,11 @@ _mint_failure: Optional[MintFailure] = None
 _mint_failures_by_home: Dict[str, MintFailure] = {}
 _MINT_RETRY_LADDER = _UNREACHABLE_RETRY_LADDER = (15.0, 60.0, 300.0)
 _unreachable_attempts = 0
+
+
+def _mint_memo_key() -> str:
+    from hermes_constants import get_hermes_home_override, hermes_home_key
+    return "" if get_hermes_home_override() is None else hermes_home_key()
 
 
 def _mint_failure_for_profile() -> Optional[MintFailure]:
@@ -531,7 +638,8 @@ def refresh_guest_state(state: Dict[str, Any], client: httpx.Client) -> None:
     if not isinstance(anon_token, str) or not anon_token:
         raise AnonCredentialDead("Nous free-tier credential is missing.", code="anon_credential_dead")
     from hermes_cli.auth import _nous_portal_base_url
-    apply_exchange_to_state(state, exchange_anon_jwt(client, _nous_portal_base_url(state), anon_token))
+    apply_exchange_to_state(state, exchange_anon_jwt(
+        client, _nous_portal_base_url(state), anon_token, auth_state=state))
 
 
 def clear_dead_guest(reason: str, *, dead_token: Optional[str] = None) -> None:
@@ -585,33 +693,26 @@ _WELCOME_ROUTE_REFUSALS = (
     ("anonymous accounts must use", "anon_on_paid_host"),
     ("serves anonymous hermes agent accounts only", "named_on_welcome_host"),
     ("anonymous accounts are not accepted", "tier_disabled"),
+    # The gateway's answer to an expired or unreadable bearer: the credential, not the tier. A
+    # retry that waited out a long rate limit outlives the 15-minute free-tier JWT and lands here.
+    ("invalid jwt", "session_expired"),
 )
 _WELCOME_ROUTE_COPY = {
-    "anon_on_paid_host": "The Nous free tier must use its own inference host ({host}); "
-                         "Hermes is pointed at the paid one. Restart Hermes to re-read the route, "
-                         "or unset NOUS_INFERENCE_BASE_URL if you set it.",
-    "named_on_welcome_host": "This Nous account needs to reconnect to its account route. "
-                             "Run /model and pick the Nous row again.",
-    "tier_disabled": "The Nous free tier is switched off right now. {signin}",
+    # Only reachable when the route heal (``turn_recovery._recover_welcome_tier``) could not move
+    # the session: the one cause left is a user-set NOUS_INFERENCE_BASE_URL naming the paid host.
+    "anon_on_paid_host": "This install is set to use a different Nous server (NOUS_INFERENCE_BASE_URL). "
+                         "Unset it to use the free model, or sign in. {signin}",
+    "named_on_welcome_host": "This Nous account needs to reconnect. {model_hint}",
+    "tier_disabled": "Using Hermes without signing in is switched off right now. "
+                     "Sign in to keep chatting, it's free. {signin}",
+    # Only reachable when re-exchanging the free credential failed (``turn_recovery._recover_welcome_tier``).
+    "session_expired": "Hermes couldn't renew its connection to the free model. "
+                       "Send your message again, or sign in to keep chatting, it's free. {signin}",
 }
 _SIGNIN_CHAT = "Sign in with a Nous account for the full catalog: /login."
 _SIGNIN_TERMINAL = "Sign in with a Nous account for the full catalog: `hermes auth upgrade`."
-
-
-def friendly_wait(seconds: Any) -> str:
-    """Render a retry delay as a short, rounded duration rather than raw seconds."""
-    try:
-        value = max(0.0, float(seconds or 0))
-    except (TypeError, ValueError):
-        value = 0.0
-    if value <= 15:
-        return "a few seconds"
-    if value < 90:
-        return "about a minute"
-    if value < 3600:
-        return f"about {int(round(value / 60))} minutes"
-    hours = int(round(value / 3600))
-    return "about an hour" if hours <= 1 else f"about {hours} hours"
+_MODEL_HINT_CHAT = "Run /model and pick the Nous row again."
+_MODEL_HINT_TERMINAL = "Run `hermes model` and pick the Nous row again."
 
 
 def parse_welcome_refusal(body: Any) -> Optional[Dict[str, Any]]:
@@ -670,7 +771,13 @@ def welcome_route_refusal(status: Any, message: Any, base_url: Any = None) -> Op
 
     ``"anon_on_paid_host"``: a free-tier JWT reached the paid host. ``"named_on_welcome_host"``: an
     account or API key reached the free tier's host. ``"tier_disabled"``: the tier is dark
-    (``WELCOME_MODE=off``). Each is deterministic for the request: retrying cannot help."""
+    (``WELCOME_MODE=off``). Each is deterministic for the request: retrying cannot help.
+    ``"session_expired"``: the 403 names the bearer (``invalid jwt``); a fresh credential heals it.
+
+    The dark-tier 403 is keyed on the ROUTE, not the message: the gateway's permission error
+    carries only its generic sentence (the detail stays in its logs), so any 403 answered by the
+    welcome host means the tier refused this install. The message needles remain for gateways
+    that do spell it out, and for the two wrong-host 400s."""
     if status not in (400, 403):
         return None
     text = str(message or "").lower()
@@ -684,7 +791,8 @@ def welcome_route_refusal_copy(kind: str, *, in_chat: bool = True, door: bool = 
     template = _WELCOME_ROUTE_COPY.get(kind) or "The Nous inference gateway refused this route."
     return template.format(
         host=DEFAULT_NOUS_WELCOME_URL,
-        signin=(_SIGNIN_CHAT if in_chat else _SIGNIN_TERMINAL) if door else "").rstrip()
+        signin=(_SIGNIN_CHAT if in_chat else _SIGNIN_TERMINAL) if door else "",
+        model_hint=_MODEL_HINT_CHAT if in_chat else _MODEL_HINT_TERMINAL).rstrip()
 
 
 def note_model_switch(agent: Any, headers: Any) -> Optional[str]:

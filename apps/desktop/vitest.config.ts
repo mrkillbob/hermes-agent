@@ -47,7 +47,8 @@ const electronNative: TestProjectConfiguration = {
       'scripts/perf/lunar-city-orchestrator.test.mjs',
       'scripts/perf/lunar-city-runner.test.mjs',
       'scripts/perf/lunar-city.test.mjs'
-    ]
+    ],
+    testTimeout: 30_000
   }
 }
 

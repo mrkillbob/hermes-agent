@@ -798,7 +798,8 @@ def _pick_provider(prompt: str = "Provider") -> str:
     """Prompt for a provider name with auto-complete hints."""
     from hermes_cli.cli_output import line_input
 
-    known = sorted(set(list(PROVIDER_REGISTRY.keys()) + ["openrouter"]))
+    from providers import unlisted_provider_names
+    known = sorted((set(PROVIDER_REGISTRY) - unlisted_provider_names()) | {"openrouter"})
     custom_display = [entry["name"] for entry in _get_custom_provider_entries()]
     print(f"\nKnown providers: {', '.join(known)}")
     if custom_display:
