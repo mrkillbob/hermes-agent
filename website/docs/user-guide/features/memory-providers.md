@@ -453,6 +453,11 @@ The plugin authenticates with `X-API-Key` and uses the server's `/search` / `/me
 
 ### Migrating from bundled Mem0
 
+:::note Fork catalog availability
+This fork defers the new local Mem0 catalog entry to separate data-only admission. The migration
+below requires an available published or cached entry; offline checkout fallback cannot supply it. See [Fork catalog admission](../../developer-guide/fork-local-environment.md#catalog-admission-during-upstream-syncs).
+:::
+
 Mem0 used to ship inside the Hermes tree (and as the `hermes-agent[mem0]` pip extra). If your `config.yaml` already has `memory.provider: mem0`, there is nothing to do for most users:
 
 - `hermes update` installs the catalog plugin into every profile home that names the provider.

@@ -18,3 +18,23 @@ repository runtime before an agent is released; inside those worktrees use
 - Open this canonical Hermes workspace with `vscode-studio hermes`.
 - Open only curated workspaces or specific files; do not open `/Users/mikedemott/Codex` or network drives from Hermes agents.
 - VS Code is for inspection/editing ergonomics only; tests and runtime evidence still come from explicit commands.
+
+## Catalog admission during upstream syncs
+
+This fork keeps catalog additions and entry edits out of mixed source syncs. Those changes require
+separate data-only admission work under the existing Plugin Catalog CI guard; neither a successful
+structural check nor an upstream SHA bump establishes that admission. This sync retains the fork's
+previous entry files, including their exact pins, while adopting the catalog tooling and policy updates.
+
+Online catalog browsing and bare-name installs use the published or cached catalog when available;
+otherwise they fall back to this checkout's catalog. Deferring a local entry does not block an
+already installed plugin or guarantee that the published catalog has the entry. The fork's existing
+delisted entries remain absent from its local catalog, and `removed.yaml` retains its separate blocklist role.
+
+Mem0 moved out of core in this sync, but its new local catalog entry is deferred. Existing installed
+Mem0 plugins, configuration and stored memories remain in place. A home without the plugin can
+migrate only when the published or cached catalog supplies a usable Mem0 entry and installation is
+permitted; if that catalog is unavailable, the checkout fallback cannot supply Mem0. Offline recovery
+hints based on the local catalog are also unavailable until separate admission adds the entry.
+The generic upstream Mem0 installation instructions assume such a catalog entry is available.
+Do not restore the bundled provider or removed dependency extra to bypass this deferral.
