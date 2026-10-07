@@ -20,7 +20,7 @@ from tools.skills_hub_search import (
     HERMES_INDEX_TTL, _load_hermes_index, create_source_router, parallel_search_sources, unified_search,
 )
 from tools.skills_hub_skillssh import SkillsShSource
-from tools.skills_hub_sources import LobeHubSource, UrlSource, WellKnownSkillSource
+from tools.skills_hub_sources import LobeHubSource, UrlSource, WellKnownSkillSource, _referenced_support_paths
 
 # ---------------------------------------------------------------------------
 # GitHubSource._parse_frontmatter_quick

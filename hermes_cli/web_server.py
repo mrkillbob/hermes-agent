@@ -1330,17 +1330,18 @@ def _reclaim_host_from_orphaned_owner(role: str) -> bool:
     """
     from gateway import host_rendezvous as hr
     from hermes_cli.process_identity import reap_orphaned_backend_owner
+    logger = _log
 
     try:
         owner = hr.read_record(role)
     except Exception:
-        _log.debug("Host owner record read failed for %s", role, exc_info=True)
+        logger.debug("Host owner record read failed for %s", role, exc_info=True)
         return False
     if owner is None:
         try:
             return bool(hr.discard_dead_record(role))
         except Exception:
-            _log.debug("Dead host owner record cleanup failed for %s", role, exc_info=True)
+            logger.debug("Dead host owner record cleanup failed for %s", role, exc_info=True)
             return False
     if owner.pid == os.getpid():
         return False  # never reap our own incarnation on a re-entrant claim
@@ -1348,12 +1349,12 @@ def _reclaim_host_from_orphaned_owner(role: str) -> bool:
         if reap_orphaned_backend_owner(owner.pid, owner.create_time) is None:
             return False
     except Exception:
-        _log.debug("Orphan host owner reclaim failed for %s", role, exc_info=True)
+        logger.debug("Orphan host owner reclaim failed for %s", role, exc_info=True)
         return False
     try:
         hr.discard_dead_record(role)
     except Exception:
-        _log.debug("Reaped host owner record cleanup failed for %s", role, exc_info=True)
+        logger.debug("Reaped host owner record cleanup failed for %s", role, exc_info=True)
     return True
 
 

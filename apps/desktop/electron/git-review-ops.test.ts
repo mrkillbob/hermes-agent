@@ -222,6 +222,44 @@ test('gitFor host retains safe environment and blocks ambient Git command substi
   }
 })
 
+test('gitFor actual Git rejects abbreviated receive-pack before transport execution', async () => {
+  const dir = makeRepo()
+  const missingRemote = path.join(dir, 'missing-local-remote.git')
+
+  assert.equal(fs.existsSync(missingRemote), false)
+
+  // Full spelling is valid Git syntax. This direct, benign control reaches only
+  // the missing local repository; no network remote or shell command is used.
+  assert.throws(
+    () =>
+      execFileSync('git', ['push', '--dry-run', '--receive-pack=git-receive-pack', missingRemote, 'HEAD'], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          LC_ALL: 'C',
+          GIT_TERMINAL_PROMPT: '0',
+          GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS: 'true'
+        },
+        stdio: ['ignore', 'pipe', 'pipe']
+      }),
+    (error: unknown) => {
+      const failure = error as Error & { status?: number; stderr?: Buffer | string }
+
+      assert.equal(failure.status, 128)
+      assert.match(String(failure.stderr), /does not appear to be a git repository/)
+
+      return true
+    }
+  )
+
+  // The parser preserves this abbreviated spelling, so actual Git must enforce
+  // simple-git's default flag. Accept only Git's specific option-parser refusal.
+  await assert.rejects(
+    gitFor(dir, 'git').raw(['push', '--dry-run', '--receive-p=git-receive-pack', missingRemote, 'HEAD']),
+    /fatal: disallowed abbreviated or ambiguous option 'receive-p'/
+  )
+})
+
 test('resolveRenamePath: simple rename resolves to the new path', () => {
   assert.equal(resolveRenamePath('old.ts => new.ts'), 'new.ts')
 })

@@ -25,6 +25,10 @@ jobs:
           command: npm ci
           working-directory: website
 
+      - name: Audit website dependencies
+        run: npm audit --audit-level=high
+        working-directory: website
+
       - name: Install ascii-guard
         uses: ./.github/actions/retry
         with:

@@ -62,7 +62,6 @@ import {
   $selectedStoredSessionId,
   $sessions,
   $sessionStartedAt,
-  $turnStartedAt,
   _resetSessionOwnerHintsForTests,
   getSessionOwnerHint,
   knownSessionOwner,
@@ -89,7 +88,6 @@ import {
   setSessionOwnerHint,
   setSessions,
   setSessionStartedAt,
-  setTurnStartedAt,
   setUnlistedSessionOwnerRows
 } from '@/store/session'
 import { assertSessionOwnerResolved } from '@/store/session-owner-resolution'

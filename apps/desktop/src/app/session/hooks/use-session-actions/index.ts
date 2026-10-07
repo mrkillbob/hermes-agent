@@ -128,7 +128,6 @@ import {
   type SessionProfileRoute
 } from '@/store/session-request-router'
 import {
-  $sessionTiles,
   closeSessionTile,
   dropSessionState,
   focusOpenSession,
@@ -166,10 +165,10 @@ import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this
 import { captureDisplayHydration } from './display-hydration'
 import { reconcilePersistedLiveTurn } from './persisted-live-turn'
 import { provisionalTranscriptPaint, transcriptRestScope } from './provisional-transcript'
-import { preparePrimarySessionResume } from './resume-entry'
 import { rememberedOwnerForResume } from './remembered-owner'
 import { pendingClarifyToolPayload, restorePendingClarifyFromSnapshot } from './restore-pending-clarify'
 import { projectPendingConnection, restorePendingConnectionFromSnapshot } from './restore-pending-connection'
+import { preparePrimarySessionResume } from './resume-entry'
 import { createGatewaySession } from './session-create-request'
 import {
   createPersistedDisplayTranscriptProvenance,

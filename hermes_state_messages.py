@@ -86,7 +86,7 @@ def _coerce_timestamp(value: Any, default: float) -> float:
     return 0.0 if result == 0.0 else result
 
 
-from hermes_state_tool_calls import (_parse_tool_calls, _tool_calls_len)
+from hermes_state_tool_calls import (_parse_tool_calls, _tool_calls_count, _tool_calls_len)
 
 
 def _scrub_surrogates(value: Any) -> Any:
