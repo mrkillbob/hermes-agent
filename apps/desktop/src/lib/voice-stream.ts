@@ -76,7 +76,9 @@ export async function openDictationStream(
   }
 
   ws.onmessage = event => {
-    if (settled) return
+    if (settled) {
+      return
+    }
     let message: { message?: string; text?: string; transcript?: string; type?: string }
 
     try {

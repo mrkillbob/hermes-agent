@@ -63,6 +63,9 @@ def _unbound_voice_adapter() -> AsyncMock:
     adapter._client = MagicMock()
     adapter.handle_message = AsyncMock()
     adapter._thread_id_and_chat_for_channel = MagicMock(return_value=(None, "123"))
+    adapter._guild_channel_labels = MagicMock(return_value=(None, None))
+    adapter._resolve_channel_prompt = None
+    adapter._resolve_channel_skills = None
     adapter.build_source = MagicMock(side_effect=lambda **kw: SessionSource(platform=Platform.DISCORD, **kw))
     return adapter
 
@@ -655,18 +658,13 @@ class TestVoiceChannelCommands:
                 }
             },
         )
-        mock_adapter = AsyncMock()
-        mock_adapter._voice_text_channels = {111: 123}
-        mock_adapter._voice_sources = {}
+        mock_adapter = _unbound_voice_adapter()
         mock_adapter._voice_clients = {
             111: SimpleNamespace(channel=SimpleNamespace(id=456))
         }
-        mock_adapter._resolve_channel_prompt = None
-        mock_adapter._client = MagicMock()
         mock_channel = MagicMock()
         mock_channel.send = AsyncMock()
         mock_adapter._client.get_channel = MagicMock(return_value=mock_channel)
-        mock_adapter.handle_message = AsyncMock()
         runner.adapters[Platform.DISCORD] = mock_adapter
 
         await runner._handle_voice_channel_input(111, 42, "What did you just say?")

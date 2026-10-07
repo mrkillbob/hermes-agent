@@ -6,6 +6,7 @@ with argv receipts. No setup actions, installs, E2E tests or native hosts run he
 from __future__ import annotations
 
 import fnmatch
+import itertools
 import json
 import os
 import subprocess
@@ -35,6 +36,26 @@ def required(step: dict, ctx: dict) -> None:
     label = step.get("name", step.get("id", "required step"))
     assert gha.condition(step.get("if"), ctx), f"{label}: disabled"
     assert not gha.truthy(gha.render(step.get("continue-on-error", False), ctx)), f"{label}: advisory"
+
+
+def matrix_cells(job: dict, ctx: dict) -> list[dict]:
+    """Expand supported axis-only/include-only matrices after their planner outputs."""
+    matrix = gha.render(job.get("strategy", {}).get("matrix", {}), ctx)
+    assert isinstance(matrix, dict), f"unresolved matrix: {matrix!r}"
+    assert "exclude" not in matrix, "matrix exclusions need explicit replay support"
+    axes = {key: gha.render(value, ctx) for key, value in matrix.items() if key != "include"}
+    included = matrix.get("include")
+    assert not (axes and included is not None), "mixed axis/include matrices need explicit replay support"
+    if included is not None:
+        assert isinstance(included, list) and all(isinstance(cell, dict) for cell in included), included
+        cells = included
+    elif axes:
+        assert all(isinstance(values, list) and values for values in axes.values()), axes
+        cells = [dict(zip(axes, values)) for values in itertools.product(*axes.values())]
+    else:
+        cells = [{}]
+    assert cells, "empty matrix"
+    return cells
 
 
 def _interpreter_dirs(root: Path) -> tuple[str, ...]:

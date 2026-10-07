@@ -119,7 +119,9 @@ export function useVoiceRecorder({
 
       const streamed = await liveTranscript(dictation)
       // Cancellation may have ended the stream while stop() awaited its final response.
-      if (!live()) return
+      if (!live()) {
+        return
+      }
       const transcript = streamed ?? (await onTranscribeAudio(result.audio, dictation.owner)).trim()
 
       if (!live()) {
@@ -180,7 +182,9 @@ export function useVoiceRecorder({
     const owner = resolveOwnerNow(ownerRef.current)
     let dictation: Dictation
     const stream = liveStream(owner, text => {
-      if (dictationRef.current === dictation) setPartial(text)
+      if (dictationRef.current === dictation) {
+        setPartial(text)
+      }
     })
     dictation = { cancelLive: stream.cancel, live: stream.session, owner, warmup: Promise.resolve() }
     // Publish before mic startup: unmount must retire pending stream opens too.
@@ -188,7 +192,9 @@ export function useVoiceRecorder({
     try {
       await handle.start({
         onError: error => {
-          if (dictationRef.current === dictation) notifyError(error, voiceCopy.recordingFailed)
+          if (dictationRef.current === dictation) {
+            notifyError(error, voiceCopy.recordingFailed)
+          }
         },
         onPcm: stream.push,
         onPcmRate: stream.open
@@ -232,13 +238,19 @@ export function useVoiceRecorder({
     let opening: Promise<DictationStreamSession | null> | null = null
 
     const open = (sampleRate: number) => {
-      if (cancelled) return
+      if (cancelled) {
+        return
+      }
       opening = (async () => {
         const config = await fetchVoiceClientConfigFor(owner).catch(() => null)
-        if (cancelled) return null
+        if (cancelled) {
+          return null
+        }
         const opened = config?.stt.streaming
           ? await openDictationStream(owner, sampleRate, text => {
-              if (!cancelled) onPartial(text)
+              if (!cancelled) {
+                onPartial(text)
+              }
             })
           : null
         if (cancelled) {
@@ -263,7 +275,9 @@ export function useVoiceRecorder({
     }
 
     const push = (chunk: ArrayBuffer) => {
-      if (cancelled) return
+      if (cancelled) {
+        return
+      }
       if (session) {
         session.pushAudio(chunk)
       } else if (!settled && buffered.length < 64) {

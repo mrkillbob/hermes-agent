@@ -66,7 +66,7 @@ def _real_classifier(paths: list[str]) -> dict[str, bool]:
     out = subprocess.run([sys.executable, str(_CLASSIFIER)], input="\n".join(paths) + "\n",
                          capture_output=True, text=True, env=env, check=True, timeout=60).stdout
     pairs = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
-    return {k: v == "true" for k, v in pairs.items()}
+    return {k: v == "true" for k, v in pairs.items() if v in ("true", "false")}
 
 
 # -- workflow replay ---------------------------------------------------------------------
@@ -82,9 +82,13 @@ def _on(workflow: dict) -> dict:
     return workflow.get("on", workflow.get(True)) or {}
 
 
-def _detect_outputs(lanes: dict[str, bool]) -> dict[str, Any]:
+def _detect_outputs(lanes: dict[str, bool], *, inputs: dict | None = None,
+                    github: dict | None = None) -> dict[str, Any]:
     """The classifier's lines -> the composite action's outputs -> ci.yaml ``detect`` outputs."""
     raw = {k: gha.to_string(v) for k, v in lanes.items()}
+    # The replay feeds lane booleans rather than a file list; the classifier's
+    # other declared output is JSON text, never a missing/null step output.
+    raw["ci_review_files"] = "[]"
     action = _yaml(".github/actions/detect-changes/action.yml")
     action_out = {k: gha.render(v["value"], {"steps": {"classify": {"outputs": raw}}})
                   for k, v in action["outputs"].items()}
@@ -93,8 +97,10 @@ def _detect_outputs(lanes: dict[str, bool]) -> dict[str, Any]:
     classify = next(s for s in detect["steps"] if s.get("id") == "classify")
     assert classify["uses"] == "./.github/actions/detect-changes"
     steps = {"classify": {"outputs": action_out}}
-    ctx = {"steps": steps, "github": {"event_name": "pull_request"}, "inputs": {}}
+    ctx = {"steps": steps, "github": github or _github_context(), "inputs": inputs or {}}
     steps["gate-lanes"] = {"outputs": workflow_steps.outputs(gate, ctx)}
+    policy = next(s for s in detect["steps"] if s.get("id") == "platform-policy")
+    steps["platform-policy"] = {"outputs": workflow_steps.outputs(policy, ctx, _REPO)}
     return {k: gha.render(v, ctx) for k, v in detect["outputs"].items()}
 
 
@@ -105,13 +111,19 @@ def _inputs_for(called: str, given: dict[str, Any]) -> dict[str, Any]:
     return {name: given.get(name, spec.get("default")) for name, spec in declared.items()}
 
 
-def _run_workflow(rel: str, *, inputs: dict[str, Any], detect: dict[str, Any] | None = None) -> dict:
+def _github_context(repository="NousResearch/hermes-agent", event_name="pull_request") -> dict:
+    return {"repository": repository, "event_name": event_name, "ref_type": "branch"}
+
+
+def _run_workflow(rel: str, *, inputs: dict[str, Any], detect: dict[str, Any] | None = None,
+                  github: dict | None = None) -> dict:
     """Which jobs of ``rel`` run on a pull request, recursing into called workflows.
 
     Returns ``{job: {"inputs": ..., "jobs": <child result>}}`` for every job that runs.
     ``detect`` (ci.yaml only) is the replayed ``detect`` job's outputs.
     """
     jobs = _yaml(rel)["jobs"]
+    github = github or _github_context()
     ran: dict[str, dict] = {}
     done: set[str] = set()
     pending = list(jobs)
@@ -132,7 +144,7 @@ def _run_workflow(rel: str, *, inputs: dict[str, Any], detect: dict[str, Any] | 
             all_ran = all(n in ran for n in needs)
             ctx = {
                 "inputs": inputs,
-                "github": {"event_name": "pull_request", "ref_type": "branch"},
+                "github": github,
                 "needs": {n: {"outputs": (ran.get(n) or {}).get("outputs", {}),
                               "result": "success" if n in ran else "skipped"} for n in needs},
                 "__status__": {"always": True, "success": all_ran, "failure": False, "cancelled": False},
@@ -144,23 +156,30 @@ def _run_workflow(rel: str, *, inputs: dict[str, Any], detect: dict[str, Any] | 
             if not gha.condition(cond, ctx):
                 continue
             entry: dict[str, Any] = {"ctx": ctx, "body": body}
-            if name == "e2e-upgrade-plan":
+            if name in ("plan", "e2e-upgrade-plan"):
                 plan = next(s for s in body["steps"] if s.get("id") == "plan")
-                entry["outputs"] = workflow_steps.outputs(plan, ctx, _REPO)
-                assert json.loads(entry["outputs"]["shards"]), "upgrade plan selected no shards"
+                planned = workflow_steps.outputs(plan, ctx, _REPO)
+                step_ctx = {**ctx, "steps": {"plan": {"outputs": planned}}}
+                entry["outputs"] = {key: gha.render(value, step_ctx)
+                                    for key, value in body["outputs"].items()}
+                if name == "e2e-upgrade-plan":
+                    assert json.loads(entry["outputs"]["shards"]), "upgrade plan selected no shards"
             uses = body.get("uses")
             if isinstance(uses, str) and uses.startswith("./.github/workflows/"):
                 called = uses[2:]
                 given = {k: gha.render(v, ctx) for k, v in (body.get("with") or {}).items()}
                 entry["inputs"] = _inputs_for(called, given)
-                entry["jobs"] = _run_workflow(called, inputs=entry["inputs"])
+                entry["jobs"] = _run_workflow(called, inputs=entry["inputs"], github=github)
             ran[name] = entry
         assert progressed, f"{rel}: unresolvable needs among {pending}"
     return ran
 
 
-def _ci_run(lanes: dict[str, bool]) -> dict:
-    return _run_workflow(".github/workflows/ci.yaml", inputs={}, detect=_detect_outputs(lanes))
+def _ci_run(lanes: dict[str, bool], *, repository="NousResearch/hermes-agent",
+            event_name="pull_request", inputs: dict | None = None) -> dict:
+    github, inputs = _github_context(repository, event_name), inputs or {}
+    return _run_workflow(".github/workflows/ci.yaml", inputs=inputs, github=github,
+                         detect=_detect_outputs(lanes, inputs=inputs, github=github))
 
 
 def _reached(run: dict, *path: str) -> dict | None:
@@ -176,11 +195,7 @@ def _selected_test_files(node: dict, name: str, *, windows_only: bool = False) -
     body, ctx = node["body"], node["ctx"]
     steps = [s for s in body["steps"] if s.get("name", "").startswith(name)]
     assert len(steps) == 1, f"missing/ambiguous required step: {name}"
-    matrix = body.get("strategy", {}).get("matrix", {})
-    if "shard" in matrix:
-        cells = [{"shard": s} for s in gha.render(matrix["shard"], ctx)]
-    else:
-        cells = matrix.get("include", [{}])
+    cells = workflow_steps.matrix_cells(body, ctx)
     if windows_only:
         cells = [cell for cell in cells if cell.get("marker") == "windows"]
     assert cells, f"{name}: empty matrix"
@@ -196,9 +211,16 @@ def _selected_test_files(node: dict, name: str, *, windows_only: bool = False) -
     return selected
 
 
+def _native_path(run: dict, path: tuple[str, ...]) -> tuple[str, ...]:
+    """The fork's ordinary branch runs native Windows in its separate advisory caller."""
+    if path[0] == "tests-os" and "tests-windows-advisory" in run:
+        return ("tests-windows-advisory", *path[1:])
+    return path
+
+
 def _windows_desktop_updater_tests_selected(run: dict) -> bool:
-    """tests-os os-tests runs, and its Windows step keeps the desktop-update hand-off files."""
-    os_tests = _reached(run, "tests-os", "os-tests")
+    """The native caller runs and keeps the desktop-update hand-off files."""
+    os_tests = _reached(run, *_native_path(run, ("tests-os", "os-tests")))
     if os_tests is None:
         return False
     selected = _selected_test_files(os_tests, "Run ${{ matrix.marker }} tests", windows_only=True)
@@ -226,6 +248,7 @@ def _consumers_reached(run: dict, lane: str) -> dict[str, bool]:
                 _windows_desktop_updater_tests_selected(run)}
     reached = {}
     for path in _CONSUMERS[lane]:
+        path = _native_path(run, path)
         node = _reached(run, *path)
         if node is None or path[-1] == "e2e-upgrade-plan":
             reached["/".join(path)] = node is not None
@@ -785,6 +808,7 @@ _STRICT_STEPS = (
 
 
 def _strict_env(run: dict, path: tuple[str, ...], rel: str, job: str, step_name: str) -> str:
+    path = _native_path(run, path)
     node = _reached(run, *path)
     assert node is not None, f"{'/'.join(path)} did not run"
     step = next(s for s in _yaml(rel)["jobs"][job]["steps"] if str(s.get("name", "")).startswith(step_name))
@@ -796,8 +820,8 @@ def _strict_env(run: dict, path: tuple[str, ...], rel: str, job: str, step_name:
 def test_strict_acceptance_dispatch_reaches_every_e2e_suite(value):
     """`gh workflow run ci.yaml -f strict_acceptance=upd-txn` (the batch's acceptance run)."""
     lanes = cc.classify([])  # a dispatch has no diff: every lane on
-    run = _run_workflow(".github/workflows/ci.yaml", inputs={"release": False, "strict_acceptance": value},
-                        detect=_detect_outputs(lanes))
+    run = _ci_run(lanes, event_name="workflow_dispatch",
+                  inputs={"release": False, "strict_acceptance": value})
     for path, rel, job, step in _STRICT_STEPS:
         assert _strict_env(run, path, rel, job, step) == value, "/".join(path)
 
@@ -808,9 +832,55 @@ def test_pull_requests_never_run_strict():
         assert _strict_env(run, path, rel, job, step) == "", "/".join(path)
 
 
+@pytest.mark.parametrize("repository,release,event_name", [
+    ("NousResearch/hermes-agent", False, "pull_request"),
+    ("mrkillbob/hermes-agent", False, "pull_request"),
+    ("mrkillbob/hermes-agent", False, "workflow_dispatch"),
+    ("mrkillbob/hermes-agent", True, "workflow_dispatch"),
+])
+def test_native_policy_keeps_complete_selection_and_strict_acceptance(repository, release, event_name):
+    """Advisory fork branches retain the native journeys; a release requires them."""
+    strict = "upd-txn" if event_name == "workflow_dispatch" else ""
+    run = _ci_run(cc.classify([]), repository=repository, event_name=event_name,
+                  inputs={"release": release, "strict_acceptance": strict})
+    advisory = repository == "mrkillbob/hermes-agent" and not release
+    caller = "tests-windows-advisory" if advisory else "tests-os"
+    required = _yaml(".github/workflows/ci.yaml")["jobs"]["all-checks-pass"]["needs"]
+    assert (caller in required) == (not advisory), f"wrong merge-gate authority for {caller}"
+    assert ("tests-windows-advisory" in run) == advisory
+    assert run["detect"]["outputs"]["advisory_windows"] == gha.to_string(advisory)
+    assert run["tests-os"]["inputs"]["platform_scope"] == ("macos" if advisory else "all")
+    for lane in ("desktop_updater", "e2e", "e2e_upgrade", "e2e_desktop_update"):
+        assert all(_consumers_reached(run, lane).values()), lane
+    journey = _reached(run, caller, "install-update-e2e", "install-update")
+    assert journey is not None, f"{caller}: native update journey did not run"
+    expected = {p.relative_to(_REPO).as_posix() for p in
+                (_REPO / "tests/e2e/core/windows_update").glob("test_*.py")}
+    assert expected and _selected_test_files(journey, "Run Windows install + update E2E") == expected
+    for path, rel, job, step in _STRICT_STEPS:
+        assert _strict_env(run, path, rel, job, step) == strict, "/".join(path)
+
+
+@pytest.mark.parametrize("path", ["agent/memory_provider.py", "apps/desktop/electron/update-marker.ts"])
+def test_fork_owner_change_reaches_advisory_windows_consumers(path):
+    lanes = _real_classifier([path])
+    run = _ci_run(lanes, repository="mrkillbob/hermes-agent")
+    assert "tests-windows-advisory" in run
+    for lane in ("desktop_updater", "e2e_upgrade", "e2e_desktop_update"):
+        if lanes[lane]:
+            assert all(_consumers_reached(run, lane).values()), f"{path}: {lane} lost its consumer"
+    # The fork intentionally requests the full Windows E2E/update journeys
+    # whenever the native caller starts, even for desktop-updater-only edits.
+    for lane in ("e2e", "e2e_upgrade"):
+        native = {key: reached for key, reached in _consumers_reached(run, lane).items()
+                  if key.startswith("tests-windows-advisory/")}
+        assert native and all(native.values()), f"{path}: lost full native coverage: {native}"
+
+
 def test_windows_install_update_dispatch_alone_sets_strict():
     jobs = _run_workflow(".github/workflows/windows-install-update-e2e.yml",
-                         inputs={"strict_acceptance": "upd-txn"})
+                         inputs={"strict_acceptance": "upd-txn"},
+                         github=_github_context(event_name="workflow_dispatch"))
     assert _strict_env({"w": {"jobs": jobs}}, ("w", "install-update"),
                        ".github/workflows/windows-install-update-e2e.yml", "install-update",
                        "Run Windows install + update E2E") == "upd-txn"

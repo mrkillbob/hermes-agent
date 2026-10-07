@@ -1145,8 +1145,11 @@ def _commit_tool_result(
     )
     tool_message = make_tool_result_message(
         function_name, _tool_content, tool_call_id, effect_disposition=effect_disposition,
-        source_provenance=_source_provenance,
     )
+    # An in-flight pre-update worker may retain the older builder signature.
+    # Attach provenance here before persistence so that cached helper cannot lose it.
+    if _source_provenance is not None:
+        tool_message["_source_provenance"] = dict(_source_provenance)
     # Prepare presentation data before the append. The emitting completion callback
     # stays below the durability fence; raw tool/model content remains unchanged.
     prepare_metadata = getattr(agent, "tool_result_metadata_callback", None)

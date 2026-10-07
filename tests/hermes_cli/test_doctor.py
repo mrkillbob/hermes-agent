@@ -418,12 +418,40 @@ class TestDoctorMemoryProviderSection:
         assert "Mem0" not in out
 
 
-    def test_catalog_provider_not_installed_names_install_command(self, monkeypatch, tmp_path):
-        # mem0 left core for the plugin catalog: a home still configured for it gets the exact command.
+    @pytest.mark.parametrize("catalog_available", [True, False], ids=["catalog-entry", "no-entry"])
+    def test_missing_provider_recovery_matches_catalog_availability(
+        self, monkeypatch, tmp_path, catalog_available
+    ):
+        import hermes_yaml as yaml
+        import plugins.memory as memory_plugins
+
+        # Recovery advice depends on usable catalog data, not the checkout's current pins.
+        catalog = tmp_path / "plugin-catalog"
+        catalog.mkdir()
+        monkeypatch.setenv("HERMES_PLUGIN_CATALOG", str(catalog))
+        if catalog_available:
+            (catalog / "mem0.yaml").write_text(
+                yaml.safe_dump({
+                    "name": "mem0",
+                    "repo": "https://example.invalid/mem0.git",
+                    "sha": "a" * 40,
+                    "category": "memory",
+                }),
+                encoding="utf-8",
+            )
+        monkeypatch.setattr(memory_plugins, "load_memory_provider", lambda name: None)
+        monkeypatch.setattr(memory_plugins, "find_provider_dir", lambda name: None)
+
         out = self._run_doctor_and_capture(monkeypatch, tmp_path, provider="mem0")
         section = out.split("Memory Provider", 1)[1][:600]
         assert "Built-in memory active" not in out
-        assert "mem0 plugin not found" in section and "plugins install mem0" in section
+        assert "mem0 plugin not found" in section
+        if catalog_available:
+            assert "plugins install mem0" in section
+            assert "run: hermes memory setup" not in section
+        else:
+            assert "run: hermes memory setup" in section
+            assert "plugins install mem0" not in section
 
     @pytest.mark.parametrize("memory_enabled", [False, True])
     def test_stale_builtin_files_reported_only_when_store_enabled(

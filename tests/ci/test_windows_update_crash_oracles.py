@@ -18,18 +18,36 @@ from _pytest.mark.expression import Expression
 
 import tests.e2e.core.windows_update.test_crash_cells as crash
 from hermes_cli import update_lock
+from tests.ci import _gha_expr as gha
+from tests.ci import workflow_steps
 
 _REPO = Path(__file__).resolve().parents[2]
 _SUITE = "tests/e2e/core/windows_update"
 
 
-def _workflow_selection() -> str:
-    """The ``-m`` expression the Windows install + update E2E workflow runs its suite with."""
+def _workflow_invocations() -> list[tuple[dict, list[str], set[str]]]:
+    """Render each shard and receipt the workflow's actual file selection."""
     yaml = pytest.importorskip("hermes_yaml")
     wf = yaml.safe_load((_REPO / ".github/workflows/windows-install-update-e2e.yml").read_text(encoding="utf-8-sig"))
-    step = next(s for s in wf["jobs"]["install-update"]["steps"] if s.get("name") == "Run Windows install + update E2E")
-    argv = shlex.split(step["run"].replace("\\\n", " "))
-    assert f"{_SUITE}/" in argv, f"the workflow no longer runs {_SUITE}/: {argv}"
+    job = wf["jobs"]["install-update"]
+    step = next(s for s in job["steps"] if s.get("name") == "Run Windows install + update E2E")
+    base = {"inputs": {}, "github": {"repository": "mrkillbob/hermes-agent"}}
+    invocations = []
+    for cell in workflow_steps.matrix_cells(job, base):
+        ctx = {**base, "matrix": cell}
+        workflow_steps.required(job, ctx)
+        argv = shlex.split(gha.render(step["run"], ctx).replace("\\\n", " "))
+        invocations.append((ctx, argv, workflow_steps.selected_files(step, ctx, _REPO)))
+    return invocations
+
+
+def _workflow_selection(path: str) -> str:
+    """Every suite file must be selected exactly once, with its real marker expression."""
+    expected = f"{_SUITE}/{path}"
+    matches = [argv for _, argv, selected in _workflow_invocations() if expected in selected]
+    assert len(matches) == 1, f"{expected}: expected one workflow invocation, got {matches}"
+    argv = matches[0]
+    assert "-m" in argv, f"the Windows marker filter disappeared: {argv}"
     return argv[argv.index("-m") + 1]
 
 
@@ -37,7 +55,7 @@ def _workflow_selection() -> str:
 # tests run, so a dropped platforms("windows") marker would silently run zero cells.
 @pytest.mark.parametrize("path", sorted(p.name for p in (_REPO / _SUITE).glob("test_*.py")))
 def test_windows_update_workflow_selects_every_test_of_the_suite(path):
-    selection = Expression.compile(_workflow_selection())
+    selection = Expression.compile(_workflow_selection(path))
     module = importlib.import_module(f"{_SUITE.replace('/', '.')}.{Path(path).stem}")
     tests = [fn for name, fn in inspect.getmembers(module, inspect.isfunction) if name.startswith("test")]
     assert tests, f"{path}: no module-level test functions to select"
@@ -228,15 +246,20 @@ def test_orphan_marker_guard_fires_once_the_fix_lands(monkeypatch):
 # Review 5411223855 (F52): a runtime proof the crash file ran, beside the static selection check
 # above: a lost opt-in env or any other zero-execution path also exits 0 per file.
 def test_workflow_requires_the_crash_journey_manifest(tmp_path, monkeypatch):
-    from tests.ci import workflow_steps
-
     yaml = pytest.importorskip("hermes_yaml")
     wf = yaml.safe_load((_REPO / ".github/workflows/windows-install-update-e2e.yml").read_text(encoding="utf-8-sig"))
     steps = wf["jobs"]["install-update"]["steps"]
     names = [s.get("name") for s in steps]
     run, check = steps[names.index("Run Windows install + update E2E")], steps[names.index("Every crash cell ran")]
     assert names.index("Every crash cell ran") > names.index("Run Windows install + update E2E")
-    workflow_steps.required(check, {"inputs": {}})  # neither disabled nor advisory
+    crash_file = f"{_SUITE}/test_crash_cells.py"
+    invocations = _workflow_invocations()
+    owners = [ctx for ctx, _, selected in invocations if crash_file in selected]
+    assert len(owners) == 1, f"the crash journey needs exactly one shard: {owners}"
+    workflow_steps.required(check, owners[0])  # required on the shard that runs the crash cells
+    for ctx, _, selected in invocations:
+        if crash_file not in selected:
+            assert not gha.condition(check.get("if"), ctx), "crash receipt required on a different shard"
     assert check["env"]["HERMES_E2E_ARTIFACTS"] == run["env"]["HERMES_E2E_ARTIFACTS"]
     assert f"'{crash.CELLS_RAN_MANIFEST}'" in check["run"] and "throw" in check["run"]
 
