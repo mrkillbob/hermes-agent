@@ -4113,7 +4113,7 @@ class _StreamingCall(StreamingWaitMonitor):
         if response is None or response is not self._attempt_stream_response:
             return
         try:
-            from agent.agent_runtime_helpers import _shutdown_socket, _socket_from_response
+            from agent.agent_runtime_helpers_connections import _shutdown_socket, _socket_from_response
             sock = _socket_from_response(response)
             if sock is not None:
                 _shutdown_socket(sock)

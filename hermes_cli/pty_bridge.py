@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import fcntl  # windows-footgun: ok — POSIX-only module by design (see docstring)
+import logging
 import math
 import os
 import select
@@ -27,6 +28,9 @@ try:
 except ImportError:  # pragma: no cover - dev env without ptyprocess
     ptyprocess = None  # type: ignore
     _PTY_AVAILABLE = False
+
+
+_log = logging.getLogger(__name__)
 
 
 __all__ = ["PTY_HOST_DASHBOARD", "PTY_HOST_ENV", "PtyBridge", "PtyUnavailableError"]
@@ -88,17 +92,6 @@ def _process_group_exists(pgid: int) -> bool:
     except OSError:
         return False
     return True
-
-
-def _psutil_alive(proc) -> bool:
-    """Best-effort 'is this psutil Process still alive' for the shutdown cadence;
-    zombies count as dead and it never raises."""
-    try:
-        import psutil  # type: ignore
-
-        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
-    except Exception:
-        return False
 
 
 class PtyBridge:
@@ -305,12 +298,9 @@ class PtyBridge:
             # Not a group leader: the child shares OUR process group, so killpg would
             # take the TUI down with it. Signal the child directly instead.
             if leader_was_alive:
-                try:
-                    import psutil  # type: ignore
+                from hermes_cli.pty_bridge_shutdown import _snapshot_descendants
 
-                    non_leader_descendants = psutil.Process(self._proc.pid).children(recursive=True)
-                except Exception:
-                    non_leader_descendants = []
+                non_leader_descendants = _snapshot_descendants(self._proc.pid)
             pgid = None
 
         # Signal the whole process group, not just the PTY leader: the dashboard TUI starts helper
@@ -324,7 +314,9 @@ class PtyBridge:
                 else:
                     self._proc.kill(sig)
             except Exception:
-                pass
+                # ptyprocess and duck-typed handles can raise beyond OS errors;
+                # teardown must still drain output, escalate, and close the fd.
+                _log.debug("PTY leader signal failed", exc_info=True)
             deadline = time.monotonic() + 0.5
             while self._proc.isalive() and time.monotonic() < deadline:
                 self._discard_output(0.02)
@@ -348,31 +340,16 @@ class PtyBridge:
                     break  # ESRCH: the group is empty
                 self._wait_for_group_exit(pgid, grace if sig == signal.SIGHUP else 0.5)  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
         elif non_leader_descendants:
-            # The shared-group branch: the helpers-outlive-leader sweep above cannot run
-            # (no killpg is safe), so end the snapshotted descendants individually. The main
-            # loop above signalled only the child PID, so the descendants got no SIGHUP —
-            # send it now and allow the helper grace, then SIGKILL survivors: a helper
-            # saving state on SIGHUP still finishes, and one that ignores SIGHUP cannot
-            # outlive the close (mirrors the group sweep's leader-dead cadence, #76759).
-            grace = _helper_shutdown_grace()
-            for sig in (signal.SIGHUP, signal.SIGKILL):  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
-                for child in non_leader_descendants:
-                    try:
-                        if sig == signal.SIGHUP:  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
-                            child.send_signal(sig)
-                        else:
-                            child.kill()
-                    except Exception:
-                        pass  # already gone; psutil raises NoSuchProcess/Zombie
-                if sig == signal.SIGHUP:  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
-                    deadline = time.monotonic() + grace
-                    while any(_psutil_alive(c) for c in non_leader_descendants) and time.monotonic() < deadline:
-                        self._discard_output(0.02)
+            from hermes_cli.pty_bridge_shutdown import _terminate_descendants
+
+            _terminate_descendants(
+                non_leader_descendants, _helper_shutdown_grace(), self._discard_output,
+            )
 
         try:
             self._proc.close(force=True)
         except Exception:
-            pass
+            _log.debug("PTY handle close failed", exc_info=True)
 
     def __enter__(self) -> "PtyBridge":
         return self

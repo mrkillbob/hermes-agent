@@ -814,6 +814,7 @@ def _default_on(dir_path, source: str) -> bool:
     try:
         kind = str(_load_yaml_manifest(manifest_file).get("kind", "standalone")).strip().lower()
     except Exception:
+        logger.debug("Plugin default-on manifest unreadable at %s", manifest_file, exc_info=True)
         return False
     return kind == "model-provider" or (source == "bundled" and kind in _BUNDLED_DEFAULT_ON_KINDS)
 

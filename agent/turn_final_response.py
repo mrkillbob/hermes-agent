@@ -357,6 +357,20 @@ def finish_text_response(
         else:
             final_msg["content"] = final_response
 
+    _persist_final_text_response(agent, final_msg, messages, conversation_history)
+
+    _turn_exit_reason = ("kanban_shutdown_paused" if _sg.kanban_shutdown_paused
+                         else f"text_response(finish_reason={finish_reason})")
+    if not agent.quiet_mode:
+        agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
+    return _verdict("break")
+
+
+
+def _persist_final_text_response(
+    agent: Any, final_msg: Any, messages: Any, conversation_history: Any
+) -> None:
+    """Append the transformed final reply and flush it before leaving the loop."""
     append_message(messages, final_msg)
     # Make the answer durable before leaving the loop (_DB_PERSISTED_MARKER keeps
     # _persist_session idempotent). Failure must NOT abort the turn: finalize retries.
@@ -369,9 +383,3 @@ def finish_text_response(
             getattr(agent, "session_id", None) or "none",
             exc_info=True,
         )
-
-    _turn_exit_reason = ("kanban_shutdown_paused" if _sg.kanban_shutdown_paused
-                         else f"text_response(finish_reason={finish_reason})")
-    if not agent.quiet_mode:
-        agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
-    return _verdict("break")

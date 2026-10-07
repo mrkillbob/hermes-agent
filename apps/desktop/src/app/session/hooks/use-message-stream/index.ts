@@ -48,6 +48,7 @@ import {
 import { useGatewayEventHandler } from './gateway-event'
 import { handleServerRequest as dispatchServerRequest } from './gateway-event/server-requests'
 import { extendInterruptedReply } from './interrupted-reply'
+import { isPersistedInterimCompletion } from './persisted-completion'
 import { currentResponseParts, mergeCurrentResponseText } from './response-parts'
 import { completionErrorText, delegateTaskPayloads, MAX_STREAM_FLUSH_GAP_MS, STREAM_DELTA_FLUSH_MS } from './utils'
 
@@ -978,14 +979,7 @@ export function useMessageStream({
             // interim instead of painting a second bubble for one row
             // (#124128). A frame with no receipt keeps the rules below, so a
             // genuinely distinct reply still appends its own bubble.
-            const finalRowId = persistedTurn?.final_assistant_row_id
-
-            const settlesPersistedRow =
-              existing.interim === true &&
-              existing.rowId === undefined &&
-              typeof finalRowId === 'number' &&
-              Number.isSafeInteger(finalRowId) &&
-              finalRowId > 0
+            const settlesPersistedRow = isPersistedInterimCompletion(existing, persistedTurn)
 
             if (
               existing.pending ||

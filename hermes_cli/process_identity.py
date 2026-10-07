@@ -418,6 +418,7 @@ def _reparented_orphan(pid: int) -> bool:
         import psutil
         return max(0.0, _time.time() - psutil.Process(pid).create_time()) >= _REAP_MIN_AGE_SECONDS
     except Exception:
+        logger.debug("Orphan parent proof failed for pid %s", pid, exc_info=True)
         return False  # unprovable → never touch
 
 
@@ -451,6 +452,7 @@ def reap_orphaned_backend_owner(
                   or abs(float(e["create_time"]) - float(create_time)) < 2.0)),
             None)
     except Exception:
+        logger.debug("Backend owner ledger proof failed for pid %s", pid, exc_info=True)
         return None
     if entry is None:
         return None

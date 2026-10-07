@@ -38,6 +38,7 @@ from agent.codex_headers import (
 )
 from agent.codex_runtime import _codex_event_has_content
 from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
+from agent import auxiliary_client_latency as _latency
 
 # `openai.OpenAI` is imported lazily (~240 ms cold); `OpenAI` below is a proxy
 # so in-module calls, `auxiliary_client.OpenAI` reads and
@@ -1136,7 +1137,7 @@ def _scoped_key_env(name: str) -> str:
 def _attempt_stream_socket(stream: Any) -> Any:
     """The raw socket under an SDK event stream (``stream.response`` is the ``httpx.Response``;
     httpcore publishes its connection as the ``network_stream`` extension), or None."""
-    from agent.agent_runtime_helpers import _socket_from_stream
+    from agent.agent_runtime_helpers_connections import _socket_from_stream
     extensions = getattr(getattr(stream, "response", None), "extensions", None)
     network_stream = extensions.get("network_stream") if isinstance(extensions, dict) else None
     return _socket_from_stream(network_stream) if network_stream is not None else None
@@ -1247,7 +1248,7 @@ class _CodexStreamGuard:
         if threading.get_ident() != self._owner_tid:
             sock = _attempt_stream_socket(stream)
             if sock is not None:
-                from agent.agent_runtime_helpers import _shutdown_socket
+                from agent.agent_runtime_helpers_connections import _shutdown_socket
                 _shutdown_socket(sock)
                 return
         _close_quietly(stream, failure_note)
@@ -1297,7 +1298,7 @@ class _CodexStreamGuard:
             _close_quietly(self._client, "client close during timeout failed")
         else:
             try:
-                from agent.agent_runtime_helpers import force_close_tcp_sockets
+                from agent.agent_runtime_helpers_connections import force_close_tcp_sockets
                 shutdown_count = force_close_tcp_sockets(self._client)
                 logger.info(
                     "Codex auxiliary client aborted (timeout, tcp_force_closed=%d, "
@@ -8144,17 +8145,6 @@ async def _drive_ladder_async(ladder, perform: Callable[[_LadderStep], Any]) -> 
         return stop.value
 
 
-def _elapsed_ms(started_at: float, now: Optional[float] = None) -> int:
-    """Whole milliseconds since ``started_at`` (clamped at 0)."""
-    return max(0, int(((time.monotonic() if now is None else now) - started_at) * 1000))
-
-
-def _stamp_latency_once(latency_info: Optional[Dict[str, int]], key: str, started_at: float) -> None:
-    """Record ``key`` in ``latency_info`` the first time it fires."""
-    if latency_info is not None and key not in latency_info:
-        latency_info[key] = _elapsed_ms(started_at)
-
-
 @_relay_auxiliary_call
 def call_llm(
     task: str = None, *, provider: str = None, model: str = None, base_url: str = None,
@@ -8172,7 +8162,7 @@ def call_llm(
         semaphore.acquire()
     request_started_at = time.monotonic()
     if latency_info is not None:
-        latency_info["queue_wait_ms"] = _elapsed_ms(queue_started_at, request_started_at)
+        latency_info["queue_wait_ms"] = _latency._elapsed_ms(queue_started_at, request_started_at)
     prior_progress_hook = getattr(_aux_progress, "hook", None)
     try:
         with (
@@ -8182,9 +8172,9 @@ def call_llm(
                 else ((lambda: None) if latency_info is not None else None)
             ),
             _aux_thread_local_hook(_aux_dispatch, functools.partial(
-                _stamp_latency_once, latency_info, "provider_dispatch_ms", request_started_at)),
+                _latency._stamp_latency_once, latency_info, "provider_dispatch_ms", request_started_at)),
             _aux_thread_local_hook(_aux_provider_response, functools.partial(
-                _stamp_latency_once, latency_info, "time_to_first_progress_ms", request_started_at)),
+                _latency._stamp_latency_once, latency_info, "time_to_first_progress_ms", request_started_at)),
         ):
             with scoped_runtime_main(main_runtime):
                 response = _call_llm_impl(
@@ -8201,7 +8191,7 @@ def call_llm(
         return response
     finally:
         if latency_info is not None:
-            latency_info["summary_generation_ms"] = _elapsed_ms(request_started_at)
+            latency_info["summary_generation_ms"] = _latency._elapsed_ms(request_started_at)
         if semaphore is not None:
             semaphore.release()
 

@@ -514,7 +514,7 @@ def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
         try:
             subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                            check=False, capture_output=True, stdin=subprocess.DEVNULL)
-        except Exception:
+        except OSError:
             pass
         return
     # POSIX-only below (the nt guard returned), but resolve killpg/SIGKILL via
@@ -523,7 +523,7 @@ def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
     if killpg is None:  # windows-footgun: ok - non-POSIX fallback
         try:
             proc.kill()
-        except Exception:
+        except OSError:
             pass
         return
     try:
@@ -551,16 +551,22 @@ def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
         try:
             import psutil
 
-            descendants = psutil.Process(proc.pid).children(recursive=True)
-        except Exception:
-            descendants = []
+        except ImportError:
+            _bt.logger.debug("psutil unavailable for browser descendant cleanup", exc_info=True)
+        else:
+            try:
+                descendants = psutil.Process(proc.pid).children(recursive=True)
+            except psutil.Error:
+                _bt.logger.debug("Could not snapshot browser descendants for pid %s", proc.pid, exc_info=True)
     try:
         proc.kill()
-    except Exception:
+    except OSError:
         pass
     for child in descendants:
-        with contextlib.suppress(Exception):
+        try:
             child.kill()
+        except psutil.Error:
+            _bt.logger.debug("Could not kill browser descendant %s", child.pid, exc_info=True)
 
 
 def _pid_exists(pid: int) -> bool:

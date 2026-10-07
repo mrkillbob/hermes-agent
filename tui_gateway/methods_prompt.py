@@ -750,6 +750,25 @@ def _admit_prompt_submit(
         return None, survivor_fields
 
 
+def _prompt_submit_context(rid, session: dict, params: dict):
+    """Validate the in-process author and hosted/group submit authority before admission."""
+    raw_turn_author = params.get("_turn_author")
+    turn_author = None
+    if raw_turn_author is not None:
+        from tools.bot_relay import DeliveryAuthor
+        if not isinstance(raw_turn_author, DeliveryAuthor):
+            return None, None, None, False, _err(
+                rid, 4124, "turn author may only be supplied by the in-process relay")
+        turn_author = dict(raw_turn_author.author)
+    hosted_task = params.get("_hosted_task")
+    hosted_terminal_callback = params.get("_hosted_terminal_callback")
+    internal_hosted_submit = hosted_task is not None or hosted_terminal_callback is not None
+    err = (
+        _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback)
+        if internal_hosted_submit else _legacy_group_fence_error(rid, session, params))
+    return turn_author, hosted_task, hosted_terminal_callback, internal_hosted_submit, err
+
+
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
@@ -774,19 +793,8 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-    raw_turn_author = params.get("_turn_author")
-    turn_author = None
-    if raw_turn_author is not None:
-        from tools.bot_relay import DeliveryAuthor
-        if not isinstance(raw_turn_author, DeliveryAuthor):
-            return _err(rid, 4124, "turn author may only be supplied by the in-process relay")
-        turn_author = dict(raw_turn_author.author)
-    hosted_task = params.get("_hosted_task")
-    hosted_terminal_callback = params.get("_hosted_terminal_callback")
-    internal_hosted_submit = hosted_task is not None or hosted_terminal_callback is not None
-    err = (
-        _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback)
-        if internal_hosted_submit else _legacy_group_fence_error(rid, session, params))
+    turn_author, hosted_task, hosted_terminal_callback, internal_hosted_submit, err = (
+        _prompt_submit_context(rid, session, params))
     if err is not None:
         return err
     has_truncation = any(params.get(k) is not None for k in _TRUNCATION_PARAMS)

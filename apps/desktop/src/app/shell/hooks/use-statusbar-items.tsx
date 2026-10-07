@@ -63,7 +63,6 @@ import {
 import { $focusedStoredSessionId } from '@/store/session-focus'
 import { $focusedRuntimeId, $focusedSessionState, $sessionTiles, isSessionRemote } from '@/store/session-states'
 import { $statusbarHiddenIds } from '@/store/statusbar-prefs'
-import { $subagentsBySession, activeSubagentCount, failedSubagentCount } from '@/store/subagents'
 import { $gatewayRestarting } from '@/store/system-actions'
 import {
   $backendUpdateApply,
@@ -77,6 +76,8 @@ import type { StatusResponse, UsageStats } from '@/types/hermes'
 
 import { CRON_ROUTE, SETTINGS_ROUTE, WEBHOOKS_ROUTE } from '../../routes'
 import type { StatusbarItem } from '../statusbar-controls'
+
+import { useStatusbarSubagentCounts } from './use-statusbar-subagent-counts'
 
 const EMPTY_USAGE: UsageStats = { calls: 0, input: 0, output: 0, total: 0 }
 
@@ -134,26 +135,7 @@ export function useStatusbarItems({
   const tileSessionFocusStartedAt = useStore($tileSessionFocusStartedAt)
   const primaryTurnStartedAt = useStore($turnStartedAt)
 
-  // The indicator must speak the same scope as the Spawn-tree panel it opens:
-  // running/queued from every session (never background system actions), plus
-  // terminal rows only for the session the user is in — the scope
-  // `subagentsForPanel` derives, so the count and the tree can never disagree
-  // and finished history from inactive sessions stops accumulating (#75505).
-  // Only two COUNTS are read, so select scalars — a whole-map `useStore` re-ran
-  // this hook (rebuilding all ~9 statusbar items) on every subagent progress
-  // tick in ANY session, including background ones.
-  const subagentsRunning = useStoreSelector($subagentsBySession, bySession =>
-    Object.values(bySession).reduce((sum, items) => sum + activeSubagentCount(items), 0)
-  )
-
-  // Terminal rows only from the session the user is in — the panel drops other
-  // sessions' finished history (#75505), so the count the indicator shows must
-  // not resurrect it. Live running/queued rows stay cross-session above.
-  const subagentsFailed = useStoreSelector($subagentsBySession, bySession =>
-    Object.entries(bySession)
-      .filter(([sid]) => sid === primaryActiveSessionId)
-      .reduce((sum, [, items]) => sum + failedSubagentCount(items), 0)
-  )
+  const { subagentsRunning, subagentsFailed } = useStatusbarSubagentCounts(primaryActiveSessionId)
 
   // Backend truth for the free-tier chip. Refreshed on the ambient status
   // cadence (use-status-snapshot), never polled from here.

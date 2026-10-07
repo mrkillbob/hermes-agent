@@ -1229,7 +1229,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         budget = _stream_drain_timeout()
         if budget <= 0:
             return
-        from agent.agent_runtime_helpers import _socket_from_response
+        from agent.agent_runtime_helpers_connections import _socket_from_response
 
         # Only the raw SDK stream carries ``.response``; any lookup failure means "not interruptible".
         try:
@@ -1249,7 +1249,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             timed_out.set()
             # FD-safe from a stranger thread: never close here. The owner continues the iteration,
             # observes EOF/error, and performs the real close from the same thread that was reading.
-            from agent.agent_runtime_helpers import _shutdown_socket
+            from agent.agent_runtime_helpers_connections import _shutdown_socket
             _shutdown_socket(sock)
 
         watchdog = threading.Timer(budget, _wake_owner)

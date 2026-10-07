@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from threading import Lock, Thread, current_thread
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 _pricing_prewarm_lock = Lock()
 _pricing_prewarm_threads: dict[tuple[str, tuple[tuple[str, str], ...]], Thread] = {}
@@ -598,6 +602,7 @@ def _apply_featured(rows: list[dict], *, metadata_config: dict | None = None) ->
     try:
         from agent.models_dev import get_model_info
     except Exception:
+        logger.debug("Featured model metadata unavailable", exc_info=True)
         get_model_info = None  # type: ignore[assignment]
 
     # "Is this row an aggregator?" is answered canonically by is_routing_aggregator() — the same
@@ -607,6 +612,7 @@ def _apply_featured(rows: list[dict], *, metadata_config: dict | None = None) ->
     try:
         from hermes_cli.providers import is_routing_aggregator
     except Exception:
+        logger.debug("Featured model routing predicate unavailable", exc_info=True)
         is_routing_aggregator = None  # type: ignore[assignment]
 
     for row in rows:

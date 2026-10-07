@@ -28,6 +28,7 @@ import {
   hasThreadScopedGroupSession
 } from './group-membership'
 import { runGroupContinuationMembers, runGroupRoundMember } from './group-round-members'
+import type { GroupRoundMemberContext } from './group-round-members'
 import { rejectGroupSlashCommand } from './group-slash'
 import { GROUP_TURN_HARD_CAP_MS, harvestStrandedGroupReply } from './group-turns'
 import { botsText } from './i18n'
@@ -777,32 +778,38 @@ export async function runGroupChatRounds(
     // the round cap ended the drive, not consensus. (#94478)
     exitKind = 'capped'
   } finally {
-    if (isCurrent()) {
-      recordGroupActivity(group, {
-        kind: exitKind,
-        member: null,
-        thread
-      })
-      updateGroupChat(group, (r: GroupChatRoom) => {
-        r.running = false
-        r.turn = null
-
-        return r
-      })
-
-      // #89545: the loop's harvest pass only ran at the top of each round of
-      // an ACTIVE loop — a member whose turn timed out after the final round
-      // stayed stranded until the user's NEXT send. Poll for the late reply
-      // in the background (bounded) so long work is late, never lost.
-      // (window feature-detect: the engine also runs under node in tests.)
-      const strandedLeft = Object.keys(($groupChats.get()[group] || {}).stranded || {})
-
-      if (strandedLeft.length && typeof window !== 'undefined') {
-        void harvestStrandedUntilSettled(group, members, thread)
-      }
-    }
+    finishGroupChatRounds(context, exitKind)
 
     binding.dispose()
+  }
+}
+
+function finishGroupChatRounds(context: GroupRoundMemberContext, exitKind: 'capped' | 'settled') {
+  const { members, thread } = context
+
+  if (context.isCurrent()) {
+    recordGroupActivity(context.group, {
+      kind: exitKind,
+      member: null,
+      thread
+    })
+    updateGroupChat(context.group, (r: GroupChatRoom) => {
+      r.running = false
+      r.turn = null
+
+      return r
+    })
+
+    // #89545: the loop's harvest pass only ran at the top of each round of
+    // an ACTIVE loop — a member whose turn timed out after the final round
+    // stayed stranded until the user's NEXT send. Poll for the late reply
+    // in the background (bounded) so long work is late, never lost.
+    // (window feature-detect: the engine also runs under node in tests.)
+    const strandedLeft = Object.keys(($groupChats.get()[context.group] || {}).stranded || {})
+
+    if (strandedLeft.length && typeof window !== 'undefined') {
+      void harvestStrandedUntilSettled(context.group, members, thread)
+    }
   }
 }
 

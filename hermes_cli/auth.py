@@ -470,23 +470,8 @@ _ENTITLEMENT_ERROR_CODES = frozenset(_GENERIC_ENTITLEMENT_MESSAGES) | {
 
 def format_auth_error(error: Exception) -> str:
     """Map auth failures to concise user-facing guidance."""
-    if not isinstance(error, AuthError) or is_rate_limited_auth_error(error):
-        # Rate-limit / quota errors are not credential problems: never append "re-authenticate".
-        return str(error)
-    if error.relogin_required:
-        # Profile-aware: a bare `hermes model` from a named profile re-signs the ROOT store (#114012).
-        from hermes_constants import profile_cli_selector
-
-        return f"{error} Run `hermes {profile_cli_selector()}model` to re-authenticate."
-    if error.code in _ENTITLEMENT_ERROR_CODES:
-        if error.provider == "nous":
-            return _format_nous_entitlement_auth_error(error)
-        generic = _GENERIC_ENTITLEMENT_MESSAGES.get(error.code)
-        if generic:
-            return generic
-    if error.code == "temporarily_unavailable":
-        return f"{error} Please retry in a few seconds."
-    return str(error)
+    from hermes_cli.auth_errors import format_auth_error as render_auth_error
+    return render_auth_error(error)
 
 
 def _nonempty_str(value: Any) -> bool:

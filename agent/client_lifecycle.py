@@ -190,8 +190,8 @@ class ClientLifecycleMixin:
         return build_keepalive_http_client(base_url, verify=verify)
 
     _create_openai_client = _forward("agent.agent_runtime_helpers", "create_openai_client")
-    _force_close_tcp_sockets = _forward_static("agent.agent_runtime_helpers", "force_close_tcp_sockets")
-    _cleanup_dead_connections = _forward("agent.agent_runtime_helpers", "cleanup_dead_connections")
+    _force_close_tcp_sockets = _forward_static("agent.agent_runtime_helpers_connections", "force_close_tcp_sockets")
+    _cleanup_dead_connections = _forward("agent.agent_runtime_helpers_connections", "cleanup_dead_connections")
     _run_codex_stream = _forward("agent.codex_runtime", "run_codex_stream")
     _recover_with_credential_pool = _forward("agent.agent_runtime_helpers", "recover_with_credential_pool")
 

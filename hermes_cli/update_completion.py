@@ -68,6 +68,7 @@ def run_completion(request: dict) -> dict:
     # tree's pre-install as its own process (this parent stays stdlib-only); a
     # tree without it, or any failure, just leaves the in-lock repair to report.
     if sys.platform.startswith("linux"):
+        # health: allow HX006 -- interactive pre-lock host-package repair must not kill sudo/dpkg mid-install; pm.libatomic intentionally waits for its own host installer
         subprocess.run([sys.executable, "-I", "-S", "-B", "-c",
                         "import sys; sys.path.insert(0, sys.argv[1]); "
                         "from pm.libatomic import install_before_lock; install_before_lock()", str(root)],

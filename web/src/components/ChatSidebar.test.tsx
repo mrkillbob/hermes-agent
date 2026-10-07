@@ -3,7 +3,7 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { EVENTS_CONNECT_TIMEOUT_MS, EVENTS_MAX_RECONNECT_ATTEMPTS } from '@/lib/events-reconnect'
+import { EVENTS_CONNECT_TIMEOUT_MS, EVENTS_MAX_RECONNECT_ATTEMPTS, eventsGaveUpMessage, eventsReconnectDelayMs } from '@/lib/events-reconnect'
 
 const apiMocks = vi.hoisted(() => ({
   buildWsUrl: vi.fn(async () => "ws://localhost/api/events?channel=chat-1"),
@@ -488,18 +488,29 @@ describe("ChatSidebar event socket reconnect", () => {
   it('gives up after the attempt cap even when every socket opens briefly first', async () => {
     await renderSidebar()
 
-    for (let i = 0; i < 40; i++) {
-      const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+    for (let attempt = 0; attempt <= EVENTS_MAX_RECONNECT_ATTEMPTS; attempt++) {
+      expect(FakeWebSocket.instances).toHaveLength(attempt + 1)
+      const socket = FakeWebSocket.instances[attempt]
       await act(async () => {
         socket.emit('open', {})
         socket.emit('close', { code: 1006 })
       })
-      await advance(30_000)
+      if (attempt < EVENTS_MAX_RECONNECT_ATTEMPTS) {
+        // Stop exactly when the next async ticket request has created its socket:
+        // advancing farther would also time out that socket's pending handshake.
+        await advance(eventsReconnectDelayMs(attempt))
+      }
     }
 
-    // A flapping socket must not refill the ladder: 15 retries + the initial connection.
-    expect(FakeWebSocket.instances.length).toBeLessThanOrEqual(EVENTS_MAX_RECONNECT_ATTEMPTS + 1)
-    expect(container.textContent).toContain('stopped after')
+    // Every permitted dial mints a fresh ticket; a brief open cannot refill the budget.
+    expect(FakeWebSocket.instances).toHaveLength(EVENTS_MAX_RECONNECT_ATTEMPTS + 1)
+    expect(apiMocks.buildWsUrl).toHaveBeenCalledTimes(EVENTS_MAX_RECONNECT_ATTEMPTS + 1)
+    expect(container.textContent).toContain(eventsGaveUpMessage())
+
+    await advance(120_000)
+    expect(FakeWebSocket.instances).toHaveLength(EVENTS_MAX_RECONNECT_ATTEMPTS + 1)
+    expect(apiMocks.buildWsUrl).toHaveBeenCalledTimes(EVENTS_MAX_RECONNECT_ATTEMPTS + 1)
+    expect(container.textContent).toContain(eventsGaveUpMessage())
   })
 
   it('does not retry auth rejections', async () => {

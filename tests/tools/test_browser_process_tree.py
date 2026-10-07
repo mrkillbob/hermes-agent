@@ -115,7 +115,6 @@ def test_real_shared_group_child_does_not_signal_us(monkeypatch):
     to fail: a real child in our own process group must be proc.kill()ed
     without any killpg — if the group signal fired, this test process would
     be dead before the assertion."""
-    from tools.browser_tool_lifecycle import _kill_process_tree
 
     proc = subprocess.Popen(
         ["sleep", "60"],
@@ -194,7 +193,6 @@ def test_real_shared_group_child_descendants_are_killed(tmp_path):
 def test_real_group_leader_child_is_tree_killed(monkeypatch):
     """Control: a child leading its own group (process_group=0) still gets the
     group signal through the same fallback path."""
-    from tools.browser_tool_lifecycle import _kill_process_tree
 
     proc = subprocess.Popen(
         ["sleep", "60"],

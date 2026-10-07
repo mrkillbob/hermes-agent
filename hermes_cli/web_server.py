@@ -1325,7 +1325,8 @@ def _reclaim_host_from_orphaned_owner(role: str) -> bool:
     HELD_BY_OTHER helper for #121964. A stale record with no live owner is retracted via
     ``discard_dead_record`` (which only removes provably-gone owners); a live owner is reaped
     only when the spawn ledger proves it is a dead session's orphan. Anything else returns
-    False and the caller stays observe-only. Never raises.
+    False and the caller stays observe-only. Never raises: each best-effort ownership
+    boundary logs unexpected failures with a traceback before returning safely.
     """
     from gateway import host_rendezvous as hr
     from hermes_cli.process_identity import reap_orphaned_backend_owner
@@ -1333,11 +1334,13 @@ def _reclaim_host_from_orphaned_owner(role: str) -> bool:
     try:
         owner = hr.read_record(role)
     except Exception:
+        _log.debug("Host owner record read failed for %s", role, exc_info=True)
         return False
     if owner is None:
         try:
             return bool(hr.discard_dead_record(role))
         except Exception:
+            _log.debug("Dead host owner record cleanup failed for %s", role, exc_info=True)
             return False
     if owner.pid == os.getpid():
         return False  # never reap our own incarnation on a re-entrant claim
@@ -1345,11 +1348,12 @@ def _reclaim_host_from_orphaned_owner(role: str) -> bool:
         if reap_orphaned_backend_owner(owner.pid, owner.create_time) is None:
             return False
     except Exception:
+        _log.debug("Orphan host owner reclaim failed for %s", role, exc_info=True)
         return False
     try:
         hr.discard_dead_record(role)
     except Exception:
-        pass
+        _log.debug("Reaped host owner record cleanup failed for %s", role, exc_info=True)
     return True
 
 

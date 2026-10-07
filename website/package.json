@@ -47,7 +47,9 @@
     "dompurify": "3.4.16",
     "mermaid": "11.16.1",
     "image-size": "npm:@nous-research/image-size@2.0.3",
-    "tar": "7.5.22"
+    "tar": "7.5.22",
+    "shell-quote": "1.11.0",
+    "source-map-js": "1.2.2"
   },
   "browserslist": {
     "production": [

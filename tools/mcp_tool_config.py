@@ -136,7 +136,7 @@ def _tail_server_stderr(server_name: str, *, max_bytes: int = 8192, max_lines: i
             return ""
         lines = [line for line in chunk[cut:].splitlines() if line.strip()]
         return "\n".join(lines[-max_lines:]) if lines else ""
-    except Exception:
+    except (OSError, ValueError):
         return ""
 
 
@@ -306,7 +306,7 @@ def _is_hermes_managed_bin_dir(directory: str) -> bool:
     from hermes_constants import get_hermes_home
     try:
         home = Path(get_hermes_home()).resolve()
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return False
     return resolved == home / "bin" or home in resolved.parents
 
