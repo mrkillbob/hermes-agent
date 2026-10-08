@@ -74,7 +74,10 @@
     },
     "app-builder-lib@27.0.0-alpha.6": {
       "plist@3.1.0": "3.1.1"
-    }
+    },
+    "@simple-git/argv-parser": "2.0.1",
+    "@simple-git/args-pathspec": "1.0.4",
+    "source-map-js": "1.2.2"
   },
   "engines": {
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0",
