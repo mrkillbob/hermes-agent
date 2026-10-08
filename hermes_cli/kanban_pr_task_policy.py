@@ -19,7 +19,7 @@ def _pr_task_payload(body: Optional[str]) -> Optional[dict[str, Any]]:
     except (TypeError, ValueError):
         # The existing feedback CLI appends its JSON evidence on the last line.
         try:
-            payload = json.loads((body or "").rsplit("\n", 1)[-1])
+            payload = json.loads((body or "").rstrip().rsplit("\n", 1)[-1])
         except (TypeError, ValueError):
             return None
     return payload if isinstance(payload, dict) else None

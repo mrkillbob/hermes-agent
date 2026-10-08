@@ -154,6 +154,8 @@ def test_intent_review_exception_does_not_allow_runnable_write_task(kanban_home)
     "repository", "pr_number", "expected_head_sha", "action", "metadata",
     "ordinary", "unknown_owner", "rendered_head", "rendered_metadata", "profile_switch",
     "release_audit", "release_final", "review_push", "review_and_delete", "verify_ci_receipt",
+    "rendered_nl_repository", "rendered_nl_pr_number", "rendered_nl_expected_head_sha",
+    "rendered_nl_action", "rendered_nl_metadata", "rendered_nl_metadata_multiple",
 ])
 def test_specification_retains_exact_identity_and_effective_authority(kanban_home, monkeypatch, change):
     from hermes_cli.kanban_db_connect import connect
@@ -213,7 +215,8 @@ def test_specification_retains_exact_identity_and_effective_authority(kanban_hom
     if change in {"body_write_reader", "ordinary", "review_push", "review_and_delete", "verify_ci_receipt"}:
         original = "Ordinary report."
     updates = {"title": "Clarified scope"}
-    rejected = change not in {"metadata", "ordinary", "rendered_metadata", "verify_ci_receipt"}
+    rejected = change not in {"metadata", "ordinary", "rendered_metadata", "verify_ci_receipt",
+                              "rendered_nl_metadata", "rendered_nl_metadata_multiple"}
     if change == "body_write_reader":
         updates = {"body": _repair_body(), "assignee": "reader"}
     elif change in {"review_push", "review_and_delete", "verify_ci_receipt"}:
@@ -232,6 +235,23 @@ def test_specification_retains_exact_identity_and_effective_authority(kanban_hom
             "metadata": "Additional local evidence.",
         }[change]})
         updates = {"body": json.dumps(payload)}
+    elif change.startswith("rendered_nl_"):
+        field = change.removeprefix("rendered_nl_")
+        payload = json.loads(original)
+        if field.startswith("metadata"):
+            payload.pop("action")  # Retain legacy rendered-card authority policy.
+        prefix = "Verify local evidence.\nCanonical PR audit receipt (JSON):\n"
+        suffix = "\r\n \t\n\n" if field == "metadata_multiple" else "\n"
+        original = prefix + json.dumps(payload) + suffix
+        payload.update({
+            "repository": {"repository": "other/repo"},
+            "pr_number": {"pr_number": 133},
+            "expected_head_sha": {"expected_head_sha": "b" * 40},
+            "action": {"action": "verify_ci_receipt"},
+            "metadata": {"diagnostic_note": "Additional local evidence."},
+            "metadata_multiple": {"diagnostic_note": "Additional local evidence."},
+        }[field])
+        updates = {"body": prefix + json.dumps(payload) + suffix}
     elif change.startswith("rendered_"):
         payload = json.loads(original)
         payload.pop("action")
