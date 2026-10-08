@@ -112,6 +112,10 @@ _PR_WRITE_ACTION_RE = re.compile(
 
 def is_atomic_pr_automation_task(*, body: Optional[str], idempotency_key: Optional[str]) -> bool:
     """Return whether a task carries indivisible PR-automation identity."""
+    from hermes_cli.kanban_pr_task_policy import classify_pr_task
+
+    if classify_pr_task(body) is not None:
+        return True
     key = (idempotency_key or "").strip().casefold()
     if key.startswith(_GITHUB_PR_FEEDBACK_IDEMPOTENCY_PREFIX):
         return True
@@ -128,15 +132,20 @@ def is_governed_research_intake(*, idempotency_key: Optional[str]) -> bool:
 def _task_requires_pr_write_authority(
     *, title: str, body: Optional[str], idempotency_key: Optional[str]
 ) -> bool:
+    from hermes_cli.kanban_pr_task_policy import classify_pr_task
+
+    classification = classify_pr_task(body)
+    if classification is not None:
+        return classification == "write"
     if not is_atomic_pr_automation_task(body=body, idempotency_key=idempotency_key):
         return False
     return _PR_WRITE_ACTION_RE.search(f"{title}\n{body or ''}") is not None
 
 
-def _profile_is_explicitly_read_only(profile: Optional[str]) -> bool:
-    """Read operator-authored profile authority metadata, failing open."""
+def _profile_read_only_status(profile: Optional[str]) -> Optional[bool]:
+    """Resolve operator-authored authority on each call; unknown is distinct."""
     if not profile:
-        return False
+        return None
     try:
         import hermes_yaml as yaml
 
@@ -146,14 +155,16 @@ def _profile_is_explicitly_read_only(profile: Optional[str]) -> bool:
         with profile_path.open("r", encoding="utf-8-sig") as handle:
             data = yaml.safe_load(handle) or {}
     except Exception:
-        return False
+        return None
     if not isinstance(data, dict):
-        return False
+        return None
     authority = str(data.get("execution_authority") or data.get("authority") or "").strip().casefold()
     if authority in {"read-only", "read_only", "readonly", "review-only"}:
         return True
+    if authority in {"write", "read-write", "read_write", "readwrite"}:
+        return False
     description = str(data.get("description") or "").casefold()
-    return "read-only" in description or "read only" in description
+    return True if "read-only" in description or "read only" in description else None
 
 
 def _validate_pr_task_assignee_authority(
@@ -170,12 +181,19 @@ def _validate_pr_task_assignee_authority(
     )
     if blocked_read_only_intent:
         return
-    if _task_requires_pr_write_authority(
+    if not _task_requires_pr_write_authority(
         title=title, body=body, idempotency_key=idempotency_key
-    ) and _profile_is_explicitly_read_only(assignee):
+    ):
+        return
+    from hermes_cli.kanban_pr_task_policy import classify_pr_task
+
+    status = _profile_read_only_status(assignee)
+    if status is True:
         raise ValueError(
             f"read-only profile {assignee!r} cannot own PR repair, push, reply, or base-refresh work"
         )
+    if status is None and classify_pr_task(body) == "write":
+        raise ValueError(f"cannot verify write authority for profile {assignee!r}")
 
 
 # --- Constants ---
@@ -4687,11 +4705,22 @@ def specify_triage_task(
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
         existing = conn.execute(
-            "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",
+            "SELECT title, body, assignee, idempotency_key FROM tasks WHERE id = ? AND status = 'triage'",
             (task_id,),
         ).fetchone()
         if existing is None:
             return False
+        from hermes_cli.kanban_pr_task_policy import validate_pr_task_identity_transition
+
+        effective_body = body if body is not None else existing["body"]
+        validate_pr_task_identity_transition(
+            existing_body=existing["body"], replacement_body=effective_body,
+        )
+        _validate_pr_task_assignee_authority(
+            title=title.strip() if title is not None else existing["title"],
+            body=effective_body, idempotency_key=existing["idempotency_key"],
+            assignee=assignee if assignee is not None else existing["assignee"],
+        )
         sets: list[str] = ["status = 'todo'"]
         params: list[Any] = []
         changed_fields: list[str] = []
@@ -4795,6 +4824,10 @@ def decompose_triage_task(
         ).fetchone()
         if root_row is None or root_row["status"] != "triage":
             return None
+        if is_atomic_pr_automation_task(
+            body=root_row["body"], idempotency_key=root_row["idempotency_key"],
+        ):
+            raise ValueError("atomic PR automation task must retain its typed exact-head owner")
         child_ids = [
             _insert_decomposed_child(conn, task_id, root_row, child, author, now)
             for child in children
@@ -4860,6 +4893,10 @@ def _insert_decomposed_child(
         child_ws_path = None
     new_id = _new_task_id()
     body = child.get("body")
+    _validate_pr_task_assignee_authority(
+        title=child["title"], body=body if isinstance(body, str) else None,
+        idempotency_key=None, assignee=_canonical_assignee(child.get("assignee")),
+    )
     conn.execute(
         "INSERT INTO tasks "
         "(id, title, body, assignee, status, workspace_kind, "

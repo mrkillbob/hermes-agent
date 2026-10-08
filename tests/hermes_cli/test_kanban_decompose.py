@@ -409,17 +409,28 @@ def test_decompose_returns_false_when_task_not_triage(kanban_home):
                 }
             ),
         ),
+        (
+            None,
+            jsonlib.dumps({
+                "repository": "mrkillbob/luna-bot", "pr_number": 132,
+                "expected_head_sha": "a" * 40, "action": "verify_ci_receipt",
+            }),
+        ),
     ],
 )
 def test_decompose_refuses_atomic_pr_automation_before_llm(
     kanban_home, idempotency_key, body
 ):
     import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    profile = kanban_home / "profiles" / "pr-owner"
+    profile.mkdir(parents=True)
+    (profile / "profile.yaml").write_text("execution_authority: write\n")
     with _hermes_cli_kanban_db_connect.connect() as conn:
         tid = kb.create_task(
             conn,
             title="Repair ExampleApp PR #132",
             body=body,
+            assignee="pr-owner",
             triage=True,
             idempotency_key=idempotency_key,
         )

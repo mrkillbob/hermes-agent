@@ -103,7 +103,7 @@ def decompose_triage_task(
     """
     from hermes_cli.kanban_db import (
         _canonical_assignee, _link, _append_event, _insert_comment,
-        write_txn, recompute_ready,
+        write_txn, recompute_ready, is_atomic_pr_automation_task,
     )
 
     if not children:
@@ -117,11 +117,15 @@ def decompose_triage_task(
     now = int(time.time())
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, body, idempotency_key "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if root_row is None or root_row["status"] != "triage":
             return None
+        if is_atomic_pr_automation_task(
+            body=root_row["body"], idempotency_key=root_row["idempotency_key"],
+        ):
+            raise ValueError("atomic PR automation task must retain its typed exact-head owner")
         # Dependency links alone do not imply lineage. The completion event is
         # committed with the graph, and survives re-triage or unlinking.
         if conn.execute(
@@ -183,7 +187,7 @@ def _insert_decomposed_child(
     ``<repo>/.worktrees/<child-id>`` per child from the board anchor.
     """
     from hermes_cli.kanban_db import (
-        _new_task_id, _canonical_assignee, _append_event,
+        _new_task_id, _canonical_assignee, _append_event, _validate_pr_task_assignee_authority,
     )
 
     root_ws_kind = root_row["workspace_kind"] or "scratch"
@@ -198,6 +202,10 @@ def _insert_decomposed_child(
         child_ws_path = None
     new_id = _new_task_id()
     body = child.get("body")
+    _validate_pr_task_assignee_authority(
+        title=child["title"], body=body if isinstance(body, str) else None,
+        idempotency_key=None, assignee=_canonical_assignee(child.get("assignee")),
+    )
     conn.execute(
         "INSERT INTO tasks "
         "(id, title, body, assignee, status, workspace_kind, "
