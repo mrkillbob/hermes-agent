@@ -1155,6 +1155,16 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             headers = {"content-type": "image/png"}
             content = png_bytes
 
+            async def aiter_bytes(self):
+                yield png_bytes
+
+        class _Stream:
+            async def __aenter__(self):
+                return _Resp()
+
+            async def __aexit__(self, *a):
+                return False
+
         class _Client:
             def __init__(self, *a, **k):
                 pass
@@ -1165,9 +1175,9 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             async def __aexit__(self, *a):
                 return False
 
-            async def get(self, url):
+            def stream(self, method, url):
                 assert url == "https://v3.fal.media/media/abc123"
-                return _Resp()
+                return _Stream()
 
         import hermes_cli.web_routers.files as files_router
 
@@ -1193,6 +1203,16 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             headers = {"content-type": "text/html"}
             content = b"<html>nope</html>"
 
+            async def aiter_bytes(self):
+                yield self.content
+
+        class _Stream:
+            async def __aenter__(self):
+                return _Resp()
+
+            async def __aexit__(self, *a):
+                return False
+
         class _Client:
             def __init__(self, *a, **k):
                 pass
@@ -1203,8 +1223,8 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             async def __aexit__(self, *a):
                 return False
 
-            async def get(self, url):
-                return _Resp()
+            def stream(self, method, url):
+                return _Stream()
 
         import httpx
 

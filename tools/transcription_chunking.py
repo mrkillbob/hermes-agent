@@ -109,7 +109,8 @@ def _split(ffmpeg: str, path: str, work_dir: str, cuts: List[float]) -> List[str
     _run_quiet([ffmpeg, "-y", "-loglevel", "error", "-i", path, "-vn", "-c", "copy", "-f", "segment",
                 "-segment_times", ",".join(f"{c:.3f}" for c in cuts), "-reset_timestamps", "1", pattern],
                timeout=300)
-    return sorted(os.path.join(work_dir, name) for name in os.listdir(work_dir) if name.startswith("part"))
+    return sorted(os.path.join(work_dir, name) for name in os.listdir(work_dir)
+                  if re.fullmatch(r"part\d{3}\.m4a", name))
 
 
 def transcribe_oversized(

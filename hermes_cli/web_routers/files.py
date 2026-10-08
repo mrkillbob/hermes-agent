@@ -393,20 +393,31 @@ async def proxy_remote_media(url: str, request: Request):
 
     import httpx
 
+    too_large = False
     try:
         async with httpx.AsyncClient(timeout=_MEDIA_PROXY_TIMEOUT_S, follow_redirects=True) as client:
-            response = await client.get(url)
+            async with client.stream("GET", url) as response:
+                status = response.status_code
+                content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+                chunks: list[bytes] = []
+                size = 0
+                if status == 200 and content_type in _MEDIA_CONTENT_TYPES.values():
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > _MEDIA_MAX_BYTES:
+                            too_large = True
+                            break
+                        chunks.append(chunk)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Image fetch failed: {exc}")
 
-    if response.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Image fetch returned HTTP {response.status_code}")
-    content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if status != 200:
+        raise HTTPException(status_code=502, detail=f"Image fetch returned HTTP {status}")
     if content_type not in _MEDIA_CONTENT_TYPES.values():
         raise HTTPException(status_code=415, detail="Unsupported media type")
-    data = response.content
-    if len(data) > _MEDIA_MAX_BYTES:
+    if too_large:
         raise HTTPException(status_code=413, detail="File too large")
+    data = b"".join(chunks)
 
     encoded = base64.b64encode(data).decode("ascii")
     return {"data_url": f"data:{content_type};base64,{encoded}"}
