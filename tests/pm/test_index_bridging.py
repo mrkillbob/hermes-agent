@@ -1,5 +1,5 @@
 """Mirrored and air-gapped networks configure indexes through pip or uv; PM forwards
-exactly that into uv while still refusing every other ambient uv setting."""
+index settings and install concurrency while refusing ambient selection settings."""
 from __future__ import annotations
 
 import os
@@ -84,3 +84,37 @@ def test_uv_timeout_names_the_mirror_knobs(tmp_path, monkeypatch):
     with pytest.raises(InstallError, match="UV_INDEX_URL") as info:
         environment._run(["sync"], cwd=tmp_path, timeout=7)
     assert "timed out after 7s" in str(info.value)
+
+
+@pytest.mark.parametrize("no_config", [False, True])
+def test_install_concurrency_reaches_child_without_steering_selection(tmp_path, no_config):
+    """The PM bootstrap bounds uv compiler workers while keeping selected paths isolated."""
+    import sys
+    from pathlib import Path
+
+    ambient = {
+        "UV_CONCURRENT_INSTALLS": "1",
+        "UV_INDEX_URL": "https://fixture.invalid/simple",
+        "UV_HTTP_TIMEOUT": "99",
+        "UV_PYTHON": "poison-python",
+        "UV_CACHE_DIR": "poison-cache",
+        "UV_PROJECT_ENVIRONMENT": "poison-project",
+        "UV_CONFIG_FILE": "poison-config",
+    }
+    environment = PythonEnvironment(
+        uv=Path(sys.executable), python=Path(sys.executable),
+        destination=tmp_path / "venv", cache=tmp_path / "cache",
+        env=ambient, no_config=no_config,
+    )
+    child = (
+        "import os\n"
+        "assert os.environ['UV_CONCURRENT_INSTALLS'] == '1'\n"
+        f"assert ('UV_INDEX_URL' in os.environ) == {not no_config!r}\n"
+        "assert os.environ['UV_HTTP_TIMEOUT'] == '99'\n"
+        "assert 'UV_CONFIG_FILE' not in os.environ\n"
+        f"assert os.environ['UV_PYTHON'] == {str(environment.python)!r}\n"
+        f"assert os.environ['UV_CACHE_DIR'] == {str(environment.cache)!r}\n"
+        f"assert os.environ['UV_PROJECT_ENVIRONMENT'] == {str(environment.destination)!r}\n"
+    )
+    result = environment._run(["-I", "-B", "-c", child], cwd=tmp_path, timeout=10)
+    assert result.returncode == 0, result.stderr
