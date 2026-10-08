@@ -1,4 +1,4 @@
-# Temporary candidate qualification; remove before updating PR204.
+# Temporary logger requalification after the full e63e368 run; remove before PR204.
 name: Ordinary sync validation
 
 on:
@@ -13,23 +13,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  python:
-    uses: ./.github/workflows/tests.yml
-    with:
-      slice_count: 24
-      e2e: false
-      e2e_upgrade: false
-
-  native:
-    uses: ./.github/workflows/tests-os.yml
-    with:
-      platform_scope: all
-      desktop_updater: true
-      e2e: false
-      e2e_upgrade: false
-
-  javascript:
-    uses: ./.github/workflows/js-tests.yml
+  oauth:
+    name: Auxiliary OAuth and provider contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout candidate code
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up canonical locked test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          test-environment: 'true'
+          archive-inputs: 'false'
+          prune-python-cache: true
+      - name: Exercise the auxiliary provider and OAuth paths
+        run: >-
+          scripts/run_tests.sh
+          tests/agent/test_auxiliary_plugin_oauth.py
+          tests/agent/test_auxiliary_provider_supplied_client.py
+          tests/agent/test_anthropic_third_party_oauth_guard.py
+          tests/agent/test_auxiliary_client.py
+        env:
+          HERMES_TEST_WORKERS: '2'
+          HERMES_TEST_FILE_TIMEOUT: '600'
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
 
   source-checks:
     uses: ./.github/workflows/lint.yml
@@ -59,23 +71,3 @@ jobs:
           command: python -m scripts.ci.python_packages "$(python -m scripts.code_health --print-pins)"
       - name: Ratchet the candidate against the immutable fork base
         run: python scripts/check --only health --base 23ed0acc3f8e9d72c67c663dcefc642ca5682c59
-
-  windows-installer:
-    uses: ./.github/workflows/install-e2e-windows-run.yml
-    with:
-      install-method: desktop-installer@latest
-      update-method: hermes-desktop-app-update
-      install-ref: HEAD
-      update-ref: NEXT
-      tag-has-desktop: true
-      leg-id: ordinary-sync-windows-gui-head-next
-
-  macos-installer:
-    uses: ./.github/workflows/install-e2e-macos-run.yml
-    with:
-      install-method: desktop-installer@latest
-      update-method: hermes-desktop-app-update
-      install-ref: HEAD
-      update-ref: NEXT
-      tag-has-desktop: true
-      leg-id: ordinary-sync-macos-gui-head-next
