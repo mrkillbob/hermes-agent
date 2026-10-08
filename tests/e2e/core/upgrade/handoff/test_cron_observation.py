@@ -1,5 +1,6 @@
 """Job-scoped observation contracts for release-N1 cron swap issue #113293."""
 
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +19,7 @@ def _observation(tmp_path, *, column="n1", calls=1, scoped=True, import_error=Tr
     inst = SimpleNamespace(root=tmp_path, hermes_home=home)
     return SimpleNamespace(
         column=column, relaunch="", cron_calls=list(range(calls)), cron_outputs=list(range(outputs)),
-        cron_list=SimpleNamespace(returncode=int(readback_error), stdout="", stderr=""), cron_job_after=job,
+        cron_list=subprocess.CompletedProcess(["hermes", "cron", "list"], int(readback_error), "", ""), cron_job_after=job,
         cron_error=cron_failure(inst, "fixture", job), diag="fixture diagnostics")
 
 
