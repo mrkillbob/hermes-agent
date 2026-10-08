@@ -37,13 +37,14 @@ def is_managed_provider(provider: str, base_url: str = "") -> bool:
     return False
 
 
-def _props_modalities(model_id: str) -> "bool | None":
+def _props_modalities(model_id: str, *, endpoint: "tuple[str, str] | None" = None) -> "bool | None":
     """Ask the running server whether this loaded child sees images. None when the server is down,
-    the model isn't loaded, or the build doesn't report modalities."""
+    the model isn't loaded, or the build doesn't report modalities. Recovery callers may
+    pin an already verified local endpoint instead of borrowing the managed root."""
     with suppress(Exception):
         from hermes_cli.local_runtime.endpoint import managed_get_json, managed_root
 
-        ep = managed_root()
+        ep = endpoint if endpoint is not None else managed_root()
         if ep is None:
             return None
         modalities = managed_get_json(*ep, f"/props?model={model_id}", timeout_s=3).get("modalities")
@@ -52,7 +53,7 @@ def _props_modalities(model_id: str) -> "bool | None":
     return None
 
 
-def managed_model_supports_vision(model_id: str) -> "bool | None":
+def managed_model_supports_vision(model_id: str, *, endpoint: "tuple[str, str] | None" = None) -> "bool | None":
     """Ground-truth vision capability for a staged model, or None when the model isn't ours /
     nothing is known (caller keeps falling through)."""
     if not model_id:
@@ -65,7 +66,7 @@ def managed_model_supports_vision(model_id: str) -> "bool | None":
         # Only answer for models actually staged with us.
         if model_id not in staged_model_ids():
             return None
-        live = _props_modalities(model_id)
+        live = _props_modalities(model_id, endpoint=endpoint) if endpoint is not None else _props_modalities(model_id)
         if live is not None:
             return live
         # Staged but not loaded (or an older server build): the catalog knows whether this model

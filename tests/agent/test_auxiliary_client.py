@@ -77,6 +77,168 @@ def _blocked_egress_error(reason="base64_payload"):
     )
 
 
+
+@pytest.mark.parametrize("remote_provider,has_local", [
+    ("nous", True), ("nous", False),
+    ("screening-remote", True), ("screening-remote", False),
+    ("opencode-free", False),
+    ("screening-local-override", True), ("screening-explicit-remote", False),
+    ("vllm", False), ("custom:vllm", False),
+    ("openrouter", True), ("openrouter-remote", False),
+])
+def test_blocked_recovery_screens_remote_auth_before_resolving_local(
+    monkeypatch, tmp_path, request, remote_provider, has_local
+):
+    import yaml
+    import agent.auxiliary_client as auxiliary
+    from agent.auxiliary_egress_recovery import local_fallback_steps
+
+    home = tmp_path / "screening-home"
+    home.mkdir()
+    task = "compression" if remote_provider == "opencode-free" else "title_generation"
+    chain = [{"provider": remote_provider, "model": "remote-model",
+              "base_url": "http://127.0.0.1:11434/v1"}]
+    if remote_provider.startswith("openrouter"):
+        chain[0].update(provider="openrouter", model="local-model:free", api_key="local-test-key")
+        if remote_provider == "openrouter-remote":
+            chain[0]["base_url"] = "https://remote.invalid/v1"
+    if remote_provider == "opencode-free":
+        chain[0].update(model="minimax-m2.5-free", api_mode="anthropic_messages", api_key="synthetic-key")
+    if remote_provider in {"screening-remote", "screening-explicit-remote"}:
+        chain[0]["base_url"] = "https://remote.invalid/v1"
+    if remote_provider == "screening-local-override":
+        chain[0].update(model="local-model", api_key="local-test-key")
+    if remote_provider in {"vllm", "custom:vllm"}:
+        chain[0].pop("base_url")
+    if has_local and remote_provider not in {"screening-local-override", "openrouter"}:
+        chain.append({"provider": "custom", "model": "local-model",
+                      "base_url": "http://127.0.0.1:11434/v1", "api_key": "local-test-key"})
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "model": {"provider": "nous", "default": "main-remote-model"},
+        "auxiliary": {task: {"fallback_chain": chain}},
+        "providers": {"screening-remote": {"base_url": "https://remote.invalid/v1",
+                                                "key_env": "SCREENING_REMOTE_API_KEY"},
+                      "screening-local-override": {"base_url": "https://remote.invalid/v1", "api_key": "local-test-key"},
+                      "screening-explicit-remote": {"base_url": "http://127.0.0.1:11434/v1", "key_env": "SCREENING_REMOTE_API_KEY"},
+                      "vllm": {"base_url": "https://remote.invalid/v1", "key_env": "SCREENING_REMOTE_API_KEY"}},
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    auth_reads = []
+    # Observe the credential I/O boundary; use the real config/router/SDK.
+    def read_remote_auth():
+        auth_reads.append("nous")
+        return None
+    monkeypatch.setattr(auxiliary, "_read_nous_auth", read_remote_auth)
+    import hermes_cli.runtime_provider_custom as runtime_provider
+    import requests as provider_http
+    key_reads = []
+    original_getenv = runtime_provider.get_secret_str
+    def observe_key(name, default=""):
+        if name == "SCREENING_REMOTE_API_KEY":
+            key_reads.append(name)
+            return "synthetic-key"
+        return original_getenv(name, default)
+    monkeypatch.setattr(runtime_provider, "get_secret_str", observe_key)
+    context_reads = []
+    original_context = auxiliary.get_model_context_length
+    def observe_context(*args, **kwargs):
+        context_reads.append(kwargs.get("base_url"))
+        return original_context(*args, **kwargs)
+    monkeypatch.setattr(auxiliary, "get_model_context_length", observe_context)
+    remote_catalog = MagicMock(side_effect=RuntimeError("unexpected catalog I/O"))
+    monkeypatch.setattr(provider_http, "get", remote_catalog)
+    route = SimpleNamespace(task=task, resolved_provider="openai-codex",
+                            final_model="blocked-model", route_info={},
+                            base_info="https://chatgpt.com/backend-api/codex",
+                            main_runtime=None, async_mode=False)
+    if remote_provider in {"vllm", "custom:vllm"}:
+        route.main_runtime = {"provider": "nous", "model": "main-remote-model"}
+        token = auxiliary.set_runtime_main("custom", "main-local-model", base_url="http://127.0.0.1:11434/v1")
+        request.addfinalizer(lambda: auxiliary.reset_runtime_main(token))
+    ladder = local_fallback_steps(route, lambda kind, args: SimpleNamespace(kind=kind, args=args))
+    if has_local:
+        step = next(ladder)
+        client, model, _ = step.args
+        assert str(client.base_url) == "http://127.0.0.1:11434/v1/"
+        assert model == ("local-model:free" if remote_provider == "openrouter" else "local-model")
+        with pytest.raises(StopIteration) as result:
+            ladder.send("local response")
+        assert result.value.value == "local response"
+        client.close()
+    else:
+        assert list(ladder) == []
+    assert auth_reads == []
+    assert key_reads == []
+    remote_catalog.assert_not_called()
+    assert context_reads == []
+
+
+
+@pytest.mark.parametrize("supports_vision,cached_vision,managed_vision", [
+    (None, None, None), (False, None, None), (True, None, None),
+    (None, False, None), (None, True, None),
+    (None, None, False), (None, None, True),
+])
+def test_blocked_local_main_vision_uses_config_or_cached_metadata(
+    monkeypatch, tmp_path, supports_vision, cached_vision, managed_vision
+):
+    import yaml
+    import agent.auxiliary_client as auxiliary
+    import agent.models_dev as models_dev
+
+    home = tmp_path / "cold-catalog-home"
+    home.mkdir()
+    model_cfg = {"provider": "openai-api", "default": "gpt-4o",
+                 "base_url": "http://127.0.0.1:11434/v1", "api_key": "local-test-key"}
+    model_id = "gpt-4o"
+    if managed_vision is not None:
+        from hermes_cli.local_runtime.catalog import CATALOG
+        entry = next(e for e in CATALOG if e.mmproj is not None)
+        model_id = entry.variants[-1].model_id
+        model_cfg.update(provider="llamacpp", default=model_id)
+        models_dir = home / "models"
+        models_dir.mkdir()
+        (models_dir / f"{model_id}.gguf").write_bytes(b"GGUF" + b"\x00" * 32)
+        if managed_vision:
+            assets = models_dir / "assets"
+            assets.mkdir()
+            (assets / entry.mmproj.local_name).write_bytes(b"GGUF projector")
+        import urllib.request
+        import urllib.error
+        def offline_local_props(req, **kwargs):
+            assert req.full_url.startswith("http://127.0.0.1:11434/")
+            raise urllib.error.URLError("local server offline")
+        monkeypatch.setattr(urllib.request, "urlopen", offline_local_props)
+    if supports_vision is not None:
+        model_cfg["supports_vision"] = supports_vision
+    (home / "config.yaml").write_text(yaml.safe_dump({"model": model_cfg}))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    cache = {} if cached_vision is None else {
+        "openai": {"models": {"gpt-4o": {"modalities": {
+            "input": ["text", "image"] if cached_vision else ["text"],
+        }}}},
+    }
+    monkeypatch.setattr(models_dev, "_models_dev_cache", cache)
+    monkeypatch.setattr(models_dev, "_models_dev_cache_time", 0)
+    monkeypatch.setattr(models_dev, "_models_dev_retry_after", 0)
+    remote_send = MagicMock(side_effect=RuntimeError("remote catalog forbidden during recovery"))
+    monkeypatch.setattr(models_dev.requests, "get", remote_send)
+    client, model, _ = auxiliary._try_main_agent_model_fallback(
+        "openai-codex", "vision", failed_model="blocked-model",
+        main_runtime={**model_cfg, "model": model_id}, local_only=True,
+    )
+    if supports_vision is False or cached_vision is False or managed_vision is False:
+        assert client is None
+    else:
+        assert str(client.base_url) == "http://127.0.0.1:11434/v1/"
+        assert model == model_id
+        client.close()
+    from agent.llm_egress_firewall import DestinationClass, classify_destination
+    for call in remote_send.call_args_list:
+        assert classify_destination("", call.args[0], None) is DestinationClass.LOOPBACK
+
+
 def _run_aux_codex_call(
     monkeypatch,
     tmp_path,
