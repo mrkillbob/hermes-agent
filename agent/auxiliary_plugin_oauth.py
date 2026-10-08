@@ -20,6 +20,18 @@ def _configured_endpoint(provider: str) -> str:
     return _config_base_url_for_provider(_get_model_config(), provider) or (pconfig.inference_base_url if pconfig else "")
 
 
+def _profile_client(provider: str, api_key: Any, base_url: str) -> Any:
+    """Use the registered OAuth provider's transport; a failed hook leaves the route unavailable."""
+    from agent import auxiliary_client as aux
+    try:
+        from providers import get_provider_profile
+        profile = get_provider_profile(provider)
+        return profile.create_client(api_key=api_key, base_url=base_url) if profile else None
+    except Exception:
+        aux.logger.warning("resolve_provider_client: OAuth provider %s client hook failed", provider, exc_info=True)
+        return None
+
+
 def resolve_plugin_oauth_client(req: Any) -> tuple[Any, Any]:
     """``(client, model)`` for ``req.provider``, or ``(None, None)`` when signed out or transport-less.
 
@@ -28,14 +40,15 @@ def resolve_plugin_oauth_client(req: Any) -> tuple[Any, Any]:
     from agent import auxiliary_client as aux
 
     provider = req.provider
-    api_key = aux._normalize_api_key(req.explicit_api_key)
+    raw_key = req.explicit_api_key
+    api_key = aux._explicit_api_key_value(raw_key) if isinstance(raw_key, str) or callable(raw_key) else ""
     entry = None
     if not api_key:
         _exists, entry = aux._select_pool_entry(provider)
         api_key = str(getattr(entry, "runtime_api_key", "") or "") if entry is not None else ""
     base_url = (req.explicit_base_url or str(getattr(entry, "runtime_base_url", "") or "")
                 or _configured_endpoint(provider)).strip().rstrip("/")
-    client = aux._api_key_profile_supplied_client(provider, api_key=api_key, base_url=base_url) if api_key else None
+    client = _profile_client(provider, api_key, base_url) if api_key else None
     if client is None:
         aux._log_once_debug(aux._LOGGED_UNSUPPORTED_OAUTH_KEYS, provider,
                             "resolve_provider_client: OAuth provider %s has no signed-in credential or "

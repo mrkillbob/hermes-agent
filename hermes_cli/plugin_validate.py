@@ -420,7 +420,7 @@ def _declared_list(manifest: dict, key: str) -> List[str]:
 
 def _check_capabilities(
     report: ValidationReport, manifest: dict, plugin_dir: Path,
-    probe: Optional[Tuple[Path, Dict[str, str]]] = None,
+    probe: Optional[Tuple[List[str], Dict[str, str]]] = None,
 ) -> Optional[dict]:
     """Probe actual registrations and diff against declared capabilities.
 

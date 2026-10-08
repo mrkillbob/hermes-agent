@@ -4,7 +4,7 @@ Carried from upstream core tests into a focused module to retain fork source-hea
 """
 import pytest
 from tests.hermes_cli.test_kanban_core_functionality import (
-    kanban_home,  # noqa: F401 -- shared real temporary-home fixture
+    kanban_home as kanban_home,
     _drive_protocol_violation,
     _drive_nonzero_crash,
 )

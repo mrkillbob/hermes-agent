@@ -400,7 +400,8 @@ def isolated_pool_home(monkeypatch, tmp_path):
 
     user_home = tmp_path / "user"
     user_home.mkdir()
-    home = user_home / ".hermes"
+    # Keep the served profile distinct from the protected default auth store.
+    home = user_home / "pool-profile"
     monkeypatch.setenv("HOME", str(user_home))
     monkeypatch.setenv("USERPROFILE", str(user_home))
     monkeypatch.setenv("HERMES_HOME", str(home))

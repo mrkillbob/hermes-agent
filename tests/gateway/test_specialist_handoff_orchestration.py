@@ -43,6 +43,7 @@ def test_specialist_handoff_creates_goal_mode_triage_root(kanban_home):
         message_id="message-1",
     )
 
+    kb.create_board("exampleproject-burndown")
     result = create_specialist_handoff(
         decision=decision,
         source=source,
@@ -81,8 +82,7 @@ def test_specialist_handoff_explicit_board_ignores_database_environment_override
         message_id="message-env-isolation",
     )
     board = "exampleproject-burndown"
-    with _hermes_cli_kanban_db_connect.connect(board=board):
-        pass
+    kb.create_board(board)
     override_path = tmp_path / "override" / "kanban.db"
     with _hermes_cli_kanban_db_connect.connect(db_path=override_path):
         pass

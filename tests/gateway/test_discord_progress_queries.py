@@ -103,7 +103,10 @@ def test_specialist_routing_configuration_requires_nonempty_explicit_board(adapt
 
 
 def test_specialist_routing_registry_requires_explicit_profile_declarations(adapter):
+    from hermes_cli import kanban_db as kb
+
     settings = adapter._specialist_routing_settings()
+    kb.create_board(settings["board"])
     registry = adapter._specialist_capability_registry(settings)
     assert registry is not None
     assert registry.is_profile_declared("task-orchestrator") is False

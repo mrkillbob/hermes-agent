@@ -83,6 +83,7 @@ import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import { searchSnippetMap } from "./SessionsPage_search";
 
 
 /** Render an FTS5 snippet with highlighted matches.
@@ -1473,14 +1474,7 @@ export default function SessionsPage() {
     ? sessions.find((s) => s.id === sessionDelete.pendingId)
     : null;
 
-  // Build snippet map from search results (session_id → snippet)
-  const snippetMap = new Map<string, string>();
-  if (searchResults) {
-    for (const r of searchResults) {
-      snippetMap.set(r.session_id, r.snippet);
-      snippetMap.set(r.id, r.snippet);
-    }
-  }
+  const snippetMap = searchSnippetMap(searchResults);
 
   const filtered = searchResults ?? sessions;
 

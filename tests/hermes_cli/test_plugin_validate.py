@@ -88,17 +88,31 @@ def test_validate_after_dependency_sync_uses_selected_interpreter(monkeypatch, t
     from hermes_cli import plugin_validate, plugins_cmd_catalog
 
     plugin_dir = tmp_path / "candidate"
-    selected_python = tmp_path / "install" / "generations" / "new" / "bin" / "python"
-    selected_python.parent.mkdir(parents=True)
-    selected_python.touch()
+    old_venv = tmp_path / "install" / "generations" / "old"
+    new_venv = tmp_path / "install" / "generations" / "new"
+    for generation in (old_venv, new_venv):
+        interpreter = pm.environments.venv_python(generation)
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+    selected_python = pm.environments.venv_python(new_venv)
+    selection = [old_venv]
     selected_env = {"PATH": str(selected_python.parent), "HERMES_ENV_GENERATION": "new"}
     calls = []
 
-    monkeypatch.setattr(pm, "sync_venv", lambda **kwargs: calls.append(("sync", kwargs)))
-    monkeypatch.setattr(pm.paths, "repo_root", lambda: tmp_path / "checkout")
-    monkeypatch.setattr(pm.environments, "project_python", lambda root: selected_python)
+    def sync(**kwargs):
+        calls.append(("sync", kwargs))
+        selection[0] = new_venv
 
-    monkeypatch.setattr(pm.environments, "activation_environment", lambda root: selected_env)
+    def activation(root):
+        return {
+            "PATH": str(pm.environments.venv_python(selection[0]).parent),
+            "HERMES_ENV_GENERATION": selection[0].name,
+        }
+
+    monkeypatch.setattr(pm, "sync_venv", sync)
+    monkeypatch.setattr(pm.paths, "repo_root", lambda: tmp_path / "checkout")
+    monkeypatch.setattr(pm.environments, "selected_venv", lambda root: selection[0])
+    monkeypatch.setattr(pm.environments, "activation_environment", activation)
 
     def validate(path, probe):
         calls.append(("validate", Path(path), probe))
@@ -110,7 +124,7 @@ def test_validate_after_dependency_sync_uses_selected_interpreter(monkeypatch, t
 
     assert raised.value.code == 0
     assert calls[0][0] == "sync"
-    assert calls[-1] == ("validate", plugin_dir, (selected_python, selected_env))
+    assert calls[-1] == ("validate", plugin_dir, ([str(selected_python)], selected_env))
 
 
 def test_requires_hermes_spec_is_validated(tmp_path):

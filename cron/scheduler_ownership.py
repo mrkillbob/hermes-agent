@@ -18,11 +18,14 @@ Every probe failure answers "no": ownership claims are certainties, never guesse
 
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 from hermes_constants import get_hermes_home, hermes_home_key
+
+logger = logging.getLogger(__name__)
 
 # Home key -> home path for every profile this process ticks, republished each ticker cycle so a
 # profile created or tombstoned mid-run is reflected without a restart.
@@ -162,4 +165,5 @@ def _claim_owner_is_dead(claim: Dict[str, Any]) -> bool:
         from gateway.status import _pid_exists
         return not _pid_exists(int(parts[1]))
     except Exception:
+        logger.debug("Could not verify cron claim owner liveness", exc_info=True)
         return False

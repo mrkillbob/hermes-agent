@@ -4524,7 +4524,9 @@ class TestRunConversation:
         assert result["completed"] is True
 
 
-    def test_glm_prompt_exceeds_max_length_triggers_compression(self, agent):
+    def test_glm_prompt_exceeds_max_length_triggers_compression(
+        self, _stream_recovery_diagnostics, agent
+    ):
         """GLM/Z.AI uses 'Prompt exceeds max length' for context overflow."""
         self._setup_agent(agent)
         agent.compression_enabled = True  # this test verifies overflow→compression fires
@@ -4539,9 +4541,11 @@ class TestRunConversation:
             {"role": "assistant", "content": "previous answer"},
         ]
 
+        # Keep process-wide sleep intact: the overflow retry pauses only two
+        # seconds, while daemon cleanup/heartbeat workers need real scheduling.
+        scheduler_sleep = time.sleep
         with (
             patch.object(agent, "_compress_context") as mock_compress,
-            patch("agent.turn_overflow.time.sleep"),
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
@@ -4550,9 +4554,11 @@ class TestRunConversation:
                 [{"role": "user", "content": "hello"}],
                 "compressed system prompt",
             )
+            assert time.sleep is scheduler_sleep, "overflow fixture changed process-wide scheduling"
             result = agent.run_conversation("hello", conversation_history=prefill)
 
         mock_compress.assert_called_once()
+        assert agent.client.chat.completions.create.call_count == 2
         assert result["final_response"] == "Recovered after compression"
         assert result["completed"] is True
 

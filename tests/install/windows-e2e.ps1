@@ -1012,11 +1012,15 @@ function Invoke-PhaseInstallGui {
     $logStateTest = Start-Process -FilePath $ahkExe -ArgumentList $logStateArguments `
         -RedirectStandardOutput (Join-Path $proof "log-state-stdout.log") `
         -RedirectStandardError (Join-Path $proof "log-state-stderr.log") -PassThru
+    # Cache the native handle before waiting: redirected Start-Process in Windows
+    # PowerShell can otherwise lose ExitCode (PowerShell/PowerShell#5421).
+    $null = $logStateTest.Handle
     if (-not $logStateTest.WaitForExit(30000)) {
         Stop-Process -Id $logStateTest.Id -Force -ErrorAction SilentlyContinue
         throw "bootstrap log state regression did not finish within 30 seconds"
     }
-    Assert-True ($logStateTest.ExitCode -eq 0) "bootstrap log state regression passed"
+    $logStateExitCode = $logStateTest.ExitCode
+    Assert-True ($null -ne $logStateExitCode -and $logStateExitCode -eq 0) "bootstrap log state regression passed (exit code: $logStateExitCode)"
 
     $env:HERMES_HOME = $HermesHome
     New-Item -ItemType Directory -Path $HermesHome -Force | Out-Null
