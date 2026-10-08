@@ -128,3 +128,29 @@ def test_each_profile_gets_its_own_configured_backend(tmp_path):
             assert app["backend"] == expected and str(home) in app["file"]
         finally:
             reset_hermes_home_override(tok)
+
+
+def test_missing_backend_install_hint_follows_active_profile(tmp_path, monkeypatch):
+    from plugins.computer_use import get_active_provider
+
+    user_home = tmp_path / "user"
+    user_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: user_home)
+    monkeypatch.setenv("HERMES_HOME", str(user_home / ".hermes"))
+    profile = _home(user_home / ".hermes" / "profiles" / "coder", (), "missing-profile")
+    custom = _home(tmp_path / "custom", (), "missing-custom")
+    for home, backend, displayed in (
+        (profile, "missing-profile", "~/.hermes/profiles/coder"),
+        (custom, "missing-custom", str(custom)),
+        (profile, "missing-profile", "~/.hermes/profiles/coder"),
+    ):
+        token = set_hermes_home_override(str(home))
+        try:
+            with pytest.raises(LookupError) as exc:
+                get_active_provider()
+            message = str(exc.value)
+            assert f"computer_use.backend is {backend!r}" in message
+            assert "is not installed (available: cua)" in message
+            assert f"Install it under {displayed}/plugins/<name>/" in message
+        finally:
+            reset_hermes_home_override(token)

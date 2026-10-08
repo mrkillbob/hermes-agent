@@ -305,3 +305,23 @@ class TestLanguageForwardingFromConfig:
         assert result["success"] is True
         assert provider.last_call["kwargs"]["language"] is None
         assert provider.last_call["kwargs"]["model"] is None
+
+
+def test_streaming_enabled_plugin_keeps_file_transcription(tmp_path, monkeypatch, sample_audio_file):
+    """Live STT remains built-in; enabling it must keep a registered batch plugin usable."""
+    from tools import transcription_streaming, voice_mode
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("stt:\n  provider: batch-plugin\n  streaming: true\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    provider = _FakeProvider(name="batch-plugin")
+    transcription_registry.register_provider(provider)
+
+    assert transcription_streaming.streaming_available() is False
+    assert transcription_streaming.open_streaming_session() is None
+    result = voice_mode.transcribe_recording(sample_audio_file)
+    assert result["success"] is True
+    assert result["transcript"] == "fake transcript"
+    assert result["provider"] == "batch-plugin"
+    assert provider.last_call["file_path"] == sample_audio_file

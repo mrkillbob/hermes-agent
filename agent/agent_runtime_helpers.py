@@ -33,6 +33,7 @@ from agent.error_classifier import FailoverReason
 from agent.retry_utils import parse_retry_after_seconds, reset_delay_from_message
 from agent.message_metadata import MERGED_TURN_PREFIX
 from agent.turn_context import drop_stale_api_content
+from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
 logger = logging.getLogger(__name__)
 
@@ -1471,46 +1472,10 @@ def restore_primary_runtime(agent) -> bool:
     previous_model, previous_provider = (str(v or "unknown") for v in fallback_route)
     provider_fallback_active = bool(getattr(agent, "_provider_fallback_active", False))
     try:
-        _apply_primary_runtime_fields(agent, rt)
-        from agent.turn_recovery import reset_codex_reasoning_replay
-        reset_codex_reasoning_replay(agent)
-        _restore_runtime_capabilities(agent, rt)
-        agent._use_prompt_caching = rt["use_prompt_caching"]
-        # Default to native layout for snapshots predating the native-vs-proxy split.
-        agent._use_native_cache_layout = rt.get(
-            "use_native_cache_layout",
-            agent.api_mode == "anthropic_messages" and agent.provider == "anthropic",
+        from agent.route_binding import reinstall_primary_runtime
+        reinstall_primary_runtime(
+            agent, rt, primary_provider, primary_model, _matches_primary, _load_primary_pool, prefetched_pool, prefetched,
         )
-        # An operator cache disable (_cache_disabled) must survive snapshot restoration.
-        if getattr(agent, "_cache_disabled", False):
-            agent._use_prompt_caching = False
-            agent._use_native_cache_layout = False
-        _rebuild_primary_client(agent, rt, reason="restore_primary")
-        agent.context_compressor.update_model(
-            model=rt["compressor_model"], context_length=rt["compressor_context_length"],
-            base_url=rt["compressor_base_url"], api_key=rt["compressor_api_key"],
-            provider=rt["compressor_provider"], api_mode=rt.get("compressor_api_mode", ""),
-        )
-        # Same rule as fallback activation: refresh an existing verdict only; never-probed sessions stay lazy.
-        if getattr(agent, "_compression_feasibility_checked", False) is True:
-            from agent.conversation_compression import revalidate_compression_feasibility
-            revalidate_compression_feasibility(agent)
-        _rebind_primary_credential_pool(
-            agent, primary_provider, primary_model, _matches_primary, _load_primary_pool, prefetched_pool, prefetched
-        )
-        # Older snapshots have no reasoning_config; keep the current value.
-        saved_reasoning = rt.get("reasoning_config")
-        if saved_reasoning is not None:
-            agent.reasoning_config = dict(saved_reasoning)
-        agent._fallback_activated = False
-        agent._fallback_index = 0
-        agent._rate_limit_backoff_count = 0
-        # Reset the stale-call circuit breaker: its streak measured the fallback provider.
-        from agent.chat_completion_helpers import _reset_stale_streak, rewrite_prompt_model_identity
-        _reset_stale_streak(agent)
-        # Undo the fallback's identity rewrite so the prompt is byte-identical to the stored copy
-        # again (prefix cache match).
-        rewrite_prompt_model_identity(agent, rt["model"], rt["provider"])
         logger.info("Primary runtime restored for new turn: %s (%s)", agent.model, agent.provider)
         agent._provider_fallback_active = False
         agent._provider_fallback_route = None
@@ -2713,10 +2678,6 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     matches = get_close_matches(lowered, agent.valid_tool_names, n=1, cutoff=0.7)
     return matches[0] if matches else None
 
-
-# Placeholder for an empty non-final message the provider would reject. Kept identical to the stub
-# placeholder in chat_completion_helpers so healed transcripts read consistently.
-_INTERRUPTED_PLACEHOLDER = "[response interrupted]"
 
 # Escalate repeated heals once per session window, then stay quiet. Default threshold; tunable via
 # ``agent.sanitizer_heal_escalation_threshold`` (<= 0 disables).

@@ -722,6 +722,7 @@ def _admit_prompt_submit(
             busy_response = _handle_busy_submit(
                 rid, sid, session, text, busy_transport, queued=bool(params.get("queued")),
                 turn_author=turn_author,
+                voice_turn=params.get("voice_turn") is True,
                 client_surface="voice-live" if params.get("surface") == "voice-live" else "",
                 voice_live_context=(str(params.get("voice_context") or "")
                                     if params.get("surface") == "voice-live" else ""))
@@ -744,6 +745,7 @@ def _admit_prompt_submit(
         session["voice_live_context"] = (
             str(params.get("voice_context") or "") if client_surface == "voice-live" else ""
         )
+        session["voice_turn"] = params.get("voice_turn") is True
         session["_surface_from_busy_queue"] = False
         if turn_author is not None:
             session["_accepted_turn_author"] = turn_author
@@ -836,6 +838,7 @@ def _(rid, params: dict) -> dict:
         busy_response = _handle_busy_submit(
             rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author,
             display_kind=display_kind,
+            voice_turn=params.get("voice_turn") is True,
             client_surface="voice-live" if params.get("surface") == "voice-live" else "",
             voice_live_context=(str(params.get("voice_context") or "")
                                 if params.get("surface") == "voice-live" else ""))

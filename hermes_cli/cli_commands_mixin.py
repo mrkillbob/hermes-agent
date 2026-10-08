@@ -1114,23 +1114,24 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         parent_session_id = self.session_id
         # Create the child BEFORE ending the parent: a failed create_session must leave the session the
         # user is still on open, not ended with end_reason="branched" and no branch (#11030).
-        # The stable ``_branched_from`` marker keeps the branch visible in /resume + /sessions
-        # even after the parent is re-ended with a different end_reason.
-        # The child sends the parent's exact system prompt: a row without one makes the branch's first
-        # turn rebuild (re-probing the workspace), so the warm cache the copied transcript buys is
-        # lost at byte 0 whenever the repo moved since the parent's session start.
+        # The stable ``_branched_from`` marker keeps the branch visible in /resume + /sessions even after the
+        # parent is re-ended with a different end_reason; with_session_yolo keeps a live /yolo on the branch.
+        # The child sends the parent's exact system prompt: a row without one makes the branch's first turn rebuild
+        # (re-probing the workspace), losing the copied transcript's warm cache whenever the repo moved since.
         parent_prompt = getattr(self.agent, "_cached_system_prompt", None)
         if not isinstance(parent_prompt, str) or not parent_prompt:
             with suppress(Exception):
                 parent_prompt = (self._session_db.get_session(parent_session_id) or {}).get("system_prompt")
+        from tools.approval_yolo import transfer_session_yolo, with_session_yolo
         try:
             def persist_branch():
                 self._session_db.create_session(
                     session_id=new_session_id, source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                     model=self.model, parent_session_id=parent_session_id, cwd=os.getcwd(),
                     system_prompt=parent_prompt or None,
-                    model_config={"max_iterations": self.max_turns, "reasoning_config": self.reasoning_config,
-                                  "_branched_from": parent_session_id})
+                    model_config=with_session_yolo({"max_iterations": self.max_turns,
+                                                  "reasoning_config": self.reasoning_config,
+                                                  "_branched_from": parent_session_id}, parent_session_id))
 
             if getattr(self, "_conversation_worktree_manager", None) is not None:
                 if not self._prepare_conversation_root(new_session_id, before_commit=persist_branch):
@@ -1151,7 +1152,7 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         with suppress(Exception):
             self._session_db.set_session_title(new_session_id, branch_title)
         # Switch to the new session
-        self._transfer_session_yolo(self.session_id, new_session_id)
+        transfer_session_yolo(self.session_id, new_session_id)
         self.session_id, self.session_start, self._pending_title = new_session_id, now, None
         self._resumed = True  # Prevents auto-title generation
         _sync_process_session_id(new_session_id)

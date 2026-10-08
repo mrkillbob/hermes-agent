@@ -148,8 +148,11 @@ def _session_row_summary(row: dict, *, tip_row: dict | None = None, resolved_id=
             **({} if db is None else _live_count_field(db, row["id"] if resolved_id is None else resolved_id))}
 
 
-# Hidden from human listings (sub-agent runs, kanban workers); a deny-list so new platforms surface automatically.
-_LISTING_DENY_SOURCES = frozenset({"kanban", "tool", "oneshot"})
+from hermes_state_sessions import INTERNAL_LISTING_SOURCES
+
+
+# Hidden from human listings (kanban workers, tool integrations, one-shot runs); see INTERNAL_LISTING_SOURCES.
+_LISTING_DENY_SOURCES = frozenset(INTERNAL_LISTING_SOURCES)
 
 
 def _denied_source(row: dict) -> bool:
@@ -1250,11 +1253,13 @@ def _(rid, params: dict) -> dict:
                         "no ready conversation worktree for resumed session; refusing profile checkout fallback")
             except Exception as exc:
                 return _err(rid, 5000, f"conversation worktree setup failed: {exc}")
+        from hermes_state import SessionDB
+        from tools.approval_yolo import restore_session_yolo  # a fresh backend starts with an empty set
+        restore_session_yolo(ctx.target, SessionDB.session_yolo_enabled(ctx.found))
         if ctx.lazy:
             return _resume_lazy(ctx)
-        if ctx.eager_build:
-            return _resume_eager(ctx)
-        return _resume_deferred(ctx) if ctx.defer_history else _resume_cold(ctx)
+        return _resume_eager(ctx) if ctx.eager_build else (
+            _resume_deferred(ctx) if ctx.defer_history else _resume_cold(ctx))
     finally:
         if ctx.conversation_root_lease is not None:
             with contextlib.suppress(Exception):
@@ -2546,8 +2551,6 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"closed": _teardown_popped_session(session, end_reason="tui_close")})
 
 
-
-
 @_session_method("session.branch", live=True)
 def _(rid, params: dict, session: dict) -> dict:
     return _branch_live(rid, params, session)
@@ -2557,10 +2560,6 @@ def _(rid, params: dict, session: dict) -> dict:
 def _(rid, params: dict, session: dict) -> dict:
     """Whole-history ``session.branch`` that doesn't echo the copied transcript back."""
     return _branch_live(rid, params, session, omit_messages=True)
-
-
-
-
 
 
 # ── delegation / spawn trees ─────────────────────────────────────────

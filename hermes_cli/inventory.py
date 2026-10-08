@@ -349,8 +349,8 @@ def _apply_usage(rows: list[dict]) -> None:
             if windows and not snapshot_is_stale(snapshot):
                 row["usage"] = {"windows": windows}
             continue
-        if supports_usage:
-            wanted.append(slug)
+        # Pooled rows refresh only through explicit read-only account requests. The legacy
+        # provider resolver may select or rotate a credential this picker does not own.
         accounts = _pool_usage_accounts(slug, _wire_windows, _account_resets_at, entry_requests)
         if accounts is not None:
             row["usage"] = {"accounts": accounts}
@@ -429,6 +429,13 @@ def _pool_usage_accounts(slug: str, wire_windows, account_resets_at,
             "id": identity_id, "label": str(entry.label or ""), "windows": windows,
             "state": state, "resets_at": account_resets_at(snapshot, live_cooldown),
         }
+        # Display dedupe must not skip a live credential after a dead sibling. The
+        # refresh worker separately throttles these requests by account identity.
+        if supports_usage and not is_dead:
+            entry_requests.append({
+                "provider": slug, "identity_id": identity_id,
+                "base_url": _pool_entry_route_base_url(slug, entry), "api_key": entry.runtime_api_key,
+            })
         if dedupe_key in seen:
             # Same account under a second credential: keep the row that says more (state rank
             # limited > ready > unknown > unavailable), but never duplicate the account.
@@ -440,11 +447,6 @@ def _pool_usage_accounts(slug: str, wire_windows, account_resets_at,
             continue
         seen[dedupe_key] = account_row
         accounts.append(account_row)
-        if supports_usage and not is_dead:
-            entry_requests.append({
-                "provider": slug, "identity_id": identity_id,
-                "base_url": _pool_entry_route_base_url(slug, entry), "api_key": entry.runtime_api_key,
-            })
     return accounts or None
 
 

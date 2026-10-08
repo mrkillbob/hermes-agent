@@ -130,3 +130,10 @@ def test_bundle_env_round_trips_the_cli_flags():
     facts = dispatch_log.describe(env(BUILD_COMMIT=SHA, BUNDLE_ENV_JSON=json.dumps(baked)))
     flags = dispatch_log.command_flags(facts)
     assert flags == ["--build-commit", SHA, "--bundle-unset", "HERMES_HOME", "--bundle-env", "HERMES_SHARED_AUTH_DIR=/shared"]
+
+
+def test_connector_preference_is_not_a_bundle_environment_setting():
+    for assignments, unset in ((["HERMES_PREVIEW_FULL_CONNECTORS=1"], []),
+                               ([], ["HERMES_PREVIEW_FULL_CONNECTORS"])):
+        with pytest.raises(ValueError, match="Bundle environment name is not permitted"):
+            parse_assignments(assignments, unset)

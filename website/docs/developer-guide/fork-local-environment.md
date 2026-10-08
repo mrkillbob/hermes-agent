@@ -31,10 +31,10 @@ otherwise they fall back to this checkout's catalog. Deferring a local entry doe
 already installed plugin or guarantee that the published catalog has the entry. The fork's existing
 delisted entries remain absent from its local catalog, and `removed.yaml` retains its separate blocklist role.
 
-Mem0 moved out of core in this sync, but its new local catalog entry is deferred. Existing installed
-Mem0 plugins, configuration and stored memories remain in place. A home without the plugin can
-migrate only when the published or cached catalog supplies a usable Mem0 entry and installation is
-permitted; if that catalog is unavailable, the checkout fallback cannot supply Mem0. Offline recovery
-hints based on the local catalog are also unavailable until separate admission adds the entry.
-The generic upstream Mem0 installation instructions assume such a catalog entry is available.
-Do not restore the bundled provider or removed dependency extra to bypass this deferral.
+Mem0 and OpenViking moved out of core in this sync, but their new local catalog entries are deferred.
+Existing installed plugins, configuration and stored memories remain in place. A home without the
+plugin can migrate only when the published or cached catalog supplies a usable entry and installation
+is permitted; if that catalog is unavailable, the checkout fallback cannot supply either provider.
+Offline recovery hints based on the local catalog are also unavailable until separate admission adds
+the entries. The generic upstream migration instructions assume such a catalog entry is available.
+Do not restore the bundled providers or removed dependency extras to bypass this deferral.

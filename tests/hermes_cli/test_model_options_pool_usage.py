@@ -391,3 +391,97 @@ def test_non_supporting_pool_provider_reports_unknown_without_fetching(monkeypat
     accounts = row["usage"]["accounts"]
     assert len(accounts) == 2
     assert all(a["state"] == "unknown" and a["windows"] == [] for a in accounts)
+
+
+@pytest.fixture
+def isolated_pool_home(monkeypatch, tmp_path):
+    """Both the active auth store and native-client fallback homes are disposable."""
+    from pathlib import Path
+
+    user_home = tmp_path / "user"
+    user_home.mkdir()
+    home = user_home / ".hermes"
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("USERPROFILE", str(user_home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: user_home)
+    return home
+
+
+def test_pool_usage_background_401_never_resolves_or_refreshes_credentials(monkeypatch, isolated_pool_home):
+    """A multi-entry picker only runs the explicit-token read-only workers, even on 401."""
+    import httpx
+
+    home = isolated_pool_home
+    _write_pool(home, "openai-codex", [
+        _entry("c1", "tok-1", auth_type="oauth"), _entry("c2", "tok-2", auth_type="oauth")])
+    before = (home / "auth.json").read_bytes()
+    resolved, fetched = [], []
+
+    def resolve(**kwargs):
+        resolved.append(kwargs)
+        return {"api_key": "legacy-key", "base_url": "https://usage.invalid/backend-api/codex"}
+
+    def unauthorized(url, headers, **kwargs):
+        fetched.append(headers["Authorization"])
+        response = httpx.Response(401, request=httpx.Request("GET", url))
+        raise httpx.HTTPStatusError("expired", request=response.request, response=response)
+
+    monkeypatch.setattr(account_usage, "resolve_codex_runtime_credentials", resolve)
+    monkeypatch.setattr(account_usage, "_get_json", unauthorized)
+    row = {"slug": "openai-codex", "authenticated": True}
+    try:
+        _apply_usage([row])
+        _join_refresh_workers()
+        _apply_usage([row])  # failed account attempts are throttled too
+        _join_refresh_workers()
+        assert resolved == []
+        assert sorted(fetched) == ["Bearer tok-1", "Bearer tok-2"]
+        assert all(account["state"] == "unknown" for account in row["usage"]["accounts"])
+        assert (home / "auth.json").read_bytes() == before
+    finally:
+        _join_refresh_workers()
+
+
+def test_dead_first_codex_duplicate_refreshes_from_live_credential(monkeypatch, isolated_pool_home):
+    """A dead row cannot hide a live sibling's refresh when both name the same account."""
+    import base64
+
+    home = isolated_pool_home
+    claims = {"sub": "user-1", "https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"}}
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    dead_token, live_token = f"e30.{payload}.dead", f"e30.{payload}.live"
+    _write_pool(home, "openai-codex", [
+        _entry("dead", dead_token, auth_type="oauth", last_status="dead"),
+        _entry("live", live_token, auth_type="oauth"),
+        _entry("live-copy", f"e30.{payload}.other", auth_type="oauth"),
+    ])
+    before = (home / "auth.json").read_bytes()
+    fetched, resolved = [], []
+
+    def resolve(**kwargs):
+        resolved.append(kwargs)
+        return {"api_key": "legacy-key", "base_url": "https://usage.invalid/backend-api/codex"}
+
+    def usage(url, headers, **kwargs):
+        fetched.append(headers["Authorization"])
+        return {"rate_limit": {"primary_window": {"used_percent": 23.0}}}
+
+    monkeypatch.setattr(account_usage, "resolve_codex_runtime_credentials", resolve)
+    monkeypatch.setattr(account_usage, "_get_json", usage)
+    row = {"slug": "openai-codex", "authenticated": True}
+    try:
+        _apply_usage([row])
+        _join_refresh_workers()
+        _apply_usage([row])
+        _join_refresh_workers()
+        assert resolved == []
+        assert fetched == [f"Bearer {live_token}"]
+        account, = row["usage"]["accounts"]
+        assert account["id"] == "codex:acct-1:user-1"
+        assert account["label"] == "live"
+        assert account["state"] == "ready"
+        assert account["windows"][0]["used_percent"] == 23.0
+        assert (home / "auth.json").read_bytes() == before
+    finally:
+        _join_refresh_workers()

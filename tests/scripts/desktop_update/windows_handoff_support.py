@@ -88,6 +88,10 @@ def _op(home: Path, *args: str) -> tuple[int, str, str]:
 
 
 def _log(home: Path) -> str:
+    """Read the hand-off log, leaving sharing-violation retries to the caller's deadline.
+
+    Add-Content briefly holds the file without read sharing while it writes.
+    """
     path = home / 'logs/desktop-update-handoff.log'
     try:
         return path.read_text(encoding='utf-8-sig') if path.exists() else ''

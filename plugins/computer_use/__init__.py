@@ -100,9 +100,11 @@ def get_active_provider() -> "ComputerUseProvider":
     name = configured_backend_name()
     provider = load_computer_use_provider(name)
     if provider is None:
+        from hermes_constants import display_hermes_home
+
         available = ", ".join(found for found, _ in discover_computer_use_providers())
         state = "could not be loaded (see the log)" if find_provider_dir(name) else "is not installed"
         raise LookupError(
             f"computer_use.backend is {name!r}, but that computer-use provider {state} (available: {available}). "
-            "Install it under ~/.hermes/plugins/<name>/ or pick a backend with `hermes tools`.")
+            f"Install it under {display_hermes_home()}/plugins/<name>/ or pick a backend with `hermes tools`.")
     return provider
