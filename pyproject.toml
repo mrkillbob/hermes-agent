@@ -613,6 +613,8 @@ environments = ["python_version >= '3.14'"]
 constraint-dependencies = [
   # PTB's optional webhooks server must include the request-parser fixes.
   "tornado>=6.5.9,<7",
+  # GHSA-54p9-h82j-f925: release item-set operands after union/subtraction.
+  "multidict==6.9.1",
 ]
 override-dependencies = [
   # discord.py's latest published version, 2.7.1, pins pynacl at <1.6. however, pynacl 1.5.0 has known vulnerabilities.
