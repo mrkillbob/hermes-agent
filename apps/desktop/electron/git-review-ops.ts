@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { isGitEnvKey } from '@simple-git/argv-parser'
 import { simpleGit } from 'simple-git'
 
 import { resolveRequestedPathForIpc } from './hardening'
@@ -65,35 +66,31 @@ function gitFor(cwd, gitBin) {
   const binary = simpleGitBinary(gitBin, host)
   const unsafe = Boolean(gitBin) || Array.isArray(binary)
 
+  const hosted = Array.isArray(binary)
+
   const git = simpleGit({
     baseDir: cwd,
     binary,
     maxConcurrentProcesses: 4,
     trimmed: false,
     ...(unsafe ? { unsafe: { allowUnsafeCustomBinary: true } } : {}),
-    ...(Array.isArray(binary) ? { allowEnvironment: ['GIT_TERMINAL_PROMPT'] } : {})
+    ...(hosted ? { allowEnvironment: ['GIT_TERMINAL_PROMPT'] } : {})
   })
 
-  if (!Array.isArray(binary)) {
+  if (!hosted) {
     return git
   }
 
-  // .env replaces the entire child environment. Keep normal OS/user variables,
-  // but remove v4's guarded ambient keys before explicitly supplying the host
-  // environment. Only prompt suppression is allowed; editor/config/SSH command
-  // substitution remains blocked by simple-git's unsafe-operation guard.
-  const env = noConsoleGitEnv(process.env, gitBin || 'git')
-  const guardedAliases = new Set(['editor', 'pager', 'prefix', 'ssh_askpass', 'visual'])
+  // Explicit .env() replaces inheritance. Retain the Windows host's OS/runtime
+  // environment while removing the same guarded keys as simple-git's ambient
+  // filter; permit only the non-interactive prompt setting added by our host.
+  const env = Object.fromEntries(
+    Object.entries(noConsoleGitEnv(process.env, gitBin || 'git')).filter(([key]) => {
+      const normalized = key.toLowerCase().trim()
 
-  for (const key of Object.keys(env)) {
-    const normalized = key.toLowerCase().trim()
-
-    if (normalized.startsWith('git_') || guardedAliases.has(normalized)) {
-      delete env[key]
-    }
-  }
-
-  env.GIT_TERMINAL_PROMPT = '0'
+      return normalized === 'git_terminal_prompt' || (!normalized.startsWith('git_') && !isGitEnvKey(normalized))
+    })
+  )
 
   return git.env(env)
 }

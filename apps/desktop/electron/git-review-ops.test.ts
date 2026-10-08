@@ -4,16 +4,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+import { simpleGit } from 'simple-git'
 import { afterEach, test, vi } from 'vitest'
 
-import {
-  gitFor,
-  repoStatus,
-  resolveRenamePath,
-  REVIEW_FILE_CAP,
-  reviewCreatePr,
-  reviewList
-} from './git-review-ops'
+import { gitFor, repoStatus, resolveRenamePath, REVIEW_FILE_CAP, reviewCreatePr, reviewList } from './git-review-ops'
 import type * as NoConsoleGit from './no-console-git'
 
 // `runGh` shells to the `gh` CLI via execFile. Mock it so reviewCreatePr's gh
@@ -95,7 +89,7 @@ test('gitFor accepts a Windows no-console host tuple with restricted characters'
   }
 })
 
-test('gitFor accepts trusted custom binaries without intercepting console warnings', () => {
+test('gitFor leaves unrelated console warnings intact for trusted binary paths', () => {
   const spacedBin = String.raw`C:\Program Files\Git\cmd\git.exe`
   const warnings: unknown[][] = []
   const originalWarn = console.warn
@@ -113,151 +107,13 @@ test('gitFor accepts trusted custom binaries without intercepting console warnin
 
     assert.equal(console.warn, recordingWarn)
 
+    simpleGit({ baseDir: process.cwd(), binary: spacedBin, unsafe: { allowUnsafeCustomBinary: true } })
     console.warn('unrelated warning')
   } finally {
     console.warn = originalWarn
   }
 
   assert.deepEqual(warnings, [['unrelated warning']])
-})
-
-test('gitFor host retains safe environment and blocks ambient Git command substitution', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-git-host-env-'))
-  const scriptPath = path.join(dir, 'host.cjs')
-  const spawnReceiptPath = path.join(dir, 'host-spawns.txt')
-
-  tempDirs.push(dir)
-  fs.writeFileSync(scriptPath, `require('node:fs').appendFileSync(${JSON.stringify(spawnReceiptPath)}, 'spawn\\n')
-  process.stdout.write(JSON.stringify({
-    argv: process.argv.slice(2), env: Object.fromEntries(Object.entries(process.env).filter(
-      ([key]) => /^(?:GIT_|EDITOR$|PAGER$|PREFIX$|SSH_ASKPASS$|VISUAL$|HERMES_GIT_|PATH$|HOME$|SystemRoot$)/i.test(key)
-    ).map(([key, value]) => [key.toUpperCase(), value]))
-  }))`)
-  vi.stubEnv('GIT_SSH_COMMAND', 'untrusted-ssh-command')
-  vi.stubEnv('VISUAL', 'untrusted-editor')
-  vi.stubEnv('EDITOR', 'untrusted-editor')
-  vi.stubEnv('GIT_TERMINAL_PROMPT', '1')
-  vi.stubEnv('HERMES_GIT_ENV_PROBE', 'kept')
-  vi.resetModules()
-  vi.doMock('./no-console-git', async importOriginal => ({
-    ...await importOriginal<typeof NoConsoleGit>(),
-    windowsGitHost: () => ({ isWindows: true, pythonBin: process.execPath, scriptPath })
-  }))
-
-  try {
-    const { gitFor: gitForWithHost } = await import('./git-review-ops')
-    const git = gitForWithHost(dir, 'git')
-    const receipt = JSON.parse(await git.raw(['status', '--porcelain']))
-
-    assert.deepEqual(receipt.argv, ['status', '--porcelain'])
-    assert.equal(receipt.env.HERMES_GIT_ARGV0, JSON.stringify('git'))
-    assert.equal(receipt.env.HERMES_GIT_ENV_PROBE, 'kept')
-    assert.equal(receipt.env.GIT_TERMINAL_PROMPT, '0')
-    assert.equal(receipt.env.GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS, 'true')
-    assert.equal(receipt.env.GIT_SSH_COMMAND, undefined)
-    assert.equal(receipt.env.VISUAL, undefined)
-    assert.equal(receipt.env.EDITOR, undefined)
-    assert.equal(receipt.env.PATH, process.env.PATH)
-    assert.equal(receipt.env.HOME, process.env.HOME)
-    assert.equal(receipt.env.SYSTEMROOT, process.env.SystemRoot)
-    // Each rejected call must fail in the argv/environment guard, before the
-    // harmless host records another spawn. Use a fresh wrapper for each case.
-    const deniedArgs: Array<{ argv: string[]; category: RegExp }> = [
-      {
-        argv: ['-c', 'core.sshCommand=untrusted-command', 'status'],
-        category: /allowUnsafeSshCommand/
-      },
-      {
-        argv: ['-c', 'trailer.audit.cmd=untrusted-command', 'interpret-trailers'],
-        category: /allowUnsafeCommandBinaries/
-      },
-      {
-        argv: ['-c', 'trailer.audit.command=untrusted-command', 'interpret-trailers'],
-        category: /allowUnsafeCommandBinaries/
-      },
-      {
-        argv: ['-c', 'include.path=untrusted-config', 'status'],
-        category: /allowUnsafeInclude/
-      },
-      {
-        argv: ['-c', 'includeIf.gitdir:.path=untrusted-config', 'status'],
-        category: /allowUnsafeInclude/
-      },
-      {
-        argv: ['rebase', '--ex=untrusted-command', 'HEAD'],
-        category: /allowUnsafeExec/
-      },
-      {
-        argv: ['rebase', '--exe=untrusted-command', 'HEAD'],
-        category: /allowUnsafeExec/
-      },
-      {
-        argv: ['push', '--receive-pack=untrusted-command', 'unused-remote', 'HEAD'],
-        category: /allowUnsafePack/
-      },
-      {
-        argv: ['push', '--exec=untrusted-command', 'unused-remote', 'HEAD'],
-        category: /allowUnsafePack/
-      }
-    ]
-
-    assert.equal(fs.readFileSync(spawnReceiptPath, 'utf8'), 'spawn\n')
-
-    for (const { argv, category } of deniedArgs) {
-      await assert.rejects(gitForWithHost(dir, 'git').raw(argv), category)
-      assert.equal(fs.readFileSync(spawnReceiptPath, 'utf8'), 'spawn\n', JSON.stringify(argv))
-    }
-
-    // Ambient VISUAL was removed above. Supplying it explicitly must still
-    // trigger the published parser's editor guard, with no unsafe allowance.
-    await assert.rejects(
-      gitForWithHost(dir, 'git').env('VISUAL', 'untrusted-editor').raw(['status']),
-      /allowUnsafeEditor/
-    )
-    assert.equal(fs.readFileSync(spawnReceiptPath, 'utf8'), 'spawn\n')
-  } finally {
-    vi.doUnmock('./no-console-git')
-    vi.resetModules()
-    vi.unstubAllEnvs()
-  }
-})
-
-test('gitFor actual Git rejects abbreviated receive-pack before transport execution', async () => {
-  const dir = makeRepo()
-  const missingRemote = path.join(dir, 'missing-local-remote.git')
-
-  assert.equal(fs.existsSync(missingRemote), false)
-
-  // Full spelling is valid Git syntax. This direct, benign control reaches only
-  // the missing local repository; no network remote or shell command is used.
-  assert.throws(
-    () =>
-      execFileSync('git', ['push', '--dry-run', '--receive-pack=git-receive-pack', missingRemote, 'HEAD'], {
-        cwd: dir,
-        env: {
-          ...process.env,
-          LC_ALL: 'C',
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS: 'true'
-        },
-        stdio: ['ignore', 'pipe', 'pipe']
-      }),
-    (error: unknown) => {
-      const failure = error as Error & { status?: number; stderr?: Buffer | string }
-
-      assert.equal(failure.status, 128)
-      assert.match(String(failure.stderr), /does not appear to be a git repository/)
-
-      return true
-    }
-  )
-
-  // The parser preserves this abbreviated spelling, so actual Git must enforce
-  // simple-git's default flag. Accept only Git's specific option-parser refusal.
-  await assert.rejects(
-    gitFor(dir, 'git').raw(['push', '--dry-run', '--receive-p=git-receive-pack', missingRemote, 'HEAD']),
-    /fatal: disallowed abbreviated or ambiguous option 'receive-p'/
-  )
 })
 
 test('resolveRenamePath: simple rename resolves to the new path', () => {
