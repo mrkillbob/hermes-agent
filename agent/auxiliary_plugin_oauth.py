@@ -22,13 +22,13 @@ def _configured_endpoint(provider: str) -> str:
 
 def _profile_client(provider: str, api_key: Any, base_url: str) -> Any:
     """Use the registered OAuth provider's transport; a failed hook leaves the route unavailable."""
-    from agent import auxiliary_client as aux
+    from agent.auxiliary_client import logger
     try:
         from providers import get_provider_profile
         profile = get_provider_profile(provider)
         return profile.create_client(api_key=api_key, base_url=base_url) if profile else None
     except Exception:
-        aux.logger.warning("resolve_provider_client: OAuth provider %s client hook failed", provider, exc_info=True)
+        logger.warning("resolve_provider_client: OAuth provider %s client hook failed", provider, exc_info=True)
         return None
 
 

@@ -5324,6 +5324,7 @@
     }
    ],
    "model": "my-local-model",
+   "reasoning_effort": "high",
    "timeout": 1800.0,
    "tools": [
     {
@@ -5382,6 +5383,7 @@
     }
    ],
    "model": "my-local-model",
+   "reasoning_effort": "none",
    "timeout": 1800.0,
    "tools": [
     {
@@ -5439,6 +5441,7 @@
     }
    ],
    "model": "my-local-model",
+   "reasoning_effort": "medium",
    "timeout": 1800.0,
    "tools": [
     {
