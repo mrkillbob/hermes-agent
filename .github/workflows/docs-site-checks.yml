@@ -65,5 +65,6 @@ jobs:
         working-directory: website
 
       - name: Audit website dependencies
-        run: npm audit --audit-level=high
-        working-directory: website
+        # Fails on any high/critical advisory except the allow-listed ones (braces has no
+        # patched release); see scripts/ci/npm_audit_gate.py.
+        run: python3 scripts/ci/npm_audit_gate.py website
