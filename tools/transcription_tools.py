@@ -462,12 +462,14 @@ def _transcribe_prepared_audio(
                 file_path = trimmed
                 cleanup.callback(shutil.rmtree, os.path.dirname(trimmed), ignore_errors=True)
         if remote:
-            limit = upload_limit(provider, _limit_model_name(provider, stt_config, model))
+            # Hints are resolved once for the whole recording (not per segment), and BEFORE the
+            # limit: a ``pre_transcription`` hook may swap the model, whose caps differ.
+            hints = _resolve_dispatch_hints(file_path, provider, stt_config, model, source)
+            limit = upload_limit(provider, _limit_model_name(provider, stt_config, hints[0]))
             if exceeds_upload_limit(file_path, limit):
-                # Hints are resolved once for the whole recording, not once per segment.
-                hints = _resolve_dispatch_hints(file_path, provider, stt_config, model, source)
                 return transcribe_oversized(
                     file_path, limit, lambda part: _route_stt_provider(part, provider, stt_config, *hints))
+            return _dispatch_stt_provider(file_path, provider, stt_config, model, source, hints)
         return _dispatch_stt_provider(file_path, provider, stt_config, model, source)
 
 
@@ -516,10 +518,12 @@ def _resolve_dispatch_hints(
 
 def _dispatch_stt_provider(
     file_path: str, provider: str, stt_config: Dict[str, Any], model: Optional[str] = None,
-    source: Optional[str] = None) -> Dict[str, Any]:
-    """Route *file_path* to the handler for *provider* (built-in > command > plugin)."""
-    return _route_stt_provider(
-        file_path, provider, stt_config, *_resolve_dispatch_hints(file_path, provider, stt_config, model, source))
+    source: Optional[str] = None, hints: Optional[tuple] = None) -> Dict[str, Any]:
+    """Route *file_path* to the handler for *provider* (built-in > command > plugin).
+    *hints* are pre-resolved ``(model, language, prompt)``; omitted, the hooks run here."""
+    if hints is None:
+        hints = _resolve_dispatch_hints(file_path, provider, stt_config, model, source)
+    return _route_stt_provider(file_path, provider, stt_config, *hints)
 
 
 def _route_stt_provider(

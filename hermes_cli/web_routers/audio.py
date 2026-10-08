@@ -558,6 +558,8 @@ async def transcribe_stream_ws(ws: "WebSocket") -> None:
     ended = False
     try:
         first = json.loads(await ws.receive_text())
+        if not isinstance(first, dict):
+            raise ValueError("first frame must be a JSON object")
         rate = int(first.get("sample_rate") or 0)
         if not 8000 <= rate <= 48000:
             raise ValueError(f"unsupported sample_rate {rate}")
@@ -568,14 +570,18 @@ async def transcribe_stream_ws(ws: "WebSocket") -> None:
                 break
             if message.get("bytes"):
                 session.push_audio(message["bytes"])
-            elif message.get("text") and json.loads(message["text"]).get("eos"):
-                ended = True
-                break
-    except (WebSocketDisconnect, ValueError, RuntimeError) as exc:
+            elif message.get("text"):
+                frame = json.loads(message["text"])
+                if isinstance(frame, dict) and frame.get("eos"):
+                    ended = True
+                    break
+    except (WebSocketDisconnect, ValueError, TypeError, RuntimeError) as exc:
         _log.debug("transcribe-stream client ended early: %s", exc)
+    finally:
+        if not ended:
+            session.cancel()
+            forwarder.cancel()
     if not ended:
-        session.cancel()
-        forwarder.cancel()
         return
     result = await loop.run_in_executor(None, session.finalize)
     await asyncio.sleep(0)  # let the last partial flush before the final frame
