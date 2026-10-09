@@ -137,6 +137,70 @@ class TestExplicitProvision:
         assert anon_auth.ensure_portal_identity(explicit=True) is None
         assert portal.minted == 0
 
+    @pytest.mark.parametrize("preference, body", [
+        (True, {"preview_full_connectors": True}),
+        (False, {"preview_full_connectors": False}),
+        (None, {}),
+        ("true", {}),
+        (1, {}),
+        (0, {}),
+    ])
+    @pytest.mark.parametrize("retired_value", ["true", "false"])
+    def test_preview_full_connectors_rides_the_create_call(self, portal, monkeypatch, preference, body, retired_value):
+        """Profile config reaches the account service once; the retired environment flag is ignored."""
+        monkeypatch.setenv("HERMES_PREVIEW_FULL_CONNECTORS", retired_value)
+        home = Path(os.environ["HERMES_HOME"])
+        (home / "config.yaml").write_text(json.dumps({"nous": {"preview_full_connectors": preference}}))
+        anon_auth.ensure_portal_identity(explicit=True)
+        assert portal.create_requests == [body]
+        (home / "config.yaml").write_text(json.dumps({"nous": {"preview_full_connectors": False}}))
+        anon_auth.ensure_portal_identity(explicit=True)
+        assert portal.create_requests == [body]  # Changing the preference never replaces an identity.
+
+    def test_connector_preference_post_follows_interleaved_profile_scopes(self, portal, tmp_path, monkeypatch):
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        homes = []
+        for name, preference in (("on", True), ("off", False), ("unset", None)):
+            home = tmp_path / ".hermes" / "profiles" / name
+            home.mkdir(parents=True)
+            home.joinpath("config.yaml").write_text(
+                json.dumps({"nous": {"preview_full_connectors": preference}} if preference is not None else {}))
+            homes.append(home)
+        with anon_auth.httpx.Client() as client:
+            for index in (0, 1, 0, 2):
+                token = set_hermes_home_override(homes[index])
+                try:
+                    anon_auth.mint_guest(client, PORTAL)
+                finally:
+                    reset_hermes_home_override(token)
+        assert portal.create_requests == [
+            {"preview_full_connectors": True}, {"preview_full_connectors": False},
+            {"preview_full_connectors": True}, {},
+        ]
+
+    def test_unreadable_connector_config_omits_stale_preference(self, portal):
+        home = Path(os.environ["HERMES_HOME"])
+        home.joinpath("config.yaml").write_text("nous:\n  preview_full_connectors: true\n")
+        with anon_auth.httpx.Client() as client:
+            anon_auth.mint_guest(client, PORTAL)
+            home.joinpath("config.yaml").write_text("nous: [broken\n")
+            anon_auth.mint_guest(client, PORTAL)
+        assert portal.create_requests == [{"preview_full_connectors": True}, {}]
+
+    def test_connector_config_read_error_keeps_guest_gate_closed(self, portal, monkeypatch):
+        from hermes_cli import config
+
+        def unreadable():
+            raise PermissionError("fixture configuration unavailable")
+
+        monkeypatch.setattr(config, "load_config_readonly", unreadable)
+        assert anon_auth.mint_request_body() == {}
+        assert anon_auth.guest_enabled() is False
+        assert anon_auth.ensure_portal_identity(explicit=True) is None
+        assert portal.create_requests == []
+
 
 class TestResolverIsUnchanged:
     def test_guest_is_last_resort_and_explicit_key_wins(self, portal, monkeypatch):

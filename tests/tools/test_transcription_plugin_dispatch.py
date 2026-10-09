@@ -177,7 +177,8 @@ class TestTranscribeAudioE2E:
         # Plugin was never called
         assert provider.last_call is None
 
-    def test_oversized_plugin_file_is_rejected_before_dispatch(self, tmp_path):
+    def test_unsplittable_oversized_plugin_file_never_reaches_the_plugin(self, tmp_path):
+        """Over the upload cap with no way to fit it (ffmpeg missing) -> refused, plugin untouched."""
         from unittest.mock import patch
 
         provider = _FakeProvider(name="openrouter")
@@ -190,7 +191,8 @@ class TestTranscribeAudioE2E:
 
         with patch("tools.transcription_tools._load_stt_config", return_value={"provider": "openrouter"}), \
              patch("tools.transcription_tools.is_stt_enabled", return_value=True), \
-             patch("tools.transcription_tools._get_provider", return_value="openrouter"):
+             patch("tools.transcription_tools._get_provider", return_value="openrouter"), \
+             patch("tools.transcription_chunking._find_ffmpeg_binary", return_value=None):
             result = transcription_tools.transcribe_audio(str(audio_path))
 
         assert result["success"] is False
@@ -303,3 +305,23 @@ class TestLanguageForwardingFromConfig:
         assert result["success"] is True
         assert provider.last_call["kwargs"]["language"] is None
         assert provider.last_call["kwargs"]["model"] is None
+
+
+def test_streaming_enabled_plugin_keeps_file_transcription(tmp_path, monkeypatch, sample_audio_file):
+    """Live STT remains built-in; enabling it must keep a registered batch plugin usable."""
+    from tools import transcription_streaming, voice_mode
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("stt:\n  provider: batch-plugin\n  streaming: true\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    provider = _FakeProvider(name="batch-plugin")
+    transcription_registry.register_provider(provider)
+
+    assert transcription_streaming.streaming_available() is False
+    assert transcription_streaming.open_streaming_session() is None
+    result = voice_mode.transcribe_recording(sample_audio_file)
+    assert result["success"] is True
+    assert result["transcript"] == "fake transcript"
+    assert result["provider"] == "batch-plugin"
+    assert provider.last_call["file_path"] == sample_audio_file

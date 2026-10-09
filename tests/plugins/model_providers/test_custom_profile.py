@@ -123,6 +123,25 @@ class TestCustomReasoningWireShape:
         assert eb == {"think": False}
         assert tl == {"reasoning_effort": "none"}
 
+    @pytest.mark.parametrize(
+        "reasoning_config,expected",
+        [({"enabled": False}, "none"), ({"enabled": True, "effort": "medium"}, "medium")],
+    )
+    def test_non_ollama_nested_reasoning_gate_keeps_top_level_effort(
+        self, custom_profile, reasoning_config, expected
+    ):
+        """An arbitrary custom URL lacks nested-reasoning support, not top-level effort."""
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        kwargs = ChatCompletionsTransport().build_kwargs(
+            model="fixture-model", messages=[{"role": "user", "content": "ping"}], tools=None,
+            provider_profile=custom_profile, base_url="http://127.0.0.1:8080/v1",
+            reasoning_config=reasoning_config, supports_reasoning=False,
+        )
+        assert kwargs["reasoning_effort"] == expected
+        assert "think" not in kwargs.get("extra_body", {})
+        assert "reasoning" not in kwargs.get("extra_body", {})
+
     def test_non_thinking_ollama_omits_all_reasoning_fields(self, custom_profile):
         eb, tl = custom_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": True, "effort": "medium"},

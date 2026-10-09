@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_cli.timefmt import coerce_epoch
 from hermes_state_common import _placeholders
-from hermes_state_messages import _parse_tool_calls
+from hermes_state_tool_calls import _parse_tool_calls
 
 
 class SessionCoverageMixin:

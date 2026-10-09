@@ -3,7 +3,7 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { EVENTS_CONNECT_TIMEOUT_MS } from "@/lib/events-reconnect";
+import { EVENTS_CONNECT_TIMEOUT_MS, EVENTS_MAX_RECONNECT_ATTEMPTS, eventsGaveUpMessage, eventsReconnectDelayMs } from '@/lib/events-reconnect'
 
 const apiMocks = vi.hoisted(() => ({
   buildWsUrl: vi.fn(async () => "ws://localhost/api/events?channel=chat-1"),
@@ -16,6 +16,7 @@ const apiMocks = vi.hoisted(() => ({
 const gatewayMocks = vi.hoisted(() => {
   const handlers = new Map<string, (event: unknown) => void>();
   return {
+    constructed: 0,
     close: vi.fn(),
     connect: vi.fn(async () => undefined),
     handlers,
@@ -23,9 +24,9 @@ const gatewayMocks = vi.hoisted(() => {
       handlers.set(event, handler);
       return () => handlers.delete(event);
     }),
-    onState: vi.fn((handler: (state: string) => void) => {
-      handler("open");
-      return () => undefined;
+    onState: vi.fn((handler: (state: string) => void): (() => void) => {
+      handler('open')
+      return () => undefined
     }),
     request: vi.fn(async () => ({ session_id: "sidecar-1" })),
   };
@@ -34,6 +35,9 @@ const gatewayMocks = vi.hoisted(() => {
 const reloadMocks = vi.hoisted(() => ({
   maybeReloadForLoopbackWsAuthFailure: vi.fn(() => true),
 }));
+
+const routerMocks = vi.hoisted(() => ({ navigate: vi.fn() }));
+vi.mock("react-router", () => ({ useNavigate: () => routerMocks.navigate }));
 
 vi.mock("@/lib/api", () => ({
   api: { getModelInfo: apiMocks.getModelInfo },
@@ -45,6 +49,7 @@ vi.mock("@/lib/dashboard-auth-reload", () => ({
 }));
 vi.mock("@/lib/gatewayClient", () => ({
   GatewayClient: class {
+    constructor() { gatewayMocks.constructed += 1; }
     close = gatewayMocks.close;
     connect = gatewayMocks.connect;
     on = gatewayMocks.on;
@@ -62,7 +67,7 @@ vi.mock("@/components/ReasoningPicker", () => ({
   ReasoningPicker: () => null,
 }));
 vi.mock("@nous-research/ui/ui/components/button", () => ({
-  Button: ({ children }: { children?: ReactNode }) => <button>{children}</button>,
+  Button: ({ children, onClick }: { children?: ReactNode; onClick?: () => void }) => <button onClick={onClick}>{children}</button>,
 }));
 vi.mock("@nous-research/ui/ui/components/badge", () => ({
   Badge: ({ children }: { children?: ReactNode }) => <span>{children}</span>,
@@ -144,6 +149,93 @@ describe("ChatSidebar event socket", () => {
 
     expect(reloadMocks.maybeReloadForLoopbackWsAuthFailure).toHaveBeenCalledWith(4401)
   })
+
+  /** The PTY-side events socket of the chat tab, opened and ready. */
+  async function openedFeedSocket() {
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+    await act(async () => {
+      socket.emit('open', {})
+    })
+    return socket
+  }
+
+  function feedEvent(payload: Record<string, unknown>) {
+    return {
+      data: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'event',
+        params: { type: 'session.info', payload }
+      })
+    }
+  }
+
+  it('shows the PTY runtime model after a fallback swap (#54509)', async () => {
+    apiMocks.getModelInfo.mockResolvedValue({
+      capabilities: { supports_reasoning: false },
+      model: 'configured-primary'
+    })
+
+    const { ChatSidebar } = await import('./ChatSidebar')
+    await render(<ChatSidebar channel="chat-1" />)
+
+    // The badge seeds from config (/api/model/info): the configured primary.
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain('configured-primary')
+    )
+
+    // End-of-turn `session.info` from the PTY chat session: a provider
+    // fallback replaced the configured primary mid-turn, so the agent's
+    // runtime model is the one that actually answered. The badge must
+    // follow the runtime identity over config.yaml.
+    const socket = await openedFeedSocket()
+    await act(async () => {
+      socket.emit(
+        'message',
+        feedEvent({ model: 'runtime-fallback', provider: 'fallback-provider' })
+      )
+    })
+
+    expect(container.textContent).toContain('runtime-fallback')
+    expect(container.textContent).not.toContain('configured-primary')
+  })
+
+  it('keeps showing the configured model until the PTY reports a runtime one', async () => {
+    apiMocks.getModelInfo.mockResolvedValue({
+      capabilities: { supports_reasoning: false },
+      model: 'configured-primary'
+    })
+
+    const { ChatSidebar } = await import('./ChatSidebar')
+    await render(<ChatSidebar channel="chat-1" />)
+    await openedFeedSocket()
+
+    // A session.info without a usable model (e.g. a title-only update)
+    // must not blank the badge: config stays the source until the PTY
+    // chat session reports its runtime identity.
+    const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+    await act(async () => {
+      socket.emit('message', feedEvent({ title: 'Some session title' }))
+    })
+
+    expect(container.textContent).toContain('configured-primary')
+  })
+
+  it("ignores the synchronous sidecar state replay", async () => {
+    const { ChatSidebar } = await import("./ChatSidebar");
+
+    await render(<ChatSidebar channel="chat-1" />);
+    await vi.waitFor(() => expect(gatewayMocks.onState).toHaveBeenCalled());
+
+    const redialHandler = gatewayMocks.onState.mock.calls[1][0] as (s: string) => void;
+    // The mock invokes the initial replay synchronously during subscription.
+    // A later closed transition must still schedule a retry.
+    redialHandler("closed");
+    await vi.waitFor(
+      () => expect(gatewayMocks.connect).toHaveBeenCalledTimes(2),
+      { timeout: 3000 },
+    );
+  });
 
   it("auto-redials the JSON-RPC sidecar after a transient close (#95951)", async () => {
     const { ChatSidebar } = await import("./ChatSidebar")
@@ -352,8 +444,8 @@ describe("ChatSidebar event socket reconnect", () => {
     expect(FakeWebSocket.instances).toHaveLength(2);
   });
 
-  it("resets the backoff after a successful reconnect", async () => {
-    await renderSidebar();
+  it('resets the backoff after a connection stays open past the grace window', async () => {
+    await renderSidebar()
 
     await act(async () => {
       FakeWebSocket.instances[0].emit("close", { code: 1006 });
@@ -361,17 +453,68 @@ describe("ChatSidebar event socket reconnect", () => {
     await advance(1_000);
     expect(FakeWebSocket.instances).toHaveLength(2);
 
-    // Reconnected — the next drop should start from 1s again, not 2s.
+    // Reconnected and stable — the next drop should start from 1s again, not 2s.
     await act(async () => {
-      FakeWebSocket.instances[1].emit("open", {});
-      FakeWebSocket.instances[1].emit("close", { code: 1006 });
-    });
-    await advance(1_000);
-    expect(FakeWebSocket.instances).toHaveLength(3);
-  });
+      FakeWebSocket.instances[1].emit('open', {})
+    })
+    await advance(10_000)
+    await act(async () => {
+      FakeWebSocket.instances[1].emit('close', { code: 1006 })
+    })
+    await advance(1_000)
+    expect(FakeWebSocket.instances).toHaveLength(3)
+  })
 
-  it("does not retry auth rejections", async () => {
-    await renderSidebar();
+  it('does not reset the backoff when a connection opens only briefly', async () => {
+    await renderSidebar()
+
+    await act(async () => {
+      FakeWebSocket.instances[0].emit('close', { code: 1006 })
+    })
+    await advance(1_000)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+
+    // Open → immediate close is a flap: the ladder continues at 2s, not 1s.
+    await act(async () => {
+      FakeWebSocket.instances[1].emit('open', {})
+      FakeWebSocket.instances[1].emit('close', { code: 1006 })
+    })
+    await advance(1_000)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    await advance(1_000)
+    expect(FakeWebSocket.instances).toHaveLength(3)
+  })
+
+  it('gives up after the attempt cap even when every socket opens briefly first', async () => {
+    await renderSidebar()
+
+    for (let attempt = 0; attempt <= EVENTS_MAX_RECONNECT_ATTEMPTS; attempt++) {
+      expect(FakeWebSocket.instances).toHaveLength(attempt + 1)
+      const socket = FakeWebSocket.instances[attempt]
+      await act(async () => {
+        socket.emit('open', {})
+        socket.emit('close', { code: 1006 })
+      })
+      if (attempt < EVENTS_MAX_RECONNECT_ATTEMPTS) {
+        // Stop exactly when the next async ticket request has created its socket:
+        // advancing farther would also time out that socket's pending handshake.
+        await advance(eventsReconnectDelayMs(attempt))
+      }
+    }
+
+    // Every permitted dial mints a fresh ticket; a brief open cannot refill the budget.
+    expect(FakeWebSocket.instances).toHaveLength(EVENTS_MAX_RECONNECT_ATTEMPTS + 1)
+    expect(apiMocks.buildWsUrl).toHaveBeenCalledTimes(EVENTS_MAX_RECONNECT_ATTEMPTS + 1)
+    expect(container.textContent).toContain(eventsGaveUpMessage())
+
+    await advance(120_000)
+    expect(FakeWebSocket.instances).toHaveLength(EVENTS_MAX_RECONNECT_ATTEMPTS + 1)
+    expect(apiMocks.buildWsUrl).toHaveBeenCalledTimes(EVENTS_MAX_RECONNECT_ATTEMPTS + 1)
+    expect(container.textContent).toContain(eventsGaveUpMessage())
+  })
+
+  it('does not retry auth rejections', async () => {
+    await renderSidebar()
 
     await act(async () => {
       FakeWebSocket.instances[0].emit("close", { code: 4403 });
@@ -493,22 +636,170 @@ describe("ChatSidebar event socket reconnect", () => {
     expect(FakeWebSocket.instances).toHaveLength(2);
   });
 
+  it('reuses one JSON-RPC client across reconnects so seq replay can fire', async () => {
+    // The shared client only asks `session.events.since` for the gap when the
+    // instance that recorded the watermarks is the one that redials.
+    gatewayMocks.constructed = 0
+    await renderSidebar()
+    expect(gatewayMocks.constructed).toBe(1)
+    expect(gatewayMocks.connect).toHaveBeenCalledTimes(1)
+
+    // Drop the feed so the banner (and its reconnect button) renders.
+    await act(async () => {
+      FakeWebSocket.instances[0].emit('close', { code: 1006 })
+    })
+    const reconnectButton = Array.from(container.querySelectorAll('button')).find(b =>
+      /reconnect side panel/i.test(b.textContent ?? '')
+    )
+    expect(reconnectButton).toBeDefined()
+    await act(async () => {
+      reconnectButton!.click()
+    })
+
+    expect(gatewayMocks.close).toHaveBeenCalled()
+    expect(gatewayMocks.connect).toHaveBeenCalledTimes(2)
+    expect(gatewayMocks.constructed).toBe(1)
+  })
+
   it("clears the reconnect timer and closes the socket on unmount", async () => {
     await renderSidebar();
 
     await act(async () => {
-      FakeWebSocket.instances[0].emit("close", { code: 1006 });
-    });
-    expect(vi.getTimerCount()).toBeGreaterThan(0);
+      FakeWebSocket.instances[0].emit('close', { code: 1006 })
+    })
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    // Let the retry dial a second socket so unmount has a live one to close.
+    await advance(1_000)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    await act(async () => {
+      FakeWebSocket.instances[1].emit('open', {})
+      FakeWebSocket.instances[1].emit('close', { code: 1006 })
+    })
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    // The brief open did not refill the ladder, so this retry is the 2s rung.
+    await advance(2_000)
+    expect(FakeWebSocket.instances).toHaveLength(3)
 
     await act(async () => root.unmount());
 
-    expect(FakeWebSocket.instances[0].closed).toBe(true);
+    expect(FakeWebSocket.instances[2].closed).toBe(true);
     // The pending retry timer must be cleared, not merely neutered by the
     // `unmounting` flag — a live timer keeps the effect closure alive.
     expect(vi.getTimerCount()).toBe(0);
 
-    await advance(60_000);
-    expect(FakeWebSocket.instances).toHaveLength(1);
-  });
-});
+    await advance(60_000)
+    expect(FakeWebSocket.instances).toHaveLength(3)
+  })
+})
+
+describe('ChatSidebar sidecar redial grace (#129393)', () => {
+  // The file-wide onState mock replays "open" to every new subscription,
+  // which would start a fresh grace window on every rebuild. Capture the
+  // handlers instead and drive the exact state sequence of each scenario.
+  const stateHandlers: Array<(s: string) => void> = []
+  let originalOnState: ((handler: (s: string) => void) => () => void) | undefined
+
+  beforeEach(() => {
+    reloadMocks.maybeReloadForLoopbackWsAuthFailure.mockReturnValue(false)
+    stateHandlers.length = 0
+    originalOnState = gatewayMocks.onState.getMockImplementation()
+    gatewayMocks.onState.mockImplementation((handler: (s: string) => void) => {
+      stateHandlers.push(handler)
+      return () => undefined
+    })
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    gatewayMocks.onState.mockImplementation(originalOnState!)
+    vi.useRealTimers()
+  })
+
+  // Older subscriptions are unmounted for real (cancelled closure) but the
+  // mock keeps them callable, so always drive the latest effect run's
+  // redial owner.
+  const latestHandler = () => stateHandlers[stateHandlers.length - 1]
+
+  async function renderSidebar() {
+    const { ChatSidebar } = await import('./ChatSidebar')
+    await render(<ChatSidebar channel="chat-1" />)
+  }
+
+  /** Advance timers and flush the version-bump rebuild that fires on the tick. */
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms)
+    })
+  }
+
+  it('does not reset the redial budget when a connection opens briefly', async () => {
+    await renderSidebar()
+    expect(gatewayMocks.connect).toHaveBeenCalledTimes(1)
+
+    // Every iteration of the #129393 loop passed briefly through `open`
+    // before the pending redial tore the socket down. The budget must not
+    // reset on those, or it never exhausts and the loop runs forever.
+    for (let round = 0; round < 5; round += 1) {
+      await act(async () => {
+        latestHandler()('open')
+        latestHandler()('closed')
+      })
+      await advance(4_000)
+      expect(gatewayMocks.connect).toHaveBeenCalledTimes(2 + round)
+    }
+
+    // Budget spent: the next drop gives up instead of redialing.
+    await act(async () => {
+      latestHandler()('closed')
+    })
+    await advance(4_000)
+    expect(gatewayMocks.connect).toHaveBeenCalledTimes(6)
+    expect(container?.textContent ?? '').toContain('gave up after 5 attempts')
+  })
+
+  it('clears the pending redial timer when the connection opens', async () => {
+    await renderSidebar()
+    expect(gatewayMocks.connect).toHaveBeenCalledTimes(1)
+
+    // A drop schedules the backoff redial...
+    await act(async () => {
+      latestHandler()('closed')
+    })
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+    // ...but the connection comes back up before it fires. The timer must
+    // be gone, not left to tear the fresh socket down (#129393).
+    await act(async () => {
+      latestHandler()('open')
+    })
+
+    // Well past the 250ms first-attempt backoff: no version bump, no redial.
+    await advance(4_000)
+    expect(gatewayMocks.connect).toHaveBeenCalledTimes(1)
+  })
+
+  it('resets the redial budget once a connection stays open past the grace window', async () => {
+    await renderSidebar()
+
+    // First drop: budget 0 → 1, 250ms backoff.
+    await act(async () => {
+      latestHandler()('closed')
+    })
+    await advance(250)
+    expect(gatewayMocks.connect).toHaveBeenCalledTimes(2)
+
+    // Hold the connection open past the 10s grace window so the budget
+    // resets to 0.
+    await act(async () => {
+      latestHandler()('open')
+    })
+    await advance(10_000)
+
+    // The next drop backoffs from the start again (250ms, not 500ms).
+    await act(async () => {
+      latestHandler()('closed')
+    })
+    await advance(250)
+    expect(gatewayMocks.connect).toHaveBeenCalledTimes(3)
+  })
+})

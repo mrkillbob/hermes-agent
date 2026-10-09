@@ -88,15 +88,34 @@ def test_validate_after_dependency_sync_uses_selected_interpreter(monkeypatch, t
     from hermes_cli import plugin_validate, plugins_cmd_catalog
 
     plugin_dir = tmp_path / "candidate"
-    selected_python = tmp_path / "install" / "generations" / "new" / "bin" / "python"
+    old_venv = tmp_path / "install" / "generations" / "old"
+    new_venv = tmp_path / "install" / "generations" / "new"
+    for generation in (old_venv, new_venv):
+        interpreter = pm.environments.venv_python(generation)
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+    selected_python = pm.environments.venv_python(new_venv)
+    selection = [old_venv]
+    selected_env = {"PATH": str(selected_python.parent), "HERMES_ENV_GENERATION": "new"}
     calls = []
 
-    monkeypatch.setattr(pm, "sync_venv", lambda **kwargs: calls.append(("sync", kwargs)))
-    monkeypatch.setattr(pm.paths, "repo_root", lambda: tmp_path / "checkout")
-    monkeypatch.setattr(pm.environments, "project_python", lambda root: selected_python)
+    def sync(**kwargs):
+        calls.append(("sync", kwargs))
+        selection[0] = new_venv
 
-    def validate(path, *, python_executable):
-        calls.append(("validate", Path(path), python_executable))
+    def activation(root):
+        return {
+            "PATH": str(pm.environments.venv_python(selection[0]).parent),
+            "HERMES_ENV_GENERATION": selection[0].name,
+        }
+
+    monkeypatch.setattr(pm, "sync_venv", sync)
+    monkeypatch.setattr(pm.paths, "repo_root", lambda: tmp_path / "checkout")
+    monkeypatch.setattr(pm.environments, "selected_venv", lambda root: selection[0])
+    monkeypatch.setattr(pm.environments, "activation_environment", activation)
+
+    def validate(path, probe):
+        calls.append(("validate", Path(path), probe))
         return SimpleNamespace(to_dict=lambda: {}, exit_code=0)
 
     monkeypatch.setattr(plugin_validate, "validate_plugin_dir", validate)
@@ -105,7 +124,7 @@ def test_validate_after_dependency_sync_uses_selected_interpreter(monkeypatch, t
 
     assert raised.value.code == 0
     assert calls[0][0] == "sync"
-    assert calls[-1] == ("validate", plugin_dir, selected_python)
+    assert calls[-1] == ("validate", plugin_dir, ([str(selected_python)], selected_env))
 
 
 def test_requires_hermes_spec_is_validated(tmp_path):
@@ -437,6 +456,36 @@ class TestDesktopSurface:
             "remote import outside the SDK (desktop/plugin.js:4)",
         ]
 
+    def test_root_layout_plugin_js_is_linted_like_desktop_plugin_js(self, tmp_path):
+        """The Desktop installer takes a repo-root ``plugin.js`` as the entry (ahead of
+        ``desktop/plugin.js``) and publishes the root beside it, so admission lints that layout too:
+        the entry, the root JS shipped next to it, and a ``desktop/`` tree that rides along."""
+        d = tmp_path / "root-desk"
+        (d / "desktop").mkdir(parents=True)
+        (d / "sidecar").mkdir()
+        (d / "plugin.yaml").write_text(yaml.safe_dump(dict(BASE_MANIFEST, name="root-desk")), encoding="utf-8")
+        (d / "plugin.js").write_text(
+            "import { definePlugin } from '@hermes/plugin-sdk'\n"
+            "document.querySelectorAll('[data-slot=\"dialog-overlay\"]').forEach(el => el.remove())\n",
+            encoding="utf-8")
+        (d / "helper.js").write_text("const s = document.createElement('script')\n", encoding="utf-8")
+        (d / "desktop" / "plugin.js").write_text("eval(payload)\n", encoding="utf-8")
+        (d / "sidecar" / "worker.js").write_text("const m = await import('jszip')\n", encoding="utf-8")
+        assert desktop_surface_hits(d) == [
+            "dynamic code evaluation (desktop/plugin.js:1)",
+            "script injection (helper.js:1)",
+            "app DOM reach (plugin.js:2)",
+        ]
+        report = validate_plugin_dir(d)
+        failed = {name: detail for name, ok, detail in report.checks if not ok}
+        assert "app DOM reach (plugin.js:2)" in failed["desktop surface"]
+
+        (d / "plugin.js").write_text("import { definePlugin } from '@hermes/plugin-sdk'\n", encoding="utf-8")
+        (d / "helper.js").unlink()
+        (d / "desktop" / "plugin.js").unlink()
+        report = validate_plugin_dir(d)
+        assert ("desktop surface", True, "stays inside the plugin SDK surface") in report.checks
+
 
 def test_runtime_rebind_of_hermes_core_fails_admission(tmp_path):
     """A plugin that replaces Hermes core in place fails ``no core override``: through a module
@@ -503,3 +552,33 @@ def test_core_override_through_a_method_patch_helper(tmp_path):
     from hermes_cli.plugin_validate_core_override import core_override_findings
 
     assert core_override_findings(bad) == ["bind(auxiliary_client, ...) (__init__.py:6)"]
+
+
+def test_install_deps_probe_imports_from_the_synced_environment(tmp_path: Path, monkeypatch, capsys) -> None:
+    """`--install-deps` commits a new dependency environment this process never switches to;
+    the probe must import the plugin from that environment, not the validator's own."""
+    import os
+    import sys
+
+    import pm
+    import pm.environments as environments
+    from hermes_cli.plugins_cmd_catalog import cmd_validate
+
+    deps = tmp_path / "synced-site-packages"
+    deps.mkdir()
+    (deps / "probe_only_dep.py").write_text("VALUE = 1\n", encoding="utf-8")
+    plugin = _make_plugin(tmp_path, manifest={"name": "needs-dep", "version": "1.0.0", "description": "d"},
+                          init_py="import probe_only_dep\n\ndef register(ctx):\n    pass\n")
+    synced_env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(Path(__file__).resolve().parents[2]), str(deps)])}
+    monkeypatch.setattr(pm, "sync_venv", lambda **_kw: None)
+    monkeypatch.setattr(environments, "project_python", lambda _root: Path(sys.executable))
+    monkeypatch.setattr(environments, "selected_venv", lambda _root: tmp_path / "synced-venv")
+    monkeypatch.setattr(environments, "venv_command", lambda _root, _venv, options=(): [sys.executable, *options])
+    monkeypatch.setattr(environments, "activation_environment", lambda _root: synced_env)
+
+    try:
+        cmd_validate(str(plugin), as_json=True, install_deps=True)
+    except SystemExit:
+        pass
+    checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert checks["capability probe"]["ok"], checks["capability probe"]["detail"]

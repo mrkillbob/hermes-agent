@@ -97,6 +97,8 @@ def test_release_reuses_whole_ci_and_docker_before_publication():
     for name in ("acceptance", "publication", "complete"):
         failed = {need: {"result": "failure"} for need in ancestors(jobs, name)}
         assert gate(jobs[name]["if"], {}, failed), name
+        assert not gate(jobs[name]["if"], {}, failed,
+                        github={"repository": "mrkillbob/hermes-agent"}), name
 
 
 def test_claim_flags_remove_exactly_the_jobs_the_gate_expects_skipped():

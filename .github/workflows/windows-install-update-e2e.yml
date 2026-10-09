@@ -14,6 +14,23 @@ name: Windows install + update E2E
 
 on:
   workflow_call:
+    inputs:
+      strict_acceptance:
+        description: >-
+          Acceptance runs only: known_failure owners whose gaps FAIL this run instead of xfailing ('upd-txn', a comma list, or '1' for every gap). Sets HERMES_E2E_STRICT_ACCEPTANCE for the E2E suites (tests/e2e/core/_pending_fixes.py).
+        type: string
+        required: false
+        default: ''
+  # An acceptance run of an integrated batch on its own: e.g.
+  # `gh workflow run windows-install-update-e2e.yml --ref <branch> -f strict_acceptance=upd-txn`.
+  workflow_dispatch:
+    inputs:
+      strict_acceptance:
+        description: >-
+          Acceptance runs only: known_failure owners whose gaps FAIL this run instead of xfailing ('upd-txn', a comma list, or '1' for every gap). Sets HERMES_E2E_STRICT_ACCEPTANCE for the E2E suites (tests/e2e/core/_pending_fixes.py).
+        type: string
+        required: false
+        default: ''
   push:
     branches: ['wine2e-install/**']
 
@@ -38,9 +55,14 @@ jobs:
           - test_git_and_holders.py
           - test_interpreter.py
           - test_paths_and_acls.py
+          - test_crash_cells.py
+          - test_pause_custody.py
+          - test_pause_durable.py
+          - test_update_lock_tree.py
+          - test_update_spares_other_installs.py
     # Each file provisions a cold install that takes about 17-22 minutes. Isolate files on
-    # separate hosted runners so the fork does not serialize those installs into a 50-minute job.
-    timeout-minutes: 40
+    # separate hosted runners so the fork does not serialize those installs into a single serial job.
+    timeout-minutes: 75
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -66,6 +88,7 @@ jobs:
             -m "platforms and integration" -v --tb=short -rA
         env:
           HERMES_E2E_WINDOWS_INSTALL: '1'
+          HERMES_E2E_STRICT_ACCEPTANCE: ${{ inputs.strict_acceptance }}
           # Machine work dirs (serve.git, transcripts) stay short under runner.temp. The fake
           # user profiles live in C:\Users itself, where a real one does: the checkout carries
           # 159-character paths, so a deeper profile hits MAX_PATH where no user would (the
@@ -74,11 +97,27 @@ jobs:
           HERMES_E2E_PROFILES_ROOT: C:\Users
           HERMES_E2E_ARTIFACTS: ${{ runner.temp }}\win-update-e2e
           HERMES_TEST_WORKERS: '1'
-          HERMES_TEST_FILE_TIMEOUT: '2400'
+          # The crash-cell journey needs up to an hour on a standard hosted runner.
+          HERMES_TEST_FILE_TIMEOUT: '3600'
           HERMES_TEST_FILE_RETRIES: '0'
           OPENROUTER_API_KEY: ''
           OPENAI_API_KEY: ''
           NOUS_API_KEY: ''
+
+      - name: Every crash cell ran
+        if: matrix.test_file == 'test_crash_cells.py'
+        # run_tests.sh passes a file whose tests were all deselected (pytest exit 5) or skipped,
+        # so a lost marker or opt-in would run zero crash cells green. The crash journey writes
+        # this manifest only when it ran (tests/e2e/core/windows_update/test_crash_cells.py).
+        shell: pwsh
+        env:
+          HERMES_E2E_ARTIFACTS: ${{ runner.temp }}\win-update-e2e
+        run: |
+          $manifest = Join-Path $env:HERMES_E2E_ARTIFACTS 'crash-cells-ran.txt'
+          if (-not (Test-Path -LiteralPath $manifest)) {
+            throw "test_crash_cells.py ran no crash cells: $manifest is missing"
+          }
+          Get-Content -LiteralPath $manifest
 
       - name: Upload transcripts, logs and receipts
         if: always()

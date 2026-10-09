@@ -22,6 +22,7 @@ import { useI18n } from '@/i18n'
 import {
   type ChatMessage,
   preserveLocalAssistantErrors,
+  QUESTION_CARD_TOOLS,
   restorePendingClarifyToolCall,
   settlePendingClarifyToolCall,
   stripPendingClarifyProjectionForCache,
@@ -38,7 +39,6 @@ import { clearQueuedPrompts, migrateQueuedPrompts } from '@/store/composer-queue
 import { resetSessionBackground } from '@/store/composer-status'
 import { $connectionRequests } from '@/store/connection-request'
 import {
-  $gateway,
   isActivePrimary,
   openGatewayForAgent,
   openGatewayForProfile,
@@ -67,7 +67,7 @@ import {
 } from '@/store/profile'
 import { $projectScope } from '@/store/project-scope'
 import { projectProfile, resolveNewSessionCwd } from '@/store/projects'
-import { clearAllPrompts, receiveApprovalRequest, replayPendingApproval } from '@/store/prompts'
+import { clearAllPrompts } from '@/store/prompts'
 import { clearStoredTranscriptReadOnly, markStoredTranscriptReadOnly } from '@/store/read-only-transcript'
 import {
   $activeSessionStoredIdRotation,
@@ -84,7 +84,6 @@ import {
   $sessions,
   $yoloActive,
   getCurrentModelSource,
-  getSessionOwnerHint,
   idsShareLineage,
   type NewChatWorkspaceTarget,
   resolveComposerSessionKey,
@@ -103,7 +102,6 @@ import {
   setIntroSeed,
   setMessages,
   setNewChatWorkspaceTarget,
-  setResumeExhaustedSessionId,
   setResumeFailedSessionId,
   setSelectedStoredSessionId,
   setSessionOwnerHint,
@@ -130,7 +128,6 @@ import {
   type SessionProfileRoute
 } from '@/store/session-request-router'
 import {
-  $sessionTiles,
   closeSessionTile,
   dropSessionState,
   focusOpenSession,
@@ -160,16 +157,25 @@ import type {
 
 import { navigateToWorkspacePage, NEW_CHAT_ROUTE, sessionRoute, SETTINGS_ROUTE } from '../../../routes'
 import type { ClientSessionState, SidebarNavItem } from '../../../types'
-import { pinStoredSessionForOwner, releaseStoredSessionPins, sessionContextDrift } from '../session-context-drift'
+import {
+  pinStoredSessionForOwner,
+  releaseStoredSessionPins,
+  resumeRouteStillCurrent,
+  sessionContextDrift
+} from '../session-context-drift'
 import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-resume'
 
+import { branchCreateKey } from './branch-create-key'
 import { sessionCreateOverrideParams, type SessionCreateOverrides, type SessionSeedMessage } from './create-overrides'
 import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this-run'
 import { captureDisplayHydration } from './display-hydration'
 import { reconcilePersistedLiveTurn } from './persisted-live-turn'
 import { provisionalTranscriptPaint, transcriptRestScope } from './provisional-transcript'
+import { rememberedOwnerForResume } from './remembered-owner'
+import { restorePendingApproval } from './restore-pending-approval'
 import { pendingClarifyToolPayload, restorePendingClarifyFromSnapshot } from './restore-pending-clarify'
 import { projectPendingConnection, restorePendingConnectionFromSnapshot } from './restore-pending-connection'
+import { preparePrimarySessionResume } from './resume-entry'
 import { createGatewaySession } from './session-create-request'
 import {
   createPersistedDisplayTranscriptProvenance,
@@ -243,42 +249,6 @@ export interface BranchLoadedSessionOptions {
   messages: ChatMessage[]
   runtimeId: null | string
   storedSessionId: null | string
-}
-
-const branchMessagesFingerprint = (messages: BranchMessage[]): string =>
-  JSON.stringify(messages.map(({ content, role }) => [role, content]))
-
-// Identity of one branch create, so a re-entered branch action (a retried
-// renderer transition, a double right-click) rides the create already in
-// flight instead of minting a second child. The OWNER is part of the identity:
-// the same parent id served by two connections is two different sessions.
-function branchCreateKey({
-  branchCount,
-  branchMessages,
-  cwd,
-  ownerRoute,
-  parentStoredId,
-  profile,
-  sourceSessionId
-}: {
-  branchCount?: number
-  branchMessages: BranchMessage[]
-  cwd?: string
-  ownerRoute?: SessionOwnerRoute
-  parentStoredId: null | string
-  profile?: null | string
-  sourceSessionId: null | string
-}): string {
-  return JSON.stringify({
-    branchCount: branchCount ?? null,
-    connectionId: ownerRoute?.connectionId || null,
-    cwd: cwd?.trim() || null,
-    messages: sourceSessionId ? null : branchMessagesFingerprint(branchMessages),
-    ownerProfile: ownerRoute?.profile || null,
-    parentStoredId,
-    profile: profile?.trim() || null,
-    sourceSessionId
-  })
 }
 
 // How long we keep creatingSessionRef after create/fork navigate before giving up
@@ -419,7 +389,7 @@ function withoutEarlyClarifyProjection(messages: ChatMessage[], requestId: strin
       part =>
         !(
           part.type === 'tool-call' &&
-          part.toolName === 'clarify' &&
+          QUESTION_CARD_TOOLS.has(part.toolName) &&
           part.result === undefined &&
           part.toolCallId === requestId
         )
@@ -448,30 +418,6 @@ function livePromptStreamId(
   const live = projections.find(Boolean)
 
   return live ? { awaitingResponse: false, sawAssistantPayload: true, streamId: live.streamId } : {}
-}
-
-function restorePendingApproval(response: SessionResumeResult, sessionId: string): boolean {
-  const pending = response.pending_approval
-
-  if (!pending) {
-    return false
-  }
-
-  // The live `approval` server request (re-delivered from `open_requests`
-  // before this ran) already parked itself with the same queue id; don't
-  // clobber it with a copy that can only answer through the RPC fallback.
-  void receiveApprovalRequest(null, {
-    allowPermanent: pending.allow_permanent !== false,
-    choices: pending.choices,
-    command: pending.command ?? '',
-    description: pending.description ?? 'dangerous command',
-    requestId: typeof pending.request_id === 'string' ? pending.request_id : undefined,
-    sessionId,
-    smartDenied: pending.smart_denied === true
-  })
-  void replayPendingApproval($gateway.get(), sessionId).catch(() => undefined)
-
-  return true
 }
 
 function normalizeNewChatWorkspaceTarget(target: NewChatWorkspaceTarget): NewChatWorkspaceTarget {
@@ -1335,7 +1281,7 @@ export function useSessionActions({
       const isCurrentResume = () =>
         resumeRequestRef.current === requestId &&
         selectedStoredSessionIdRef.current === storedSessionId &&
-        getRouteToken() === routeToken
+        resumeRouteStillCurrent(routeToken, getRouteToken(), storedSessionId)
 
       // A reconnect re-resumes the runtime this view is streaming. Let its
       // replay land while that runtime still owns the view. Otherwise the REST
@@ -1367,28 +1313,7 @@ export function useSessionActions({
       setSelectedStoredSessionId(storedSessionId)
       selectedStoredSessionIdRef.current = storedSessionId
 
-      // A session is EITHER the main thread OR a tile — never both. openSessionTile
-      // enforces this from the tile side (it refuses to tile the selected session);
-      // this enforces it from the main side. Loading an existing session into main
-      // (cold-start restore, a pasted/⌘K route, a notification jump) while it's also
-      // an open tile would paint the same transcript twice — the workspace pane from
-      // the route and the tile pane in parallel, both fighting one runtime. Drop the
-      // now-redundant tile so main owns it. Runs before the async awaits below (and
-      // before the selection listener homes focus) so the tile is gone the same tick
-      // the route takes over; the warm cache/runtime binding survives for main to reuse.
-      if ($sessionTiles.get().some(t => t.storedSessionId === storedSessionId)) {
-        closeSessionTile(storedSessionId)
-      }
-
-      // Optimistically clear any prior resume-failure latch for this session:
-      // we're attempting a fresh resume, so the self-heal in use-route-resume
-      // must not keep treating it as stranded. It's re-armed below only if THIS
-      // attempt fails terminally (RPC reject + REST fallback failure).
-      setResumeFailedSessionId(current => (current === storedSessionId ? null : current))
-      // Also clear the exhausted-latch: a fresh attempt (manual Retry, reconnect,
-      // reselect) gives the bounded auto-retry counter a clean cycle, so the
-      // chat view drops the error state and shows the loader again.
-      setResumeExhaustedSessionId(current => (current === storedSessionId ? null : current))
+      preparePrimarySessionResume(storedSessionId)
 
       // A warm cache entry is only trustworthy when it still BELONGS to the
       // session being resumed. A pooled profile backend that gets idle-reaped
@@ -1446,7 +1371,15 @@ export function useSessionActions({
       // gateway call (no-op when it's already on that profile / single-profile).
       // resolveStoredSession finds the row by id (cheap), so an uncached pasted
       // id loads as fast as a sidebar click instead of hanging on a list scan.
-      const ownerRoute = capturedOwner || getSessionOwnerHint(storedSessionId)
+      //
+      // Only the REMEMBERED hint is validated (remembered-owner.ts); an explicitly captured owner
+      // (requestSessionResume with a row route, a plugin open) is authoritative as given.
+      const rememberedOwner = capturedOwner ? undefined : rememberedOwnerForResume(storedSessionId)
+
+      // An explicit capture outranks the remembered hint; the hint only
+      // fills in when the caller had no route to give.
+      const ownerRoute = capturedOwner || rememberedOwner
+
       // A connection switch clears/reloads the session rows before this path
       // runs, so an untagged row belongs to the connection that supplied the
       // current list. Capture that source before the async metadata lookup. If

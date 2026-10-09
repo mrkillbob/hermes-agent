@@ -66,7 +66,7 @@ def test_force_close_tcp_sockets_shutdown_only_no_close():
     FD-recycling race that corrupted ``kanban.db`` (issue #29507) will
     re-open. Pin the contract explicitly.
     """
-    from agent.agent_runtime_helpers import force_close_tcp_sockets
+    from agent.agent_runtime_helpers_connections import force_close_tcp_sockets
 
     sock = _FakeSocket()
     client = _build_fake_client(sock)
@@ -87,7 +87,7 @@ def test_force_close_tcp_sockets_uses_shut_rdwr():
     Half-close (e.g. SHUT_WR only) wouldn't unblock a worker blocked in
     ``recv``, defeating the whole point of the helper.
     """
-    from agent.agent_runtime_helpers import force_close_tcp_sockets
+    from agent.agent_runtime_helpers_connections import force_close_tcp_sockets
 
     captured = []
 

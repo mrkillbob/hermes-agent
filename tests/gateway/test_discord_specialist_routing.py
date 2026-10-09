@@ -63,6 +63,7 @@ def test_specialist_route_creates_one_handoff_and_acknowledges(monkeypatch, tmp_
     from pathlib import Path
     from gateway.configured_board import configured_board_db_path
     from gateway.specialist_routing import RouteKind, SpecialistRouteDecision
+    from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect_closing
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -74,6 +75,7 @@ def test_specialist_route_creates_one_handoff_and_acknowledges(monkeypatch, tmp_
     (profile_dir / "identity.json").write_text("{}")
     adapter = _adapter(monkeypatch)
     settings = adapter._specialist_routing_settings()
+    kb.create_board(settings["board"])
     settings["capabilities"]["task-orchestrator"] = dict(
         settings["capabilities"]["burndown-patch-steward"])
     registry = adapter._specialist_capability_registry(settings)
