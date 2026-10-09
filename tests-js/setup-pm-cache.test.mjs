@@ -10,6 +10,8 @@ const save = action('../.github/actions/save-pm-cache/action.yml')
 // how a gate behaves rather than how it is spelled. Status functions default
 // to a healthy, uncancelled run; `status` overrides them.
 const evaluate = (expression, { status = {}, ...context } = {}) => {
+  // Release fixtures model upstream unless a fork identity is supplied.
+  context.github = { repository: 'NousResearch/hermes-agent', ...context.github }
   const lookup = path => path.split('.').reduce(
     (value, key) => (value !== null && typeof value === 'object' ? value[key] : undefined), context) ?? ''
   const statuses = { always: true, success: true, failure: false, cancelled: false, ...status }
@@ -137,6 +139,9 @@ it.each([
     expect(evaluate(job.if, { inputs: dispatches.tag, needs })).toBe(cacheMode === 'write')
     expect(evaluate(job.if, { inputs: dispatches.commit, needs })).toBe(cacheMode === 'read')
     expect(evaluate(job.if, { inputs: dispatches.channel, needs })).toBe(cacheMode === 'read')
+    for (const inputs of Object.values(dispatches)) {
+      expect(evaluate(job.if, { inputs, needs, github: { repository: 'mrkillbob/hermes-agent' } })).toBe(false)
+    }
   }
   const cacheSteps = job.steps.filter(step => step.uses === BUILD_CACHE)
   expect(cacheSteps.map(step => step.with.phase)).toEqual(['restore', 'save'])

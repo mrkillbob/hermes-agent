@@ -97,6 +97,8 @@ def test_release_reuses_whole_ci_and_docker_before_publication():
     for name in ("acceptance", "publication", "complete"):
         failed = {need: {"result": "failure"} for need in ancestors(jobs, name)}
         assert gate(jobs[name]["if"], {}, failed), name
+        assert not gate(jobs[name]["if"], {}, failed,
+                        github={"repository": "mrkillbob/hermes-agent"}), name
 
 
 def test_claim_flags_remove_exactly_the_jobs_the_gate_expects_skipped():
@@ -315,11 +317,14 @@ def test_publication_reconciler_has_every_recovery_trigger_and_shared_lock():
     # a manual dispatch of the reconciler always runs.
     def run_of(**overrides):
         workflow_run = {"conclusion": "failure", "event": "workflow_dispatch",
-                        "head_repository": {"full_name": "o/r"}, **overrides}
-        return {"event_name": "workflow_run", "repository": "o/r", "event": {"workflow_run": workflow_run}}
+                        "head_repository": {"full_name": "NousResearch/hermes-agent"}, **overrides}
+        return {"event_name": "workflow_run", "repository": "NousResearch/hermes-agent",
+                "event": {"workflow_run": workflow_run}}
 
     assert gate(reconcile["if"], {}, {}, github=run_of())
     assert gate(reconcile["if"], {}, {}, github={"event_name": "workflow_dispatch"})
+    assert not gate(reconcile["if"], {}, {}, github={
+        "event_name": "workflow_dispatch", "repository": "mrkillbob/hermes-agent"})
     for refused in ({"conclusion": "success"}, {"event": "push"}, {"head_repository": {"full_name": "fork/r"}}):
         assert not gate(reconcile["if"], {}, {}, github=run_of(**refused)), refused
     checkout = reconcile["steps"][0]
