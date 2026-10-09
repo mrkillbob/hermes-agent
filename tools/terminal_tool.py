@@ -1336,11 +1336,11 @@ def _pre_exec_block(
     command: str, *, env: Any, env_type: str, cwd: str,
     workdir: Optional[str], session_key: str,
 ) -> None:
-    """Raise :class:`_Rejected` with the blocked-result JSON when the command must not run.
+    """Worker budget applies before force; then lifecycle, workdir, and local source guards."""
+    from tools.approval import _kanban_github_actions_block_result, _kanban_github_actions_mutation
 
-    Order matters: gateway lifecycle first (protects the running gateway),
-    then the dangerous-workdir check, then the self-repo guard (local only).
-    """
+    if _kanban_github_actions_mutation(command):
+        raise _Rejected(_error_json(_kanban_github_actions_block_result()["message"], status="blocked"))
     blocked = gateway_lifecycle_block(
         command=command, env=env, env_type=env_type, cwd=cwd, workdir=workdir, session_key=session_key,
     )
