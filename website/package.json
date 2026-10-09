@@ -6,9 +6,9 @@
     "docusaurus": "docusaurus",
     "prestart": "node scripts/prebuild.mjs",
     "start": "docusaurus start",
-    "prebuild": "node scripts/prebuild.mjs",
+    "prebuild": "npm run test:security && node scripts/prebuild.mjs",
     "build": "docusaurus build",
-    "build:fast": "docusaurus build --locale en",
+    "build:fast": "npm run test:security && docusaurus build --locale en",
     "swizzle": "docusaurus swizzle",
     "deploy": "docusaurus deploy",
     "clear": "docusaurus clear",
@@ -16,7 +16,8 @@
     "write-translations": "docusaurus write-translations",
     "write-heading-ids": "docusaurus write-heading-ids",
     "typecheck": "tsc -p . --noEmit",
-    "lint:diagrams": "ascii-guard lint --exclude-code-blocks docs"
+    "lint:diagrams": "ascii-guard lint --exclude-code-blocks docs",
+    "test:security": "node --test scripts/test-braces-depth-guard.cjs"
   },
   "dependencies": {
     "@docusaurus/core": "3.10.2",
@@ -54,7 +55,8 @@
     "proxy-addr": "2.0.8",
     "tinypool": "2.1.2",
     "postcss-selector-parser": "7.1.6",
-    "katex": "0.18.2"
+    "katex": "0.18.2",
+    "braces": "npm:@dieub/braces-depth-guard@3.0.3-pn.3"
   },
   "browserslist": {
     "production": [
