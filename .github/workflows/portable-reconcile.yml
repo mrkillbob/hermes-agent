@@ -22,10 +22,10 @@ jobs:
           cache-suffix: pr97370-v14-portable
           save-tools-cache: 'false'
           save-python-cache: 'false'
-      - name: Observe retry, trusted compression and CLI worker regressions
+      - name: Qualify remaining inherited fallback and privacy topic files
         run: |
           set -o pipefail
-          scripts/run_tests.sh -j 1 --file-retries 0 tests/agent/test_context_source_final_read.py | tee portable-focused.log
+          scripts/run_tests.sh -j 1 --file-retries 0 tests/agent/test_auxiliary_auth_rung_fallthrough.py tests/agent/test_auxiliary_auto_never_guesses_provider.py tests/agent/test_auxiliary_client.py tests/agent/test_auxiliary_error_classification.py tests/agent/test_auxiliary_fallback_multihop.py tests/agent/test_auxiliary_main_first.py tests/agent/test_auxiliary_reasoning_field_rejection_retry.py tests/agent/test_auxiliary_title_timeout_bound.py tests/agent/test_codex_aux_no_progress_timeout.py tests/agent/test_codex_request_transport_diagnostics.py tests/agent/test_coding_context.py tests/agent/test_fallback_api_mode_preservation.py tests/agent/test_kanban_stop.py tests/agent/test_llm_egress_firewall.py tests/agent/test_provider_fallback.py tests/agent/test_run_agent.py tests/agent/test_system_prompt.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_remote_kanban_private_work.py tests/tools/test_file_tools_source_provenance.py tests/tools/test_kanban_tools.py tests/tools/test_terminal_foreground_timeout_cap.py | tee portable-focused.log
       - name: Verify source remained frozen
         if: always()
         run: python3 .ci/portable-reconcile/verify_source.py
@@ -33,7 +33,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: final-read-red
+          name: reconciliation-inherited
           path: |
             portable-focused.log
             portable-static.log
