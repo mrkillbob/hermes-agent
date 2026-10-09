@@ -25,6 +25,10 @@ jobs:
           command: npm ci
           working-directory: website
 
+      - name: Check Docusaurus Tinypool compatibility
+        run: node scripts/check-tinypool-compat.mjs
+        working-directory: website
+
       - name: Install ascii-guard
         uses: ./.github/actions/retry
         with:
@@ -59,3 +63,8 @@ jobs:
         # Same pattern Docusaurus uses internally (build:fast --locale en).
         run: npm run build:fast
         working-directory: website
+
+      - name: Audit website dependencies
+        # Fails on any high/critical advisory except the allow-listed ones (braces has no
+        # patched release); see scripts/ci/npm_audit_gate.py.
+        run: python3 scripts/ci/npm_audit_gate.py website

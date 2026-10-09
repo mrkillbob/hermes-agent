@@ -30,12 +30,15 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
+from hermes_cli import kanban_workflow
 from hermes_cli.web_read_coalescing import coalesced_read
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
+from plugins.kanban.dashboard import plugin_api_task_diagnostics as task_diagnostics
+from plugins.kanban.dashboard.plugin_api_diagnostics import warnings_summary
 from hermes_cli.kanban_db import KANBAN_ATTACHMENT_MAX_BYTES, _collision_free_path, _safe_attachment_name
 from hermes_cli.kanban_completion_policy import CompletionPolicyError
 
@@ -198,8 +201,14 @@ def _resolve_board(board: Optional[str]) -> Optional[str]:
     if board is None or board == "":
         return None
     normed = _normalize_slug_or_400(board)
-    if normed and normed != kanban_db.DEFAULT_BOARD and not kanban_db.board_exists(normed):
-        raise HTTPException(status_code=404, detail=f"board {normed!r} does not exist")
+    if normed and normed != kanban_db.DEFAULT_BOARD:
+        if not kanban_db.board_exists(normed):
+            raise HTTPException(status_code=404, detail=f"board {normed!r} does not exist")
+        # An archived board has a tombstone board.json; it must not be openable
+        # (connect() would refuse anyway) — a stale dashboard tab gets a clean
+        # 404 instead of a resurrection or a 500 (#43243).
+        if kanban_db.read_board_metadata(normed).get("archived"):
+            raise HTTPException(status_code=404, detail=f"board {normed!r} is archived")
     return normed
 
 
@@ -294,9 +303,9 @@ def _errors_to_500(prefix: str) -> Iterator[None]:
 
 # --- Serialization helpers --------------------------------------------------
 
-# Dashboard columns, left-to-right ("archived" is a filter toggle, not a column). Keep in
-# sync with kanban_db.VALID_STATUSES — a status missing here gets mis-bucketed into ``todo``.
-BOARD_COLUMNS: list[str] = ["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"]
+# Dashboard columns, left-to-right ("archived" is a filter toggle, not a column), from the
+# one workflow definition. A status missing here gets mis-bucketed into ``todo``.
+BOARD_COLUMNS: list[str] = list(kanban_workflow.DEFAULT_WORKFLOW.keys())
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
 
@@ -328,64 +337,15 @@ def _placeholders(ids: list) -> str:
 
 
 def _compute_task_diagnostics(conn: sqlite3.Connection, task_ids: Optional[list[str]] = None) -> dict[str, list[dict]]:
-    """``{task_id: [diagnostic_dict, ...]}`` (tasks with none omitted) via three aggregate
-    queries (tasks, events, runs) — slurps the board; paginate if profiling shows a hotspot."""
-    from hermes_cli.config import load_config
-
-    if task_ids is not None and not task_ids:
-        return {}
-    diag_config = kd.config_from_runtime_config(load_config())
-    if task_ids is not None:
-        rows = conn.execute(f"SELECT * FROM tasks WHERE id IN ({_placeholders(task_ids)})", tuple(task_ids)).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM tasks WHERE status != 'archived'").fetchall()
-    if not rows:
-        return {}
-    row_ids = [r["id"] for r in rows]
-
-    def _rows_by_task(table: str) -> dict[str, list]:
-        by_task: dict[str, list] = {tid: [] for tid in row_ids}
-        for row in conn.execute(
-            f"SELECT * FROM {table} WHERE task_id IN ({_placeholders(row_ids)}) ORDER BY id", tuple(row_ids)):
-            by_task.setdefault(row["task_id"], []).append(row)
-        return by_task
-
-    events_by_task = _rows_by_task("task_events")
-    runs_by_task = _rows_by_task("task_runs")
-    graph_by_task = kanban_db.task_graph_contexts(conn, row_ids)
-    out: dict[str, list[dict]] = {}
-    for r in rows:
-        tid = r["id"]
-        diags = kd.compute_task_diagnostics(
-            r, events_by_task[tid], runs_by_task[tid], config=diag_config, graph=graph_by_task.get(tid))
-        if diags:
-            out[tid] = [d.to_dict() for d in diags]
-    return out
-
-
-def _warnings_summary_from_diagnostics(diagnostics: list[dict]) -> Optional[dict]:
-    """Compact card badge summary ``{count, kinds, latest_at, highest_severity}``; None when empty."""
-    if not diagnostics:
-        return None
-    kinds: dict[str, int] = {}
-    count = latest = 0
-    highest_idx, highest_sev = -1, None
-    for d in diagnostics:
-        n = d.get("count", 1)
-        kinds[d["kind"]] = kinds.get(d["kind"], 0) + n
-        count += n
-        latest = max(latest, d.get("last_seen_at") or 0)
-        sev = d.get("severity")
-        if sev in kd.SEVERITY_ORDER and kd.SEVERITY_ORDER.index(sev) > highest_idx:
-            highest_idx, highest_sev = kd.SEVERITY_ORDER.index(sev), sev
-    return {"count": count, "kinds": kinds, "latest_at": latest, "highest_severity": highest_sev}
+    return task_diagnostics.compute_task_diagnostics(
+        conn, task_ids, kanban_db=kanban_db, diagnostics=kd, placeholders=_placeholders)
 
 
 def _attach_diagnostics(task_d: dict, diags: Optional[list[dict]]) -> None:
     """Full list in the payload (drawer renders without a second round-trip); card badge gets the summary."""
     if diags:
         task_d["diagnostics"] = diags
-        task_d["warnings"] = _warnings_summary_from_diagnostics(diags)
+        task_d["warnings"] = warnings_summary(diags)
 
 
 def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
@@ -463,8 +423,13 @@ def get_board(
 
         # Queue columns keep list_tasks' dispatch order (priority DESC, created_at ASC).
         tenants = [r["tenant"] for r in conn.execute("SELECT DISTINCT tenant FROM tasks WHERE tenant IS NOT NULL ORDER BY tenant")]
-        assignees = [r["assignee"] for r in conn.execute(
-            "SELECT DISTINCT assignee FROM tasks WHERE assignee IS NOT NULL AND status != 'archived' ORDER BY assignee")]
+        # List of known assignees for the lane-by-profile sub-grouping.
+        # Uses kanban_db.known_assignees so the lane set unions profiles
+        # currently holding non-archived tasks with profiles configured on
+        # disk — a freshly-added profile shows up as a (possibly empty)
+        # lane immediately, matching the assignee picker at /assignees
+        # which already uses this helper.
+        assignees = [entry["name"] for entry in kanban_db.known_assignees(conn)]
         return {
             "columns": [{"name": name, "tasks": columns[name]} for name in columns], "tenants": tenants,
             "assignees": assignees, "latest_event_id": int(latest_event_id), "now": int(time.time())}
@@ -1830,6 +1795,14 @@ class OrchestrationSettingsBody(BaseModel):
 _PROFILE_SETTINGS = ("orchestrator_profile", "default_assignee")
 
 
+@router.get("/workflow")
+def get_workflow():
+    """Board columns (order, label, icon, drag target) and the manual move
+    allow-list. Every board uses the default workflow today; per-board
+    workflows (``board.json``) arrive in a later phase behind this same shape."""
+    return kanban_workflow.DEFAULT_WORKFLOW.to_dict()
+
+
 @router.get("/orchestration")
 def get_orchestration_settings():
     """Current orchestration knobs from config.yaml plus the resolved effective
@@ -1924,6 +1897,19 @@ def _ws_board(raw: Optional[str]) -> Optional[str]:
         return None
 
 
+def _ws_board_live(normed: Optional[str]) -> Optional[str]:
+    """Require an already-normalised slug to name a *live* board.
+
+    A stale dashboard tab can keep its old board slug around after the board
+    was archived or deleted; the event stream must reject it instead of handing
+    it to ``connect(board=slug)``, which would resurrect an empty board (#43243).
+    Returns ``None`` when the board is unknown/archived.
+    """
+    if not normed or normed == kanban_db.DEFAULT_BOARD:
+        return normed
+    return normed if kanban_db.board_exists(normed) else None
+
+
 class _EventTail:
     """Per-socket ``task_events`` tailer. One SQLite connection, used/closed only on a
     dedicated single-thread executor (connections are thread-affine); reusing it avoids
@@ -2013,7 +1999,14 @@ async def stream_events(ws: WebSocket):
     await ws.accept()
     # Board is pinned at the handshake; the UI opens a new WS on board change
     # rather than reconciling two cursors mid-stream.
-    tail = _EventTail(_ws_board(ws.query_params.get("board")))
+    raw_board = _ws_board(ws.query_params.get("board"))
+    board = _ws_board_live(raw_board)
+    if raw_board is not None and board is None:
+        # Stale tab: the slug names an archived or deleted board. Close the
+        # stream instead of connecting, which would resurrect the board (#43243).
+        await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
+        return
+    tail = _EventTail(board)
     since = _since_param(ws)
     try:
         # Capture the tail at accept, before the first wait, so an event that

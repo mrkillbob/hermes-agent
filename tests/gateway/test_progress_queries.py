@@ -16,13 +16,11 @@ BOARD = "exampleproject-burndown"
 
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
-    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    with _hermes_cli_kanban_db_connect.connect(board=BOARD):
-        pass
+    kb.create_board(BOARD)
     return home
 
 
@@ -179,6 +177,7 @@ def test_progress_query_uses_explicit_board_not_current_or_other_board(kanban_ho
     import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     from gateway.progress_queries import resolve_progress_query
 
+    kb.create_board("other-board")
     with _hermes_cli_kanban_db_connect.connect(board="other-board") as conn:
         root = _task(conn, "Exception Burndown", status="done")
         _sub(conn, root)

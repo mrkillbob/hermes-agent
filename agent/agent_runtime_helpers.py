@@ -33,6 +33,7 @@ from agent.error_classifier import FailoverReason
 from agent.retry_utils import parse_retry_after_seconds, reset_delay_from_message
 from agent.message_metadata import MERGED_TURN_PREFIX
 from agent.turn_context import drop_stale_api_content
+from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
 logger = logging.getLogger(__name__)
 
@@ -1471,46 +1472,10 @@ def restore_primary_runtime(agent) -> bool:
     previous_model, previous_provider = (str(v or "unknown") for v in fallback_route)
     provider_fallback_active = bool(getattr(agent, "_provider_fallback_active", False))
     try:
-        _apply_primary_runtime_fields(agent, rt)
-        from agent.turn_recovery import reset_codex_reasoning_replay
-        reset_codex_reasoning_replay(agent)
-        _restore_runtime_capabilities(agent, rt)
-        agent._use_prompt_caching = rt["use_prompt_caching"]
-        # Default to native layout for snapshots predating the native-vs-proxy split.
-        agent._use_native_cache_layout = rt.get(
-            "use_native_cache_layout",
-            agent.api_mode == "anthropic_messages" and agent.provider == "anthropic",
+        from agent.route_binding import reinstall_primary_runtime
+        reinstall_primary_runtime(
+            agent, rt, primary_provider, primary_model, _matches_primary, _load_primary_pool, prefetched_pool, prefetched,
         )
-        # An operator cache disable (_cache_disabled) must survive snapshot restoration.
-        if getattr(agent, "_cache_disabled", False):
-            agent._use_prompt_caching = False
-            agent._use_native_cache_layout = False
-        _rebuild_primary_client(agent, rt, reason="restore_primary")
-        agent.context_compressor.update_model(
-            model=rt["compressor_model"], context_length=rt["compressor_context_length"],
-            base_url=rt["compressor_base_url"], api_key=rt["compressor_api_key"],
-            provider=rt["compressor_provider"], api_mode=rt.get("compressor_api_mode", ""),
-        )
-        # Same rule as fallback activation: refresh an existing verdict only; never-probed sessions stay lazy.
-        if getattr(agent, "_compression_feasibility_checked", False) is True:
-            from agent.conversation_compression import revalidate_compression_feasibility
-            revalidate_compression_feasibility(agent)
-        _rebind_primary_credential_pool(
-            agent, primary_provider, primary_model, _matches_primary, _load_primary_pool, prefetched_pool, prefetched
-        )
-        # Older snapshots have no reasoning_config; keep the current value.
-        saved_reasoning = rt.get("reasoning_config")
-        if saved_reasoning is not None:
-            agent.reasoning_config = dict(saved_reasoning)
-        agent._fallback_activated = False
-        agent._fallback_index = 0
-        agent._rate_limit_backoff_count = 0
-        # Reset the stale-call circuit breaker: its streak measured the fallback provider.
-        from agent.chat_completion_helpers import _reset_stale_streak, rewrite_prompt_model_identity
-        _reset_stale_streak(agent)
-        # Undo the fallback's identity rewrite so the prompt is byte-identical to the stored copy
-        # again (prefix cache match).
-        rewrite_prompt_model_identity(agent, rt["model"], rt["provider"])
         logger.info("Primary runtime restored for new turn: %s (%s)", agent.model, agent.provider)
         agent._provider_fallback_active = False
         agent._provider_fallback_route = None
@@ -2013,7 +1978,11 @@ def _gemini_native_client(agent, client_kwargs: dict, httpx_verify, *, reason: s
 
 
 def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
-    from agent.auxiliary_client import _validate_base_url, _validate_proxy_env_urls
+    from agent.auxiliary_client import (
+        _to_openai_base_url,
+        _validate_base_url,
+        _validate_proxy_env_urls,
+    )
     from agent.ssl_verify import resolve_httpx_verify
     # Treat client_kwargs as read-only: callers pass agent._client_kwargs, and in-place mutation
     # leaks into later requests (a torn-down httpx transport got reused).
@@ -2024,6 +1993,8 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # that specific path; this copy locks the contract so future transport/keepalive work can't reintroduce
     # the same class of bug.
     client_kwargs = dict(client_kwargs)
+    if client_kwargs.get("base_url"):
+        client_kwargs["base_url"] = _to_openai_base_url(client_kwargs["base_url"])
     try:
         from providers import get_provider_profile
 
@@ -2708,10 +2679,6 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     return matches[0] if matches else None
 
 
-# Placeholder for an empty non-final message the provider would reject. Kept identical to the stub
-# placeholder in chat_completion_helpers so healed transcripts read consistently.
-_INTERRUPTED_PLACEHOLDER = "[response interrupted]"
-
 # Escalate repeated heals once per session window, then stay quiet. Default threshold; tunable via
 # ``agent.sanitizer_heal_escalation_threshold`` (<= 0 disables).
 # Repeated heals of the same poisoned transcript used to WARNING on every send (#96870).
@@ -3245,15 +3212,142 @@ def looks_like_codex_intermediate_ack(
 ) -> bool:
     """Detect a planning/ack message that should continue instead of ending the turn.
     ``require_workspace=False`` (opt-in for all api_modes) drops the filesystem/repo reference
-    requirement; future-ack + short-content + no-prior-tools + action-verb checks always apply."""
+    requirement; short-content + no-prior-tools guardrails always apply. A response must then
+    contain either a first-person future acknowledgement with an action marker or a narrowly
+    bounded pronounless action clause with an explicit transition cue; this keeps ordinary
+    conversational replies such as "I'll help you brainstorm" from tripping it."""
     if any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in messages):
         return False
     assistant_text = agent._strip_think_blocks(assistant_content or "").strip().lower()
     if not assistant_text or len(assistant_text) > 1200:
         return False
-    if not _ACK_FUTURE_RE.search(assistant_text):
+    # Some tool-using providers narrate the next action in terse log style
+    # rather than with a first-person lead-in: "Brief written. Creating the
+    # session now." Bare gerunds are too ambiguous ("Reading the traceback
+    # explains the failure" is a final answer), so this path also requires an
+    # explicit transition cue such as "now", "via acpx", "actual log", or
+    # "then launching". Completed reports and questions stay final.
+    action_clause_pattern = re.compile(
+        r"(?:^|[.!…—–]\s+|\n+\s*|,\s+then\s+)"
+        r"(?:(?P<transition>then)\s+)?"
+        r"(?P<action>(?:re)?launching|(?:re)?starting|creating|"
+        r"checking|running|writing|opening|reading|inspecting|reviewing|"
+        r"testing|debugging|searching|fixing)\b"
+    )
+    list_item_prefix_pattern = re.compile(r"(?:^|\n)\s*(?:[-*+]|\d+[.)])\s*$")
+    numbered_item_pattern = re.compile(r"(?:^|\s)(\d+)[.)](?=\s)")
+    status_number_pattern = re.compile(
+        r"\b(?P<label>exit\s+code|attempt|step|retry)\s+"
+        r"(?P<number>\d+)[.)](?=\s)"
+    )
+    question_pattern = re.compile(r"\?(?=\s|$|[\"'’”)\\]])")
+    sentence_boundary_pattern = re.compile(
+        r"(?:[.!…](?=\s|$)|\?(?=\s|$|[\"'’”)\\]])|\n+)"
+    )
+    allowed_trailing_action_pattern = re.compile(
+        r"\s*(?:will\s+report\s+back|"
+        r"then\s+(?:launching|relaunching|starting|restarting|creating)\s+"
+        r"(?:it|(?:the\s+)?(?:session|worker|agent|job|process))|"
+        r"(?:checking|reading|opening|inspecting)\s+(?:the\s+)?(?:log|output))"
+        r"\s*[.!…]?\s*$"
+    )
+    launch_now_tail_pattern = re.compile(
+        r"\s+(?:(?:it|(?:the\s+)?(?:session|worker|agent|job|process)|"
+        r"(?:the\s+)?migration\s+file\s+in\s+the\s+repo)\s+)?"
+        r"now(?:\s*\([^)]*\))?\s*$"
+    )
+    run_now_tail_pattern = re.compile(
+        r"\s+(?:(?:it|(?:the\s+)?(?:(?:repo\s+)?suite|tests?|job|process|"
+        r"server|service))\s+)?now(?:\s*\([^)]*\))?\s*$"
+    )
+    check_now_tail_pattern = re.compile(
+        r"\s+(?:the\s+)?(?:log|output|status|service|session|job)\s+"
+        r"now(?:\s*\([^)]*\))?\s*$"
+    )
+    launch_url_tail_pattern = re.compile(
+        r"\s+now\s*[—–-]\s*see\s+https?://\S+"
+        r"(?:\s+for\s+progress)?\s*$"
+    )
+    provider_tail_pattern = re.compile(
+        r"\s+(?:it|(?:the\s+)?(?:session|worker|agent|job|process))\s+"
+        r"on\s+copilot(?:\s+via\s+acpx)?\s*$"
+    )
+    actual_log_tail_pattern = re.compile(
+        r"\s+(?:the\s+)?actual\s+(?:log|output)\s*$"
+    )
+    health_check_tail_pattern = re.compile(
+        r"\s+whether\b.*\b(?:healthy|ready|running|available|reachable|working)\s*$"
+    )
+    launch_with_pattern = re.compile(
+        r"\s+with\s+(?:(?:corrected|updated|new)\s+"
+        r"(?:arguments?|args?|options?|flags?|parameters?)|"
+        r"globals?\s+before\s+(?:the\s+)?agent\s+name)\s*$"
+    )
+    has_pronounless_action = False
+    step_numbers = {
+        status_match.group("number")
+        for status_match in status_number_pattern.finditer(assistant_text)
+        if status_match.group("label") == "step"
+    }
+    has_step_sequence = len(step_numbers) >= 2
+    numbering_text = status_number_pattern.sub("", assistant_text)
+    numbered_markers = {
+        match.group(1) for match in numbered_item_pattern.finditer(numbering_text)
+    }
+    has_numbered_list = has_step_sequence or bool(numbered_markers)
+    if not question_pattern.search(assistant_text):
+        for action_match in action_clause_pattern.finditer(assistant_text):
+            action_prefix = assistant_text[: action_match.start("action")]
+            if has_numbered_list or list_item_prefix_pattern.search(action_prefix):
+                continue
+            raw_clause_tail = assistant_text[action_match.end() :]
+            boundary_match = sentence_boundary_pattern.search(raw_clause_tail)
+            if boundary_match:
+                clause_tail = raw_clause_tail[: boundary_match.start()]
+                remaining_text = raw_clause_tail[boundary_match.end() :]
+            else:
+                clause_tail = raw_clause_tail
+                remaining_text = ""
+            if remaining_text.strip() and not allowed_trailing_action_pattern.fullmatch(
+                remaining_text
+            ):
+                continue
+            action_word = action_match.group("action")
+            is_launch_action = action_word in {
+                "launching",
+                "relaunching",
+                "starting",
+                "restarting",
+                "creating",
+            }
+            has_transition_cue = bool(
+                (is_launch_action and launch_now_tail_pattern.fullmatch(clause_tail))
+                or (action_word == "running" and run_now_tail_pattern.fullmatch(clause_tail))
+                or (
+                    action_word == "checking"
+                    and check_now_tail_pattern.fullmatch(clause_tail)
+                )
+                or (is_launch_action and launch_url_tail_pattern.fullmatch(clause_tail))
+                or (is_launch_action and provider_tail_pattern.fullmatch(clause_tail))
+                or (
+                    action_word in {"checking", "reading", "opening", "inspecting"}
+                    and actual_log_tail_pattern.fullmatch(clause_tail)
+                )
+                or (
+                    action_word == "checking"
+                    and health_check_tail_pattern.fullmatch(clause_tail)
+                )
+                or (is_launch_action and launch_with_pattern.fullmatch(clause_tail))
+            )
+            if not has_transition_cue:
+                continue
+            has_pronounless_action = True
+            break
+    if not (_ACK_FUTURE_RE.search(assistant_text) or has_pronounless_action):
         return False
-    if not any(marker in assistant_text for marker in _ACK_ACTION_MARKERS):
+    if not has_pronounless_action and not any(
+        marker in assistant_text for marker in _ACK_ACTION_MARKERS
+    ):
         return False
     # Opted-in (all-api_mode) path: future-ack + action verb + no prior tool call suffices.
     if not require_workspace:
@@ -3422,172 +3516,6 @@ def reapply_reasoning_echo_for_provider(agent, api_messages: list) -> int:
     return reapply_reasoning_echo(api_messages, agent._needs_thinking_reasoning_pad())
 
 
-def _iter_httpx_pools_with_owner(http_client: Any):
-    """Yield ``(pool, owner)`` pairs reachable from an httpx client, including mounted transports:
-    keepalive and proxy configs put live connections on ``client._mounts``, which a
-    ``_transport``-only walk misses.
-
-    ``owner`` is ``None`` for a pool this client owns outright, or the ``_SharedTransport`` view
-    id when the pool is process-shared with other clients
-    (``process_bootstrap.build_keepalive_http_client``). Callers must then touch only the
-    in-flight requests stamped with that owner.
-
-    Walking the default transport alone makes ``force_close_tcp_sockets`` return 0 while a stream is still
-    mid-recv — the interrupt logs success and the provider keeps burning the slot (#72975).
-    """
-    seen_pools: set[int] = set()
-    try:
-        transports = [getattr(http_client, "_transport", None)]
-        transports += list((getattr(http_client, "_mounts", None) or {}).values())
-        for transport in transports:
-            if transport is None:
-                continue
-            # Connections live under ``_pool``; a directly mounted HTTPProxy *is* a ConnectionPool,
-            # so ``_connections`` may sit on the transport itself.
-            pool = getattr(transport, "_pool", None)
-            if pool is None and getattr(transport, "_connections", None) is not None:
-                pool = transport
-            if pool is not None and id(pool) not in seen_pools:
-                seen_pools.add(id(pool))
-                owner = id(transport) if type(transport).__name__ == "_SharedTransport" else None
-                yield pool, owner
-    except Exception:
-        return
-
-
-def _iter_httpx_pool_objects(http_client: Any):
-    """Yield httpcore pool objects reachable from an httpx client."""
-    for pool, _owner in _iter_httpx_pools_with_owner(http_client):
-        yield pool
-
-
-def _connection_candidates(conn: Any):
-    """Walk nested wrappers: proxy tunnels (``_connection``) plus httpx/httpcore
-    stream envelopes (``_stream``/``_httpcore_stream``: BoundSyncStream →
-    ResponseStream → connection byte stream → HTTP11/2 connection)."""
-    seen: set[int] = set()
-    stack = [conn]
-    while stack:
-        obj = stack.pop()
-        if obj is None or id(obj) in seen:
-            continue
-        seen.add(id(obj))
-        yield obj
-        for attr in ("_connection", "_stream", "_httpcore_stream"):
-            nxt = getattr(obj, attr, None)
-            if nxt is not None:
-                stack.append(nxt)
-
-
-def _socket_from_candidate(candidate: Any):
-    """Raw socket behind a connection/stream wrapper yielded by ``_connection_candidates``."""
-    stream = getattr(candidate, "_network_stream", None) or getattr(candidate, "_stream", None)
-    sock = _socket_from_stream(stream) if stream is not None else None
-    return sock if sock is not None else _socket_from_stream(candidate)
-
-
-def _socket_from_response(response: Any):
-    """Raw socket behind an httpx response's network stream (``extensions["network_stream"]``
-    first, then ``response.stream``), or None. Callers own their error handling."""
-    exts = getattr(response, "extensions", None) or {}
-    direct = exts.get("network_stream") if isinstance(exts, dict) else None
-    for start in (direct, getattr(response, "stream", None)):
-        if start is None:
-            continue
-        for candidate in _connection_candidates(start):
-            sock = _socket_from_candidate(candidate)
-            if sock is not None:
-                return sock
-    return None
-
-
-def _socket_from_stream(stream: Any):
-    """Raw socket behind an httpcore network stream (several backends), or None."""
-    sock = getattr(stream, "_sock", None)
-    if sock is None and callable(getattr(stream, "get_extra_info", None)):
-        with contextlib.suppress(Exception):
-            sock = stream.get_extra_info("socket")
-    if sock is None:
-        sock = getattr(getattr(stream, "stream", None), "_sock", None)
-    if sock is None and callable(getattr(getattr(stream, "_stream", None), "extra", None)):
-        # anyio-backed streams expose the raw socket through SocketAttribute.raw_socket.
-        with contextlib.suppress(Exception):
-            from anyio.abc import SocketAttribute
-            sock = stream._stream.extra(SocketAttribute.raw_socket)
-    return sock
-
-
-def _iter_pool_sockets(client: Any):
-    """Yield raw sockets reachable from an OpenAI/httpx client pool. Defensive over private
-    httpcore internals (``conn._connection``, proxy tunnel wrappers) that vary by release; also
-    walks mount transports and in-flight ``PoolRequest.connection`` objects (``_connections``
-    is empty during checkout)."""
-    try:
-        # Some SDK wrappers *are* the httpx client; fall through so mount-aware discovery runs.
-        http_client = getattr(client, "_client", None)
-        pools = list(_iter_httpx_pools_with_owner(client if http_client is None else http_client))
-    except Exception:
-        return
-    if not pools:
-        return
-    from agent.process_bootstrap import HERMES_TRANSPORT_OWNER_EXT
-    seen: set[int] = set()
-    for pool, owner in pools:
-        # ``is None``, not falsiness: an empty ``_connections`` must still let us walk in-flight ``_requests``.
-        raw_conns = getattr(pool, "_connections", None)
-        if raw_conns is None:
-            raw_conns = getattr(pool, "_pool", None)
-        # A process-shared pool carries other clients' idle + in-flight connections: only this
-        # client's own in-flight requests (stamped by ``_SharedTransport.handle_request``) may be
-        # shut down.
-        connections = [] if owner is not None else list(raw_conns or [])
-        for pool_req in list(getattr(pool, "_requests", None) or []):
-            if owner is not None:
-                exts = getattr(getattr(pool_req, "request", None), "extensions", None) or {}
-                if exts.get(HERMES_TRANSPORT_OWNER_EXT) != owner:
-                    continue
-            conn = getattr(pool_req, "connection", None)
-            if conn is not None:
-                connections.append(conn)
-        for conn in connections:
-            for candidate in _connection_candidates(conn):
-                sock = _socket_from_candidate(candidate)
-                if sock is not None and id(sock) not in seen:
-                    seen.add(id(sock))
-                    yield sock
-
-
-def _socket_is_dead(sock) -> bool:
-    """Probe socket health with a non-blocking recv peek."""
-    import socket as _socket
-    try:
-        sock.setblocking(False)
-        return sock.recv(1, _socket.MSG_PEEK | _socket.MSG_DONTWAIT) == b""
-    except BlockingIOError:
-        return False  # no data available: socket is healthy
-    except OSError:
-        return True
-    finally:
-        with contextlib.suppress(OSError):
-            sock.setblocking(True)
-
-
-def cleanup_dead_connections(agent) -> bool:
-    """Force-close and rebuild the primary client if its pool has dead sockets (CLOSE-WAIT, errors); returns True if cleaned."""
-    client = getattr(agent, "client", None)
-    if client is None:
-        return False
-    try:
-        dead_count = sum(1 for sock in _iter_pool_sockets(client) if _socket_is_dead(sock))
-        if dead_count > 0:
-            _ra().logger.warning("Found %d dead connection(s) in client pool — rebuilding client", dead_count)
-            agent._replace_primary_openai_client(reason="dead_connection_cleanup")
-            return True
-    except Exception as exc:
-        _ra().logger.debug("Dead connection check error: %s", exc)
-    return False
-
-
 def _set_reset_from_retry_after(context: Dict[str, Any], retry_after: Any) -> None:
     if "reset_at" in context:
         return
@@ -3733,36 +3661,6 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
     )
 
 
-def _shutdown_socket(sock: Any) -> None:
-    """``shutdown(SHUT_RDWR)`` WITHOUT closing the FD. ``close()`` from a non-owner thread is
-    unsafe: the SSL BIO caches the raw FD, the kernel recycles it, and a flushed TLS record lands
-    in the wrong file (once clobbered a SQLite header). ``shutdown()`` is FD-safe from any thread.
-    Already shut down / not connected / FD invalid are all benign."""
-    import socket as _socket
-    try:
-        # Clear a blocking timeout so a hung SSL_read notices the shutdown. Still no close().
-        settimeout = getattr(sock, "settimeout", None)
-        if callable(settimeout):
-            with contextlib.suppress(OSError):
-                settimeout(0)
-        sock.shutdown(_socket.SHUT_RDWR)
-    except OSError:
-        pass
-
-
-def force_close_tcp_sockets(client: Any) -> int:
-    """Abort in-flight TCP I/O on every pool socket via ``_shutdown_socket``. Returns the count
-    (logged as ``tcp_force_closed=N``)."""
-    shutdown_count = 0
-    try:
-        for sock in _iter_pool_sockets(client):
-            _shutdown_socket(sock)
-            shutdown_count += 1
-    except Exception as exc:
-        _ra().logger.debug("Force-close TCP sockets sweep error: %s", exc)
-    return shutdown_count
-
-
 __all__ = [
     "convert_to_trajectory_format", "sanitize_tool_call_arguments", "repair_message_sequence",
     "strip_think_blocks", "recover_with_credential_pool", "try_recover_primary_transport",
@@ -3770,7 +3668,6 @@ __all__ = [
     "dump_api_request_debug", "prompt_caching_disabled_from_config", "blank_cache_policy_stub",
     "plan_cache_sections_for_destination", "anthropic_prompt_cache_policy", "create_openai_client",
     "switch_model", "invoke_tool", "repair_tool_call", "sanitize_api_messages",
-    "looks_like_codex_intermediate_ack", "copy_reasoning_content_for_api", "cleanup_dead_connections",
-    "extract_api_error_context", "apply_pending_steer_to_tool_results", "_iter_pool_sockets",
-    "force_close_tcp_sockets",
+    "looks_like_codex_intermediate_ack", "copy_reasoning_content_for_api",
+    "extract_api_error_context", "apply_pending_steer_to_tool_results",
 ]

@@ -34,6 +34,8 @@ Usage:
     pytest failure. Tokens after ``--`` are never validated.
 
 Environment:
+    HERMES_TEST_SCRATCH_ROOT  Absolute caller-owned root for per-file temporary
+                              directories and cleanup (default: per-user disk root)
     HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
     HERMES_TEST_PATHS    Override discovery roots (colon-sep; on Windows
                          ';' also works and drive letters are handled;
@@ -45,6 +47,7 @@ Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -99,6 +102,14 @@ def _runner_scratch_root() -> str:
     later makedirs/mkdtemp here fail with EPERM for every other user on the host, with no way
     back that does not need root. Keying by uid means no run is blocked by another's leftovers.
     """
+    configured = os.environ.get("HERMES_TEST_SCRATCH_ROOT")
+    if configured is not None:
+        if not configured or not os.path.isabs(configured):
+            raise ValueError("HERMES_TEST_SCRATCH_ROOT must be an absolute directory")
+        root = os.path.realpath(configured)
+        os.makedirs(root, exist_ok=True)
+        return root
+
     name = "hermes-pytest" + (f"-{os.getuid()}" if hasattr(os, "getuid") else "")
     if os.name == "nt" or not os.path.isdir("/var/tmp"):  # no-tmp: ok — probing the disk-backed FHS root
         root = os.path.join(tempfile.gettempdir(), name)
@@ -197,6 +208,86 @@ def _split_pathspec(value: str) -> List[str]:
 # this runner never executes them, by construction. The summary calls that
 # out explicitly so a local run isn't misread as covering macOS/Windows
 # behaviour, and names the CI lane where those tests actually execute.
+
+
+def _apply_pytest_ignores(
+    files: List[Path], pytest_args: List[str], repo_root: Path
+) -> List[Path]:
+    """Drop the files a passthrough ``--ignore``/``--ignore-glob`` names.
+
+    Each file is handed to its own pytest as an explicit argument, and pytest
+    applies ``--ignore``/``--ignore-glob`` only while recursing directories,
+    never to an explicit file argument. Forwarded as-is, the flags are no-ops:
+    the CI lane's ``--ignore-glob='*test_desktop_update_windows_*.py'`` gate
+    ran every one of those files on PRs it was meant to spare. Apply them here
+    with pytest's own matching (``fnmatch`` on the absolute path, relative
+    patterns anchored at the invocation directory, the repo root here).
+    """
+    paths: List[Path] = []
+    globs: List[str] = []
+    i = 0
+    while i < len(pytest_args):
+        tok = pytest_args[i]
+        flag, eq, value = tok.partition("=")
+        if flag in ("--ignore", "--ignore-glob"):
+            if not eq:
+                i += 1
+                value = pytest_args[i] if i < len(pytest_args) else ""
+            if value:
+                anchored = Path(value) if Path(value).is_absolute() else repo_root / value
+                if flag == "--ignore":
+                    paths.append(anchored.resolve())
+                else:
+                    globs.append(str(anchored))
+        i += 1
+    if not paths and not globs:
+        return files
+
+    def _ignored(file: Path) -> bool:
+        real = file.resolve()
+        if any(real == p or p in real.parents for p in paths):
+            return True
+        return any(fnmatch.fnmatch(str(file), g) or fnmatch.fnmatch(str(real), g) for g in globs)
+
+    kept = [f for f in files if not _ignored(f)]
+    ignored = len(files) - len(kept)
+    if ignored:
+        print(f"note: --ignore/--ignore-glob excluded {ignored} test "
+              f"file{'s' if ignored != 1 else ''} from this run.", flush=True)
+    return kept
+
+
+def _select_files(
+    args: argparse.Namespace, pytest_passthrough: List[str], repo_root: Path
+) -> Tuple[List[Path], List[Path]]:
+    """Return ``(files, discovery roots)`` for this run, passthrough ignores applied."""
+    # --files / --files-from: explicit file list (argv or file-backed) from
+    # the CI generate job — skip discovery.
+    if args.files and args.files_from:
+        print(
+            "error: --files and --files-from are mutually exclusive", file=sys.stderr
+        )
+        sys.exit(2)
+    roots: List[Path] = []
+    if args.files:
+        files = [repo_root / f for f in _split_pathspec(args.files)]
+    elif args.files_from:
+        files = [repo_root / f for f in _read_files_from(args.files_from)]
+    else:
+        # Resolve discovery roots: positional path args override --paths if any
+        # were supplied, otherwise --paths (which itself defaults to 'tests').
+        if args.paths_positional:
+            roots = [repo_root / p for p in args.paths_positional]
+        else:
+            roots = [repo_root / p for p in _split_pathspec(args.paths)]
+
+        if args.include_integration:
+            # Caller takes responsibility — typically used via explicit -k filter.
+            global _SKIP_PARTS  # noqa: PLW0603 — config knob
+            _SKIP_PARTS = set()
+
+        files = _discover_files(roots)
+    return _apply_pytest_ignores(files, pytest_passthrough, repo_root), roots
 
 
 def _read_files_from(spec: str) -> List[str]:
@@ -1232,33 +1323,7 @@ def main() -> int:
 
     repo_root = Path(__file__).resolve().parent.parent
 
-    # --files / --files-from: explicit file list (argv or file-backed) from
-    # the CI generate job — skip discovery.
-    if args.files and args.files_from:
-        print(
-            "error: --files and --files-from are mutually exclusive", file=sys.stderr
-        )
-        sys.exit(2)
-    if args.files:
-        files = [repo_root / f for f in _split_pathspec(args.files)]
-        roots = []
-    elif args.files_from:
-        files = [repo_root / f for f in _read_files_from(args.files_from)]
-        roots = []
-    else:
-        # Resolve discovery roots: positional path args override --paths if any
-        # were supplied, otherwise --paths (which itself defaults to 'tests').
-        if args.paths_positional:
-            roots = [repo_root / p for p in args.paths_positional]
-        else:
-            roots = [repo_root / p for p in _split_pathspec(args.paths)]
-
-        if args.include_integration:
-            # Caller takes responsibility — typically used via explicit -k filter.
-            global _SKIP_PARTS  # noqa: PLW0603 — config knob
-            _SKIP_PARTS = set()
-
-        files = _discover_files(roots)
+    files, roots = _select_files(args, pytest_passthrough, repo_root)
 
     if not files:
         print("No test files to run", file=sys.stderr)
@@ -1380,7 +1445,10 @@ def main() -> int:
 
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
-    _sweep_killed_run_roots(_runner_scratch_root())
+    # Explicit roots may hold other caller-owned evidence or processes. Only
+    # each newly allocated attempt is disposable there; keep default sweeping.
+    if "HERMES_TEST_SCRATCH_ROOT" not in os.environ:
+        _sweep_killed_run_roots(_runner_scratch_root())
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         # Duration cache for the timeout scaler: known-slow files get

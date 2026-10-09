@@ -174,8 +174,8 @@ def test_finite_batch_returns_parent_interruption(harness, monkeypatch):
     from tools import delegate_tool_dispatch as dispatch_impl
     report_done = dispatch_impl._report_child_done
 
-    def report_completed(*args):
-        report_done(*args)
+    def report_completed(*args, **kwargs):
+        report_done(*args, **kwargs)
         if args[2]["task_index"] == 0:
             completed_reported.set()
 

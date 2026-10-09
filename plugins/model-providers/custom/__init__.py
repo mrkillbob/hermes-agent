@@ -76,7 +76,7 @@ class CustomProfile(ProviderProfile):
                 top_level["reasoning_effort"] = "none"
                 if ollama_endpoint:
                     extra_body["think"] = False
-            elif ctx.get("supports_reasoning") is False:
+            elif ollama_endpoint and ctx.get("supports_reasoning") is False:
                 pass
             elif effort and base_url_host_matches(str(ctx.get("base_url") or ""), "api.groq.com"):
                 # Groq's OpenAI-compatible wire accepts top-level reasoning_effort only as
@@ -87,8 +87,11 @@ class CustomProfile(ProviderProfile):
         return extra_body, top_level
 
     def sanitize_request_kwargs(self, api_kwargs: dict[str, Any], **context: Any) -> dict[str, Any]:
-        """Drop inherited reasoning overrides when endpoint capability says it cannot accept them."""
-        if context.get("supports_reasoning") is not False:
+        """Drop inherited reasoning overrides when an Ollama probe rules out thinking."""
+        # For other custom hosts this flag only gates nested extra_body.reasoning; it
+        # does not rule out the OpenAI-compatible top-level reasoning_effort field.
+        if (not _looks_like_ollama_endpoint(context.get("base_url"))
+                or context.get("supports_reasoning") is not False):
             return api_kwargs
         api_kwargs.pop("reasoning_effort", None)
         extra_body = api_kwargs.get("extra_body")

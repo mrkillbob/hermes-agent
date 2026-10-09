@@ -27,13 +27,16 @@ import { openPluginInstallRequest } from '@/store/plugin-install-request'
 import { openFolderAsProject } from '@/store/projects'
 import {
   $selectedStoredSessionId,
+  forgetSessionOwnerHintsForSession,
   getRememberedRoute,
   getRememberedSessionId,
   resolveComposerSessionKey,
   sessionBelongsToProfile,
   sessionMatchesStoredId,
+  sessionOwnerRouteFromRow,
   setRememberedRoute,
-  setRememberedSessionId
+  setRememberedSessionId,
+  setSessionOwnerHint
 } from '@/store/session'
 import { $botChatScopes, $sessionTiles, storedSessionIdForRuntimeId } from '@/store/session-states'
 import { onSessionsChanged } from '@/store/session-sync'
@@ -63,6 +66,50 @@ interface DesktopIntegrationsParams {
   routedSessionId: null | string
   runtimeIdByStoredSessionId: { readonly current: Map<string, string> }
   sessions: readonly RememberedSession[]
+}
+
+function rememberSessionNavigation({
+  activeProfile,
+  locationPathname,
+  resumeExhaustedSessionId,
+  routedSessionId,
+  sessions
+}: Pick<
+  DesktopIntegrationsParams,
+  'activeProfile' | 'locationPathname' | 'resumeExhaustedSessionId' | 'routedSessionId' | 'sessions'
+>): void {
+  // Remember the open chat (session id for notifications/resume) AND the last
+  // non-overlay route (a page like /skills, or a session route) per profile.
+  // Session-shaped routes require an explicit matching owner; unresolved and
+  // wrong-profile rows must not replace known-safe navigation.
+  // The resume-exhausted session must not be written back into remembered
+  // navigation: the cleanup effect above drops it once, but this
+  // persistence effect re-runs on every session-list refresh while its
+  // deps are unchanged — without the barrier the dead id outlives every
+  // restart and the window boots into the resume-error screen each time.
+  const exhausted = routedSessionId !== null && routedSessionId === resumeExhaustedSessionId
+
+  if (routedSessionId && !exhausted && sessionBelongsToProfile(sessions, routedSessionId, activeProfile)) {
+    // A delegate child (source='subagent') is never itself a rememberable
+    // destination: it is invisible in the sidebar, so a restart would resume
+    // an orphan chat while the sidebar highlights its parent (#56983).
+    // `/branch` children also carry parent_session_id but ARE user-facing —
+    // source, not parenthood, is the discriminator.
+    const routedRow = sessions.find(session => sessionMatchesStoredId(session, routedSessionId))
+
+    const rememberedSessionId =
+      routedRow?.source === 'subagent' ? routedRow.parent_session_id || null : routedSessionId
+
+    if (rememberedSessionId) {
+      setRememberedSessionId(rememberedSessionId, activeProfile)
+      setRememberedRoute(
+        rememberedSessionId === routedSessionId ? locationPathname : sessionRoute(rememberedSessionId),
+        activeProfile
+      )
+    }
+  } else if (!routedSessionId && !isOverlayView(appViewForPath(locationPathname))) {
+    setRememberedRoute(locationPathname, activeProfile)
+  }
 }
 
 /**
@@ -183,6 +230,29 @@ export function useDesktopIntegrations({
         // synchronous there; an unlisted id resolves by id below.
         const rowFor = (id: string) => sessions.find(session => sessionMatchesStoredId(session, id))
 
+        // The same owner hygiene the click path (openStoredSession) applies to
+        // a list row: an untagged row is owned by the ambient backend, so a
+        // stale explicit hint (older builds persisted `local` for legacy
+        // primary-SSH rows) must not survive into the pathname-driven resume —
+        // it would dial the Mac backend for a remote session and die with
+        // "session not found" (#97809). A connection-tagged row pins its exact
+        // route instead, exactly as a clicked row does.
+        const repairOwnerHintsForRestore = (id: string) => {
+          const row = rowFor(id)
+
+          if (!row) {
+            return
+          }
+
+          const ownerRoute = sessionOwnerRouteFromRow(row)
+
+          if (ownerRoute) {
+            setSessionOwnerHint(id, ownerRoute)
+          } else {
+            forgetSessionOwnerHintsForSession(id)
+          }
+        }
+
         const restorableRouteSession = routeSession && rowFor(routeSession)?.source !== 'subagent' ? routeSession : null
 
         if (
@@ -194,6 +264,10 @@ export function useDesktopIntegrations({
           // The user may have started typing on the fresh chat while the
           // backend was still coming up; the composer moves that draft onto
           // the restored session when its scope swaps (#114122).
+          if (routeSession) {
+            repairOwnerHintsForRestore(routeSession)
+          }
+
           announceNewSessionDraftKey(routeSession && resolveComposerSessionKey(routeSession, sessions))
           navigate(route, { replace: true })
 
@@ -210,6 +284,7 @@ export function useDesktopIntegrations({
           // Fast path: a listed, non-delegate row restores directly, exactly
           // as before — no by-id fetch on the common cold start.
           if (rowFor(last)?.source !== 'subagent' && sessionBelongsToProfile(sessions, last, activeProfile)) {
+            repairOwnerHintsForRestore(last)
             announceNewSessionDraftKey(resolveComposerSessionKey(last, sessions))
             navigate(sessionRoute(last), { replace: true })
 
@@ -229,6 +304,7 @@ export function useDesktopIntegrations({
                 return
               }
 
+              repairOwnerHintsForRestore(remembered)
               announceNewSessionDraftKey(resolveComposerSessionKey(remembered, sessions))
               setRememberedSessionId(remembered, activeProfile)
               navigate(sessionRoute(remembered), { replace: true })
@@ -242,38 +318,7 @@ export function useDesktopIntegrations({
       }
     }
 
-    // Remember the open chat (session id for notifications/resume) AND the last
-    // non-overlay route (a page like /skills, or a session route) per profile.
-    // Session-shaped routes require an explicit matching owner; unresolved and
-    // wrong-profile rows must not replace known-safe navigation.
-    // The resume-exhausted session must not be written back into remembered
-    // navigation: the cleanup effect above drops it once, but this
-    // persistence effect re-runs on every session-list refresh while its
-    // deps are unchanged — without the barrier the dead id outlives every
-    // restart and the window boots into the resume-error screen each time.
-    const exhausted = routedSessionId !== null && routedSessionId === resumeExhaustedSessionId
-
-    if (routedSessionId && !exhausted && sessionBelongsToProfile(sessions, routedSessionId, activeProfile)) {
-      // A delegate child (source='subagent') is never itself a rememberable
-      // destination: it is invisible in the sidebar, so a restart would resume
-      // an orphan chat while the sidebar highlights its parent (#56983).
-      // `/branch` children also carry parent_session_id but ARE user-facing —
-      // source, not parenthood, is the discriminator.
-      const routedRow = sessions.find(session => sessionMatchesStoredId(session, routedSessionId))
-
-      const rememberedSessionId =
-        routedRow?.source === 'subagent' ? routedRow.parent_session_id || null : routedSessionId
-
-      if (rememberedSessionId) {
-        setRememberedSessionId(rememberedSessionId, activeProfile)
-        setRememberedRoute(
-          rememberedSessionId === routedSessionId ? locationPathname : sessionRoute(rememberedSessionId),
-          activeProfile
-        )
-      }
-    } else if (!routedSessionId && !isOverlayView(appViewForPath(locationPathname))) {
-      setRememberedRoute(locationPathname, activeProfile)
-    }
+    rememberSessionNavigation({ activeProfile, locationPathname, resumeExhaustedSessionId, routedSessionId, sessions })
   }, [
     activeProfile,
     diskPluginsScanPending,

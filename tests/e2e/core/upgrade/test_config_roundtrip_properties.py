@@ -263,7 +263,7 @@ def _before_version(text: str, block: str) -> str:
 
 
 def gen_case(seed: int, *, long: bool = False, n_sections: tuple = (5, 11), exclude_top: set = frozenset(),
-             null_leaves: bool = True) -> Case:
+             null_leaves: bool = True, require_null_leaf: bool = False) -> Case:
     rng = random.Random(seed)
     env: dict[str, str] = {}
     by_section: dict[str, list] = {}
@@ -286,6 +286,10 @@ def gen_case(seed: int, *, long: bool = False, n_sections: tuple = (5, 11), excl
         sec = sections[0]
         leaf = next(p for p in _leaves(tree) if p[0] == sec)
         _set(tree, leaf, "A" * 76 + "D:\\CentBrowserPortable " + "B" * 60)
+    if require_null_leaf and not any(v is None for v in _leaves(tree).values()):
+        # Schema changes shift seeded samples. Null-specific properties need an
+        # explicit null on a generated documented scalar, before text/oracle emission.
+        _set(tree, next(reversed(_leaves(tree))), None)
     if "providers" not in exclude_top:  # a provider name with a literal dot (#84064 family)
         tree["providers"] = {f"acme.v{seed % 7}": {"base_url": f"http://127.0.0.1:9/v{seed}", "api_mode": "chat_completions"}}
     if "c18_custom_root" not in exclude_top:
@@ -439,7 +443,7 @@ def test_p1_noop_save_is_byte_identical(seed, home, monkeypatch):
 
 @pytest.mark.parametrize("seed", [101, 103])
 def test_p1_explicit_null_leaves_survive_a_noop_save(seed, home, monkeypatch):
-    case = gen_case(seed)
+    case = gen_case(seed, require_null_leaf=True)
     assert any(v is None for v in _leaves(case.tree).values()), f"seed {seed} generated no null leaf"
     _noop_save_roundtrip(case, monkeypatch)
 
@@ -788,7 +792,7 @@ def test_p2_dashboard_partial_put_adds_no_phantom_section(web_app, home, monkeyp
 
 @pytest.mark.parametrize("seed", [607])
 def test_p2_dashboard_noop_put_keeps_explicit_nulls(seed, web_app, home, monkeypatch):
-    case = gen_case(seed)
+    case = gen_case(seed, require_null_leaf=True)
     assert any(v is None for v in _leaves(case.tree).values())
     _dashboard_roundtrip(case, web_app, monkeypatch)
 
