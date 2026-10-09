@@ -90,14 +90,27 @@ def _make_head_moved_side_effect(pre_sha=PRE_SHA, post_sha=POST_SHA):
 
 def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     """Isolate machine maintenance while exercising interrupted fleet updates."""
-    monkeypatch.setattr(hermes_main.subprocess, "run", run_side_effect)
+    def run(cmd, **kwargs):
+        result = run_side_effect(cmd, **kwargs)
+        text_mode = any(
+            kwargs.get(key)
+            for key in ("text", "universal_newlines", "encoding", "errors")
+        )
+        if not text_mode:
+            for stream in ("stdout", "stderr"):
+                value = getattr(result, stream, None)
+                if isinstance(value, str):
+                    setattr(result, stream, value.encode())
+        return result
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", run)
     # The update's git (the commit point's target resolve, the move itself) goes through the custody
     # runner; off Windows it calls subprocess.run, on Windows a job-bound Popen the fake above
     # would miss. Fake the runner itself so the seam holds on every OS.
     from hermes_cli import update_custody
 
     monkeypatch.setattr(update_custody, "run",
-                        lambda argv, *, inherit_lock=False, **kw: run_side_effect(list(argv), **kw))
+                        lambda argv, *, inherit_lock=False, **kw: run(list(argv), **kw))
     monkeypatch.setattr(hermes_main, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(update_cmd, "_prepare_updated_checkout", lambda *a, **k: None)
     (tmp_path / ".git").mkdir()
