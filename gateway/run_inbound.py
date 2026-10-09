@@ -1685,6 +1685,7 @@ class GatewayInboundMixin(GatewayInboundContextMixin, GatewayPluginInjectionMixi
         follow-up paths so attribution, image enrichment, STT, document notes, reply context and
         @ references behave the same. Side effect: buffers per-session native image paths when the
         model supports native vision; the caller consumes that buffer at ``run_conversation``."""
+        event._gateway_source_slices = []
         rehome_inbound_media(event)  # before any consumer (vision, STT, document notes) reads media_urls
         _pending_stt_prepared = hasattr(event, "_gateway_pending_stt_text")
         message_text = (event._gateway_pending_stt_text if _pending_stt_prepared else event.text) or ""
@@ -1703,7 +1704,9 @@ class GatewayInboundMixin(GatewayInboundContextMixin, GatewayPluginInjectionMixi
         message_text = self._prepend_inbound_media_file_notes(message_text, audio_file_paths, video_paths)
         message_text = self._prepend_inbound_document_notes(event, message_text)
         if "@" in message_text:
-            message_text = await self._expand_inbound_context_references(source, session_key, message_text)
+            message_text = await self._expand_inbound_context_references(
+                source, session_key, message_text, source_slices=event._gateway_source_slices,
+            )
             if message_text is None:
                 return None
         # After expansion: the quoted reply is someone else's text and stays literal — an

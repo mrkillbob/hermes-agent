@@ -153,12 +153,11 @@ async def test_at_reference_reaches_preprocessor_with_real_context_length(
     # adopted as the final message text.
     assert result == "[expanded body]"
 
+    # Inbound preparation cannot borrow a previous or unresolved turn's authority.
+    # The consuming-turn invariant covers binding after actual agent resolution.
+    assert captured["proof"] == {}
     if binding == "live":
-        assert captured["proof"]["session_id"] == "live-session"
-        assert captured["proof"]["turn_id"] == "live-turn"
-        assert captured["proof"]["source_provenance_registry"] is state.turn.agent._source_provenance_registry
-    else:
-        assert captured["proof"] == {}
+        assert not hasattr(state.turn.agent, "_source_provenance_registry")
     assert not hasattr(foreign, "_source_provenance_registry")
 
 
