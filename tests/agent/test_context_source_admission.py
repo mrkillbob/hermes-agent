@@ -127,11 +127,11 @@ def test_abandoned_context_preparation_clears_only_pending_authority(
         with pytest.raises(RuntimeError, match="preparation failed"):
             host.chat("Inspect @file:source.py:1-1")
     else:
-        from tui_gateway.prompt_turn import _TurnRun, _release_turn_scopes
+        from tui_gateway import server
         expand("Inspect @file:source.py:1-1")
-        st = _TurnRun(consumer, None, None, False)
-        monkeypatch.setattr("tui_gateway.prompt_turn._clear_session_context", lambda _tokens: None)
-        _release_turn_scopes("test", {}, st)
+        st = server._TurnRun(consumer, None, None, False)
+        monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+        server._release_turn_scopes("test", {}, st)
 
     assert getattr(consumer, "_source_provenance_pending_turn_id", None) is None
     assert not consumer._source_provenance_registry._grants

@@ -65,7 +65,7 @@
   "tools/kanban_tools.py": "3eb3821defbfe52be80698a05f690c9c1e33847a8bd908ee0618d1b9621d97c6",
   "tui_gateway/prompt_turn.py": "26f3f482bdfd9aeec61abf8b8faa8a706f77da7b93fa6a43ba9e9b670d27ad80",
   "website/docs/user-guide/configuration.md": "fb5e657fa7c525af37a944e1d0a96f01447ee6391e4d1a5b851e6debf023133e",
-  "tests/agent/test_context_source_admission.py": "b7321f2f59dd25129406521addbb0bfb22d047010f80fb3eaac429037417641b",
+  "tests/agent/test_context_source_admission.py": "68660546b4877f5faa020fe7d7a60180cfacf0496557eaeb19e8a12061a22f57",
   ".ci/portable-reconcile/verify_source.py": "3235a28022bebbefaa7c4485f7b33eb0baedbbcef54b130c5ba4b636464ca6e9",
   ".github/workflows/portable-reconcile.yml": "2d35b09cb36591ed8378bd9bebcd42d4ffc2076d96cbcc1b35a65a92daf0b791",
   "pyproject.toml": "cadde2f6a92574d292103f43abf66408b1d841cd9ea332ca7f3e3dfc5dcc87fd",
