@@ -70,11 +70,9 @@
   "tools/kanban_tools.py": "3eb3821defbfe52be80698a05f690c9c1e33847a8bd908ee0618d1b9621d97c6",
   "tui_gateway/prompt_turn.py": "cde771e06cd5bb4d75000e089bccc20c28531e6002038502411b06ff6a7830c1",
   "website/docs/user-guide/configuration.md": "fb5e657fa7c525af37a944e1d0a96f01447ee6391e4d1a5b851e6debf023133e",
-  "gateway/kanban_watchers.py": "38056340dcf5e8928bc6149fa8f912eef5d3c6baa7a4f393725f37d28c702228",
-  "gateway/kanban_watchers_dispatcher.py": "5872cc714aec785483635aba251b6933e9f2f8c1ae2b7036685124b498a58e70",
-  "tests/gateway/test_kanban_dispatch_order.py": "b63a2787a998de7b8f4e782d2ff94a04c357f0100f5fee6d6e363aa8f0f49002",
+  "tests/agent/test_context_source_streaming.py": "56953c125204956f09f259af7a775d77d27a02159ce2b8be0890cec14751edea",
   ".ci/portable-reconcile/verify_source.py": "49f9ba77745c938939095fd84325a35a7d2e4504c7565eb64e928056d0c6fded",
-  ".github/workflows/portable-reconcile.yml": "b3b72d899383fa5569eb416736f3e2a582d99600b030cada16e45197436c13c1",
+  ".github/workflows/portable-reconcile.yml": "58214ef72ebedc227539c0054e07c13198004f9a8a8afc62bd70d1f4c55441cd",
   "pyproject.toml": "cadde2f6a92574d292103f43abf66408b1d841cd9ea332ca7f3e3dfc5dcc87fd",
   "uv.lock": "2bc4db483e9cba927cd7147f9ccbb09635f85bb3f1f36d6e9d51d06b65d1c67e",
   "pm/lock.json": "49b79259220160f147255078a19af541a5f328d3871c8041cc1eb909d19eb549"
