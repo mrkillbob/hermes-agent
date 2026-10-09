@@ -117,11 +117,18 @@ def _finalize(
     )
 
 
-@pytest.mark.parametrize("final_response", [None, "", "   "])
-def test_blank_response_at_iteration_limit_requests_summary(
-    monkeypatch, final_response
+@pytest.mark.parametrize(("final_response", "needs_summary"), [
+    (None, True),
+    ("", True),
+    ("   ", True),
+    ([], True),
+    ([{"type": "text", "text": " \t\n"}], True),
+    ([{"type": "text", "text": "composed answer"}], False),
+])
+def test_iteration_limit_summary_depends_on_visible_response_text(
+    monkeypatch, final_response, needs_summary
 ):
-    """A tool-only tail may leave ``final_response`` absent or blank."""
+    """Missing or blank visible text needs a summary; composed text survives."""
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = _LimitAgent()
 
@@ -131,9 +138,13 @@ def test_blank_response_at_iteration_limit_requests_summary(
         exit_reason="unknown",
     )
 
-    assert result["final_response"] == "summary from extra call"
-    assert result["turn_exit_reason"] == "max_iterations_reached(60/60)"
-    assert agent._handle_max_iterations_called is True
+    assert result["final_response"] == (
+        "summary from extra call" if needs_summary else final_response
+    )
+    assert result["turn_exit_reason"] == (
+        "max_iterations_reached(60/60)" if needs_summary else "unknown"
+    )
+    assert agent._handle_max_iterations_called is needs_summary
 
 
 
