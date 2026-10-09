@@ -11,7 +11,11 @@ const KNOWN_TAGS = new Set<KnownTag>([
   "action",
   "result",
 ]);
-const FENCE_RE = /^```/;
+// CommonMark fences: up to 3 spaces of indent, 3+ backticks or tildes (a backtick fence's info
+// string may not contain a backtick). A closer needs the same character, at least the opener's
+// length, and nothing but whitespace after it.
+const FENCE_OPEN_RE = /^ {0,3}(`{3,}(?![^`]*`)|~{3,})/;
+const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 const TAG_RE = /<\/?(thinking|reflection|action|result)>/gi;
 
 export function hasReasoningMarkup(content: string): boolean {
@@ -139,21 +143,29 @@ function splitFenceAware(
   const chunks: Array<{ kind: "prose" | "code"; content: string }> = [];
   const lines = content.split("\n");
   let buffer: string[] = [];
-  let inCode = false;
+  let fence: string | null = null;
 
   for (const line of lines) {
-    if (FENCE_RE.test(line)) {
-      if (!inCode && buffer.length > 0) {
+    const opening = fence === null ? FENCE_OPEN_RE.exec(line) : null;
+    const closing = fence !== null ? FENCE_CLOSE_RE.exec(line) : null;
+    const closes =
+      closing !== null &&
+      fence !== null &&
+      closing[1][0] === fence[0] &&
+      closing[1].length >= fence.length;
+
+    if (opening || closes) {
+      if (!fence && buffer.length > 0) {
         chunks.push({ kind: "prose", content: buffer.join("\n") });
         buffer = [];
       }
       buffer.push(line);
 
-      if (inCode) {
+      if (fence) {
         chunks.push({ kind: "code", content: buffer.join("\n") });
         buffer = [];
       }
-      inCode = !inCode;
+      fence = opening ? opening[1] : null;
       continue;
     }
 
@@ -162,7 +174,7 @@ function splitFenceAware(
 
   if (buffer.length > 0) {
     chunks.push({
-      kind: inCode ? "code" : "prose",
+      kind: fence ? "code" : "prose",
       content: buffer.join("\n"),
     });
   }
