@@ -27,8 +27,8 @@ def test_media_delivery_roots_follow_runtime_profile_home(tmp_path, monkeypatch)
     active_home = tmp_path / "profiles" / "reviewer"
     monkeypatch.setattr(platform_base, "get_hermes_home", lambda: active_home)
     monkeypatch.setattr(platform_base, "MEDIA_DELIVERY_SAFE_ROOTS", ())
-    monkeypatch.setattr(platform_base, "_profile_cache_roots", lambda: [])
-    monkeypatch.setattr(platform_base, "_kanban_attachment_roots", lambda: [])
+    monkeypatch.setattr(platform_base, "_profile_cache_roots", list)
+    monkeypatch.setattr(platform_base, "_kanban_attachment_roots", list)
 
     roots = platform_base._media_delivery_allowed_roots()
 
@@ -51,7 +51,7 @@ def test_media_delivery_roots_follow_runtime_profile_home(tmp_path, monkeypatch)
 
 def test_media_delivery_denies_encrypted_bitwarden_cache(tmp_path, monkeypatch):
     """Encrypted Bitwarden cache is covered by the media credential guard."""
-    import gateway.platforms.base as base
+    from gateway.platforms import base
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
@@ -72,7 +72,7 @@ class TestInboundMediaSizeCap:
 
 
     def test_image_bytes_rejected_when_oversized(self, monkeypatch):
-        import gateway.platforms.base as base
+        from gateway.platforms import base
         monkeypatch.setattr(base, "get_inbound_media_max_bytes", lambda: 16)
         with pytest.raises(ValueError, match="Inbound image payload is too large"):
             cache_image_from_bytes(self._PNG, ext=".png")
@@ -246,7 +246,7 @@ class TestExtractMedia:
 
     def test_single_media_tag(self):
         content = "MEDIA:/path/to/audio.ogg"
-        media, cleaned = BasePlatformAdapter.extract_media(content)
+        media, _cleaned = BasePlatformAdapter.extract_media(content)
         assert len(media) == 1
         assert media[0][0] == "/path/to/audio.ogg"
         assert media[0][1] is False  # no voice tag

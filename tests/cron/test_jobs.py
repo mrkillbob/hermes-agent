@@ -1492,7 +1492,7 @@ class TestLateEnvRepointScopesStore:
     previously read/wrote the import-time jobs.json — the user's real file."""
 
     def test_late_env_repoint_scopes_store(self, tmp_path, monkeypatch):
-        import cron.jobs as jobs
+        from cron import jobs
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         store = jobs._current_cron_store()
@@ -1505,7 +1505,7 @@ class TestLateEnvRepointScopesStore:
 
 
     def test_use_cron_store_override_still_wins(self, tmp_path, monkeypatch):
-        import cron.jobs as jobs
+        from cron import jobs
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "env-home"))
         with jobs.use_cron_store(tmp_path / "override-home"):
@@ -1513,7 +1513,7 @@ class TestLateEnvRepointScopesStore:
             assert store.jobs_file == (tmp_path / "override-home").resolve() / "cron" / "jobs.json"
 
     def test_heartbeat_does_not_recreate_deleted_named_profile(self, tmp_path):
-        import cron.jobs as jobs
+        from cron import jobs
 
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()
@@ -1526,7 +1526,7 @@ class TestLateEnvRepointScopesStore:
         assert not deleted_home.exists()
 
     def test_heartbeat_initializes_existing_named_profile(self, tmp_path):
-        import cron.jobs as jobs
+        from cron import jobs
 
         profile_home = tmp_path / "profiles" / "active"
         profile_home.mkdir(parents=True)
@@ -1551,7 +1551,7 @@ class TestLateEnvRepointScopesStore:
         was first imported before the suite's env isolation applied, that
         path IS the developer's live file — writing a sentinel there is
         exactly the incident this PR exists to prevent."""
-        import cron.jobs as jobs
+        from cron import jobs
 
         sim_old_home = tmp_path / "import-time-home"
         sim_cron = sim_old_home / "cron"
@@ -1968,7 +1968,7 @@ class TestEnsureCronDirWidened:
 
     def test_ensure_cron_dir_named_profile_subdir_fails_closed(self, tmp_path):
         """A subdir under a deleted named profile's cron/ must not recreate it."""
-        import cron.jobs as jobs
+        from cron import jobs
 
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()
@@ -1984,7 +1984,7 @@ class TestEnsureCronDirWidened:
 
     def test_ensure_cron_dir_default_home_creates_subdir(self, tmp_path):
         """A subdir under a default home's cron/ should be created normally."""
-        import cron.jobs as jobs
+        from cron import jobs
 
         default_home = tmp_path / "default_home"
         default_home.mkdir()
@@ -1995,7 +1995,7 @@ class TestEnsureCronDirWidened:
 
     def test_ensure_cron_dir_custom_home_under_profiles_creates_hierarchy(self, tmp_path):
         """A custom home may contain a ``profiles`` ancestor without being a named profile."""
-        import cron.jobs as jobs
+        from cron import jobs
 
         custom_home = tmp_path / "srv" / "profiles" / "team-hermes"
         cron_dir = custom_home / "cron" / "output"
@@ -2006,7 +2006,7 @@ class TestEnsureCronDirWidened:
 
     def test_ensure_cron_dir_named_profile_cron_dir_fails_closed(self, tmp_path):
         """The cron dir of a deleted named profile must not be recreated."""
-        import cron.jobs as jobs
+        from cron import jobs
 
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()
@@ -2021,7 +2021,7 @@ class TestEnsureCronDirWidened:
 
     def test_ensure_cron_dir_existing_named_profile_cron_dir_works(self, tmp_path):
         """An existing named profile's cron dir should be created normally."""
-        import cron.jobs as jobs
+        from cron import jobs
 
         profiles_dir = tmp_path / "profiles"
         active_home = profiles_dir / "active"
@@ -2033,7 +2033,7 @@ class TestEnsureCronDirWidened:
 
     def test_ensure_cron_dir_scripts_dir_under_named_profile_fails_closed(self, tmp_path):
         """A scripts dir under a deleted named profile must not be recreated."""
-        import cron.jobs as jobs
+        from cron import jobs
 
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()

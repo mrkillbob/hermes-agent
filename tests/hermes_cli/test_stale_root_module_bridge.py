@@ -66,6 +66,30 @@ def test_drop_stale_root_modules_leaves_complete_utils_alone():
     assert sys.modules["utils"] is before
 
 
+def test_backup_restore_heals_stale_utils_missing_sibling_staging(monkeypatch, pre_handoff_purge, tmp_path):
+    """Legacy utils already has file_signature but lacks the newer atomic staging helper."""
+    import os
+    from pathlib import Path
+    import utils
+
+    monkeypatch.delattr(utils, "mkstemp_beside")
+    assert callable(utils.file_signature)
+    pre_handoff_purge()
+    module = importlib.import_module("hermes_cli.backup_restore")
+    assert module.mkstemp_beside is sys.modules["utils"].mkstemp_beside
+    target = tmp_path / "auth.json"
+    target.write_bytes(b"original")
+    fd, name = module.mkstemp_beside(target, suffix=".partial")
+    try:
+        assert Path(name).parent == target.parent
+        if os.name == "posix":
+            assert os.fstat(fd).st_mode & 0o777 == 0o600
+        assert target.read_bytes() == b"original"
+    finally:
+        os.close(fd)
+        Path(name).unlink()
+
+
 def test_drop_stale_root_modules_also_heals_stale_package_modules():
     import types
     from hermes_cli.stale_modules import drop_stale_root_modules

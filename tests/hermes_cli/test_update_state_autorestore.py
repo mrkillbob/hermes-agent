@@ -263,7 +263,7 @@ def test_post_update_guard_covers_sibling_profiles(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(update_cmd, "get_hermes_home", lambda: root_home)
     monkeypatch.setattr(
         "hermes_cli.backup._sibling_profile_homes",
-        lambda invoking_home: [("work", sibling_home)],
+        lambda invoking_home, **kwargs: [("work", sibling_home)],
     )
 
     update_cmd._verify_and_restore_state_dbs_post_update()
@@ -294,7 +294,7 @@ def test_post_update_guard_leaves_valid_sibling_dbs_alone(tmp_path, monkeypatch,
     monkeypatch.setattr(update_cmd, "get_hermes_home", lambda: root_home)
     monkeypatch.setattr(
         "hermes_cli.backup._sibling_profile_homes",
-        lambda invoking_home: [("work", sibling_home)],
+        lambda invoking_home, **kwargs: [("work", sibling_home)],
     )
 
     update_cmd._verify_and_restore_state_dbs_post_update()
@@ -320,7 +320,7 @@ def test_post_update_guard_survives_missing_sibling_snapshot(tmp_path, monkeypat
     monkeypatch.setattr(update_cmd, "get_hermes_home", lambda: root_home)
     monkeypatch.setattr(
         "hermes_cli.backup._sibling_profile_homes",
-        lambda invoking_home: [("work", sibling_home)],
+        lambda invoking_home, **kwargs: [("work", sibling_home)],
     )
 
     # Must not raise even though no snapshot exists to restore from.

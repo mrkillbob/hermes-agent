@@ -19,6 +19,11 @@ import zipfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from hermes_cli.stale_modules import drop_stale_root_modules
+
+# Pre-handoff updaters retain utils even when newer backup staging needs a missing helper.
+drop_stale_root_modules({"utils": ("mkstemp_beside",)})
+
 from hermes_state_holders import read_only_db_uri
 from utils import (
     _preserve_file_mode, _preserve_file_owner, _restore_file_mode, _restore_file_owner, atomic_replace,
@@ -27,7 +32,7 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
-def _foreign_db_holder_pids(db_path: Path) -> Optional[List[int]]:
+def _foreign_db_holder_pids(db_path: Path) -> Optional[list[int]]:
     """PIDs of OTHER processes holding *db_path* or its WAL/SHM open.
 
     Linux-only ``/proc/<pid>/fd`` scan (no psutil dependency), preserving the
@@ -46,7 +51,7 @@ def _foreign_db_holder_pids(db_path: Path) -> Optional[List[int]]:
 
     canonical_db = _canonical(os.fspath(db_path))
     watched = {canonical_db, canonical_db + "-wal", canonical_db + "-shm"}
-    pids: List[int] = []
+    pids: list[int] = []
     try:
         own_pid = os.getpid()
         for pid_str in os.listdir("/proc"):
@@ -463,7 +468,7 @@ def _extract_member_atomically(
         raise
 
 
-def _count_session_rows(path: Path) -> Optional[Tuple[int, int]]:
+def _count_session_rows(path: Path) -> Optional[tuple[int, int]]:
     """Return ``(sessions, messages)`` stored in the session database *path*.
 
     Read-only and best effort.  ``None`` means "unknown" — a missing file, a

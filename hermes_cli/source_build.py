@@ -26,7 +26,7 @@ def source_product_current(project_root: Path, product: str, out: Path) -> bool:
         return False
 
 
-def source_build_env(base_env: dict | None = None, *, explicit: bool = False) -> dict[str, str]:
+def source_build_env(base_env: dict | None = None, *, explicit: bool = False, verify: bool = True) -> dict[str, str]:
     from pm import ensure
     from pm.environments import project_python, running_from_selected_environment
     from pm.paths import repo_root
@@ -43,7 +43,7 @@ def source_build_env(base_env: dict | None = None, *, explicit: bool = False) ->
     npmrc = get_hermes_home() / "npmrc"
     if npmrc.is_file():
         env.setdefault("NPM_CONFIG_USERCONFIG", str(npmrc))
-    return ensure("npm", base_env=env, explicit=explicit).env
+    return ensure("npm", base_env=env, explicit=explicit, verify=verify).env
 
 
 def run_in_custody(project_root: Path, command: list, label: str, **kwargs):
@@ -116,8 +116,9 @@ def source_frontends(project_root: Path) -> tuple[str, ...]:
 class ProductBuildError(RuntimeError):
     """One or more products failed; every independent product was still attempted."""
 
-    def __init__(self, failures: list[tuple[str, BaseException]]):
+    def __init__(self, failures: list[tuple[str, BaseException]], *, pending=None):
         self.failures = failures
+        self.pending = list(pending or [])
         super().__init__("; ".join(f"{name}: {_failure_text(exc)}" for name, exc in failures))
 
 
@@ -127,7 +128,11 @@ def _failure_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
-def build_update_products(project_root: Path, *, desktop: bool) -> None:
+def _headless_linux() -> bool:
+    return sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def build_update_products(project_root: Path, *, desktop: bool) -> list[tuple[str, str]]:
     """Prepare the selected union once, attempting every independent product.
 
     A failed product never skips the next one (a broken web build must not leave the TUI or the
@@ -139,6 +144,7 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
     from hermes_cli.update_stage import publish_stage
 
     failures: list[tuple[str, BaseException]] = []
+    pending: list[tuple[str, str]] = []
 
     def attempt(name: str, step) -> bool:
         try:
@@ -157,13 +163,29 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
         workspaces = frontends + (("apps/desktop",) if desktop else ())
         publish_stage("Updating Node dependencies")
 
-        def node_dependencies() -> None:
+        def node_dependencies(selected: tuple[str, ...]) -> None:
             # Acquiring npm is part of this step: its failure must be reported like the install's.
-            env.update(source_build_env(explicit=True))
-            prepare_source_dependencies(project_root, workspaces, env=env, explicit=True)
+            # A recorded install is trusted as at startup (re-hashing node+npm costs ~2 s per
+            # tail); a missing one is still installed explicitly.
+            env.update(source_build_env(explicit=True, verify=False))
+            prepare_source_dependencies(project_root, selected, env=env, explicit=True)
 
         # Every product compiles from these node_modules: without them there is nothing to build.
-        if attempt("Node dependencies", node_dependencies):
+        prepared = attempt("Node dependencies", lambda: node_dependencies(workspaces))
+        desktop_skipped = False
+        if not prepared and desktop and env:
+            # Only apps/desktop brings native addons (node-pty, electron) into the union: a host
+            # whose compiler cannot build them must still get the TUI and web UI it runs.
+            print("  → Retrying Node dependencies without the desktop app")
+            failed = failures.pop()
+            prepared = desktop_skipped = attempt("Node dependencies", lambda: node_dependencies(frontends))
+            if desktop_skipped:
+                failures.append(("desktop dependencies", failed[1]))
+        desktop_reason = failures[-1][0] if failures else ""
+        if desktop and (desktop_skipped or _headless_linux()):
+            print("  ⓘ If this host never runs the desktop app, `hermes uninstall --gui` removes it "
+                  "and future updates stop building it.")
+        if prepared:
             # An update that changed no TUI/web input reuses the receipted output, as the
             # launch path already does; recompiling it produces the same bytes. Desktop
             # additionally needs the packaged app to name HEAD (its baked stamp carries the
@@ -181,12 +203,13 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
                 else:
                     publish_stage("Building the web UI")
                     attempt("web UI build", lambda: build_source_web(project_root, env=env))
-            if desktop:
+            if desktop and not desktop_skipped:
                 desktop_built = attempt("desktop app build", lambda: _build_desktop_product(project_root, env, publish_stage))
+                desktop_reason = failures[-1][0] if not desktop_built else ""
         if desktop and not desktop_built:
             # One whole line the Desktop hand-off scripts match: the follow-up text is truncated
             # and names whichever products failed first, so it cannot say if THIS app was rebuilt.
-            print(f"  Desktop app build owed: {failures[-1][0]} failed")
+            print(f"  Desktop app build owed: {desktop_reason} failed")
     # A configured memory provider that no longer ships in core is installed from the
     # catalog for every profile home sharing this venv (config, data and tool names
     # unchanged). The update must finish even if the migration blows up.
@@ -201,11 +224,14 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
     try:
         from hermes_cli.left_core_migration import migrate_all_homes as migrate_left_core
 
-        migrate_left_core()
+        migrate_left_core(pending=pending)
     except Exception as exc:  # health: allow BLE001 -- post-commit boundary: printed as ⚠, never fails the committed update; every later update/tail re-runs it
-        print(f"  ⚠ Plugin migration skipped: {exc}")
+        reason = f"Left-core plugin migration failed: {exc}"
+        print(f"  ⚠ {reason}")
+        pending.append(("left_core_migration", reason))
     if failures:
-        raise ProductBuildError(failures)
+        raise ProductBuildError(failures, pending=pending)
+    return pending
 
 
 def _build_desktop_product(project_root: Path, env: dict, publish_stage) -> None:
@@ -245,4 +271,9 @@ if __name__ == "__main__":
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--desktop", action="store_true")
     args = parser.parse_args()
-    build_update_products(args.source.resolve(), desktop=args.desktop)
+    pending = build_update_products(args.source.resolve(), desktop=args.desktop)
+    if pending:
+        from hermes_cli.maintenance_policy import report_pending
+
+        report_pending(pending, None)
+        raise SystemExit(1)

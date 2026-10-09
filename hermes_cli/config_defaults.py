@@ -1352,6 +1352,7 @@ DEFAULT_CONFIG = {
     "memory": {  # Persistent memory — bounded curated memory injected into the system prompt
         "memory_enabled": True,
         "user_profile_enabled": True,
+        "prefetch_spill_enabled": False,  # External recall opt-in to hooks.output_spill.
         # Approval gate for memory writes on BOTH foreground turns and the background review fork.
         # true = foreground writes prompt inline; background writes are staged (/memory
         # pending|approve <id>|reject <id>). To disable memory: memory_enabled.
@@ -1360,9 +1361,8 @@ DEFAULT_CONFIG = {
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
         # Periodic built-in memory review; 0 when an external provider auto-extracts.
         "nudge_interval": 10,
-        # External memory provider plugin (empty = built-in only); only ONE at a time: "holographic",
-        # "retaindb", "byterover", or a catalog-installed one ("honcho", "hindsight", "supermemory",
-        # "mem0", "openviking").
+        # One external provider: bundled (holographic, retaindb, byterover) or catalog-installed
+        # (honcho, hindsight, supermemory, mem0, openviking). Empty = built-in only.
         "provider": "",
     },
     # Subagent delegation — override the provider:model used by delegate_task so children run on a
@@ -2401,15 +2401,9 @@ DEFAULT_CONFIG = {
         "source_feed_base_url": "",
         # Passive version/banner checks only; explicit `hermes update --check` remains enabled.
         "check": True,
-        # Pre-update backup. quick = snapshot small critical state (pairing JSONs, cron jobs,
-        # config.yaml, .env, auth.json, profile DBs) into <HERMES_HOME>/state-snapshots/, skipping
-        # files >1 GiB; restore via ``/snapshot``. full = quick PLUS a ``hermes backup`` zip in
-        # <HERMES_HOME>/backups/ (``hermes import`` restores; slow on large homes; ``--backup``
-        # forces once). off = none (``--no-backup`` forces once). Legacy booleans: true -> full,
-        # false -> off.
-        # Pre-update safety backup — ONE consolidated mechanism, three modes: Files over 1 GiB (e.g. a
-        # bloated state.db) are skipped with a warning so the snapshot stays fast. This is the #48200
-        # (wrong-path wipe) safety net.
+        # quick snapshots each home's critical state into state-snapshots/, skipping >1 GiB.
+        # full adds a backup zip (--backup forces it once); off disables backups (--no-backup
+        # forces once). Legacy true/false mean full/off. Recover through /snapshot or import.
         "pre_update_backup": "quick",
         # Full backup zips to retain (older pruned after each success; floored to 1 so the newest is
         # always kept). The quick snapshot always keeps exactly 1.
@@ -2432,6 +2426,11 @@ DEFAULT_CONFIG = {
         # Refresh an installed cua-driver during `hermes update` (best-effort, macOS only). Turn off
         # e.g. on non-admin accounts where /Applications isn't writable.
         "refresh_cua_driver": True,
+        # Defer catalog acquisition for features that left core, while preserving their scope.
+        # Startup honors the same per-home choice; the feature stays unavailable until installed.
+        "left_core_migration": "auto",  # auto | defer
+        # Check-only reports unhealthy databases without selecting or copying a recovery snapshot.
+        "state_db_recovery": "auto",  # auto | check-only
     },
     # LSP diagnostics (pyright, gopls, rust-analyzer...) in the post-write lint check of
     # write_file/patch. Runs only when the cwd or edited file is inside a git worktree; otherwise

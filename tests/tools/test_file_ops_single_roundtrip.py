@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-import tools.file_operations as file_operations
+from tools import file_operations
 from tools.environments.local import LocalEnvironment
 from tools.file_operations import ExecuteResult, ShellFileOperations
 
@@ -111,12 +111,12 @@ class TestReadFileOneRoundTrip:
 
     def test_bom_stripped_on_first_page(self, shell, tmp_path):
         ops, calls = shell
-        r = ops.read_file(_write(tmp_path, "f.txt", "﻿hello\n".encode("utf-8")))
+        r = ops.read_file(_write(tmp_path, "f.txt", "﻿hello\n".encode()))
         assert len(calls) == 1
         assert r.content == "1|hello"
 
     def test_crlf_bytes_survive(self, shell, tmp_path):
-        ops, calls = shell
+        ops, _calls = shell
         r = ops.read_file(_write(tmp_path, "g.txt", b"x\r\ny\r\n"))
         assert r.content == "1|x\r\n2|y\r"
 
@@ -129,15 +129,15 @@ class TestReadFileOneRoundTrip:
         assert second == "2|short"
 
     def test_relative_path_resolves_against_env_cwd(self, shell, tmp_path):
-        ops, calls = shell
+        ops, _calls = shell
         _write(tmp_path, "rel.txt", b"here\n")
         r = ops.read_file("rel.txt")
         assert r.error is None and r.content == "1|here"
 
     def test_sentinel_lookalike_in_content_reads_intact(self, shell, tmp_path):
-        ops, calls = shell
+        ops, _calls = shell
         lookalike = "__HERMES_RF_" + "ab" * 16 + "__"
-        p = _write(tmp_path, "s.txt", f"x\n{lookalike}\ny\n".encode("utf-8"))
+        p = _write(tmp_path, "s.txt", f"x\n{lookalike}\ny\n".encode())
         r = ops.read_file(p)
         assert r.error is None and r.total_lines == 3
         assert r.content == f"1|x\n2|{lookalike}\n3|y"
@@ -152,7 +152,7 @@ class TestReadFileNonTextPaths:
         assert any(s.endswith("notes.txt") for s in r.similar_files)
 
     def test_unicode_variant_retry_still_works(self, shell, tmp_path):
-        ops, calls = shell
+        ops, _calls = shell
         # A curly apostrophe vs the ASCII one: visually identical in a
         # terminal, and — unlike NFC/NFD — never aliased by the filesystem
         # (APFS resolves NFD lookups to NFC files directly, which would skip
@@ -230,10 +230,10 @@ class TestWriteFileRoundTrips:
     def test_bom_is_read_from_disk_and_preserved(self, shell, tmp_path):
         ops, calls = shell
         p = tmp_path / "bom.txt"
-        p.write_bytes("﻿old\n".encode("utf-8"))
+        p.write_bytes("﻿old\n".encode())
         r = ops.write_file(str(p), "new\n")
         assert r.error is None and len(calls) == 3
-        assert p.read_bytes() == "﻿new\n".encode("utf-8")
+        assert p.read_bytes() == "﻿new\n".encode()
 
     def test_pre_content_read_rides_the_same_probe(self, shell, tmp_path):
         """A lintable extension wants the old text (lint delta); it comes
@@ -257,7 +257,7 @@ class TestWriteFileRoundTrips:
         assert p.read_bytes() == b"hi\n"
 
     def test_unparseable_probe_reply_falls_back_to_separate_probes(self, shell, tmp_path):
-        ops, calls = shell
+        ops, _calls = shell
         p = tmp_path / "crlf.txt"
         p.write_bytes(b"a\r\nb\r\n")
         real_exec = ops._exec
@@ -375,11 +375,11 @@ PARITY_CASES = [
     ("blank_tail", b"a\n\n", {}),
     ("crlf", b"x\r\ny\r\n", {}),
     ("lone_cr", b"a\rb\n", {}),
-    ("bom", "﻿hello\n".encode("utf-8"), {}),
+    ("bom", "﻿hello\n".encode(), {}),
     ("empty", b"", {}),
     ("single_no_newline", b"solo", {}),
     ("only_newline", b"\n", {}),
-    ("unicode", "héllo wörld\n汉字\n".encode("utf-8"), {}),
+    ("unicode", "héllo wörld\n汉字\n".encode(), {}),
     ("long_line", b"a" * 9000 + b"\nshort\n", {}),
     ("multibyte_long_line", ("汉" * 4000 + "\nx\n").encode("utf-8"), {}),
     ("multi_chunk_line", b"b" * 3_000_000 + b"\nz\n", {}),
@@ -455,7 +455,7 @@ class TestNativeReadParity:
 
 class TestCompoundFallback:
     def test_unparseable_reply_falls_back_to_sequential_probes(self, shell, tmp_path):
-        ops, calls = shell
+        ops, _calls = shell
         p = _write(tmp_path, "a.txt", b"one\ntwo\n")
         real_exec = ops._exec
 

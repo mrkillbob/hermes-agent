@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-import tools.terminal_tool as terminal_tool
+from tools import terminal_tool
 from hermes_constants import get_hermes_home
 
 

@@ -200,7 +200,7 @@ class TestLoadMCPConfig:
 
 class TestMCPParallelSafetyProvenance:
     def test_parallel_safe_servers_keep_exact_raw_names(self, monkeypatch):
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
 
         first = SimpleNamespace(session=object(), _registered_tool_names=[])
         second = SimpleNamespace(session=object(), _registered_tool_names=[])
@@ -234,7 +234,7 @@ class TestMCPParallelSafetyProvenance:
                 mcp_tool._parallel_safe_servers.update(saved_parallel)
 
     def test_tool_provenance_keeps_exact_raw_server_names(self):
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         from tools import mcp_tool_registration as _mcp_registration
 
         first_tool = "mcp__foo_bar__first"
@@ -265,7 +265,7 @@ class TestMCPParallelSafetyProvenance:
 
     def test_profile_policy_uses_each_server_connection_key(self, tmp_path, monkeypatch):
         from hermes_constants import hermes_home_key
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         from tools import mcp_tool_discovery as discovery
 
         scope = hermes_home_key(tmp_path / "worker")
@@ -298,7 +298,7 @@ class TestMCPParallelSafetyProvenance:
 
     def test_scoped_registered_names_are_current_profile_public_names(self, tmp_path, monkeypatch):
         from hermes_constants import hermes_home_key
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         from tools import mcp_tool_discovery as discovery
 
         active = hermes_home_key(tmp_path / "active")
@@ -319,7 +319,7 @@ class TestMCPParallelSafetyProvenance:
 
     def test_lazy_scoped_tools_use_public_registry_toolset(self, tmp_path, monkeypatch):
         from hermes_constants import hermes_home_key
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         from tools import mcp_tool_registration as registration
         from tools.registry import registry
 
@@ -343,7 +343,7 @@ class TestMCPStatus:
     def test_status_distinguishes_configured_connecting_failed_and_disabled(
         self, monkeypatch
     ):
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         from tools import mcp_tool_config as _mcp_config
         from tools import mcp_tool_discovery as _mcp_discovery
 
@@ -390,7 +390,7 @@ class TestMCPStatus:
         assert statuses["disabled"]["disabled"] is True
 
     def test_status_ignores_a_runtime_owned_by_another_profile(self, monkeypatch):
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         from tools import mcp_tool_config as _mcp_config
         from tools import mcp_tool_discovery as _mcp_discovery
 
@@ -428,7 +428,7 @@ class TestMCPStatus:
 
 
     def test_scoped_shutdown_clears_only_its_connection_status(self, monkeypatch):
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         from tools import mcp_tool_lifecycle, mcp_tool_loop
 
         monkeypatch.setattr(mcp_tool_loop, "_stop_mcp_loop", lambda **_kwargs: None)
@@ -498,7 +498,7 @@ class TestMCPStatus:
 
     def test_scoped_shutdown_evicts_lazy_overlay_before_clearing_ownership(self, tmp_path, monkeypatch):
         """A removed profile-owned lazy server cannot survive ownership teardown."""
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         from tools import mcp_tool_lifecycle, mcp_tool_loop
         from tools.mcp_schema_cache import config_fingerprint
         from tools.registry import registry
@@ -539,7 +539,7 @@ class TestMCPStatus:
 
     def test_scoped_shutdown_removes_only_adopted_profile_overlay(self, tmp_path, monkeypatch):
         """A peer reload removes its overlay without orphaning the shared owner connection."""
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         from tools import mcp_tool_lifecycle, mcp_tool_loop
         from tools.registry import registry
 
@@ -2886,7 +2886,6 @@ class TestDiscoveryConnectConcurrency:
 
         def fake_run_on_mcp_loop(factory, timeout=None):
             captured["timeout"] = timeout
-            return None
 
         # 40 servers = 14 waves at cap 3: uncapped, the pass would block 28 min
         # and outlive the waiter budget by 26+ minutes.

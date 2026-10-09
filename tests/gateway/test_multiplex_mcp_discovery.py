@@ -133,7 +133,7 @@ async def test_reload_mcp_formats_scoped_connection_keys_before_refreshing_cache
         {launch_key: launch_scope, worker_key: worker_scope},
     )
     monkeypatch.setattr(_mcp_lifecycle, "shutdown_mcp_servers", lambda **_kwargs: None)
-    monkeypatch.setattr(_mcp_discovery, "discover_mcp_tools", lambda: [])
+    monkeypatch.setattr(_mcp_discovery, "discover_mcp_tools", list)
 
     event = MessageEvent(
         text="/reload-mcp", message_id="m1",
@@ -432,7 +432,7 @@ async def test_reload_mcp_projects_scoped_connection_keys_to_public_names(
     monkeypatch.setattr(mcp_tool, "_server_tool_scopes", {connection_key: {worker_scope}})
     monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: worker_scope)
     monkeypatch.setattr(_mcp_lifecycle, "shutdown_mcp_servers", lambda **_kwargs: None)
-    monkeypatch.setattr(_mcp_discovery, "discover_mcp_tools", lambda: [])
+    monkeypatch.setattr(_mcp_discovery, "discover_mcp_tools", list)
 
     event = MessageEvent(
         text="/reload-mcp", message_id="m1",
@@ -663,7 +663,7 @@ def test_profile_owned_lazy_and_delimiter_names_keep_public_identity(
 
     lazy = discovery._select_new_servers({"shared": {"auth": "oauth", "lazy": True}})
     assert list(lazy) == [f"shared::profile::{worker_scope}"]
-    assert mcp_tool._server_public_names[list(lazy)[0]] == "shared"
+    assert mcp_tool._server_public_names[next(iter(lazy))] == "shared"
 
     configured = "acme::profile::prod"
     monkeypatch.setattr(mcp_tool, "_lazy_server_configs", {})

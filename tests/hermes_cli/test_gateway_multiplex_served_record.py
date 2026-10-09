@@ -37,7 +37,7 @@ def served_root(tmp_path, monkeypatch, real_live_default_gateway_pid):
     (tmp_path / "locks").mkdir()
     monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
     import hermes_constants
-    import gateway.status as status
+    from gateway import status
     monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None)
     from hermes_cli import gateway_multiplex_served
     monkeypatch.setattr(gateway_multiplex_served, "live_default_gateway_pid", lambda: os.getpid())
@@ -137,7 +137,7 @@ def test_recycled_pid_does_not_lend_a_stale_record_its_served_profiles(
     line is not a gateway's) must not make its ``served_profiles`` authoritative: bare PID existence
     once did, so `hermes -p coder gateway start` exited 78 for a multiplexer that was long gone."""
     import subprocess
-    import gateway.status as status
+    from gateway import status
     from hermes_cli import gateway_multiplex_served
     from hermes_cli.gateway import named_profile_served_by_running_multiplexer
     from hermes_cli.gateway_multiplex_served import recorded_served_profiles

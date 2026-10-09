@@ -309,7 +309,7 @@ def _parse_env_value(raw_value: str) -> str:
 # symlink repointed mid-read can't file one file's contents under another's identity.
 # ``invalidate_env_file_cache()`` is the explicit knob; ``hermes_cli.config.invalidate_env_cache()``
 # calls it for Hermes's own .env writers.
-_ENV_FILE_CACHE: "OrderedDict[str, Tuple[tuple, Dict[str, str]]]" = OrderedDict()
+_ENV_FILE_CACHE: "OrderedDict[str, tuple[tuple, dict[str, str]]]" = OrderedDict()
 _ENV_FILE_CACHE_LOCK = threading.Lock()
 _ENV_FILE_CACHE_MAX = 64  # one entry per profile home in practice
 
@@ -364,7 +364,7 @@ def _model_provider_secret_names() -> frozenset[str]:
         return _MODEL_PROVIDER_SECRET_NAMES
 
 
-def _shared_model_provider_secrets(hermes_home: Path) -> Dict[str, str]:
+def _shared_model_provider_secrets(hermes_home: Path) -> dict[str, str]:
     """Load provider credentials from the installation root for named profiles only.
 
     The root ``.env`` remains the single shared credential store.  A profile's own
@@ -396,7 +396,7 @@ def _shared_model_provider_secrets(hermes_home: Path) -> Dict[str, str]:
         return {}
 
 
-def _shared_github_automation_secrets(hermes_home: Path) -> Dict[str, str]:
+def _shared_github_automation_secrets(hermes_home: Path) -> dict[str, str]:
     """Share the central bot identity only with profiles authorized to publish."""
     try:
         from hermes_constants import get_default_hermes_root, hermes_home_key, named_profile_home
@@ -477,9 +477,9 @@ def _decode_env_bytes(raw: bytes) -> str:
         return raw.decode("latin-1")
 
 
-def _parse_env_text(text: str) -> Dict[str, str]:
+def _parse_env_text(text: str) -> dict[str, str]:
     """Tokenize already-read ``.env`` text. See :func:`load_env_file`."""
-    secrets: Dict[str, str] = {}
+    secrets: dict[str, str] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -493,7 +493,7 @@ def _parse_env_text(text: str) -> Dict[str, str]:
     return secrets
 
 
-def load_env_file(env_path: Path) -> Dict[str, str]:
+def load_env_file(env_path: Path) -> dict[str, str]:
     """THE ``.env`` tokenizer: every reader (profile scope, ``hermes_cli.config.load_env``, the dashboard
     scrub, skill secret capture, managed .env, setup prompts) parses through here so no two boundaries
     disagree on which keys/values a file defines. Dict only — never touches ``os.environ``. ``export``
@@ -533,7 +533,7 @@ def load_env_file(env_path: Path) -> Dict[str, str]:
     return secrets
 
 
-def build_profile_secret_scope(hermes_home: Path) -> Dict[str, str]:
+def build_profile_secret_scope(hermes_home: Path) -> dict[str, str]:
     """Build a profile's secret mapping from shared model keys and its own secrets.
 
     Named profiles inherit only model-provider credentials from the installation

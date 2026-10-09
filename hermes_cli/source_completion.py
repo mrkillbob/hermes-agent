@@ -104,7 +104,7 @@ def _complete_locked(
         # The builds, the release-history refresh and the install stamp all run
         # git; a fresh Windows machine has only PM's.
         expose_pm_git(root)
-    except Exception as exc:  # noqa: BLE001 — git-less steps below still complete
+    except Exception as exc:
         print(f"⚠ Could not provide git for the source completion: {exc}", file=sys.stderr)
     owed: list[tuple[str, str]] = []
 
@@ -119,11 +119,14 @@ def _complete_locked(
             reason = str(exc) or type(exc).__name__
             record_followup(name, reason)
             owed.append((name, reason))
+            if name == "build":
+                pending.extend(getattr(exc, "pending", []))
 
     step("launchers", lambda: publish_launchers(root))
     if before_build is not None:
         before_build()  # never raises: a failed restart stays owed and is retried after the build
-    step("build", lambda: build_update_products(root, desktop=desktop))
+    pending: list[tuple[str, str]] = []
+    step("build", lambda: pending.extend(build_update_products(root, desktop=desktop) or []))
     if announce:
         print(announce)
     verdict: list[bool] = []
@@ -134,9 +137,11 @@ def _complete_locked(
         had_desktop_app_before_update=desktop,
         pre_update_version=pre_update_version,
         completion_message=completion_message,
-        followups=owed,
+        followups=owed, pending=pending,
     )))
-    tail_done = not owed
+    from hermes_cli.update_receipt import TAIL_FOLLOWUPS
+
+    tail_done = not any(name in TAIL_FOLLOWUPS for name, _ in owed)
     if tail_done:
         from hermes_cli.source_stamp import write_source_stamp
 

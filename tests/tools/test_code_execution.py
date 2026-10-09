@@ -149,7 +149,7 @@ class TestExecuteCodeRemoteTempDir(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["exit_code"], 0)
         self.assertFalse(result["stdout_truncated"])
-        self.assertEqual(result["stdout_bytes_total"], len("hello\n".encode("utf-8")))
+        self.assertEqual(result["stdout_bytes_total"], len(b"hello\n"))
         # The session-kernel path runs first and fails open on this fake env
         # (no PID from nohup), so search for the per-call sandbox commands
         # rather than pinning positions.
@@ -230,21 +230,18 @@ class TestToolCallLimit(unittest.TestCase):
         self.assertFalse(_tool_call_limit_reached(4, 5))
         self.assertTrue(_tool_call_limit_reached(5, 5))
 
-    def test_negative_limit_disables_it_same_as_zero(self):
-        """The documented contract (cli-config.yaml.example) is `<= 0 = unlimited`,
-        and _tool_call_limit_reached already treats every non-positive value as
-        unbounded -- the config validator must not reject exactly the values the
-        adjacent limit predicate treats as valid."""
-        from tools.code_execution_tool import _configured_max_tool_calls, _tool_call_limit_reached
+    def test_negative_limit_is_rejected(self):
+        from tools.code_execution_tool import _configured_max_tool_calls
 
-        self.assertEqual(_configured_max_tool_calls({"max_tool_calls": -1}), -1)
-        self.assertFalse(_tool_call_limit_reached(100_000, -1))
+        with self.assertRaisesRegex(ValueError, "must be 0 .* or positive"):
+            _configured_max_tool_calls({"max_tool_calls": -1})
 
     def test_non_integer_limit_is_rejected(self):
         from tools.code_execution_tool import _configured_max_tool_calls
 
-        with self.assertRaisesRegex(ValueError, "must be an integer"):
-            _configured_max_tool_calls({"max_tool_calls": "unlimited"})
+        for value in ("unlimited", "5", 5.0, True, False):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "must be an integer"):
+                _configured_max_tool_calls({"max_tool_calls": value})
 
     def test_invalid_limit_returns_tool_error_for_local_and_remote(self):
         for env_type in ("local", "ssh"):
@@ -558,8 +555,8 @@ class TestStubSchemaDrift(unittest.TestCase):
 
         # Import the registry and trigger tool registration
         from tools.registry import registry
-        import tools.file_tools  # noqa: F401 - registers read_file, write_file, patch, search_files
-        import tools.web_tools  # noqa: F401 - registers web_search, web_extract
+        import tools.file_tools
+        import tools.web_tools
 
         for tool_name, (sig, doc, args_expr) in _TOOL_STUBS.items():
             entry = registry._tools.get(tool_name)

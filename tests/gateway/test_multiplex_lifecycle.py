@@ -13,7 +13,7 @@ class TestServedProfilesStatus:
     def test_write_and_read_served_profiles(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         import importlib
-        import gateway.status as status
+        from gateway import status
         importlib.reload(status)
         try:
             status.write_runtime_status(
@@ -119,7 +119,7 @@ def test_gateway_starts_one_ticker_for_the_complete_served_set(tmp_path, monkeyp
 
 def test_second_gateway_logs_non_owner_and_starts_no_dispatch_loop(tmp_path, monkeypatch, caplog):
     """The singleton lock loser reports its role and exits before constructing a dispatcher."""
-    import gateway.kanban_watchers as kanban_watchers
+    from gateway import kanban_watchers
     from hermes_cli import kanban_db as kanban_db
     import hermes_cli.config as config_mod
 
@@ -168,7 +168,7 @@ class TestNamedProfileMultiplexerGuard:
     def _fake_running_default_gateway(self, monkeypatch, tmp_path):
         """Make the guard believe a live default gateway exists at tmp_path."""
         from hermes_cli import gateway as gw
-        import gateway.status as status
+        from gateway import status
 
         monkeypatch.setattr(gw, "_profile_suffix", lambda: "coder")
         monkeypatch.setattr(

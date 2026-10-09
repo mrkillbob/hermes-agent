@@ -24,7 +24,8 @@
     "audit:fix:tui": "npm audit fix --workspace ui-tui",
     "check": "npm run --ws check",
     "fix": "npm run --ws fix",
-    "audit:high": "npm audit --audit-level=high"
+    "audit:high": "npm audit --audit-level=high",
+    "prepare": "node -e \"const {existsSync}=require('fs');const {spawnSync}=require('child_process');if(existsSync('.git'))process.exit(spawnSync('lefthook',['install'],{stdio:'inherit',shell:true}).status??1)\""
   },
   "repository": {
     "type": "git",
@@ -42,8 +43,9 @@
     "eslint-plugin-unused-imports": "4.4.1",
     "globals": "17.7.0",
     "ip-address": "10.7.2",
-    "typescript-eslint": "8.64.0",
-    "node-gyp": "13.0.2"
+    "node-gyp": "13.0.2",
+    "lefthook": "^2.1.14",
+    "typescript-eslint": "8.64.0"
   },
   "overrides": {
     "@electron/osx-sign": {
@@ -91,7 +93,8 @@
     "electron@41.10.7": true,
     "fsevents@2.3.2": true,
     "fsevents@2.3.3": true,
-    "get-windows@9.3.0": true
+    "get-windows@9.3.0": true,
+    "lefthook@2.1.14": true
   },
   "dependencies": {
     "js-yaml": "4.3.2",

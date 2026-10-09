@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import pytest
 
 from agent.conversation_worktree import CleanupResult, CleanupVerdict
-import tui_gateway.server as server
+from tui_gateway import server
 
 
 @dataclass
@@ -263,6 +263,6 @@ def test_close_and_delete_never_imply_worktree_cleanup(monkeypatch, tmp_path):
     closed = server._methods["session.close"]("close", {"session_id": "missing"})
     deleted = server._methods["session.delete"]("delete", {"session_id": "root"})
 
-    assert closed["result"] == {"closed": False}
+    assert closed["result"] == {"closed": False, "messages": []}
     assert deleted["result"] == {"deleted": "root"}
     assert db.deleted == ["root"]
