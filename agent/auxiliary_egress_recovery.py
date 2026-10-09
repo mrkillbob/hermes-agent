@@ -3,6 +3,160 @@
 from agent.llm_egress_firewall import DestinationClass, classify_destination
 
 
+
+def local_fallback_entry(entry, *, main_runtime=None):
+    """Screen the router's concrete endpoint before credentials or catalogs resolve.
+
+    Built-in OAuth/discovery arms do not honor entry URLs. Named custom and
+    ordinary API-key arms honor explicit endpoints before their configured
+    defaults. Never infer locality from a provider name or transport mode.
+    """
+    from agent import auxiliary_client as auxiliary
+
+    raw_provider = str(entry.get("provider") or "").strip()
+    if not raw_provider or not str(entry.get("model") or "").strip():
+        return None
+    provider = auxiliary._normalize_aux_provider(raw_provider)
+    base_url = str(entry.get("base_url") or "").strip()
+    api_key = entry.get("api_key")
+    screened_entry = dict(entry)
+    try:
+        from agent.secret_scope import get_secret_str
+        from agent.auxiliary_local_runtime import bare_llamacpp_endpoint
+        from hermes_cli.runtime_provider import _get_named_custom_provider
+
+        original_provider = raw_provider.lower()
+        alias_identity = original_provider.removeprefix("custom:")
+        named = None
+        local = None
+        branch = auxiliary._EXPLICIT_PROVIDER_BRANCHES.get(provider)
+        if branch is None or alias_identity in auxiliary._LOCAL_SERVER_ALIASES:
+            if original_provider != provider:
+                named = _get_named_custom_provider(original_provider, metadata_only=True)
+            if named is None:
+                # The bare alias owns its endpoint before normalization can select providers.custom.
+                local = bare_llamacpp_endpoint(original_provider, base_url, api_key)
+            if named is None and local is None:
+                named = _get_named_custom_provider(provider, metadata_only=True)
+        if local is not None:
+            base_url, api_key = local
+            if not base_url:
+                return None
+        elif named:
+            # Current named routes honor explicit endpoints before saved defaults.
+            base_url = base_url or str(named.get("base_url") or "").strip()
+        elif provider == "custom":
+            from hermes_cli.config import load_config_readonly
+            from hermes_cli.runtime_provider import _config_base_url_trustworthy_for_bare_custom
+
+            model_cfg = load_config_readonly().get("model") or {}
+            configured_base = str(model_cfg.get("base_url") or "").strip() if isinstance(model_cfg, dict) else ""
+            configured_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
+            if not _config_base_url_trustworthy_for_bare_custom(configured_base, configured_provider):
+                configured_base = ""
+            # OPENAI_BASE_URL binds a key; CUSTOM_BASE_URL or trusted config picks the endpoint.
+            base_url = (
+                base_url
+                or str((main_runtime or {}).get("base_url") or "").strip()
+                or get_secret_str("CUSTOM_BASE_URL", "").strip()
+                or configured_base
+                or get_secret_str("OPENROUTER_BASE_URL", "").strip()
+            )
+        elif provider == "openrouter":
+            # This dedicated API-key arm honors an explicit endpoint override.
+            # Its saved pool/default host is remote and cannot imply locality.
+            if not base_url:
+                return None
+        elif branch is not None:
+            # OAuth/discovery branches ignore per-entry endpoint overrides.
+            return None
+        else:
+            from hermes_cli.auth import PROVIDER_REGISTRY
+
+            registered = PROVIDER_REGISTRY.get(provider)
+            if (
+                registered is None or registered.auth_type != "api_key"
+                or provider in {"anthropic", "copilot", "azure-foundry"}
+            ):
+                return None
+            env_url = (
+                get_secret_str(registered.base_url_env_var, "").strip()
+                if registered.base_url_env_var else ""
+            )
+            # Z.AI can probe credentials before applying explicit endpoint overrides.
+            if provider == "zai" and classify_destination(
+                provider, env_url, "chat_completions"
+            ) is not DestinationClass.LOOPBACK:
+                return None
+            base_url = base_url or env_url or registered.inference_base_url
+            if not (entry.get("api_mode") or entry.get("transport")):
+                # Destination bookkeeping must not re-run credential/catalog discovery.
+                screened_entry["api_mode"] = (
+                    "anthropic_messages" if auxiliary._endpoint_speaks_anthropic_messages(base_url)
+                    else auxiliary._profile_declared_messages_wire(provider) or "chat_completions"
+                )
+    except Exception:
+        return None
+    if classify_destination(provider, base_url, "chat_completions") is not DestinationClass.LOOPBACK:
+        return None
+    return {**screened_entry, "base_url": base_url, "api_key": api_key}
+
+
+
+def local_main_supports_vision(provider, model, *, base_url, api_key="", requested_provider=""):
+    """Honor known capability constraints without remote discovery after a denial."""
+    from agent.image_routing import _supports_vision_override
+    from agent.models_dev import get_model_capabilities
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.local_runtime.capabilities import is_managed_provider, managed_model_supports_vision
+    from hermes_cli.providers import normalize_provider
+
+    try:
+        config = load_config_readonly()
+        model_cfg = config.get("model") if isinstance(config.get("model"), dict) else {}
+        identities = []
+        for identity in (requested_provider or provider, model_cfg.get("provider")):
+            identity = str(identity or "").strip().lower()
+            canonical = normalize_provider(identity)
+            # Distinct named/local custom routes must not collapse to "custom".
+            identities.append(identity.removeprefix("custom:") if canonical == "custom"
+                              or identity.startswith("custom:") else canonical)
+        if identities[0] != identities[1] or str(model_cfg.get("default") or "").strip() != model:
+            # Saved main defaults cannot override a session's switched route or
+            # contribute another provider's per-model declarations.
+            config = {**config, "model": {}}
+        # "auto" proves which saved route was requested, but is not the
+        # concrete inference provider whose capability metadata we can use.
+        requested_provider = requested_provider if provider == "custom" and requested_provider != "auto" else ""
+        supports = _supports_vision_override(config, provider, model, requested_provider=requested_provider)
+        if supports is None and is_managed_provider(provider, base_url):
+            endpoint = (base_url.rsplit("/v1", 1)[0], api_key if isinstance(api_key, str) else "")
+            supports = managed_model_supports_vision(model, endpoint=endpoint)
+        if supports is None:
+            capabilities = get_model_capabilities(requested_provider or provider, model, allow_network=False, config=config)
+            supports = capabilities.supports_vision if capabilities is not None else None
+        if supports is None:
+            from agent.model_metadata import detect_local_server_type, query_ollama_supports_vision
+            key = api_key if isinstance(api_key, str) else ""
+            if provider == "ollama" or detect_local_server_type(base_url, api_key=key) == "ollama":
+                supports = query_ollama_supports_vision(model, base_url, api_key=key)
+    except Exception:
+        supports = None
+    # Match ordinary fallback's existing unknown-capability behavior.
+    return True if supports is None else bool(supports)
+
+
+
+def is_local_fallback_client(client, provider):
+    """Verify the resolved physical endpoint before any metadata probe."""
+    base_url = getattr(client, "base_url", None)
+    api_mode = getattr(client, "api_mode", None)
+    return classify_destination(
+        provider, str(base_url) if base_url is not None else None,
+        api_mode if isinstance(api_mode, str) else None,
+    ) in {DestinationClass.LOCAL_PROCESS, DestinationClass.LOOPBACK}
+
+
 def local_fallback_steps(route, step_factory):
     """Try configured fallbacks, accepting only local-process or loopback routes."""
     # Resolve through the caller module so its routing/cache seams remain authoritative.
@@ -34,6 +188,7 @@ def local_fallback_steps(route, step_factory):
                     main_runtime=route.main_runtime,
                     excluded_identities=visited,
                     async_mode=route.async_mode,
+                    local_only=True,
                 )
             elif source is auxiliary._try_main_fallback_chain:
                 client, model, label = source(
@@ -44,6 +199,7 @@ def local_fallback_steps(route, step_factory):
                     failed_base_url=failed_base_url,
                     excluded_identities=visited,
                     async_mode=route.async_mode,
+                    local_only=True,
                 )
             else:
                 client, model, label = source(
@@ -54,6 +210,7 @@ def local_fallback_steps(route, step_factory):
                     failed_base_url=failed_base_url,
                     excluded_identities=visited,
                     async_mode=route.async_mode,
+                    local_only=True,
                 )
             if client is None:
                 break

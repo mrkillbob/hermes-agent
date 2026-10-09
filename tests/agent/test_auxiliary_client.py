@@ -77,6 +77,382 @@ def _blocked_egress_error(reason="base64_payload"):
     )
 
 
+
+@pytest.mark.parametrize("remote_provider,has_local", [
+    ("nous", True), ("nous", False),
+    ("screening-remote", True), ("screening-remote", False),
+    ("opencode-free", False),
+    ("screening-local-override", True), ("screening-explicit-remote", False),
+    ("vllm", False), ("custom:vllm", False),
+    ("openrouter", True), ("openrouter-remote", False),
+    ("profile-custom", True), ("profile-openai-api", True),
+    ("profile-custom-remote", True), ("profile-openai-api-remote", True),
+    ("profile-custom-config", True), ("profile-custom-config-remote", True),
+    ("profile-custom-live-remote", True), ("profile-custom-config-live-remote", True),
+    ("llamacpp", True), ("llama.cpp", True), ("llama-cpp", True),
+    ("llamacpp-missing", False), ("llamacpp-named", False),
+    ("llamacpp-override", True), ("moa-llamacpp", True),
+    ("llamacpp-custom-remote", True), ("llamacpp-custom-loopback", True),
+    ("llama.cpp-custom-remote", True), ("llama.cpp-custom-loopback", True),
+    ("llama-cpp-custom-remote", True), ("llama-cpp-custom-loopback", True),
+    ("moa-llamacpp-custom-remote", True), ("moa-llamacpp-custom-loopback", True),
+    ("llamacpp-named-custom-loopback", False), ("llamacpp-override-custom-remote", True),
+])
+def test_blocked_recovery_screens_remote_auth_before_resolving_local(
+    monkeypatch, tmp_path, request, remote_provider, has_local
+):
+    import yaml
+    import agent.auxiliary_client as auxiliary
+    from agent.auxiliary_egress_recovery import local_fallback_steps
+
+    home = tmp_path / "screening-home"
+    home.mkdir()
+    task = "compression" if remote_provider == "opencode-free" else "title_generation"
+    chain = [{"provider": remote_provider, "model": "remote-model",
+              "base_url": "http://127.0.0.1:11434/v1"}]
+    if remote_provider.startswith("openrouter"):
+        chain[0].update(provider="openrouter", model="local-model:free", api_key="local-test-key")
+        if remote_provider == "openrouter-remote":
+            chain[0]["base_url"] = "https://remote.invalid/v1"
+    if remote_provider == "opencode-free":
+        chain[0].update(model="minimax-m2.5-free", api_mode="anthropic_messages", api_key="synthetic-key")
+    if remote_provider in {"screening-remote", "screening-explicit-remote"}:
+        chain[0]["base_url"] = "https://remote.invalid/v1"
+    if remote_provider == "screening-local-override":
+        chain[0].update(model="local-model", api_key="local-test-key")
+    if remote_provider in {"vllm", "custom:vllm"}:
+        chain[0].pop("base_url")
+    profile_case = remote_provider.startswith("profile-")
+    managed_provider = remote_provider.split("-custom-", 1)[0]
+    managed_case = managed_provider in {
+        "llamacpp", "llama.cpp", "llama-cpp", "llamacpp-missing",
+        "llamacpp-named", "llamacpp-override", "moa-llamacpp",
+    }
+    if profile_case:
+        chain[0] = {"provider": "openai-api" if "openai-api" in remote_provider else "custom",
+                    "model": "local-model"}
+    if managed_case:
+        chain[0] = {"provider": managed_provider if managed_provider in {"llama.cpp", "llama-cpp"} else "llamacpp",
+                    "model": "local-model"}
+        if managed_provider == "llamacpp-override":
+            chain[0].update(base_url="http://127.0.0.1:11434/v1", api_key="local-test-key")
+        if managed_provider == "moa-llamacpp":
+            chain.clear()
+    if has_local and not profile_case and not managed_case and remote_provider not in {"screening-local-override", "openrouter"}:
+        chain.append({"provider": "custom", "model": "local-model",
+                      "base_url": "http://127.0.0.1:11434/v1", "api_key": "local-test-key"})
+    config = {
+        "model": {"provider": "nous", "default": "main-remote-model"},
+        "auxiliary": {task: {"fallback_chain": chain}},
+        "providers": {"screening-remote": {"base_url": "https://remote.invalid/v1",
+                                                "key_env": "SCREENING_REMOTE_API_KEY"},
+                      "screening-local-override": {"base_url": "https://remote.invalid/v1", "api_key": "local-test-key"},
+                      "screening-explicit-remote": {"base_url": "http://127.0.0.1:11434/v1", "key_env": "SCREENING_REMOTE_API_KEY"},
+                      "vllm": {"base_url": "https://remote.invalid/v1", "key_env": "SCREENING_REMOTE_API_KEY"}},
+    }
+    if profile_case and chain[0]["provider"] == "custom":
+        config["model"] = {"provider": "custom", "default": "local-model"}
+    if managed_case and "-custom-" in remote_provider:
+        config["providers"]["custom"] = {
+            "base_url": "https://remote.invalid/v1" if remote_provider.endswith("remote") else "http://127.0.0.1:19434/v1",
+            "api_key": "unrelated-custom-key",
+        }
+    if managed_provider in {"llamacpp-named", "llamacpp-override"}:
+        config["providers"]["llamacpp"] = {
+            "base_url": "https://remote.invalid/v1", "key_env": "SCREENING_REMOTE_API_KEY",
+        }
+        if managed_provider == "llamacpp-override":
+            config["providers"]["llamacpp"] = {"base_url": "https://remote.invalid/v1", "api_key": "local-test-key"}
+    if managed_provider == "moa-llamacpp":
+        config["model"] = {"provider": "moa", "default": "local-preset"}
+        config["moa"] = {"presets": {"local-preset": {
+            "aggregator": {"provider": "llamacpp", "model": "local-model"},
+        }}}
+    (home / "config.yaml").write_text(yaml.safe_dump(config))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    expected_base = "http://127.0.0.1:11434/v1"
+    expected_key = None
+    if managed_case:
+        from hermes_cli.local_runtime import recovery, supervisor
+        state_path = supervisor.state_path()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = {"pid": 647, "base_url": "http://127.0.0.1:18434/v1", "api_key": "managed-test-key"}
+        if managed_provider != "llamacpp-missing":
+            state_path.write_text(json.dumps(state))
+        process = SimpleNamespace(
+            exe=lambda: str(state_path.parent / "test-engine" / "llama-server"),
+            create_time=lambda: 1,
+            cmdline=lambda: ["llama-server", "--host", "127.0.0.1", "--port", "18434",
+                             "--api-key", state["api_key"], "--models-preset", str(state_path.parent / "presets.ini")],
+        )
+        monkeypatch.setattr(recovery.psutil, "Process", lambda pid: process)
+        # Missing managed state must not detect a real machine's external runtime.
+        import urllib.request
+        import urllib.error
+        monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=urllib.error.URLError("offline")))
+        expected_base = "http://127.0.0.1:11434/v1" if managed_provider == "llamacpp-override" else state["base_url"]
+        expected_key = "local-test-key" if managed_provider == "llamacpp-override" else state["api_key"]
+    auth_reads = []
+    # Observe the credential I/O boundary; use the real config/router/SDK.
+    def read_remote_auth():
+        auth_reads.append("nous")
+        return None
+    monkeypatch.setattr(auxiliary, "_read_nous_auth", read_remote_auth)
+    import hermes_cli.runtime_provider_custom as runtime_provider
+    import requests as provider_http
+    key_reads = []
+    original_getenv = runtime_provider.get_secret_str
+    def observe_key(name, default=""):
+        if name == "SCREENING_REMOTE_API_KEY":
+            key_reads.append(name)
+            return "synthetic-key"
+        return original_getenv(name, default)
+    monkeypatch.setattr(runtime_provider, "get_secret_str", observe_key)
+    context_reads = []
+    original_context = auxiliary.get_model_context_length
+    def observe_context(*args, **kwargs):
+        context_reads.append(kwargs.get("base_url"))
+        return original_context(*args, **kwargs)
+    monkeypatch.setattr(auxiliary, "get_model_context_length", observe_context)
+    remote_catalog = MagicMock(side_effect=RuntimeError("unexpected catalog I/O"))
+    monkeypatch.setattr(provider_http, "get", remote_catalog)
+    route = SimpleNamespace(task=task, resolved_provider="openai-codex",
+                            final_model="blocked-model", route_info={},
+                            base_info="https://chatgpt.com/backend-api/codex",
+                            main_runtime=None, async_mode=False)
+    if remote_provider in {"vllm", "custom:vllm"}:
+        route.main_runtime = {"provider": "nous", "model": "main-remote-model"}
+        token = auxiliary.set_runtime_main("custom", "main-local-model", base_url="http://127.0.0.1:11434/v1")
+        request.addfinalizer(lambda: auxiliary.reset_runtime_main(token))
+    if managed_provider == "moa-llamacpp":
+        route.main_runtime = {"provider": "moa", "model": "local-preset", "base_url": "moa://local-preset", "api_key": "moa-key"}
+    if managed_provider in {"llamacpp", "llama.cpp", "llama-cpp", "moa-llamacpp"}:
+        ordinary_provider = "moa" if managed_provider == "moa-llamacpp" else managed_provider
+        ordinary_model = "local-preset" if ordinary_provider == "moa" else "local-model"
+        ordinary, resolved_model = auxiliary.resolve_provider_client(ordinary_provider, ordinary_model)
+        assert ordinary is not None
+        try:
+            assert str(ordinary.base_url).rstrip("/") == expected_base
+            assert ordinary.api_key == expected_key
+            assert resolved_model == "local-model"
+        finally:
+            ordinary.close()
+
+    def check_recovery(available, base, key=None):
+        ladder = local_fallback_steps(route, lambda kind, args: SimpleNamespace(kind=kind, args=args))
+        if available:
+            step = next(ladder)
+            client, model, _ = step.args
+            try:
+                assert str(client.base_url).rstrip("/") == base
+                assert model == ("local-model:free" if remote_provider == "openrouter" else "local-model")
+                if key is not None:
+                    assert client.api_key == key
+                with pytest.raises(StopIteration) as result:
+                    ladder.send("local response")
+                assert result.value.value == "local response"
+            finally:
+                client.close()
+        else:
+            assert list(ladder) == []
+
+    if profile_case:
+        from agent import secret_scope
+        from gateway.run import _profile_runtime_scope
+        other = tmp_path / "other-home"
+        other.mkdir()
+        (other / "config.yaml").write_text(yaml.safe_dump(config))
+        bases = {home: expected_base, other: "https://remote.invalid/v1" if remote_provider.endswith("-remote") else "http://127.0.0.1:12434/v1"}
+        for profile, base in bases.items():
+            custom_base = f"CUSTOM_BASE_URL={base}\n" if chain[0]["provider"] == "custom" and "config" not in remote_provider else ""
+            if "config" in remote_provider:
+                profile_config = {**config, "model": {**config["model"], "base_url": base, "api_key": "profile-test-key"}}
+                (profile / "config.yaml").write_text(yaml.safe_dump(profile_config))
+            (profile / ".env").write_text(f"{custom_base}OPENAI_BASE_URL={base}\nOPENAI_API_KEY=profile-test-key\n")
+        monkeypatch.setenv("OPENAI_BASE_URL", expected_base)
+        if "-live-" in remote_provider:
+            token = auxiliary.set_runtime_main("custom", "main-remote-model",
+                                               base_url="https://remote-main.invalid/v1", api_key="remote-main-key")
+            request.addfinalizer(lambda: auxiliary.reset_runtime_main(token))
+        multiplex = secret_scope.set_multiplex_context(True)
+        try:
+            for profile in (home, other, home):
+                with _profile_runtime_scope(profile, hydrate_secrets=False):
+                    if "-live-" in remote_provider:
+                        # Only the explicit main candidate may reuse the session endpoint.
+                        for main_base, available in (("http://127.0.0.1:18434/v1", True),
+                                                     ("https://remote-main.invalid/v1", False)):
+                            runtime = {"provider": "custom", "model": "main-model", "base_url": main_base,
+                                       "api_key": "main-test-key"}
+                            main_client, main_model, _ = auxiliary._try_main_agent_model_fallback(
+                                "openai-codex", task, main_runtime=runtime, local_only=True,
+                            )
+                            if available:
+                                assert main_client is not None
+                                try:
+                                    assert str(main_client.base_url).rstrip("/") == main_base
+                                    assert main_client.api_key == "main-test-key"
+                                    assert main_model == "main-model"
+                                finally:
+                                    main_client.close()
+                            else:
+                                assert main_client is None
+                    if chain[0]["provider"] == "custom":
+                        # The current custom router chooses CUSTOM_BASE_URL over OPENAI_BASE_URL.
+                        ordinary, _ = auxiliary.resolve_provider_client("custom", "local-model")
+                        assert ordinary is not None
+                        try:
+                            assert str(ordinary.base_url).rstrip("/") == bases[profile]
+                        finally:
+                            ordinary.close()
+                    check_recovery(not bases[profile].startswith("https:"), bases[profile], "profile-test-key")
+        finally:
+            secret_scope.reset_multiplex_context(multiplex)
+    else:
+        check_recovery(has_local, expected_base, expected_key)
+    assert auth_reads == []
+    assert key_reads == []
+    remote_catalog.assert_not_called()
+    assert context_reads == []
+
+
+
+@pytest.mark.parametrize("supports_vision,cached_vision,managed_vision,route_change", [
+    (None, None, None, "same"), (False, None, None, "same"), (True, None, None, "same"),
+    (None, False, None, "same"), (None, True, None, "same"),
+    (None, None, False, "same"), (None, None, True, "same"),
+    (False, True, None, "model"), (True, False, None, "model"),
+    (False, True, None, "provider"), (True, False, None, "provider"),
+    (False, True, None, "model-declared"), (True, False, None, "model-declared"),
+    (False, True, None, "same"), (True, False, None, "same"),
+    (False, None, True, "model"), (True, None, False, "model"),
+    (False, None, True, "same"), (True, None, False, "same"),
+    (False, True, None, "named"), (True, False, None, "named"),
+    (False, True, None, "named-same"), (True, False, None, "named-same"),
+    (False, True, None, "moa"), (True, False, None, "moa"),
+    (False, True, None, "auto-same"), (True, False, None, "auto-same"),
+    (False, True, None, "auto-model"), (True, False, None, "auto-model"),
+])
+def test_blocked_local_main_vision_uses_config_or_cached_metadata(
+    monkeypatch, tmp_path, supports_vision, cached_vision, managed_vision, route_change
+):
+    import yaml
+    import agent.auxiliary_client as auxiliary
+    import agent.models_dev as models_dev
+
+    home = tmp_path / "cold-catalog-home"
+    home.mkdir()
+    model_cfg = {"provider": "openai-api", "default": "gpt-4o",
+                 "base_url": "http://127.0.0.1:11434/v1", "api_key": "local-test-key"}
+    model_id = "gpt-4o"
+    if managed_vision is not None:
+        from hermes_cli.local_runtime.catalog import CATALOG
+        entry = next(e for e in CATALOG if e.mmproj is not None)
+        model_id = entry.variants[-1].model_id
+        model_cfg.update(provider="llamacpp", default=model_id)
+        models_dir = home / "models"
+        models_dir.mkdir()
+        (models_dir / f"{model_id}.gguf").write_bytes(b"GGUF" + b"\x00" * 32)
+        if managed_vision:
+            assets = models_dir / "assets"
+            assets.mkdir()
+            (assets / entry.mmproj.local_name).write_bytes(b"GGUF projector")
+        import urllib.request
+        import urllib.error
+        def offline_local_props(req, **kwargs):
+            assert req.full_url.startswith("http://127.0.0.1:11434/")
+            raise urllib.error.URLError("local server offline")
+        monkeypatch.setattr(urllib.request, "urlopen", offline_local_props)
+    if supports_vision is not None:
+        model_cfg["supports_vision"] = supports_vision
+    config = {"model": model_cfg}
+    runtime = {**model_cfg, "model": model_id}
+    if route_change.startswith("model"):
+        model_cfg["default"] = "configured-model"
+    if route_change == "provider":
+        model_cfg["provider"] = "configured-provider"
+        config["providers"] = {"configured-provider": {
+            "base_url": "http://127.0.0.1:12434/v1", "api_key": "configured-test-key",
+            "models": {model_id: {"supports_vision": supports_vision}},
+        }}
+    if route_change == "model-declared":
+        config["providers"] = {runtime["provider"]: {"models": {
+            model_id: {"supports_vision": cached_vision},
+        }}}
+    if route_change.startswith("named"):
+        runtime.update(provider="custom", requested_provider="live-local")
+        model_cfg["provider"] = "live-local" if route_change == "named-same" else "saved-local"
+        config["providers"] = {
+            "live-local": {"base_url": runtime["base_url"], "api_key": runtime["api_key"],
+                           "models": {model_id: {"supports_vision": cached_vision}}},
+            "saved-local": {"base_url": "http://127.0.0.1:12434/v1", "api_key": "saved-test-key",
+                            "models": {model_id: {"supports_vision": supports_vision}}},
+        }
+    if route_change == "moa":
+        runtime.update(provider="moa", requested_provider="moa", model="local-preset")
+        model_cfg.update(provider="moa", default="local-preset")
+        config["moa"] = {"presets": {"local-preset": {
+            "aggregator": {"provider": "custom", "model": model_id},
+        }}}
+        config["providers"] = {
+            "custom": {"base_url": runtime["base_url"], "api_key": runtime["api_key"],
+                       "models": {model_id: {"supports_vision": cached_vision}}},
+            "moa": {"models": {model_id: {"supports_vision": supports_vision}}},
+        }
+    if route_change.startswith("auto"):
+        model_cfg["provider"] = "auto"
+        if route_change == "auto-model":
+            model_cfg["default"] = "configured-model"
+        config["providers"] = {
+            "custom": {"models": {model_id: {"supports_vision": cached_vision}}},
+            "auto": {"models": {model_id: {"supports_vision":
+                                          cached_vision if route_change == "auto-same" else supports_vision}}},
+        }
+    (home / "config.yaml").write_text(yaml.safe_dump(config))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    metadata_vision = not cached_vision if route_change == "model-declared" else cached_vision
+    cache = {} if metadata_vision is None else {
+        "openai": {"models": {"gpt-4o": {"modalities": {
+            "input": ["text", "image"] if metadata_vision else ["text"],
+        }}}},
+    }
+    monkeypatch.setattr(models_dev, "_models_dev_cache", cache)
+    monkeypatch.setattr(models_dev, "_models_dev_cache_time", 0)
+    monkeypatch.setattr(models_dev, "_models_dev_retry_after", 0)
+    remote_send = MagicMock(side_effect=RuntimeError("remote catalog forbidden during recovery"))
+    monkeypatch.setattr(models_dev.requests, "get", remote_send)
+    if route_change.startswith("auto"):
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        runtime = {**resolve_runtime_provider(requested="auto", target_model=model_id), "model": model_id}
+        assert runtime["provider"] == "custom"
+        assert runtime["requested_provider"] == "auto"
+    # Bind the actual session's switched main route; config.yaml remains its saved default.
+    token = auxiliary.set_runtime_main(runtime["provider"], runtime["model"],
+                                       base_url=runtime["base_url"], api_key=runtime["api_key"],
+                                       requested_provider=runtime.get("requested_provider", ""))
+    try:
+        client, model, _ = auxiliary._try_main_agent_model_fallback(
+            "openai-codex", "vision", failed_model="blocked-model", local_only=True,
+        )
+    finally:
+        auxiliary.reset_runtime_main(token)
+    expected_vision = (supports_vision if route_change in {"same", "named-same", "auto-same"} and supports_vision is not None
+                       else cached_vision if cached_vision is not None else managed_vision)
+    if expected_vision is False:
+        assert client is None
+    else:
+        assert client is not None
+        assert str(client.base_url) == "http://127.0.0.1:11434/v1/"
+        assert model == model_id
+        client.close()
+    from agent.llm_egress_firewall import DestinationClass, classify_destination
+    for call in remote_send.call_args_list:
+        assert classify_destination("", call.args[0], None) is DestinationClass.LOOPBACK
+
+
 def _run_aux_codex_call(
     monkeypatch,
     tmp_path,
