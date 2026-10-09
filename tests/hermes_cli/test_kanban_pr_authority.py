@@ -40,7 +40,11 @@ def _repair_body() -> str:
                                    "read_metadata_write", "read_only", "read_unknown_write",
                                    "read_prohibition", "read_target", "read_mixed",
                                    "read_prohibition_multiline", "read_target_multiline",
-                                   "read_metadata_write_multiline"])
+                                   "read_metadata_write_multiline", "rendered_unknown_write",
+                                   "rendered_read_unknown", "read_edit", "read_approve", "read_merge",
+                                   "read_prohibited_mutations", "read_merge_target", "ordinary_pr_record",
+                                   "producer_missing_repository", "producer_missing_pr_number",
+                                   "producer_missing_head"])
 def test_create_rejects_read_only_owner_for_atomic_pr_repair(kanban_home, intent):
     import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     _write_profile(
@@ -68,47 +72,113 @@ def test_create_rejects_read_only_owner_for_atomic_pr_repair(kanban_home, intent
         title = "Review the proposed fix" + (" then push the repository" if intent == "read_mixed" else "")
     if intent == "read_metadata_write":
         payload["instructions"] = "Repair and push the repository."
+    if intent in {"rendered_unknown_write", "rendered_read_unknown"}:
+        payload.pop("action")
+    if intent == "rendered_unknown_write":
+        title = "Repair and push ExampleApp PR #132"
+    if intent in {"read_edit", "read_approve", "read_merge"}:
+        payload["instructions"] = {"read_edit": "Edit the source", "read_approve": "Approve it",
+                                   "read_merge": "Merge this pull request"}[intent]
+    if intent == "read_prohibited_mutations":
+        payload["instructions"] = "Do not edit, approve, or merge."
+    if intent == "read_merge_target":
+        title = "Inspect the proposed merge conflicts"
+    if intent == "ordinary_pr_record":
+        payload = {"pr_number": 12, "note": "summarize this imported record"}
+        title = "Summarize imported record"
+    if intent.startswith("producer_missing_"):
+        payload.pop({"producer_missing_repository": "repository",
+                     "producer_missing_pr_number": "pr_number",
+                     "producer_missing_head": "expected_head_sha"}[intent])
     body = json.dumps(payload)
+    if intent in {"rendered_unknown_write", "rendered_read_unknown"}:
+        body = ("Repair and push the repository." if intent == "rendered_unknown_write"
+                else "Review exact-head evidence only.") + "\n" + body
     if intent == "read_body_write":
         body = "Repair and push the repository.\n" + body
-    owner = "unknown-steward" if intent == "read_unknown_write" else "review-verification-steward"
+    owner = ("unknown-steward" if intent in {"read_unknown_write", "rendered_unknown_write",
+                                              "rendered_read_unknown"}
+             else "review-verification-steward")
     with _hermes_cli_kanban_db_connect.connect() as conn:
         if intent in {"read_only", "read_prohibition", "read_target",
-                      "read_prohibition_multiline", "read_target_multiline"}:
+                      "read_prohibition_multiline", "read_target_multiline", "rendered_read_unknown",
+                      "read_prohibited_mutations", "read_merge_target", "ordinary_pr_record"}:
             tid = kb.create_task(conn, title=title, body=body, assignee=owner,
-                                 idempotency_key="github-pr-feedback:review:132:abc")
+                                 idempotency_key=("imported-record:12" if intent == "ordinary_pr_record"
+                                                  else "github-pr-feedback:review:132:abc"))
             assert kb.get_task(conn, tid).assignee == owner
         else:
-            with pytest.raises(ValueError, match="read-only profile|cannot verify write authority"):
+            error = ("requires an exact PR identity" if intent.startswith("producer_missing_")
+                     else "read-only profile|cannot verify write authority")
+            with pytest.raises(ValueError, match=error):
                 kb.create_task(conn, title=title, body=body, assignee=owner,
                                idempotency_key="github-pr-feedback:repair:132:abc")
 
 
 
-def test_reassign_rejects_read_only_owner_and_preserves_current_owner(kanban_home):
+@pytest.mark.parametrize("path", ["manual", "worker_block", "router", "generated", "default"])
+@pytest.mark.parametrize("authority", ["read_only", "unknown", "write"])
+@pytest.mark.parametrize("rendered", [False, True])
+def test_reassign_rejects_read_only_owner_and_preserves_current_owner(
+    kanban_home, monkeypatch, path, authority, rendered,
+):
+    from types import SimpleNamespace
     import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
-    _write_profile(
-        kanban_home,
-        "review-verification-steward",
-        "Read-only verifier; never edits, pushes, replies, refreshes, or merges.",
-    )
-    _write_profile(
-        kanban_home,
-        "pr-repair-steward",
-        "Repairs pull requests, pushes exact-head fixes, and posts factual replies.",
-    )
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from hermes_cli import kanban_repair_routing as repair_routing
+    from hermes_cli import kanban_worker_routing as routing
 
+    target = "task-intake-router" if path == "worker_block" else "review-verification-steward"
+    _write_profile(kanban_home, target,
+                   "Read-only verifier" if authority == "read_only" else "Task owner")
+    if authority == "write":
+        profile = kanban_home / "profiles" / target / "profile.yaml"
+        profile.write_text(profile.read_text() + "execution_authority: write\n")
+    _write_profile(kanban_home, "pr-repair-steward", "Repairs pull requests and pushes fixes")
+    payload = json.loads(_repair_body())
+    if rendered:
+        payload.pop("action")
+    body = ("Repair and push the repository.\n" if rendered else "") + json.dumps(payload)
+    monkeypatch.setattr(repair_routing, "repair_profile_for_task", lambda *_: target)
+    result = SimpleNamespace(auto_reassigned_invalid=[], routed_to_specialist=[])
     with _hermes_cli_kanban_db_connect.connect() as conn:
-        tid = kb.create_task(
-            conn,
-            title="Resolve merge conflict and push PR #132",
-            body=_repair_body(),
-            assignee="pr-repair-steward",
-            idempotency_key="github-pr-feedback:repair:132:abc",
-        )
-        with pytest.raises(ValueError, match="read-only profile"):
-            kb.reassign_task(conn, tid, "review-verification-steward")
-        assert kb.get_task(conn, tid).assignee == "pr-repair-steward"
+        tid = kb.create_task(conn, title="Repair and push PR #132", body=body,
+                             assignee="pr-repair-steward",
+                             idempotency_key="github-pr-feedback:repair:132:abc")
+        if path == "router":
+            conn.execute("UPDATE tasks SET assignee = 'task-intake-router' WHERE id = ?", (tid,))
+        elif path == "generated":
+            conn.execute("UPDATE tasks SET assignee = 'missing-profile' WHERE id = ?", (tid,))
+        elif path == "default":
+            conn.execute("UPDATE tasks SET assignee = NULL WHERE id = ?", (tid,))
+        conn.commit()
+        before = dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone())
+        events = len(kb.list_events(conn, tid))
+        if path == "manual":
+            if authority != "write":
+                with pytest.raises(ValueError, match="read-only profile|cannot verify write authority"):
+                    kb.reassign_task(conn, tid, target)
+            else:
+                kb.reassign_task(conn, tid, target)
+        elif path == "worker_block":
+            landed = kb.route_worker_block_to_orchestrator(conn, tid, reason="provider failure")
+            assert landed[0] == (authority == "write")
+        elif path == "router":
+            landed = routing.route_orchestrator_task(conn, before, dry_run=False, result=result)
+            assert landed == (target if authority == "write" else None)
+        elif path == "generated":
+            landed = routing.recover_generated_assignee(conn, before, target, dry_run=False, result=result)
+            assert landed == (target if authority == "write" else "missing-profile")
+        else:
+            assert dispatch._apply_default_assignee(conn, tid, target, dry_run=False) == (authority == "write")
+        after = dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone())
+        if authority == "write":
+            assert after["assignee"] == target
+        else:
+            assert after == before
+            assert len(kb.list_events(conn, tid)) == events
+            assert result.auto_reassigned_invalid == result.routed_to_specialist == []
+
 
 
 def test_read_only_profile_may_own_exact_head_verification(kanban_home):

@@ -110,7 +110,7 @@ def is_atomic_pr_automation_task(*, body: Optional[str], idempotency_key: Option
     """Return whether a task carries indivisible PR-automation identity."""
     from hermes_cli.kanban_pr_task_policy import classify_pr_task
 
-    if classify_pr_task(body) is not None:
+    if classify_pr_task(body, idempotency_key=idempotency_key) is not None:
         return True
     key = (idempotency_key or "").strip().casefold()
     if key.startswith(_GITHUB_PR_FEEDBACK_IDEMPOTENCY_PREFIX):
@@ -130,7 +130,7 @@ def _task_requires_pr_write_authority(
 ) -> bool:
     from hermes_cli.kanban_pr_task_policy import _PR_WRITE_ACTION_RE, classify_pr_task
 
-    classification = classify_pr_task(body, title=title)
+    classification = classify_pr_task(body, title=title, idempotency_key=idempotency_key)
     if classification is not None:
         return classification == "write"
     if not is_atomic_pr_automation_task(body=body, idempotency_key=idempotency_key):
@@ -181,14 +181,12 @@ def _validate_pr_task_assignee_authority(
         title=title, body=body, idempotency_key=idempotency_key
     ):
         return
-    from hermes_cli.kanban_pr_task_policy import classify_pr_task
-
     status = _profile_read_only_status(assignee)
     if status is True:
         raise ValueError(
             f"read-only profile {assignee!r} cannot own PR repair, push, reply, or base-refresh work"
         )
-    if status is None and classify_pr_task(body) is not None:
+    if status is None:
         raise ValueError(f"cannot verify write authority for profile {assignee!r}")
 
 
@@ -4076,7 +4074,7 @@ def route_worker_block_to_orchestrator(
     """
     with write_txn(conn):
         row = conn.execute(
-            "SELECT status, assignee, current_run_id, title, body FROM tasks WHERE id = ?",
+            "SELECT status, assignee, current_run_id, title, body, idempotency_key FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if row is None or row["status"] not in {"running", "ready"}:
@@ -4105,6 +4103,13 @@ def route_worker_block_to_orchestrator(
         else:
             new_status = "ready" if _parents_satisfied(conn, task_id) else "todo"
             new_assignee = target_assignee
+        try:
+            _validate_pr_task_assignee_authority(
+                title=row["title"], body=row["body"], idempotency_key=row["idempotency_key"],
+                assignee=new_assignee, initial_status=new_status,
+            )
+        except ValueError:
+            return False, None, None
         cur = conn.execute(
             "UPDATE tasks SET status = ?, assignee = ?, claim_lock = NULL, "
             "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "

@@ -2440,10 +2440,19 @@ def _apply_default_assignee(
     by the default, not "unassigned but secretly routed". ``dry_run`` reports
     without writing. Returns False when the write failed.
     """
-    if dry_run:
-        return True
     try:
         with _kb.write_txn(conn):
+            detail = conn.execute(
+                "SELECT title, body, idempotency_key FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if detail is None:
+                return False
+            _kb._validate_pr_task_assignee_authority(
+                title=detail["title"], body=detail["body"], idempotency_key=detail["idempotency_key"],
+                assignee=assignee,
+            )
+            if dry_run:
+                return True
             conn.execute(
                 "UPDATE tasks SET assignee = ? WHERE id = ? "
                 "AND (assignee IS NULL OR assignee = '')",

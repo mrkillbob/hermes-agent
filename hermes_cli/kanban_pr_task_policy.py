@@ -6,6 +6,7 @@ import re
 from typing import Any, Mapping, Optional
 
 _PR_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_PR_IDENTITY_FIELDS = frozenset({"repository", "pr_number", "expected_head_sha"})
 _PR_HEAD_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _PR_READ_ONLY_ACTIONS = frozenset({
     "verify", "review", "inspect", "audit", "check", "read",
@@ -14,7 +15,7 @@ _PR_READ_ONLY_ACTIONS = frozenset({
 })
 
 _PR_WRITE_ACTION_RE = re.compile(
-    r"\b(?:repair|fix|push|reply|respond|base[-_ ]?refresh|"
+    r"\b(?:edit|approve|merge|repair|fix|push|reply|respond|base[-_ ]?refresh|"
     r"refresh(?:ing)?\s+(?:the\s+)?base|resolve(?:d|s|ing)?\s+(?:a\s+)?merge\s+conflict)\b",
     re.IGNORECASE,
 )
@@ -28,7 +29,7 @@ _PR_PROHIBITED_WRITE_RE = re.compile(
 _PR_READ_TARGET_RE = re.compile(
     r"\b(?:review|verify|inspect|audit|check|read)\s+"
     r"(?:(?:the|a|an|proposed|previous|existing|failed|planned|attempted|recorded|blocked)\s+)*"
-    r"(?:fix|repair|push|reply|response|base[-_ ]?refresh)\b",
+    r"(?:edit|approval|approve|merge|fix|repair|push|reply|response|base[-_ ]?refresh)\b",
     re.IGNORECASE,
 )
 
@@ -93,19 +94,21 @@ def _validate_exact_pr_identity(payload: Mapping[str, Any]) -> None:
         )
 
 
-def classify_pr_task(body: Optional[str], *, title: str = "") -> Optional[str]:
+def classify_pr_task(
+    body: Optional[str], *, title: str = "", idempotency_key: Optional[str] = None,
+) -> Optional[str]:
     payload = _pr_task_payload(body)
-    if payload is None or "pr_number" not in payload:
+    marked = (idempotency_key or "").strip().casefold().startswith("github-pr-feedback:")
+    if payload is None or (not marked and not _PR_IDENTITY_FIELDS.issubset(payload)):
         return None
     _validate_exact_pr_identity(payload)
     action = payload.get("action")
     if not isinstance(action, str) or not action.strip():
-        # Legacy rendered cards have no typed action: retain their existing
-        # title/instruction authority policy while binding exact identity.
+        # Legacy rendered cards bind exact identity and derive intent from prose.
         try:
             json.loads(body or "")
         except (TypeError, ValueError):
-            return None
+            return "write" if _pr_task_has_text_write_intent(payload, body, title) else "read"
         return "write"
     return "read" if (
         action.strip().casefold() in _PR_READ_ONLY_ACTIONS
@@ -115,7 +118,7 @@ def classify_pr_task(body: Optional[str], *, title: str = "") -> Optional[str]:
 
 def _canonical_pr_task_identity(body: Optional[str]) -> tuple[object, ...] | None:
     payload = _pr_task_payload(body)
-    if payload is None or "pr_number" not in payload:
+    if payload is None or not _PR_IDENTITY_FIELDS.issubset(payload):
         return None
     _validate_exact_pr_identity(payload)
     action = payload.get("action")
