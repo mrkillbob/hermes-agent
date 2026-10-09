@@ -1,4 +1,4 @@
-name: Portable reconciliation qualification
+name: Portable dispatch-order split qualification
 on:
   push:
     branches: [codex/portable-pr97370-lifecycle-qualification-20261009]
@@ -25,12 +25,12 @@ jobs:
       - name: Qualify reviewed source integrity and affected lifecycle consumers
         run: |
           set -o pipefail
-          scripts/run_tests.sh -j 1 --file-retries 0 tests/tools/test_kanban_tools.py | tee portable-focused.log
+          scripts/run_tests.sh -j 1 --file-retries 0 tests/gateway/test_kanban_dispatch_order.py tests/gateway/test_kanban_auto_decompose_live.py tests/gateway/test_kanban_auto_decompose_secret_scope.py tests/gateway/test_kanban_notifier_watcher_dispatch_gate.py tests/gateway/test_kanban_notifier_wake_only_ordering.py tests/gateway/test_kanban_multiplex_served_profile_parity.py | tee portable-focused.log
       - name: Run eleven required static checks against observed upstream main
         if: always()
         run: |
           set -o pipefail
-          python scripts/check --base 8bff64d6ed3414a66976bfa8ab72c14b6bca2a6f | tee portable-static.log
+          python scripts/check --base 0670ba45240b734c1e6f6d1d5ead87233f37df49 | tee portable-static.log
       - name: Verify source remained frozen
         if: always()
         run: python3 .ci/portable-reconcile/verify_source.py
@@ -38,7 +38,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: reconciliation-boundary-targeted
+          name: reconciliation-pr97368-split
           path: |
             portable-focused.log
             portable-static.log

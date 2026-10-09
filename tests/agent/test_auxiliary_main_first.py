@@ -12,7 +12,6 @@ runs when the main provider has no working client.
 """
 
 from __future__ import annotations
-from agent import auxiliary_egress_recovery
 
 from unittest.mock import MagicMock, patch
 
@@ -153,7 +152,7 @@ class TestResolveAutoMainFirst:
             "agent.auxiliary_client.resolve_provider_client",
             return_value=(None, None),  # main provider has no client
         ), patch(
-            "agent.auxiliary_egress_recovery.try_configured_fallback_chain",
+            "agent.auxiliary_client._try_configured_fallback_chain",
             return_value=(task_client, "task-free-model", "fallback_chain[0](openrouter)"),
         ) as mock_task_chain, patch(
             "agent.auxiliary_client._try_main_fallback_chain",
