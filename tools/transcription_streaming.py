@@ -214,15 +214,21 @@ class _WebSocketSession(StreamingSession):
             if result is not None:
                 self._finish(result)
                 return result
-            if self._backlog and self._ready():
+            if self._ready() and (self._backlog or self._end_pending):
                 self._flush_backlog(ws)
+                if self._end_pending:
+                    self._end_pending = False
+                    self._end(ws)
 
     def _drain_audio(self, ws: Any) -> Optional[float]:
         """Send queued audio; on end-of-audio send the provider's flush and return its time."""
         while True:
             chunk = self._take_audio(block=False)
             if chunk is None:
-                self._end(ws)
+                if self._ready():
+                    self._end(ws)
+                else:
+                    self._end_pending = True  # flushed with the backlog once the provider is ready
                 return time.monotonic()
             if not chunk:
                 if self._audio.empty():
@@ -234,6 +240,7 @@ class _WebSocketSession(StreamingSession):
                 self._backlog.append(chunk)
 
     _backlog: list[bytes]
+    _end_pending = False
 
     def _ready(self) -> bool:
         return True
@@ -341,8 +348,6 @@ class XAIStreamingSession(_WebSocketSession):
         ws.send(chunk)
 
     def _end(self, ws: Any) -> None:
-        if not self._created:
-            self._backlog.clear()
         ws.send(json.dumps({"type": "audio.done"}))
 
     def _text(self) -> str:

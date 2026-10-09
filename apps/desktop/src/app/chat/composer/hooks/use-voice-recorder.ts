@@ -234,6 +234,8 @@ export function useVoiceRecorder({
     let session: DictationStreamSession | null = null
     let settled = false
     let cancelled = false
+    // Startup buffer overflowed: the provider would miss audio, so the recorded blob is the transcript.
+    let overflowed = false
     let buffered: ArrayBuffer[] = []
     let opening: Promise<DictationStreamSession | null> | null = null
 
@@ -253,8 +255,11 @@ export function useVoiceRecorder({
               }
             })
           : null
-        if (cancelled) {
+        if (cancelled || overflowed) {
           opened?.cancel()
+          settled = true
+          buffered = []
+
           return null
         }
 
@@ -280,8 +285,13 @@ export function useVoiceRecorder({
       }
       if (session) {
         session.pushAudio(chunk)
-      } else if (!settled && buffered.length < 64) {
-        buffered.push(chunk)
+      } else if (!settled) {
+        if (buffered.length < 64) {
+          buffered.push(chunk)
+        } else {
+          overflowed = true
+          buffered = []
+        }
       }
     }
 

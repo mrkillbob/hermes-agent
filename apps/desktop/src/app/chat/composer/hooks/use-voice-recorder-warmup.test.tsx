@@ -396,6 +396,25 @@ describe('useVoiceRecorder STT readiness barrier', () => {
     expect(syncSttLeaseSpy).not.toHaveBeenCalledWith('desktop:voice-input:test', true, OWNER_A)
   })
 
+  it('uses the recorded blob when the startup PCM buffer overflows before the stream opens', async () => {
+    fetchVoiceConfig.mockResolvedValue({ stt: { streaming: true } })
+    micHandle.start.mockImplementation(async options => {
+      options?.onPcmRate?.(16_000)
+      for (let i = 0; i < 70; i++) { options?.onPcm?.(new ArrayBuffer(2)) }
+      recording = true
+    })
+    const session = streamSession()
+    openStream.mockResolvedValue(session)
+    const transcribe = vi.fn(async () => 'blob words')
+    const onTranscript = vi.fn()
+    const hook = renderRecorder(transcribe, onTranscript)
+    await act(async () => { hook.result.current.dictate() })
+    await act(async () => { hook.result.current.dictate() })
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith('blob words'))
+    expect(session.pushAudio).not.toHaveBeenCalled()
+    expect(session.stop).not.toHaveBeenCalled()
+  })
+
   it('falls back to the original owner blob when the live final response times out', async () => {
     enableStreaming()
     const session = streamSession()
