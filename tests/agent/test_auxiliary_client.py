@@ -88,6 +88,7 @@ def _blocked_egress_error(reason="base64_payload"):
     ("profile-custom", True), ("profile-openai-api", True),
     ("profile-custom-remote", True), ("profile-openai-api-remote", True),
     ("profile-custom-config", True), ("profile-custom-config-remote", True),
+    ("profile-custom-live-remote", True), ("profile-custom-config-live-remote", True),
     ("llamacpp", True), ("llama.cpp", True), ("llama-cpp", True),
     ("llamacpp-missing", False), ("llamacpp-named", False),
     ("llamacpp-override", True), ("moa-llamacpp", True),
@@ -272,10 +273,33 @@ def test_blocked_recovery_screens_remote_auth_before_resolving_local(
                 (profile / "config.yaml").write_text(yaml.safe_dump(profile_config))
             (profile / ".env").write_text(f"{custom_base}OPENAI_BASE_URL={base}\nOPENAI_API_KEY=profile-test-key\n")
         monkeypatch.setenv("OPENAI_BASE_URL", expected_base)
+        if "-live-" in remote_provider:
+            token = auxiliary.set_runtime_main("custom", "main-remote-model",
+                                               base_url="https://remote-main.invalid/v1", api_key="remote-main-key")
+            request.addfinalizer(lambda: auxiliary.reset_runtime_main(token))
         multiplex = secret_scope.set_multiplex_context(True)
         try:
             for profile in (home, other, home):
                 with _profile_runtime_scope(profile, hydrate_secrets=False):
+                    if "-live-" in remote_provider:
+                        # Only the explicit main candidate may reuse the session endpoint.
+                        for main_base, available in (("http://127.0.0.1:18434/v1", True),
+                                                     ("https://remote-main.invalid/v1", False)):
+                            runtime = {"provider": "custom", "model": "main-model", "base_url": main_base,
+                                       "api_key": "main-test-key"}
+                            main_client, main_model, _ = auxiliary._try_main_agent_model_fallback(
+                                "openai-codex", task, main_runtime=runtime, local_only=True,
+                            )
+                            if available:
+                                assert main_client is not None
+                                try:
+                                    assert str(main_client.base_url).rstrip("/") == main_base
+                                    assert main_client.api_key == "main-test-key"
+                                    assert main_model == "main-model"
+                                finally:
+                                    main_client.close()
+                            else:
+                                assert main_client is None
                     if chain[0]["provider"] == "custom":
                         # The current custom router chooses CUSTOM_BASE_URL over OPENAI_BASE_URL.
                         ordinary, _ = auxiliary.resolve_provider_client("custom", "local-model")

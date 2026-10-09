@@ -58,7 +58,6 @@ def local_fallback_entry(entry, *, main_runtime=None):
             base_url = (
                 base_url
                 or str((main_runtime or {}).get("base_url") or "").strip()
-                or str(auxiliary._runtime_main_value("base_url") or "").strip()
                 or get_secret_str("CUSTOM_BASE_URL", "").strip()
                 or configured_base
                 or get_secret_str("OPENROUTER_BASE_URL", "").strip()
