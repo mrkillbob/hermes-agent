@@ -85,6 +85,17 @@ def _blocked_egress_error(reason="base64_payload"):
     ("screening-local-override", True), ("screening-explicit-remote", False),
     ("vllm", False), ("custom:vllm", False),
     ("openrouter", True), ("openrouter-remote", False),
+    ("profile-custom", True), ("profile-openai-api", True),
+    ("profile-custom-remote", True), ("profile-openai-api-remote", True),
+    ("profile-custom-config", True), ("profile-custom-config-remote", True),
+    ("llamacpp", True), ("llama.cpp", True), ("llama-cpp", True),
+    ("llamacpp-missing", False), ("llamacpp-named", False),
+    ("llamacpp-override", True), ("moa-llamacpp", True),
+    ("llamacpp-custom-remote", True), ("llamacpp-custom-loopback", True),
+    ("llama.cpp-custom-remote", True), ("llama.cpp-custom-loopback", True),
+    ("llama-cpp-custom-remote", True), ("llama-cpp-custom-loopback", True),
+    ("moa-llamacpp-custom-remote", True), ("moa-llamacpp-custom-loopback", True),
+    ("llamacpp-named-custom-loopback", False), ("llamacpp-override-custom-remote", True),
 ])
 def test_blocked_recovery_screens_remote_auth_before_resolving_local(
     monkeypatch, tmp_path, request, remote_provider, has_local
@@ -110,10 +121,26 @@ def test_blocked_recovery_screens_remote_auth_before_resolving_local(
         chain[0].update(model="local-model", api_key="local-test-key")
     if remote_provider in {"vllm", "custom:vllm"}:
         chain[0].pop("base_url")
-    if has_local and remote_provider not in {"screening-local-override", "openrouter"}:
+    profile_case = remote_provider.startswith("profile-")
+    managed_provider = remote_provider.split("-custom-", 1)[0]
+    managed_case = managed_provider in {
+        "llamacpp", "llama.cpp", "llama-cpp", "llamacpp-missing",
+        "llamacpp-named", "llamacpp-override", "moa-llamacpp",
+    }
+    if profile_case:
+        chain[0] = {"provider": "openai-api" if "openai-api" in remote_provider else "custom",
+                    "model": "local-model"}
+    if managed_case:
+        chain[0] = {"provider": managed_provider if managed_provider in {"llama.cpp", "llama-cpp"} else "llamacpp",
+                    "model": "local-model"}
+        if managed_provider == "llamacpp-override":
+            chain[0].update(base_url="http://127.0.0.1:11434/v1", api_key="local-test-key")
+        if managed_provider == "moa-llamacpp":
+            chain.clear()
+    if has_local and not profile_case and not managed_case and remote_provider not in {"screening-local-override", "openrouter"}:
         chain.append({"provider": "custom", "model": "local-model",
                       "base_url": "http://127.0.0.1:11434/v1", "api_key": "local-test-key"})
-    (home / "config.yaml").write_text(yaml.safe_dump({
+    config = {
         "model": {"provider": "nous", "default": "main-remote-model"},
         "auxiliary": {task: {"fallback_chain": chain}},
         "providers": {"screening-remote": {"base_url": "https://remote.invalid/v1",
@@ -121,9 +148,52 @@ def test_blocked_recovery_screens_remote_auth_before_resolving_local(
                       "screening-local-override": {"base_url": "https://remote.invalid/v1", "api_key": "local-test-key"},
                       "screening-explicit-remote": {"base_url": "http://127.0.0.1:11434/v1", "key_env": "SCREENING_REMOTE_API_KEY"},
                       "vllm": {"base_url": "https://remote.invalid/v1", "key_env": "SCREENING_REMOTE_API_KEY"}},
-    }))
+    }
+    if profile_case and chain[0]["provider"] == "custom":
+        config["model"] = {"provider": "custom", "default": "local-model"}
+    if managed_case and "-custom-" in remote_provider:
+        config["providers"]["custom"] = {
+            "base_url": "https://remote.invalid/v1" if remote_provider.endswith("remote") else "http://127.0.0.1:19434/v1",
+            "api_key": "unrelated-custom-key",
+        }
+    if managed_provider in {"llamacpp-named", "llamacpp-override"}:
+        config["providers"]["llamacpp"] = {
+            "base_url": "https://remote.invalid/v1", "key_env": "SCREENING_REMOTE_API_KEY",
+        }
+        if managed_provider == "llamacpp-override":
+            config["providers"]["llamacpp"] = {"base_url": "https://remote.invalid/v1", "api_key": "local-test-key"}
+    if managed_provider == "moa-llamacpp":
+        config["model"] = {"provider": "moa", "default": "local-preset"}
+        config["moa"] = {"presets": {"local-preset": {
+            "aggregator": {"provider": "llamacpp", "model": "local-model"},
+        }}}
+    (home / "config.yaml").write_text(yaml.safe_dump(config))
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    expected_base = "http://127.0.0.1:11434/v1"
+    expected_key = None
+    if managed_case:
+        from hermes_cli.local_runtime import recovery, supervisor
+        state_path = supervisor.state_path()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = {"pid": 647, "base_url": "http://127.0.0.1:18434/v1", "api_key": "managed-test-key"}
+        if managed_provider != "llamacpp-missing":
+            state_path.write_text(json.dumps(state))
+        process = SimpleNamespace(
+            exe=lambda: str(state_path.parent / "test-engine" / "llama-server"),
+            create_time=lambda: 1,
+            cmdline=lambda: ["llama-server", "--host", "127.0.0.1", "--port", "18434",
+                             "--api-key", state["api_key"], "--models-preset", str(state_path.parent / "presets.ini")],
+        )
+        monkeypatch.setattr(recovery.psutil, "Process", lambda pid: process)
+        # Missing managed state must not detect a real machine's external runtime.
+        import urllib.request
+        import urllib.error
+        monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=urllib.error.URLError("offline")))
+        expected_base = "http://127.0.0.1:11434/v1" if managed_provider == "llamacpp-override" else state["base_url"]
+        expected_key = "local-test-key" if managed_provider == "llamacpp-override" else state["api_key"]
     auth_reads = []
     # Observe the credential I/O boundary; use the real config/router/SDK.
     def read_remote_auth():
@@ -156,18 +226,69 @@ def test_blocked_recovery_screens_remote_auth_before_resolving_local(
         route.main_runtime = {"provider": "nous", "model": "main-remote-model"}
         token = auxiliary.set_runtime_main("custom", "main-local-model", base_url="http://127.0.0.1:11434/v1")
         request.addfinalizer(lambda: auxiliary.reset_runtime_main(token))
-    ladder = local_fallback_steps(route, lambda kind, args: SimpleNamespace(kind=kind, args=args))
-    if has_local:
-        step = next(ladder)
-        client, model, _ = step.args
-        assert str(client.base_url) == "http://127.0.0.1:11434/v1/"
-        assert model == ("local-model:free" if remote_provider == "openrouter" else "local-model")
-        with pytest.raises(StopIteration) as result:
-            ladder.send("local response")
-        assert result.value.value == "local response"
-        client.close()
+    if managed_provider == "moa-llamacpp":
+        route.main_runtime = {"provider": "moa", "model": "local-preset", "base_url": "moa://local-preset", "api_key": "moa-key"}
+    if managed_provider in {"llamacpp", "llama.cpp", "llama-cpp", "moa-llamacpp"}:
+        ordinary_provider = "moa" if managed_provider == "moa-llamacpp" else managed_provider
+        ordinary_model = "local-preset" if ordinary_provider == "moa" else "local-model"
+        ordinary, resolved_model = auxiliary.resolve_provider_client(ordinary_provider, ordinary_model)
+        assert ordinary is not None
+        try:
+            assert str(ordinary.base_url).rstrip("/") == expected_base
+            assert ordinary.api_key == expected_key
+            assert resolved_model == "local-model"
+        finally:
+            ordinary.close()
+
+    def check_recovery(available, base, key=None):
+        ladder = local_fallback_steps(route, lambda kind, args: SimpleNamespace(kind=kind, args=args))
+        if available:
+            step = next(ladder)
+            client, model, _ = step.args
+            try:
+                assert str(client.base_url).rstrip("/") == base
+                assert model == ("local-model:free" if remote_provider == "openrouter" else "local-model")
+                if key is not None:
+                    assert client.api_key == key
+                with pytest.raises(StopIteration) as result:
+                    ladder.send("local response")
+                assert result.value.value == "local response"
+            finally:
+                client.close()
+        else:
+            assert list(ladder) == []
+
+    if profile_case:
+        from agent import secret_scope
+        from gateway.run import _profile_runtime_scope
+        other = tmp_path / "other-home"
+        other.mkdir()
+        (other / "config.yaml").write_text(yaml.safe_dump(config))
+        bases = {home: expected_base, other: "https://remote.invalid/v1" if remote_provider.endswith("-remote") else "http://127.0.0.1:12434/v1"}
+        for profile, base in bases.items():
+            custom_base = f"CUSTOM_BASE_URL={base}\n" if chain[0]["provider"] == "custom" and "config" not in remote_provider else ""
+            if "config" in remote_provider:
+                profile_config = {**config, "model": {**config["model"], "base_url": base, "api_key": "profile-test-key"}}
+                (profile / "config.yaml").write_text(yaml.safe_dump(profile_config))
+            (profile / ".env").write_text(f"{custom_base}OPENAI_BASE_URL={base}\nOPENAI_API_KEY=profile-test-key\n")
+        monkeypatch.setenv("OPENAI_BASE_URL", expected_base)
+        multiplex = secret_scope.set_multiplex_context(True)
+        try:
+            for profile in (home, other, home):
+                with _profile_runtime_scope(profile, hydrate_secrets=False):
+                    if chain[0]["provider"] == "custom":
+                        # The current custom router chooses CUSTOM_BASE_URL over OPENAI_BASE_URL.
+                        ordinary, _ = auxiliary.resolve_provider_client("custom", "local-model")
+                        assert ordinary is not None
+                        try:
+                            assert str(ordinary.base_url).rstrip("/") == bases[profile]
+                        finally:
+                            ordinary.close()
+                    check_recovery(not bases[profile].startswith("https:"), bases[profile], "profile-test-key")
+        finally:
+            secret_scope.reset_multiplex_context(multiplex)
     else:
-        assert list(ladder) == []
+        check_recovery(has_local, expected_base, expected_key)
     assert auth_reads == []
     assert key_reads == []
     remote_catalog.assert_not_called()

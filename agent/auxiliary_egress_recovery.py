@@ -1,7 +1,5 @@
 """Recover a denied auxiliary request only through an explicitly local route."""
 
-import os
-
 from agent.llm_egress_firewall import DestinationClass, classify_destination
 
 
@@ -20,29 +18,50 @@ def local_fallback_entry(entry, *, main_runtime=None):
         return None
     provider = auxiliary._normalize_aux_provider(raw_provider)
     base_url = str(entry.get("base_url") or "").strip()
+    api_key = entry.get("api_key")
+    screened_entry = dict(entry)
     try:
+        from agent.secret_scope import get_secret_str
+        from agent.auxiliary_local_runtime import bare_llamacpp_endpoint
         from hermes_cli.runtime_provider import _get_named_custom_provider
 
         original_provider = raw_provider.lower()
         alias_identity = original_provider.removeprefix("custom:")
         named = None
+        local = None
         branch = auxiliary._EXPLICIT_PROVIDER_BRANCHES.get(provider)
         if branch is None or alias_identity in auxiliary._LOCAL_SERVER_ALIASES:
             if original_provider != provider:
                 named = _get_named_custom_provider(original_provider, metadata_only=True)
             if named is None:
+                # The bare alias owns its endpoint before normalization can select providers.custom.
+                local = bare_llamacpp_endpoint(original_provider, base_url, api_key)
+            if named is None and local is None:
                 named = _get_named_custom_provider(provider, metadata_only=True)
-        if named:
+        if local is not None:
+            base_url, api_key = local
+            if not base_url:
+                return None
+        elif named:
             # Current named routes honor explicit endpoints before saved defaults.
             base_url = base_url or str(named.get("base_url") or "").strip()
         elif provider == "custom":
-            # Pin the same concrete endpoint the generic custom arm would use.
+            from hermes_cli.config import load_config_readonly
+            from hermes_cli.runtime_provider import _config_base_url_trustworthy_for_bare_custom
+
+            model_cfg = load_config_readonly().get("model") or {}
+            configured_base = str(model_cfg.get("base_url") or "").strip() if isinstance(model_cfg, dict) else ""
+            configured_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
+            if not _config_base_url_trustworthy_for_bare_custom(configured_base, configured_provider):
+                configured_base = ""
+            # OPENAI_BASE_URL binds a key; CUSTOM_BASE_URL or trusted config picks the endpoint.
             base_url = (
                 base_url
                 or str((main_runtime or {}).get("base_url") or "").strip()
                 or str(auxiliary._runtime_main_value("base_url") or "").strip()
-                or os.getenv("OPENAI_BASE_URL", "").strip()
-                or auxiliary._read_main_field("base_url", readonly=True)
+                or get_secret_str("CUSTOM_BASE_URL", "").strip()
+                or configured_base
+                or get_secret_str("OPENROUTER_BASE_URL", "").strip()
             )
         elif provider == "openrouter":
             # This dedicated API-key arm honors an explicit endpoint override.
@@ -62,7 +81,7 @@ def local_fallback_entry(entry, *, main_runtime=None):
             ):
                 return None
             env_url = (
-                os.getenv(registered.base_url_env_var, "").strip()
+                get_secret_str(registered.base_url_env_var, "").strip()
                 if registered.base_url_env_var else ""
             )
             # Z.AI can probe credentials before applying explicit endpoint overrides.
@@ -71,11 +90,17 @@ def local_fallback_entry(entry, *, main_runtime=None):
             ) is not DestinationClass.LOOPBACK:
                 return None
             base_url = base_url or env_url or registered.inference_base_url
+            if not (entry.get("api_mode") or entry.get("transport")):
+                # Destination bookkeeping must not re-run credential/catalog discovery.
+                screened_entry["api_mode"] = (
+                    "anthropic_messages" if auxiliary._endpoint_speaks_anthropic_messages(base_url)
+                    else auxiliary._profile_declared_messages_wire(provider) or "chat_completions"
+                )
     except Exception:
         return None
     if classify_destination(provider, base_url, "chat_completions") is not DestinationClass.LOOPBACK:
         return None
-    return {**entry, "base_url": base_url}
+    return {**screened_entry, "base_url": base_url, "api_key": api_key}
 
 
 

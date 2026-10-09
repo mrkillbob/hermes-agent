@@ -4422,11 +4422,11 @@ def _try_main_agent_model_fallback(
         from agent.auxiliary_egress_recovery import local_fallback_entry
         local_entry = local_fallback_entry(
             {"provider": main_provider, "model": main_model,
-             "base_url": runtime.get("base_url") or ""}, main_runtime=runtime,
+             "base_url": runtime.get("base_url") or "", "api_key": runtime.get("api_key")}, main_runtime=runtime,
         )
         if local_entry is None:
             return None, None, ""
-        runtime = dict(runtime, base_url=local_entry["base_url"])
+        runtime = dict(runtime, base_url=local_entry["base_url"], api_key=local_entry["api_key"])
     if task == "vision":
         if local_only:
             from agent.auxiliary_egress_recovery import local_main_supports_vision
