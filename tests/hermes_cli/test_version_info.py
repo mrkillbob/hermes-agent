@@ -1,10 +1,12 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 
 from hermes_cli.version_info import (
     VersionInfo,
     _derived_version,
+    _git_version_info,
     _reset_version_info_cache,
     _resolve_stamp_file,
     _stamp_version_info,
@@ -14,6 +16,35 @@ from hermes_cli.version_info import (
 
 def setup_function():
     _reset_version_info_cache()
+
+
+def test_git_identity_reads_dirty_state_without_refreshing_the_index(tmp_path):
+    """Startup identity must not acquire Git's optional index-refresh lock."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("config", "user.name", "Hermes test")
+    git("config", "user.email", "hermes@example.invalid")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("original\n", encoding="utf-8")
+    git("add", "tracked.txt")
+    git("commit", "-qm", "initial")
+    index = repo / ".git" / "index"
+    before = index.read_bytes()
+    # Identical content with changed stat data requires Git to inspect the file;
+    # ordinary `git status` refreshes the cached stat entry as an optional write.
+    stat = tracked.stat()
+    os.utime(tracked, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000_000))
+    assert not _git_version_info(repo, include_untracked=True).dirty
+    assert index.read_bytes() == before
+    tracked.write_text("changed\n", encoding="utf-8")
+    assert _git_version_info(repo).dirty
+    assert index.read_bytes() == before
+    assert not (repo / ".git" / "index.lock").exists()
 
 
 def test_derived_version_shows_plus_question_for_dirty_unknown_distance():
