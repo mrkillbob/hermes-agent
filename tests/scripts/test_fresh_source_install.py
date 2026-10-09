@@ -33,7 +33,7 @@ def _copy_fixture_source(source: Path) -> None:
     # the agent runtime stays out of this small install fixture.
     (source / "agent").mkdir()
     for name in ("__init__.py", "jiter_preload.py", "i18n.py", "i18n_layers.py", "i18n_languages.py",
-                 "secret_scope.py", "provider_media.py"):
+                 "secret_scope.py", "provider_media.py", "file_safety.py"):
         shutil.copy2(ROOT / "agent" / name, source / "agent" / name)
     (source / "gateway").mkdir()
     for name in ("__init__.py", "config.py", "config_loader.py", "shutdown_watchdog.py", "restart.py"):
@@ -59,15 +59,19 @@ sys.path[:0] = sys.argv[1:3]
 from pathlib import Path
 import sqlite3
 from hermes_cli.left_core_migration import _pending
-from hermes_cli.backup import verify_sqlite_integrity
+from hermes_cli.backup import _sibling_profile_homes, verify_sqlite_integrity
+from hermes_cli.update_cmd_maint import _verify_and_restore_one_state_db
 from hermes_state_file_identity import stat_db_file_identity
 from hermes_state_dbfile import _stat_sqlite_sidecar_identity
 home = Path(sys.argv[3])
 assert _pending(home, say=lambda message: None) == []
+assert _sibling_profile_homes(home, strict=True) == []
+assert _verify_and_restore_one_state_db(home, label='fixture') == {'ok': True, 'skipped': 'no-state-db'}
 db = home / 'state.db'
 with sqlite3.connect(db) as connection:
     connection.execute('CREATE TABLE acceptance (value TEXT)')
 assert verify_sqlite_integrity(db, check_header=True, run_pragma=True)['valid']
+assert _verify_and_restore_one_state_db(home, label='fixture') == {'ok': True, 'policy': 'auto'}
 info = db.stat()
 expected_identity = (info.st_dev, info.st_ino) if info.st_dev and info.st_ino else None
 assert stat_db_file_identity(db) == expected_identity
