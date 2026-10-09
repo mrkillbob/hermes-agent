@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 
 from hermes_cli.version_info import _git_version_info, _reset_version_info_cache
@@ -23,8 +24,27 @@ def write_source_stamp(root: Path, *, adopted: bool = False) -> dict | None:
     than left naming the commit that was just replaced. Returns None then.
     """
     root = Path(root).resolve()
-    info = _git_version_info(root, include_untracked=True)
-    if info.commit is None:
+    # An unpacked tree or invalid .git can make Git walk to a parent.
+    # Only the supplied checkout may supply its identity.
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=root,
+            capture_output=True, timeout=3,
+        )
+        # This is a pathname, not a token: preserve whitespace in its final
+        # component and remove only the newline Git appends to its output.
+        toplevel = (
+            os.fsdecode(result.stdout.removesuffix(b"\n"))
+            if result.returncode == 0 else None
+        )
+    except (OSError, subprocess.SubprocessError):
+        toplevel = None
+    info = (
+        _git_version_info(root, include_untracked=True)
+        if toplevel and Path(toplevel).resolve() == root
+        else None
+    )
+    if info is None or info.commit is None:
         with suppress(FileNotFoundError):
             (root / "install-stamp.json").unlink()
         _reset_version_info_cache()

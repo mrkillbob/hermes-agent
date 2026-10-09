@@ -274,7 +274,8 @@ def _web_feature(web_cfg: Dict[str, object], tool_enabled: bool, managed: bool, 
         "tavily": (_any_env("TAVILY_API_KEY") or "tavily" in {backend, search_backend, extract_backend}) and not web_gw,
         "searxng": _any_env("SEARXNG_URL"),
     }
-    web_managed = backend == "firecrawl" and managed and not direct_firecrawl
+    web_managed = managed and (
+        (backend == "firecrawl" and not direct_firecrawl) or "nous" in {search_backend, extract_backend})
     active = web_managed or direct.get(backend) or direct.get(search_backend) or (extract_backend == "tavily" and direct[extract_backend])
     return _state(
         "web", available=bool(managed or any(direct.values())), active=bool(tool_enabled and active),

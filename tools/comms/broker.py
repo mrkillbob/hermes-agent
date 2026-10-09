@@ -50,6 +50,7 @@ def _secure_state_permissions(
     permissions = "(OI)(CI)F" if directory else "F"
     result = subprocess.run(
         ["icacls", str(path), "/inheritance:r", "/grant:r", f"{account}:{permissions}"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         check=False,

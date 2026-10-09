@@ -15,7 +15,6 @@
   git,
   openssh,
   ffmpeg,
-  tirith,
 
   # linux-only deps
   wl-clipboard,
@@ -153,7 +152,6 @@ let
     git
     openssh
     ffmpeg
-    tirith
   ]
   ++ lib.optionals stdenv.isLinux [
     wl-clipboard

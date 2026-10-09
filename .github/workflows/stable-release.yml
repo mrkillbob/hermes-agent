@@ -30,6 +30,7 @@ concurrency:
 
 jobs:
   admit:
+    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: Admit the claim
     # A read token cannot see a draft release, so gh release view answers
     # "release not found" for a draft that exists. Write is the permission
@@ -64,7 +65,7 @@ jobs:
   ci:
     name: Full CI pipeline
     needs: admit
-    if: needs.admit.outputs.skip-tests != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-tests != 'true') }}
     permissions:
       contents: read
       pull-requests: write
@@ -80,8 +81,7 @@ jobs:
     # The image publish-docker pushes is built here, so a claim that skipped
     # tests still runs this job with its tests off. It builds alongside the
     # gates; only the acceptance join waits for CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success') }}
     uses: ./.github/workflows/docker.yml
     secrets: inherit
     with:
@@ -93,7 +93,7 @@ jobs:
   nix:
     needs: admit
     # The claim's policy removes it, not a gate it happens to need.
-    if: needs.admit.outputs.skip-tests != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-tests != 'true') }}
     uses: ./.github/workflows/nix.yml
     with:
       release: true
@@ -102,9 +102,7 @@ jobs:
   pm-bundle:
     needs: admit
     # Bundle acceptance is a test of bundles, so either claim flag removes it.
-    if: >-
-      needs.admit.outputs.skip-bundles != 'true'
-      && needs.admit.outputs.skip-tests != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-bundles != 'true' && needs.admit.outputs.skip-tests != 'true') }}
     uses: ./.github/workflows/pm-bundle.yml
     with:
       release: true
@@ -112,7 +110,7 @@ jobs:
 
   termux-checks:
     needs: admit
-    if: needs.admit.outputs.skip-tests != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-tests != 'true') }}
     permissions:
       contents: read
       actions: read
@@ -123,7 +121,7 @@ jobs:
 
   windows-live:
     needs: admit
-    if: needs.admit.outputs.skip-tests != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-tests != 'true') }}
     uses: ./.github/workflows/windows-venv-e2e.yml
     with:
       release: true
@@ -131,7 +129,7 @@ jobs:
   install-e2e:
     name: Install and update E2E
     needs: admit
-    if: needs.admit.outputs.skip-tests != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-tests != 'true') }}
     permissions:
       contents: read
       actions: read
@@ -146,8 +144,7 @@ jobs:
     name: Build signed release candidates (darwin-arm64)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true') }}
     permissions:
       contents: write
       actions: read
@@ -167,8 +164,7 @@ jobs:
     name: Build signed release candidates (darwin-x64)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true') }}
     permissions:
       contents: write
       actions: read
@@ -188,8 +184,7 @@ jobs:
     name: Build signed release candidates (win32-arm64)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true') }}
     permissions:
       contents: write
       actions: read
@@ -209,8 +204,7 @@ jobs:
     name: Build signed release candidates (win32-x64)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true') }}
     permissions:
       contents: write
       actions: read
@@ -230,10 +224,7 @@ jobs:
     name: Build signed release candidates (win32-bundle)
     needs: [admit, candidates-win32-arm64, candidates-win32-x64]
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true'
-      && needs.candidates-win32-arm64.result == 'success'
-      && needs.candidates-win32-x64.result == 'success'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true' && needs.candidates-win32-arm64.result == 'success' && needs.candidates-win32-x64.result == 'success') }}
     permissions:
       contents: write
       actions: read
@@ -253,8 +244,7 @@ jobs:
     name: Build signed release candidates (termux)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && needs.admit.outputs.skip-bundles != 'true') }}
     permissions:
       contents: write
       actions: read
@@ -273,7 +263,7 @@ jobs:
   transitions-darwin-arm64:
     name: Pin actual OLD and NEW signed packages (darwin-arm64)
     needs: [admit, candidates-darwin-arm64]
-    if: needs.admit.outputs.skip-tests != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-tests != 'true') }}
     runs-on: ubuntu-24.04
     environment: release-signing
     outputs:
@@ -307,7 +297,7 @@ jobs:
   transitions-darwin-x64:
     name: Pin actual OLD and NEW signed packages (darwin-x64)
     needs: [admit, candidates-darwin-x64]
-    if: needs.admit.outputs.skip-tests != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-tests != 'true') }}
     runs-on: ubuntu-24.04
     environment: release-signing
     outputs:
@@ -341,7 +331,7 @@ jobs:
   transitions-win32:
     name: Pin actual OLD and NEW signed packages (win32)
     needs: [admit, candidates-win32-bundle]
-    if: needs.admit.outputs.skip-tests != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-tests != 'true') }}
     runs-on: ubuntu-24.04
     environment: release-signing
     outputs:
@@ -378,7 +368,7 @@ jobs:
     # The recorded smoke results are the calls' own workflow results: a
     # call's stable-phase-result fails when its smokes fail, so a failed
     # smoke fails this job's RELEASE_NEEDS check and stages no manifest.
-    if: always() && needs.admit.outputs.skip-bundles != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (always() && needs.admit.outputs.skip-bundles != 'true') }}
     needs: [admit, candidates-darwin-arm64, candidates-darwin-x64, candidates-win32-arm64,
             candidates-win32-x64, candidates-win32-bundle, candidates-termux]
     runs-on: ubuntu-24.04
@@ -410,6 +400,7 @@ jobs:
         run: python -m scripts.releases.stable candidate-manifest
 
   windows-packaged:
+    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: Windows signed-package acceptance
     needs: transitions-win32
     strategy:
@@ -426,6 +417,7 @@ jobs:
       bundle-arch: ${{ matrix.arch }}
 
   macos-packaged-arm64:
+    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: macOS arm64 signed-package acceptance
     needs: transitions-darwin-arm64
     strategy:
@@ -442,6 +434,7 @@ jobs:
       bundle-arch: ${{ matrix.arch }}
 
   macos-packaged-x64:
+    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: macOS x64 signed-package acceptance
     needs: transitions-darwin-x64
     strategy:
@@ -460,7 +453,7 @@ jobs:
   bootstrap-version:
     name: Bootstrap installer release identity
     needs: admit
-    if: needs.admit.outputs.skip-tests != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-tests != 'true') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -493,7 +486,7 @@ jobs:
 
   acceptance:
     name: All release acceptance checks pass
-    if: always()
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (always()) }}
     needs: [admit, ci, docker, nix, pm-bundle, termux-checks, windows-live, install-e2e,
             candidates-darwin-arm64, candidates-darwin-x64, candidates-win32-arm64,
             candidates-win32-x64, candidates-win32-bundle, candidates-termux,
@@ -515,6 +508,7 @@ jobs:
           SKIP_TESTS: ${{ needs.admit.outputs.skip-tests }}
 
   publish-docker:
+    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: Publish tested Docker image
     # B5: this job pushes only the immutable attempt-ref image tags; the
     # stable/latest aliases move in the ordered publication pass.
@@ -529,7 +523,7 @@ jobs:
   publish-bundles:
     name: Publish tested bundle artifacts
     needs: [admit, acceptance, candidate-manifest]
-    if: needs.admit.outputs.skip-bundles != 'true'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.admit.outputs.skip-bundles != 'true') }}
     permissions:
       contents: write
       actions: read
@@ -546,7 +540,7 @@ jobs:
 
   publication:
     name: All artifact publication succeeded
-    if: always()
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (always()) }}
     needs: [admit, acceptance, publish-docker, publish-bundles]
     runs-on: ubuntu-24.04
     steps:
@@ -564,7 +558,7 @@ jobs:
 
   complete:
     name: Stable release is green
-    if: always()
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (always()) }}
     needs: [admit, ci, docker, acceptance, candidate-manifest, publication, publish-docker,
             windows-packaged, macos-packaged-arm64, macos-packaged-x64]
     runs-on: ubuntu-24.04

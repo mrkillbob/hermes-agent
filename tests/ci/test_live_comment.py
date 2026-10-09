@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.ci import _gha_expr as gha
+
 _PATH = Path(__file__).resolve().parents[2] / "scripts" / "ci" / "live_comment.py"
 _spec = importlib.util.spec_from_file_location("live_comment", _PATH)
 if _spec is None or _spec.loader is None:
@@ -135,6 +137,22 @@ def test_poller_never_watches_its_own_workflow():
     )
     watched = _mod.parse_watch_workflows(step["env"]["WATCH_WORKFLOWS"])
     assert own_name not in watched
+
+
+@pytest.mark.parametrize("repository", ["NousResearch/hermes-agent", "fork-owner/hermes-agent"])
+@pytest.mark.parametrize("status", ["completed", "in_progress", "queued", "waiting"])
+def test_the_merge_gate_never_shows_as_a_job_in_the_comment(repository, status):
+    """The gate's display name is versioned (bumped to void pre-change greens);
+    every rename must reach the infra list, or the comment lists the gate as a job."""
+    yaml = pytest.importorskip("hermes_yaml")
+    root = Path(__file__).resolve().parents[2]
+    ci = yaml.safe_load((root / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
+    # The API reports the display name after Actions evaluates repository policy.
+    gate = gha.render(ci["jobs"]["all-checks-pass"]["name"], {"github": {"repository": repository}})
+    completed, pending, job_urls = classify_jobs([
+        {"name": gate, "status": status, "conclusion": "success", "html_url": "https://example/gate"}
+    ])
+    assert (completed, pending, job_urls) == ({}, [], {})
 
 
 # ─── runs_all_completed ───────────────────────────────────────────────

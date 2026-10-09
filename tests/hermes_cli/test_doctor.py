@@ -418,12 +418,40 @@ class TestDoctorMemoryProviderSection:
         assert "Mem0" not in out
 
 
-    def test_mem0_provider_not_installed_shows_fail(self, monkeypatch, tmp_path):
-        # Make mem0 import fail
-        monkeypatch.setitem(sys.modules, "plugins.memory.mem0", None)
+    @pytest.mark.parametrize("catalog_available", [True, False], ids=["catalog-entry", "no-entry"])
+    def test_missing_provider_recovery_matches_catalog_availability(
+        self, monkeypatch, tmp_path, catalog_available
+    ):
+        import hermes_yaml as yaml
+        import plugins.memory as memory_plugins
+
+        # Recovery advice depends on usable catalog data, not the checkout's current pins.
+        catalog = tmp_path / "plugin-catalog"
+        catalog.mkdir()
+        monkeypatch.setenv("HERMES_PLUGIN_CATALOG", str(catalog))
+        if catalog_available:
+            (catalog / "mem0.yaml").write_text(
+                yaml.safe_dump({
+                    "name": "mem0",
+                    "repo": "https://example.invalid/mem0.git",
+                    "sha": "a" * 40,
+                    "category": "memory",
+                }),
+                encoding="utf-8",
+            )
+        monkeypatch.setattr(memory_plugins, "load_memory_provider", lambda name: None)
+        monkeypatch.setattr(memory_plugins, "find_provider_dir", lambda name: None)
+
         out = self._run_doctor_and_capture(monkeypatch, tmp_path, provider="mem0")
-        assert "Memory Provider" in out
+        section = out.split("Memory Provider", 1)[1][:600]
         assert "Built-in memory active" not in out
+        assert "mem0 plugin not found" in section
+        if catalog_available:
+            assert "plugins install mem0" in section
+            assert "run: hermes memory setup" not in section
+        else:
+            assert "run: hermes memory setup" in section
+            assert "plugins install mem0" not in section
 
     @pytest.mark.parametrize("memory_enabled", [False, True])
     def test_stale_builtin_files_reported_only_when_store_enabled(
@@ -1781,3 +1809,27 @@ class TestMacOSTCCGrants:
         out = capsys.readouterr().out
         assert "could not read code-signing requirement" in out
         assert "stable" not in out
+
+
+@pytest.mark.parametrize("probe_error,free,root,expected,issues", [
+    (None, 50 << 30, False, "store is writable", []),
+    (OSError(28, "No space left on device"), 50 << 30, False, "NOT writable (ENOSPC", ["is not writable"]),
+    (None, 10 << 20, False, "free — cron jobs stop when it fills", ["Free disk space"]),
+    # root may fill the reserved blocks: 0 B for disk_usage, but statvfs f_bfree says 4 GB
+    pytest.param(None, 0, True, "store is writable", [], id="root-reserved-blocks",
+                 marks=pytest.mark.skipif(not hasattr(os, "geteuid"), reason="no os.geteuid")),
+])
+def test_cron_store_check_reports_writability_and_low_space(
+        monkeypatch, tmp_path, capsys, probe_error, free, root, expected, issues):
+    from cron import store_health
+
+    (tmp_path / "cron").mkdir()
+    monkeypatch.setattr(doctor, "HERMES_HOME", tmp_path)
+    monkeypatch.setattr(store_health, "probe_store", lambda _d: probe_error)
+    monkeypatch.setattr(store_health.shutil, "disk_usage", lambda _d: SimpleNamespace(free=free))
+    if hasattr(os, "geteuid"):  # rows run as the user they name, whoever runs the suite
+        monkeypatch.setattr(os, "geteuid", lambda: 0 if root else 1000)
+        monkeypatch.setattr(os, "statvfs", lambda _d: SimpleNamespace(f_bfree=1 << 20, f_frsize=4096))
+    finding = doctor_state._check_cron_store(False)
+    assert expected in capsys.readouterr().out
+    assert len(finding.issues) == len(issues) and all(any(s in i for i in finding.issues) for s in issues)

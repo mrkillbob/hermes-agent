@@ -135,9 +135,7 @@ jobs:
   build:
     name: Build and test image (${{ matrix.variant }}/${{ matrix.arch }})
     needs: [mode, detect]
-    if: >-
-      !cancelled() && needs.mode.result == 'success' &&
-      ((needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && needs.detect.outputs.build == 'true') || needs.mode.outputs.phase == 'test')
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.mode.result == 'success' && ((needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && needs.detect.outputs.build == 'true') || needs.mode.outputs.phase == 'test')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -321,10 +319,7 @@ jobs:
   # release gate, so a main push can never advance the stable channel.
   # ---------------------------------------------------------------------------
   publish:
-    if: >-
-      needs.mode.outputs.release != 'true' &&
-      github.repository == 'NousResearch/hermes-agent' &&
-      github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: [mode, build]
     environment: container-publish
     strategy:
@@ -422,7 +417,7 @@ jobs:
   merge:
     # `needs` is the whole 4-leg matrix: only publish both :main variants
     # after every arch and variant publisher succeeds.
-    if: ${{ !cancelled() && needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.mode.outputs.release != 'true' && github.repository == 'NousResearch/hermes-agent' && github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     needs: [mode, publish]
     timeout-minutes: 10
@@ -509,7 +504,7 @@ jobs:
   # login/push fails loudly (missing credentials) instead of faking green.
   release-publish:
     name: Publish tested Docker image (${{ matrix.variant }}/${{ matrix.arch }})
-    if: needs.mode.outputs.phase == 'publish'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.mode.outputs.phase == 'publish') }}
     needs: [mode]
     environment: container-publish
     strategy:
@@ -606,7 +601,7 @@ jobs:
   # to the parent release receipt. Registry-side only; nothing is rebuilt.
   release-publish-manifest:
     name: Assemble versioned manifest and digest receipt
-    if: needs.mode.outputs.phase == 'publish'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (needs.mode.outputs.phase == 'publish') }}
     needs: [mode, release-publish]
     runs-on: ubuntu-latest
     outputs:
@@ -738,7 +733,7 @@ jobs:
   # publisher turns this red instead of letting the phase go green.
   release-phase-gate:
     name: Docker phase requirements met
-    if: always() && inputs.release-phase != ''
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (always() && inputs.release-phase != '') }}
     needs: [mode, build, release-publish, release-publish-manifest]
     runs-on: ubuntu-latest
     timeout-minutes: 5

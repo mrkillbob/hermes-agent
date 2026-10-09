@@ -467,6 +467,37 @@ def test_runner_selection_records_actual_test_identity(tmp_path, form, expected)
     assert sorted(path.name for path in receipt.iterdir()) == expected
 
 
+@pytest.mark.parametrize("selector", ["files", "discovery"])
+@pytest.mark.parametrize("ignore", ["glob", "glob-spaced", "path"])
+def test_passthrough_ignore_drops_files_the_runner_hands_pytest_explicitly(
+    tmp_path, selector, ignore,
+):
+    """Each file reaches its own pytest as an explicit argument, which pytest's
+    --ignore/--ignore-glob never filter; the runner must apply them itself. The
+    Windows lane's ``--ignore-glob='*test_desktop_update_windows_*.py'`` gate was a
+    no-op, so those files ran (and hit the per-file cap) on PRs it meant to spare."""
+    root = _probe_root(tmp_path)   # relative globs anchor at the repo root (per-file pytest's cwd)
+    probe = root / "tests" / "probe"
+    probe.mkdir(parents=True)
+    receipt = tmp_path / "witnesses"
+    receipt.mkdir()
+    for name in ("keep", "gated_skipme"):
+        (probe / f"test_{name}.py").write_text(
+            f"from pathlib import Path\ndef test_{name}():\n    Path({str(receipt / name)!r}).touch()\n",
+            encoding="utf-8")
+    pick = (["--files", os.pathsep.join(f"tests/probe/test_{n}.py" for n in ("keep", "gated_skipme"))]
+            if selector == "files" else ["--paths", str(probe)])
+    flag = {"glob": ["--ignore-glob=*test_gated_*.py"],
+            "glob-spaced": ["--ignore-glob", "*test_gated_*.py"],
+            "path": ["--ignore=tests/probe/test_gated_skipme.py"]}[ignore]
+    runner = root / "scripts/run_tests_parallel.py"
+    result = subprocess.run([sys.executable, str(runner), *pick, "-j", "1", "--file-timeout", "30", "--", *flag],
+                            cwd=tmp_path, capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sorted(path.name for path in receipt.iterdir()) == ["keep"], result.stdout
+    assert "excluded 1 test file" in result.stdout, result.stdout
+
+
 
 
 @pytest.mark.platforms("posix")  # POSIX signal death; Windows has no SIGSEGV exit
@@ -553,6 +584,92 @@ def test_files_from_dash_reads_the_list_from_stdin(tmp_path: Path) -> None:
     assert "✓2" in proc.stdout or "2 passed" in proc.stdout, proc.stdout
 
 
+@pytest.mark.skipif(shutil.which("bash") is None, reason="canonical runner requires bash")
+def test_canonical_runner_confines_explicit_scratch(tmp_path: Path) -> None:
+    """The shell and per-file runner honor the same caller-owned storage root."""
+    root = _probe_root(tmp_path)
+    real_scripts = Path(__file__).resolve().parents[2] / "scripts"
+    for name in ("run_tests.sh", "_activation.sh"):
+        shutil.copy2(real_scripts / name, root / "scripts" / name)
+    shutil.copy2(real_scripts.parent / "hermes_constants_scratch.py", root)
+    scratch = tmp_path / "owned-scratch"
+    scratch.mkdir()
+    general_tmp = tmp_path / "general-tmp"
+    general_tmp.mkdir()
+    pycache = tmp_path / "pycache"
+    foreign = scratch / "foreign-evidence"
+    foreign.mkdir()
+    sentinel = foreign / "keep.txt"
+    sentinel.write_text("foreign evidence", encoding="utf-8")
+    stale = time.time() - 48 * 3600
+    os.utime(sentinel, (stale, stale))
+    os.utime(foreign, (stale, stale))
+    probe = root / "test_storage_probe.py"
+    probe.write_text(
+        "import os, sys, tempfile\nfrom pathlib import Path\n"
+        "def test_storage():\n"
+        "    root = Path(os.environ['HERMES_TEST_SCRATCH_ROOT'])\n"
+        "    assert Path(tempfile.gettempdir()).parent == root\n"
+        "    assert Path(os.environ['TMPDIR']).parent == root\n"
+        "    assert os.environ['TMP'] == os.environ['TEMP']\n"
+        "    assert Path(sys.pycache_prefix).name == 'pycache'\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("__HERMES_ACTIVATED", None)
+    env.update(HERMES_PYTHON=sys.executable, HERMES_TEST_SCRATCH_ROOT=str(scratch),
+               TMPDIR=str(general_tmp), TMP=str(general_tmp), TEMP=str(general_tmp),
+               PYTHONPYCACHEPREFIX=str(pycache), PYTHONDONTWRITEBYTECODE="1",
+               PYTHON_CPU_COUNT="1", HERMES_TEST_WORKERS="1", HERMES_TEST_FILE_RETRIES="0")
+    parked = subprocess.Popen(
+        [sys.executable, "-B", "-c", "import time; time.sleep(120)"], cwd=foreign,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        proc = subprocess.run(
+            [shutil.which("bash"), str(root / "scripts" / "run_tests.sh"), str(probe),
+             "-o", "cache_dir=" + str(tmp_path / "pytest-cache")],
+            cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=60,
+        )
+        assert proc.returncode == 0, proc.stdout
+        assert scratch.is_dir()
+        assert not list(scratch.glob("r-*"))
+        assert sentinel.read_text(encoding="utf-8") == "foreign evidence"
+        assert parked.poll() is None
+    finally:
+        if parked.poll() is None:
+            parked.terminate()
+        parked.wait(timeout=10)
+
+
+@pytest.mark.parametrize("invalid", ["absolute", "", "relative-root", "file"])
+def test_explicit_scratch_root_selection(tmp_path: Path, monkeypatch, invalid: str) -> None:
+    """An invalid caller selection fails instead of allocating shared fallback storage."""
+    import importlib
+
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    monkeypatch.syspath_prepend(str(scripts_dir))
+    runner = importlib.import_module("run_tests_parallel")
+    # Keep even the unmodified resolver's fallback inside this disposable fixture.
+    monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(tmp_path))
+    real_isdir = os.path.isdir
+    monkeypatch.setattr(runner.os.path, "isdir",
+                        lambda path: False if str(path) == "/var/tmp" else real_isdir(path))
+    selected = str(tmp_path / "owned-root") if invalid == "absolute" else invalid
+    if invalid == "file":
+        path = tmp_path / "file"
+        path.write_text("keep", encoding="utf-8")
+        selected = str(path)
+    monkeypatch.setenv("HERMES_TEST_SCRATCH_ROOT", selected)
+    if invalid == "absolute":
+        assert Path(runner._runner_scratch_root()) == Path(selected)
+        assert Path(selected).is_dir()
+    else:
+        with pytest.raises((ValueError, OSError)):
+            runner._runner_scratch_root()
+
+
 def test_scratch_root_is_per_user(tmp_path: Path, monkeypatch) -> None:
     """Two users on one host must never share the runner's scratch root.
 
@@ -566,6 +683,7 @@ def test_scratch_root_is_per_user(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.syspath_prepend(str(scripts_dir))
     runner = importlib.import_module("run_tests_parallel")
 
+    monkeypatch.delenv("HERMES_TEST_SCRATCH_ROOT", raising=False)
     # Exercise the non-/var/tmp arm so the probe never mints roots in the real shared dir.
     # (Narrow: on 3.14 ``Path.is_dir()`` itself goes through ``os.path.isdir``.)
     monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(tmp_path))

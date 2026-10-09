@@ -1,5 +1,6 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
+#Include bootstrap-log-state.ahk
 
 ; Drive the REAL Hermes-Setup.exe (Tauri bootstrap installer) window:
 ; click Install, wait for the install to finish, click Launch, and wait for
@@ -93,24 +94,6 @@ TryFindImage(rect, imageFile, &outX, &outY) {
     return false
 }
 
-BootstrapLogContains(needle) {
-    global bootstrapLog
-    if (bootstrapLog = "" or !FileExist(bootstrapLog)) {
-        return false
-    }
-    try {
-        f := FileOpen(bootstrapLog, "r-d")   ; read, share read+write
-        if !f {
-            return false
-        }
-        content := f.Read()
-        f.Close()
-        return InStr(content, needle) > 0
-    } catch {
-        return false
-    }
-}
-
 installerWin := "ahk_exe " setupExe
 appWin := "ahk_exe Hermes.exe"
 
@@ -159,7 +142,7 @@ complete := false
 waitDeadline := A_TickCount + 1000 * 60 * 45
 Log("Waiting for install to finish (bootstrap log or Launch template) ...")
 while (A_TickCount < waitDeadline) {
-    if BootstrapLogContains("bootstrap complete") {
+    if RequireBootstrapProgress(bootstrapLog) {
         complete := true
         Log("bootstrap-installer.log reports completion")
         break

@@ -9,6 +9,7 @@ import {
   eventsReconnectingMessage,
   eventsRejectedMessage,
   isEventsAuthRejection,
+  isEventsAuthRejectionMessage,
   isEventsFeedMessage,
   shouldRetryEventsClose,
   EVENTS_DISCONNECTED_MESSAGE,
@@ -93,6 +94,16 @@ describe("isEventsFeedMessage", () => {
     expect(isEventsFeedMessage("gateway not connected")).toBe(false);
     expect(isEventsFeedMessage(null)).toBe(false);
     expect(isEventsFeedMessage("")).toBe(false);
+  });
+});
+
+describe("isEventsAuthRejectionMessage", () => {
+  it("identifies only the auth rejection messages that need a page reload", () => {
+    expect(isEventsAuthRejectionMessage(eventsRejectedMessage(4401))).toBe(true);
+    expect(isEventsAuthRejectionMessage(eventsRejectedMessage(4403))).toBe(true);
+    expect(isEventsAuthRejectionMessage(eventsRejectedMessage(4500))).toBe(false);
+    expect(isEventsAuthRejectionMessage(eventsGaveUpMessage())).toBe(false);
+    expect(isEventsAuthRejectionMessage(null)).toBe(false);
   });
 });
 

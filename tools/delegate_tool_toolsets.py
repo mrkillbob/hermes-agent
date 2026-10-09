@@ -19,6 +19,7 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
         "send_message",  # no cross-platform side effects
         "inter_agent",  # no cross-conversation messaging side effects
         "cronjob_manage",  # no scheduling more work in the parent's name
+        "start_chat",
     ]
 )
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]

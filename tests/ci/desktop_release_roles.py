@@ -197,6 +197,8 @@ def evaluate(expression, inputs, needs, *, cancelled=False, failed=False, job_if
     ``job_if`` judges implicit success by the needs' results; a step ``if``
     (``job_if=False``) judges it by whether an earlier step ``failed``.
     """
+    # Release fixtures model upstream; an explicit fork identity remains authoritative.
+    github = {'repository': 'NousResearch/hermes-agent', **(github or {})}
     expression = str(expression).strip().removeprefix('${{').removesuffix('}}').strip()
     if not re.search(r'\b(always|cancelled|success|failure)\(', expression):
         if cancelled or failed:
@@ -206,7 +208,7 @@ def evaluate(expression, inputs, needs, *, cancelled=False, failed=False, job_if
 
     def value(match):
         bits = match[0].split('.')
-        result = {'inputs': inputs, 'needs': needs, 'github': github or {}, 'env': env or {}, 'steps': steps or {}}
+        result = {'inputs': inputs, 'needs': needs, 'github': github, 'env': env or {}, 'steps': steps or {}}
         for bit in bits:
             result = result.get(bit, '') if isinstance(result, dict) else ''
         return repr(result)

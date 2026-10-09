@@ -597,12 +597,12 @@ def test_explicit_migrate_with_no_standalone_secondaries_still_flips_flag_and_re
 
 
 def test_failed_auto_migration_keeps_manifest_for_recovery(fleet, monkeypatch, capsys):
-    # Automatic migration stays within the existing service domain. A failed
-    # served-profile confirmation leaves the manifest as the recovery authority;
-    # it does not throw or silently restore a second independent fleet.
+    # A failed served-profile confirmation retains the recovery authority and
+    # tells the updater that its attempted migration did not complete.
     fleet.services["default"] = ("systemd", False)
     monkeypatch.setattr(gm, '_wait_for_served', lambda *args: ['default'])
-    gm.maybe_auto_migrate_after_update()
+    with pytest.raises(RuntimeError, match="automatic gateway migration did not confirm"):
+        gm.maybe_auto_migrate_after_update()
     assert "has not confirmed serving" in capsys.readouterr().out
     assert fleet.services == {"default": ("systemd", False)}
     assert _config_flag(fleet.root) is True
