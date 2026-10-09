@@ -70,9 +70,9 @@
   "tools/kanban_tools.py": "3eb3821defbfe52be80698a05f690c9c1e33847a8bd908ee0618d1b9621d97c6",
   "tui_gateway/prompt_turn.py": "cde771e06cd5bb4d75000e089bccc20c28531e6002038502411b06ff6a7830c1",
   "website/docs/user-guide/configuration.md": "fb5e657fa7c525af37a944e1d0a96f01447ee6391e4d1a5b851e6debf023133e",
-  "tests/agent/test_context_source_streaming.py": "56953c125204956f09f259af7a775d77d27a02159ce2b8be0890cec14751edea",
+  "tests/agent/test_context_source_streaming.py": "e79af500a1855448a9532f02e4a5e547cd4358059900656dc443058b88a0991a",
   ".ci/portable-reconcile/verify_source.py": "49f9ba77745c938939095fd84325a35a7d2e4504c7565eb64e928056d0c6fded",
-  ".github/workflows/portable-reconcile.yml": "58214ef72ebedc227539c0054e07c13198004f9a8a8afc62bd70d1f4c55441cd",
+  ".github/workflows/portable-reconcile.yml": "605cd7f01f07d12f3b1786f3ec0fff7b6192c713107af4b6a2d490c99aca5711",
   "pyproject.toml": "cadde2f6a92574d292103f43abf66408b1d841cd9ea332ca7f3e3dfc5dcc87fd",
   "uv.lock": "2bc4db483e9cba927cd7147f9ccbb09635f85bb3f1f36d6e9d51d06b65d1c67e",
   "pm/lock.json": "49b79259220160f147255078a19af541a5f328d3871c8041cc1eb909d19eb549"

@@ -136,3 +136,47 @@ def test_local_fallback_walk_advances_and_stops_repeated_lanes(monkeypatch, repe
         with pytest.raises(StopIteration) as done:
             walk.send("healthy")
         assert done.value.value == "healthy"
+
+
+@pytest.mark.parametrize("secret", [False, True])
+def test_codex_auxiliary_adapter_binds_receipt_to_final_responses_wire(tmp_path, monkeypatch, secret):
+    from hashlib import sha256
+    from agent import auxiliary_client as auxiliary
+    from agent.auxiliary_egress_recovery import authorize_auxiliary_request
+    from agent.llm_egress_firewall import EgressBlocked
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    captured = []
+    def io(request):
+        captured.append(json.loads(request.content))
+        final = {"id": "response-1", "object": "response", "model": "gpt-5-codex",
+                 "status": "completed", "output": [{"type": "message", "id": "message-1",
+                 "role": "assistant", "status": "completed", "content": [
+                 {"type": "output_text", "text": "ok", "annotations": []}]}],
+                 "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              content=("data: " + json.dumps({"type": "response.completed", "response": final}) + "\n\n").encode())
+    base = "https://chatgpt.com/backend-api/codex"
+    kwargs = {"model": "gpt-5-codex", "messages": [
+        {"role": "system", "content": "You are Hermes."},
+        {"role": "user", "content": "token=super-secret-value" if secret else "hello"}], "stream": True}
+    with OpenAI(api_key="synthetic-key", base_url=base,
+                http_client=httpx.Client(transport=httpx.MockTransport(io))) as sdk:
+        client = auxiliary.CodexAuxiliaryClient(sdk, "gpt-5-codex")
+        with auxiliary.scoped_runtime_main({"provider": "openai-codex", "model": "gpt-5-codex",
+                                            "session_id": "session-1", "turn_id": "turn-1", "base_url": base}):
+            def dispatch():
+                return authorize_auxiliary_request(client, kwargs,
+                    lambda request: client.chat.completions.create(**request),
+                    provider="openai-codex", api_mode="codex_responses", metadata=None)
+            if secret:
+                with pytest.raises(EgressBlocked):
+                    dispatch()
+                assert not captured
+            else:
+                dispatch()
+                assert len(captured) == 1 and "input" in captured[0] and "messages" not in captured[0]
+                receipt = json.loads((tmp_path / "egress/llm-egress-receipts.jsonl").read_text().splitlines()[-1])
+                wire = json.dumps(captured[0], ensure_ascii=False, allow_nan=False,
+                                  separators=(",", ":"), sort_keys=True).encode()
+                assert receipt["payload_sha256"] == sha256(wire).hexdigest()
+    assert "_hermes_aux_request_provider" not in kwargs
