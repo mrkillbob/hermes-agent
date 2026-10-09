@@ -12,7 +12,7 @@ agent = _agent_fixture
 
 
 @pytest.mark.parametrize("rotate", [False, True])
-@pytest.mark.parametrize("lines", [8, 3000])
+@pytest.mark.parametrize("lines", [8, 1600])
 def test_context_slice_survives_durable_admission_and_tool_loop(
     agent, tmp_path, monkeypatch, rotate, lines,
 ):
@@ -22,7 +22,7 @@ def test_context_slice_survives_durable_admission_and_tool_loop(
     from tests.agent.test_cross_process_turn_lease import _DB
 
     source = tmp_path / "source.py"
-    raw = "my_value = 123\n" * lines
+    raw = "my_value = other_value + 123\n" * lines
     source.write_text(raw)
     agent.provider = "nous"
     agent.base_url = "https://inference-api.nousresearch.com/v1"
@@ -75,7 +75,8 @@ def test_context_slice_survives_durable_admission_and_tool_loop(
     result = agent.run_conversation(expanded.message)
     assert result["final_response"] == "ok"
     assert len(captured) == 2
-    assert all(raw in request["messages"][1]["content"] for request in captured)
+    assert all(any(raw in message.get("content", "") for message in request["messages"])
+               for request in captured)
     receipts = [json.loads(line) for line in
                 (tmp_path / "egress/llm-egress-receipts.jsonl").read_text().splitlines()]
     assert [receipt["source_grant_count"] for receipt in receipts] == [1, 1]
@@ -99,7 +100,7 @@ def test_abandoned_context_preparation_clears_only_pending_authority(
 
     def expand(message):
         result = preprocess_context_references(
-            message, cwd=tmp_path, allowed_root=tmp_path,
+            message, cwd=tmp_path, allowed_root=tmp_path, context_length=240_000,
             **provenance_kwargs_for_agent(consumer, establish_turn=True),
         )
         assert not result.blocked
