@@ -25,7 +25,7 @@ jobs:
       - name: Observe retry, trusted compression and CLI worker regressions
         run: |
           set -o pipefail
-          scripts/run_tests.sh -j 1 --file-retries 0 tests/agent/test_context_source_commit_failure.py | tee portable-focused.log
+          scripts/run_tests.sh -j 1 --file-retries 0 tests/agent/test_context_source_final_read.py | tee portable-focused.log
       - name: Verify source remained frozen
         if: always()
         run: python3 .ci/portable-reconcile/verify_source.py
@@ -33,7 +33,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: commit-failure-red
+          name: final-read-red
           path: |
             portable-focused.log
             portable-static.log

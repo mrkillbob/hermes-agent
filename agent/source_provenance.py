@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from hmac import compare_digest
 import os
@@ -404,6 +404,7 @@ def admit_agent_context_sources(agent, *, turn_id, prepared_session_id):
     """Bind explicit pre-turn slices only after durable admission settles identity."""
     registry = getattr(agent, "_source_provenance_registry", None)
     agent._source_provenance_context_grants = ()
+    agent._source_provenance_context_error = None
     if not isinstance(registry, SourceProvenanceRegistry):
         return
     request_id = f"{turn_id}:api:1"
@@ -422,6 +423,9 @@ def admit_agent_context_sources(agent, *, turn_id, prepared_session_id):
 
 def renew_agent_context_sources(agent, *, session_id, turn_id, request_id, policy_digest):
     """Reverify the same admitted raw slices for each request in this turn."""
+    error = getattr(agent, "_source_provenance_context_error", None)
+    if error:
+        raise SourceProvenanceError(error)
     grants = getattr(agent, "_source_provenance_context_grants", ())
     if not grants:
         return
@@ -451,7 +455,11 @@ def renew_agent_context_sources(agent, *, session_id, turn_id, request_id, polic
 
 
 def transfer_agent_context_source_session(agent, new_session_id):
-    """Carry current-turn raw bindings only at validated compression handoffs."""
+    """Carry raw binding records at trusted handoffs; grant only at verified SDK dispatch.
+
+    Publication is already durable: no source IO or fallible authority issuance
+    belongs here. Every retained byte digest is checked again before the next SDK call.
+    """
     grants = getattr(agent, "_source_provenance_context_grants", ())
     if not grants:
         return
@@ -460,14 +468,17 @@ def transfer_agent_context_source_session(agent, new_session_id):
                   getattr(agent, "_current_turn_id", "") or "")
     registry = getattr(agent, "_source_provenance_registry", None)
     if not isinstance(registry, SourceProvenanceRegistry) or not new_session_id:
-        raise SourceProvenanceError("missing_identity")
+        agent._source_provenance_context_error = "missing_identity"
+        return
     if any(grant.session_id != old_session_id or grant.turn_id != turn_id for grant in grants):
-        raise SourceProvenanceError("grant_binding_mismatch")
+        registry.clear_turn(turn_id)
+        agent._source_provenance_context_error = "grant_binding_mismatch"
+        return
     registry.clear_turn(turn_id)
-    transferred = tuple(_renew_context_slice(
-        registry, grant, session_id=new_session_id, request_id=f"{turn_id}:api:1",
-    ) for grant in grants)
-    agent._source_provenance_context_grants = transferred
+    agent._source_provenance_context_grants = tuple(
+        replace(grant, session_id=new_session_id, request_id=f"{turn_id}:api:1")
+        for grant in grants
+    )
 
 
 def following_api_request_id(request_id: str, turn_id: str) -> str:
