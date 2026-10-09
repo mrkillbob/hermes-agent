@@ -17,7 +17,7 @@ def changed_directories(base: str, head: str) -> list[str]:
     # Direct tree comparison needs no merge base, including in depth-1 checkouts.
     diff = subprocess.run(
         ['git', 'diff', '--no-renames', '--diff-filter=ACMT', '--name-only', '-z', base, head, '--'],
-        check=True, capture_output=True,
+        check=True, capture_output=True, timeout=30,
     )
     directories = sorted({
         str(Path(os.fsdecode(path)).parent)
@@ -26,7 +26,7 @@ def changed_directories(base: str, head: str) -> list[str]:
     if not directories:
         # Workflow edits select this lane too. A valid empty diff audits every
         # tracked lockfile, rather than silently treating root as the target.
-        tracked = subprocess.run(['git', 'ls-files', '-z'], check=True, capture_output=True)
+        tracked = subprocess.run(['git', 'ls-files', '-z'], check=True, capture_output=True, timeout=30)
         directories = sorted({str(Path(os.fsdecode(path)).parent)
                               for path in tracked.stdout.split(b'\0')
                               if path and Path(os.fsdecode(path)).name == 'package-lock.json'})
@@ -45,7 +45,7 @@ def audit(base: str, head: str) -> dict:
     result = {'audits': [], 'high': 0, 'critical': 0, 'errors': []}
     try:
         directories = changed_directories(base, head)
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
         result['errors'].append(f'Lockfile comparison failed: {exc}')
         return result
     for directory in directories:
@@ -54,7 +54,7 @@ def audit(base: str, head: str) -> dict:
         try:
             completed = subprocess.run(
                 ['npm', 'audit', '--package-lock-only', '--ignore-scripts', '--audit-level=high', '--json'],
-                cwd=directory, capture_output=True, text=True,
+                cwd=directory, capture_output=True, text=True, timeout=180,
             )
             entry['exit_code'] = completed.returncode
             report = json.loads(completed.stdout)
@@ -70,7 +70,7 @@ def audit(base: str, head: str) -> dict:
                 result[severity] += counts[severity]
             if completed.returncode and not (counts['high'] or counts['critical']):
                 result['errors'].append(f'{directory}: npm audit exited {completed.returncode}: {completed.stderr.strip()}')
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
             result['errors'].append(f'{directory}: npm audit failed: {exc}')
     return result
 
