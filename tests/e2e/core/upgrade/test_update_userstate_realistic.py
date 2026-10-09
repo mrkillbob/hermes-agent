@@ -68,11 +68,15 @@ def _assert_userstate_partial(update, receipt):
     assert update.returncode == 1, I.describe(update)
     assert I.TRACEBACK not in update.stdout + update.stderr, I.describe(update)
     assert receipt["outcome"] == "partial", receipt
+    action = receipt.get("user_action")
+    assert isinstance(action, dict) and action.get("step") in ("left_core_migration", "state_db_health"), receipt
+    assert any(followup["step"] == action["step"] and followup["reason"] == action["reason"]
+               for followup in receipt.get("followups", [])), receipt
     for step in ("left_core_migration", "state_db_health"):
         assert any(action["step"] == step and "badyaml" in action["reason"]
                    and "while parsing a flow sequence" in action["reason"]
                    and "model: [unclosed" in action["reason"]
-                   for action in receipt.get("user_action", [])), receipt
+                   for action in receipt.get("followups", [])), receipt
 
 
 def _config_versions(sb: I.Sandbox) -> tuple[int, int]:

@@ -245,6 +245,7 @@ tree = os.path.realpath(spec["tree"])
 sys.path.insert(0, spec["tree"])
 first_party = set(spec["first_party"])
 for name in spec["preload"]:
+    print("import runner preloading %s" % name, file=sys.stderr, flush=True)
     try:
         importlib.import_module(name)
     except BaseException:
@@ -306,6 +307,7 @@ def child(entry, wfd):
 queue = list(spec["modules"])
 running = {}
 results = []
+next_progress = time.monotonic() + 30
 while queue or running:
     while queue and len(running) < spec["workers"]:
         entry = queue.pop(0)
@@ -315,28 +317,48 @@ while queue or running:
             os.close(r)
             child(entry, w)
         os.close(w)
-        running[r] = [pid, entry, time.monotonic(), []]
-    ready, _, _ = select.select(list(running), [], [], 0.5)
+        running[r] = [pid, entry, time.monotonic(), [], False]
+    ready, _, _ = select.select([r for r, state in running.items() if not state[4]], [], [], 0.5)
     for r in ready:
         chunk = os.read(r, 65536)
         if chunk:
             running[r][3].append(chunk)
             continue
-        pid, entry, _start, chunks = running.pop(r)
+        running[r][4] = True
+    now = time.monotonic()
+    for r, (pid, entry, start, chunks, _eof) in list(running.items()):
+        finished, status = os.waitpid(pid, os.WNOHANG)
+        if not finished:
+            if now - start > spec["timeout"]:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+                os.close(r)
+                running.pop(r)
+                results.append({"id": entry["id"], "ok": False, "type": "Timeout",
+                                "msg": "import did not finish within %ss" % spec["timeout"]})
+                print("import timeout: %s" % entry["id"], file=sys.stderr, flush=True)
+            continue
+        # A closed reporting pipe does not prove exit; only waitpid does. Never block the watchdog on EOF.
+        if not _eof:
+            os.set_blocking(r, False)
+            while True:
+                try:
+                    chunk = os.read(r, 65536)
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        running.pop(r)
         os.close(r)
-        _, status = os.waitpid(pid, 0)
         raw = b"".join(chunks)
         results.append(json.loads(raw) if raw else {
             "id": entry["id"], "ok": False, "type": "ChildDied", "msg": "wait status %d, no result" % status})
-    now = time.monotonic()
-    for r, (pid, entry, start, _chunks) in list(running.items()):
-        if now - start > spec["timeout"]:
-            os.kill(pid, 9)
-            os.waitpid(pid, 0)
-            os.close(r)
-            running.pop(r)
-            results.append({"id": entry["id"], "ok": False, "type": "Timeout",
-                            "msg": "import did not finish within %ss" % spec["timeout"]})
+    if now >= next_progress:
+        active = ["%s (%.0fs)" % (entry["id"], now - start) for _pid, entry, start, _chunks, _eof in running.values()]
+        print("import progress: %d finished, %d queued; active: %s" % (len(results), len(queue), ", ".join(active)),
+              file=sys.stderr, flush=True)
+        next_progress = now + 30
 with open(spec["out"], "w") as fh:
     json.dump(results, fh)
 '''
