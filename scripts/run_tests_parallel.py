@@ -34,6 +34,8 @@ Usage:
     pytest failure. Tokens after ``--`` are never validated.
 
 Environment:
+    HERMES_TEST_SCRATCH_ROOT  Absolute caller-owned root for per-file temporary
+                              directories and cleanup (default: per-user disk root)
     HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
     HERMES_TEST_PATHS    Override discovery roots (colon-sep; on Windows
                          ';' also works and drive letters are handled;
@@ -99,6 +101,14 @@ def _runner_scratch_root() -> str:
     later makedirs/mkdtemp here fail with EPERM for every other user on the host, with no way
     back that does not need root. Keying by uid means no run is blocked by another's leftovers.
     """
+    configured = os.environ.get("HERMES_TEST_SCRATCH_ROOT")
+    if configured is not None:
+        if not configured or not os.path.isabs(configured):
+            raise ValueError("HERMES_TEST_SCRATCH_ROOT must be an absolute directory")
+        root = os.path.realpath(configured)
+        os.makedirs(root, exist_ok=True)
+        return root
+
     name = "hermes-pytest" + (f"-{os.getuid()}" if hasattr(os, "getuid") else "")
     if os.name == "nt" or not os.path.isdir("/var/tmp"):  # no-tmp: ok — probing the disk-backed FHS root
         root = os.path.join(tempfile.gettempdir(), name)
@@ -1380,7 +1390,10 @@ def main() -> int:
 
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
-    _sweep_killed_run_roots(_runner_scratch_root())
+    # Explicit roots may hold other caller-owned evidence or processes. Only
+    # each newly allocated attempt is disposable there; keep default sweeping.
+    if "HERMES_TEST_SCRATCH_ROOT" not in os.environ:
+        _sweep_killed_run_roots(_runner_scratch_root())
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         # Duration cache for the timeout scaler: known-slow files get

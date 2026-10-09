@@ -149,13 +149,21 @@ _pf86="$(env | sed -n 's/^ProgramFiles(x86)=//p' | head -n1)"
 # These are test-infrastructure knobs, not credentials — same class as the
 # HERMES_RUN_SLOW_PET_TESTS / HERMES_E2E_BROWSER / HERMES_RUN_E2E opt-ins
 # forwarded below.
+# HERMES_TEST_SCRATCH_ROOT selects a caller-owned per-file allocation/cleanup root.
+# TMPDIR/TMP/TEMP and Python bytecode controls keep the runner and interpreter
+# outputs in the caller's reserved storage; these are paths/flags, not credentials.
 # SSL_CERT_FILE/DIR are trust-store locations: the pinned interpreter's
 # OpenSSL has no compiled-in bundle path on NixOS, so network tests (PM
 # downloads, channel reads) need the host's pointer to verify TLS.
 # Keep this an explicit allowlist (no HERMES_TEST_* glob) so the "no
 # credential can leak" property stays auditable at a glance.
 TEST_ENV=()
-for _test_var in HERMES_TEST_IMAGE HERMES_TEST_WORKERS HERMES_TEST_PATHS \
+if [ "${HERMES_TEST_SCRATCH_ROOT+x}" = x ]; then
+  TEST_ENV+=("HERMES_TEST_SCRATCH_ROOT=$HERMES_TEST_SCRATCH_ROOT")
+fi
+for _test_var in TMPDIR TMP TEMP \
+  PYTHONPYCACHEPREFIX PYTHONDONTWRITEBYTECODE \
+  HERMES_TEST_IMAGE HERMES_TEST_WORKERS HERMES_TEST_PATHS \
   HERMES_TEST_FILE_TIMEOUT HERMES_TEST_FILE_RETRIES HERMES_TEST_SLICE \
   SSL_CERT_FILE SSL_CERT_DIR HERMES_GATEWAY_LOCK_DIR HERMES_E2E_REQUIRE_TUI CI GITHUB_ACTIONS \
   HERMES_E2E_WINDOWS_INSTALL HERMES_E2E_MACHINE_ROOT HERMES_E2E_PROFILES_ROOT HERMES_E2E_ARTIFACTS; do
