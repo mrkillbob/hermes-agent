@@ -404,7 +404,8 @@ def _pool_usage_accounts(slug: str, wire_windows, account_resets_at,
         host = _pool_entry_host(slug, entry)
         dedupe_key = (slug, host, identity_id)
         is_dead = entry.last_status == STATUS_DEAD
-        snapshot = (cached_account_usage(slug, identity_id=identity_id)
+        route_base_url = _pool_entry_route_base_url(slug, entry)
+        snapshot = (cached_account_usage(slug, identity_id=identity_id, base_url=route_base_url)
                     if supports_usage and not is_dead else None)
         stale = snapshot_is_stale(snapshot)
         windows = wire_windows(snapshot) if not stale else []
@@ -434,7 +435,7 @@ def _pool_usage_accounts(slug: str, wire_windows, account_resets_at,
         if supports_usage and not is_dead:
             entry_requests.append({
                 "provider": slug, "identity_id": identity_id,
-                "base_url": _pool_entry_route_base_url(slug, entry), "api_key": entry.runtime_api_key,
+                "base_url": route_base_url, "api_key": entry.runtime_api_key,
             })
         if dedupe_key in seen:
             # Same account under a second credential: keep the row that says more (state rank

@@ -15,12 +15,13 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 | Docs-site `npm audit` gate allow-lists advisories with no upstream fix (`braces`, GHSA-vfj7-8cjw-p6xm); everything else high/critical still fails | `.github/workflows/docs-site-checks.yml`, `scripts/ci/npm_audit_gate.py` | `tests/scripts/test_npm_audit_gate.py` |
 | xAI streaming defers end-of-audio until `transcript.created` instead of dropping queued PCM | `tools/transcription_streaming.py` | `tests/tools/test_xai_streaming_early_eos.py` |
 | Desktop dictation falls back to the recorded blob when the startup PCM buffer overflows | `apps/desktop/src/app/chat/composer/hooks/use-voice-recorder.ts` | `use-voice-recorder-warmup.test.tsx` ("startup PCM buffer overflows") |
+| Pooled account-usage cache/refresh keys include the route host | `agent/account_usage_cache.py`, `hermes_cli/inventory.py` | `tests/agent/test_account_usage_cache_route_host.py` |
 
 ```bash
 scripts/run_tests.sh tests/tools/test_env_passthrough_fork_isolation.py \
   tests/hermes_cli/test_media_proxy_streaming_limit.py tests/tools/test_transcription_chunking_fork_names.py \
   tests/tools/test_transcription_hook_model_limit.py tests/hermes_cli/test_transcribe_stream_cleanup.py tests/scripts/test_npm_audit_gate.py \
-  tests/tools/test_xai_streaming_early_eos.py
+  tests/tools/test_xai_streaming_early_eos.py tests/agent/test_account_usage_cache_route_host.py
 # plus: (cd apps/desktop && npx vitest run src/app/chat/composer/hooks/use-voice-recorder-warmup.test.tsx)
 ```
 

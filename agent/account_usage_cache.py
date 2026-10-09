@@ -116,8 +116,11 @@ def remember_account_usage(
             targets.append(_key(provider, None, base_url))
             if snapshot_identity:
                 targets.append(_key(provider, snapshot_identity, None))
+                if base_url:
+                    targets.append(_key(provider, snapshot_identity, base_url))
         else:
-            targets.append(_key(provider, snapshot_identity or identity_id, None))
+            # One account can hold credentials on two route hosts; each host has its own quota.
+            targets.append(_key(provider, snapshot_identity or identity_id, base_url))
         for key in targets:
             if key in _started and _started[key] > started:
                 continue  # a fresher fetch already landed; this late result must not replace it
@@ -204,7 +207,7 @@ def refresh_account_usage_entries_async(requests: Iterable[dict]) -> list[thread
         identity_id = str(request.get("identity_id") or "").strip()
         if not provider or not identity_id or not str(request.get("api_key") or "").strip():
             continue
-        if not _claim_refresh(_key(provider, identity_id), now):
+        if not _claim_refresh(_key(provider, identity_id, request.get("base_url")), now):
             continue
         due.append(request)
     if not due:
@@ -221,7 +224,7 @@ def _refresh_entries(requests: list[dict]) -> None:
 
     for request in requests:
         provider = request["provider"]
-        key = _key(provider, request["identity_id"])
+        key = _key(provider, request["identity_id"], request.get("base_url"))
         try:
             fetch_account_usage(
                 provider, base_url=request.get("base_url"), api_key=request.get("api_key"),
