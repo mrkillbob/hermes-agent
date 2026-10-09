@@ -18,6 +18,7 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 | Pooled account-usage cache/refresh keys include the route host | `agent/account_usage_cache.py`, `hermes_cli/inventory.py` | `tests/agent/test_account_usage_cache_route_host.py` |
 | Capabilities ▸ Plugins withholds the settings gear for an agent on a non-active connection (Settings only reaches the active gateway) | `apps/desktop/src/app/capabilities/plugins/plugins-tab.tsx`, `plugin-scope.ts` | `plugin-scope.test.ts` (vitest) |
 | Reasoning-markup parser recognizes CommonMark fences (tilde, up to 3-space indent, fence length) | `web/src/lib/reasoning-markup.ts` | `web/src/lib/reasoning-markup.test.ts` (vitest) |
+| API server: structured `reasoning.effort` outranks legacy `reasoning_effort` | `gateway/platforms/api_server_request_options.py` | `tests/gateway/test_api_server_reasoning_precedence.py` |
 
 ```bash
 scripts/run_tests.sh tests/tools/test_env_passthrough_fork_isolation.py \

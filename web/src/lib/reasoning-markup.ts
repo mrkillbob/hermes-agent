@@ -146,8 +146,8 @@ function splitFenceAware(
   let fence: string | null = null;
 
   for (const line of lines) {
-    const opening = fence === null ? FENCE_OPEN_RE.exec(line) : null;
-    const closing = fence !== null ? FENCE_CLOSE_RE.exec(line) : null;
+    const opening: RegExpExecArray | null = fence === null ? FENCE_OPEN_RE.exec(line) : null;
+    const closing: RegExpExecArray | null = fence !== null ? FENCE_CLOSE_RE.exec(line) : null;
     const closes =
       closing !== null &&
       fence !== null &&

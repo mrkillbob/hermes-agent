@@ -21,7 +21,9 @@ def _request_reasoning_config(model_options: Any) -> Optional[Dict[str, Any]]:
     if isinstance(reasoning, dict):
         enabled = reasoning.get("enabled")
         effort = reasoning.get("effort")
-    effort = model_options.get("reasoning_effort", effort)
+    # The structured ``reasoning.effort`` is authoritative; the legacy field is only its fallback.
+    if effort is None:
+        effort = model_options.get("reasoning_effort")
     effort_norm = str(effort).strip().lower() if effort is not None else ""
     if enabled is False or effort_norm == "none":
         return {"enabled": False}
