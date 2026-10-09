@@ -19,6 +19,7 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 | Capabilities ▸ Plugins withholds the settings gear for an agent on a non-active connection (Settings only reaches the active gateway) | `apps/desktop/src/app/capabilities/plugins/plugins-tab.tsx`, `plugin-scope.ts` | `plugin-scope.test.ts` (vitest) |
 | Reasoning-markup parser recognizes CommonMark fences (tilde, up to 3-space indent, fence length) | `web/src/lib/reasoning-markup.ts` | `web/src/lib/reasoning-markup.test.ts` (vitest) |
 | API server: structured `reasoning.effort` outranks legacy `reasoning_effort` | `gateway/platforms/api_server_request_options.py` | `tests/gateway/test_api_server_reasoning_precedence.py` |
+| `update-ui.test.mjs` "probe Git reaches the staged main" gets a 60s timeout (spawns Python repeatedly; 5s default flakes on CI) | `tests-js/update-ui.test.mjs` | itself |
 
 ```bash
 scripts/run_tests.sh tests/tools/test_env_passthrough_fork_isolation.py \
