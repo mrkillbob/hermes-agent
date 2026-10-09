@@ -21,10 +21,10 @@ jobs:
           cache-suffix: pr97370-v14-portable
           save-tools-cache: 'false'
           save-python-cache: 'false'
-      - name: Qualify portable provenance and consuming owners
+      - name: Observe baseline failures for consuming turn and dispatch order
         run: |
           set -o pipefail
-          scripts/run_tests.sh -j 1 --file-retries 0 tests/agent/test_source_provenance_pipeline.py tests/gateway/test_context_ref_expansion_runtime.py tests/agent/test_source_provenance.py tests/hermes_cli/test_cli_codex_context_reference.py tests/tui_gateway/test_file_attachment_allocation.py tests/agent/test_auxiliary_egress_recovery.py | tee portable-focused.log
+          scripts/run_tests.sh -j 1 --file-retries 0 tests/gateway/test_context_source_consuming_turn.py tests/gateway/test_kanban_dispatch_order.py | tee portable-focused.log
       - name: Verify source remained frozen
         if: always()
         run: python3 .ci/portable-reconcile/verify_source.py
@@ -32,5 +32,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: portable-pr97370-v14
+          name: portable-reconcile-red
           path: portable-focused.log
