@@ -763,7 +763,7 @@ def _handle_show(args: dict, **kw) -> str:
         if is_protected_worker() and _is_dispatcher_owned_worker():
             payload = _sanitize_remote_worker_payload(
                 _project_remote_worker_state(payload, current_run_id=_worker_run_id(tid)),
-                workspace_path=task.workspace_path, control_home=os.environ.get("HERMES_CONTROL_HOME") or str(get_hermes_home()))
+                workspace_path=task.workspace_path, control_home=os.environ.get("HERMES_CONTROL_HOME") or str(get_hermes_home()))  # health: allow HX002 -- dispatcher-owned path anchor, not a behavioral setting
         return json.dumps(payload)
 
 @_kanban_handler("kanban_list")

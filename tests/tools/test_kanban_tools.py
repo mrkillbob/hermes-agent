@@ -1614,7 +1614,8 @@ def test_create_normalizes_worker_supplied_scratch_path(worker_env):
 
     from hermes_cli import kanban_db as kb
 
-    conn = kb.connect()
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
     try:
         child = kb.get_task(conn, result["task_id"])
         assert child.workspace_path is None

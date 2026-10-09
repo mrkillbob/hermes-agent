@@ -30,7 +30,7 @@ jobs:
         if: always()
         run: |
           set -o pipefail
-          python scripts/check --base 93257fd315751ae119886457bb8e1c46a162406c | tee portable-static.log
+          python scripts/check --base 8bff64d6ed3414a66976bfa8ab72c14b6bca2a6f | tee portable-static.log
       - name: Verify source remained frozen
         if: always()
         run: python3 .ci/portable-reconcile/verify_source.py
@@ -38,7 +38,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: reconciliation-boundary-green
+          name: reconciliation-boundary-corrected
           path: |
             portable-focused.log
             portable-static.log

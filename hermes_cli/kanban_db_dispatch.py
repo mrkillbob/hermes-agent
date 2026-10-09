@@ -2830,7 +2830,6 @@ def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
 
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
-
     Returns the child's PID so the dispatcher can detect crashes before the
     claim TTL expires; completion is still observed via the worker's own
     ``complete`` / ``block`` transitions. ``board`` pins the child's
@@ -2839,11 +2838,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     """
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
-
     from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
-
+    from hermes_constants import get_hermes_home
     profile_arg = normalize_profile_name(task.assignee)
-
     from agent.secret_scope import is_multiplex_active
     from tools.environments.local import _is_routed_home, build_subprocess_env, strip_launch_profile_env
 
