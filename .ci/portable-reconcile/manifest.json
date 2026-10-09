@@ -5,7 +5,7 @@
   "agent/chat_completion_helpers.py": "eb3ae255c02091daa9f33b1564cf4f177efed261a9c687c02906f288687e98f1",
   "agent/codex_runtime.py": "8067aa9052276056966cc953d3e8a81f0acfc4b1625d82c9b2af229c82763575",
   "agent/coding_context.py": "4f5337082cd5e87f595ea9f74b8347273fab5f8d0c6f276c9019a4acebeb2da3",
-  "agent/context_references.py": "12bc01e43c54afb19d0694a792f25d147f715e345045c3f89ee93a773dadd4b8",
+  "agent/context_references.py": "6ff6c1dceab0d6275b4a9733d320a5e2e5a60ae59a3db6208f2a19f7dd3ccb9f",
   "agent/cross_process_file_lock.py": "776425e514a4650058c595b93cc21c289fd670d8e43f344c83893d453e3710ba",
   "agent/error_classifier.py": "c4b6c968b6e9ce0c6b49e2adcf755d9c16b5cbd5675ab0ab4ed7efc2fb0965ee",
   "agent/kanban_stop.py": "0c92e6853487ef204c55bd054a94844a4181d261ec85bef10fdc925bf1223e44",

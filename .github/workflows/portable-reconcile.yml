@@ -21,7 +21,7 @@ jobs:
           cache-suffix: pr97370-v14-portable
           save-tools-cache: 'false'
           save-python-cache: 'false'
-      - name: Observe baseline raw-byte preservation
+      - name: Qualify exact raw-byte preservation
         run: |
           set -o pipefail
           scripts/run_tests.sh -j 1 --file-retries 0 tests/agent/test_context_reference_raw_slice.py | tee portable-focused.log
@@ -32,5 +32,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: portable-raw-slice-red
+          name: portable-raw-slice-green
           path: portable-focused.log

@@ -368,7 +368,8 @@ def _read_file_reference(
             return ("".join(pieces) if collect else "") if seen else None
 
         parts, total_chars = [], 0
-        with path.open(encoding="utf-8") as fh:
+        # Match the registry's LF-delimited raw slices without newline translation.
+        with path.open(encoding="utf-8", newline="\n") as fh:
             for _ in range(max(ref.line_start - 1, 0)):
                 if _next_line(fh, collect=False) is None:
                     break
