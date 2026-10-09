@@ -319,6 +319,7 @@ def conversation_worktree_ownership_verdict(path: Path) -> bool | None:
                 "--path-format=absolute",
                 "--git-common-dir",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -335,6 +336,7 @@ def conversation_worktree_ownership_verdict(path: Path) -> bool | None:
     try:
         marker_result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--git-path", _OWNER_MARKER],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -412,6 +414,7 @@ def conversation_worktree_reclaim_guard(
                 "--path-format=absolute",
                 "--git-common-dir",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",

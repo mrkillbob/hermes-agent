@@ -7,10 +7,13 @@
  *   1. **JSON-RPC sidecar** (`GatewayClient` → /api/ws) — a lightweight
  *      session used only for connection state (the "live" badge) and
  *      credential warnings. Independent of the PTY pane's session by
- *      design. The model badge does NOT come from here: it reads the
- *      effective config model over REST (`/api/model/info`), and the model
- *      picker writes config over REST (`/api/model/set`) then offers a
- *      dashboard reload so the running chat adopts the new model.
+ *      design. The model badge does NOT come from here: it prefers the
+ *      PTY chat session's runtime identity (`session.info` over the events
+ *      feed — the model actually answering, which changes when a provider
+ *      fallback replaces the configured primary mid-turn, #54509), falls
+ *      back to the effective config model over REST (`/api/model/info`),
+ *      and the model picker writes config over REST (`/api/model/set`)
+ *      then offers a dashboard reload so the running chat adopts it.
  *
  *   2. **Event subscriber** (/api/events?channel=…) — passive, receives
  *      every dispatcher emit from the PTY-side `tui_gateway.entry` that
@@ -44,13 +47,16 @@ import {
   eventsReconnectingMessage,
   eventsRejectedMessage,
   isEventsAuthRejection,
+  isEventsAuthRejectionMessage,
   isEventsFeedMessage,
   shouldRetryEventsClose,
 } from "@/lib/events-reconnect";
+import { credentialWarning, sidecarErrorMessage } from "@/lib/chat-sidebar-banner";
+import { useNavigate } from "react-router";
 import { titleFromSessionInfoPayload } from "@/lib/chat-title";
 
 import { cn } from "@/lib/utils";
-import { AlertCircle, ChevronDown, RefreshCw } from "lucide-react";
+import { AlertCircle, ChevronDown, KeyRound, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface SessionInfo {
@@ -70,6 +76,11 @@ interface RpcEnvelope {
 // bounded-backoff attempts the manual Reconnect affordance stays the only
 // path, mirroring the events feed's give-up contract.
 const SIDE_CAR_MAX_RECONNECT_ATTEMPTS = 5;
+
+// A socket that opens and dies within this window is a flap, not a recovery:
+// only a connection that stays open this long refills a reconnect budget.
+// Shared by the JSON-RPC sidecar and the events feed (#129393).
+const HEALTHY_OPEN_GRACE_MS = 10_000;
 
 // Surfaced once when the redial budget is exhausted. Only this module may
 // clear it (on the next successful open), matching how the events feed
@@ -96,6 +107,15 @@ const STATE_TONE: Record<
   closed: "secondary",
   error: "destructive",
 };
+
+/** The runtime model a `session.info` payload reports, or undefined when it
+ *  carries none (title-only updates) — config stays the badge's source then.
+ *  `session.info` is surface-specific on the wire, so narrow defensively. */
+function sessionInfoModel(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined
+  const model = (payload as { model?: unknown }).model
+  return typeof model === 'string' && model.trim() ? model : undefined
+}
 
 interface ChatSidebarProps {
   channel: string;
@@ -129,25 +149,35 @@ export function ChatSidebar({
   onSessionTitleChange,
 }: ChatSidebarProps) {
   // `version` recreates the clients for an explicit reconnect or scope change.
+  const navigate = useNavigate();
   const [version, setVersion] = useState(0)
-  const gw = useMemo(() => new GatewayClient(), [version])
+  const gw = useMemo(() => new GatewayClient(), [])
   // The sidecar retry budget survives each redial-triggered effect rebuild.
   const sidecarRedialAttemptRef = useRef(0)
   const sidecarGaveUpRef = useRef(false)
 
-  const [state, setState] = useState<ConnectionState>("idle");
-  const [info, setInfo] = useState<SessionInfo>({});
-  const [modelOpen, setModelOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // The badge shows config.yaml's main model (`model.default`) via
-  // `/api/model/info` — the same value the Models page writes and a new chat
-  // session boots from. We deliberately don't use the sidecar's `session.info`
-  // model: that's a one-time snapshot of the throwaway sidecar agent taken when
-  // its session is created, and it never updates when the model is changed
-  // elsewhere, so the badge would go stale. Pass the chat profile explicitly so
-  // this card stays scoped to the PTY even if the global dashboard switcher
-  // changes while the chat is open.
-  const [effectiveModel, setEffectiveModel] = useState("");
+  const [state, setState] = useState<ConnectionState>('idle')
+  const [info, setInfo] = useState<SessionInfo>({})
+  const [modelOpen, setModelOpen] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // Runtime model identity of the PTY chat session, from its `session.info`
+  // broadcasts over the events feed. This is the model actually answering —
+  // when a provider fallback replaces the configured primary mid-turn
+  // (#54509), the end-of-turn `session.info` reports the fallback model, and
+  // the badge must follow it rather than attribute the response to the
+  // configured model that failed.
+  const [runtimeModel, setRuntimeModel] = useState('')
+  // The config fallback for the badge: config.yaml's main model
+  // (`model.default`) via `/api/model/info` — the same value the Models page
+  // writes and a new chat session boots from, shown until the PTY session
+  // has broadcast a runtime identity. We deliberately don't use the
+  // SIDECAR's `session.info` model: that's a one-time snapshot of the
+  // throwaway sidecar agent taken when its session is created, and it never
+  // updates when the model is changed elsewhere, so the badge would go
+  // stale. Pass the chat profile explicitly so this card stays scoped to
+  // the PTY even if the global dashboard switcher changes while the chat
+  // is open.
+  const [effectiveModel, setEffectiveModel] = useState('')
   // Whether the effective model supports reasoning effort — gates the
   // ReasoningPicker. Read from the same `/api/model/info` capabilities the
   // (currently unused) ModelInfoCard surfaces, so the dashboard exposes a
@@ -193,6 +223,9 @@ export function ChatSidebar({
     if (prevScopeKey.current === scopeKey) return
     prevScopeKey.current = scopeKey
     setError(null)
+    // Fresh PTY child on the new scope: its runtime identity is unknown until
+    // its first `session.info` broadcast, so drop the previous chat's model.
+    setRuntimeModel('')
     // Fresh scope, fresh sidecar redial budget (#95951).
     sidecarRedialAttemptRef.current = 0
     sidecarGaveUpRef.current = false
@@ -218,7 +251,7 @@ export function ChatSidebar({
       const message = ev.payload?.message;
 
       if (message) {
-        setError(message);
+        setError(sidecarErrorMessage(message));
       }
     });
 
@@ -231,19 +264,49 @@ export function ChatSidebar({
     // the counter; unmount or a scope switch (version bump) cancels the
     // pending timer because this effect tears down with the old client.
     let redialTimer: ReturnType<typeof setTimeout> | null = null;
+    let healthyOpenTimer: ReturnType<typeof setTimeout> | null = null;
+    // onState replays the current state synchronously. Ignore only that
+    // subscription-time snapshot; real transitions in the same effect must
+    // still consume the retry budget.
+    let replayingInitialState = true;
+    queueMicrotask(() => {
+      replayingInitialState = false;
+    });
     const offRedial = gw.onState((s) => {
+      if (replayingInitialState) {
+        return;
+      }
       if (s === "open") {
-        sidecarRedialAttemptRef.current = 0;
-        if (sidecarGaveUpRef.current) {
-          sidecarGaveUpRef.current = false;
-          setError((current) =>
-            current === SIDE_CAR_GAVE_UP_MESSAGE ? null : current,
-          );
+        // A pending redialTimer would bump the version and tear down the
+        // connection that just opened (#129393).
+        if (redialTimer) {
+          clearTimeout(redialTimer);
+          redialTimer = null;
         }
+        if (healthyOpenTimer) {
+          clearTimeout(healthyOpenTimer);
+        }
+        // Do not reset the budget on every open: an open→immediate-close
+        // cycle would otherwise reset it forever. Reset only after a stable
+        // connection has remained open for the grace period.
+        healthyOpenTimer = setTimeout(() => {
+          healthyOpenTimer = null;
+          sidecarRedialAttemptRef.current = 0;
+          if (sidecarGaveUpRef.current) {
+            sidecarGaveUpRef.current = false;
+            setError((current: string | null) =>
+              current === SIDE_CAR_GAVE_UP_MESSAGE ? null : current,
+            );
+          }
+        }, HEALTHY_OPEN_GRACE_MS);
         return;
       }
       if (s !== "closed" && s !== "error") {
         return;
+      }
+      if (healthyOpenTimer) {
+        clearTimeout(healthyOpenTimer);
+        healthyOpenTimer = null;
       }
       if (cancelled || redialTimer) {
         return;
@@ -288,7 +351,7 @@ export function ChatSidebar({
       })
       .catch((e: Error) => {
         if (!cancelled) {
-          setError(e.message);
+          setError(sidecarErrorMessage(e.message));
         }
       });
 
@@ -298,6 +361,10 @@ export function ChatSidebar({
         clearTimeout(redialTimer)
         redialTimer = null
       }
+      if (healthyOpenTimer) {
+        clearTimeout(healthyOpenTimer)
+        healthyOpenTimer = null
+      }
       offRedial()
       offState()
       offSessionInfo()
@@ -305,7 +372,7 @@ export function ChatSidebar({
       gw.close()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gw]);
+  }, [gw, version]);
 
   // Event subscriber WebSocket — receives the rebroadcast of every
   // dispatcher emit from the PTY child's gateway.  See /api/pub +
@@ -328,6 +395,7 @@ export function ChatSidebar({
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
     let connectGeneration = 0;
+    let healthyOpenTimer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
 
     const clearConnectTimer = () => {
@@ -357,6 +425,10 @@ export function ChatSidebar({
     const scheduleReconnect = () => {
       if (unmounting || reconnectTimer) {
         return;
+      }
+      if (healthyOpenTimer) {
+        clearTimeout(healthyOpenTimer)
+        healthyOpenTimer = null
       }
       if (attempt >= EVENTS_MAX_RECONNECT_ATTEMPTS) {
         surface(eventsGaveUpMessage());
@@ -430,8 +502,16 @@ export function ChatSidebar({
           return;
         }
         clearConnectTimer();
-        attempt = 0;
         clearEventsBanner();
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        if (healthyOpenTimer) clearTimeout(healthyOpenTimer);
+        healthyOpenTimer = setTimeout(() => {
+          healthyOpenTimer = null;
+          if (!unmounting && isCurrent()) attempt = 0;
+        }, HEALTHY_OPEN_GRACE_MS);
       });
 
       // `unmounting` suppresses the banner during cleanup — `ws.close()`
@@ -461,6 +541,7 @@ export function ChatSidebar({
       });
 
       socket.addEventListener("message", (ev) => {
+        if (unmounting || !isCurrent()) return;
         let frame: RpcEnvelope;
 
         try {
@@ -480,6 +561,8 @@ export function ChatSidebar({
           if (title !== undefined) {
             onSessionTitleChange?.(title);
           }
+          const model = sessionInfoModel(payload);
+          if (model !== undefined) setRuntimeModel(model);
         } else if (type === "dashboard.new_session_requested") {
           onDashboardNewSessionRequest?.();
         }
@@ -495,6 +578,10 @@ export function ChatSidebar({
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
+      }
+      if (healthyOpenTimer) {
+        clearTimeout(healthyOpenTimer);
+        healthyOpenTimer = null;
       }
       ws?.close();
     };
@@ -513,11 +600,16 @@ export function ChatSidebar({
     setVersion((v) => v + 1);
   }, []);
 
-  // The picker writes config.yaml over REST and reloads — it doesn't ride the
-  // sidecar gateway session, so it's available whenever the sidebar is mounted.
-  const modelName = effectiveModel || info.model || "—";
-  const modelLabel = modelName.split("/").slice(-1)[0] ?? "—";
-  const banner = error ?? info.credential_warning ?? null;
+  // Runtime-first (#54509): the PTY session's `session.info` reports the
+  // model that is actually answering, so a provider-fallback swap shows the
+  // fallback model, not the configured primary that failed. Config remains
+  // the fallback until the PTY has broadcast a runtime identity (fresh chat,
+  // events feed still connecting).
+  const modelName = runtimeModel || effectiveModel || info.model || '—'
+  const modelLabel = modelName.split('/').slice(-1)[0] ?? '—'
+  const credential = credentialWarning(info.credential_warning)
+  const banner = error ?? credential?.message ?? null
+  const showReload = isEventsAuthRejectionMessage(error)
 
   return (
     <aside
@@ -588,16 +680,39 @@ export function ChatSidebar({
           <div className="min-w-0 flex-1">
             <div className="wrap-break-word text-destructive">{banner}</div>
 
-            {error && (
+            {error && showReload && (
               <Button
                 size="sm"
                 outlined
                 className="mt-1"
-                onClick={reconnect}
+                onClick={() => window.location.reload()}
                 prefix={<RefreshCw />}
               >
-                reconnect events feed
+                Reload page
               </Button>
+            )}
+            {error && !showReload && (
+              <Button size="sm" outlined className="mt-1" onClick={reconnect} prefix={<RefreshCw />}>
+                Reconnect side panel
+              </Button>
+            )}
+            {!error && credential && (
+              <div className="mt-1 flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  outlined
+                  prefix={<KeyRound />}
+                  // Router navigation: a full page load would tear down the
+                  // xterm scrollback and the chat sockets. (The mobile portal
+                  // still lives under ChatPage, so router context is present.)
+                  onClick={() => navigate('/env')}
+                >
+                  Add key
+                </Button>
+                <Button size="sm" outlined onClick={() => setModelOpen(true)}>
+                  Switch model
+                </Button>
+              </div>
             )}
           </div>
         </Card>

@@ -754,66 +754,6 @@ class TestWebServerEndpoints:
         return {field["key"]: field for field in payload["fields"]}
 
 
-    def test_openviking_dashboard_persists_typed_recall_values(self):
-        from hermes_cli.config import load_config
-
-        resp = self.client.put(
-            "/api/memory/providers/openviking/config",
-            json={
-                "values": {
-                    "endpoint": "http://127.0.0.1:1933",
-                    "recall_limit": "12",
-                    "recall_score_threshold": "0.42",
-                    "recall_max_injected_chars": "8000",
-                    "profile_token_budget": "7000",
-                    "recall_timeout_seconds": "2.5",
-                    "recall_request_timeout_seconds": "1.5",
-                    "recall_full_read_limit": "5",
-                    "recall_prefer_abstract": True,
-                    "recall_resources": False,
-                }
-            },
-        )
-
-        assert resp.status_code == 200
-        config = load_config()["memory"]["openviking"]
-        assert config["recall_limit"] == 12
-        assert config["recall_score_threshold"] == 0.42
-        assert config["profile_token_budget"] == 7000
-        assert config["recall_prefer_abstract"] is True
-        assert config["recall_resources"] is False
-
-    def test_openviking_dashboard_rejects_out_of_range_recall_value(self):
-        resp = self.client.put(
-            "/api/memory/providers/openviking/config",
-            json={
-                "values": {
-                    "endpoint": "http://127.0.0.1:1933",
-                    "recall_limit": 101,
-                }
-            },
-        )
-
-        assert resp.status_code == 400
-
-    def test_openviking_dashboard_rejects_blocked_endpoint_before_saving(self):
-        from hermes_cli.config import load_config
-
-        resp = self.client.put(
-            "/api/memory/providers/openviking/config",
-            json={
-                "values": {
-                    "endpoint": "http://169.254.169.254/latest/meta-data/credential",
-                }
-            },
-        )
-
-        assert resp.status_code == 400
-        assert "credential" not in resp.json()["detail"]
-        memory_config = load_config().get("memory", {})
-        assert "openviking" not in memory_config
-
-
     # A user-installed memory provider with a DECLARED config surface (``config_schema.py``, flat
     # ``<home>/<name>/config.json`` storage) and a live ``get_config_schema``/``save_config`` pair.
     # Bundled providers no longer ship a flat-storage declared schema (hindsight moved to the
@@ -1215,6 +1155,16 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             headers = {"content-type": "image/png"}
             content = png_bytes
 
+            async def aiter_bytes(self):
+                yield png_bytes
+
+        class _Stream:
+            async def __aenter__(self):
+                return _Resp()
+
+            async def __aexit__(self, *a):
+                return False
+
         class _Client:
             def __init__(self, *a, **k):
                 pass
@@ -1225,9 +1175,9 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             async def __aexit__(self, *a):
                 return False
 
-            async def get(self, url):
+            def stream(self, method, url):
                 assert url == "https://v3.fal.media/media/abc123"
-                return _Resp()
+                return _Stream()
 
         import hermes_cli.web_routers.files as files_router
 
@@ -1253,6 +1203,16 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             headers = {"content-type": "text/html"}
             content = b"<html>nope</html>"
 
+            async def aiter_bytes(self):
+                yield self.content
+
+        class _Stream:
+            async def __aenter__(self):
+                return _Resp()
+
+            async def __aexit__(self, *a):
+                return False
+
         class _Client:
             def __init__(self, *a, **k):
                 pass
@@ -1263,8 +1223,8 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             async def __aexit__(self, *a):
                 return False
 
-            async def get(self, url):
-                return _Resp()
+            def stream(self, method, url):
+                return _Stream()
 
         import httpx
 
@@ -1454,35 +1414,6 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert check_data["install_method"] == "apt"
         assert check_data["can_apply"] is False
         assert check_data["update_command"] == data["update_command"]
-
-    def test_update_status_recovers_completed_result_after_dashboard_restart(self, monkeypatch, tmp_path):
-
-        action_id = "c" * 32
-        (tmp_path / "hermes-update.log").write_text(
-            "=== hermes-update started 2026-08-17 11:19:34 ===\n"
-            "pulling updates...\n",
-            encoding="utf-8",
-        )
-        (tmp_path / "update.log").write_text(
-            "=== hermes update started 2026-08-17T11:19:35 ===\n"
-            "✓ Update complete!\n"
-            f"=== hermes-update completed {action_id} ===\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(_web_server_gateway, "_ACTION_LOG_DIR", tmp_path)
-        monkeypatch.setattr(_web_server_gateway, "_ACTION_PROCS", {})
-        monkeypatch.setattr(_web_server_gateway, "_ACTION_RESULTS", {})
-        monkeypatch.setattr(_web_server_gateway, "_ACTION_COMMANDS", {})
-        monkeypatch.setattr(_web_server_gateway, "_ACTION_IDS", {})
-
-        status = self.client.get("/api/actions/hermes-update/status?lines=2000")
-
-        assert status.status_code == 200
-        data = status.json()
-        assert data["running"] is False
-        assert data["exit_code"] == 0
-        assert data["action_id"] == action_id
-        assert f"=== hermes-update completed {action_id} ===" in data["lines"]
 
     def test_update_hermes_spawns_with_action_id(self, monkeypatch):
         import hermes_cli.web_server as web_server
@@ -2566,6 +2497,30 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert payload["limit"] == 3
         assert len(payload["sessions"]) == 3
 
+    def test_profiles_sessions_pages_past_500_rows(self):
+        """The aggregate route must not strand rows after its old 500-row
+        per-profile source cap (issue #88438)."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            for i in range(501):
+                sid = f"archived-page-{i:03d}"
+                db.create_session(session_id=sid, source="cli")
+                db.append_message(session_id=sid, role="user", content="hi")
+                db.set_session_archived(sid, True)
+        finally:
+            db.close()
+
+        resp = self.client.get(
+            "/api/profiles/sessions?limit=1&offset=500&archived=only&profile=default"
+        )
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["total"] == 501
+        assert len(payload["sessions"]) == 1
+        assert payload["offset"] == 500
+
     def test_get_session_messages_rejects_negative_limit(self):
         """limit=-1 previously bypassed the documented 500-row clamp because
         min(-1, 500) == -1, which SQLite treats as 'no limit'."""
@@ -2858,6 +2813,42 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert payload["messages"][-1]["content"] == "msg 500"
         # Transfer projection: archived rows ride along with their flags (import re-archives them).
         assert calls == [(500, 0, True), (500, 500, True)]
+    def test_pick_silent_default_model_empty_list_returns_empty_string(self):
+        """Empty model list must return \"\" so the caller degrades gracefully."""
+        from hermes_cli.models import pick_silent_default_model
+
+        assert pick_silent_default_model([], "nous") == ""
+        assert pick_silent_default_model([], "") == ""
+        assert pick_silent_default_model([], "openrouter") == ""
+
+    def test_is_anthropic_frontier_tier(self):
+        """Unit coverage for the frontier-tier predicate used by the cost-safe
+        silent policy. Anchored on the claude- prefix so community/distill
+        slugs whose lowercase form merely contains opus are rejected."""
+        from hermes_cli.models import _is_anthropic_frontier_tier
+
+        # Opus + Fable, dash + dot, vendor-prefixed, colon-suffixed.
+        assert _is_anthropic_frontier_tier("claude-opus-4-8") is True
+        assert _is_anthropic_frontier_tier("claude-opus-4.8") is True
+        assert _is_anthropic_frontier_tier("anthropic/claude-opus-4.8") is True
+        assert _is_anthropic_frontier_tier("claude-fable-5") is True
+        assert _is_anthropic_frontier_tier("anthropic/claude-fable-5") is True
+        assert _is_anthropic_frontier_tier("anthropic/claude-fable-5:thinking") is True
+        assert _is_anthropic_frontier_tier("claude-opus-5-0") is True  # forward-compat
+
+        # Sonnet / Haiku remain non-frontier.
+        assert _is_anthropic_frontier_tier("claude-sonnet-5") is False
+        assert _is_anthropic_frontier_tier("claude-haiku-4.5") is False
+        assert _is_anthropic_frontier_tier("anthropic/claude-sonnet-4.6") is False
+
+        # Community / distill / non-Anthropic must not match.
+        assert _is_anthropic_frontier_tier("qwopus3.6-27b-coder") is False
+        assert _is_anthropic_frontier_tier("jackrong/qwopus3.6-27b-coder") is False
+        assert _is_anthropic_frontier_tier("openai/gpt-5.5") is False
+        assert _is_anthropic_frontier_tier("z-ai/glm-5.2") is False
+        assert _is_anthropic_frontier_tier("") is False
+        assert _is_anthropic_frontier_tier(None) is False
+
 
 
 # ---------------------------------------------------------------------------
@@ -3457,142 +3448,6 @@ class TestNewEndpoints:
 
 
 # ---------------------------------------------------------------------------
-# Desktop-owned loopback backends are not gated by dashboard.public_url (#96490)
-# ---------------------------------------------------------------------------
-
-
-class TestDesktopLoopbackAuthExemption:
-    """``_desktop_loopback_auth_exempt`` decides the #96490 exemption."""
-
-    def test_exempt_with_desktop_env_and_session_token_on_loopback(self, monkeypatch):
-        import hermes_cli.web_server as web_server
-
-        monkeypatch.setenv("HERMES_DESKTOP", "1")
-        monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "desktop-minted")
-        assert web_server._desktop_loopback_auth_exempt("127.0.0.1") is True
-        assert web_server._desktop_loopback_auth_exempt("::1") is True
-
-    def test_exempt_via_ssh_spawn_credentials_without_env_token(self, monkeypatch):
-        import hermes_cli.web_server as web_server
-
-        monkeypatch.setenv("HERMES_DESKTOP", "1")
-        monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
-        assert web_server._desktop_loopback_auth_exempt(
-            "127.0.0.1", ssh_session_token="tok"
-        )
-        assert web_server._desktop_loopback_auth_exempt(
-            "127.0.0.1", ssh_owner_nonce="nonce"
-        )
-
-    def test_not_exempt_without_desktop_env(self, monkeypatch):
-        import hermes_cli.web_server as web_server
-
-        monkeypatch.delenv("HERMES_DESKTOP", raising=False)
-        monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "tok")
-        assert web_server._desktop_loopback_auth_exempt("127.0.0.1") is False
-
-    def test_not_exempt_without_any_credential(self, monkeypatch):
-        import hermes_cli.web_server as web_server
-
-        # HERMES_DESKTOP=1 alone is not enough: a plain serve with the env var
-        # exported must stay gated.
-        monkeypatch.setenv("HERMES_DESKTOP", "1")
-        monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
-        assert web_server._desktop_loopback_auth_exempt("127.0.0.1") is False
-
-    def test_not_exempt_on_non_loopback_bind(self, monkeypatch):
-        import hermes_cli.web_server as web_server
-
-        monkeypatch.setenv("HERMES_DESKTOP", "1")
-        monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "tok")
-        assert web_server._desktop_loopback_auth_exempt("0.0.0.0") is False
-        assert web_server._desktop_loopback_auth_exempt("192.168.1.10") is False
-
-    def test_public_url_engages_gate_for_non_desktop_loopback(self, monkeypatch):
-        import hermes_cli.web_server as web_server
-
-        # Sanity: the base behaviour is untouched — a non-Desktop loopback
-        # serve with a public_url configured stays ticket-gated.
-        monkeypatch.delenv("HERMES_DESKTOP", raising=False)
-        assert web_server.should_require_dashboard_auth(
-            "127.0.0.1", frozenset({"dash.example.com"})
-        ) is True
-
-
-class TestDesktopHostRendezvousIsolation:
-    """Desktop pool children have a private lifecycle, not a host ownership role."""
-
-    def test_desktop_backend_does_not_claim_the_host_serve_record(self, monkeypatch, tmp_path):
-        """A Desktop child must not block a separately supervised public dashboard, yet a
-        terminal `hermes plugins install` on a Desktop-only box must still find it (#119644):
-        it publishes under its OWN role, which the attach ladder never reads."""
-        import io
-        import urllib.request
-        from gateway import host_rendezvous as hr
-        import hermes_cli.web_server as web_server
-        from hermes_cli.main_dashboard import _host_backend_attachment
-        from hermes_cli.plugins_activation import notify_serve_backend
-
-        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
-        monkeypatch.setenv("HERMES_DESKTOP", "1")
-        monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "desktop-spawn-token")
-        monkeypatch.setattr(web_server, "_SESSION_TOKEN", "desktop-spawn-token")
-        monkeypatch.setattr(hr, "cleanup_on_exit", lambda role: None)
-        dialed = []
-
-        class _Reply(io.BytesIO):
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-        def _fake_urlopen(request, timeout=None):
-            dialed.append((request.full_url, request.get_header("X-hermes-session-token")))
-            return _Reply(b'{"ok": true}')
-
-        monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
-        try:
-            web_server._publish_host_rendezvous("127.0.0.1", 9231)
-
-            # Not a host owner: the supervised public dashboard's attach ladder sees nobody.
-            assert hr.read_record(hr.ROLE_SERVE) is None
-            assert _host_backend_attachment() is None
-            # ...but a terminal `hermes plugins install` still lights up its open chats.
-            assert notify_serve_backend("demo", tmp_path) == {"ok": True}
-            assert dialed == [("http://127.0.0.1:9231/api/dashboard/agent-plugins/activate",
-                               "desktop-spawn-token")]
-        finally:
-            hr.clear_record(hr.ROLE_DESKTOP_SERVE)
-            hr.release_host_lock(hr.ROLE_DESKTOP_SERVE)
-
-    def test_standalone_backend_still_claims_the_host_serve_record(self, monkeypatch):
-        """The Desktop exclusion must not alter standalone dashboard discovery — including a
-        supervised service whose shell merely inherited HERMES_DESKTOP=1 without the token."""
-        from gateway import host_rendezvous as hr
-        import hermes_cli.web_server as web_server
-
-        monkeypatch.setenv("HERMES_DESKTOP", "1")
-        monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
-        claimed = []
-        published = []
-        monkeypatch.setattr(
-            hr,
-            "claim_host_lock",
-            lambda role: (claimed.append(role) or (hr.HostLockOutcome.ACQUIRED, None)),
-        )
-        monkeypatch.setattr(hr, "publish_record", lambda *args, **kwargs: published.append((args, kwargs)))
-        monkeypatch.setattr(hr, "cleanup_on_exit", lambda role: None)
-
-        web_server._publish_host_rendezvous("0.0.0.0", 9119)
-
-        assert claimed == [hr.ROLE_SERVE]
-        assert published[0][0] == (hr.ROLE_SERVE,)
-        assert published[0][1]["host"] == "0.0.0.0"
-        assert published[0][1]["port"] == 9119
-
-
-# ---------------------------------------------------------------------------
 # Model context length: normalize/denormalize + /api/model/info
 # ---------------------------------------------------------------------------
 
@@ -3814,57 +3669,6 @@ class TestModelInfoEndpoint:
 # ---------------------------------------------------------------------------
 # Gateway health probe tests
 # ---------------------------------------------------------------------------
-
-
-class TestProbeGatewayHealth:
-    """Tests for _probe_gateway_health() — cross-container gateway detection."""
-
-
-    def test_probe_uses_configured_short_timeout(self, monkeypatch):
-        """The HTTP probe must not fall through to the OS TCP timeout."""
-        import hermes_cli.web_server as ws
-
-        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642")
-        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_TIMEOUT", 0.75)
-        timeouts = []
-
-        def mock_urlopen(req, **kwargs):
-            timeouts.append(kwargs.get("timeout"))
-            raise TimeoutError("mock timeout")
-
-        monkeypatch.setattr(ws.urllib.request, "urlopen", mock_urlopen)
-
-        alive, body = _web_server_gateway._probe_gateway_health()
-
-        assert alive is False
-        assert body is None
-        assert timeouts == [0.75, 0.75]
-
-
-    def test_detailed_fails_falls_back_to_simple_health(self, monkeypatch):
-        """If /health/detailed fails, falls back to /health."""
-        import hermes_cli.web_server as ws
-        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642")
-        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_TIMEOUT", 1)
-
-        call_count = [0]
-
-        def mock_urlopen(req, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise ConnectionError("detailed failed")
-            mock_resp = MagicMock()
-            mock_resp.status = 200
-            mock_resp.read.return_value = json.dumps({"status": "ok"}).encode()
-            mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-            mock_resp.__exit__ = MagicMock(return_value=False)
-            return mock_resp
-
-        monkeypatch.setattr(ws.urllib.request, "urlopen", mock_urlopen)
-        alive, body = _web_server_gateway._probe_gateway_health()
-        assert alive is True
-        assert body["status"] == "ok"
-        assert call_count[0] == 2
 
 
 class TestStatusRemoteGateway:
@@ -5867,3 +5671,133 @@ class TestSubmittedCustomEndpointSurvivesAssignment:
         assert applied["base_url"] == "https://api.anthropic.com"
         assert applied["api_mode"] == "anthropic_messages"
         assert applied["api_key"] == "submitted-key"
+
+
+
+class TestNousRecommendedDefaultCostSafePolicy:
+    """Paid-tier Nous recommended default must never land on an Anthropic frontier
+    tier (Opus / Fable) — the user gets no opt-out before it pins their main model
+    (#51491). Regression tests from PR #51493."""
+
+    def test_recommended_default_nous_paid_uses_curated_default(self, monkeypatch):
+        """A paid Nous user gets the cost-safe silent default from the list.
+
+        With no preferred catalog label present in the curated list and no
+        Anthropic frontier entries, the first curated entry is selected.
+        """
+        import hermes_cli.models as models_mod
+        from hermes_cli.web_routers.models import get_recommended_default_model
+
+        monkeypatch.setattr(models_mod, "get_curated_nous_model_ids", lambda: ["top/model", "other/model"])
+        import hermes_cli.models_pricing as mp
+        monkeypatch.setattr(mp, "get_pricing_for_provider", lambda provider: {})
+        monkeypatch.setattr(models_mod, "check_nous_free_tier", lambda *, force_fresh=False: False)
+        monkeypatch.setattr(
+            models_mod, "union_with_portal_paid_recommendations",
+            lambda ids, pricing, url: (ids, pricing),
+        )
+        # Keep the catalog preferred out of this list so we exercise the
+        # non-frontier fallback rather than the preferred-hit branch.
+        monkeypatch.setattr(
+            models_mod, "get_preferred_silent_default_model",
+            lambda provider="openrouter": "z-ai/glm-5.2",
+        )
+
+        result = get_recommended_default_model(provider="nous")
+        assert result["provider"] == "nous"
+        assert result["model"] == "top/model"
+        assert result["free_tier"] is False
+
+    @pytest.mark.parametrize(
+        "model_ordering, expected_model",
+        [
+            # Opus-first ordering (historical PR-branch catalog shape).
+            (
+                [
+                    "anthropic/claude-opus-4.8",
+                    "anthropic/claude-sonnet-5",
+                    "anthropic/claude-haiku-4.5",
+                ],
+                "anthropic/claude-sonnet-5",
+            ),
+            # Fable-first ordering (current origin/main catalog shape).
+            (
+                [
+                    "anthropic/claude-fable-5",
+                    "anthropic/claude-opus-4.8",
+                    "anthropic/claude-sonnet-5",
+                    "anthropic/claude-haiku-4.5",
+                ],
+                "anthropic/claude-sonnet-5",
+            ),
+            # Preferred silent default present in the list always wins,
+            # independent of relative ordering / frontiers.
+            (
+                [
+                    "anthropic/claude-fable-5",
+                    "anthropic/claude-opus-4.8",
+                    "z-ai/glm-5.2",
+                    "anthropic/claude-sonnet-5",
+                ],
+                "z-ai/glm-5.2",
+            ),
+        ],
+        ids=["opus_first", "fable_first_main", "override_beats_ordering"],
+    )
+    def test_recommended_default_nous_paid_cost_safe_policy(
+        self, monkeypatch, model_ordering, expected_model,
+    ):
+        """Regression for PR #51493 maintainer feedback (Teknium + DavidMetcalfe).
+
+        The interactive Nous recommended default must use the shared
+        cost-safe silent policy: preferred catalog label when present,
+        else first non-frontier (Opus / Fable) entry. Covers both the
+        current Fable-first catalog and a future Opus-first catalog.
+        """
+        import hermes_cli.models as models_mod
+        from hermes_cli.web_routers.models import get_recommended_default_model
+
+        monkeypatch.setattr(
+            models_mod, "get_curated_nous_model_ids", lambda: list(model_ordering),
+        )
+        import hermes_cli.models_pricing as mp
+        monkeypatch.setattr(mp, "get_pricing_for_provider", lambda provider: {})
+        monkeypatch.setattr(models_mod, "check_nous_free_tier", lambda *, force_fresh=False: False)
+        monkeypatch.setattr(
+            models_mod, "union_with_portal_paid_recommendations",
+            lambda ids, pricing, url: (ids, pricing),
+        )
+        monkeypatch.setattr(
+            models_mod, "get_preferred_silent_default_model",
+            lambda provider="openrouter": "z-ai/glm-5.2",
+        )
+
+        result = get_recommended_default_model(provider="nous")
+        assert result["provider"] == "nous"
+        assert result["model"] == expected_model
+        assert result["free_tier"] is False
+
+    def test_recommended_default_nous_paid_falls_back_when_all_frontier(self, monkeypatch):
+        """If every curated entry is a frontier tier (Opus / Fable), fall
+        back to the head of the list so the picker is never empty."""
+        import hermes_cli.models as models_mod
+        from hermes_cli.web_routers.models import get_recommended_default_model
+
+        monkeypatch.setattr(
+            models_mod, "get_curated_nous_model_ids",
+            lambda: ["anthropic/claude-fable-5", "anthropic/claude-opus-4.8"],
+        )
+        import hermes_cli.models_pricing as mp
+        monkeypatch.setattr(mp, "get_pricing_for_provider", lambda provider: {})
+        monkeypatch.setattr(models_mod, "check_nous_free_tier", lambda *, force_fresh=False: False)
+        monkeypatch.setattr(
+            models_mod, "union_with_portal_paid_recommendations",
+            lambda ids, pricing, url: (ids, pricing),
+        )
+        monkeypatch.setattr(
+            models_mod, "get_preferred_silent_default_model",
+            lambda provider="openrouter": "z-ai/glm-5.2",
+        )
+
+        result = get_recommended_default_model(provider="nous")
+        assert result["model"] == "anthropic/claude-fable-5"

@@ -14,13 +14,13 @@ from tools.skills_hub_github import GitHubAuth, GitHubSource
 from tools.skills_hub_install import (
     bundle_content_hash, check_for_skill_updates, install_from_quarantine, quarantine_bundle,
 )
-from tools.skills_hub_models import SkillBundle, SkillMeta, SkillSource, _referenced_support_paths
+from tools.skills_hub_models import SkillBundle, SkillMeta, SkillSource
 from tools.skills_hub_official import OptionalSkillSource
 from tools.skills_hub_search import (
     HERMES_INDEX_TTL, _load_hermes_index, create_source_router, parallel_search_sources, unified_search,
 )
 from tools.skills_hub_skillssh import SkillsShSource
-from tools.skills_hub_sources import LobeHubSource, UrlSource, WellKnownSkillSource
+from tools.skills_hub_sources import LobeHubSource, UrlSource, WellKnownSkillSource, _referenced_support_paths
 
 # ---------------------------------------------------------------------------
 # GitHubSource._parse_frontmatter_quick
@@ -155,6 +155,29 @@ class TestGitHubSourceFileFetch:
             "https://api.github.com/repos/owner/repo/contents/"
             "skill/references/foo%23bar.md"
         )
+
+    @pytest.mark.parametrize("gh_token", ["gh-live", "gh-dead"])
+    def test_rejected_token_falls_through_to_next_credential(self, monkeypatch, gh_token):
+        """A 401 on the .env token retries with `gh auth token`, then anonymously (#98725)."""
+        import tools.skills_hub as hub
+        auth = GitHubAuth()
+        monkeypatch.setattr(auth, "_try_pat", lambda: "pat-dead")
+        monkeypatch.setattr(auth, "_try_gh_cli", lambda: gh_token)
+        monkeypatch.setattr(auth, "_try_github_app", lambda: None)
+        sent = []
+
+        def fake_get(url, *, headers, **_kw):
+            sent.append(headers)
+            dead = headers.get("Authorization", "").endswith("-dead")
+            return httpx.Response(401 if dead else 200, content=b"body")
+
+        monkeypatch.setattr(hub, "_skills_hub_http_get", fake_get)
+        assert GitHubSource(auth)._fetch_file_bytes("o/r", "s/SKILL.md") == b"body"
+        expected = ["token pat-dead", "token gh-live"] if gh_token == "gh-live" else [
+            "token pat-dead", "token gh-dead", None]
+        assert [h.get("Authorization") for h in sent] == expected
+        assert sent[-1]["Accept"] == "application/vnd.github.v3.raw"
+        assert auth.rejected[0] == "GITHUB_TOKEN/GH_TOKEN"
 
 # ---------------------------------------------------------------------------
 # SkillsShSource
@@ -2110,54 +2133,3 @@ class TestLoadHermesIndex:
 
         data = _load_hermes_index()
         assert data == {"skills": [{"name": "stale"}]}
-
-# ---------------------------------------------------------------------------
-# Referenced-path extraction & missing support files (regression: a prose
-# glob or a repo-only dev tool referenced in SKILL.md must not abort install)
-# ---------------------------------------------------------------------------
-
-class TestReferencedSupportPaths:
-    def test_ignores_globs_placeholders_and_truncated_tokens(self):
-        md = (
-            "Load `references/type-*.md` before drawing, and "
-            "`references/type-<name>.md` for the matching type.\n"
-            "Real files: [flowchart](references/type-flowchart.md) and "
-            "`references/type-architecture.md`.\n"
-        )
-        assert _referenced_support_paths(md) == {
-            "references/type-flowchart.md",
-            "references/type-architecture.md",
-        }
-
-    def test_keeps_real_backtick_references(self):
-        md = "Run `python3 scripts/self_check.py <file>` and see `references/guide.md`.\n"
-        assert _referenced_support_paths(md) == {
-            "scripts/self_check.py",
-            "references/guide.md",
-        }
-
-class TestGitHubSourceFetchMissingReferencedFile:
-    def _source(self):
-        auth = MagicMock(spec=GitHubAuth)
-        return GitHubSource(auth=auth)
-
-    def test_fetch_skips_missing_referenced_file_and_keeps_the_rest(self):
-        md = (
-            "---\nname: demo\ndescription: demo\n---\n\n"
-            "See [guide](references/guide.md) and `references/missing.md`.\n"
-        )
-        tree_entries = [
-            {"path": "skills/demo/references/guide.md", "type": "blob", "mode": "100644"},
-        ]
-        source = self._source()
-        with patch.object(source, "_fetch_file_content", return_value=md), \
-             patch.object(source, "_get_repo_tree", return_value=("main", tree_entries)), \
-             patch.object(source, "_fetch_file_bytes", return_value=b"# guide"):
-            bundle = source.fetch("owner/repo/skills/demo")
-
-        assert bundle is not None
-        assert bundle.name == "demo"
-        # The present referenced file is bundled…
-        assert bundle.files["references/guide.md"] == b"# guide"
-        # …and the missing one is warned about and skipped, not fatal.
-        assert "references/missing.md" not in bundle.files

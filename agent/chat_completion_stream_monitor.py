@@ -57,7 +57,7 @@ class StreamingWaitMonitor:
         """Unblock a checked-out HTTP response without closing its owner-thread FD."""
         if response is None:
             return 0
-        from agent.agent_runtime_helpers import (
+        from agent.agent_runtime_helpers_connections import (
             _connection_candidates,
             _shutdown_socket,
             _socket_from_candidate,

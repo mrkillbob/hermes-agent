@@ -29,7 +29,7 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
 from hermes_cli.web_deps import late
 from hermes_cli.web_server_files import (
-    _fs_path, _managed_file_entry, _managed_response_meta, _resolve_managed_path,
+    _fs_path, _hosted_fs_read_guard, _managed_file_entry, _managed_response_meta, _resolve_managed_path,
 )
 from hermes_cli.web_models import (
     ChatImageUpload, FsWriteText, ManagedDirectoryCreate, ManagedFileDelete, ManagedFileUpload,
@@ -393,20 +393,31 @@ async def proxy_remote_media(url: str, request: Request):
 
     import httpx
 
+    too_large = False
     try:
         async with httpx.AsyncClient(timeout=_MEDIA_PROXY_TIMEOUT_S, follow_redirects=True) as client:
-            response = await client.get(url)
+            async with client.stream("GET", url) as response:
+                status = response.status_code
+                content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+                chunks: list[bytes] = []
+                size = 0
+                if status == 200 and content_type in _MEDIA_CONTENT_TYPES.values():
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > _MEDIA_MAX_BYTES:
+                            too_large = True
+                            break
+                        chunks.append(chunk)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Image fetch failed: {exc}")
 
-    if response.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Image fetch returned HTTP {response.status_code}")
-    content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if status != 200:
+        raise HTTPException(status_code=502, detail=f"Image fetch returned HTTP {status}")
     if content_type not in _MEDIA_CONTENT_TYPES.values():
         raise HTTPException(status_code=415, detail="Unsupported media type")
-    data = response.content
-    if len(data) > _MEDIA_MAX_BYTES:
+    if too_large:
         raise HTTPException(status_code=413, detail="File too large")
+    data = b"".join(chunks)
 
     encoded = base64.b64encode(data).decode("ascii")
     return {"data_url": f"data:{content_type};base64,{encoded}"}
@@ -513,11 +524,14 @@ async def list_managed_files(request: Request, path: Optional[str] = None):
         raise HTTPException(status_code=400, detail="Path is not a directory")
 
     with _io_errors("Directory is not readable", "Could not read directory"), os.scandir(target) as scan:
-        entries = [
-            _managed_file_entry(policy, Path(entry.path))
-            for entry in scan
-            if not _is_sensitive_path(Path(entry.path))
-        ]
+        entries = []
+        for entry in scan:
+            entry_path = Path(entry.path)
+            if _is_sensitive_path(entry_path):
+                continue
+            metadata = _managed_file_entry(policy, entry_path, skip_missing=True)
+            if metadata is not None:
+                entries.append(metadata)
 
     entries.sort(key=lambda item: (not item["is_directory"], str(item["name"]).lower()))
     locked_root = policy.locked_root
@@ -757,7 +771,7 @@ _FS_LIST_ERRNO = (
 
 
 @router.get("/api/fs/list")
-async def fs_list(path: str, profile: Optional[str] = None):
+async def fs_list(path: str, request: Request, profile: Optional[str] = None):
     backend = await asyncio.to_thread(_fs_backend, profile)
     if backend is not None:
         try:
@@ -765,6 +779,7 @@ async def fs_list(path: str, profile: Optional[str] = None):
         except Exception as exc:
             _raise_fs_backend_error(exc)
     target = _fs_path(path)
+    _hosted_fs_read_guard(target, request)
     try:
         entries = []
         with os.scandir(target) as scan:
@@ -786,7 +801,7 @@ async def fs_list(path: str, profile: Optional[str] = None):
 
 
 @router.get("/api/fs/read-text")
-async def fs_read_text(path: str, profile: Optional[str] = None):
+async def fs_read_text(path: str, request: Request = None, profile: Optional[str] = None):
     backend = await asyncio.to_thread(_fs_backend, profile)
     if backend is not None:
         try:
@@ -808,7 +823,9 @@ async def fs_read_text(path: str, profile: Optional[str] = None):
             "text": data.decode("utf-8", errors="replace"),
             "truncated": size > _FS_TEXT_PREVIEW_MAX_BYTES,
         }
-    target, st = _fs_regular_file(_fs_path(path))
+    target = _fs_path(path)
+    _hosted_fs_read_guard(target, request)
+    target, st = _fs_regular_file(target)
     if st.st_size > _FS_TEXT_SOURCE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
     data = await asyncio.to_thread(
@@ -900,7 +917,7 @@ async def _fs_download_path(path: str, profile: Optional[str], session_id: Optio
 
 @router.get("/api/fs/read-data-url")
 async def fs_read_data_url(
-    path: str, profile: Optional[str] = None, session_id: Optional[str] = None,
+    path: str, request: Request, profile: Optional[str] = None, session_id: Optional[str] = None,
 ):
     from hermes_cli.web_server import _FS_DATA_URL_MAX_BYTES
     backend = await asyncio.to_thread(_fs_backend, profile)
@@ -913,7 +930,9 @@ async def fs_read_data_url(
             _raise_fs_backend_error(exc)
         encoded = base64.b64encode(data).decode("ascii")
         return {"dataUrl": f"data:{_fs_mime_type(Path(target))};base64,{encoded}"}
-    target, st = _fs_regular_file(await _fs_download_path(path, profile, session_id))
+    target = await _fs_download_path(path, profile, session_id)
+    _hosted_fs_read_guard(target, request)
+    target, st = _fs_regular_file(target)
     if st.st_size > _FS_DATA_URL_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
     encoded = await asyncio.to_thread(
@@ -924,7 +943,7 @@ async def fs_read_data_url(
 
 @router.get("/api/fs/download")
 async def fs_download(
-    path: str, profile: Optional[str] = None, session_id: Optional[str] = None,
+    path: str, request: Request = None, profile: Optional[str] = None, session_id: Optional[str] = None,
 ):
     backend = await asyncio.to_thread(_fs_backend, profile)
     if backend is not None:
@@ -941,7 +960,9 @@ async def fs_download(
             media_type=_fs_mime_type(target_path),
             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
         )
-    target, _st = _fs_regular_file(await _fs_download_path(path, profile, session_id))
+    target = await _fs_download_path(path, profile, session_id)
+    _hosted_fs_read_guard(target, request)
+    target, _st = _fs_regular_file(target)
     await asyncio.to_thread(_refuse_live_database, target)
     return FileResponse(
         path=str(target),

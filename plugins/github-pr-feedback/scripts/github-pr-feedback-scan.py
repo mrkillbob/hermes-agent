@@ -180,6 +180,7 @@ def main() -> int:
     child_env.pop("_HERMES_GATEWAY", None)
     completed = subprocess.run(
         scan_cmd,
+        stdin=subprocess.DEVNULL,
         env=child_env,
         check=False,
         capture_output=True,

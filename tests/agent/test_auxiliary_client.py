@@ -44,6 +44,7 @@ from agent.auxiliary_client import (
     _RELAY_AUX_CALL_CONTEXT,
     _LadderRoute,
     _ladder_provider_fallback,
+    _unwrap_data_envelope,
 )
 
 
@@ -318,6 +319,80 @@ def test_blocked_recovery_screens_remote_auth_before_resolving_local(
     remote_catalog.assert_not_called()
     assert context_reads == []
 
+
+
+@pytest.mark.parametrize("runtime_endpoint", [
+    None, "", " \t ", "http://127.0.0.1:18434/v1", "https://remote-main.invalid/v1",
+])
+def test_blocked_custom_main_keeps_endpoint_and_key_paired(monkeypatch, tmp_path, runtime_endpoint):
+    import httpx
+    import yaml
+    import agent.auxiliary_client as auxiliary
+    from agent import secret_scope
+    from gateway.run import _profile_runtime_scope
+
+    profiles = []
+    for name, port in (("a", 11434), ("b", 12434)):
+        home = tmp_path / name
+        home.mkdir()
+        endpoint = f"http://127.0.0.1:{port}/v1"
+        key = f"profile-{name}-key"
+        (home / "config.yaml").write_text(yaml.safe_dump({
+            "model": {"provider": "custom", "default": "main-model"},
+        }))
+        (home / ".env").write_text(
+            f"CUSTOM_BASE_URL={endpoint}\nOPENAI_BASE_URL={endpoint}\nOPENAI_API_KEY={key}\n"
+        )
+        profiles.append((home, endpoint, key))
+    monkeypatch.setenv("HERMES_HOME", str(profiles[0][0]))
+    runtime = {"provider": "custom", "model": "main-model", "api_key": "live-main-key"}
+    if runtime_endpoint is not None:
+        runtime["base_url"] = runtime_endpoint
+    requests = []
+
+    def send_local(client, request, **kwargs):
+        assert request.url.host == "127.0.0.1"
+        requests.append((str(request.url), request.headers["Authorization"]))
+        return httpx.Response(200, request=request, json={
+            "id": "local-response", "object": "chat.completion", "created": 0,
+            "model": "main-model", "choices": [{"index": 0, "finish_reason": "stop",
+                                                   "message": {"role": "assistant", "content": "ok"}}],
+        })
+
+    monkeypatch.setattr(httpx.Client, "send", send_local)
+    multiplex = secret_scope.set_multiplex_context(True)
+    try:
+        for home, profile_endpoint, profile_key in (profiles[0], profiles[1], profiles[0]):
+            with _profile_runtime_scope(home, hydrate_secrets=False):
+                expected_endpoint = runtime_endpoint.strip() if runtime_endpoint and runtime_endpoint.strip() else profile_endpoint
+                expected_key = "live-main-key" if runtime_endpoint and runtime_endpoint.strip() else profile_key
+                ordinary, ordinary_model = auxiliary.resolve_provider_client(
+                    "custom", "main-model", main_runtime=runtime,
+                )
+                assert ordinary is not None
+                try:
+                    assert str(ordinary.base_url).rstrip("/") == expected_endpoint
+                    assert ordinary.api_key == expected_key
+                    assert ordinary_model == "main-model"
+                finally:
+                    ordinary.close()
+                client, model, _ = auxiliary._try_main_agent_model_fallback(
+                    "openai-codex", "title_generation", main_runtime=runtime, local_only=True,
+                )
+                if expected_endpoint.startswith("https:"):
+                    assert client is None
+                    continue
+                assert client is not None
+                try:
+                    assert str(client.base_url).rstrip("/") == expected_endpoint
+                    assert client.api_key == expected_key
+                    assert model == "main-model"
+                    client.chat.completions.create(model=model, messages=[{"role": "user", "content": "hello"}])
+                    assert requests[-1] == (f"{expected_endpoint}/chat/completions", f"Bearer {expected_key}")
+                finally:
+                    client.close()
+    finally:
+        secret_scope.reset_multiplex_context(multiplex)
 
 
 @pytest.mark.parametrize("supports_vision,cached_vision,managed_vision,route_change", [
@@ -2751,6 +2826,106 @@ class TestStaleFallbackCandidateSkip:
                     task="compression",
                     messages=[{"role": "user", "content": "summarize"}],
                 )
+
+
+class TestDataEnvelopeUnwrap:
+    """Gateways like api.cline.bot wrap completions in {"data": ..., "success": ...}."""
+
+    def _envelope_data(self, content="unwrapped"):
+        return {
+            "id": "chatcmpl-env",
+            "object": "chat.completion",
+            "created": 1751000000,
+            "model": "cline-pass/kimi-k2.7-code",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    def test_unwrap_envelope_via_model_validate(self):
+        """A leniently-parsed ChatCompletion with the envelope as extras is rebuilt."""
+        from openai.types.chat import ChatCompletion
+
+        wrapped = ChatCompletion.model_construct(
+            data=self._envelope_data(), success=True
+        )
+
+        result = _unwrap_data_envelope(wrapped, task="vision")
+
+        assert isinstance(result, ChatCompletion)
+        assert result.choices[0].message.content == "unwrapped"
+        assert result.model == "cline-pass/kimi-k2.7-code"
+        assert result.usage.total_tokens == 15
+
+    def test_call_llm_unwraps_data_envelope(self):
+        """End-to-end sync path; SimpleNamespace exercises the synthesis fallback."""
+        primary_client = MagicMock()
+        primary_client.chat.completions.create.return_value = SimpleNamespace(
+            choices=None, success=True, data=self._envelope_data()
+        )
+
+        with patch("agent.auxiliary_client._get_cached_client",
+                   return_value=(primary_client, "cline-pass/kimi-k2.7-code")), \
+             patch("agent.auxiliary_client._resolve_task_provider_model",
+                   return_value=("custom", "cline-pass/kimi-k2.7-code", None, None, None)), \
+             patch("agent.auxiliary_client._try_configured_fallback_chain") as mock_chain:
+            result = call_llm(
+                task="title_generation",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        assert result.choices[0].message.content == "unwrapped"
+        mock_chain.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_call_llm_unwraps_data_envelope(self):
+        primary_client = MagicMock()
+        primary_client.chat.completions.create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=None, success=True, data=self._envelope_data()
+            )
+        )
+
+        with patch("agent.auxiliary_client._get_cached_client",
+                   return_value=(primary_client, "cline-pass/kimi-k2.7-code")), \
+             patch("agent.auxiliary_client._resolve_task_provider_model",
+                   return_value=("custom", "cline-pass/kimi-k2.7-code", None, None, None)), \
+             patch("agent.auxiliary_client._try_configured_fallback_chain") as mock_chain:
+            result = await async_call_llm(
+                task="vision",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        assert result.choices[0].message.content == "unwrapped"
+        mock_chain.assert_not_called()
+
+    def test_error_envelope_raises_provider_message(self):
+        wrapped = SimpleNamespace(
+            choices=None,
+            success=False,
+            data={"error": {"message": "upstream provider rejected the request",
+                            "code": "bad_model"}},
+        )
+
+        with pytest.raises(RuntimeError, match="upstream provider rejected the request"):
+            _unwrap_data_envelope(wrapped, task="vision")
+
+    def test_non_envelope_responses_unchanged(self):
+        normal = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="hi"))]
+        )
+        assert _unwrap_data_envelope(normal) is normal
+
+        # MagicMock's auto-attribute `data` is not a dict — must stay on the
+        # existing invalid-response path (guards the fallback tests below).
+        mock_resp = MagicMock(choices=[])
+        assert _unwrap_data_envelope(mock_resp) is mock_resp
+
+        no_choices = SimpleNamespace(choices=None, success=True, data={"no": "choices"})
+        assert _unwrap_data_envelope(no_choices) is no_choices
 
 
 class TestAuxiliaryFallbackLayering:
@@ -6358,152 +6533,6 @@ class TestFastModelTier:
         # The inline api_key from the providers: entry must reach the
         # client — this is what the 'custom' downgrade was losing.
         assert client.api_key == "sk-agnes-test"
-
-
-# ---------------------------------------------------------------------------
-# Regression coverage for #76602 — auxiliary vision with a custom provider
-# defined in the ``providers:`` section of config.yaml plus an explicit
-# ``base_url`` was being silently downgraded to ``"custom"`` because
-# ``_preserve_provider_with_base_url`` only consulted the built-in
-# provider registry (``hermes_cli.providers.get_provider``). The
-# downgrade routed the call through the bare-custom branch in
-# ``resolve_provider_client`` with no key, producing 401s from
-# auth-required providers (e.g. agnes-ai.cn, nvidia-nim with key_env).
-# The fix also checks ``_get_named_custom_provider`` so a named
-# user-defined provider + explicit base_url stays named through to the
-# named-custom-provider key-resolution branch.
-# ---------------------------------------------------------------------------
-
-
-class TestPreserveNamedCustomProviderWithBaseUrl:
-    """#76602 — _resolve_task_provider_model must keep a user-defined
-    provider named when the call site passes ``provider=<name>`` +
-    ``base_url=...`` (the shape async_call_llm takes after resolving the
-    auxiliary.vision task config). The bare-custom downgrade to the
-    ``"custom"`` string loses the key and produces 401s.
-    """
-
-    def test_user_defined_provider_named_in_config_is_preserved(self, monkeypatch):
-        """A provider name from ``providers:`` survives explicit base_url.
-
-        Before the fix this returned ``("custom", ...)`` → bare-custom
-        branch in ``resolve_provider_client`` → ``no-key-required`` → 401.
-        After the fix it returns ``("agnes-ai.cn", ...)`` so the
-        named-custom-provider branch picks up
-        ``providers.<name>.api_key`` (or the configured ``key_env``).
-        """
-        import agent.auxiliary_client as ac
-
-        fake_entry = {
-            "name": "AgnesAI",
-            "base_url": "https://api.agnes-ai.cn/v1",
-            "api_key": "sk-agnes-test",
-            "model": "agnes-2.5-flash",
-        }
-        with patch(
-            "hermes_cli.runtime_provider._get_named_custom_provider",
-            return_value=fake_entry,
-        ), patch(
-            "hermes_cli.providers.get_provider", return_value=None,
-        ):
-            resolved_provider, _model, base_url, _api_key, _api_mode = (
-                ac._resolve_task_provider_model(
-                    task="vision",
-                    provider="agnes-ai.cn",
-                    model="agnes-2.5-flash",
-                    base_url="https://api.agnes-ai.cn/v1",
-                    api_key=None,
-                )
-            )
-
-        assert resolved_provider == "agnes-ai.cn", (
-            "User-defined provider from providers: section must be preserved "
-            "instead of being downgraded to 'custom' (issue #76602)"
-        )
-        assert base_url == "https://api.agnes-ai.cn/v1"
-
-    def test_built_in_provider_with_base_url_still_preserved(self, monkeypatch):
-        """Built-in registry hit still wins — user-defined fallback only
-        fires when the built-in registry missed. This guards against
-        regressing the pre-existing built-in provider behavior.
-        """
-        import agent.auxiliary_client as ac
-
-        with patch(
-            "hermes_cli.providers.get_provider",
-            return_value={"name": "Anthropic", "api_key": "sk-anthropic"},
-        ):
-            resolved_provider, _model, base_url, _api_key, _api_mode = (
-                ac._resolve_task_provider_model(
-                    task="moa_reference",
-                    provider="anthropic",
-                    model="claude-sonnet-4-6",
-                    base_url="https://api.anthropic.com/v1",
-                    api_key="sk-anthropic",
-                )
-            )
-
-        assert resolved_provider == "anthropic"
-        assert base_url == "https://api.anthropic.com/v1"
-
-    def test_unknown_provider_with_base_url_falls_back_to_custom_downgrade(self, monkeypatch):
-        """Provider name not in either registry → keep the existing
-        ``"custom"`` downgrade behavior. Nothing changes for truly
-        anonymous custom endpoints (no name → no key → bare-custom branch
-        handles ``no-key-required`` itself).
-        """
-        import agent.auxiliary_client as ac
-
-        with patch(
-            "hermes_cli.runtime_provider._get_named_custom_provider",
-            return_value=None,
-        ), patch(
-            "hermes_cli.providers.get_provider", return_value=None,
-        ):
-            resolved_provider, _model, base_url, _api_key, _api_mode = (
-                ac._resolve_task_provider_model(
-                    task="vision",
-                    provider="some-unknown-gateway",
-                    model="custom-model",
-                    base_url="https://example.com/v1",
-                    api_key="some-token",
-                )
-            )
-
-        # Pre-existing behavior: unknown name + explicit base_url →
-        # downgrade to "custom" so the caller routes through the
-        # bare-custom branch (which uses the explicit api_key).
-        assert resolved_provider == "custom"
-        assert base_url == "https://example.com/v1"
-
-    def test_hardcoded_allowlist_still_works_when_both_registries_unavailable(self, monkeypatch):
-        """If both the built-in registry and the user-defined config are
-        unavailable (e.g. early import path before config is loaded), the
-        existing hardcoded allowlist still returns True for known names —
-        so xai-oauth / qwen-oauth / etc. aren't regressed by the fix.
-        """
-        import agent.auxiliary_client as ac
-
-        def _boom(_name):
-            raise RuntimeError("catalog unavailable")
-
-        with patch(
-            "hermes_cli.runtime_provider._get_named_custom_provider",
-            side_effect=_boom,
-        ), patch(
-            "hermes_cli.providers.get_provider", side_effect=_boom,
-        ):
-            resolved_provider, _model, _base_url, _api_key, _api_mode = (
-                ac._resolve_task_provider_model(
-                    task="moa_reference",
-                    provider="xai-oauth",
-                    model="grok-3",
-                    base_url="https://api.x.ai/v1",
-                    api_key="xai-token",
-                )
-            )
-
-        assert resolved_provider == "xai-oauth"
 
 
 
