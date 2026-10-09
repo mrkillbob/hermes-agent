@@ -1,0 +1,8 @@
+{
+  "stt.elevenlabs.model_id": ["scribe_v2", "scribe_v1"],
+  "stt.groq.model": ["whisper-large-v3-turbo", "whisper-large-v3"],
+  "stt.local.model": ["base", "tiny", "small", "medium", "large-v3", "turbo"],
+  "stt.mistral.model": ["voxtral-mini-latest", "voxtral-mini-2602"],
+  "stt.openai.model": ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"],
+  "stt.xai.model": ["grok-voice-transcribe-2.0", "grok-voice-transcribe-1.0"]
+}
