@@ -257,6 +257,9 @@ def test_intent_review_exception_does_not_allow_runnable_write_task(kanban_home)
     "release_audit", "release_final", "review_push", "review_and_delete", "verify_ci_receipt",
     "rendered_nl_repository", "rendered_nl_pr_number", "rendered_nl_expected_head_sha",
     "rendered_nl_action", "rendered_nl_metadata", "rendered_nl_metadata_multiple",
+    "local_ci_no_post", "local_ci_post", "reconcile_repository", "reconcile_pr_number",
+    "reconcile_expected_head_sha", "reconcile_action", "reconcile_reader", "reconcile_unknown",
+    "reconcile_metadata",
 ])
 def test_specification_retains_exact_identity_and_effective_authority(kanban_home, monkeypatch, change):
     from hermes_cli.kanban_db_connect import connect
@@ -265,6 +268,59 @@ def test_specification_retains_exact_identity_and_effective_authority(kanban_hom
         profile = kanban_home / "profiles" / name
         profile.mkdir(parents=True)
         (profile / "profile.yaml").write_text(f"execution_authority: {authority}\n")
+    if change in {"local_ci_no_post", "local_ci_post"}:
+        monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "plugins/github-pr-feedback"))
+        from github_pr_feedback.cli import _kanban_create_argv
+        from github_pr_feedback.controller import PreparedWorktree, _local_ci_task
+        from github_pr_feedback.policy import FeedbackReceipt, LocalCIAuditPolicy, PluginPolicy
+
+        post = change == "local_ci_post"
+        policy = PluginPolicy(enabled=True, targets={}, reviewer_logins=frozenset(),
+                              reviewer_associations=frozenset(), include_self_feedback=False,
+                              include_bot_feedback=False, auto_dispatch=False, not_before=None,
+                              assignee="reader", board=None,
+                              local_ci_audit=LocalCIAuditPolicy(assignee="reader", post_results=post))
+        receipt = FeedbackReceipt("acme/widgets", 132, "pr_local_ci", "local-ci", "a" * 40)
+        prepared = PreparedWorktree(kanban_home, "codex/test", "a" * 40)
+        task = _local_ci_task(policy, receipt, prepared, control_home=kanban_home, post_results=post)
+        argv = _kanban_create_argv(task)
+        body = argv[argv.index("--body") + 1]
+        assert "Do not publish, approve, or merge any change" in body
+        with connect() as conn:
+            tid = kb.create_task(conn, title=task.title, body=body, assignee=task.assignee,
+                                 idempotency_key=task.idempotency_key, triage=True)
+            assert kb.specify_triage_task(conn, tid, title="Clarified read-only audit")
+            assert kb.get_task(conn, tid).assignee == "reader"
+        return
+    if change.startswith("reconcile_"):
+        field = change.removeprefix("reconcile_")
+        original = ("This card is intake-only and starts blocked; an operator must validate\n"
+                    + _repair_body())
+        payload = json.loads(_repair_body())
+        if field in {"repository", "pr_number", "expected_head_sha", "action"}:
+            payload[field] = {"repository": "other/widgets", "pr_number": 133,
+                              "expected_head_sha": "b" * 40, "action": "verify_ci_receipt"}[field]
+        payload["note"] = "Authorized clarification"
+        body = "Repair and push the repository.\n" + json.dumps(payload)
+        assignee = {"reader": "reader", "unknown": "missing-profile"}.get(field, "writer")
+        with connect() as conn:
+            tid = kb.create_task(conn, title="Repair PR #132", body=original, assignee="writer",
+                                 idempotency_key="github-pr-feedback:repair:132:abc", initial_status="blocked")
+            before = {table: [tuple(r) for r in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+                      for table in ("tasks", "task_events", "task_comments", "task_links")}
+            args = dict(idempotency_key="github-pr-feedback:repair:132:abc", head_sha="a" * 40,
+                        body=body, assignee=assignee, workspace_path=str(kanban_home),
+                        branch_name="codex/test", max_retries=2, max_runtime_seconds=60)
+            if field == "metadata":
+                assert kb.reconcile_legacy_dispatch_task(conn, tid, **args)
+                task = kb.get_task(conn, tid)
+                assert task.body == body and task.assignee == "writer" and task.status == "ready"
+            else:
+                with pytest.raises(ValueError, match="preserve exact|read-only profile|cannot verify write authority"):
+                    kb.reconcile_legacy_dispatch_task(conn, tid, **args)
+                assert {table: [tuple(r) for r in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+                        for table in before} == before
+        return
     if change in {"release_audit", "release_final"}:
         from types import SimpleNamespace
 

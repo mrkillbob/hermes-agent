@@ -15,21 +15,21 @@ _PR_READ_ONLY_ACTIONS = frozenset({
 })
 
 _PR_WRITE_ACTION_RE = re.compile(
-    r"\b(?:edit|approve|merge|repair|fix|push|reply|respond|base[-_ ]?refresh|"
+    r"\b(?:edit|approve|merge|publish|repair|fix|push|reply|respond|base[-_ ]?refresh|"
     r"refresh(?:ing)?\s+(?:the\s+)?base|resolve(?:d|s|ing)?\s+(?:a\s+)?merge\s+conflict)\b",
     re.IGNORECASE,
 )
 _PR_PROHIBITED_WRITE_RE = re.compile(
     r"\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not)\s+"
-    r"(?:edit|repair|fix|push|reply|respond|approve|merge)\b"
+    r"(?:edit|repair|fix|push|publish|reply|respond|approve|merge)\b"
     r"(?:\s*(?:,\s*(?:(?:and|or)\s+)?|(?:and|or)\s+)"
-    r"(?:edit|repair|fix|push|reply|respond|approve|merge)\b)*",
+    r"(?:edit|repair|fix|push|publish|reply|respond|approve|merge)\b)*",
     re.IGNORECASE,
 )
 _PR_READ_TARGET_RE = re.compile(
     r"\b(?:review|verify|inspect|audit|check|read)\s+"
     r"(?:(?:the|a|an|proposed|previous|existing|failed|planned|attempted|recorded|blocked)\s+)*"
-    r"(?:edit|approval|approve|merge|fix|repair|push|reply|response|base[-_ ]?refresh)\b",
+    r"(?:edit|approval|approve|merge|publish|fix|repair|push|reply|response|base[-_ ]?refresh)\b",
     re.IGNORECASE,
 )
 

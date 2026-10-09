@@ -1928,7 +1928,7 @@ def reconcile_legacy_dispatch_task(
         raise ValueError("head_sha must be a full 40-character hexadecimal SHA")
     with write_txn(conn):
         row = conn.execute(
-            "SELECT status, idempotency_key, body, current_run_id, claim_lock "
+            "SELECT status, idempotency_key, title, body, current_run_id, claim_lock "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -1955,6 +1955,14 @@ def reconcile_legacy_dispatch_task(
             or row["claim_lock"] is not None
         ):
             return False
+        from hermes_cli.kanban_pr_task_policy import validate_pr_task_identity_transition
+
+        validate_pr_task_identity_transition(existing_body=row["body"], replacement_body=body)
+        assignee = _canonical_assignee(assignee)
+        _validate_pr_task_assignee_authority(
+            title=row["title"], body=body, idempotency_key=row["idempotency_key"],
+            assignee=assignee, initial_status="ready",
+        )
         updated = conn.execute(
             "UPDATE tasks SET body = ?, assignee = ?, status = 'ready', "
             "workspace_path = ?, branch_name = ?, max_retries = ?, "
