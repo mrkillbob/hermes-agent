@@ -137,7 +137,13 @@ def transcribe_oversized(
         target = max_bytes * _SEGMENT_HEADROOM * duration / os.path.getsize(compact)
         if max_seconds:
             target = min(target, max_seconds * _SEGMENT_HEADROOM)
-        parts = _split(ffmpeg, compact, work_dir, _cut_points(duration, target, _silence_midpoints(ffmpeg, compact)))
+        try:
+            parts = _split(ffmpeg, compact, work_dir,
+                           _cut_points(duration, target, _silence_midpoints(ffmpeg, compact)))
+        except (OSError, subprocess.SubprocessError) as exc:  # disk full, ffmpeg timeout, missing muxer
+            return _too_large(path, max_bytes, f"segmenting failed: {exc}")
+        if not parts:
+            return _too_large(path, max_bytes, "segmenting produced no files")
         logger.info("Transcribing %s (%.0fs) in %d segments of <= %.0fs",
                     os.path.basename(path), duration, len(parts), math.ceil(target))
         transcripts: List[str] = []
