@@ -320,6 +320,80 @@ def test_blocked_recovery_screens_remote_auth_before_resolving_local(
 
 
 
+@pytest.mark.parametrize("runtime_endpoint", [
+    None, "", " \t ", "http://127.0.0.1:18434/v1", "https://remote-main.invalid/v1",
+])
+def test_blocked_custom_main_keeps_endpoint_and_key_paired(monkeypatch, tmp_path, runtime_endpoint):
+    import httpx
+    import yaml
+    import agent.auxiliary_client as auxiliary
+    from agent import secret_scope
+    from gateway.run import _profile_runtime_scope
+
+    profiles = []
+    for name, port in (("a", 11434), ("b", 12434)):
+        home = tmp_path / name
+        home.mkdir()
+        endpoint = f"http://127.0.0.1:{port}/v1"
+        key = f"profile-{name}-key"
+        (home / "config.yaml").write_text(yaml.safe_dump({
+            "model": {"provider": "custom", "default": "main-model"},
+        }))
+        (home / ".env").write_text(
+            f"CUSTOM_BASE_URL={endpoint}\nOPENAI_BASE_URL={endpoint}\nOPENAI_API_KEY={key}\n"
+        )
+        profiles.append((home, endpoint, key))
+    monkeypatch.setenv("HERMES_HOME", str(profiles[0][0]))
+    runtime = {"provider": "custom", "model": "main-model", "api_key": "live-main-key"}
+    if runtime_endpoint is not None:
+        runtime["base_url"] = runtime_endpoint
+    requests = []
+
+    def send_local(client, request, **kwargs):
+        assert request.url.host == "127.0.0.1"
+        requests.append((str(request.url), request.headers["Authorization"]))
+        return httpx.Response(200, request=request, json={
+            "id": "local-response", "object": "chat.completion", "created": 0,
+            "model": "main-model", "choices": [{"index": 0, "finish_reason": "stop",
+                                                   "message": {"role": "assistant", "content": "ok"}}],
+        })
+
+    monkeypatch.setattr(httpx.Client, "send", send_local)
+    multiplex = secret_scope.set_multiplex_context(True)
+    try:
+        for home, profile_endpoint, profile_key in (profiles[0], profiles[1], profiles[0]):
+            with _profile_runtime_scope(home, hydrate_secrets=False):
+                expected_endpoint = runtime_endpoint.strip() if runtime_endpoint and runtime_endpoint.strip() else profile_endpoint
+                expected_key = "live-main-key" if runtime_endpoint and runtime_endpoint.strip() else profile_key
+                ordinary, ordinary_model = auxiliary.resolve_provider_client(
+                    "custom", "main-model", main_runtime=runtime,
+                )
+                assert ordinary is not None
+                try:
+                    assert str(ordinary.base_url).rstrip("/") == expected_endpoint
+                    assert ordinary.api_key == expected_key
+                    assert ordinary_model == "main-model"
+                finally:
+                    ordinary.close()
+                client, model, _ = auxiliary._try_main_agent_model_fallback(
+                    "openai-codex", "title_generation", main_runtime=runtime, local_only=True,
+                )
+                if expected_endpoint.startswith("https:"):
+                    assert client is None
+                    continue
+                assert client is not None
+                try:
+                    assert str(client.base_url).rstrip("/") == expected_endpoint
+                    assert client.api_key == expected_key
+                    assert model == "main-model"
+                    client.chat.completions.create(model=model, messages=[{"role": "user", "content": "hello"}])
+                    assert requests[-1] == (f"{expected_endpoint}/chat/completions", f"Bearer {expected_key}")
+                finally:
+                    client.close()
+    finally:
+        secret_scope.reset_multiplex_context(multiplex)
+
+
 @pytest.mark.parametrize("supports_vision,cached_vision,managed_vision,route_change", [
     (None, None, None, "same"), (False, None, None, "same"), (True, None, None, "same"),
     (None, False, None, "same"), (None, True, None, "same"),

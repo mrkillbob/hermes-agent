@@ -4420,6 +4420,11 @@ def _try_main_agent_model_fallback(
         return None, None, ""
     if local_only:
         from agent.auxiliary_egress_recovery import local_fallback_entry
+        if main_provider.lower() == "custom" and not runtime.get("base_url"):
+            # An incomplete live custom route cannot bind its key to the
+            # profile endpoint selected below. Let that endpoint resolve its
+            # own credentials through the ordinary custom-provider path.
+            runtime = dict(runtime, api_key="")
         local_entry = local_fallback_entry(
             {"provider": main_provider, "model": main_model,
              "base_url": runtime.get("base_url") or "", "api_key": runtime.get("api_key")}, main_runtime=runtime,
