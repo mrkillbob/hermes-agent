@@ -200,7 +200,6 @@ def test_blocked_recovery_screens_remote_auth_before_resolving_local(
     # Observe the credential I/O boundary; use the real config/router/SDK.
     def read_remote_auth():
         auth_reads.append("nous")
-        return None
     monkeypatch.setattr(auxiliary, "_read_nous_auth", read_remote_auth)
     import hermes_cli.runtime_provider_custom as runtime_provider
     import requests as provider_http
@@ -416,7 +415,7 @@ def test_blocked_local_main_vision_uses_config_or_cached_metadata(
 ):
     import yaml
     import agent.auxiliary_client as auxiliary
-    import agent.models_dev as models_dev
+    from agent import models_dev
 
     home = tmp_path / "cold-catalog-home"
     home.mkdir()
@@ -1144,7 +1143,7 @@ class TestResolveTaskProviderModel:
         monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"moa": {}})
         monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {"moa": {}})
 
-        resolved_provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(
+        resolved_provider, model, base_url, api_key, _api_mode = _resolve_task_provider_model(
             task="title_generation",
             provider="moa",
             model="opus-gpt",
@@ -1180,7 +1179,7 @@ class TestResolveTaskProviderModel:
         monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"moa": {}})
         monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {"moa": {}})
 
-        resolved_provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(
+        resolved_provider, model, base_url, api_key, _api_mode = _resolve_task_provider_model(
             task="title_generation",
         )
 
@@ -1202,7 +1201,7 @@ class TestResolveTaskProviderModel:
         monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"moa": {}})
         monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {"moa": {}})
 
-        resolved_provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(
+        resolved_provider, model, _base_url, _api_key, _api_mode = _resolve_task_provider_model(
             task="title_generation",
             provider="moa",
             model="gone-preset",
@@ -1218,7 +1217,7 @@ class TestResolveTaskProviderModel:
         auxiliary.<task> config. Only cfg_model was normalized before, so a
         MoA reference/aggregator slot configured with `model: auto` sent the
         literal string "auto" to the wire as a model id."""
-        resolved_provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(
+        resolved_provider, model, _base_url, _api_key, _api_mode = _resolve_task_provider_model(
             provider="anthropic",
             model="auto",
         )
@@ -1285,7 +1284,7 @@ class TestMoaAggregatorSharedResolution:
         cfg["auxiliary"] = {"title_generation": {"provider": "moa", "model": "opus-gpt"}}
         (home / "config.yaml").write_text(yaml.safe_dump(cfg))
 
-        resolved_provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(
+        resolved_provider, model, base_url, api_key, _api_mode = _resolve_task_provider_model(
             task="title_generation",
         )
 
@@ -1638,7 +1637,7 @@ class TestAnthropicOAuthFlag:
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _try_anthropic, AnthropicAuxiliaryClient
-            client, model = _try_anthropic()
+            client, _model = _try_anthropic()
             assert client is not None
             assert isinstance(client, AnthropicAuxiliaryClient)
             # The adapter inside should have is_oauth=True
@@ -1652,7 +1651,7 @@ class TestAnthropicOAuthFlag:
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _try_anthropic, AnthropicAuxiliaryClient
-            client, model = _try_anthropic()
+            client, _model = _try_anthropic()
             assert client is not None
             assert isinstance(client, AnthropicAuxiliaryClient)
             adapter = client.chat.completions
@@ -1677,7 +1676,7 @@ class TestAnthropicOAuthFlag:
         ):
             from agent.auxiliary_client import _try_anthropic
 
-            client, model = _try_anthropic()
+            client, _model = _try_anthropic()
 
         assert client is not None
         assert mock_build.call_args.args[0] == "sk-ant-oat01-pooled"
@@ -1917,7 +1916,7 @@ class TestExpiredCodexFallback:
         with patch("agent.auxiliary_client.OpenAI") as mock_openai:
             mock_openai.return_value = MagicMock()
             from agent.auxiliary_client import _resolve_auto_route
-            client, model, _provider = _resolve_auto_route()
+            client, _model, _provider = _resolve_auto_route()
             assert client is not None
             # OpenRouter is 1st in chain, should win
             mock_openai.assert_called()
@@ -1934,7 +1933,7 @@ class TestExpiredCodexFallback:
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _try_anthropic
-            client, model = _try_anthropic()
+            client, _model = _try_anthropic()
             assert client is not None
             adapter = client.chat.completions
             assert adapter._is_oauth is True
@@ -1949,7 +1948,7 @@ class TestExplicitProviderRouting:
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
-            client, model = resolve_provider_client("anthropic")
+            client, _model = resolve_provider_client("anthropic")
             assert client is not None
             adapter = client.chat.completions
             assert adapter._is_oauth is False
@@ -2380,7 +2379,7 @@ class TestIsPaymentError:
             "this model requires a subscription, upgrade for access: "
             "https://ollama.com/upgrade"
         )
-        setattr(exc, "status_code", 403)
+        exc.status_code = 403
         assert _is_payment_error(exc) is True
 
 
@@ -4168,7 +4167,7 @@ class TestAnthropicAuxiliaryReasoningTranslation:
         # commandcode-anthropic: OpenAI-shaped URL, anthropic_messages api_mode, and a profile
         # class that overrides build_api_kwargs_extras (so the generic extra_body.reasoning
         # fallback the adapter used to read is suppressed). The adapter must still be told.
-        import model_tools  # noqa: F401 — triggers provider discovery
+        import model_tools
         import providers
 
         assert providers.get_provider_profile("commandcode-anthropic") is not None
@@ -4188,7 +4187,7 @@ class TestAnthropicAuxiliaryReasoningTranslation:
         # Bare ``provider: commandcode-anthropic`` (no api_mode) must wrap the client on the
         # profile's declared wire, or the ``_reasoning_config`` kwarg above would reach a plain
         # OpenAI client and TypeError.
-        import model_tools  # noqa: F401
+        import model_tools
         from agent.auxiliary_client import AnthropicAuxiliaryClient, resolve_provider_client
 
         monkeypatch.setenv("COMMANDCODE_API_KEY", "sk-test-" + "x" * 20)
@@ -5332,7 +5331,7 @@ class TestOpenRouterExplicitApiKey:
         mock_openai.return_value = MagicMock(name="openrouter-client")
 
         with patch("agent.auxiliary_client.OpenAI", mock_openai):
-            client, model = resolve_provider_client(
+            client, _model = resolve_provider_client(
                 provider="openrouter",
                 explicit_api_key="explicit-pool-key",
             )
@@ -5379,7 +5378,7 @@ class TestAnthropicExplicitApiKey:
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
-            client, model = resolve_provider_client(
+            client, _model = resolve_provider_client(
                 provider="anthropic",
                 explicit_api_key="explicit-fallback-key",
             )
@@ -5444,7 +5443,7 @@ class TestAuxUnhealthyCache:
              patch("agent.auxiliary_client._try_nous", return_value=(nous_client, "n-model")), \
              patch("agent.auxiliary_client._try_custom_endpoint") as custom_try, \
              patch("agent.auxiliary_client._resolve_api_key_provider", return_value=(None, None)):
-            client, model, label = _try_payment_fallback("openrouter", task="compression")
+            client, _model, label = _try_payment_fallback("openrouter", task="compression")
         assert client is nous_client
         assert label == "nous"
         # OR is skipped via skip_chain_labels (failed provider), custom via unhealthy cache.
@@ -5796,7 +5795,7 @@ class TestCustomEndpointApiKeyInheritance:
 
         with patch("hermes_cli.config.load_config", return_value=fake_config), patch("hermes_cli.config.load_config_readonly", return_value=fake_config), \
              patch.object(ac, "_create_openai_client", side_effect=_capture_create):
-            client, model = resolve_provider_client(
+            _client, _model = resolve_provider_client(
                 "custom",
                 model="test-model",
                 explicit_base_url="https://gw.example.com/v1",
@@ -5824,7 +5823,7 @@ class TestCustomEndpointApiKeyInheritance:
 
         with patch("hermes_cli.config.load_config", return_value=fake_config), patch("hermes_cli.config.load_config_readonly", return_value=fake_config), \
              patch.object(ac, "_create_openai_client", side_effect=_capture_create):
-            client, model = resolve_provider_client(
+            _client, _model = resolve_provider_client(
                 "custom",
                 model="test-model",
                 explicit_base_url="https://gw.example.com/v1",
@@ -5851,7 +5850,7 @@ class TestCustomEndpointApiKeyInheritance:
              patch.object(ac, "_RUNTIME_MAIN_BASE_URL", "https://gw.example.com/v1"), \
              patch("hermes_cli.config.load_config", return_value={"model": {}}), patch("hermes_cli.config.load_config_readonly", return_value={"model": {}}), \
              patch.object(ac, "_create_openai_client", side_effect=_capture_create):
-            client, model = resolve_provider_client(
+            _client, _model = resolve_provider_client(
                 "custom",
                 model="test-model",
                 explicit_base_url="https://gw.example.com/v1",
@@ -5883,7 +5882,7 @@ class TestCustomEndpointApiKeyInheritance:
 
         with patch("hermes_cli.config.load_config", return_value=fake_config), patch("hermes_cli.config.load_config_readonly", return_value=fake_config), \
              patch.object(ac, "_create_openai_client", side_effect=_capture_create):
-            client, model = resolve_provider_client(
+            _client, _model = resolve_provider_client(
                 "custom",
                 model="test-model",
                 explicit_base_url="https://other-host.example.net/v1",

@@ -22,7 +22,7 @@ def _fake_multiplexer(monkeypatch, tmp_path, *, multiplex: bool, pid_file: bool 
     import json
 
     import hermes_constants
-    import gateway.status as status
+    from gateway import status
     from hermes_cli import gateway_multiplex_served
 
     (tmp_path / "profiles" / "beta").mkdir(parents=True)

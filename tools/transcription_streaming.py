@@ -93,7 +93,7 @@ class StreamingSession:
         self._audio: "queue.Queue[Optional[bytes]]" = queue.Queue()
         self._done = threading.Event()
         self._cancelled = threading.Event()
-        self._result: Dict[str, Any] = {}
+        self._result: dict[str, Any] = {}
         self._partial = ""
         self._worker: Optional[threading.Thread] = None
         self._to_16k: Optional[Resampler] = None
@@ -131,7 +131,7 @@ class StreamingSession:
         """Signal end of speech without waiting (the worker flushes the provider)."""
         self._audio.put(None)
 
-    def finalize(self, timeout: float = _FINALIZE_TIMEOUT_S) -> Dict[str, Any]:
+    def finalize(self, timeout: float = _FINALIZE_TIMEOUT_S) -> dict[str, Any]:
         self.end_audio()
         if not self._done.wait(timeout):
             self.cancel()
@@ -154,13 +154,13 @@ class StreamingSession:
             if self._on_partial is not None:
                 try:
                     self._on_partial(text)
-                except Exception:  # noqa: BLE001 — a UI callback must not kill the socket
+                except Exception:
                     logger.debug("on_partial callback raised", exc_info=True)
 
-    def _error(self, message: str) -> Dict[str, Any]:
+    def _error(self, message: str) -> dict[str, Any]:
         return {"success": False, "transcript": "", "provider": self.provider, "error": message}
 
-    def _finish(self, result: Dict[str, Any]) -> None:
+    def _finish(self, result: dict[str, Any]) -> None:
         if not self._done.is_set():
             self._result = result
             self._done.set()
@@ -172,7 +172,7 @@ class StreamingSession:
             logger.warning("Live STT (%s) failed: %s", self.provider, exc, exc_info=True)
             self._finish(self._error(f"live transcription failed: {exc}"))
 
-    def _session(self) -> Dict[str, Any]:  # pragma: no cover - overridden
+    def _session(self) -> dict[str, Any]:  # pragma: no cover - overridden
         raise NotImplementedError
 
 
@@ -180,9 +180,9 @@ class _WebSocketSession(StreamingSession):
     """A provider wire over one websocket: subclasses map audio out and events in."""
 
     url = ""
-    headers: Dict[str, str] = {}
+    headers: dict[str, str] = {}
 
-    def _session(self) -> Dict[str, Any]:
+    def _session(self) -> dict[str, Any]:
         from websockets.sync.client import connect
 
         ws = connect(self.url, additional_headers=self.headers, open_timeout=_CONNECT_TIMEOUT_S,
@@ -194,7 +194,7 @@ class _WebSocketSession(StreamingSession):
             # server that already hung up, and the caller is blocked on finalize() meanwhile.
             spawn_context_thread(ws.close, name="stt-stream-close").start()
 
-    def _loop(self, ws: Any) -> Dict[str, Any]:
+    def _loop(self, ws: Any) -> dict[str, Any]:
         self._open(ws)
         ending_since: Optional[float] = None
         while True:
@@ -259,7 +259,7 @@ class _WebSocketSession(StreamingSession):
     def _end(self, ws: Any) -> None:  # pragma: no cover - overridden
         raise NotImplementedError
 
-    def _event(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:  # pragma: no cover
+    def _event(self, event: dict[str, Any]) -> Optional[dict[str, Any]]:  # pragma: no cover
         raise NotImplementedError
 
 
@@ -280,7 +280,7 @@ class OpenAIRealtimeSession(_WebSocketSession):
 
     def _open(self, ws: Any) -> None:
         super()._open(ws)
-        transcription: Dict[str, Any] = {"model": self.model}
+        transcription: dict[str, Any] = {"model": self.model}
         if self.language:
             # gpt-live-transcribe takes a ``languages`` list and rejects the singular field.
             if self.model == DEFAULT_OPENAI_STREAMING_MODEL:
@@ -306,7 +306,7 @@ class OpenAIRealtimeSession(_WebSocketSession):
             return
         ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
 
-    def _event(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _event(self, event: dict[str, Any]) -> Optional[dict[str, Any]]:
         kind = str(event.get("type") or "")
         if kind.endswith("input_audio_transcription.delta"):
             self._text += str(event.get("delta") or "")
@@ -353,7 +353,7 @@ class XAIStreamingSession(_WebSocketSession):
     def _text(self) -> str:
         return " ".join(p for p in (*self._utterances, *self._chunks, self._interim) if p).strip()
 
-    def _event(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _event(self, event: dict[str, Any]) -> Optional[dict[str, Any]]:
         kind = event.get("type")
         if kind == "transcript.created":
             self._created = True
@@ -409,7 +409,7 @@ class ElevenLabsRealtimeSession(_WebSocketSession):
     def _text(self) -> str:
         return " ".join(p for p in (*self._committed, self._interim) if p).strip()
 
-    def _event(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _event(self, event: dict[str, Any]) -> Optional[dict[str, Any]]:
         kind = event.get("message_type")
         if kind == "partial_transcript":
             self._interim = str(event.get("text") or "").strip()
@@ -432,7 +432,7 @@ class ElevenLabsRealtimeSession(_WebSocketSession):
 
 # ── resolution ──
 
-def streaming_enabled(stt_config: Dict[str, Any]) -> bool:
+def streaming_enabled(stt_config: dict[str, Any]) -> bool:
     return is_truthy_value(stt_config.get("streaming", False), default=False)
 
 
@@ -450,12 +450,12 @@ def _openai_credentials() -> Optional[tuple[str, str]]:
     return api_key, base_url
 
 
-def _builtin_session(provider: str, stt_config: Dict[str, Any], language: Optional[str],
+def _builtin_session(provider: str, stt_config: dict[str, Any], language: Optional[str],
                      prompt: Optional[str], on_partial: Optional[PartialCallback]) -> Optional[StreamingSession]:
     from tools import transcription_common as tc
     from tools import transcription_tools as tt
     raw_section = stt_config.get(provider)
-    section: Dict[str, Any] = raw_section if isinstance(raw_section, dict) else {}
+    section: dict[str, Any] = raw_section if isinstance(raw_section, dict) else {}
     if provider == "openai":
         creds = _openai_credentials()
         if creds is None:
@@ -479,7 +479,7 @@ def _builtin_session(provider: str, stt_config: Dict[str, Any], language: Option
     return None
 
 
-def streaming_available(stt_config: Optional[Dict[str, Any]] = None) -> bool:
+def streaming_available(stt_config: Optional[dict[str, Any]] = None) -> bool:
     """Cheap capability probe (no connection): would :func:`open_streaming_session` try a wire?"""
     from tools import transcription_tools as tt
     cfg = tt._load_stt_config() if stt_config is None else stt_config
@@ -492,7 +492,7 @@ def streaming_available(stt_config: Optional[Dict[str, Any]] = None) -> bool:
 
 
 def open_streaming_session(on_partial: Optional[PartialCallback] = None,
-                           stt_config: Optional[Dict[str, Any]] = None) -> Optional[StreamingSession]:
+                           stt_config: Optional[dict[str, Any]] = None) -> Optional[StreamingSession]:
     """Start a live STT session for the active profile's provider, or None (use the file path).
 
     None when ``stt.streaming`` is off, the provider has no live wire, or it lacks credentials.
@@ -511,7 +511,7 @@ def open_streaming_session(on_partial: Optional[PartialCallback] = None,
             session = _builtin_session(provider, cfg, language, prompt, on_partial)
         else:
             session = None
-    except Exception:  # noqa: BLE001 — a broken session open falls back to the file path
+    except Exception:
         logger.warning("Live STT session for %s could not open", provider, exc_info=True)
         return None
     return session.start() if session is not None else None

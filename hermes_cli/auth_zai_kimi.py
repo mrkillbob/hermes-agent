@@ -13,7 +13,7 @@ from typing import Dict, Optional
 from hermes_cli.auth_constants import httpx
 
 logger = logging.getLogger("hermes_cli.auth")
-_zai_probe_failed_until: Dict[str, float] = {}
+_zai_probe_failed_until: dict[str, float] = {}
 _ZAI_FAILED_PROBE_TTL_SECONDS = 300.0
 
 # "sk-kimi-" keys only work on api.kimi.com/coding; legacy moonshot keys use the old default.
@@ -43,7 +43,7 @@ ZAI_ENDPOINTS = [
 ]
 
 
-def _probe_single_zai_endpoint(api_key: str, endpoint: tuple, timeout: float) -> Optional[Dict[str, str]]:
+def _probe_single_zai_endpoint(api_key: str, endpoint: tuple, timeout: float) -> Optional[dict[str, str]]:
     """Probe one Z.AI endpoint, trying its candidate models in order; None when none succeeds."""
     ep_id, base_url, probe_models, label = endpoint
     for model in probe_models:
@@ -63,7 +63,7 @@ def _probe_single_zai_endpoint(api_key: str, endpoint: tuple, timeout: float) ->
     return None
 
 
-def detect_zai_endpoint(api_key: str, timeout: float = 8.0) -> Optional[Dict[str, str]]:
+def detect_zai_endpoint(api_key: str, timeout: float = 8.0) -> Optional[dict[str, str]]:
     """Probe z.ai endpoints in parallel; first working one in ZAI_ENDPOINTS priority order, or None."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     # No `with`: it would join ALL probes on exit, defeating the early return below.
@@ -71,9 +71,9 @@ def detect_zai_endpoint(api_key: str, timeout: float = 8.0) -> Optional[Dict[str
     try:
         futures = {pool.submit(_probe_single_zai_endpoint, api_key, ep, timeout): ep[0] for ep in ZAI_ENDPOINTS}
         by_id = {ep_id: f for f, ep_id in futures.items()}
-        results: Dict[str, Dict[str, str]] = {}
+        results: dict[str, dict[str, str]] = {}
 
-        def _first_ready(require_done: bool) -> Optional[Dict[str, str]]:
+        def _first_ready(require_done: bool) -> Optional[dict[str, str]]:
             # Walk endpoints in PRIORITY order; a lower-priority success only wins once every
             # higher-priority probe has finished without success.
             for ep in ZAI_ENDPOINTS:

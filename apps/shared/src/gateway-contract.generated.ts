@@ -3360,6 +3360,7 @@ export interface SessionCloseParams {
 }
 export interface SessionCloseResult {
   closed: boolean
+  messages?: string[]
 }
 export interface SessionBranchParams {
   session_id: string

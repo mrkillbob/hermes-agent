@@ -124,17 +124,25 @@ jobs:
       - name: Force all lanes on release
         # Overwrite the classifier outputs with 'true' when inputs.release.
         # ci_review stays raw: it only ever feeds the PR review-label gate.
+        # Upstream E2E runs on release/dispatch; public forks retain full PR/push journeys.
         id: gate-lanes
         env:
           RELEASE: ${{ inputs.release }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
           CLASSIFIED: ${{ toJSON(steps.classify.outputs) }}
         run: |
           python3 - <<'PY'
           import json, os
           values = json.loads(os.environ['CLASSIFIED'])
+          release = os.environ['RELEASE'] == 'true'
+          e2e_allowed = (release or os.environ['EVENT_NAME'] == 'workflow_dispatch'
+                         or os.environ['REPOSITORY'] != 'NousResearch/hermes-agent')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               for lane, value in values.items():
-                  if os.environ['RELEASE'] == 'true' and value in ('true', 'false'):
+                  if lane.startswith('e2e') and not e2e_allowed:
+                      value = 'false'
+                  elif release and value in ('true', 'false'):
                       value = 'true'
                   if '\n' in value or '\r' in value:
                       continue
@@ -157,12 +165,8 @@ jobs:
   # Skipped workflows (if condition is false) don't spin up runners.
   #
   # The E2E suites (e2e, e2e-upgrade, both Desktop suites, and the two
-  # Windows journeys in tests-os) take most of the larger-runner minutes.
-  # On a pull request each runs only when the diff touches that suite or the
-  # code it guards, or the PR carries the `run-e2e` label
-  # (scripts/ci/classify_changes.py::_E2E_LANES). Every push to main runs
-  # all of them, so a regression the path lists miss turns main red after
-  # the merge.
+  # Windows journeys in tests-os) run on release/dispatch upstream. Public forks
+  # retain their classified PR/push lanes and full native journeys.
   # ─────────────────────────────────────────────────────────────────────
   tests:
     name: Python tests
@@ -283,7 +287,7 @@ jobs:
     # The deterministic core suite (apps/desktop/e2e/core): transcript
     # integrity, boot/respawn/orphans, clarify+approval. Run it on PRs so
     # lifecycle and profile-routing regressions are found before merge; retries 0.
-    if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' || needs.detect.outputs.e2e_desktop_core == 'true' }}
+    if: ${{ needs.detect.outputs.e2e_desktop_core == 'true' || (github.repository != 'NousResearch/hermes-agent' && (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true')) }}
     uses: ./.github/workflows/e2e-desktop-core.yml
 
   e2e-desktop-update:
@@ -296,7 +300,7 @@ jobs:
     # the Linux e2e-upgrade shards and the Windows install + update journey
     # (tests / tests-os, gated on e2e_upgrade), it is skipped — and the skip
     # counts as success — when the PR does not touch that path.
-    if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' || needs.detect.outputs.e2e_desktop_update == 'true' }}
+    if: ${{ needs.detect.outputs.e2e_desktop_update == 'true' || (github.repository != 'NousResearch/hermes-agent' && (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true')) }}
     uses: ./.github/workflows/e2e-desktop-update.yml
 
   docs-site:

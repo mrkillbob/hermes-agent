@@ -888,7 +888,7 @@ class Task:
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
-        g = lambda col, default=None: _row_get(row, col, default)  # noqa: E731
+        g = lambda col, default=None: _row_get(row, col, default)
         parsed = _json_or(g("skills"))
         skills_value = [str(s) for s in parsed if s] if isinstance(parsed, list) else None
         text_columns = {
@@ -898,7 +898,7 @@ class Task:
             "idempotency_key", "workflow_template_id", "current_step_key", "session_id",
             "completion_contract", "model_override", "provider_override", "reasoning_effort", "block_kind",
         }
-        text_value = lambda col, value: _lossy_text(value) if col in text_columns else value  # noqa: E731
+        text_value = lambda col, value: _lossy_text(value) if col in text_columns else value
         return cls(
             **{col: text_value(col, row[col]) for col in _TASK_REQUIRED_COLUMNS},
             **{col: text_value(col, g(col)) for col in _TASK_OPTIONAL_COLUMNS},
@@ -2482,7 +2482,7 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
     return "ready"
 
 
-def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
+def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
     """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
     returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
 
@@ -5466,7 +5466,7 @@ def current_run_started_ats(conn: sqlite3.Connection, task_ids: Iterable[str]) -
 
 
 # --- Split modules (imported at the tail: they import this module as ``_kb``) ---
-from hermes_cli.kanban_db_boards import (  # noqa: E402
+from hermes_cli.kanban_db_boards import (
     _default_board_display_name,
     _dir_holds_board,
     board_metadata_path,
@@ -5476,18 +5476,18 @@ from hermes_cli.kanban_db_boards import (  # noqa: E402
     remove_board,
     write_board_metadata,
 )
-from hermes_cli.kanban_db_connect import (  # noqa: E402
+from hermes_cli.kanban_db_connect import (
     _INITIALIZED_PATHS,
     init_db,
     write_txn,
 )
-from hermes_cli.kanban_db_workspace import (  # noqa: E402
+from hermes_cli.kanban_db_workspace import (
     _cleanup_workspace,
     _is_managed_scratch_path,
     _managed_scratch_path_info,
     _scratch_workspace,
 )
-from hermes_cli.kanban_db_dispatch import (  # noqa: E402
+from hermes_cli.kanban_db_dispatch import (
     DEFAULT_FAILURE_LIMIT,
     DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
     DispatchResult,

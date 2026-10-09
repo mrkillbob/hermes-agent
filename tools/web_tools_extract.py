@@ -61,7 +61,7 @@ def _strict_selection_error(capability: str, backend: str) -> str:
     return _no_provider_error(capability, selection_error("web", f"'{backend}'", failure))
 
 
-def _result_entry(url: str, error: Optional[str]) -> Dict[str, Any]:
+def _result_entry(url: str, error: Optional[str]) -> dict[str, Any]:
     return {"url": url, "title": "", "content": "", "error": error}
 
 
@@ -75,8 +75,8 @@ def _refuse_all(error: str):
 
 
 def _merge_in_order(
-    total: int, fixed: Dict[int, dict], fetch_positions: List[int], fetch_urls: List[str], results: List[dict]
-) -> List[dict]:
+    total: int, fixed: dict[int, dict], fetch_positions: list[int], fetch_urls: list[str], results: list[dict]
+) -> list[dict]:
     """Rebuild a ``total``-long result list: *fixed* entries by position, fetched *results* at
     *fetch_positions* (a short provider list yields ``_NO_RESULT_ERROR`` entries for the rest)."""
     merged = dict(fixed)
@@ -86,7 +86,7 @@ def _merge_in_order(
     return [merged[i] for i in range(total)]
 
 
-def _validate_extract_urls(urls: List[Any]):
+def _validate_extract_urls(urls: list[Any]):
     """Normalize model-supplied items and block URLs carrying secrets (percent-encoded forms are unquoted
     and checked too). Returns ``(normalized_urls, normalized_indices, invalid_urls, blocked_json)``;
     ``blocked_json`` is a whole-call refusal (exfiltration prevention) or None."""
@@ -148,7 +148,7 @@ def _extract_timeout_seconds() -> float:
 
 
 def _sync_extract_process_entry(
-    provider, fetch_urls: List[str], format: Optional[str], timeout: float, send_conn
+    provider, fetch_urls: list[str], format: Optional[str], timeout: float, send_conn
 ) -> None:
     """Run a synchronous provider in a child that the parent can terminate.
 
@@ -164,7 +164,7 @@ def _sync_extract_process_entry(
     def invoke() -> None:
         try:
             outcome.append(("ok", provider.extract(fetch_urls, format=format)))
-        except BaseException as exc:  # noqa: BLE001 - marshal the child failure to the parent
+        except BaseException as exc:
             outcome.append(("error", f"{type(exc).__name__}: {exc}"))
 
     worker = threading.Thread(target=invoke, daemon=True)
@@ -180,7 +180,7 @@ def _sync_extract_process_entry(
     send_conn.close()
 
 
-async def _run_sync_extract_terminable(provider, fetch_urls: List[str], format: Optional[str], timeout: float):
+async def _run_sync_extract_terminable(provider, fetch_urls: list[str], format: Optional[str], timeout: float):
     """Run sync extraction in a killable process and enforce its deadline."""
     methods = multiprocessing.get_all_start_methods()
     method = "fork" if "fork" in methods else multiprocessing.get_start_method()
@@ -214,7 +214,7 @@ async def _run_sync_extract_terminable(provider, fetch_urls: List[str], format: 
         process.join(timeout=1.0)
 
 
-async def _dispatch_extract(provider, fetch_urls: List[str], format: Optional[str]) -> List[dict]:
+async def _dispatch_extract(provider, fetch_urls: list[str], format: Optional[str]) -> list[dict]:
     """Call ``provider.extract`` (async or in a terminable process), with one-shot keyless rescue.
 
     Rescue fires on a raised exception — including a dispatch timeout — or when the WHOLE batch
@@ -240,7 +240,7 @@ async def _dispatch_extract(provider, fetch_urls: List[str], format: Optional[st
         if not _rescue_eligible(provider):
             return failed
         return await asyncio.to_thread(_rescue_extract, provider.name, fetch_urls, failed)
-    except Exception as exc:  # noqa: BLE001 — candidate for rescue
+    except Exception as exc:
         if not _rescue_eligible(provider):
             raise
         failed = [_result_entry(u, str(exc)) for u in fetch_urls]
@@ -264,7 +264,7 @@ async def _dispatch_extract(provider, fetch_urls: List[str], format: Optional[st
     return results
 
 
-async def _extract_safe_urls(provider, safe_urls: List[str], format: Optional[str]) -> List[dict]:
+async def _extract_safe_urls(provider, safe_urls: list[str], format: Optional[str]) -> list[dict]:
     """Serve cache hits, fetch the rest, and merge back in ``safe_urls`` order.
 
     The disk cache (tools/web_result_cache.py) sits AFTER the secret-URL gate, SSRF gate, and provider
@@ -277,7 +277,7 @@ async def _extract_safe_urls(provider, safe_urls: List[str], format: Optional[st
     for position, url in enumerate(safe_urls):
         try:
             _policy_block = _check_site(url)
-        except Exception:  # noqa: BLE001 — policy errors fail open like dispatch
+        except Exception:
             _policy_block = None
         hit = extract_cache_get(url, format=format, provider=provider.name) if _policy_block is None else None
         if hit is not None:

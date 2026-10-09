@@ -104,7 +104,7 @@ def _sync_trajectory_directory(directory: str) -> None:
             os.close(fd)
 
 
-def save_trajectory(trajectory: List[Dict[str, Any]], model: str, completed: bool, filename: str = None):
+def save_trajectory(trajectory: list[dict[str, Any]], model: str, completed: bool, filename: str | None = None):
     """Append a ShareGPT-format entry, gzip-compressed by default."""
     if filename is None:
         filename = "trajectory_samples.jsonl.gz" if completed else "failed_trajectories.jsonl.gz"

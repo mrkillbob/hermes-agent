@@ -199,7 +199,7 @@ def _pet_emit(event: str, payload: dict, what: str) -> None:
     """Best-effort progress emit: a transport hiccup must never abort generation."""
     try:
         _emit(event, "", payload)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("%s emit failed: %s", what, exc)
 
 
@@ -218,7 +218,7 @@ def _pet_method(name: str, *, fail_open=None, slug: bool = False, scoped: bool =
                 if slug and not (value := _str_param(params, "slug")):
                     return _err(rid, 4004, "missing slug")
                 return fn(rid, params, value) if slug else fn(rid, params)
-            except Exception as exc:  # noqa: BLE001 - cosmetic surface
+            except Exception as exc:
                 logger.debug("%s failed: %s", name, exc)
                 if fail_open is not None:
                     return _ok(rid, fail_open(params) if callable(fail_open) else dict(fail_open))
@@ -499,7 +499,7 @@ def _create_session_once(rid, params: dict, *, profile_home, copy_parent_history
             return _err(rid, 4008, "send a message first")
     # Only a chosen workspace persists as cwd; the launch-dir fallback is "No workspace"
     # (#108205: the desktop arm lets the client vouch for a host-invisible path, #52589 provenance).
-    explicit_cwd, session_cwd, remote_cwd = _resolve_create_cwd(params, source, profile_home)
+    explicit_cwd, session_cwd, _remote_cwd = _resolve_create_cwd(params, source, profile_home)
     _enable_gateway_prompts()
     from .methods_session_model_guard import create_overrides
     try:
@@ -1936,7 +1936,7 @@ def _(rid, params: dict) -> dict:
                 # No popularity metric; petdex's hand-picked set (by asset path) is closest.
                 "curated": "/curated/" in entry.spritesheet_url,
                 "generated": entry.slug in installed and installed[entry.slug].generated})
-    except Exception as exc:  # noqa: BLE001 - offline: fall back to installed
+    except Exception as exc:
         logger.debug("pet.gallery manifest fetch failed: %s", exc)
     seen = {item["slug"] for item in gallery}
     gallery.extend(
@@ -1975,7 +1975,7 @@ def _pet_config_followup(what: str, fn, *args) -> None:
     """Best-effort ``hermes_cli.pets`` active-slug update after a store op that already succeeded."""
     try:
         fn(*args)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("%s config update failed: %s", what, exc)
 
 
@@ -2050,7 +2050,7 @@ def _(rid, params: dict) -> dict:
         available = False
     try:
         providers = list_sprite_providers()
-    except Exception as exc:  # noqa: BLE001 - picker is best-effort
+    except Exception as exc:
         logger.debug("pet provider list failed: %s", exc)
     return _ok(rid, {"available": available, "providers": providers})
 
@@ -2100,7 +2100,7 @@ def _(rid, params: dict) -> dict:
         try:
             shutil.copyfile(src, dest)
             data_uri = _pet_png_data_uri(dest)
-        except Exception as exc:  # noqa: BLE001 - skip a bad draft, keep the rest
+        except Exception as exc:
             logger.debug("pet.generate draft %d failed: %s", index, exc)
             return
         out.append({"index": index, "dataUri": data_uri})
@@ -2543,12 +2543,12 @@ def _(rid, params: dict) -> dict:
     with _sessions_lock:
         candidate = _sessions.get(sid)
     if candidate is None:
-        return _ok(rid, {"closed": False})
+        return _ok(rid, {"closed": False, "messages": []})
     # Prompt admission claims active/root leases and persists the draft. Take its lock first so close
     # cannot pop a session between those steps; then take the resume lock in the same order as prompt.submit.
     with _session_prompt_submit_lock(candidate), _session_resume_lock:
         session = _pop_session_by_id(sid)
-    return _ok(rid, {"closed": _teardown_popped_session(session, end_reason="tui_close")})
+    return _ok(rid, {"closed": _teardown_popped_session(session, end_reason="tui_close"), "messages": list((session or {}).get("_end_msgs") or [])})
 
 
 @_session_method("session.branch", live=True)

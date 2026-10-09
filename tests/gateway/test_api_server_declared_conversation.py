@@ -209,7 +209,7 @@ class TestOtherStructuresUnaffected:
         """Rows carry no chat_id/origin, so the directory has no entry to build."""
         from gateway import channel_directory
 
-        a, db = adapter
+        _a, db = adapter
         _seed(db, "sess-live")
         row = db.get_session("sess-live")
         origin = {
@@ -221,7 +221,7 @@ class TestOtherStructuresUnaffected:
 
     def test_session_store_routing_table_is_untouched(self, adapter):
         """SessionStore loads from gateway_routing, not from sessions.session_key."""
-        a, db = adapter
+        _a, db = adapter
         _seed(db, "sess-live")
         assert db.load_gateway_routing_entries() == {}
 
@@ -319,7 +319,7 @@ class TestResponsesHandlerPrecedence:
 
     @pytest.mark.asyncio
     async def test_undeclared_request_keeps_a_per_request_id(self, live):
-        adapter, db, app = live
+        adapter, _db, app = live
         seen = []
         adapter._run_agent = _spy_run_agent(adapter, seen)
 
@@ -470,7 +470,7 @@ class TestRealRunAgentSettlement:
 
     @pytest.mark.asyncio
     async def test_two_replies_settle_on_one_conversation(self, live):
-        adapter, db, app = live
+        adapter, _db, app = live
         seen = []
         ids = []
 

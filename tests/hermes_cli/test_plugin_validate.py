@@ -116,7 +116,7 @@ def test_validate_after_dependency_sync_uses_selected_interpreter(monkeypatch, t
 
     def validate(path, probe):
         calls.append(("validate", Path(path), probe))
-        return SimpleNamespace(to_dict=lambda: {}, exit_code=0)
+        return SimpleNamespace(to_dict=dict, exit_code=0)
 
     monkeypatch.setattr(plugin_validate, "validate_plugin_dir", validate)
     with pytest.raises(SystemExit) as raised:
@@ -561,7 +561,7 @@ def test_install_deps_probe_imports_from_the_synced_environment(tmp_path: Path, 
     import sys
 
     import pm
-    import pm.environments as environments
+    from pm import environments
     from hermes_cli.plugins_cmd_catalog import cmd_validate
 
     deps = tmp_path / "synced-site-packages"

@@ -49,7 +49,7 @@ GUARDED_EXECUTION_CONTRACT = (
 )
 
 
-def _guarded_prompt_flags(agent: Any) -> Tuple[bool, bool]:
+def _guarded_prompt_flags(agent: Any) -> tuple[bool, bool]:
     """``(remote_kanban, guarded)``: a remote Kanban worker on a protected egress
     route is always guarded (and additionally path-neutral); otherwise guarded mode
     is the explicit opt-in resolved by ``agent.coding_context.guarded_prompt_enabled``.
@@ -128,7 +128,7 @@ def _tui_embedded_pane_clarifier(hint: str) -> str:
     return hint + _TUI_EMBEDDED_PANE_CLARIFIER
 
 
-def _plugin_session_info(agent: Any) -> Dict[str, str]:
+def _plugin_session_info(agent: Any) -> dict[str, str]:
     """Return immutable-at-render-time metadata exposed to prompt sections."""
     try:
         cwd = str(resolve_context_cwd() or "")
@@ -212,7 +212,7 @@ def restore_plugin_prompt_sections(agent: Any, prompt: str) -> None:
     agent._plugin_system_prompt_sections_snapshot = _restore_plugin_prompt_sections(prompt)
 
 
-def _plugin_section_blocks(sections: tuple, position: str) -> List[str]:
+def _plugin_section_blocks(sections: tuple, position: str) -> list[str]:
     from hermes_cli.plugins import format_system_prompt_sections
     block = format_system_prompt_sections([s for s in sections if s.position == position])
     return [block] if block else []
@@ -396,11 +396,11 @@ def _auto_load_skills_prompt(agent: Any) -> str:
     return result[0]
 
 
-def _bot_mode_parts(agent: Any) -> List[str]:
+def _bot_mode_parts(agent: Any) -> list[str]:
     """Bot Mode teammate protocol — only in a bot's canonical "Bot Chat" session.
     Marks the prompt timeless (the volatile date line is dropped) since a birth
     date pinned in a months-long session is misinformation."""
-    parts: List[str] = []
+    parts: list[str] = []
     try:
         from tools.bot_mode_probe import BOT_CHAT_TITLE, epoch_line, get_bot_mode_protocol_section
         _title = str(getattr(agent, "_session_title_hint", "") or "").strip()
@@ -517,7 +517,7 @@ def _telegram_rich_messages_enabled() -> bool:
         return False
 
 
-def _zone_bits(now: Any, tz: Any) -> List[str]:
+def _zone_bits(now: Any, tz: Any) -> list[str]:
     """IANA key, abbreviation (if different) and UTC offset — all constant for
     the day, so the byte-stable date line stays cacheable."""
     _iana = getattr(tz, "key", None)
@@ -559,11 +559,11 @@ def _timestamp_line(agent: Any) -> str:
     return timestamp_line + "".join(f"\n{label}: {value}" for label, value in trailer if value)
 
 
-def _memory_parts(agent: Any) -> List[str]:
+def _memory_parts(agent: Any) -> list[str]:
     """Built-in memory/USER.md blocks plus the external provider block (gated on
     the same check ``inject_memory_provider_tools`` uses, so we never advertise
     tools the toolset config gated off)."""
-    parts: List[str] = []
+    parts: list[str] = []
     if agent._memory_store:
         for enabled, kind in ((agent._memory_enabled, "memory"), (agent._user_profile_enabled, "user")):
             block = agent._memory_store.format_for_system_prompt(kind) if enabled else None
@@ -587,7 +587,7 @@ def _memory_parts(agent: Any) -> List[str]:
     return parts
 
 
-def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool]:
+def _identity_parts(agent: Any, ctx_len: Optional[int]) -> tuple[list[str], bool]:
     """SOUL.md (primary identity; cron keeps the persona while skipping cwd
     instructions, scoped to the agent's OWN home) or the default identity.
     Returns ``(parts, soul_loaded)``."""
@@ -607,7 +607,7 @@ def _guarded_execution_contract(agent: Any) -> str:
     return f"{contract}\n- Use tool discovery when a needed capability is not visible."
 
 
-def _guidance_parts(agent: Any, *, guarded: bool = False) -> List[str]:
+def _guidance_parts(agent: Any, *, guarded: bool = False) -> list[str]:
     """Universal + tool-aware + model-gated guidance blocks, each gated by its config.yaml key.
 
     Guarded mode prepends the compact GUARDED_EXECUTION_CONTRACT and suppresses
@@ -616,7 +616,7 @@ def _guidance_parts(agent: Any, *, guarded: bool = False) -> List[str]:
     Task-completion guidance and tool-use enforcement still apply — the failure
     modes they target aren't specific to the verbose per-model coaching above.
     """
-    parts: List[str] = []
+    parts: list[str] = []
     if guarded:
         parts.append(_guarded_execution_contract(agent))
     if agent.valid_tool_names:
@@ -650,7 +650,7 @@ def _guidance_parts(agent: Any, *, guarded: bool = False) -> List[str]:
     return parts
 
 
-def _alibaba_identity_part(agent: Any) -> List[str]:
+def _alibaba_identity_part(agent: Any) -> list[str]:
     """Alibaba Coding Plan always reports "glm-4.7" as the model name; inject
     the real identity so the agent can answer correctly."""
     if agent.provider != "alibaba":
@@ -730,7 +730,7 @@ def _seed_workspace_pin(agent: Any, key: str) -> None:
 
 def _coding_parts(
     agent: Any, *, remote_kanban: bool = False, guarded: bool = False
-) -> Tuple[List[str], List[str], List[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """``(prefix, workspace, trailing)`` coding-posture blocks; all empty
     without tools or when probing fails (it must never block prompt build).
 
@@ -774,13 +774,13 @@ def _coding_parts(
     return [], [], []
 
 
-def _post_workspace_parts(agent: Any, *, remote_kanban: bool = False) -> List[str]:
+def _post_workspace_parts(agent: Any, *, remote_kanban: bool = False) -> list[str]:
     """Blocks that follow the worktree-specific context: environment probe
     (config.yaml agent.environment_probe; one line, nothing when clean, skipped
     for remote backends), bot-mode protocol and platform hint. A remote Kanban
     worker gets a path-neutral profile line instead of absolute host paths.
     """
-    parts: List[str] = []
+    parts: list[str] = []
     if not remote_kanban and getattr(agent, "_environment_probe", True):
         try:
             from tools.env_probe import get_environment_probe_line
@@ -799,7 +799,7 @@ def _post_workspace_parts(agent: Any, *, remote_kanban: bool = False) -> List[st
     return parts
 
 
-def _context_files_part(agent: Any, ctx_len: Optional[int], soul_loaded: bool) -> List[str]:
+def _context_files_part(agent: Any, ctx_len: Optional[int], soul_loaded: bool) -> list[str]:
     """Project context files (AGENTS.md etc.) for the context tier. TERMINAL_CWD
     when set (gateway); None lets discovery fall back to the launch dir.  The
     install-tree fallback is only legitimate for cli/tui where the launch dir
@@ -815,12 +815,12 @@ def _context_files_part(agent: Any, ctx_len: Optional[int], soul_loaded: bool) -
         allow_install_tree_fallback=agent.platform in ("cli", "tui"), home_override=_agent_home(agent))]
 
 
-def _join_tier(parts: List[Optional[str]]) -> str:
+def _join_tier(parts: list[Optional[str]]) -> str:
     """Join non-empty parts; None/blank entries are dropped."""
     return "\n\n".join(p.strip() for p in parts if p and p.strip())
 
 
-def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> Dict[str, str]:
+def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> dict[str, str]:
     """Assemble the system prompt as three ordered cache tiers: ``stable`` (identity,
     guidance and the coding brief), ``context`` (caller ``system_message``, project
     context files, workspace snapshot and remaining workspace guidance) and
@@ -860,7 +860,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     stable_parts.extend(coding_prefix_parts)
     post_workspace_parts = _post_workspace_parts(agent, remote_kanban=_remote_kanban_prompt)
     # ── Context tier (project/worktree-dependent, may change between sessions) ──
-    context_parts: List[str] = []
+    context_parts: list[str] = []
     # ephemeral_system_prompt is injected at API-call time only, never cached.
     if system_message is not None:
         context_parts.append(system_message)
@@ -874,7 +874,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ── Volatile tier (most likely to differ on a rebuild; kept last so the stable prefix stays reusable) ──
     # Skills are runtime-mutable, so the index leads the volatile band: on a longest-prefix
     # backend an unchanged index stays inside the reused prefix; a changed one re-prefills from here.
-    volatile_parts: List[str] = [skills_prompt, _auto_load_skills_prompt(agent), *_memory_parts(agent)]
+    volatile_parts: list[str] = [skills_prompt, _auto_load_skills_prompt(agent), *_memory_parts(agent)]
     # Plugin sections are confined to one coarse anchor in the volatile tail so
     # a resumed process can reconstruct the stable prefix without re-running plugins.
     # A remote Kanban worker's request already crosses the protected egress boundary,
@@ -967,5 +967,11 @@ def format_tools_for_system_message(agent: Any) -> str:
                        for t in agent.tools], ensure_ascii=False)
 
 
-__all__ = ["build_system_prompt_parts", "build_system_prompt", "invalidate_system_prompt",
-           "platform_hint", "restore_plugin_prompt_sections", "format_tools_for_system_message"]
+__all__ = [
+    "build_system_prompt",
+    "build_system_prompt_parts",
+    "format_tools_for_system_message",
+    "invalidate_system_prompt",
+    "platform_hint",
+    "restore_plugin_prompt_sections",
+]

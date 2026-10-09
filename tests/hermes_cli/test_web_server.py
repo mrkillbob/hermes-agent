@@ -706,7 +706,7 @@ class TestWebServerEndpoints:
         DIFFERENT profile's gateway as this profile's, which hides a real
         outage behind a false "connected" (issue #71211).
         """
-        import hermes_cli.web_server as web_server
+        from hermes_cli import web_server
         from hermes_cli import profiles as profiles_mod
 
         worker_home = profiles_mod.get_profile_dir("worker")
@@ -718,16 +718,13 @@ class TestWebServerEndpoints:
         def _pid(pid_path=None, **kw):
             seen["pid_path"] = pid_path
             seen.setdefault("pid_paths", []).append(pid_path)
-            return None
 
         def _runtime(path=None):
             seen["status_path"] = path
             seen.setdefault("status_paths", []).append(path)
-            return None
 
         def _runtime_pid(runtime=None, *, expected_home=None):
             seen.setdefault("expected_homes", []).append(expected_home)
-            return None
 
         monkeypatch.setattr(_gw_status, "get_running_pid_cached", _pid)
         monkeypatch.setattr(_gw_status, "get_running_pid", _pid)
@@ -851,7 +848,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         """Dashboard dependency setup publishes through PM, never direct pip."""
         import subprocess as _subprocess
 
-        import hermes_cli.web_server as web_server
+        from hermes_cli import web_server
         from hermes_cli import memory_setup
 
         prepared = []
@@ -1416,7 +1413,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert check_data["update_command"] == data["update_command"]
 
     def test_update_hermes_spawns_with_action_id(self, monkeypatch):
-        import hermes_cli.web_server as web_server
+        from hermes_cli import web_server
 
         class Proc:
             pid = 12345
@@ -3204,7 +3201,7 @@ class TestNewEndpoints:
         never-installed KittenTTS/Piper. The endpoint now reports the honest
         state so keyless ≠ ready.
         """
-        import hermes_cli.tools_config as tools_config
+        from hermes_cli import tools_config
         from hermes_cli.nous_account import NousPortalAccountInfo
 
         # Logged out of Nous Portal → managed subscription rows need sign-in.
@@ -3215,7 +3212,7 @@ class TestNewEndpoints:
             ),
         )
         # No xAI credentials → the Grok OAuth-backed row needs sign-in.
-        import hermes_cli.tools_config_post_setup as tools_config_post_setup
+        from hermes_cli import tools_config_post_setup
 
         monkeypatch.setattr(tools_config, "_xai_credentials_present", lambda: False)
         # Local TTS engines not installed → their rows need setup.
@@ -5244,7 +5241,7 @@ class TestDesktopCronTicker:
         self, monkeypatch, _isolate_hermes_home
     ):
         import threading
-        import hermes_cli.web_server as web_server
+        from hermes_cli import web_server
 
         called = threading.Event()
         monkeypatch.setenv("HERMES_DESKTOP", "1")

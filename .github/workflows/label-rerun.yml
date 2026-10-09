@@ -6,8 +6,9 @@ name: Label rerun
 #
 # When the ``run-e2e`` label is added, rerun the head commit's CI, Docker and
 # Nix runs in full. Their ``detect`` job reads the PR's labels through the API
-# (a rerun replays the original event payload), so the rerun turns every slow
-# lane on (scripts/ci/classify_changes.py).
+# (a rerun replays the original event payload), so the rerun turns the Docker
+# and Nix slow lanes on (scripts/ci/classify_changes.py). The E2E suites stay
+# off on pull requests either way: they run only on release builds.
 #
 # ``gh run rerun`` only works on a completed run. Thus this waits when the
 # run is still in progress. The wait is now short. The two slowest jobs are

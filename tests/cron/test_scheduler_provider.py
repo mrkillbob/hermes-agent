@@ -226,7 +226,7 @@ def test_resolve_no_cron_section_falls_back_to_builtin(monkeypatch):
     import hermes_cli.config as cfg
     from cron import scheduler_provider as sp
 
-    monkeypatch.setattr(cfg, "load_config", lambda: {})
+    monkeypatch.setattr(cfg, "load_config", dict)
     prov = sp.resolve_cron_scheduler()
     assert prov.name == "builtin"
 
@@ -322,7 +322,7 @@ def test_external_provider_falls_back_to_builtin_under_multiplex():
 
 def test_fire_due_default_claims_then_runs(monkeypatch):
     """The default fire_due runs the exact owner-bearing CAS snapshot."""
-    import cron.jobs as jobs
+    from cron import jobs
     import cron.scheduler as sched
     from cron.scheduler_provider import InProcessCronScheduler
 
@@ -347,8 +347,8 @@ def test_fire_due_default_claims_then_runs(monkeypatch):
 
 
 def test_claim_fire_persists_attempt_before_fire_claimed(monkeypatch):
-    import cron.executions as executions
-    import cron.jobs as jobs
+    from cron import executions
+    from cron import jobs
     import cron.scheduler as sched
     from cron.scheduler_provider import InProcessCronScheduler
 
@@ -382,7 +382,7 @@ def test_claim_fire_persists_attempt_before_fire_claimed(monkeypatch):
 
 
 def test_fire_due_forwards_manual_force_to_store_claim(monkeypatch):
-    import cron.jobs as jobs
+    from cron import jobs
     import cron.scheduler as sched
     from cron.scheduler_provider import InProcessCronScheduler
 
@@ -406,7 +406,7 @@ def test_fire_due_forwards_manual_force_to_store_claim(monkeypatch):
 def test_fire_due_lost_claim_does_not_run(monkeypatch):
     """If the CAS claim is lost (another machine/retry won), fire_due returns
     False and never runs the job."""
-    import cron.jobs as jobs
+    from cron import jobs
     import cron.scheduler as sched
     from cron.scheduler_provider import InProcessCronScheduler
 
@@ -455,7 +455,7 @@ def test_failing_tick_records_liveness_but_not_success():
 def test_heartbeat_roundtrip_and_age(tmp_path, monkeypatch):
     """record_ticker_heartbeat writes fresh timestamps atomically; the age
     getters read them back as small positive ages."""
-    import cron.jobs as jobs
+    from cron import jobs
 
     cron_dir = tmp_path / "cron"
     monkeypatch.setattr(jobs, "CRON_DIR", cron_dir)
@@ -483,7 +483,7 @@ def test_future_ticker_heartbeat_is_not_liveness_evidence(tmp_path, monkeypatch)
     """A restored or skewed future marker must not keep a dead ticker alive."""
     import time
 
-    import cron.jobs as jobs
+    from cron import jobs
 
     cron_dir = tmp_path / "cron"
     cron_dir.mkdir()
@@ -659,7 +659,7 @@ def test_multiplex_profile_gate_owns_startup_and_preserves_aba_scope(tmp_path, m
 
 def test_multiplex_ticker_skips_deleted_profile_from_startup_snapshot(tmp_path):
     """A stale profile_homes entry must not recreate a deleted profile."""
-    import cron.jobs as jobs
+    from cron import jobs
     from cron.scheduler_provider import InProcessCronScheduler
 
     default_home = tmp_path / "default"
@@ -1046,7 +1046,7 @@ def test_scheduled_cloud_route_keeps_cloud_backed_moa_fallback():
 
 def test_scheduled_cloud_route_skips_moa_with_scoped_lan_override(tmp_path, monkeypatch):
     """MoA classification honors the same scoped provider URL override as slot execution."""
-    import agent.moa_loop as moa_loop
+    from agent import moa_loop
     from agent.secret_scope import set_multiplex_active
     from cron.scheduler_provider import scheduled_model_fallback_chain
     from cron.scheduler_provider import _profile_cron_scope
@@ -1082,7 +1082,7 @@ def test_scheduled_cloud_route_skips_moa_with_auto_selected_local_route(tmp_path
     """A MoA auto slot inherits the effective local main route before cron classifies it."""
     import hermes_yaml as yaml
 
-    import agent.moa_loop as moa_loop
+    from agent import moa_loop
     from cron.scheduler_provider import scheduled_model_fallback_chain
 
     home = tmp_path / ".hermes"
@@ -1149,7 +1149,7 @@ def test_scheduled_cloud_route_skips_effective_scoped_and_auto_local_fallbacks(t
 def test_cron_agent_runtime_auth_recovery_pinned_job_gets_no_fallback_ladder(monkeypatch):
     """A job pinned to a provider (#100437) gets no mid-run fallback ladder either: a later
     401/403 from the pinned primary must not recover through a substituted route."""
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     local = {
         "provider": "llamacpp",
