@@ -63,6 +63,18 @@ def _ok(cp):
     return cp
 
 
+def _assert_userstate_partial(update, receipt):
+    """Committed code must not claim acceptance while a sibling's config blocks maintenance."""
+    assert update.returncode == 1, I.describe(update)
+    assert I.TRACEBACK not in update.stdout + update.stderr, I.describe(update)
+    assert receipt["outcome"] == "partial", receipt
+    for step in ("left_core_migration", "state_db_health"):
+        assert any(action["step"] == step and "badyaml" in action["reason"]
+                   and "while parsing a flow sequence" in action["reason"]
+                   and "model: [unclosed" in action["reason"]
+                   for action in receipt.get("user_action", [])), receipt
+
+
 def _config_versions(sb: I.Sandbox) -> tuple[int, int]:
     """(latest, support floor) from the installed PM-selected interpreter."""
     cp = _ok(sb.run([sb.python, "-c", _VERSIONS_PY]))
@@ -166,22 +178,23 @@ def world(tmp_path_factory, provider):
     snap = _snapshot(sb)
     target = I.publish_commit(origin, root, "release: e2e bump 1", {"docs/e2e-update-marker.txt": "release 1\n"})
     update = sb.cli("update", "--yes", "--branch", "main", timeout=UPDATE_TIMEOUT)
+    receipt = json.loads((sb.hermes_home / "logs/update_receipts/latest.json").read_text(encoding="utf-8"))
     return {"sb": sb, "origin": origin, "root": root, "markers": markers, "versions": versions,
-            "snap": snap, "target": target, "update": update}
+            "snap": snap, "target": target, "update": update, "receipt": receipt}
 
 
-def test_update_on_a_realistic_home_exits_clean_at_the_new_commit(world):
+def test_update_on_a_realistic_home_commits_with_pending_maintenance(world):
     sb, up = world["sb"], world["update"]
-    assert up.returncode == 0, "hermes update failed on a realistic home:\n" + I.describe(up)
+    _assert_userstate_partial(up, world["receipt"])
     assert I.TRACEBACK not in up.stdout + up.stderr, I.describe(up)
-    assert I.git("rev-parse", "HEAD", cwd=sb.checkout) == world["target"], "update exited 0 but HEAD is not the target"
+    assert I.git("rev-parse", "HEAD", cwd=sb.checkout) == world["target"], "partial update did not reach the target"
     assert not (sb.checkout / ".git" / "index.lock").exists()
     assert (sb.checkout / "my_local_notes.txt").read_text(encoding="utf-8") == "untracked notes in the checkout\n"
 
 
 def test_user_state_survives_byte_for_byte(world):
     sb, before = world["sb"], world["snap"]
-    assert world["update"].returncode == 0, I.describe(world["update"])
+    _assert_userstate_partial(world["update"], world["receipt"])
     after = _snapshot(sb)
     latest = max(world["versions"].values())
     for name in PROFILES:
@@ -204,7 +217,7 @@ def test_outdated_configs_migrate_to_the_current_version_keeping_user_values(wor
     (``_migrate_sibling_profile_configs``) alike: the version reaches the running code's, and
     every value the user wrote (known keys, unknown keys, nested and unicode) is still there."""
     sb, up = world["sb"], world["update"]
-    assert up.returncode == 0, I.describe(up)
+    _assert_userstate_partial(up, world["receipt"])
     latest, _floor = _config_versions(sb)
     outdated = [n for n in PROFILES if world["versions"][n] < latest]
     assert {"default", "work"} <= set(outdated), f"harness: {world['versions']} vs latest {latest}"
@@ -224,7 +237,7 @@ def test_outdated_configs_migrate_to_the_current_version_keeping_user_values(wor
 
 def test_every_profile_session_resumes_after_update(world, provider):
     sb = world["sb"]
-    assert world["update"].returncode == 0, I.describe(world["update"])
+    _assert_userstate_partial(world["update"], world["receipt"])
     for name in PROFILES:
         sid = world["snap"][name]["db"]["sessions"][0]
         n = len(provider.main_requests())
@@ -243,10 +256,10 @@ def test_every_profile_session_resumes_after_update(world, provider):
             f"{name}: resume forked a new session instead of continuing {sid}: {db['sessions']}")
 
 
-def test_broken_profiles_warn_but_do_not_fail_the_update(world):
+def test_broken_profiles_require_user_action_without_rewriting_config(world):
     sb, up = world["sb"], world["update"]
     out = up.stdout + up.stderr
-    assert up.returncode == 0, "a broken profile under ~/.hermes/profiles/ failed the whole update:\n" + I.describe(up)
+    _assert_userstate_partial(up, world["receipt"])
     bad = str(sb.hermes_home / "profiles" / "badyaml" / "config.yaml")
     assert bad in out, "the update did not warn about the profile whose config.yaml is broken:\n" + I.describe(up)
     assert (sb.hermes_home / "profiles" / "badyaml" / "config.yaml").read_bytes() == world["snap"]["badyaml"], (
@@ -258,7 +271,7 @@ def conflicting_leg(world):
     """Second release touches a file the user edited in the checkout; an untracked extension dir
     (installed into the tree by a third-party tool) sits next to it."""
     sb = world["sb"]
-    assert world["update"].returncode == 0, I.describe(world["update"])
+    _assert_userstate_partial(world["update"], world["receipt"])
     ext = sb.checkout / "plugins" / "my-inplace-ext"
     ext.mkdir(parents=True, exist_ok=True)
     (ext / "__init__.py").write_text("NAME = 'my-inplace-ext'\n", encoding="utf-8")
