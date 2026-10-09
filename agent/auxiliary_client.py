@@ -4387,7 +4387,7 @@ def _try_main_agent_model_fallback(
     failed_model: Optional[str] = None, failed_base_url: str = "", failure_scope: Any = None,
     main_runtime: Optional[Dict[str, Any]] = None,
     excluded_identities: set[tuple[str, str, str, str]] | None = None,
-    async_mode: bool = False,
+    async_mode: bool = False, local_only: bool = False,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Last-resort fallback to the main agent provider + model after the configured chain is exhausted.
     ``failed_model`` scoping per ``_failed_backend_skip``; same-URL custom endpoints serve many models,
@@ -4404,11 +4404,29 @@ def _try_main_agent_model_fallback(
         # The facade endpoint and placeholder credential belong to the virtual
         # MoA route, not to the aggregator that will actually receive this call.
         runtime = dict(runtime, provider=main_provider, model=main_model,
-                       base_url="", api_key="", api_mode="")
+                       requested_provider=main_provider, base_url="", api_key="", api_mode="")
     if not main_provider or not main_model or main_provider.lower() in {"auto", ""}:
         return None, None, ""
-    if task == "vision" and not _main_model_supports_vision(main_provider, main_model):
-        return None, None, ""
+    if local_only:
+        from agent.auxiliary_egress_recovery import local_fallback_entry
+        local_entry = local_fallback_entry(
+            {"provider": main_provider, "model": main_model,
+             "base_url": runtime.get("base_url") or "", "api_key": runtime.get("api_key")}, main_runtime=runtime,
+        )
+        if local_entry is None:
+            return None, None, ""
+        runtime = dict(runtime, base_url=local_entry["base_url"], api_key=local_entry["api_key"])
+    if task == "vision":
+        if local_only:
+            from agent.auxiliary_egress_recovery import local_main_supports_vision
+            supports_vision = local_main_supports_vision(
+                main_provider, main_model, base_url=local_entry["base_url"], api_key=runtime.get("api_key"),
+                requested_provider=runtime.get("requested_provider", ""),
+            )
+        else:
+            supports_vision = _main_model_supports_vision(main_provider, main_model)
+        if not supports_vision:
+            return None, None, ""
     main_base_url = str(runtime.get("base_url") or "").strip() or _custom_health_base_url(main_provider)
     if _failed_backend_skip(
             failed_provider, failed_model, failed_base_url=failed_base_url,
@@ -4439,6 +4457,10 @@ def _try_main_agent_model_fallback(
         client, resolved_model = None, None
     if client is None:
         return None, None, ""
+    if local_only:
+        from agent.auxiliary_egress_recovery import is_local_fallback_client
+        if not is_local_fallback_client(client, main_provider):
+            return None, None, ""
     label = f"main-agent({main_provider})"
     logger.info("Auxiliary %s: %s on %s — falling back to main agent model %s (%s)",
                 task or "call", reason, failed_provider, label, resolved_model or main_model)
@@ -4501,7 +4523,7 @@ def _try_configured_fallback_chain(
     task: str, failed_provider: str, reason: str = "error", failed_model: Optional[str] = None, *,
     failed_base_url: str = "", failure_scope: Any = None,
     excluded_identities: set[tuple[str, str, str, str]] | None = None,
-    async_mode: bool = False,
+    async_mode: bool = False, local_only: bool = False,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Try auxiliary.<task>.fallback_chain entries in order (each needs ``provider``; model/base_url/api_key optional).
     ``failed_model`` scoping per ``_failed_backend_skip`` (sibling models on the same provider still
@@ -4518,6 +4540,11 @@ def _try_configured_fallback_chain(
     for i, entry in enumerate(chain):
         if not isinstance(entry, dict):
             continue
+        if local_only:
+            from agent.auxiliary_egress_recovery import local_fallback_entry
+            entry = local_fallback_entry(entry)
+            if entry is None:
+                continue
         fb_provider = str(entry.get("provider", "")).strip()
         if not fb_provider:
             continue
@@ -4537,6 +4564,10 @@ def _try_configured_fallback_chain(
         except Exception:
             fb_client, resolved_model = None, None
         if fb_client is not None:
+            if local_only:
+                from agent.auxiliary_egress_recovery import is_local_fallback_client
+                if not is_local_fallback_client(fb_client, fb_provider):
+                    continue
             destination = _fallback_destination_from_entry(
                 entry, fb_client, resolved_model or fb_model
             )
@@ -4549,8 +4580,9 @@ def _try_configured_fallback_chain(
             if excluded_identities is not None and identity in excluded_identities:
                 tried.append(f"{label} (already attempted)")
                 continue
+            context_entry = {**entry, "base_url": str(fb_client.base_url)} if local_only else entry
             too_small = _context_too_small(
-                entry, fb_provider, resolved_model, min_ctx, task=task, label=label, name_model=True,
+                context_entry, fb_provider, resolved_model, min_ctx, task=task, label=label, name_model=True,
             ) if resolved_model else None
             if too_small:
                 tried.append(too_small)
@@ -4607,7 +4639,7 @@ def _try_main_fallback_chain(
     task: Optional[str], failed_provider: str = "", reason: str = "error", *,
     failed_model: Optional[str] = None, failed_base_url: str = "", failure_scope: Any = None,
     excluded_identities: set[tuple[str, str, str, str]] | None = None,
-    async_mode: bool = False,
+    async_mode: bool = False, local_only: bool = False,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Top-level main-agent fallback chain for a ``provider: auto`` auxiliary call: auto tasks honour the
     user's main fallback policy before the built-in discovery chain; read via ``get_fallback_chain`` so
@@ -4628,6 +4660,11 @@ def _try_main_fallback_chain(
     for i, entry in enumerate(chain):
         if not isinstance(entry, dict):
             continue
+        if local_only:
+            from agent.auxiliary_egress_recovery import local_fallback_entry
+            entry = local_fallback_entry(entry)
+            if entry is None:
+                continue
         fb_provider = str(entry.get("provider") or "").strip()
         fb_model = str(entry.get("model") or "").strip()
         if not fb_provider or not fb_model:
@@ -4649,6 +4686,10 @@ def _try_main_fallback_chain(
             logger.debug("Auxiliary %s: main fallback %s failed to resolve: %s", task or "call", label, exc)
             fb_client, resolved_model = None, None
         if fb_client is not None:
+            if local_only:
+                from agent.auxiliary_egress_recovery import is_local_fallback_client
+                if not is_local_fallback_client(fb_client, fb_provider):
+                    continue
             destination = _fallback_destination_from_entry(
                 entry, fb_client, resolved_model or fb_model
             )
@@ -4661,8 +4702,9 @@ def _try_main_fallback_chain(
             if excluded_identities is not None and identity in excluded_identities:
                 tried.append(f"{label} (already attempted)")
                 continue
+            context_entry = {**entry, "base_url": str(fb_client.base_url)} if local_only else entry
             too_small = _context_too_small(
-                entry, fb_provider, resolved_model or fb_model, min_ctx, task=task, label=label,
+                context_entry, fb_provider, resolved_model or fb_model, min_ctx, task=task, label=label,
             )
             if too_small:
                 tried.append(too_small)
