@@ -83,7 +83,20 @@ def _make_head_moved_side_effect(pre_sha="abc123", post_sha="def456"):
 
 def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     """Isolate machine maintenance while exercising interrupted fleet updates."""
-    monkeypatch.setattr(hermes_main.subprocess, "run", run_side_effect)
+    def run(cmd, **kwargs):
+        result = run_side_effect(cmd, **kwargs)
+        text_mode = any(
+            kwargs.get(key)
+            for key in ("text", "universal_newlines", "encoding", "errors")
+        )
+        if not text_mode:
+            for stream in ("stdout", "stderr"):
+                value = getattr(result, stream, None)
+                if isinstance(value, str):
+                    setattr(result, stream, value.encode())
+        return result
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", run)
     monkeypatch.setattr(hermes_main, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(update_cmd, "_prepare_updated_checkout", lambda *a, **k: None)
     (tmp_path / ".git").mkdir()
