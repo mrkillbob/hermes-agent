@@ -85,11 +85,7 @@ jobs:
     # Desktop-surface methods (+desktop installs,
     # hermes-desktop-app-update) also need the starting tag to ship
     # apps/desktop (their flags shipped with it).
-    if: >-
-      (inputs.install-method == 'installer-script'
-        || (inputs.install-method == 'installer-script+desktop' && inputs.tag-has-desktop))
-      && (contains(fromJSON('["hermes-update", "installer-script"]'), inputs.update-method)
-        || (contains(fromJSON('["installer-script+desktop", "hermes-desktop-app-update"]'), inputs.update-method) && inputs.tag-has-desktop))
+    if: ${{ (github.repository == 'NousResearch/hermes-agent' || contains(fromJSON('["ubuntu-latest","macos-latest"]'), inputs.runner)) && ((inputs.install-method == 'installer-script'   || (inputs.install-method == 'installer-script+desktop' && inputs.tag-has-desktop)) && (contains(fromJSON('["hermes-update", "installer-script"]'), inputs.update-method)   || (contains(fromJSON('["installer-script+desktop", "hermes-desktop-app-update"]'), inputs.update-method) && inputs.tag-has-desktop))) }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
 

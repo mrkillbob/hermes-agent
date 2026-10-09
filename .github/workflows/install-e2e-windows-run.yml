@@ -105,7 +105,7 @@ jobs:
     name: packaged bundle (open-app-update)
     if: inputs.install-method == 'packaged-app' && inputs.update-method == 'open-app-update'
     # The specialized runners are upstream-only; use a public Windows runner in the fork.
-    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && (inputs.bundle-arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core') || 'windows-latest' }}
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && (inputs.bundle-arch == 'arm64' && 'windows-latest-32-arm-core' || 'windows-latest-32-core') || (inputs.bundle-arch == 'arm64' && 'windows-11-arm' || 'windows-latest') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1

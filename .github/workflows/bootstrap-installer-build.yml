@@ -40,6 +40,7 @@ env:
 
 jobs:
   windows-x64:
+    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: Hermes-Setup.exe (windows x64, signed)
     runs-on: windows-latest
     environment: release-signing
@@ -150,6 +151,7 @@ jobs:
           if-no-files-found: error
 
   macos-arm64:
+    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: Hermes-Setup.dmg (macos arm64, signed + notarized)
     runs-on: macos-latest
     environment: release-signing
