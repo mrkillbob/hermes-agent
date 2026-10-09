@@ -104,21 +104,37 @@ def local_fallback_entry(entry, *, main_runtime=None):
 
 
 
-def local_main_supports_vision(provider, model, *, base_url, api_key=""):
+def local_main_supports_vision(provider, model, *, base_url, api_key="", requested_provider=""):
     """Honor known capability constraints without remote discovery after a denial."""
     from agent.image_routing import _supports_vision_override
     from agent.models_dev import get_model_capabilities
     from hermes_cli.config import load_config_readonly
     from hermes_cli.local_runtime.capabilities import is_managed_provider, managed_model_supports_vision
+    from hermes_cli.providers import normalize_provider
 
     try:
         config = load_config_readonly()
-        supports = _supports_vision_override(config, provider, model)
+        model_cfg = config.get("model") if isinstance(config.get("model"), dict) else {}
+        identities = []
+        for identity in (requested_provider or provider, model_cfg.get("provider")):
+            identity = str(identity or "").strip().lower()
+            canonical = normalize_provider(identity)
+            # Distinct named/local custom routes must not collapse to "custom".
+            identities.append(identity.removeprefix("custom:") if canonical == "custom"
+                              or identity.startswith("custom:") else canonical)
+        if identities[0] != identities[1] or str(model_cfg.get("default") or "").strip() != model:
+            # Saved main defaults cannot override a session's switched route or
+            # contribute another provider's per-model declarations.
+            config = {**config, "model": {}}
+        # "auto" proves which saved route was requested, but is not the
+        # concrete inference provider whose capability metadata we can use.
+        requested_provider = requested_provider if provider == "custom" and requested_provider != "auto" else ""
+        supports = _supports_vision_override(config, provider, model, requested_provider=requested_provider)
         if supports is None and is_managed_provider(provider, base_url):
             endpoint = (base_url.rsplit("/v1", 1)[0], api_key if isinstance(api_key, str) else "")
             supports = managed_model_supports_vision(model, endpoint=endpoint)
         if supports is None:
-            capabilities = get_model_capabilities(provider, model, allow_network=False, config=config)
+            capabilities = get_model_capabilities(requested_provider or provider, model, allow_network=False, config=config)
             supports = capabilities.supports_vision if capabilities is not None else None
         if supports is None:
             from agent.model_metadata import detect_local_server_type, query_ollama_supports_vision

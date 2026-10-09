@@ -4415,7 +4415,7 @@ def _try_main_agent_model_fallback(
         # The facade endpoint and placeholder credential belong to the virtual
         # MoA route, not to the aggregator that will actually receive this call.
         runtime = dict(runtime, provider=main_provider, model=main_model,
-                       base_url="", api_key="", api_mode="")
+                       requested_provider=main_provider, base_url="", api_key="", api_mode="")
     if not main_provider or not main_model or main_provider.lower() in {"auto", ""}:
         return None, None, ""
     if local_only:
@@ -4432,6 +4432,7 @@ def _try_main_agent_model_fallback(
             from agent.auxiliary_egress_recovery import local_main_supports_vision
             supports_vision = local_main_supports_vision(
                 main_provider, main_model, base_url=local_entry["base_url"], api_key=runtime.get("api_key"),
+                requested_provider=runtime.get("requested_provider", ""),
             )
         else:
             supports_vision = _main_model_supports_vision(main_provider, main_model)

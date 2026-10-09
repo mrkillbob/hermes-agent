@@ -296,13 +296,24 @@ def test_blocked_recovery_screens_remote_auth_before_resolving_local(
 
 
 
-@pytest.mark.parametrize("supports_vision,cached_vision,managed_vision", [
-    (None, None, None), (False, None, None), (True, None, None),
-    (None, False, None), (None, True, None),
-    (None, None, False), (None, None, True),
+@pytest.mark.parametrize("supports_vision,cached_vision,managed_vision,route_change", [
+    (None, None, None, "same"), (False, None, None, "same"), (True, None, None, "same"),
+    (None, False, None, "same"), (None, True, None, "same"),
+    (None, None, False, "same"), (None, None, True, "same"),
+    (False, True, None, "model"), (True, False, None, "model"),
+    (False, True, None, "provider"), (True, False, None, "provider"),
+    (False, True, None, "model-declared"), (True, False, None, "model-declared"),
+    (False, True, None, "same"), (True, False, None, "same"),
+    (False, None, True, "model"), (True, None, False, "model"),
+    (False, None, True, "same"), (True, None, False, "same"),
+    (False, True, None, "named"), (True, False, None, "named"),
+    (False, True, None, "named-same"), (True, False, None, "named-same"),
+    (False, True, None, "moa"), (True, False, None, "moa"),
+    (False, True, None, "auto-same"), (True, False, None, "auto-same"),
+    (False, True, None, "auto-model"), (True, False, None, "auto-model"),
 ])
 def test_blocked_local_main_vision_uses_config_or_cached_metadata(
-    monkeypatch, tmp_path, supports_vision, cached_vision, managed_vision
+    monkeypatch, tmp_path, supports_vision, cached_vision, managed_vision, route_change
 ):
     import yaml
     import agent.auxiliary_client as auxiliary
@@ -333,11 +344,55 @@ def test_blocked_local_main_vision_uses_config_or_cached_metadata(
         monkeypatch.setattr(urllib.request, "urlopen", offline_local_props)
     if supports_vision is not None:
         model_cfg["supports_vision"] = supports_vision
-    (home / "config.yaml").write_text(yaml.safe_dump({"model": model_cfg}))
+    config = {"model": model_cfg}
+    runtime = {**model_cfg, "model": model_id}
+    if route_change.startswith("model"):
+        model_cfg["default"] = "configured-model"
+    if route_change == "provider":
+        model_cfg["provider"] = "configured-provider"
+        config["providers"] = {"configured-provider": {
+            "base_url": "http://127.0.0.1:12434/v1", "api_key": "configured-test-key",
+            "models": {model_id: {"supports_vision": supports_vision}},
+        }}
+    if route_change == "model-declared":
+        config["providers"] = {runtime["provider"]: {"models": {
+            model_id: {"supports_vision": cached_vision},
+        }}}
+    if route_change.startswith("named"):
+        runtime.update(provider="custom", requested_provider="live-local")
+        model_cfg["provider"] = "live-local" if route_change == "named-same" else "saved-local"
+        config["providers"] = {
+            "live-local": {"base_url": runtime["base_url"], "api_key": runtime["api_key"],
+                           "models": {model_id: {"supports_vision": cached_vision}}},
+            "saved-local": {"base_url": "http://127.0.0.1:12434/v1", "api_key": "saved-test-key",
+                            "models": {model_id: {"supports_vision": supports_vision}}},
+        }
+    if route_change == "moa":
+        runtime.update(provider="moa", requested_provider="moa", model="local-preset")
+        model_cfg.update(provider="moa", default="local-preset")
+        config["moa"] = {"presets": {"local-preset": {
+            "aggregator": {"provider": "custom", "model": model_id},
+        }}}
+        config["providers"] = {
+            "custom": {"base_url": runtime["base_url"], "api_key": runtime["api_key"],
+                       "models": {model_id: {"supports_vision": cached_vision}}},
+            "moa": {"models": {model_id: {"supports_vision": supports_vision}}},
+        }
+    if route_change.startswith("auto"):
+        model_cfg["provider"] = "auto"
+        if route_change == "auto-model":
+            model_cfg["default"] = "configured-model"
+        config["providers"] = {
+            "custom": {"models": {model_id: {"supports_vision": cached_vision}}},
+            "auto": {"models": {model_id: {"supports_vision":
+                                          cached_vision if route_change == "auto-same" else supports_vision}}},
+        }
+    (home / "config.yaml").write_text(yaml.safe_dump(config))
     monkeypatch.setenv("HERMES_HOME", str(home))
-    cache = {} if cached_vision is None else {
+    metadata_vision = not cached_vision if route_change == "model-declared" else cached_vision
+    cache = {} if metadata_vision is None else {
         "openai": {"models": {"gpt-4o": {"modalities": {
-            "input": ["text", "image"] if cached_vision else ["text"],
+            "input": ["text", "image"] if metadata_vision else ["text"],
         }}}},
     }
     monkeypatch.setattr(models_dev, "_models_dev_cache", cache)
@@ -345,13 +400,27 @@ def test_blocked_local_main_vision_uses_config_or_cached_metadata(
     monkeypatch.setattr(models_dev, "_models_dev_retry_after", 0)
     remote_send = MagicMock(side_effect=RuntimeError("remote catalog forbidden during recovery"))
     monkeypatch.setattr(models_dev.requests, "get", remote_send)
-    client, model, _ = auxiliary._try_main_agent_model_fallback(
-        "openai-codex", "vision", failed_model="blocked-model",
-        main_runtime={**model_cfg, "model": model_id}, local_only=True,
-    )
-    if supports_vision is False or cached_vision is False or managed_vision is False:
+    if route_change.startswith("auto"):
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        runtime = {**resolve_runtime_provider(requested="auto", target_model=model_id), "model": model_id}
+        assert runtime["provider"] == "custom"
+        assert runtime["requested_provider"] == "auto"
+    # Bind the actual session's switched main route; config.yaml remains its saved default.
+    token = auxiliary.set_runtime_main(runtime["provider"], runtime["model"],
+                                       base_url=runtime["base_url"], api_key=runtime["api_key"],
+                                       requested_provider=runtime.get("requested_provider", ""))
+    try:
+        client, model, _ = auxiliary._try_main_agent_model_fallback(
+            "openai-codex", "vision", failed_model="blocked-model", local_only=True,
+        )
+    finally:
+        auxiliary.reset_runtime_main(token)
+    expected_vision = (supports_vision if route_change in {"same", "named-same", "auto-same"} and supports_vision is not None
+                       else cached_vision if cached_vision is not None else managed_vision)
+    if expected_vision is False:
         assert client is None
     else:
+        assert client is not None
         assert str(client.base_url) == "http://127.0.0.1:11434/v1/"
         assert model == model_id
         client.close()
