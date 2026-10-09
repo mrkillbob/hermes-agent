@@ -2401,15 +2401,9 @@ DEFAULT_CONFIG = {
         "source_feed_base_url": "",
         # Passive version/banner checks only; explicit `hermes update --check` remains enabled.
         "check": True,
-        # Pre-update backup. quick = snapshot small critical state (pairing JSONs, cron jobs,
-        # config.yaml, .env, auth.json, profile DBs) into <HERMES_HOME>/state-snapshots/, skipping
-        # files >1 GiB; restore via ``/snapshot``. full = quick PLUS a ``hermes backup`` zip in
-        # <HERMES_HOME>/backups/ (``hermes import`` restores; slow on large homes; ``--backup``
-        # forces once). off = none (``--no-backup`` forces once). Legacy booleans: true -> full,
-        # false -> off.
-        # Pre-update safety backup — ONE consolidated mechanism, three modes: Files over 1 GiB (e.g. a
-        # bloated state.db) are skipped with a warning so the snapshot stays fast. This is the #48200
-        # (wrong-path wipe) safety net.
+        # quick snapshots each home's critical state into state-snapshots/, skipping >1 GiB.
+        # full adds a backup zip (--backup forces it once); off disables backups (--no-backup
+        # forces once). Legacy true/false mean full/off. Recover through /snapshot or import.
         "pre_update_backup": "quick",
         # Full backup zips to retain (older pruned after each success; floored to 1 so the newest is
         # always kept). The quick snapshot always keeps exactly 1.
@@ -2432,6 +2426,11 @@ DEFAULT_CONFIG = {
         # Refresh an installed cua-driver during `hermes update` (best-effort, macOS only). Turn off
         # e.g. on non-admin accounts where /Applications isn't writable.
         "refresh_cua_driver": True,
+        # Defer catalog acquisition for features that left core, while preserving their scope.
+        # Startup honors the same per-home choice; the feature stays unavailable until installed.
+        "left_core_migration": "auto",  # auto | defer
+        # Check-only reports unhealthy databases without selecting or copying a recovery snapshot.
+        "state_db_recovery": "auto",  # auto | check-only
     },
     # LSP diagnostics (pyright, gopls, rust-analyzer...) in the post-write lint check of
     # write_file/patch. Runs only when the cwd or edited file is inside a git worktree; otherwise

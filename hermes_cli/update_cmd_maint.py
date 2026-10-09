@@ -451,56 +451,67 @@ def _restore_state_db_from_snapshot(state_path: Path, snap_state: Path) -> bool:
     return bool(restored.get("valid"))
 
 
-def _verify_and_restore_one_state_db(home: Path, *, label: str) -> None:
-    """Integrity check + auto-restore for ONE home's state.db from its newest valid snapshot.
-    Never raises: a guard that crashes the update tail is worse than what it detects."""
+def _verify_and_restore_one_state_db(home: Path, *, label: str) -> dict:
+    """Check one home; only auto policy may search snapshots or replace its image."""
+    from hermes_cli.backup import _quick_snapshot_root, verify_sqlite_integrity
+    from hermes_cli.maintenance_policy import maintenance_policy
+
     try:
-        from hermes_cli.backup import _quick_snapshot_root, verify_sqlite_integrity
+        policy = maintenance_policy(home, "state_db_recovery", ("auto", "check-only"))
         state_path = home / "state.db"
-        if not state_path.exists():
-            return
-        ok = verify_sqlite_integrity(state_path, check_header=True, run_pragma=True)
+        try:
+            state_path.stat()
+        except FileNotFoundError:
+            return {"ok": True, "skipped": "no-state-db"}
+        ok = verify_sqlite_integrity(state_path, check_header=True, run_pragma=True,
+                                     **({"max_bytes": 0} if policy == "check-only" else {}))
         if ok.get("valid"):
-            logger.debug("Post-update state.db integrity OK (%s): %s", label, ok.get("message"))
-            return
-        print()
-        print(f"⚠ state.db is corrupted after update ({label}): " + ok.get("message", "unknown error"))
-        snap_root = _quick_snapshot_root(home)
-        if not snap_root.exists():
-            print("  ⚠ No pre-update snapshot for this home")
-            return
+            return {"ok": True, "policy": policy}
+        message = ok.get("message", "unknown error")
+        print(f"\n⚠ state.db is corrupted or could not be verified after update ({label}): {message}")
+        if policy == "check-only":
+            return {"ok": False, "error": message, "policy": policy}
+        return _recover_unhealthy_state_db(state_path, _quick_snapshot_root(home), message=message, label=label)
+    except Exception as exc:
+        logger.debug("Database health guard failed for %s", home, exc_info=True)
+        reason = str(exc) or type(exc).__name__
+        print(f"  ⚠ state.db health check failed ({label}): {reason}")
+        return {"ok": False, "error": reason}
+
+
+def _recover_unhealthy_state_db(state_path: Path, snap_root: Path, *, message: str, label: str) -> dict:
+    """Keep legacy auto snapshot selection; a refusal remains an unhealthy result."""
+    from hermes_cli.backup import verify_sqlite_integrity
+
+    if snap_root.exists():
         for snap_dir in sorted((d for d in snap_root.iterdir() if d.is_dir()), reverse=True):
             snap_state = snap_dir / "state.db"
             if not snap_state.exists():
                 continue
             if not verify_sqlite_integrity(snap_state, check_header=True, run_pragma=True).get("valid"):
                 continue
-            try:
-                if _restore_state_db_from_snapshot(state_path, snap_state):
-                    print(f"  ✓ Auto-restored from snapshot {snap_dir.name} ({label})")
-                else:
-                    print("  ✗ Auto-restore FAILED — restored copy also failed integrity")
-            except OSError as exc:
-                print(f"  ✗ Auto-restore file copy failed: {exc}")
-            return
-        print("  ⚠ No valid pre-update snapshot found for this home")
-    except Exception as exc:
-        logger.debug("Post-update state.db guard (%s) failed: %s", label, exc)
+            if _restore_state_db_from_snapshot(state_path, snap_state):
+                print(f"  ✓ Auto-restored from snapshot {snap_dir.name} ({label})")
+                return {"ok": True, "restored": str(snap_state)}
+            print("  ✗ Auto-restore refused or restored copy failed integrity")
+            return {"ok": False, "error": message}
+    print("  ⚠ No valid pre-update snapshot found for this home")
+    return {"ok": False, "error": message}
 
 
-def _verify_and_restore_state_dbs_post_update() -> None:
-    """Integrity guard for the ROOT state.db AND every sibling profile's (the snapshot covers
-    siblings, so the guard must too or a corrupt profile DB goes undetected).
-
-    See #97994.
-    """
+def _verify_and_restore_state_dbs_post_update() -> list[tuple[str, str]]:
+    """Report health for the active home and every sibling, with each home's policy."""
     from hermes_cli.update_cmd import get_hermes_home
+    from hermes_cli.backup import _sibling_profile_homes
+
     home = get_hermes_home()
-    _verify_and_restore_one_state_db(home, label="default home")
-    with _best_effort('Sibling-profile state.db guard sweep failed: %s'):
-        from hermes_cli.backup import _sibling_profile_homes
-        for name, profile_home in _sibling_profile_homes(home):
-            _verify_and_restore_one_state_db(profile_home, label=f"profile {name}")
+    homes = [("default home", home), *((f"profile {name}", path) for name, path in _sibling_profile_homes(home, strict=True))]
+    pending = []
+    for label, path in homes:
+        result = _verify_and_restore_one_state_db(path, label=label)
+        if not result.get("ok"):
+            pending.append(("state_db_health", f"{label}: {result.get('error', 'health unknown')}"))
+    return pending
 
 
 def _invalidate_live_plugin_catalog_caches() -> None:
@@ -882,6 +893,9 @@ def _refresh_cua_driver_after_update() -> None:
     import pm
 
     if not _load_updates_cfg().get("refresh_cua_driver", True):
+        from hermes_cli.update_receipt import record_skip
+
+        record_skip("cua_driver_refresh", "updates.refresh_cua_driver=false: host setup deferred")
         return
     if os.environ.get("HERMES_CUA_DRIVER_CMD", "").strip():
         return
@@ -979,7 +993,7 @@ def _migrate_relay_exporter_env() -> None:
 
 def _run_post_update_maintenance(
     *, assume_yes, gateway_mode, pre_update_snapshot_id, had_desktop_app_before_update,
-    pre_update_version, completion_message=None, followups=None,
+    pre_update_version, completion_message=None, followups=None, pending=None,
 ) -> bool:
     """Post-build housekeeping and completion, returning the SQLite runtime verdict.
 
@@ -991,6 +1005,9 @@ def _run_post_update_maintenance(
     runtime withholds success (and is reported) but is not tail work.
     """
     from hermes_cli.update_receipt import record_followup
+    from hermes_cli.maintenance_policy import report_pending
+
+    pending = list(pending or [])
 
     def owed_step(name, run):
         try:
@@ -1027,8 +1044,11 @@ def _run_post_update_maintenance(
         logger.debug("macOS TCC anchor refresh skipped", exc_info=True)
 
     # state.db integrity guard for root home AND every profile; restore from own snapshot.
-    with _best_effort('Post-update state.db integrity check failed: %s'):
-        _verify_and_restore_state_dbs_post_update()
+    try:
+        pending.extend(_verify_and_restore_state_dbs_post_update() or [])
+    except Exception as exc:
+        logger.debug("Database health sweep failed", exc_info=True)
+        pending.append(("state_db_health", f"Database sweep could not finish: {exc}"))
 
     # Both shallow history and missing tags can hide the release identity.
     # Refresh them before the completion line and install stamp read it.
@@ -1065,7 +1085,16 @@ def _run_post_update_maintenance(
     ))
 
     print()
-    update_complete = _print_verified_update_completion(completion_message or _update_complete_message(pre_update_version))
+    report_pending(pending, followups)
+    if pending:
+        print("⚠ Code completion is partial; maintenance requires user action.")
+        sqlite_runtime_ok, sqlite_info = _post_update_sqlite_runtime_status()
+        update_complete = sqlite_info is None or sqlite_runtime_ok
+        if not update_complete:
+            for line in _sqlite_partial_completion_lines(sqlite_info.sqlite_version_string):
+                print(line)
+    else:
+        update_complete = _print_verified_update_completion(completion_message or _update_complete_message(pre_update_version))
     # A multi-profile host whose gateway came back standalone on a guard says so here too — the
     # update summary is the one line operators read (the boot log under s6 is not).
     with suppress(Exception):
@@ -1080,4 +1109,4 @@ def _run_post_update_maintenance(
     if not update_complete and (completion_message or "✓").startswith("✓"):
         record_followup("sqlite_runtime", "the selected Python links an unsafe SQLite runtime",
                         retry="run the installer again")
-    return update_complete
+    return update_complete and not pending

@@ -275,13 +275,16 @@ def _record_migration(home: Path, feature: LeftCoreFeature) -> None:
 
 
 def _pending(home: Path, *, say: Callable[[str], None], process_env: bool = False,
-             backoff: bool = False) -> list[LeftCoreFeature]:
+             backoff: bool = False, pending: list[tuple[str, str]] | None = None) -> list[LeftCoreFeature]:
     """Rows *home* uses whose plugin it never had and that the catalog ships (a catalog miss is
     reported through *say*). Converts the toolset scope of every row *home* uses once
     (:func:`_record_migration`), installed or not; a row whose scope cannot be recorded is
     reported and skipped, never installed unscoped. A row marked installed is done for good.
     *backoff* (startup) skips a row whose last attempt failed recently, before any network."""
     from hermes_cli.memory_provider_migration import catalog_source
+    from hermes_cli.maintenance_policy import maintenance_policy
+
+    policy = maintenance_policy(home, "left_core_migration", ("auto", "defer"))
     out = []
     for feature in LEFT_CORE:
         if _marked(_read_config(home), _INSTALLED_KEY, feature):
@@ -295,8 +298,18 @@ def _pending(home: Path, *, say: Callable[[str], None], process_env: bool = Fals
             say(f"  ⚠ {feature.label} moved out of core into the '{feature.plugin}' plugin: its per-platform "
                 f"toolset selection could not be kept ({exc}). Check `hermes tools`"
                 + ("." if present else f" and run `{_install_command(feature.plugin, home)}`."))
+            if pending is not None:
+                pending.append(("left_core_migration", f"{_home_label(home)}: {feature.label} scope could not be preserved: {exc}"))
             continue
         if present:
+            continue
+        if policy == "defer":
+            reason = (f"{_home_label(home)}: {feature.label} migration deferred by "
+                      "updates.left_core_migration; scope preserved, plugin absent and feature off. "
+                      f"Install with `{_install_command(feature.plugin, home)}` or set the policy to auto.")
+            say(f"  ⚠ {reason}")
+            if pending is not None:
+                pending.append(("left_core_migration", reason))
             continue
         if backoff and _failed_recently(home, feature.plugin):
             logger.info("%s plugin install failed recently for %s; retrying after %ds or on `hermes update`",
@@ -304,6 +317,8 @@ def _pending(home: Path, *, say: Callable[[str], None], process_env: bool = Fals
             continue
         if catalog_source(feature.plugin) is None:
             _note_failure(home, feature.plugin)
+            if pending is not None:
+                pending.append(("left_core_migration", f"{_home_label(home)}: {feature.label} plugin absent from catalog; migration pending"))
             say(f"  ⚠ {feature.label} moved out of core into the '{feature.plugin}' plugin, which this "
                 f"Hermes cannot find in the plugin catalog yet. Run `{_install_command(feature.plugin, home)}` "
                 f"once it is listed.")
@@ -364,7 +379,8 @@ def migrate_home(home: Path, *, install: Callable[[str], dict], say: Callable[[s
     return installed
 
 
-def migrate_all_homes(*, say: Callable[[str], None] = print) -> list[str]:
+def migrate_all_homes(*, say: Callable[[str], None] = print,
+                      pending: list[tuple[str, str]] | None = None) -> list[str]:
     """``hermes update`` hook: every profile home sharing this venv. Grouped by plugin and each home's
     unattended consent like the memory migration: homes of one group share dependency answers, and a
     failure names the rest of its group in one line instead of failing them one by one."""
@@ -374,20 +390,23 @@ def migrate_all_homes(*, say: Callable[[str], None] = print) -> list[str]:
     def labelled(home: Path) -> Callable[[str], None]:
         return lambda message: say(f"  [{_home_label(home)}] {message.lstrip()}")
 
-    pending: dict[tuple[str, bool], tuple[LeftCoreFeature, list[Path]]] = {}
+    groups: dict[tuple[str, bool], tuple[LeftCoreFeature, list[Path]]] = {}
     for home in dependency_homes():
         try:
-            features = _pending(home, say=labelled(home))
+            features = _pending(home, say=labelled(home), pending=pending)
             consent = bool(features) and _home_consent(home)
         except Exception as exc:
-            logger.debug("left-core migration skipped for %s: %s", home, exc)
+            reason = f"{_home_label(home)}: Home Assistant migration could not be planned: {exc}"
+            labelled(home)(f"⚠ {reason}")
+            if pending is not None:
+                pending.append(("left_core_migration", reason))
             continue
         for feature in features:
-            pending.setdefault((feature.plugin, consent), (feature, []))[1].append(home)
+            groups.setdefault((feature.plugin, consent), (feature, []))[1].append(home)
 
     installed: list[str] = []
     try:
-        for feature, homes in pending.values():
+        for feature, homes in groups.values():
             if len(homes) > 1 and _interactive():
                 say(f"  {feature.label} is used in {len(homes)} profiles "
                     f"({', '.join(_home_label(h) for h in homes)}); your answers to its dependency "
@@ -398,12 +417,18 @@ def migrate_all_homes(*, say: Callable[[str], None] = print) -> list[str]:
                         installed.append(feature.plugin)
                         continue
                     rest = homes[index + 1:]
+                    if pending is not None:
+                        pending.extend(("left_core_migration", f"{_home_label(h)}: {feature.label} plugin installation pending") for h in [home, *rest])
                     if rest:
                         say(f"  ⚠ The '{feature.plugin}' plugin was not installed for "
                             f"{', '.join(_home_label(h) for h in rest)} either. Run "
                             + ", ".join(f"`{_install_command(feature.plugin, h)}`" for h in rest) + ".")
                     break
     except KeyboardInterrupt:
+        if pending is not None:
+            for feature, homes in groups.values():
+                pending.extend(("left_core_migration", f"{_home_label(h)}: {feature.label} migration cancelled")
+                               for h in homes if not _marked(_read_config(h), _INSTALLED_KEY, feature))
         say("  ⚠ Plugin migration cancelled. Profiles already migrated keep their plugin; run "
             "`hermes plugins install <name>` (with `-p <profile>`) for the rest.")
     return installed

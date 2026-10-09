@@ -8,7 +8,7 @@ import sys
 
 def finish_update(*, root, assume_yes, gateway_mode, pre_update_snapshot_id,
                   had_desktop_app_before_update, pre_update_version,
-                  plan, windows_resume, followups=None) -> None:
+                  plan, windows_resume, followups=None, pending=None) -> None:
     """Finish the selected checkout; never fetch, switch branches or restore a stash.
 
     Same contract as the current completion (C3): the code is committed, so a failed build,
@@ -33,7 +33,7 @@ def finish_update(*, root, assume_yes, gateway_mode, pre_update_snapshot_id,
             assume_yes=assume_yes, gateway_mode=gateway_mode,
             pre_update_snapshot_id=pre_update_snapshot_id,
             had_desktop_app_before_update=had_desktop_app_before_update,
-            pre_update_version=pre_update_version, followups=owed,
+            pre_update_version=pre_update_version, followups=owed, pending=pending,
         )
     except (Exception, SystemExit) as exc:  # health: allow BLE001 -- the code is committed; retry later
         reason = str(exc) or type(exc).__name__
@@ -147,18 +147,20 @@ def main(context: Path, result: Path) -> int:
                 except OSError as exc:  # stale dependencies still trigger the next launch's sync
                     print(f"  ⚠ Could not record the owed source-update tail: {exc}")
                 owed: list[tuple[str, str]] = []
+                pending: list[tuple[str, str]] = []
                 try:
-                    build_update_products(root, desktop=desktop)
+                    pending.extend(build_update_products(root, desktop=desktop) or [])
                 except (Exception, SystemExit) as exc:  # health: allow BLE001 -- committed code: owed, not failed
                     reason = str(exc) or type(exc).__name__
                     update_receipt.record_followup("build", reason)
                     owed.append(("build", reason))
+                    pending.extend(getattr(exc, "pending", []))
                 finish_update(
                     root=root, assume_yes=request["assume_yes"], gateway_mode=request["gateway_mode"],
                     pre_update_snapshot_id=request.get("pre_update_snapshot_id"),
                     had_desktop_app_before_update=desktop,
                     pre_update_version=request.get("pre_update_version"),
-                    plan=plan, windows_resume=token, followups=owed,
+                    plan=plan, windows_resume=token, followups=owed, pending=pending,
                 )
         code = 0
     except SystemExit as exc:

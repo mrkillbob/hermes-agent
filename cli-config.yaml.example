@@ -2201,6 +2201,11 @@ updates:
   # Disable passive CLI/banner update checks with `hermes config set updates.check false`.
   # Explicit `hermes update --check` and `hermes update` remain available.
   check: true
+  # Per-home maintenance controls; auto preserves existing update behavior.
+  # defer keeps required scope conversion but postpones catalog/install work.
+  left_core_migration: auto
+  # check-only verifies the complete database without snapshot recovery.
+  state_db_recovery: auto
   # Create a full HERMES_HOME zip before every `hermes update`.
   # Backups land in ~/.hermes/backups/ and can be restored with `hermes import`.
   # Off by default because large homes can add minutes to every update.

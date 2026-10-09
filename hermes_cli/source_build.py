@@ -116,8 +116,9 @@ def source_frontends(project_root: Path) -> tuple[str, ...]:
 class ProductBuildError(RuntimeError):
     """One or more products failed; every independent product was still attempted."""
 
-    def __init__(self, failures: list[tuple[str, BaseException]]):
+    def __init__(self, failures: list[tuple[str, BaseException]], *, pending=None):
         self.failures = failures
+        self.pending = list(pending or [])
         super().__init__("; ".join(f"{name}: {_failure_text(exc)}" for name, exc in failures))
 
 
@@ -131,7 +132,7 @@ def _headless_linux() -> bool:
     return sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
-def build_update_products(project_root: Path, *, desktop: bool) -> None:
+def build_update_products(project_root: Path, *, desktop: bool) -> list[tuple[str, str]]:
     """Prepare the selected union once, attempting every independent product.
 
     A failed product never skips the next one (a broken web build must not leave the TUI or the
@@ -143,6 +144,7 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
     from hermes_cli.update_stage import publish_stage
 
     failures: list[tuple[str, BaseException]] = []
+    pending: list[tuple[str, str]] = []
 
     def attempt(name: str, step) -> bool:
         try:
@@ -222,11 +224,14 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
     try:
         from hermes_cli.left_core_migration import migrate_all_homes as migrate_left_core
 
-        migrate_left_core()
+        migrate_left_core(pending=pending)
     except Exception as exc:  # health: allow BLE001 -- post-commit boundary: printed as ⚠, never fails the committed update; every later update/tail re-runs it
-        print(f"  ⚠ Plugin migration skipped: {exc}")
+        reason = f"Left-core plugin migration failed: {exc}"
+        print(f"  ⚠ {reason}")
+        pending.append(("left_core_migration", reason))
     if failures:
-        raise ProductBuildError(failures)
+        raise ProductBuildError(failures, pending=pending)
+    return pending
 
 
 def _build_desktop_product(project_root: Path, env: dict, publish_stage) -> None:
@@ -266,4 +271,9 @@ if __name__ == "__main__":
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--desktop", action="store_true")
     args = parser.parse_args()
-    build_update_products(args.source.resolve(), desktop=args.desktop)
+    pending = build_update_products(args.source.resolve(), desktop=args.desktop)
+    if pending:
+        from hermes_cli.maintenance_policy import report_pending
+
+        report_pending(pending, None)
+        raise SystemExit(1)

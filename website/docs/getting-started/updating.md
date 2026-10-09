@@ -292,6 +292,41 @@ without applying code, installing dependencies, or restarting gateways. The
 comparison can fetch Git metadata; it is not a promise of zero filesystem writes.
 Package-owned installs report their external update method.
 
+### Bounded maintenance
+
+Source completion normally acquires catalog plugins for selected features that moved out of core
+and can recover an unhealthy `state.db` from an existing snapshot. These per-profile settings
+make those effects explicit:
+
+```yaml
+updates:
+  left_core_migration: defer     # default: auto
+  state_db_recovery: check-only  # default: auto
+  refresh_cua_driver: false      # existing option; default: true
+```
+
+`left_core_migration: defer` preserves the feature's previous per-platform toolset scope but does
+not look up the catalog, install dependencies or enable/activate the missing plugin. The feature
+stays unavailable and completion reports a pending user action. Agent and gateway startup honor
+the same setting. Install the plugin through the normal supported command, or change the policy
+to `auto` when acquisition is authorized. Existing installed or deliberately disabled plugins
+keep their state. No installed marker is forged for a deferred plugin.
+
+`state_db_recovery: check-only` runs a full integrity check for every profile that selects it,
+including large databases, and reports unhealthy or inconclusive results. It never searches
+recovery snapshots, deletes sidecars or replaces the database. SQLite read-only verification can
+still touch WAL/SHM state; coordinate stopped writers and consistent snapshots when required.
+`auto` retains the existing recovery behavior: it may select an old valid snapshot independently
+of the current update's snapshot ID. This setting does not bind a particular recovery image.
+
+`refresh_cua_driver: false` defers the optional Cua refresh and its host setup; it does not prevent
+separate PM provisioning. Invalid maintenance policies are reported as unresolved rather than
+silently granting automatic work. Policies are read from each home's effective configuration.
+Other config, skills, cache, dependency and launcher maintenance still runs. Deferred or unhealthy
+maintenance is reported as partial, separately from finished product identity; it does not cause
+finished frontends to be rebuilt on every startup. A source/app rollback does not undo profile
+changes or host registration. These settings are not a complete adoption plan or approval grant.
+
 ### Fleet preview: `hermes update --plan`
 
 Before updating a machine that runs several profiles or services, run `hermes update --plan`. It prints the install kind, running Hermes services across profiles, their supervisors and running code versions, and the restart mechanism for each service. Manually launched `hermes serve` / `hermes dashboard` backends appear with their recorded bind endpoint, but restart is deferred to their owner; the updater does not stop or relaunch them. Image- or package-managed installs report the external update command instead. The plan is read-only and safe on a live fleet.

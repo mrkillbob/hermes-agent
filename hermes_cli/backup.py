@@ -1922,13 +1922,11 @@ def restore_cron_prompt_fields_all_profiles(
     return restored
 
 
-def _sibling_profile_homes(invoking_home: Path) -> list[tuple[str, Path]]:
-    """(name, home) for every OTHER profile on this install. Never raises.
+def _sibling_profile_homes(invoking_home: Path, *, strict: bool = False) -> list[tuple[str, Path]]:
+    """Other profile homes; strict health sweeps must surface enumeration errors.
 
-    The update's code swap and gateway fleet restart touch every profile,
-    so the pre-update snapshot must too (#66140). The invoking profile is
-    excluded — its snapshot is taken by the existing call.
-    """
+    Snapshots include every profile (#66140); the caller handles the invoking home."""
+    from hermes_cli.backup_profiles import profile_directory
     homes: list[tuple[str, Path]] = []
     try:
         from hermes_cli.profiles import (
@@ -1939,13 +1937,13 @@ def _sibling_profile_homes(invoking_home: Path) -> list[tuple[str, Path]]:
 
         invoking = invoking_home.resolve()
         default_home = _get_default_hermes_home()
-        if default_home.is_dir() and default_home.resolve() != invoking:
+        if profile_directory(default_home, strict=strict) and default_home.resolve() != invoking:
             homes.append(("default", default_home))
         root = _get_profiles_root()
-        if root.is_dir():
+        if profile_directory(root, strict=strict):
             for entry in sorted(root.iterdir()):
                 if (
-                    entry.is_dir()
+                    profile_directory(entry, strict=strict)
                     and entry.name != "default"
                     and _PROFILE_ID_RE.match(entry.name)
                     and entry.resolve() != invoking
@@ -1953,6 +1951,8 @@ def _sibling_profile_homes(invoking_home: Path) -> list[tuple[str, Path]]:
                     homes.append((entry.name, entry))
     except Exception as exc:
         logger.debug("Sibling profile enumeration failed: %s", exc)
+        if strict:
+            raise
     return homes
 
 
