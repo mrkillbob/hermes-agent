@@ -55,6 +55,7 @@ import { useDeepLinkHighlight } from '../../settings/use-deep-link-highlight'
 import { TOOLSETS_QUERY_KEY } from '../toolsets/toolsets-data'
 
 import { mergePluginPackages, type PackageKind, type PluginPackage } from './plugin-packages'
+import { scopeIsForeignConnection } from './plugin-scope'
 
 // The REAL Plugin Catalog page (docs site) embedded as a one-click picker —
 // the same pattern as the Skills tab's EmbeddedHubPicker. `?embed=picker`
@@ -270,7 +271,7 @@ function PackageRow({
   const settingsPages = useContributions(SETTINGS_PLUGINS_AREA)
   const desktopSettings = Boolean(desktop && settingsPages.some(page => page.source === `plugin:${desktop.id}`))
   const agentSettings = Boolean(agent?.key) && Boolean(agent?.settings_schema?.length)
-  const hasSettings = desktopSettings || agentSettings
+  const hasSettings = (desktopSettings || agentSettings) && !scopeIsForeignConnection(profile)
 
   const openSettings = () => {
     // A desktop page absorbs the package's schema form as a sub-page, so its
