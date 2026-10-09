@@ -23,6 +23,64 @@ from tests.pm._fixtures import _wheel, served as served
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _copy_fixture_source(source: Path) -> None:
+    for name in ("pm", "hermes_cli", "hermes_platform"):
+        shutil.copytree(ROOT / name, source / name, ignore=shutil.ignore_patterns("__pycache__"))
+    for name in ("utils.py", "hermes_constants.py", "hermes_yaml.py", "hermes_bootstrap.py", "setup-hermes.sh",
+                 "hermes_state_dbfile.py", "hermes_state_holders.py", "hermes_state_errors.py", "hermes_state_file_identity.py"):
+        shutil.copy2(ROOT / name, source / name)
+    # Include the i18n kernel and lightweight scope/media helpers needed by real maintenance;
+    # the agent runtime stays out of this small install fixture.
+    (source / "agent").mkdir()
+    for name in ("__init__.py", "jiter_preload.py", "i18n.py", "i18n_layers.py", "i18n_languages.py",
+                 "secret_scope.py", "provider_media.py"):
+        shutil.copy2(ROOT / "agent" / name, source / "agent" / name)
+    (source / "gateway").mkdir()
+    for name in ("__init__.py", "config.py", "config_loader.py", "shutdown_watchdog.py", "restart.py"):
+        shutil.copy2(ROOT / "gateway" / name, source / "gateway" / name)
+    (source / "locales").mkdir()
+    shutil.copy2(ROOT / "locales/en.yaml", source / "locales/en.yaml")
+
+
+def test_fixture_maintenance_without_agent_runtime(tmp_path):
+    """The stripped installer still performs genuine scope planning and SQLite verification."""
+    import ruamel.yaml
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _copy_fixture_source(source)
+    dependencies = tmp_path / "dependencies"
+    shutil.copytree(Path(ruamel.yaml.__file__).parents[1], dependencies / "ruamel")
+    home = tmp_path / "home"
+    home.mkdir()
+    script = """
+import sys
+sys.path[:0] = sys.argv[1:3]
+from pathlib import Path
+import sqlite3
+from hermes_cli.left_core_migration import _pending
+from hermes_cli.backup import verify_sqlite_integrity
+from hermes_state_file_identity import stat_db_file_identity
+from hermes_state_dbfile import _stat_sqlite_sidecar_identity
+home = Path(sys.argv[3])
+assert _pending(home, say=lambda message: None) == []
+db = home / 'state.db'
+with sqlite3.connect(db) as connection:
+    connection.execute('CREATE TABLE acceptance (value TEXT)')
+assert verify_sqlite_integrity(db, check_header=True, run_pragma=True)['valid']
+info = db.stat()
+expected_identity = (info.st_dev, info.st_ino) if info.st_dev and info.st_ino else None
+assert stat_db_file_identity(db) == expected_identity
+assert _stat_sqlite_sidecar_identity(db) == {}
+assert not any(name.startswith(('agent.context_compressor', 'agent.auxiliary_client',
+                                'gateway.run', 'hermes_state_common')) for name in sys.modules)
+"""
+    env = {"HOME": str(home), "HERMES_HOME": str(home), "PATH": os.environ["PATH"]}
+    result = subprocess.run([sys.executable, "-I", "-S", "-c", script, str(source), str(dependencies), str(home)],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize("fault", [None, "missing-wheel", "bad-hash"])
 def test_current_installer_publishes_real_dependencies_and_warm_path(tmp_path, served, fault):
@@ -65,17 +123,7 @@ def test_current_installer_publishes_real_dependencies_and_warm_path(tmp_path, s
     run([uv, "python", "install", "--no-bin", "--no-registry", minor])
     source = tmp_path / "fixture source"
     source.mkdir()
-    for name in ("pm", "hermes_cli", "hermes_platform"):
-        shutil.copytree(ROOT / name, source / name, ignore=shutil.ignore_patterns("__pycache__"))
-    for name in ("utils.py", "hermes_constants.py", "hermes_yaml.py", "hermes_bootstrap.py", "setup-hermes.sh"):
-        shutil.copy2(ROOT / name, source / name)
-    # The CLI's user-facing text resolves through the i18n kernel (agent.i18n + the English catalog);
-    # the rest of agent/ stays out so the tail cannot grow a dependency on the agent runtime.
-    (source / "agent").mkdir()
-    for name in ("__init__.py", "jiter_preload.py", "i18n.py", "i18n_layers.py", "i18n_languages.py"):
-        shutil.copy2(ROOT / "agent" / name, source / "agent" / name)
-    (source / "locales").mkdir()
-    shutil.copy2(ROOT / "locales/en.yaml", source / "locales/en.yaml")
+    _copy_fixture_source(source)
     wheels = source / "wheels"
     wheels.mkdir()
     _wheel(wheels, "installer_probe", "1.0")

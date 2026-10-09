@@ -10,6 +10,8 @@ import sys
 import time
 from typing import Any
 
+from hermes_state_file_identity import FTS_REBUILD_DEFERRAL_KEY, stat_db_file_identity
+
 from hermes_cli.timefmt import EPOCH_MAX, EPOCH_MIN
 from hermes_state_pidns import persistent_record_pidns_checkable, pid_namespace_id
 from agent.skill_commands import AUTO_LOAD_SCAFFOLD_SQL_LIKE, SKILL_EXCERPT_JOINT, SKILL_SCAFFOLD_SQL_LIKE, describe_skill_invocation
@@ -327,16 +329,6 @@ _FTS_OLD_INDEXED_CONTENT_SQL = _fts_indexed_content_sql("old")
 
 # Cap on user-controlled FTS5 query input before sanitizer processing.
 MAX_FTS5_QUERY_CHARS = 2_048
-
-
-def stat_db_file_identity(path) -> "tuple[int, int] | None":
-    """``(st_dev, st_ino)`` for *path*, or None.  st_ino=0 (Windows, some network FS) would false-positive
-    every replaced-file check, so it counts as unknown."""
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    return (st.st_dev, st.st_ino) if st.st_dev and st.st_ino else None
 
 
 # Row probes shared by the messages / compression mixins.
@@ -985,8 +977,6 @@ FTS_CJK_STALE_KEY = "fts_cjk_stale"
 # index before reinstalling sync triggers (rows written while they were absent leave an unknown gap).
 FTS_STALE_KEY = "fts_stale"
 
-# Durable diagnostic for stale FTS recovery blocked across process restarts.
-FTS_REBUILD_DEFERRAL_KEY = "fts_rebuild_deferral"
 
 
 # ── Legacy (v22 / inline-content) FTS DDL ──────────────────────────────
