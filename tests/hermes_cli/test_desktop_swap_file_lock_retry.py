@@ -42,9 +42,12 @@ def test_swap_retries_transient_permission_error_then_promotes(tmp_path, monkeyp
     desktop_dir, staging, live_exe, slept = _staged_over_live(tmp_path, monkeypatch)
     real_rename = os.rename
     locked = {"n": 0}
+    # Promotion replaces the outer unpacked directory; on macOS the
+    # executable sits several levels below it inside Hermes.app.
+    live_root = desktop_dir / "release" / _packaged_exe_rel().parts[0]
 
     def scanner_locked_rename(src, dst):
-        if Path(dst) == live_exe.parent and locked["n"] < 2:
+        if Path(dst) == live_root and locked["n"] < 2:
             locked["n"] += 1
             raise PermissionError(32, "being used by another process")
         return real_rename(src, dst)
@@ -55,6 +58,7 @@ def test_swap_retries_transient_permission_error_then_promotes(tmp_path, monkeyp
 
     assert promoted == live_exe
     assert live_exe.read_text(encoding="utf-8") == "new"
+    assert locked["n"] == 2
     assert len(slept) == 2  # two transient locks → two backoff sleeps before the promotion
     assert not staging.exists()
 
