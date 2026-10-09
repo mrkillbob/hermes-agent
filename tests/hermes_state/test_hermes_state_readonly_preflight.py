@@ -188,3 +188,43 @@ class TestSessionDBIntegration:
         finally:
             os.chmod(db_path, 0o644)
             hermes_state._set_last_init_error(None)
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+@pytest.mark.parametrize("inside_home", [True, False])
+def test_checkpoint_removing_sidecar_is_not_readonly(
+    hermes_home, tmp_path, monkeypatch, suffix, inside_home
+):
+    db = (hermes_home if inside_home else tmp_path) / "concurrent.db"
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    conn.execute("CREATE TABLE t (x)")
+    conn.execute("INSERT INTO t VALUES (42)")
+    conn.commit()
+    committed = conn.execute("SELECT x FROM t").fetchall()
+    sidecar = db.with_name(db.name + suffix)
+    assert sidecar.is_file()
+    real_access = os.access
+    checkpointed = False
+
+    def checkpoint_on_access(path, mode):
+        nonlocal checkpointed
+        if Path(path) == sidecar and not checkpointed:
+            # The last SQLite connection checkpoints and removes its sidecars
+            # after preflight has enumerated them, before its access check.
+            conn.close()
+            checkpointed = True
+            assert not sidecar.exists()
+        return real_access(path, mode)
+
+    monkeypatch.setattr("hermes_state_repair.os.access", checkpoint_on_access)
+    try:
+        preflight_db_writability(db)
+    finally:
+        conn.close()
+    assert checkpointed
+    reopened = sqlite3.connect(str(db))
+    try:
+        assert reopened.execute("SELECT x FROM t").fetchall() == committed
+    finally:
+        reopened.close()
