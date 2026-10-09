@@ -326,6 +326,7 @@ _UPDATE_DEPENDENCIES = (
     "hermes_cli/desktop_build_lock.py",
     "hermes_cli/memory_provider_migration.py",
     "hermes_cli/left_core_migration.py",  # source_build migrates plugins that left core
+    "hermes_cli/maintenance_policy.py",  # update recovery and source-build maintenance decisions
     "hermes_cli/web_build_limits.py",  # source_build caps the dashboard Node build
     "hermes_cli/desktop_console.py",
     "hermes_cli/bundled_app.py",
@@ -336,6 +337,8 @@ _UPDATE_DEPENDENCIES = (
     "hermes_cli/build_info.py",
     "hermes_cli/image_provenance.py",
     "hermes_cli/backup.py",  # pre-update backup
+    "hermes_cli/backup_profiles.py",  # pre-update backup's profile-directory inventory
+    "hermes_state_file_identity.py",  # backup's database probe imports the identity helper
     "hermes_cli/backup_restore.py",
     "hermes_cli/relay_plugin_migrate.py",
     "hermes_cli/macos_tcc_anchor.py",
