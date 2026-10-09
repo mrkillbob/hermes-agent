@@ -280,6 +280,33 @@ def union_with_portal_paid_recommendations(
         force_refresh=force_refresh, synthesize_free_pricing=False)
 
 
+def union_with_nous_on_sale_models(curated_ids: list[str], pricing: dict[str, dict[str, Any]]) -> list[str]:
+    """Curated list plus every paid Nous model the gateway is discounting right now, deepest
+    discount first. A sale lives only in ``/v1/models`` ``pricing.original``, so without this the
+    picker badges discounts on curated rows but never shows a discounted model the curated list and
+    Portal recommendations omit. Free rows stay with ``freeRecommendedModels``; rows the gateway
+    marks tool-less (``"tools": False``) are skipped because Hermes is tool-calling-first, and
+    image/video generation rows are skipped because they are not chat models."""
+    from math import isfinite
+
+    from hermes_cli.models_pricing import _price_float, compute_sale_discount
+
+    seen = set(curated_ids)
+    on_sale: list[tuple[int, str]] = []
+    for mid, entry in (pricing or {}).items():
+        if mid in seen or not isinstance(entry, dict) or entry.get("tools") is False or entry.get("generation"):
+            continue
+        sale = compute_sale_discount(entry.get("prompt", ""), entry.get("completion", ""), entry.get("original"))
+        # Badge percentages are rounded: a nearly-free paid row can display 100% off.
+        paid = any(
+            (rate := _price_float(entry.get(key), positive=True)) is not None and isfinite(rate)
+            for key in ("prompt", "completion")
+        )
+        if sale is not None and isinstance(entry.get("original"), dict) and paid:
+            on_sale.append((-sale[0], mid))
+    return list(curated_ids) + [mid for _, mid in sorted(on_sale)]
+
+
 # Free-tier detection cache, per profile — short so an account upgrade shows within minutes.
 _FREE_TIER_CACHE_TTL: int = 180  # seconds
 _free_tier_cache: dict[str, tuple[bool, float]] = {}  # profile key -> (result, timestamp)
@@ -454,11 +481,63 @@ def get_preferred_silent_default_model(provider: str = "openrouter") -> str:
     return PREFERRED_SILENT_DEFAULT_MODEL
 
 
+def _is_anthropic_frontier_tier(model_id: Optional[str]) -> bool:
+    """Return True for Anthropic frontier-tier models (Opus + Fable).
+
+    Both tiers are the priciest Anthropic offerings and are unsafe defaults
+    for a freshly-authenticated provider picker or any other silent fallback:
+    paid users landing on a frontier tier have no opportunity to opt out
+    before the choice pins their main model and inherits into every cron job
+    that doesn't override ``model.provider``.
+
+    Anchored on the ``claude-`` family prefix, then the ``opus-`` / ``fable-``
+    tier token (after vendor-strip and lowercase normalization), so the
+    predicate survives future Anthropic releases (``claude-opus-5-0``,
+    ``claude-fable-6``, etc.) and rejects community / distill models whose
+    slug merely *contains* the substring ``opus`` (e.g. ``qwopus3.6-27b-coder``).
+    Sonnet and Haiku are deliberately NOT classified as frontier here — they
+    remain reasonable auto-default candidates.
+    """
+    raw = _strip_vendor_prefix(str(model_id or ""))
+    base = raw.split(":")[0].lower()
+    if not base.startswith("claude-"):
+        return False
+    return ("opus-" in base) or ("fable-" in base)
+
+
 def pick_silent_default_model(model_ids: list[str], provider: str = "openrouter") -> str:
-    """Catalog-labeled default when ``model_ids`` carries it, else the first entry, else "". Used by
-    every surface that must choose a model without an interactive picker."""
+    """Pick a cost-safe silent default from an available-models list.
+
+    Shared policy for every surface that must choose a model on the user's
+    behalf without an interactive confirmation (GUI onboarding
+    recommended-default, empty-model runtime fallback, provider-set-but-
+    model-missing resolution):
+
+    1. If the catalog-labeled preferred default (see
+       :func:`get_preferred_silent_default_model`) is present in
+       ``model_ids``, return it.
+    2. Else, return the first entry that is NOT an Anthropic frontier tier
+       (Opus / Fable — see :func:`_is_anthropic_frontier_tier`). Catalog
+       ordering is preserved, so a freshly-released cheaper model still
+       wins over a leftover Sonnet.
+    3. Else (every entry is a frontier tier), return ``model_ids[0]`` so the
+       picker is never empty — defensive last resort only.
+    4. Else (empty list), return ``\"\"``.
+
+    This hardened fallback closes the hole where a Portal-augmented list
+    that didn't carry the catalog label fell through to ``model_ids[0]``
+    (currently ``anthropic/claude-fable-5``) and billed the most expensive
+    Anthropic flagship for traffic the user never opted into.
+    """
+    if not model_ids:
+        return ""
     preferred = get_preferred_silent_default_model(provider)
-    return preferred if preferred in model_ids else (model_ids[0] if model_ids else "")
+    if preferred in model_ids:
+        return preferred
+    non_frontier = [mid for mid in model_ids if not _is_anthropic_frontier_tier(mid)]
+    if non_frontier:
+        return non_frontier[0]
+    return model_ids[0]
 
 
 def recommended_nous_default_model() -> dict[str, Any]:
@@ -753,8 +832,8 @@ def _provider_has_credentials(pid: str) -> bool:
 
 
 def list_available_providers() -> list[dict[str, str]]:
-    """``{id, label, aliases, authenticated}`` for every provider usable with ``provider:model``,
-    derived from :data:`CANONICAL_PROVIDERS` (shared with ``hermes model`` and ``/model``)."""
+    """``{id, label, aliases, authenticated}`` per listed provider (shared with ``hermes model`` / ``/model``)."""
+    from hermes_cli.models_catalog_static import listed_canonical_providers
     aliases_for: dict[str, list[str]] = {}
     for alias, canonical in _PROVIDER_ALIASES.items():
         aliases_for.setdefault(canonical, []).append(alias)
@@ -764,7 +843,7 @@ def list_available_providers() -> list[dict[str, str]]:
             "label": _PROVIDER_LABELS.get(pid, pid),
             "aliases": aliases_for.get(pid, []),
             "authenticated": _provider_has_credentials(pid)}
-        for pid in [p.slug for p in CANONICAL_PROVIDERS] + ["custom"]]
+        for pid in [p.slug for p in listed_canonical_providers()] + ["custom"]]
 
 
 def parse_model_input(
@@ -1674,19 +1753,19 @@ def _configured_relay_base_url(provider: str) -> str:
     base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
     if not base_url:
         return ""
-    # A base_url equal to the provider's own endpoint is not a relay (setup persists canonical
-    # URLs too): keep native discovery, which OAuth providers such as Codex need because the
-    # generic relay probe only speaks api_key. Profiles cover providers PROVIDER_REGISTRY lacks
-    # (OpenRouter).
+    # A base_url equal to the provider's own endpoint (the profile's or the registry row's: TokenHub's
+    # profile leaves it empty; OpenRouter has no registry row) is not a relay: setup persists
+    # canonical URLs, and OAuth providers (Codex) need native discovery.
     try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
         from providers import get_provider_profile
 
-        canonical = getattr(get_provider_profile(normalized), "base_url", "") or ""
+        profile_url = getattr(get_provider_profile(normalized), "base_url", "")
+        registry_url = getattr(PROVIDER_REGISTRY.get(normalized), "inference_base_url", "")
+        canonical = {normalize_route_base_url(u) for u in (profile_url, registry_url) if u}
     except Exception:
         return base_url  # lookup failed: stay a relay, never widening where credentials go
-    if canonical and normalize_route_base_url(base_url) == normalize_route_base_url(canonical):
-        return ""
-    return base_url
+    return "" if normalize_route_base_url(base_url) in canonical else base_url
 
 
 def _relay_model_catalog(normalized: str, relay: str) -> Optional[list[str]]:
@@ -2797,40 +2876,9 @@ def _fetch_ai_gateway_models(timeout: float = 5.0) -> Optional[list[str]]:
         return None
 
 
-def fetch_api_models(
-    api_key: Optional[str], base_url: Optional[str], timeout: float = 5.0,
-    api_mode: Optional[str] = None, headers: Optional[dict[str, str]] = None,
-) -> Optional[list[str]]:
-    """Fetch the list of available model IDs from the provider's ``/models`` endpoint."""
-    result = probe_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode, request_headers=headers)
-    return result.get("models")
-
-
-def _custom_endpoint_fingerprint(
-    api_key: Any, api_mode: Optional[str], headers: Optional[dict[str, str]]) -> str:
-    """Custom endpoints have no ``PROVIDER_REGISTRY`` slug, so hash exactly what callers pass to
-    :func:`fetch_api_models`: a rotated ``api_key``, changed ``api_mode`` or edited ``extra_headers``
-    each bust the cache entry. blake2b for the same CodeQL rationale as ``_credential_fingerprint``."""
-    import hashlib
-
-    from agent.command_token_source import CommandTokenSource
-    identity = api_key.cache_identity if isinstance(api_key, CommandTokenSource) else api_key
-    blob = "|".join((identity or "", api_mode or "", json.dumps(headers or {}, sort_keys=True)))
-    return hashlib.blake2b(blob.encode("utf-8", errors="replace"), digest_size=8).hexdigest()
-
-
-def _cache_entry_valid(
-    entry: Any, fp: str, *, allow_empty: bool = False) -> "TypeGuard[dict[str, Any]]":
-    """Well-formed cache row for fingerprint *fp*. Requires a numeric ``at`` so corrupt disk state
-    degrades to a cache miss instead of raising; empty model lists are valid only when the caller
-    opts into an authoritative empty catalog."""
-    return (
-        isinstance(entry, dict)
-        and entry.get("fp") == fp
-        and isinstance(entry.get("models"), list)
-        and (allow_empty or bool(entry["models"]))
-        and isinstance(entry.get("at"), (int, float))
-        and not isinstance(entry.get("at"), bool))
+from hermes_cli.models_custom_cache import (
+    fetch_api_models, _custom_endpoint_fingerprint, _cache_entry_valid,
+)
 
 
 def _disk_serve_tier(entry: Any, fp: str, now: float, *, is_ollama: bool,
@@ -2860,70 +2908,9 @@ def cached_fetch_api_models(
     force_refresh: bool = False, cache_only: bool = False,
     fetch_models=None,
     ttl_seconds: int = _PROVIDER_MODELS_CACHE_TTL) -> Optional[list[str]]:
-    """Disk-cached :func:`fetch_api_models` for custom endpoints. ``cache_only`` callers (GUI picker
-    opens that must not block on a stopped local endpoint) still get a warm catalog instead of
-    collapsing to the config-declared subset. ``fetch_models`` supplies native-aware discovery
-    without minting a command token before cache admission."""
-    from hermes_cli.model_switch_providers import _NativePickerModelList
-
-    def _catalog(entry):
-        rows = (_NativePickerModelList if entry.get("native_catalog") else list)(entry["models"])
-        return _chat_catalog_rows(rows)
-
-    def _entry(live, at=None):
-        return {**_cache_entry(fp, live, at), "native_catalog": isinstance(live, _NativePickerModelList)}
-
-    def _live():
-        if fetch_models is not None:
-            return fetch_models()
-        from agent.command_token_source import materialize_probe_api_key
-        return fetch_api_models(materialize_probe_api_key(api_key), base_url, timeout=timeout, api_mode=api_mode, headers=headers)
-
-    normalized_url = str(base_url or "").strip().rstrip("/").lower()
-    if not normalized_url:  # nothing to key the cache on
-        return None if cache_only else _chat_catalog_rows(_live())
-
-    # Key on URL AND credential fingerprint: N ``custom_providers`` rows can share one proxy URL
-    # with distinct keys (#106184). A URL-only key let the last probe overwrite its siblings'
-    # slot, so every other same-URL row failed the fingerprint check, got an empty catalog and
-    # vanished from the no-probe pickers.
-    fp = _custom_endpoint_fingerprint(api_key, api_mode, headers)
-    cache_key = f"custom:{normalized_url}#{fp}"
-    cache = _load_provider_models_cache()
-    entry = cache.get(cache_key)
-    now = time.time()
-    native_row = isinstance(entry, dict) and entry.get("native_catalog") is True
-    valid = not force_refresh and _cache_entry_valid(entry, fp, allow_empty=native_row)
-
-    if valid:
-        age = now - entry["at"]
-        if age < ttl_seconds:
-            return _catalog(entry)
-        # An empty native catalog is authoritative only inside the TTL (as in
-        # cached_provider_model_ids): never stale-serve it, or an Ollama that was model-less at
-        # first open keeps an empty row for the whole stale window after models are pulled.
-        if entry["models"] and age < _PROVIDER_MODELS_STALE_SERVE_MAX:
-            # Stale-while-revalidate: serve now, refresh off-thread for the next open. cache_only
-            # opens (GUI pickers that must not block on a stopped local server) take the same
-            # non-blocking refresh: without it a locally loaded model stayed invisible for the
-            # whole 7-day stale window unless the user found "Refresh Models" (#71169 class).
-            def _refresh_custom():
-                live = _live()
-                return _entry(live) if live or isinstance(live, _NativePickerModelList) else None
-
-            _spawn_swr_refresh(cache_key, _refresh_custom)
-            return _catalog(entry)
-
-    if cache_only:
-        return None
-
-    live = _live()
-    if live or isinstance(live, _NativePickerModelList):
-        stored = _entry(live, now)
-        _store_cache_entry(cache_key, stored, cache)
-        return _catalog(stored)
-    # Live returned nothing (offline, timeout, auth hiccup): a stale same-fingerprint entry beats it
-    # (non-empty only: an empty native row is not worth resurrecting over the generic fallback).
-    if _cache_entry_valid(entry, fp):
-        return _catalog(entry)
-    return _chat_catalog_rows(live)
+    """Disk-cached custom model discovery; keep the public defaults and patch surface here."""
+    from hermes_cli.models_custom_cache import _cached_fetch_api_models
+    return _cached_fetch_api_models(
+        api_key, base_url, timeout=timeout, api_mode=api_mode, headers=headers,
+        force_refresh=force_refresh, cache_only=cache_only, fetch_models=fetch_models,
+        ttl_seconds=ttl_seconds)

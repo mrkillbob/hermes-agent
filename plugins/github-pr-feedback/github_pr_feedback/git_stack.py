@@ -30,7 +30,8 @@ class GitStackRunner:
     def _run(self, *args: str) -> GitEvidence:
         argv = ("git", "-C", str(self.repository), *args)
         result = subprocess.run(
-            argv, check=False, capture_output=True, text=True, env=self._environment
+            argv, stdin=subprocess.DEVNULL, check=False, capture_output=True,
+            text=True, env=self._environment
         )
         evidence = GitEvidence(argv, result.returncode, result.stdout, result.stderr)
         if result.returncode:

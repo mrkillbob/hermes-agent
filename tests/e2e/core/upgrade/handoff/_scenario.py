@@ -192,12 +192,17 @@ def cron_failure(inst: X.Install, name: str, job: dict | None) -> str:
     """Why the job's run failed, as the scheduler logged it ('' when nothing failed)."""
     if job and job.get("last_error"):
         return str(job["last_error"])
-    pat = re.compile(rf"Job '{re.escape(name)}' failed: (.+)")
+    patterns = [re.compile(rf"Job '{re.escape(name)}' failed: (.+)")]
+    if job and job.get("id"):
+        job_id = re.escape(str(job["id"]))
+        patterns.append(re.compile(
+            rf"(?:Error processing job|Failed to record interrupted run for job) {job_id}: (.+)"))
     for log in (inst.root / "gateway.log", inst.hermes_home / "logs" / "gateway.log",
                 inst.hermes_home / "logs" / "errors.log"):
-        m = pat.search(log.read_text(errors="replace")) if log.exists() else None
-        if m:
-            return m.group(1).strip()
+        text = log.read_text(errors="replace") if log.exists() else ""
+        for pattern in patterns:
+            if m := pattern.search(text):
+                return m.group(1).strip()
     return ""
 
 
@@ -453,7 +458,10 @@ class HandoffProperties:
             f"the new code cannot read the job back:\n{H.describe(o.cron_list)}\n{o.diag}")
         if o.cron_job_after is not None:  # a spent one-shot may be dropped; a kept one records its run
             job = o.cron_job_after
-            assert job.get("last_run_at") and job.get("last_status") == "ok", f"bookkeeping lost: {job}\n{o.diag}"
+            # N-1 can reach the provider before its old scheduler fails loading completion code.
+            with known_gate(CRON_GATES, o.column):
+                assert job.get("last_run_at") and job.get("last_status") == "ok", (
+                    f"bookkeeping lost: {job}; {cron_verdict(o)}\n{o.diag}")
 
     def test_kanban_inflight_worker_finishes_once_and_new_workers_import(self, fleet):
         o = fleet
@@ -489,9 +497,10 @@ def dashboard_verdict(o) -> str:
 
 
 def cron_verdict(o) -> str:
-    """How many times the job due mid-update reached the provider, and why not when it never did."""
+    """Provider calls and job-scoped import failures during dispatch or completion."""
     n = len(o.cron_calls)
-    if n == 0 and _IMPORT_ERR.search(o.cron_error or ""):
+    if n <= 1 and _IMPORT_ERR.search(o.cron_error or ""):
+        stage = "it never reached the provider" if n == 0 else "it reached the provider once but completion failed"
         return (f"the job due mid-update fired into the update swap window and failed importing "
-                f"({o.cron_error[:240]}); it never reached the provider")
+                f"({o.cron_error[:240]}); {stage}")
     return f"the job due mid-update ran {n} times" + (f" (last error: {o.cron_error[:240]})" if o.cron_error else "")

@@ -1004,7 +1004,23 @@ function Invoke-PhaseInstallGui {
 
     # AHK script + button templates side by side (ImageSearch resolves
     # relative to the script dir).
-    Copy-Item -Path (Join-Path $AssetsDir "install-and-launch.ahk"), (Join-Path $AssetsDir "install-button.png"), (Join-Path $AssetsDir "launch-button.png") -Destination $AhkDir -Force
+    Copy-Item -Path (Join-Path $AssetsDir "install-and-launch.ahk"), (Join-Path $AssetsDir "bootstrap-log-state.ahk"), (Join-Path $AssetsDir "bootstrap-log-state.test.ahk"), (Join-Path $AssetsDir "install-button.png"), (Join-Path $AssetsDir "launch-button.png") -Destination $AhkDir -Force
+    # Exercise the same fail-fast reader before the real headed installation.
+    $logStateScript = Join-Path $AhkDir "bootstrap-log-state.test.ahk"
+    $logStateFixture = Join-Path $proof "log-state-fixture"
+    $logStateArguments = '/ErrorStdOut "{0}" "{1}"' -f $logStateScript, $logStateFixture
+    $logStateTest = Start-Process -FilePath $ahkExe -ArgumentList $logStateArguments `
+        -RedirectStandardOutput (Join-Path $proof "log-state-stdout.log") `
+        -RedirectStandardError (Join-Path $proof "log-state-stderr.log") -PassThru
+    # Cache the native handle before waiting: redirected Start-Process in Windows
+    # PowerShell can otherwise lose ExitCode (PowerShell/PowerShell#5421).
+    $null = $logStateTest.Handle
+    if (-not $logStateTest.WaitForExit(30000)) {
+        Stop-Process -Id $logStateTest.Id -Force -ErrorAction SilentlyContinue
+        throw "bootstrap log state regression did not finish within 30 seconds"
+    }
+    $logStateExitCode = $logStateTest.ExitCode
+    Assert-True ($null -ne $logStateExitCode -and $logStateExitCode -eq 0) "bootstrap log state regression passed (exit code: $logStateExitCode)"
 
     $env:HERMES_HOME = $HermesHome
     New-Item -ItemType Directory -Path $HermesHome -Force | Out-Null
@@ -1013,6 +1029,13 @@ function Invoke-PhaseInstallGui {
     $ahkLog = Join-Path $proof "ahk.log"
     try {
         Save-DesktopScreenshot (Join-Path $proof "00-before-installer.png")
+
+        # This home belongs to this E2E arm. Preserve prior evidence before
+        # launch: neither an earlier complete nor FAILED line decides this attempt.
+        $bootLog = Join-Path $HermesHome "logs\bootstrap-installer.log"
+        if (Test-Path -LiteralPath $bootLog) {
+            Move-Item -LiteralPath $bootLog -Destination (Join-Path $proof "bootstrap-prior-attempt.log") -Force
+        }
 
         # Launch the real headed installer. Scope the paired script source to
         # this process only so later product launches cannot inherit it.

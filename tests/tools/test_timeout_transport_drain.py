@@ -185,7 +185,7 @@ def test_agent_drain_shuts_sockets_down_without_fd_release(monkeypatch):
     agent._codex_session = None
     agent._active_request_abort = None
 
-    import agent.agent_runtime_helpers as arh
+    import agent.agent_runtime_helpers_connections as arh
 
     monkeypatch.setattr(arh, "_iter_pool_sockets", lambda _c: iter([sock]))
 

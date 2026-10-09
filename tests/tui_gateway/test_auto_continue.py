@@ -409,6 +409,34 @@ def test_hosted_room_marker_is_left_to_the_driver(schedule_env, marker_home):
     assert read_turn_marker(marker_home, "session-key") is not None
 
 
+@pytest.fixture()
+def unseen_intro(monkeypatch):
+    """An onboarding-enabled install whose desktop intro has not been seen yet."""
+    import hermes_cli.setup_profile as setup_profile
+    monkeypatch.setattr(setup_profile, "onboarding_eligible", lambda: True)
+    monkeypatch.setattr(setup_profile, "read_state", lambda: {"intro": "unseen"})
+
+
+def test_desktop_setup_turn_is_left_to_the_intro(schedule_env, marker_home, unseen_intro):
+    record_turn_start(marker_home, "session-key", "[/initiate-setup]\nset me up")
+
+    result = server._maybe_schedule_auto_continue("sid", _session(source="desktop"), "session-key")
+
+    assert result is None
+    assert not schedule_env
+    assert read_turn_marker(marker_home, "session-key") is None
+
+
+def test_tui_setup_turn_still_auto_continues(emits, schedule_env, marker_home, unseen_intro):
+    record_turn_start(marker_home, "session-key", "[/initiate-setup]\nset me up")
+
+    result = server._maybe_schedule_auto_continue("sid", _session(source="tui"), "session-key")
+
+    assert result is not None
+    (text, _kwargs), = schedule_env
+    assert "[/initiate-setup]" in text
+
+
 def test_stale_marker_is_cleared_not_continued(schedule_env, marker_home, monkeypatch):
     record_turn_start(marker_home, "session-key", "old prompt")
     monkeypatch.setattr(
@@ -534,7 +562,7 @@ from pathlib import Path
 from tui_gateway.turn_marker import record_turn_start
 
 home = Path(sys.argv[1])
-record_turn_start(home, "session-key", "interrupted prompt")
+record_turn_start(home, "session-key", sys.argv[2])
 print(f"ready {os.getpid()}", flush=True)
 # Linger until the test drops a sentinel. Self-exit, not terminate(): a venv
 # python.exe on Windows re-execs the real interpreter, so Popen.pid is the
@@ -565,18 +593,22 @@ def test_marker_writer_state_rejects_a_recycled_pid():
     ) != "alive"
 
 
-def test_second_backend_defers_to_a_live_marker_writer(emits, schedule_env, marker_home):
+@pytest.mark.parametrize("intro_turn", [False, True], ids=["ordinary-turn", "desktop-intro"])
+def test_second_backend_defers_to_a_live_marker_writer(
+    emits, schedule_env, marker_home, unseen_intro, intro_turn
+):
     """Two backends, one HERMES_HOME, one session: A is mid-turn (alive writer)
 
     B resumes S and must read the marker as ownership evidence, not crash
     evidence — no continuation, no misleading "Resuming interrupted turn…"
     frame, no duplicate turn, and A's marker left for A to clear. Once A is
-    really gone the same call does schedule, so the live-writer gate is what
-    held B back and not some other switch.
+    really gone an ordinary turn schedules, while the desktop intro owns
+    recovery of its setup turn and may then clear the marker.
     """
+    prompt = "[/initiate-setup]\nset me up" if intro_turn else "interrupted prompt"
     repo_root = Path(server.__file__).resolve().parents[1]
     child = subprocess.Popen(
-        [sys.executable, "-c", _CHILD_WRITER, str(marker_home)],
+        [sys.executable, "-c", _CHILD_WRITER, str(marker_home), prompt],
         cwd=str(repo_root),
         env={**os.environ, "PYTHONPATH": str(repo_root)},
         stdout=subprocess.PIPE,
@@ -597,12 +629,12 @@ def test_second_backend_defers_to_a_live_marker_writer(emits, schedule_env, mark
         assert written["writer_pid"] == writer_pid
         assert marker_writer_state(written) == "alive"
 
-        session = _session()
+        session = _session(source="desktop")
         assert server._maybe_schedule_auto_continue("sid", session, "session-key") is None
         assert not schedule_env  # nothing queued behind the live writer
         assert session.get("_auto_continue_scheduled") is None  # not even claimed
         assert not [e for e in emits if e[0] in ("status.update", "message.start")]
-        assert read_turn_marker(marker_home, "session-key") is not None  # A's marker intact
+        assert read_turn_marker(marker_home, "session-key") == written  # A's marker intact
 
         child.terminate()  # the launcher; the real writer exits on the sentinel below
         child.wait(timeout=10)
@@ -616,8 +648,14 @@ def test_second_backend_defers_to_a_live_marker_writer(emits, schedule_env, mark
             f"writer pid {writer_pid} (child pid {child.pid}) still reads live"
         )
 
-        assert server._maybe_schedule_auto_continue("sid", _session(), "session-key") is not None
-        assert len(schedule_env) == 1
+        result = server._maybe_schedule_auto_continue("sid", _session(source="desktop"), "session-key")
+        if intro_turn:
+            assert result is None
+            assert not schedule_env
+            assert read_turn_marker(marker_home, "session-key") is None
+        else:
+            assert result is not None
+            assert len(schedule_env) == 1
     finally:
         (marker_home / "writer-exit").touch()  # release the child even on an early failure
         if child.poll() is None:

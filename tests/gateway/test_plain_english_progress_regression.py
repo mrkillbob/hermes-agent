@@ -27,7 +27,7 @@ def test_plain_english_plural_burndown_question_summarizes_all_matching_roots(
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     board = "exampleproject-burndown"
-    kb.init_db(board=board)
+    kb.create_board(board)
     with _hermes_cli_kanban_db_connect.connect(board=board) as conn:
         first = kb.create_task(
             conn,
@@ -77,7 +77,7 @@ def test_plain_english_spaced_burn_downs_matches_burndown_workstream(
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     board = "exampleproject-burndown"
-    kb.init_db(board=board)
+    kb.create_board(board)
     with _hermes_cli_kanban_db_connect.connect(board=board) as conn:
         task_id = kb.create_task(
             conn,
@@ -127,7 +127,7 @@ def test_multiple_progress_roots_remain_available_when_vault_enrichment_is_enabl
     )
     monkeypatch.setenv("HERMES_HOME", str(home))
     board = "exampleproject-burndown"
-    kb.init_db(board=board)
+    kb.create_board(board)
     with _hermes_cli_kanban_db_connect.connect(board=board) as conn:
         for title in ("July exception burndowns", "August exception burndowns"):
             task_id = kb.create_task(

@@ -49,7 +49,8 @@ _TEMPLATE_IDS = {
 
 def _git(root: Path, *args: str) -> str:
     return subprocess.check_output(
-        ["git", "-C", str(root), *args], text=True, stderr=subprocess.DEVNULL
+        ["git", "-C", str(root), *args], stdin=subprocess.DEVNULL,
+        text=True, stderr=subprocess.DEVNULL
     ).strip()
 
 
@@ -173,6 +174,7 @@ def _run_reproduction(root: Path, packet: dict) -> dict:
             try:
                 result = subprocess.run(
                     _argv(packet),
+                    stdin=subprocess.DEVNULL,
                     cwd=root,
                     env=env,
                     stdout=output,
