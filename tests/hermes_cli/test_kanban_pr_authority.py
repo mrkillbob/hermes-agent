@@ -36,7 +36,12 @@ def _repair_body() -> str:
     )
 
 
-def test_create_rejects_read_only_owner_for_atomic_pr_repair(kanban_home):
+@pytest.mark.parametrize("intent", ["typed_write", "read_title_write", "read_body_write",
+                                   "read_metadata_write", "read_only", "read_unknown_write",
+                                   "read_prohibition", "read_target", "read_mixed",
+                                   "read_prohibition_multiline", "read_target_multiline",
+                                   "read_metadata_write_multiline"])
+def test_create_rejects_read_only_owner_for_atomic_pr_repair(kanban_home, intent):
     import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     _write_profile(
         kanban_home,
@@ -44,14 +49,40 @@ def test_create_rejects_read_only_owner_for_atomic_pr_repair(kanban_home):
         "Read-only verifier; never edits, pushes, replies, refreshes, or merges.",
     )
 
-    with _hermes_cli_kanban_db_connect.connect() as conn, pytest.raises(ValueError, match="read-only profile"):
-        kb.create_task(
-            conn,
-            title="Repair and push ExampleApp PR #132",
-            body=_repair_body(),
-            assignee="review-verification-steward",
-            idempotency_key="github-pr-feedback:repair:132:abc",
-        )
+    payload = json.loads(_repair_body())
+    title = "Repair and push ExampleApp PR #132"
+    if intent != "typed_write":
+        payload["action"] = "verify_ci_receipt"
+        title = "Review exact-head CI evidence for PR #132"
+    if intent in {"read_title_write", "read_unknown_write"}:
+        title = "Repair and push ExampleApp PR #132"
+    if intent == "read_prohibition":
+        payload["instructions"] = "Review only. Do not push or reply."
+    if intent == "read_prohibition_multiline":
+        payload["instructions"] = "Review only.\nDo not push or reply."
+    if intent == "read_target_multiline":
+        payload["instructions"] = "Read only.\nReview the proposed fix."
+    if intent == "read_metadata_write_multiline":
+        payload["instructions"] = "Review the evidence.\nFix the repository."
+    if intent in {"read_target", "read_mixed"}:
+        title = "Review the proposed fix" + (" then push the repository" if intent == "read_mixed" else "")
+    if intent == "read_metadata_write":
+        payload["instructions"] = "Repair and push the repository."
+    body = json.dumps(payload)
+    if intent == "read_body_write":
+        body = "Repair and push the repository.\n" + body
+    owner = "unknown-steward" if intent == "read_unknown_write" else "review-verification-steward"
+    with _hermes_cli_kanban_db_connect.connect() as conn:
+        if intent in {"read_only", "read_prohibition", "read_target",
+                      "read_prohibition_multiline", "read_target_multiline"}:
+            tid = kb.create_task(conn, title=title, body=body, assignee=owner,
+                                 idempotency_key="github-pr-feedback:review:132:abc")
+            assert kb.get_task(conn, tid).assignee == owner
+        else:
+            with pytest.raises(ValueError, match="read-only profile|cannot verify write authority"):
+                kb.create_task(conn, title=title, body=body, assignee=owner,
+                               idempotency_key="github-pr-feedback:repair:132:abc")
+
 
 
 def test_reassign_rejects_read_only_owner_and_preserves_current_owner(kanban_home):
@@ -288,7 +319,8 @@ def test_specification_retains_exact_identity_and_effective_authority(kanban_hom
 
 @pytest.mark.parametrize("entrypoint", ["facade", "graph"])
 @pytest.mark.parametrize("body", [_repair_body(), _repair_body().replace(
-    "repair_and_push", "verify_ci_receipt"), "Ordinary work."])
+    "repair_and_push", "verify_ci_receipt"), "Ordinary work.",
+    "child_read_title_write", "child_read_body_write", "child_read_metadata_write", "child_read_only"])
 def test_decomposition_cannot_split_atomic_root_or_write_child(kanban_home, entrypoint, body):
     from hermes_cli.kanban_db_connect import connect
     from hermes_cli.kanban_db_graph import decompose_triage_task
@@ -301,14 +333,26 @@ def test_decomposition_cannot_split_atomic_root_or_write_child(kanban_home, entr
     (reader / "profile.yaml").write_text("execution_authority: read_only\n")
     decompose = kb.decompose_triage_task if entrypoint == "facade" else decompose_triage_task
     with connect() as conn:
-        tid = kb.create_task(conn, title="Root scope", body=body, assignee="writer", triage=True)
+        root_body = "Ordinary work." if body.startswith("child_read_") else body
+        tid = kb.create_task(conn, title="Root scope", body=root_body, assignee="writer", triage=True)
         before = {
             table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")]
             for table in ("tasks", "task_links", "task_events", "task_comments")
         }
         children = [{"title": "Child", "body": "Ordinary work.", "assignee": "reader"}]
-        if body != "Ordinary work.":
-            with pytest.raises(ValueError, match="atomic PR automation"):
+        if body.startswith("child_read_"):
+            payload = json.loads(_repair_body())
+            payload["action"] = "verify_ci_receipt"
+            if body == "child_read_metadata_write":
+                payload["instructions"] = "Repair and push the repository."
+            child_body = json.dumps(payload)
+            if body == "child_read_body_write":
+                child_body = "Repair and push the repository.\n" + child_body
+            children = [{"title": "Repair and push the repository." if body == "child_read_title_write"
+                         else "Review exact-head CI evidence", "body": child_body, "assignee": "reader"}]
+        if root_body != "Ordinary work." or body.startswith("child_read_") and body != "child_read_only":
+            expected_error = "atomic PR automation" if root_body != "Ordinary work." else "read-only profile"
+            with pytest.raises(ValueError, match=expected_error):
                 decompose(conn, tid, root_assignee="reader", children=children,
                           author="decomposer", auto_promote=False)
         else:
@@ -321,7 +365,7 @@ def test_decomposition_cannot_split_atomic_root_or_write_child(kanban_home, entr
             table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")]
             for table in before
         } == before
-        if body == "Ordinary work.":
+        if body in {"Ordinary work.", "child_read_only"}:
             child_ids = decompose(conn, tid, root_assignee="writer", children=children,
                                   author="decomposer", auto_promote=False)
             assert len(child_ids) == len(children)

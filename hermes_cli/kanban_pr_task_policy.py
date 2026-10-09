@@ -13,6 +13,55 @@ _PR_READ_ONLY_ACTIONS = frozenset({
     "review_mergeability", "inspect_merge_conflicts", "read_credit_metadata",
 })
 
+_PR_WRITE_ACTION_RE = re.compile(
+    r"\b(?:repair|fix|push|reply|respond|base[-_ ]?refresh|"
+    r"refresh(?:ing)?\s+(?:the\s+)?base|resolve(?:d|s|ing)?\s+(?:a\s+)?merge\s+conflict)\b",
+    re.IGNORECASE,
+)
+_PR_PROHIBITED_WRITE_RE = re.compile(
+    r"\b(?:do\s+not|don['’]t|never|must\s+not|should\s+not)\s+"
+    r"(?:edit|repair|fix|push|reply|respond|approve|merge)\b"
+    r"(?:\s*(?:,\s*(?:(?:and|or)\s+)?|(?:and|or)\s+)"
+    r"(?:edit|repair|fix|push|reply|respond|approve|merge)\b)*",
+    re.IGNORECASE,
+)
+_PR_READ_TARGET_RE = re.compile(
+    r"\b(?:review|verify|inspect|audit|check|read)\s+"
+    r"(?:(?:the|a|an|proposed|previous|existing|failed|planned|attempted|recorded|blocked)\s+)*"
+    r"(?:fix|repair|push|reply|response|base[-_ ]?refresh)\b",
+    re.IGNORECASE,
+)
+
+
+def _pr_task_has_text_write_intent(payload: Mapping[str, Any], body: Optional[str], title: str) -> bool:
+    # Validated identity fields and the typed action are data, not prose requests.
+    prose_payload = {key: value for key, value in payload.items()
+                     if key not in {"repository", "pr_number", "expected_head_sha", "action"}}
+    try:
+        json.loads(body or "")
+        prefix = ""
+    except (TypeError, ValueError):
+        prefix = (body or "").rstrip().rsplit("\n", 1)[0]
+    # Scan decoded prose so JSON escapes cannot hide normal word boundaries.
+    parts = [title, prefix]
+    pending = [prose_payload]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, Mapping):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    text = "\n".join(parts)
+    # Keep cooperative prohibitions and read targets distinct from write requests.
+    # A later affirmative request in the same card still demands a write owner.
+    text = _PR_PROHIBITED_WRITE_RE.sub("", text)
+    text = _PR_READ_TARGET_RE.sub("", text)
+    return _PR_WRITE_ACTION_RE.search(text) is not None
+
+
 def _pr_task_payload(body: Optional[str]) -> Optional[dict[str, Any]]:
     try:
         payload = json.loads(body or "")
@@ -44,7 +93,7 @@ def _validate_exact_pr_identity(payload: Mapping[str, Any]) -> None:
         )
 
 
-def classify_pr_task(body: Optional[str]) -> Optional[str]:
+def classify_pr_task(body: Optional[str], *, title: str = "") -> Optional[str]:
     payload = _pr_task_payload(body)
     if payload is None or "pr_number" not in payload:
         return None
@@ -58,7 +107,10 @@ def classify_pr_task(body: Optional[str]) -> Optional[str]:
         except (TypeError, ValueError):
             return None
         return "write"
-    return "read" if action.strip().casefold() in _PR_READ_ONLY_ACTIONS else "write"
+    return "read" if (
+        action.strip().casefold() in _PR_READ_ONLY_ACTIONS
+        and not _pr_task_has_text_write_intent(payload, body, title)
+    ) else "write"
 
 
 def _canonical_pr_task_identity(body: Optional[str]) -> tuple[object, ...] | None:

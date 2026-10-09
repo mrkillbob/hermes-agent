@@ -103,11 +103,7 @@ _RESEARCH_LAB_INTAKE_IDEMPOTENCY_RE = re.compile(
     r"^research-lab-intake-[0-9]{8}-[1-9][0-9]*$"
 )
 _EXACT_HEAD_PR_MARKERS = ("expected_head_sha", "pr_number", "repository")
-_PR_WRITE_ACTION_RE = re.compile(
-    r"\b(?:repair|fix|push|reply|respond|base[-_ ]?refresh|"
-    r"refresh(?:ing)?\s+(?:the\s+)?base|resolve(?:d|s|ing)?\s+(?:a\s+)?merge\s+conflict)\b",
-    re.IGNORECASE,
-)
+
 
 
 def is_atomic_pr_automation_task(*, body: Optional[str], idempotency_key: Optional[str]) -> bool:
@@ -132,9 +128,9 @@ def is_governed_research_intake(*, idempotency_key: Optional[str]) -> bool:
 def _task_requires_pr_write_authority(
     *, title: str, body: Optional[str], idempotency_key: Optional[str]
 ) -> bool:
-    from hermes_cli.kanban_pr_task_policy import classify_pr_task
+    from hermes_cli.kanban_pr_task_policy import _PR_WRITE_ACTION_RE, classify_pr_task
 
-    classification = classify_pr_task(body)
+    classification = classify_pr_task(body, title=title)
     if classification is not None:
         return classification == "write"
     if not is_atomic_pr_automation_task(body=body, idempotency_key=idempotency_key):
@@ -192,7 +188,7 @@ def _validate_pr_task_assignee_authority(
         raise ValueError(
             f"read-only profile {assignee!r} cannot own PR repair, push, reply, or base-refresh work"
         )
-    if status is None and classify_pr_task(body) == "write":
+    if status is None and classify_pr_task(body) is not None:
         raise ValueError(f"cannot verify write authority for profile {assignee!r}")
 
 
