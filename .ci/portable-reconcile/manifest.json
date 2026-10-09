@@ -61,5 +61,6 @@
   "website/docs/user-guide/configuration.md": "fb5e657fa7c525af37a944e1d0a96f01447ee6391e4d1a5b851e6debf023133e",
   "pyproject.toml": "cadde2f6a92574d292103f43abf66408b1d841cd9ea332ca7f3e3dfc5dcc87fd",
   "uv.lock": "2bc4db483e9cba927cd7147f9ccbb09635f85bb3f1f36d6e9d51d06b65d1c67e",
-  "pm/lock.json": "49b79259220160f147255078a19af541a5f328d3871c8041cc1eb909d19eb549"
+  "pm/lock.json": "49b79259220160f147255078a19af541a5f328d3871c8041cc1eb909d19eb549",
+  "tests/agent/test_context_reference_raw_slice.py": "8bc3fb07585978f719a9073977f3c252e118e28f503c544ee5f66afaaea7491d"
 }
