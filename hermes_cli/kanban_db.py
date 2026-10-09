@@ -1958,10 +1958,10 @@ def reconcile_legacy_dispatch_task(
         from hermes_cli.kanban_pr_task_policy import validate_pr_task_identity_transition
 
         validate_pr_task_identity_transition(existing_body=row["body"], replacement_body=body)
-        assignee = _canonical_assignee(assignee)
+        canonical_assignee = _canonical_assignee(assignee)
         _validate_pr_task_assignee_authority(
             title=row["title"], body=body, idempotency_key=row["idempotency_key"],
-            assignee=assignee, initial_status="ready",
+            assignee=canonical_assignee, initial_status="ready",
         )
         updated = conn.execute(
             "UPDATE tasks SET body = ?, assignee = ?, status = 'ready', "
@@ -1971,7 +1971,7 @@ def reconcile_legacy_dispatch_task(
             "WHERE id = ? AND status = 'blocked' AND idempotency_key = ?",
             (
                 body,
-                _canonical_assignee(assignee),
+                canonical_assignee,
                 workspace_path,
                 branch_name,
                 int(max_retries),

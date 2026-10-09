@@ -45,7 +45,7 @@ def _pr_task_has_text_write_intent(payload: Mapping[str, Any], body: Optional[st
         prefix = (body or "").rstrip().rsplit("\n", 1)[0]
     # Scan decoded prose so JSON escapes cannot hide normal word boundaries.
     parts = [title, prefix]
-    pending = [prose_payload]
+    pending: list[Any] = [prose_payload]
     while pending:
         value = pending.pop()
         if isinstance(value, str):
