@@ -184,7 +184,7 @@ def _resolve_budget_fallback(
     )
     preserved_verification_fallback = False
     if (
-        (final_response is None or not str(final_response).strip())
+        not flatten_message_text(final_response).strip()
         and budget_exhausted and not interrupted and not failed
         and str(_turn_exit_reason) in {"unknown", "budget_exhausted"}
     ):
