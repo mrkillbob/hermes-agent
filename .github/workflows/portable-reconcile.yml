@@ -22,15 +22,15 @@ jobs:
           cache-suffix: pr97370-v14-portable
           save-tools-cache: 'false'
           save-python-cache: 'false'
-      - name: Qualify admission, SDK propagation and affected consumers
+      - name: Qualify reviewed source integrity and affected lifecycle consumers
         run: |
           set -o pipefail
-          scripts/run_tests.sh -j 1 --file-retries 0 tests/agent/test_context_source_admission.py tests/gateway/test_context_source_consuming_turn.py tests/gateway/test_kanban_dispatch_order.py tests/agent/test_context_reference_raw_slice.py tests/agent/test_source_provenance_pipeline.py tests/gateway/test_context_ref_expansion_runtime.py tests/agent/test_source_provenance.py tests/hermes_cli/test_cli_codex_context_reference.py tests/tui_gateway/test_file_attachment_allocation.py tests/agent/test_auxiliary_egress_recovery.py tests/agent/test_context_references.py tests/gateway/test_auto_skill_title_input.py tests/gateway/test_plugin_origin_injection.py tests/gateway/test_run_progress_topics.py tests/gateway/test_image_input_routing_runtime.py tests/gateway/test_turn_context.py tests/gateway/test_streaming_tts_gateway_regression.py tests/agent/test_cross_process_turn_lease.py tests/agent/test_turn_facade_lease.py tests/agent/test_llm_egress_runtime.py tests/agent/test_llm_egress_provider_boundaries.py | tee portable-focused.log
+          scripts/run_tests.sh -j 1 --file-retries 0 tests/agent/test_context_source_admission.py tests/gateway/test_context_source_consuming_turn.py tests/gateway/test_kanban_dispatch_order.py tests/agent/test_context_reference_raw_slice.py tests/agent/test_source_provenance_pipeline.py tests/gateway/test_context_ref_expansion_runtime.py tests/agent/test_source_provenance.py tests/hermes_cli/test_cli_codex_context_reference.py tests/tui_gateway/test_file_attachment_allocation.py tests/agent/test_auxiliary_egress_recovery.py tests/agent/test_context_references.py tests/gateway/test_auto_skill_title_input.py tests/gateway/test_plugin_origin_injection.py tests/gateway/test_run_progress_topics.py tests/gateway/test_image_input_routing_runtime.py tests/gateway/test_turn_context.py tests/gateway/test_streaming_tts_gateway_regression.py tests/agent/test_cross_process_turn_lease.py tests/agent/test_turn_facade_lease.py tests/agent/test_llm_egress_runtime.py tests/agent/test_llm_egress_provider_boundaries.py tests/agent/test_context_source_lifecycle.py tests/agent/test_context_source_commit_failure.py tests/agent/test_context_source_final_read.py tests/agent/test_compression_closed_adoption.py tests/agent/test_compression_concurrent_fork.py | tee portable-focused.log
       - name: Run eleven required static checks against observed upstream main
         if: always()
         run: |
           set -o pipefail
-          python scripts/check --base 5f045f842a60184748dda30acb9fecbd961cc18b | tee portable-static.log
+          python scripts/check --base ecf9655b5aacbc826ebbe9bf11a6db5cbbcb214d | tee portable-static.log
       - name: Verify source remained frozen
         if: always()
         run: python3 .ci/portable-reconcile/verify_source.py
@@ -38,7 +38,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: admission-green
+          name: reconciliation-final
           path: |
             portable-focused.log
             portable-static.log
