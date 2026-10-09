@@ -1,0 +1,36 @@
+name: Portable reconciliation qualification
+on:
+  push:
+    branches: [codex/portable-pr97370-v14-qualification-20261009]
+permissions:
+  contents: read
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify frozen source and dependency manifest
+        run: python3 .ci/portable-reconcile/verify_source.py
+      - name: Set up exact locked PM test environment
+        uses: ./.github/actions/setup-pm
+        with:
+          test-environment: 'true'
+          cache-suffix: pr97370-v14-portable
+          save-tools-cache: 'false'
+          save-python-cache: 'false'
+      - name: Qualify portable provenance and consuming owners
+        run: |
+          set -o pipefail
+          scripts/run_tests.sh -j 1 --file-retries 0 tests/agent/test_source_provenance_pipeline.py tests/gateway/test_context_ref_expansion_runtime.py tests/agent/test_source_provenance.py tests/hermes_cli/test_cli_codex_context_reference.py tests/tui_gateway/test_file_attachment_allocation.py tests/agent/test_auxiliary_egress_recovery.py | tee portable-focused.log
+      - name: Verify source remained frozen
+        if: always()
+        run: python3 .ci/portable-reconcile/verify_source.py
+      - name: Preserve qualification output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: portable-pr97370-v14
+          path: portable-focused.log
