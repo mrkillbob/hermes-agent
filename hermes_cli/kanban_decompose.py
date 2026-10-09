@@ -408,8 +408,8 @@ def decompose_task(
     # These typed cards have a durable owner/authority contract; asking the LLM
     # to rewrite their scope could split an exact-head PR action or erase the
     # specialist owner of a governed research intake.
-    if kb._task_requires_pr_write_authority(
-        title=task.title, body=task.body, idempotency_key=task.idempotency_key,
+    if kb.is_atomic_pr_automation_task(
+        body=task.body, idempotency_key=task.idempotency_key,
     ):
         return DecomposeOutcome(
             task_id, False, "atomic PR automation must remain one exact-head work item",

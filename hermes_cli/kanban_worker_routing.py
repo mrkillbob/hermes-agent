@@ -172,6 +172,18 @@ def recover_generated_assignee(conn, row, default_assignee, *, dry_run, result):
     # specialist routing before spawn.
     if not profile_exists(default_assignee):
         return assignee
+    detail = conn.execute(
+        "SELECT title, body, idempotency_key FROM tasks WHERE id = ?", (row["id"],)
+    ).fetchone()
+    if detail is None:
+        return assignee
+    try:
+        kb._validate_pr_task_assignee_authority(
+            title=detail["title"], body=detail["body"], idempotency_key=detail["idempotency_key"],
+            assignee=default_assignee,
+        )
+    except ValueError:
+        return assignee
     if not dry_run:
         with kb.write_txn(conn):
             changed = conn.execute(
@@ -206,6 +218,18 @@ def route_orchestrator_task(conn, row, *, dry_run: bool, result, board: Optional
         title = detail["title"] if detail else ""
         body = detail["body"] if detail else ""
     profile = repair_profile_for_task(title, body)
+    detail = conn.execute(
+        "SELECT title, body, idempotency_key FROM tasks WHERE id = ?", (row["id"],)
+    ).fetchone()
+    if detail is None:
+        return None
+    try:
+        kb._validate_pr_task_assignee_authority(
+            title=detail["title"], body=detail["body"], idempotency_key=detail["idempotency_key"],
+            assignee=profile or "task-intake-router",
+        )
+    except ValueError:
+        return None
     if profile is None:
         if not dry_run:
             with kb.write_txn(conn):
