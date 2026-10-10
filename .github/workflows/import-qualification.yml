@@ -1,5 +1,5 @@
 name: Bounded import graph qualification
-true:
+'on':
   push:
     branches:
     - codex/import-qualification-222
