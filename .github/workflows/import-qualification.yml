@@ -1,0 +1,76 @@
+name: Bounded import graph qualification
+on:
+  push:
+    branches: [codex/import-qualification-222]
+permissions:
+  contents: read
+jobs:
+  compare:
+    name: full graph (${{ matrix.case }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: base
+            ref: 14aeadc9ebb7665d6c3cfa49d17dbb31f96e64f1
+          - case: repair
+            ref: 7b10bfd915a1cbc714ff02e5e28421d531757b7c
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: ${{ matrix.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Fetch the same official release tags as upgrade CI
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch --no-recurse-submodules upstream '+refs/tags/v20*:refs/tags/v20*'
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        with:
+          version: '0.12.13'
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+      - name: Install identical locked upgrade CI dependencies
+        run: |
+          uv python install 3.14
+          uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+      - name: Enable required Linux sandbox
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          .venv/bin/python -c "from tests.e2e.core.upgrade._helpers import BWRAP_OK; assert BWRAP_OK"
+      - name: Run only the unchanged full graph import contract on two CPUs
+        env:
+          HERMES_TEST_WORKERS: '1'
+          HERMES_TEST_FILE_RETRIES: '0'
+          HERMES_TEST_FILE_TIMEOUT: '1200'
+        run: |
+          set -euo pipefail
+          mkdir qualification
+          {
+            git rev-parse HEAD
+            sha256sum pyproject.toml uv.lock tests/e2e/core/upgrade/test_fresh_process_entrypoints.py
+            .venv/bin/python -V
+            lscpu
+            free -m
+            cat /proc/self/cgroup
+          } > qualification/resources.txt
+          CPUS=$(.venv/bin/python -c 'import os; print(",".join(map(str, sorted(os.sched_getaffinity(0))[:2])))')
+          echo "Restricted process tree CPU affinity: $CPUS" | tee -a qualification/resources.txt
+          /usr/bin/time -v taskset -c "$CPUS" scripts/run_tests.sh \
+            --include-integration tests/e2e/core/upgrade/test_fresh_process_entrypoints.py \
+            -k test_every_shipped_module_imports_from_a_clean_first_party_graph \
+            -- -v --tb=long 2>&1 | tee qualification/full-import.log
+      - name: Preserve comparison evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: import-${{ matrix.case }}
+          path: qualification/
+          retention-days: 7
