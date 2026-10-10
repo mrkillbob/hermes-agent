@@ -21,7 +21,12 @@ _LOCK_POLL_SECONDS = 0.05
 
 def is_junction(path: Path) -> bool:
     """Keep junctions opaque even before Python 3.12's Path.is_junction exists."""
-    return os.name == "nt" and path.lstat().st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    if os.name != "nt":
+        return False
+    try:
+        return path.lstat().st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    except FileNotFoundError:
+        return False
 
 
 _VERBATIM = "\\\\?\\"
