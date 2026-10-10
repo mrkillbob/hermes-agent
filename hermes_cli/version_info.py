@@ -261,15 +261,20 @@ def _git_version_info(repo_dir: Path, *, include_untracked: bool = False) -> Ver
     distance = _parse_nonnegative(
         _run_git(repo_dir, "rev-list", "--count", f"v{base_version}..HEAD")
     ) if releases else None
-    candidates = [candidate for candidate in (
-        (base_version, distance) if releases else None,
-        _calver_release_version(repo_dir),
-        _upstream_calver_release(repo_dir),
-    ) if candidate is not None]
-    if candidates:
-        base_version, distance = max(
-            candidates, key=lambda item: tuple(int(part) for part in item[0].split("."))
-        )
+    # Preserve explicit current SemVer authority and its startup cost. Only a
+    # stale/absent fork identity needs additional CalVer and ancestry recovery.
+    if not releases or tuple(int(part) for part in base_version.split(".")) < tuple(
+        int(part) for part in _UPSTREAM_CALVER_RELEASE[0].split(".")
+    ):
+        candidates = [candidate for candidate in (
+            (base_version, distance) if releases else None,
+            _calver_release_version(repo_dir),
+            _upstream_calver_release(repo_dir),
+        ) if candidate is not None]
+        if candidates:
+            base_version, distance = max(
+                candidates, key=lambda item: tuple(int(part) for part in item[0].split("."))
+            )
     short_commit = _run_git(repo_dir, "rev-parse", "--short=7", "HEAD")
     if base_version == "unknown" and short_commit:
         display_version = f"git.{short_commit}{'.dirty' if dirty else ''}"
