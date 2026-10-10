@@ -154,8 +154,11 @@ def run_with_load_deadline(plugin_key: str, ctx: "PluginContext", fn: Callable[[
 def _evict_modules(module_name: str) -> None:
     """Drop ``module_name`` and every ``module_name.*`` submodule from ``sys.modules``."""
     prefix = f"{module_name}."
-    for name in [n for n in sys.modules if n == module_name or n.startswith(prefix)]:
-        del sys.modules[name]
+    # Plugin loading runs in a worker while startup imports can change this registry.
+    # Snapshot before filtering, and tolerate another eviction removing a selected name.
+    for name in tuple(sys.modules):
+        if name == module_name or name.startswith(prefix):
+            sys.modules.pop(name, None)
 
 
 def _serialized_replacement(method):
