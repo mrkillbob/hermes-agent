@@ -11,6 +11,7 @@ from hermes_cli.config import get_hermes_home, get_env_path, get_project_root, l
 from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_constants import display_hermes_home
 from agent.skill_utils import is_excluded_skill_path
+from datetime import UTC
 
 
 def _dotenv_key_names() -> set[str]:
@@ -87,7 +88,7 @@ def _get_git_commit_date(project_root: Path) -> str:
 
         from hermes_cli.version_info import get_version_info  # deferred: keeps dump cheap on non-dump paths
         commit_date = get_version_info().commit_date
-        return datetime.fromtimestamp(commit_date, tz=timezone.utc).strftime("%Y-%m-%d") if commit_date else ""
+        return datetime.fromtimestamp(commit_date, tz=UTC).strftime("%Y-%m-%d") if commit_date else ""
     except Exception:
         return ""
 
@@ -156,7 +157,7 @@ def _get_model_and_provider(config: dict) -> tuple[str, str]:
 _INTERESTING_PATHS = (
     ("agent", "max_turns"), ("agent", "gateway_timeout"), ("agent", "session_stall_timeout"),
     ("agent", "sanitizer_heal_escalation_threshold"), ("agent", "tool_use_enforcement"),
-    ("agent", "execution_guidance"), ("terminal", "backend"), ("terminal", "docker_image"),
+    ("agent", "execution_guidance"), ("agent", "guarded_prompt_mode"), ("terminal", "backend"), ("terminal", "docker_image"),
     ("terminal", "persistent_shell"), ("browser", "allow_private_urls"), ("compression", "enabled"),
     ("compression", "threshold"), ("compression", "in_place"), ("display", "streaming"),
     ("display", "skin"), ("display", "show_reasoning"), ("privacy", "redact_pii"), ("tts", "provider"),
