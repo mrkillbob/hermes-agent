@@ -90,16 +90,27 @@ export function assertChatCommit(identity: ChatIdentity, expected: string, prove
   }
 }
 
-export async function readMockPrompts(mockUrl: string): Promise<string[]> {
-  const response = await fetch(`${validateMockUrl(mockUrl)}/__e2e__/prompts`, {
-    signal: AbortSignal.timeout(5000), redirect: 'error',
-  })
+export async function readMockPrompts(mockUrl: string, { timeoutMs = 10_000, attempts = 3 } = {}): Promise<string[]> {
+  const url = `${validateMockUrl(mockUrl)}/__e2e__/prompts`
 
-  if (!response.ok) {
-    throw new Error(`Mock request witness returned HTTP ${response.status}`)
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'error' })
+
+      if (!response.ok) {
+        throw new Error(`Mock request witness returned HTTP ${response.status}`)
+      }
+
+      return z.object({ receivedPrompts: z.array(z.string()) }).parse(await response.json()).receivedPrompts
+    } catch (error) {
+      // The witness is polled while Electron and the backend start on a shared
+      // runner; one stalled response must not fail the whole checkpoint. A dead
+      // mock (connection refused) and bad payloads still fail at once.
+      if (!(error instanceof DOMException && error.name === 'TimeoutError') || attempt >= attempts) {
+        throw error
+      }
+    }
   }
-
-  return z.object({ receivedPrompts: z.array(z.string()) }).parse(await response.json()).receivedPrompts
 }
 
 export interface ComposerClickPosition { x: number; y: number }
