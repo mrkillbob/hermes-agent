@@ -198,6 +198,7 @@ function IdleView({
   version: DesktopVersionInfo | null
 }) {
   const { t } = useI18n()
+  const clientStatus = useStore($updateStatus)
   const u = t.updates
 
   if (!status && checking) {
@@ -238,8 +239,10 @@ function IdleView({
   )
 
   // Only where Settings shows a selector: a custom branch or an older runtime gets the label alone.
+  // The row names the CLIENT's channel (VersionDetails reads $updateStatus), so the link follows the
+  // client status even while the overlay is showing a remote backend's update.
   const details = version ? (
-    <VersionDetails channelAction={sourceUpdateChannel(status) ? changeChannel : undefined} version={version} />
+    <VersionDetails channelAction={sourceUpdateChannel(clientStatus) ? changeChannel : undefined} version={version} />
   ) : null
 
   // App-installer check-unknown (OS checker unavailable): NOT "no updates"
