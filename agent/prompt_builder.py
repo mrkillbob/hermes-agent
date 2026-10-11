@@ -27,7 +27,7 @@ from agent.skill_utils import (
     skill_matches_platform, skill_matches_platform_list,
 )
 from tools.threat_patterns import scan_for_threats as _scan_for_threats
-from utils import atomic_json_write
+from utils import atomic_json_write, file_signature
 
 logger = logging.getLogger(__name__)
 
@@ -1223,8 +1223,8 @@ _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 # v2 added org provenance fields (org_id/org_author); v4 adds ``rel`` (SKILL.md path relative to its root) for
-# duplicate-name resolution. Older snapshots are rebuilt.
-_SKILLS_SNAPSHOT_VERSION = 4
+# duplicate-name resolution; v5 widens manifest signatures to ``utils.file_signature``. Older snapshots are rebuilt.
+_SKILLS_SNAPSHOT_VERSION = 5
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1243,7 +1243,11 @@ def clear_skills_system_prompt_cache(*, clear_snapshot: bool = False) -> None:
 
 
 def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
-    """File-signature manifest of every SKILL.md and DESCRIPTION.md."""
+    """``utils.file_signature`` manifest of every SKILL.md and DESCRIPTION.md.
+
+    mtime + size alone miss a same-length rewrite that preserves mtime (``cp -p``, ``rsync -t``,
+    ``os.utime``); the inode and ctime in the signature catch it.
+    """
     manifest: dict[str, list[int]] = {}
     skills_dir_str = str(skills_dir)
     prefix_len = len(os.path.join(skills_dir_str, ""))
@@ -1255,7 +1259,7 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
             try:
                 if filename in files:
                     st = os.stat(path)
-                    manifest[path[prefix_len:]] = [st.st_mtime_ns, st.st_size]
+                    manifest[path[prefix_len:]] = list(file_signature(st))
             except OSError:
                 pass
     return manifest
