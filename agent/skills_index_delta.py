@@ -24,7 +24,7 @@ from agent.message_content import flatten_message_text
 logger = logging.getLogger("run_agent")
 
 _NOTE_PREFIX = "[System: The skills available in this conversation changed after its system prompt was built."
-_ADDED_HEAD = "Now available (load with skill_view(name) when relevant, like the skills listed in the system prompt):"
+_ADDED_HEAD = "Now available or updated (load with skill_view(name) when relevant, like the skills listed in the system prompt):"
 _REMOVED_HEAD = "No longer available:"
 _ACCURATE_AGAIN = " The skills listed in the system prompt are accurate again; earlier skill-change notes are superseded."
 _ROW = "    - "
@@ -32,13 +32,18 @@ _ROW = "    - "
 _BLOCK_RE = re.compile(r"<available_skills>\n?(.*?)</available_skills>", re.DOTALL)
 _NAMES_ONLY_RE = re.compile(r"\[names only\]:\s*(.+)$")
 
-_Delta = tuple[frozenset, frozenset]
+_Delta = tuple[dict[str, str], frozenset]  # (name -> row the model was shown, names withdrawn)
 
 
 def _row_name(line: str) -> str:
     """Skill name of an index row (``    - name: description`` / ``    - name``). Split on ``": "``:
     plugin skills are qualified (``plugin:skill``), so a bare ``":"`` is part of the name."""
     return line.strip()[2:].split(": ", 1)[0].strip()
+
+
+def _shown(name: str, row: str) -> str:
+    """The row text a note carries for ``name`` (its trailing ``]`` belongs to the note, not the row)."""
+    return (row or f"{_ROW}{name}").removesuffix("]")
 
 
 def index_entries(prompt: Any) -> dict[str, str]:
@@ -69,19 +74,20 @@ def _render(added: dict[str, str], removed: set[str]) -> str:
 def _parse(note: str) -> _Delta:
     """Inverse of :func:`_render` for the text that follows ``_NOTE_PREFIX``."""
     lines = note.split("\n")
-    added: set[str] = set()
+    added: dict[str, str] = {}
     if _ADDED_HEAD in lines[1:2]:
         for line in lines[2:]:
             if not line.startswith(_ROW):
                 break
-            added.add(_row_name(line.removesuffix("]")))
+            row = line.removesuffix("]")
+            added[_row_name(row)] = row
     removed: set[str] = set()
     for line in lines[1:]:
         if line.startswith(_REMOVED_HEAD):
             tail = line[len(_REMOVED_HEAD):].removesuffix("]")
             removed = {n.strip() for n in tail.split(",") if n.strip()}
             break
-    return frozenset(added), frozenset(removed)
+    return added, frozenset(removed)
 
 
 def _announced(conversation_history: Any) -> _Delta:
@@ -94,7 +100,7 @@ def _announced(conversation_history: Any) -> _Delta:
         text = (sidecar if isinstance(sidecar, str) else "") + "\n" + flatten_message_text(msg.get("content"))
         if _NOTE_PREFIX in text:
             return _parse(text.rsplit(_NOTE_PREFIX, 1)[1])
-    return frozenset(), frozenset()
+    return {}, frozenset()
 
 
 def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) -> bool:
@@ -119,14 +125,19 @@ def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) 
     told = getattr(agent, "_skills_index_told", None)
     key = hash(prompt)
     told_added, told_removed = told[1] if isinstance(told, tuple) and told[0] == key else _announced(conversation_history)
-    # What the model believes it can load: the prompt's index as amended by the newest note. A rebuilt
-    # prompt (compaction) that now lists what an earlier note announced needs no further note.
-    if (set(stored) | told_added) - told_removed == set(current):
+    # What the model believes it can load: the prompt's index as amended by the newest note, row text
+    # included so a changed description counts as a change. A rebuilt prompt (compaction) that now
+    # lists what an earlier note announced needs no further note.
+    believed = {**{name: _shown(name, row) for name, row in stored.items()}, **told_added}
+    for name in told_removed:
+        believed.pop(name, None)
+    if believed == {name: _shown(name, row) for name, row in current.items()}:
         agent._skills_index_told = (key, (told_added, told_removed))
         return False
-    added = {name: row for name, row in current.items() if name not in stored}
+    added = {name: row for name, row in current.items()
+             if name not in stored or _shown(name, stored[name]) != _shown(name, row)}
     removed = set(stored) - set(current)
-    agent._skills_index_told = (key, (frozenset(added), frozenset(removed)))
+    agent._skills_index_told = (key, ({n: _shown(n, r) for n, r in added.items()}, frozenset(removed)))
     agent._skills_index_note = _render(added, removed)
     logger.info(
         "Session %s: skills changed (+%d/-%d) since the system prompt was built; delivering the "

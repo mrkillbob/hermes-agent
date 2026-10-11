@@ -83,3 +83,28 @@ def test_long_lived_agent_is_told_each_skill_change_once(tmp_path, monkeypatch):
     assert "terraform-ops" in _turn(agent, prompt, history)
     rebuilt = "Identity.\n\n" + pb.build_skills_system_prompt()
     assert _turn(agent, rebuilt, history) == "" and _turn(_agent(tmp_path), rebuilt, history) == ""
+
+
+def test_changed_description_of_an_existing_skill_is_announced_once(tmp_path, monkeypatch):
+    """A skill that keeps its name but changes its description would otherwise leave the frozen
+    prompt's routing text stale: the note carries the replacement row, once, for fresh agents too."""
+    skills = _home(tmp_path, monkeypatch)
+    _write_skill(skills, "docker-ops", "Run containers.")
+    _write_skill(skills, "terraform-ops", "Plan infra.")
+    agent, history = _agent(tmp_path), []
+    prompt = "Identity.\n\n" + pb.build_skills_system_prompt()
+    assert _turn(agent, prompt, history) == ""
+
+    _write_skill(skills, "docker-ops", "Build and run OCI images.")
+    note = _turn(agent, prompt, history)
+    assert "    - docker-ops: Build and run OCI images." in note and "terraform-ops" not in note
+    assert _turn(agent, prompt, history) == ""
+    assert _turn(_agent(tmp_path), prompt, history) == ""
+
+    _write_skill(skills, "docker-ops", "Run containers.")
+    assert "accurate again" in _turn(agent, prompt, history)
+
+    _write_skill(skills, "docker-ops", "Build and run OCI images.")
+    assert "Build and run OCI images." in _turn(agent, prompt, history)
+    rebuilt = "Identity.\n\n" + pb.build_skills_system_prompt()
+    assert _turn(agent, rebuilt, history) == "" and _turn(_agent(tmp_path), rebuilt, history) == ""

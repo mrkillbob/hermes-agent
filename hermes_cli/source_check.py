@@ -323,6 +323,15 @@ def _heal_deleted_branch(branch_config_path: Path, desktop_config: dict) -> None
         atomic_json_write(branch_config_path, {**desktop_config, "branch": "main"})
 
 
+def _drop_branch_override(branch_config_path: Path) -> None:
+    """An explicit channel choice (the Desktop selector) supersedes a legacy branch pin: branch
+    precedence would otherwise keep the install on the pinned branch and hide the selector."""
+    desktop_config = _read_json(branch_config_path)
+    if _configured_branch(desktop_config) not in (None, "main"):
+        from utils import atomic_json_write
+        atomic_json_write(branch_config_path, {**desktop_config, "branch": "main"})
+
+
 def _unhealable_reason(co: _Checkout, branch: str) -> Optional[str]:
     """Why a branch the remote does not advertise must keep its pin; None when healing loses nothing.
 
@@ -475,6 +484,8 @@ def main() -> None:
             # The record belongs in the --home profile's config.yaml, as the check reads it.
             set_hermes_home_override(args.home)
             set_install_channel(args.set_channel, args.install_root)
+            if args.branch_config_path:
+                _drop_branch_override(args.branch_config_path)
             args.force = True
         result = check_for_updates(**{k: v for k, v in vars(args).items() if k != "set_channel"})
     if isinstance(result, dict):
