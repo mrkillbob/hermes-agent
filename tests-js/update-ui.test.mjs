@@ -106,9 +106,17 @@ test('test-only source probe pins staged main without changing other Python invo
   expected.push('--branch', 'main')
   expect(sourceBranchProbe.branchProbeArgs(probe, root, '/real/git')).toEqual(expected)
   const managed = ['--run-module', 'hermes_cli.source_check', ...probe.slice(2)]
+  // Only the PM invocation selects `main`: an official-origin checkout otherwise reports `stable`,
+  // and the Desktop would apply that release channel instead of the staged commit.
   expect(sourceBranchProbe.branchProbeArgs(managed, root, '/real/git')).toEqual([
-    '--run-module', 'hermes_cli.source_check', ...expected.slice(2),
+    '--run-module', 'hermes_cli.source_check', ...expected.slice(2), '--channel', 'main',
   ])
+  for (const explicit of ['--channel', '--set-channel']) {
+    const chosen = [...managed, explicit, 'stable']
+    const selected = sourceBranchProbe.branchProbeArgs(chosen, root, '/real/git')
+    expect(selected.filter(arg => arg === '--channel' || arg === '--set-channel')).toEqual([explicit])
+    expect(selected.slice(-2)).toEqual(['--branch', 'main'])
+  }
   expect(sourceBranchProbe.branchProbeArgs(probe, '/other/install', '/real/git')).toBe(probe)
   expect(sourceBranchProbe.branchProbeArgs(managed, '/other/install', '/real/git')).toBe(managed)
   expect(sourceBranchProbe.branchProbeArgs(['-c', 'print("hermes_cli/source_check.py")'], root, '/real/git')).toEqual(['-c', 'print("hermes_cli/source_check.py")'])
@@ -118,7 +126,9 @@ test('test-only source probe pins staged main without changing other Python invo
   const cmd = ['/d', '/v:off', '/s', '/c', `""C:\\fixture\\hermes.cmd" "--run-module" "hermes_cli.source_check" "--install-root" "${root}" "--home" "/profile with spaces" "--git" "/shim/git" "--force""`]
   const rewritten = sourceBranchProbe.branchProbeArgs(cmd, root, '/real/git')
   expect(rewritten.slice(0, 4)).toEqual(cmd.slice(0, 4))
-  expect(rewritten[4]).toContain('"--git" "/real/git" "--force" "--branch" "main"')
+  expect(rewritten[4]).toContain('"--git" "/real/git" "--force" "--branch" "main" "--channel" "main""')
+  const chosen = [...cmd.slice(0, 4), cmd[4].replace(/"$/, ' "--set-channel" "stable""')]
+  expect(sourceBranchProbe.branchProbeArgs(chosen, root, '/real/git')[4]).toMatch(/"--branch" "main""$/)
   expect(sourceBranchProbe.branchProbeArgs(cmd, '/other/install', '/real/git')).toBe(cmd)
   expect(sourceBranchProbe.branchProbeArgs(cmd, root, '/real&git')).toBe(cmd)
 })
@@ -159,6 +169,9 @@ test.skipIf(process.platform === 'win32')('probe Git reaches the staged main eve
       '--install-root', checkout, '--home', home, '--git', git, '--force'],
     { cwd: checkout, encoding: 'utf8', env }))
     expect(status).toMatchObject({ supported: true, currentSha: base, branch: 'main', targetSha: sha, updateAvailable: true })
+    // The origin reads as the official repo, whose unconfigured default is `stable`. A reported channel makes
+    // the Desktop apply `--channel stable` (the latest upstream release) rather than this staged main.
+    expect(status).not.toHaveProperty('channel')
     expect(execFileSync(launcher, ['--version'], { cwd: checkout, env, encoding: 'utf8' }).trim()).toBe('--version')
     const other = path.join(root, 'other-checkout')
     fs.mkdirSync(other)
