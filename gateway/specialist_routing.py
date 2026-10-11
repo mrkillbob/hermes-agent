@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable, Optional, Protocol
 
-from gateway.capability_registry import CapabilitySignature, RegistryResolution
+from gateway.capability_registry import CapabilityRegistry, CapabilitySignature, RegistryResolution
 
 
 _FIXED_PROFILE_CAPABILITIES: dict[str, tuple[str, tuple[str, ...], str]] = {

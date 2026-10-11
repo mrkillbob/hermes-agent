@@ -132,7 +132,7 @@ def test_shard_selector_is_not_forwarded_to_test_processes(tmp_path: Path) -> No
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        timeout=60,
+        timeout=60, check=False,
     )
 
     assert proc.returncode == 0, proc.stdout
@@ -673,7 +673,7 @@ def test_canonical_runner_confines_explicit_scratch(tmp_path: Path) -> None:
             [shutil.which("bash"), str(root / "scripts" / "run_tests.sh"), str(probe),
              "-o", "cache_dir=" + str(tmp_path / "pytest-cache")],
             cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, timeout=60,
+            text=True, timeout=60, check=False,
         )
         assert proc.returncode == 0, proc.stdout
         assert scratch.is_dir()

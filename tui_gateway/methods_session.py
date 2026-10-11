@@ -1478,7 +1478,7 @@ def _(rid, params: dict) -> dict:
             binding_record = db.get_conversation_worktree(root_session_id)
             if binding_record is None:
                 return _err(rid, 5036, "conversation worktree binding disappeared")
-            session_row = db.get_session(root_session_id) or {}
+            db.get_session(root_session_id) or {}
             # The session cwd is mutable (project workspace switches); cleanup
             # must resolve the durable binding's repository identity instead.
             binding_cwd = str(Path(binding_record.repo_common_dir).resolve().parent)
@@ -2313,7 +2313,7 @@ def _(rid, params: dict, session: dict) -> dict:
     agent = session.get("agent")
     meta = _status_row(session, params, key)
     created = _status_dt(meta.get("started_at"))
-    updated = next((_status_dt(meta[f], created) for f in ("updated_at", "last_updated_at", "last_activity_at")
+    next((_status_dt(meta[f], created) for f in ("updated_at", "last_updated_at", "last_activity_at")
                     if meta.get(f)), created)
     mirror = _metadata_mirror(session)
     # Under turn isolation the compute host owns the live route: a stale in-process agent object
@@ -2330,7 +2330,7 @@ def _(rid, params: dict, session: dict) -> dict:
         home=session.get("profile_home"),
     )
     project = _project_info_for_cwd(_display_session_cwd(session))
-    title = (meta.get("title") or "").strip()
+    (meta.get("title") or "").strip()
     lines = [
         "Hermes TUI Status", "", *status_lines(fields, "session_id", "path"),
         *([f"Project: {project['name']}"] if project else []),

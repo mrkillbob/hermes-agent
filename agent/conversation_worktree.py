@@ -1701,8 +1701,7 @@ class ConversationWorktreeManager:
             return subprocess.run(
                 ["git", "-C", str(cwd), *args],
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -1716,7 +1715,7 @@ class ConversationWorktreeManager:
             raise ConversationWorktreeError("git command could not start", phase=phase) from exc
 
     def _timeout_for_phase(self, phase: str) -> float:
-        return self._policy.create_timeout if phase in {"create", "validate", "identity", "recovery"} else self._policy.create_timeout
+        return self._policy.create_timeout
 
     def _record_failure(
         self,

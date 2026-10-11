@@ -187,7 +187,7 @@ def prepare(home: Path, selection: list[dict], *, worker_probe=worker_state, cla
     home = Path(home).resolve(strict=True)
     _require(bool(selection), 'Explicit nonempty run selection is required')
     plan = {'version': 1, 'operation_id': uuid.uuid4().hex, 'home': str(home), 'host': socket.gethostname(),
-            'claim_hosts': sorted(set((socket.gethostname(), *claim_hosts))), 'boards': []}
+            'claim_hosts': sorted({socket.gethostname(), *claim_hosts}), 'boards': []}
     grouped = {}
     for item in selection:
         _require(set(item) == {'board', 'task_id', 'run_id'} and type(item['run_id']) is int and item['run_id'] > 0,

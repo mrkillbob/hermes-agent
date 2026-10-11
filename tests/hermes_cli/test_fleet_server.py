@@ -49,7 +49,7 @@ def test_all_endpoints_require_the_machine_bearer_key(tmp_path):
 
 
 def test_task_submission_is_idempotent_over_http(tmp_path):
-    with _server(tmp_path) as (_store, coordinator, client):
+    with _server(tmp_path) as (_store, _coordinator, client):
         first = client.submit_task(_task())
         second = client.submit_task(_task())
 
@@ -58,7 +58,7 @@ def test_task_submission_is_idempotent_over_http(tmp_path):
 
 
 def test_claim_cas_and_completion_authorization_are_enforced(tmp_path):
-    with _server(tmp_path) as (_store, coordinator, client):
+    with _server(tmp_path) as (_store, _coordinator, client):
         mac = _runner("mac")
         windows = _runner("windows")
         client.register_runner(mac, now=100.0, ttl=30.0)
@@ -78,7 +78,7 @@ def test_claim_cas_and_completion_authorization_are_enforced(tmp_path):
 
 
 def test_expired_heartbeat_is_not_claimable_over_http(tmp_path):
-    with _server(tmp_path) as (_store, coordinator, client):
+    with _server(tmp_path) as (_store, _coordinator, client):
         mac = _runner("mac")
         client.register_runner(mac, now=100.0, ttl=1.0)
         client.submit_task(_task(), now=100.0)
@@ -87,7 +87,7 @@ def test_expired_heartbeat_is_not_claimable_over_http(tmp_path):
 
 
 def test_runner_status_keeps_expired_rows_visible_for_desktop(tmp_path):
-    with _server(tmp_path) as (_store, coordinator, client):
+    with _server(tmp_path) as (_store, _coordinator, client):
         mac = _runner("mac")
         now = time.time()
         client.register_runner(mac, now=now, ttl=1.0)

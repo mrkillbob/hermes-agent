@@ -32,7 +32,7 @@ def lock(repo, directory, version):
 def invoke(repo, base, head, fake_bin, tmp_path):
     output = tmp_path / 'outputs'
     report = tmp_path / 'report.json'
-    result = subprocess.run([sys.executable, str(HELPER), '--base', base, '--head', head, '--report', str(report)], cwd=repo, env={**os.environ, 'PATH': str(fake_bin) + os.pathsep + os.environ['PATH'], 'GITHUB_OUTPUT': str(output)}, capture_output=True, text=True)
+    result = subprocess.run([sys.executable, str(HELPER), '--base', base, '--head', head, '--report', str(report)], cwd=repo, env={**os.environ, 'PATH': str(fake_bin) + os.pathsep + os.environ['PATH'], 'GITHUB_OUTPUT': str(output)}, capture_output=True, text=True, check=False)
     assert report.exists(), result.stderr
     outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
     return result, json.loads(report.read_text()), outputs

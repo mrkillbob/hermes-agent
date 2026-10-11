@@ -11,13 +11,16 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
+
+if TYPE_CHECKING:
+    from hermes_cli.fleet_protocol import FleetTask
 
 
 def federated_enabled(config: Mapping[str, object] | None) -> bool:

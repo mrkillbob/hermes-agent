@@ -1524,7 +1524,7 @@ class GitHubClient:
         if latest.get("status") != "completed" or latest.get("conclusion") != "success":
             return None
         try:
-            completed_at = datetime.fromisoformat(latest["completed_at"].replace("Z", "+00:00"))
+            completed_at = datetime.fromisoformat(latest["completed_at"])
         except (AttributeError, TypeError, ValueError, KeyError) as error:
             raise GitHubClientError("Required CI gate completion was unavailable") from error
         if completed_at.tzinfo is None:
@@ -1564,7 +1564,7 @@ class GitHubClient:
             return None
         try:
             started_at = datetime.fromisoformat(
-                workflow["run_started_at"].replace("Z", "+00:00")
+                workflow["run_started_at"]
             )
         except (AttributeError, TypeError, ValueError, KeyError) as error:
             raise GitHubClientError("Required CI run start was unavailable") from error

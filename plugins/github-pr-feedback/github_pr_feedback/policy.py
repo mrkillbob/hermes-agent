@@ -688,7 +688,7 @@ def _parse_target(raw: object) -> RepositoryTarget:
 def _not_before(value: object) -> datetime:
     text = _nonempty_string(value, "not_before")
     try:
-        boundary = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        boundary = datetime.fromisoformat(text)
     except ValueError as error:
         raise ValueError("not_before must be ISO-8601") from error
     if boundary.tzinfo is None:

@@ -1113,7 +1113,6 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
             return False
         for match in _BASE64_CANDIDATE.finditer(value):
             candidate = match.group(1)
-            prefix = value[max(0, match.start() - 16) : match.start()].lower()
             source_control_window = value[
                 max(0, match.start() - 48) : min(len(value), match.end() + 16)
             ]

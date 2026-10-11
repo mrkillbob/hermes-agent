@@ -77,7 +77,7 @@ def apply(plan, out):
 
 
 def test_exact_closure_preserves_terminal_card_and_raw_provenance(boards):
-    home, selection, paths, out = boards
+    _home, selection, paths, out = boards
     before = {board: row(path, 'tasks', f't_{board}_1') for board, path in paths.items()}
     runs = {board: row(path, 'task_runs', 1) for board, path in paths.items()}
     if importlib.util.find_spec('hermes_cli.kanban_orphan_recovery') is None:
@@ -102,7 +102,7 @@ def test_exact_closure_preserves_terminal_card_and_raw_provenance(boards):
 
 
 def test_dry_run_is_read_only_and_explicit_boards_ignore_ambient_pin(boards, monkeypatch):
-    home, selection, paths, _ = boards
+    _home, _selection, paths, _ = boards
     before = {b: p.read_bytes() for b, p in paths.items()}
     monkeypatch.setenv('HERMES_KANBAN_DB', str(paths['default']))
     monkeypatch.setenv('HERMES_KANBAN_BOARD', 'default')
@@ -279,16 +279,16 @@ def test_command_path_dry_run_apply_undo_on_disposable_home(boards, tmp_path, en
     plan_path = tmp_path/'plan.json'
     argv = [sys.executable, '-m', 'hermes_cli.kanban_orphan_recovery']
     env = dict(os.environ, HERMES_HOME=str(home), PYTHONDONTWRITEBYTECODE='1')
-    preview = subprocess.run([*argv,'dry-run','--home',str(home),'--selection',str(selection_path)],capture_output=True,text=True,encoding='utf8',env=env)
+    preview = subprocess.run([*argv,'dry-run','--home',str(home),'--selection',str(selection_path)],capture_output=True,text=True,encoding='utf8',env=env, check=False)
     assert preview.returncode == 0, preview.stderr
     plan_path.write_text(preview.stdout,encoding=encoding);plan=json.loads(preview.stdout)
-    done = subprocess.run([*argv,'apply','--plan',str(plan_path),'--plan-sha256',api().digest(plan),'--run-dir',str(out)],capture_output=True,text=True,encoding='utf8',env=env)
+    done = subprocess.run([*argv,'apply','--plan',str(plan_path),'--plan-sha256',api().digest(plan),'--run-dir',str(out)],capture_output=True,text=True,encoding='utf8',env=env, check=False)
     assert done.returncode == 0, done.stderr
     journal=json.loads(done.stdout)['journal']
     if encoding == 'utf-8-sig':
         content = Path(journal).read_text(encoding='utf-8-sig')
         Path(journal).write_text(content, encoding=encoding)
-    restored = subprocess.run([*argv,'undo','--journal',journal,'--plan-sha256',api().digest(plan)],capture_output=True,text=True,encoding='utf8',env=env)
+    restored = subprocess.run([*argv,'undo','--journal',journal,'--plan-sha256',api().digest(plan)],capture_output=True,text=True,encoding='utf8',env=env, check=False)
     assert restored.returncode == 0, restored.stderr
     assert row(paths['default'],'task_runs',1)['status']=='running'
 

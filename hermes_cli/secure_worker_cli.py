@@ -111,7 +111,7 @@ def _load_yaml(path: str) -> dict[str, object]:
 def _docker_available() -> bool:
     try:
         result = subprocess.run(
-            ["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5
+            ["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False
         )
     except (OSError, subprocess.TimeoutExpired):
         return False

@@ -43,7 +43,7 @@ def _start_server(monkeypatch, tmp_path):
 
 
 def test_health_requires_auth_and_matches_endpoint_identity(monkeypatch, tmp_path):
-    server, _thread, token, base_url = _start_server(monkeypatch, tmp_path)
+    server, _thread, _token, base_url = _start_server(monkeypatch, tmp_path)
     try:
         request = urllib.request.Request(f"{base_url}/health")
         try:

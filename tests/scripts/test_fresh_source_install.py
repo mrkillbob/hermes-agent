@@ -81,7 +81,7 @@ assert not any(name.startswith(('agent.context_compressor', 'agent.auxiliary_cli
 """
     env = {"HOME": str(home), "HERMES_HOME": str(home), "PATH": os.environ["PATH"]}
     result = subprocess.run([sys.executable, "-I", "-S", "-c", script, str(source), str(dependencies), str(home)],
-                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
 
 

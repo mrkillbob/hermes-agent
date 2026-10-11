@@ -29,7 +29,7 @@ def write_source_stamp(root: Path, *, adopted: bool = False) -> dict | None:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"], cwd=root,
-            capture_output=True, timeout=3,
+            capture_output=True, timeout=3, check=False,
         )
         # This is a pathname, not a token: preserve whitespace in its final
         # component and remove only the newline Git appends to its output.

@@ -167,7 +167,7 @@ def test_all_applicable_ci_jobs_are_aggregated_and_desktop_e2e_stays_deferred(tm
             text=True, timeout=10, env={**os.environ,
                 "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
                 "POLICY_REPOSITORY": repository, "POLICY_RELEASE": release,
-                "POLICY_REF_TYPE": ref_type, "GITHUB_OUTPUT": str(output)},
+                "POLICY_REF_TYPE": ref_type, "GITHUB_OUTPUT": str(output)}, check=False,
         )
         assert result.returncode == 0, result.stderr
         outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())

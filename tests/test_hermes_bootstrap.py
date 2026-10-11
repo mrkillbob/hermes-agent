@@ -400,7 +400,7 @@ class TestHardenImportPath:
             cwd=foreign_repo,
             env=env,
             capture_output=True,
-            text=True,
+            text=True, check=False,
         )
 
         assert result.returncode == 0, result.stderr

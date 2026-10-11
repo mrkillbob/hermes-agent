@@ -217,8 +217,7 @@ class SubprocessGitRunner:
                 argv,
                 check=False,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=60,
             )
@@ -585,7 +584,7 @@ class LocalGitRepository:
                  "'base_prefix':sys.base_prefix,"
                  "'version':'.'.join(map(str,sys.version_info[:3]))}))"],
                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                timeout=10, cwd=workspace_root,
+                timeout=10, cwd=workspace_root, check=False,
             )
             payload = json.loads(probe.stdout)
             if (probe.returncode != 0

@@ -58,7 +58,7 @@ def test_classifier_fetch_retries_without_decoding_failed_responses(tmp_path, re
         env=env,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=10, check=False,
     )
     requests = calls.read_text().splitlines()
     expected = [

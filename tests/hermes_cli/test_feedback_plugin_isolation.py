@@ -15,7 +15,7 @@ def test_plugin_handoff_tests_cannot_block_the_calling_worker(tmp_path):
         cwd=root, capture_output=True, text=True, timeout=30,
         env=dict(os.environ, HOME=str(tmp_path), HERMES_HOME=str(inherited_home),
                  HERMES_KANBAN_TASK='t_isolation_probe', HERMES_KANBAN_BOARD='worker-board',
-                 HERMES_KANBAN_DB=str(inherited_home / 'kanban.db')),
+                 HERMES_KANBAN_DB=str(inherited_home / 'kanban.db')), check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert not (inherited_home / 'kanban.db').exists()

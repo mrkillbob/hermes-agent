@@ -692,7 +692,7 @@ def test_every_installed_unit_of_a_secondary_is_removed_and_recorded(fleet, caps
 def test_rollback_restores_survivors_when_default_fails_and_skips_deleted(fleet, monkeypatch):
     """When both _restart_default and the detached fallback fail, the compensator returns False
     and keeps the manifest so the next run can resume."""
-    ok, manifest = _apply_capturing_manifest(gm.build_migration_plan(), restore=True)
+    ok, _manifest = _apply_capturing_manifest(gm.build_migration_plan(), restore=True)
     assert ok is True
     monkeypatch.setattr(gm, '_restart_default', lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('default failed')))
     monkeypatch.setattr(gm, '_spawn_detached_gateway', lambda home: False)

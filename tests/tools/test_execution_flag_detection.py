@@ -75,7 +75,7 @@ def test_real_binaries_execute_leading_dash_program_payload(
     if needs_tty:
         argv = ["script", "-qec", shlex.join(argv), "/dev/null"]
 
-    subprocess.run(argv, input=input_text, text=True, capture_output=True, env=env, timeout=20)
+    subprocess.run(argv, input=input_text, text=True, capture_output=True, env=env, timeout=20, check=False)
 
     assert marker.read_text() == "executed"
 

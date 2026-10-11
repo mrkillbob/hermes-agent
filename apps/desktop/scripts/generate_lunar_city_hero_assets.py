@@ -450,7 +450,6 @@ def sculpted_limb(name, start, end, radius_a, radius_b, mat, target, asset_id, r
     start_v = Vector(start)
     end_v = Vector(end)
     axis = end_v - start_v
-    length = max(axis.length, 0.001)
     direction = axis.normalized()
     reference = Vector((0, 0, 1))
     if abs(direction.dot(reference)) > 0.96:

@@ -378,7 +378,7 @@ def test_deployment_claim_reclaims_recent_owner_after_process_exit(tmp_path):
     now = datetime(2026, 9, 12, tzinfo=UTC)
     ledger = FeedbackLedger(path)
     exited = subprocess.Popen([sys.executable, "-c", "pass"])
-    exited_start_time_us = int(round(psutil.Process(exited.pid).create_time() * 1_000_000))
+    exited_start_time_us = round(psutil.Process(exited.pid).create_time() * 1_000_000)
     exited.wait(timeout=5)
     try:
         first = ledger.claim_deployment(

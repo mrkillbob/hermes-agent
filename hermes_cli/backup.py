@@ -658,7 +658,6 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
                 total_bytes += abs_path.stat().st_size
             except (PermissionError, OSError, ValueError) as exc:
                 errors.append(f"{arcname}: {exc}")
-    incomplete_marked = not errors
     if errors and default_generated:
         incomplete_path = out_path.with_name(
             f"{out_path.stem}{_INCOMPLETE_RUN_BACKUP_SUFFIX}{out_path.suffix}"
@@ -666,7 +665,6 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
         try:
             os.replace(out_path, incomplete_path)
             out_path = incomplete_path
-            incomplete_marked = True
         except OSError as exc:
             logger.warning("Could not mark incomplete backup %s: %s", out_path, exc)
     elapsed = time.monotonic() - t0

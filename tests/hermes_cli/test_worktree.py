@@ -90,24 +90,24 @@ def git_repo_remote_no_tracking(tmp_path):
     """Create a temporary git repo with a remote but no remote-tracking refs."""
     repo = tmp_path / "test-repo-remote-no-tracking"
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=False)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=repo, capture_output=True,
+        cwd=repo, capture_output=True, check=False,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=repo, capture_output=True,
+        cwd=repo, capture_output=True, check=False,
     )
     (repo / "README.md").write_text("# Test Repo\n")
-    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=False)
     subprocess.run(
         ["git", "commit", "-m", "Initial commit"],
-        cwd=repo, capture_output=True,
+        cwd=repo, capture_output=True, check=False,
     )
     subprocess.run(
         ["git", "remote", "add", "origin", "https://example.com/test-repo.git"],
-        cwd=repo, capture_output=True,
+        cwd=repo, capture_output=True, check=False,
     )
     return repo
 
@@ -122,7 +122,7 @@ def _git_repo_root(cwd=None):
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=5,
-            cwd=cwd,
+            cwd=cwd, check=False,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -144,7 +144,7 @@ def _setup_worktree(repo_root):
 
     result = subprocess.run(
         ["git", "worktree", "add", str(wt_path), "-b", branch_name, "HEAD"],
-        capture_output=True, text=True, timeout=30, cwd=repo_root,
+        capture_output=True, text=True, timeout=30, cwd=repo_root, check=False,
     )
     if result.returncode != 0:
         return None
@@ -161,7 +161,7 @@ def _has_unpushed_commits(worktree_path, timeout=10):
     try:
         remote_refs = subprocess.run(
             ["git", "for-each-ref", "--format=%(refname)", "refs/remotes"],
-            capture_output=True, text=True, timeout=timeout, cwd=worktree_path,
+            capture_output=True, text=True, timeout=timeout, cwd=worktree_path, check=False,
         )
         if remote_refs.returncode != 0:
             return True
@@ -170,7 +170,7 @@ def _has_unpushed_commits(worktree_path, timeout=10):
 
         result = subprocess.run(
             ["git", "log", "--oneline", "HEAD", "--not", "--remotes"],
-            capture_output=True, text=True, timeout=timeout, cwd=worktree_path,
+            capture_output=True, text=True, timeout=timeout, cwd=worktree_path, check=False,
         )
         if result.returncode != 0:
             return True
@@ -197,11 +197,11 @@ def _cleanup_worktree(info):
 
     subprocess.run(
         ["git", "worktree", "remove", wt_path, "--force"],
-        capture_output=True, text=True, timeout=15, cwd=repo_root,
+        capture_output=True, text=True, timeout=15, cwd=repo_root, check=False,
     )
     subprocess.run(
         ["git", "branch", "-D", branch],
-        capture_output=True, text=True, timeout=10, cwd=repo_root,
+        capture_output=True, text=True, timeout=10, cwd=repo_root, check=False,
     )
     return True  # Cleaned up
 
@@ -240,7 +240,7 @@ class TestWorktreeCreation:
         # Verify it's a valid git worktree
         result = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, cwd=info["path"],
+            capture_output=True, text=True, cwd=info["path"], check=False,
         )
         assert result.stdout.strip() == "true"
 
@@ -251,7 +251,7 @@ class TestWorktreeCreation:
         # Check branch name in worktree
         result = subprocess.run(
             ["git", "branch", "--show-current"],
-            capture_output=True, text=True, cwd=info["path"],
+            capture_output=True, text=True, cwd=info["path"], check=False,
         )
         assert result.stdout.strip() == info["branch"]
 
@@ -298,7 +298,7 @@ class TestWorktreeCleanup:
         # Branch should be gone
         result = subprocess.run(
             ["git", "branch", "--list", branch],
-            capture_output=True, text=True, cwd=str(git_repo),
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
         )
         assert branch not in result.stdout
 
@@ -323,11 +323,11 @@ class TestWorktreeInclude:
         (git_repo / ".gitignore").write_text(".env\n.worktrees/\n")
         subprocess.run(
             ["git", "add", ".gitignore"],
-            cwd=str(git_repo), capture_output=True,
+            cwd=str(git_repo), capture_output=True, check=False,
         )
         subprocess.run(
             ["git", "commit", "-m", "Add gitignore"],
-            cwd=str(git_repo), capture_output=True,
+            cwd=str(git_repo), capture_output=True, check=False,
         )
 
         # Create .worktreeinclude
@@ -475,7 +475,7 @@ class TestMultipleWorktrees:
         # List worktrees via git
         result = subprocess.run(
             ["git", "worktree", "list"],
-            capture_output=True, text=True, cwd=str(git_repo),
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
         )
         # Should have 11 entries: main + 10 worktrees
         lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
@@ -486,7 +486,7 @@ class TestMultipleWorktrees:
             # Discard changes first so cleanup works
             subprocess.run(
                 ["git", "checkout", "--", "."],
-                cwd=info["path"], capture_output=True,
+                cwd=info["path"], capture_output=True, check=False,
             )
             _cleanup_worktree(info)
 
@@ -521,10 +521,10 @@ class TestWorktreeDirectorySymlink:
         (venv_dir / "marker.txt").write_text("venv marker")
         (git_repo / ".gitignore").write_text(".venv/\n.worktrees/\n")
         subprocess.run(
-            ["git", "add", ".gitignore"], cwd=str(git_repo), capture_output=True
+            ["git", "add", ".gitignore"], cwd=str(git_repo), capture_output=True, check=False
         )
         subprocess.run(
-            ["git", "commit", "-m", "gitignore"], cwd=str(git_repo), capture_output=True
+            ["git", "commit", "-m", "gitignore"], cwd=str(git_repo), capture_output=True, check=False
         )
 
         (git_repo / ".worktreeinclude").write_text(".venv/\n")
@@ -576,24 +576,24 @@ class TestStaleWorktreePruning:
 
             status = subprocess.run(
                 ["git", "status", "--porcelain"],
-                capture_output=True, text=True, timeout=5, cwd=str(entry),
+                capture_output=True, text=True, timeout=5, cwd=str(entry), check=False,
             )
             if status.stdout.strip():
                 continue
 
             branch_result = subprocess.run(
                 ["git", "branch", "--show-current"],
-                capture_output=True, text=True, timeout=5, cwd=str(entry),
+                capture_output=True, text=True, timeout=5, cwd=str(entry), check=False,
             )
             branch = branch_result.stdout.strip()
             subprocess.run(
                 ["git", "worktree", "remove", str(entry), "--force"],
-                capture_output=True, text=True, timeout=15, cwd=str(git_repo),
+                capture_output=True, text=True, timeout=15, cwd=str(git_repo), check=False,
             )
             if branch:
                 subprocess.run(
                     ["git", "branch", "-D", branch],
-                    capture_output=True, text=True, timeout=10, cwd=str(git_repo),
+                    capture_output=True, text=True, timeout=10, cwd=str(git_repo), check=False,
                 )
 
         assert not Path(info["path"]).exists()
@@ -633,10 +633,10 @@ class TestStaleWorktreePruning:
 
         # Make an unpushed commit (would normally protect it)
         (Path(info["path"]) / "work.txt").write_text("stale work")
-        subprocess.run(["git", "add", "work.txt"], cwd=info["path"], capture_output=True)
+        subprocess.run(["git", "add", "work.txt"], cwd=info["path"], capture_output=True, check=False)
         subprocess.run(
             ["git", "commit", "-m", "old agent work"],
-            cwd=info["path"], capture_output=True,
+            cwd=info["path"], capture_output=True, check=False,
         )
 
         # Make it very old (73h — beyond the 72h hard threshold)
@@ -651,18 +651,18 @@ class TestStaleWorktreePruning:
         # Actually remove it (simulates _prune_stale_worktrees force path)
         branch_result = subprocess.run(
             ["git", "branch", "--show-current"],
-            capture_output=True, text=True, timeout=5, cwd=info["path"],
+            capture_output=True, text=True, timeout=5, cwd=info["path"], check=False,
         )
         branch = branch_result.stdout.strip()
 
         subprocess.run(
             ["git", "worktree", "remove", info["path"], "--force"],
-            capture_output=True, text=True, timeout=15, cwd=str(git_repo),
+            capture_output=True, text=True, timeout=15, cwd=str(git_repo), check=False,
         )
         if branch:
             subprocess.run(
                 ["git", "branch", "-D", branch],
-                capture_output=True, text=True, timeout=10, cwd=str(git_repo),
+                capture_output=True, text=True, timeout=10, cwd=str(git_repo), check=False,
             )
 
         assert not Path(info["path"]).exists()
@@ -675,7 +675,7 @@ class TestEdgeCases:
         """Worktree creation should fail gracefully on a repo with no commits."""
         repo = tmp_path / "empty-repo"
         repo.mkdir()
-        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=False)
 
         info = _setup_worktree(str(repo))
         assert info is None  # Should fail gracefully
@@ -803,26 +803,26 @@ class TestOrphanedBranchPruning:
         # Create a branch that looks like a worktree branch but has no worktree
         subprocess.run(
             ["git", "branch", "hermes/hermes-deadbeef", "HEAD"],
-            cwd=str(git_repo), capture_output=True,
+            cwd=str(git_repo), capture_output=True, check=False,
         )
 
         # Verify it exists
         result = subprocess.run(
             ["git", "branch", "--list", "hermes/hermes-deadbeef"],
-            capture_output=True, text=True, cwd=str(git_repo),
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
         )
         assert "hermes/hermes-deadbeef" in result.stdout
 
         # Simulate _prune_orphaned_branches logic
         result = subprocess.run(
             ["git", "branch", "--format=%(refname:short)"],
-            capture_output=True, text=True, cwd=str(git_repo),
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
         )
         all_branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
 
         wt_result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
-            capture_output=True, text=True, cwd=str(git_repo),
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
         )
         active_branches = {"main"}
         for line in wt_result.stdout.split("\n"):
@@ -840,13 +840,13 @@ class TestOrphanedBranchPruning:
         if orphaned:
             subprocess.run(
                 ["git", "branch", "-D"] + orphaned,
-                capture_output=True, text=True, cwd=str(git_repo),
+                capture_output=True, text=True, cwd=str(git_repo), check=False,
             )
 
         # Verify gone
         result = subprocess.run(
             ["git", "branch", "--list", "hermes/hermes-deadbeef"],
-            capture_output=True, text=True, cwd=str(git_repo),
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
         )
         assert "hermes/hermes-deadbeef" not in result.stdout
 
@@ -854,16 +854,16 @@ class TestOrphanedBranchPruning:
         """pr-* branches should be deleted during pruning."""
         subprocess.run(
             ["git", "branch", "pr-1234", "HEAD"],
-            cwd=str(git_repo), capture_output=True,
+            cwd=str(git_repo), capture_output=True, check=False,
         )
         subprocess.run(
             ["git", "branch", "pr-5678", "HEAD"],
-            cwd=str(git_repo), capture_output=True,
+            cwd=str(git_repo), capture_output=True, check=False,
         )
 
         result = subprocess.run(
             ["git", "branch", "--format=%(refname:short)"],
-            capture_output=True, text=True, cwd=str(git_repo),
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
         )
         all_branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
 
@@ -877,13 +877,13 @@ class TestOrphanedBranchPruning:
 
         subprocess.run(
             ["git", "branch", "-D"] + orphaned,
-            capture_output=True, text=True, cwd=str(git_repo),
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
         )
 
         # Verify gone
         result = subprocess.run(
             ["git", "branch", "--format=%(refname:short)"],
-            capture_output=True, text=True, cwd=str(git_repo),
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
         )
         remaining = result.stdout.strip()
         assert "pr-1234" not in remaining
@@ -894,7 +894,7 @@ class TestOrphanedBranchPruning:
         """main branch should never be pruned."""
         result = subprocess.run(
             ["git", "branch", "--format=%(refname:short)"],
-            capture_output=True, text=True, cwd=str(git_repo),
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
         )
         all_branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
         active_branches = {"main"}

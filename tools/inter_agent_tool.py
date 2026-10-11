@@ -215,7 +215,7 @@ def _retire_rejected_broker(endpoint: dict[str, object]) -> None:
         if expected_start is not None:
             if isinstance(expected_start, bool) or not isinstance(expected_start, int):
                 return
-            actual_start = int(round(process.create_time() * 1_000_000))
+            actual_start = round(process.create_time() * 1_000_000)
             if actual_start != expected_start:
                 return
         process.terminate()

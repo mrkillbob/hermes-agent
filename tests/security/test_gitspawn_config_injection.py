@@ -449,7 +449,7 @@ def test_conditional_home_include_uses_the_effective_child_home(tmp_path):
     # Exercise the real hardened child with that same effective HOME.
     result = subprocess.run(
         ["git", "-C", str(repo), "worktree", "add", "-b", "safe", str(tmp_path / "wt"), "HEAD"],
-        capture_output=True, text=True, timeout=30, env=hardened)
+        capture_output=True, text=True, timeout=30, env=hardened, check=False)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "wt" / "README").read_text(encoding="utf-8") == "hi\n"
     assert list(tmp_path.glob("HOME-FILTER.*")) == []

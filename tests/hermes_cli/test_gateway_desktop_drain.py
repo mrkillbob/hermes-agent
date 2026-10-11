@@ -76,7 +76,6 @@ def test_read_desktop_drain_snapshot_filters_shared_board_workers_by_profile(
     import hermes_cli.kanban_db_connect as kbc
 
     current_home = tmp_path / "current"
-    other_home = tmp_path / "other"
     db_path = tmp_path / "kanban.db"
     db_path.touch()
     queries = []

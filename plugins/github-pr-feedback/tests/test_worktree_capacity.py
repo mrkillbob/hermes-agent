@@ -530,7 +530,7 @@ def test_all_unknown_slots_preserved_without_lease_or_git(fresh_pool):
 
 
 def test_candidate_created_after_selection_is_rejected_before_git(fresh_pool, monkeypatch):
-    source, pool, receipt, namespace, capacity, ledger, calls = fresh_pool
+    source, pool, receipt, _namespace, capacity, ledger, calls = fresh_pool
     original = capacity.is_unregistered_existing
     def concurrent_creation(candidate):
         assert not original(candidate)
@@ -555,7 +555,7 @@ def test_unknown_selection_does_not_mask_insufficient_space(fresh_pool):
 
 
 def test_registered_uncertain_first_slot_is_hard_gate(fresh_pool):
-    source, pool, receipt, namespace, capacity, ledger, calls = fresh_pool
+    source, pool, receipt, namespace, capacity, _ledger, calls = fresh_pool
     candidate = pool._slot_path(receipt, 0, namespace)
     handle = capacity.reserve(candidate)
     candidate.mkdir(parents=True)

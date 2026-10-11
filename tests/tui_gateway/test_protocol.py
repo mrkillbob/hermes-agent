@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from tests.tui_gateway.protocol_fixtures import (
-    _restore_stdout as _restore_stdout, capture as capture, server as server,
+    _restore_stdout as _restore_stdout, capture as capture, server as server,  # noqa: PLC0414
 )
 
 

@@ -410,7 +410,6 @@ def merge_board(source: str, destination: str, backup_path: str, *, task_ids: li
                         (row["task_id"], row["filename"], str(landed.resolve()), row["content_type"], row["size"], row["uploaded_by"], row["created_at"]),
                     )
                 table_counts["task_attachments"] = len(attachment_rows)
-                subs = src.execute(f"SELECT * FROM kanban_notify_subs WHERE task_id IN ({placeholders})", ids).fetchall()
                 # Notification endpoints are machine-local delivery state.
                 table_counts["kanban_notify_subs"] = 0
                 for task_id in ids:

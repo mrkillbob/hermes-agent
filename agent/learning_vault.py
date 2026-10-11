@@ -68,7 +68,7 @@ def _timestamp(metadata: dict[str, Any], path: Path) -> Optional[int]:
         try:
             from datetime import datetime, timezone
 
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=UTC)
             return int(parsed.timestamp())

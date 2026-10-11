@@ -128,7 +128,7 @@ def _timestamp(mapping: Mapping[str, Any], field_name: str, *, required: bool) -
         parsed = value
     elif isinstance(value, str):
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
         except ValueError as exc:
             raise EngineeringMemorySchemaError(f"{field_name}: invalid timestamp") from exc
     else:

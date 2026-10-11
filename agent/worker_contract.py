@@ -73,7 +73,7 @@ def _validate_choice(name: str, value: Any, choices: set[str]) -> str:
 def _parse_timestamp(name: str, value: Any) -> datetime:
     value = _require_text(name, value)
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise ContractValidationError(f"{name} must be an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -84,7 +84,7 @@ def _parse_timestamp(name: str, value: Any) -> datetime:
 def _validate_timestamp(name: str, value: Any) -> str:
     timestamp = _require_text(name, value)
     try:
-        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(timestamp)
     except ValueError as exc:
         raise ContractValidationError(
             f"{name} must be a timezone-aware ISO-8601 timestamp"

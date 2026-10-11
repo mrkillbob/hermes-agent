@@ -97,9 +97,7 @@ def _write_endpoint(server: _BrokerServer) -> Path:
             "broker_id": server.broker_id,
             "protocol_version": BROKER_PROTOCOL_VERSION,
             "pid": os.getpid(),
-            "pid_start_time_us": int(
-                round(psutil.Process(os.getpid()).create_time() * 1_000_000)
-            ),
+            "pid_start_time_us": round(psutil.Process(os.getpid()).create_time() * 1_000_000),
         }),
         encoding="utf-8",
     )
