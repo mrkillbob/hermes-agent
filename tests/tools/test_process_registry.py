@@ -1021,8 +1021,7 @@ class TestEnvPollerIncrementalRead:
             log.write_bytes(full[:n])
             out = subprocess.run(
                 ["sh", "-c", ProcessRegistry._log_delta_command(quoted, 0)],
-                capture_output=True, timeout=30,
-                check=False,
+                capture_output=True, timeout=30, check=False,
             ).stdout
             header, _, delta = out.partition(b"\n")
             size, _offset = map(int, header.split())

@@ -3338,7 +3338,7 @@ def edit_config():
         return
 
     print(f"Opening {config_path} in {editor}...")
-    subprocess.run([editor, str(config_path)], check=False)
+    subprocess.run([editor, str(config_path)], check=False)  # health: allow HX006 -- interactive editor session
 
 
 def _default_value_for_key(dotted_key: str):

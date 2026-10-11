@@ -1285,8 +1285,7 @@ def _resolve_workspace_key() -> Optional[str]:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
-            check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
             return os.path.abspath(result.stdout.strip())
@@ -1753,8 +1752,7 @@ def cmd_chat(args):
     from hermes_cli.free_tier_bootstrap import run_bootstrap
 
     run_bootstrap(announce=False)
-    # The TUI owns its first-run state: it renders "Setup Required" with in-place /setup.
-    # The classic prompt only fronts the classic CLI.
+    # The TUI owns its first-run state ("Setup Required" + in-place /setup); the classic prompt only fronts the classic CLI.
     provider_configured = _has_any_provider_configured()
     if not use_tui and not provider_configured:
         _first_run_setup_guard(args)
@@ -1782,8 +1780,7 @@ def cmd_chat(args):
     _pin_kanban_board_env()
     from hermes_cli.observability.shared_metrics_consent import offer_consent_before_chat
 
-    # Not before setup: a blank install meets "Setup Required" first. The offer stays
-    # undecided, so it is asked on the first launch with a provider.
+    # Not before setup: a blank install meets "Setup Required" first; the offer is asked on the first launch with a provider.
     if provider_configured:
         offer_consent_before_chat(args)
     _confirm_startup_expensive_model_override(args)
@@ -2481,7 +2478,6 @@ def cmd_update(args):
     finally:
         _update_lock.release()
         _finalize_update_output(_update_io_state)
-
 
 
 def _coalesce_session_name_args(argv: list) -> list:

@@ -76,7 +76,7 @@ def _require_remote_main(repo: Path, commit: str) -> None:
 
 
 def _claim_collision(repo: Path, remote: str, tag: str, error: Exception) -> ReleaseRefused:
-    subprocess.run(["git", "tag", "--delete", tag], cwd=repo, capture_output=True, check=False)
+    subprocess.run(["git", "tag", "--delete", tag], cwd=repo, capture_output=True, check=False, timeout=120)
     try:
         _git(repo, "fetch", remote, f"+refs/tags/{tag}:refs/tags/{tag}")
         details = _git(
@@ -496,6 +496,7 @@ def cmd_release(args) -> None:
     commit = _git(repo, "rev-parse", "--verify", f"{args.commit}^{{commit}}")
 
     def execute(command: list[str]) -> None:
+        # health: allow HX006 -- release command (builds/publishes); duration depends on the release
         completed = subprocess.run(command, cwd=repo, capture_output=True, text=True, encoding="utf-8", check=False)
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or "release command failed")
@@ -536,13 +537,14 @@ def _command_repository(args) -> tuple[Path, str, str]:
 
 
 def _execute(repo: Path, command: list[str]) -> None:
+    # health: allow HX006 -- release command (builds/publishes); duration depends on the release
     completed = subprocess.run(command, cwd=repo, capture_output=True, text=True, encoding="utf-8", check=False)
     if completed.returncode != 0:
         raise ReleaseRefused(completed.stderr.strip() or "release command failed")
 
 
 def _inspect(repo: Path, command: list[str]) -> str:
-    completed = subprocess.run(command, cwd=repo, capture_output=True, text=True, encoding="utf-8", check=False)
+    completed = subprocess.run(command, cwd=repo, capture_output=True, text=True, encoding="utf-8", check=False, timeout=300)
     if completed.returncode != 0:
         raise ReleaseRefused(completed.stderr.strip() or "release inspection failed")
     return completed.stdout

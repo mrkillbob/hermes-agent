@@ -154,8 +154,7 @@ def _get_service_pids(all_profiles: bool = False) -> set:
                     scope_args
                     + ["list-units", pattern, "--plain", "--no-legend", "--no-pager"],
                     timeout=5,
-                    **_CAPTURE_TEXT,
-                    check=False,
+                    **_CAPTURE_TEXT, check=False,
                 )
                 for line in result.stdout.strip().splitlines():
                     parts = line.split()
@@ -166,8 +165,7 @@ def _get_service_pids(all_profiles: bool = False) -> set:
                         show = subprocess.run(
                             scope_args + ["show", svc, "--property=MainPID", "--value"],
                             timeout=5,
-                            **_CAPTURE_TEXT,
-                            check=False,
+                            **_CAPTURE_TEXT, check=False,
                         )
                         pid = int(show.stdout.strip())
                         if pid > 0:
@@ -1663,7 +1661,6 @@ def _print_unserved_shared_ingress(profile: str | None) -> None:
     print("  Enable it on the default profile (shared ingress serves every profile), or disable it here.")
 
 
-
 def _print_other_profiles_gateway_status() -> None:
     """Print other profiles' running gateways at the bottom of ``hermes gateway status``."""
     try:
@@ -2134,8 +2131,7 @@ def _windows_scheduled_task_state(task_name: str) -> str | None:
         result = subprocess.run(
             [powershell, "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
             capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=10,
-            creationflags=windows_hide_flags(),
-            check=False,
+            creationflags=windows_hide_flags(), check=False,
         )
         if result.returncode != 0:
             return None

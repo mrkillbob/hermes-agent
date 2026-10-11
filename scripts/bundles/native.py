@@ -126,6 +126,7 @@ def stage_native(args) -> int:
                    "--ref", args.ref or "HEAD", "--source", str(root)]
         for name, product in getattr(args, "frontends", {}).items():
             command += [f"--{name}", str(product)]
+        # health: allow HX006 -- bundle build command; duration depends on the toolchain
         return subprocess.run(command, cwd=root, env=env, check=False).returncode
 
 

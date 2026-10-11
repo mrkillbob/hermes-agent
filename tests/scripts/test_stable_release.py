@@ -938,6 +938,7 @@ def test_transitions_from_the_bundle_receipt_emit_two_windows_rows(tmp_path, r2_
 
 
 def test_missing_baseline_plans_no_upgrade_arm_but_a_missing_supplied_one_blocks(
+        # health: allow F811 -- r2_server is a pytest fixture imported from test_release_r2
         tmp_path, r2_server, https_origin, monkeypatch):
     from scripts.releases import stable
 
