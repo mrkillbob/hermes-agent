@@ -529,7 +529,11 @@ def test_every_shipped_module_imports_from_a_clean_first_party_graph(tmp_path):
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     env = isolated_env(tmp_path / "sbx")
-    cp = run([PY, str(runner), str(spec_path)], env=env, cwd=tmp_path, writable=[tmp_path], timeout=900)
+    # Wall time is modules / worker throughput, so the cap grows with the module count: a fixed cap
+    # fails on small (2-worker) runners every time upstream ships more modules. Per-module hangs are
+    # still bounded by spec["timeout"].
+    cp = run([PY, str(runner), str(spec_path)], env=env, cwd=tmp_path, writable=[tmp_path],
+             timeout=max(900, len(ids)))
     assert cp.returncode == 0 and out.exists(), describe(cp)
     results = {r["id"]: r for r in json.loads(out.read_text(encoding="utf-8"))}
     assert set(results) == set(ids), f"runner lost modules: {sorted(set(ids) - set(results))[:10]}"
