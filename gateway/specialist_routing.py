@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable, Optional, Protocol
 
-from gateway.capability_registry import CapabilitySignature, RegistryResolution
+from gateway.capability_registry import CapabilityRegistry, CapabilitySignature, RegistryResolution
 
 
 _FIXED_PROFILE_CAPABILITIES: dict[str, tuple[str, tuple[str, ...], str]] = {
@@ -207,7 +207,7 @@ def parse_specialist_response(
     *,
     threshold: float = 0.80,
     fallback_title: str = "",
-    registry: "CapabilityRegistry | None" = None,
+    registry: CapabilityRegistry | None = None,
 ) -> SpecialistRouteDecision:
     """Validate an untrusted classifier answer without repair or coercion."""
     if not isinstance(raw, str):
@@ -368,7 +368,7 @@ async def classify_specialist_request(
     *,
     threshold: float = 0.80,
     timeout: float = 12.0,
-    registry: "CapabilityRegistry | None" = None,
+    registry: CapabilityRegistry | None = None,
 ) -> SpecialistRouteDecision:
     """Run one bounded classifier call and turn every failure into fallback."""
     if not isinstance(request, str) or not request.strip():
@@ -385,7 +385,7 @@ async def classify_specialist_request(
         if not inspect.isawaitable(pending):
             return _general("invalid_classifier_output")
         raw = await asyncio.wait_for(pending, timeout=max(0.01, float(timeout)))
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return _general("classifier_timeout")
     except Exception:
         return _general("classifier_error")

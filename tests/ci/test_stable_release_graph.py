@@ -167,7 +167,7 @@ def test_all_applicable_ci_jobs_are_aggregated_and_desktop_e2e_stays_deferred(tm
             text=True, timeout=10, env={**os.environ,
                 "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
                 "POLICY_REPOSITORY": repository, "POLICY_RELEASE": release,
-                "POLICY_REF_TYPE": ref_type, "GITHUB_OUTPUT": str(output)},
+                "POLICY_REF_TYPE": ref_type, "GITHUB_OUTPUT": str(output)}, check=False,
         )
         assert result.returncode == 0, result.stderr
         outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
@@ -378,6 +378,7 @@ def test_docker_recovery_refuses_to_replace_a_divergent_version_tag(tmp_path):
              "IMAGE_NAME": "owner/repo", "RELEASE_TAG": "0.21.5",
              "CREATE_MARKER": str(marker)},
         capture_output=True, text=True, encoding="utf-8",
+        check=False,
     )
     assert result.returncode != 0
     assert "versioned Docker manifest differs" in result.stderr

@@ -91,7 +91,7 @@ def _run(home: Path, *args: str, install: Path | None = None, timeout: int = 120
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        subprocess.run(['taskkill', '/T', '/F', '/PID', str(proc.pid)], capture_output=True)
+        subprocess.run(['taskkill', '/T', '/F', '/PID', str(proc.pid)], capture_output=True, check=False)
         out, _ = proc.communicate()
         pytest.fail(f'hand-off did not finish within {timeout}s: {out}')
     return proc.pid, proc.returncode, out
@@ -184,6 +184,7 @@ def test_ui_profile_sweep_keeps_dirs_of_live_handoffs(tmp_path: Path, sleeper: s
         cwd=tmp_path, env={**os.environ, 'HERMES_HOME': str(home), 'TEMP': str(tmp_path),
                            'HERMES_SELFTEST_HOLD_SECONDS': '0'},
         capture_output=True, text=True, timeout=120,
+        check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert live.exists(), 'another live hand-off lost its browser profile'

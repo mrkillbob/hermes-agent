@@ -30,8 +30,8 @@ def server():
     # unbound copy whose default sinks drop frames and treat every client as answerable. Likewise a test's
     # ``from tui_gateway.transport import bind_transport`` would bind a fresh module's ContextVar that the
     # server's ``current_transport()`` never reads (first-in-process test sees ``_stdio_transport`` as caller).
-    import tui_gateway.server_requests  # noqa: F401
-    import tui_gateway.transport  # noqa: F401
+    import tui_gateway.server_requests
+    import tui_gateway.transport
     with patch.dict("sys.modules", {
         "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test")),
         "hermes_cli.env_loader": MagicMock(),

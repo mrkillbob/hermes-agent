@@ -23,7 +23,7 @@ def maintenance_worktree_path(
 ) -> Path:
     """Return the deterministic path identity for one maintenance worktree."""
 
-    digest = sha256(f"{repository}\0{head_sha}\0{lane}".encode("utf-8")).hexdigest()
+    digest = sha256(f"{repository}\0{head_sha}\0{lane}".encode()).hexdigest()
     return (Path(worktree_root) / f"maintenance-{digest}").resolve(strict=False)
 
 
@@ -309,12 +309,12 @@ class ReleaseMaintenanceController:
 
     def _key(self, head_sha: str, stage: str, lane: str) -> str:
         digest = sha256(
-            f"{self._policy.repository}\0{head_sha}\0{stage}\0{lane}".encode("utf-8")
+            f"{self._policy.repository}\0{head_sha}\0{stage}\0{lane}".encode()
         ).hexdigest()
         return f"github-pr-release-maintenance:{digest}"
 
     def _branch(self, head_sha: str, lane: str) -> str:
         digest = sha256(
-            f"{self._policy.repository}\0{head_sha}\0{lane}".encode("utf-8")
+            f"{self._policy.repository}\0{head_sha}\0{lane}".encode()
         ).hexdigest()[:20]
         return f"hermes/release-maintenance/{digest}"

@@ -87,7 +87,7 @@ class TestSlugValidation:
 
 class TestBoardAllowlist:
     def test_configured_allowlist_rejects_unapproved_creation(self, fresh_home, monkeypatch):
-        import hermes_cli.config as config
+        from hermes_cli import config
 
         monkeypatch.setattr(
             config,
@@ -358,6 +358,7 @@ def _cli(args: list[str], env_extra: dict | None = None) -> subprocess.Completed
         text=True,
         cwd=str(_WORKTREE),
         timeout=30,
+        check=False,
     )
 
 

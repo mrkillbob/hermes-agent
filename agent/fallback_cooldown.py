@@ -46,7 +46,7 @@ def switch_deferred_by_reset(
 
 
 def _arm_rate_limit_cooldown(
-    agent, reason: "FailoverReason | None", reset_at=None,
+    agent, reason: FailoverReason | None, reset_at=None,
 ) -> int | None:
     """Arm the primary cooldown until the provider reset, or use exponential backoff.
 

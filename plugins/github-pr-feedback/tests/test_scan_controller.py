@@ -358,7 +358,7 @@ def test_scan_applies_one_exact_branch_label_and_confirms_readback(
 
 
 def test_scan_rotates_label_catalogue_across_bounded_scans(tmp_path: Path) -> None:
-    local_path, head_sha = initialized_repository(tmp_path)
+    local_path, _head_sha = initialized_repository(tmp_path)
     policy = configured_policy(
         local_path,
         not_before="2026-08-24T00:00:00Z",

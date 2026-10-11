@@ -13,12 +13,10 @@ from .registry import method
 
 class RespondParams(Params):
     """Passthrough respond methods carry a free-form payload."""
-    pass
 
 
 class RespondResult(Result):
     """Passthrough respond methods return nothing structured."""
-    pass
 
 
 # Passthrough respond methods (lambda handlers in server.py)

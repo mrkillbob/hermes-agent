@@ -174,7 +174,7 @@ def bootstrap_worktree_environments(
                     )
                     linked.append(environment_name)
                     break
-                except OSError as exc:
+                except OSError:
                     logger.warning(
                         "worktree environment bootstrap could not link %s",
                         environment_name,

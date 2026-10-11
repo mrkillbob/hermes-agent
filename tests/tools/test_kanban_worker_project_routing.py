@@ -8,7 +8,7 @@ import pytest
 @pytest.mark.parametrize('reference', ['id', 'slug', 'inherited'])
 def test_worker_child_uses_parent_project_from_shared_board_home(tmp_path, monkeypatch, reference):
     from hermes_cli import kanban_db as kb, kanban_db_connect as kbc, projects_db as pdb
-    from tools import kanban_tools  # noqa: F401
+    from tools import kanban_tools
     from tools.registry import registry
 
     root = tmp_path / '.hermes'

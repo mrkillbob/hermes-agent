@@ -28,7 +28,7 @@ class GitHubAutomationIdentity:
     @classmethod
     def from_environment(
         cls, environ: Mapping[str, str] | None = None
-    ) -> "GitHubAutomationIdentity":
+    ) -> GitHubAutomationIdentity:
         source = os.environ if environ is None else environ
         if environ is None:
             from agent.secret_scope import get_github_automation_secret

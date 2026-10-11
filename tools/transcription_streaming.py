@@ -15,8 +15,9 @@ Built-in wires (live-verified against each vendor except where noted):
 - ``elevenlabs``: ``wss://api.elevenlabs.io/v1/speech-to-text/realtime`` (``scribe_v2_realtime``),
   built from the vendor AsyncAPI schema.
 
-Streaming is opt-in (``stt.streaming: true``); every surface falls back to the file path when
-no built-in session opens or a session fails. Plugin providers use file transcription.
+Plugin providers opt in through ``TranscriptionProvider.streaming_capable`` /
+``open_stream_session``. Streaming is opt-in (``stt.streaming: true``); every surface falls back
+to the file path when no session opens or a session fails.
 """
 
 from __future__ import annotations
@@ -90,7 +91,7 @@ class StreamingSession:
 
     def __init__(self, on_partial: Optional[PartialCallback] = None) -> None:
         self._on_partial = on_partial
-        self._audio: "queue.Queue[Optional[bytes]]" = queue.Queue()
+        self._audio: queue.Queue[Optional[bytes]] = queue.Queue()
         self._done = threading.Event()
         self._cancelled = threading.Event()
         self._result: dict[str, Any] = {}
@@ -115,7 +116,7 @@ class StreamingSession:
         return chunk
 
     # ── caller API ──
-    def start(self) -> "StreamingSession":
+    def start(self) -> StreamingSession:
         # copy_context: a plugin session reads secrets from the opener's profile scope.
         ctx = contextvars.copy_context()
         self._worker = threading.Thread(target=ctx.run, args=(self._run,), name=f"stt-stream-{self.provider}",
@@ -430,6 +431,25 @@ class ElevenLabsRealtimeSession(_WebSocketSession):
         return None
 
 
+class _PluginSession(StreamingSession):
+    """Adapts a plugin ``TranscriptionStreamSession`` to the caller API (partials polled)."""
+
+    def __init__(self, provider_name: str, inner: Any, on_partial: Optional[PartialCallback]) -> None:
+        super().__init__(on_partial)
+        self.provider, self._inner = provider_name, inner
+
+    def _session(self) -> dict[str, Any]:
+        while True:
+            chunk = self._take_audio(block=True, timeout=0.25)
+            if self._cancelled.is_set():
+                return self._error("cancelled")
+            if chunk is None:
+                return dict(self._inner.finalize())
+            if chunk:
+                self._inner.push_audio(chunk)
+            self._set_partial(str(self._inner.partial_transcript() or ""))
+
+
 # ── resolution ──
 
 def streaming_enabled(stt_config: dict[str, Any]) -> bool:
@@ -479,6 +499,15 @@ def _builtin_session(provider: str, stt_config: dict[str, Any], language: Option
     return None
 
 
+def _plugin_session(provider: str, language: Optional[str], prompt: Optional[str],
+                    on_partial: Optional[PartialCallback]) -> Optional[StreamingSession]:
+    from agent.transcription_registry import get_provider
+    registered = get_provider(provider)
+    if registered is None or not registered.streaming_capable:
+        return None
+    return _PluginSession(provider, registered.open_stream_session(language=language, prompt=prompt), on_partial)
+
+
 def streaming_available(stt_config: Optional[dict[str, Any]] = None) -> bool:
     """Cheap capability probe (no connection): would :func:`open_streaming_session` try a wire?"""
     from tools import transcription_tools as tt
@@ -488,7 +517,9 @@ def streaming_available(stt_config: Optional[dict[str, Any]] = None) -> bool:
     provider = tt._get_provider(cfg)
     if provider in STREAMING_PROVIDERS:
         return _builtin_session(provider, cfg, None, None, None) is not None
-    return False
+    from agent.transcription_registry import get_provider
+    registered = get_provider(provider)
+    return bool(registered is not None and registered.streaming_capable)
 
 
 def open_streaming_session(on_partial: Optional[PartialCallback] = None,
@@ -510,7 +541,7 @@ def open_streaming_session(on_partial: Optional[PartialCallback] = None,
         if provider in STREAMING_PROVIDERS:
             session = _builtin_session(provider, cfg, language, prompt, on_partial)
         else:
-            session = None
+            session = _plugin_session(provider, language, prompt, on_partial)
     except Exception:
         logger.warning("Live STT session for %s could not open", provider, exc_info=True)
         return None

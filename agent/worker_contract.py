@@ -11,7 +11,7 @@ import dataclasses
 import math
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from typing import Any, Mapping
 
 
@@ -73,18 +73,18 @@ def _validate_choice(name: str, value: Any, choices: set[str]) -> str:
 def _parse_timestamp(name: str, value: Any) -> datetime:
     value = _require_text(name, value)
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise ContractValidationError(f"{name} must be an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ContractValidationError(f"{name} must include a timezone")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _validate_timestamp(name: str, value: Any) -> str:
     timestamp = _require_text(name, value)
     try:
-        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(timestamp)
     except ValueError as exc:
         raise ContractValidationError(
             f"{name} must be a timezone-aware ISO-8601 timestamp"
@@ -147,7 +147,7 @@ class EvidencePacket:
     reversible_next_actions: tuple[str, ...] = ()
     outcome: str = ""
 
-    def validate(self) -> "EvidencePacket":
+    def validate(self) -> EvidencePacket:
         observations = _validate_texts("observations", self.observations)
         sources = _validate_texts("sources", self.sources)
         _validate_texts("hypotheses", self.hypotheses)
@@ -217,7 +217,7 @@ class ObjectiveStack:
     hidden_objectives: tuple[str, ...] = ()
     conflicts: tuple[str, ...] = ()
 
-    def validate(self) -> "ObjectiveStack":
+    def validate(self) -> ObjectiveStack:
         _require_text("profile", self.profile)
         _require_text("authority", self.authority)
         _require_text("mission", self.mission)
@@ -263,7 +263,7 @@ class CapabilityRecord:
     source_sha: str | None = None
     limitations: tuple[str, ...] = ()
 
-    def validate(self) -> "CapabilityRecord":
+    def validate(self) -> CapabilityRecord:
         _require_text("name", self.name)
         _require_text("owner_profile", self.owner_profile)
         _require_text("authority", self.authority)
@@ -281,7 +281,7 @@ class CapabilityRecord:
         *,
         tested_at: str | None = None,
         source_sha: str | None = None,
-    ) -> "CapabilityRecord":
+    ) -> CapabilityRecord:
         """Advance one lifecycle stage while preserving tested provenance."""
 
         self.validate()
@@ -326,7 +326,7 @@ class ConsensusRecord:
     status: str = "pending"
     quorum: int = 1
 
-    def validate(self) -> "ConsensusRecord":
+    def validate(self) -> ConsensusRecord:
         if not isinstance(self.worker_reports, (list, tuple)):
             raise ContractValidationError(
                 "worker_reports must be a stable sequence of objects"
@@ -382,7 +382,7 @@ class WorkerConstitution:
     required_evidence: tuple[str, ...] = ()
     escalation_path: str = "operator-review"
 
-    def validate(self) -> "WorkerConstitution":
+    def validate(self) -> WorkerConstitution:
         _require_text("profile", self.profile)
         values = _validate_texts("values", self.values)
         _require_text("authority", self.authority)
@@ -423,7 +423,7 @@ class JobContract:
     expires_at: str = ""
     requires_review: bool = True
 
-    def validate(self) -> "JobContract":
+    def validate(self) -> JobContract:
         _require_text("name", self.name)
         _require_text("worker_profile", self.worker_profile)
         _require_text("job", self.job)
@@ -441,12 +441,12 @@ class JobContract:
 
     def is_active(self, at: datetime | None = None) -> bool:
         self.validate()
-        instant = at or datetime.now(timezone.utc)
+        instant = at or datetime.now(UTC)
         if instant.tzinfo is None or instant.utcoffset() is None:
             raise ContractValidationError("at must include a timezone")
         granted_at = _parse_timestamp("granted_at", self.granted_at)
         expires_at = _parse_timestamp("expires_at", self.expires_at)
-        instant = instant.astimezone(timezone.utc)
+        instant = instant.astimezone(UTC)
         return granted_at <= instant < expires_at
 
     def to_dict(self) -> dict[str, Any]:
@@ -477,7 +477,7 @@ class EmergencyAuthority:
     expires_at: str
     revocable: bool = True
 
-    def validate(self) -> "EmergencyAuthority":
+    def validate(self) -> EmergencyAuthority:
         _require_text("name", self.name)
         _require_text("granted_to", self.granted_to)
         _require_text("issuer", self.issuer)
@@ -496,12 +496,12 @@ class EmergencyAuthority:
 
     def is_active(self, at: datetime | None = None) -> bool:
         self.validate()
-        instant = at or datetime.now(timezone.utc)
+        instant = at or datetime.now(UTC)
         if instant.tzinfo is None or instant.utcoffset() is None:
             raise ContractValidationError("at must include a timezone")
         granted_at = _parse_timestamp("granted_at", self.granted_at)
         expires_at = _parse_timestamp("expires_at", self.expires_at)
-        instant = instant.astimezone(timezone.utc)
+        instant = instant.astimezone(UTC)
         return granted_at <= instant < expires_at
 
     def to_dict(self) -> dict[str, Any]:
@@ -529,7 +529,7 @@ class WorkerMode:
     requires_uncertainty: bool = True
     humor_enabled: bool = False
 
-    def validate(self) -> "WorkerMode":
+    def validate(self) -> WorkerMode:
         _require_text("name", self.name)
         _validate_choice("verbosity", self.verbosity, _VERBOSITIES)
         _validate_choice("directness", self.directness, _DIRECTNESS)
@@ -565,7 +565,7 @@ class MemoryPolicy:
     allow_export: bool = False
     redactions: tuple[str, ...] = ()
 
-    def validate(self) -> "MemoryPolicy":
+    def validate(self) -> MemoryPolicy:
         _require_text("purpose", self.purpose)
         _validate_choice("retention", self.retention, _MEMORY_RETENTIONS)
         if isinstance(self.retention_seconds, bool) or not isinstance(
@@ -596,11 +596,11 @@ class MemoryPolicy:
         self.validate()
         if created_at.tzinfo is None or created_at.utcoffset() is None:
             raise ContractValidationError("created_at must include a timezone")
-        instant = at or datetime.now(timezone.utc)
+        instant = at or datetime.now(UTC)
         if instant.tzinfo is None or instant.utcoffset() is None:
             raise ContractValidationError("at must include a timezone")
         age = (
-            instant.astimezone(timezone.utc) - created_at.astimezone(timezone.utc)
+            instant.astimezone(UTC) - created_at.astimezone(UTC)
         ).total_seconds()
         return 0 <= age <= self.retention_seconds
 
@@ -625,7 +625,7 @@ class TrustVector:
     updated_at: str
     decay_half_life_seconds: int = 86_400
 
-    def validate(self) -> "TrustVector":
+    def validate(self) -> TrustVector:
         if not isinstance(self.dimensions, Mapping) or not self.dimensions:
             raise ContractValidationError("trust dimensions must not be empty")
         for name, value in self.dimensions.items():
@@ -651,15 +651,15 @@ class TrustVector:
             raise ContractValidationError("decay_half_life_seconds must be positive")
         return self
 
-    def decayed(self, at: datetime | None = None) -> "TrustVector":
+    def decayed(self, at: datetime | None = None) -> TrustVector:
         self.validate()
-        instant = at or datetime.now(timezone.utc)
+        instant = at or datetime.now(UTC)
         if instant.tzinfo is None or instant.utcoffset() is None:
             raise ContractValidationError("at must include a timezone")
         age = max(
             0.0,
             (
-                instant.astimezone(timezone.utc)
+                instant.astimezone(UTC)
                 - _parse_timestamp("updated_at", self.updated_at)
             ).total_seconds(),
         )
@@ -692,7 +692,7 @@ class WorkerLineage:
     root_worker_id: str | None = None
     status: str = "active"
 
-    def validate(self) -> "WorkerLineage":
+    def validate(self) -> WorkerLineage:
         worker_id = _require_text("worker_id", self.worker_id)
         _require_text("fork_reason", self.fork_reason)
         _require_text("source_sha", self.source_sha)
@@ -706,7 +706,7 @@ class WorkerLineage:
             _require_text("root_worker_id", self.root_worker_id)
         return self
 
-    def quarantine(self, reason: str) -> "WorkerLineage":
+    def quarantine(self, reason: str) -> WorkerLineage:
         _require_text("reason", reason)
         self.validate()
         return replace(
@@ -736,7 +736,7 @@ class ExecutionEnvelope:
     side_effects_allowed: bool = False
     approval_ref: str | None = None
 
-    def validate(self) -> "ExecutionEnvelope":
+    def validate(self) -> ExecutionEnvelope:
         _validate_choice("lane", self.lane, _EXECUTION_LANES)
         _validate_bool("side_effects_allowed", self.side_effects_allowed)
         if self.lane in {"simulation", "canary"} and self.side_effects_allowed:
@@ -767,7 +767,7 @@ class CapabilityDegradation:
     reason: str | None = None
     changed_at: str = ""
 
-    def validate(self) -> "CapabilityDegradation":
+    def validate(self) -> CapabilityDegradation:
         _validate_choice("state", self.state, _DEGRADATION_STATES)
         if self.state != "full":
             _require_text("reason", self.reason)
@@ -776,7 +776,7 @@ class CapabilityDegradation:
 
     def transition(
         self, state: str, *, reason: str, changed_at: str
-    ) -> "CapabilityDegradation":
+    ) -> CapabilityDegradation:
         self.validate()
         return replace(
             self, state=state, reason=reason, changed_at=changed_at
@@ -801,7 +801,7 @@ class RoleSeparation:
     critic_accepted: bool = False
     execution_approved: bool = False
 
-    def validate(self) -> "RoleSeparation":
+    def validate(self) -> RoleSeparation:
         planner = _require_text("planner_id", self.planner_id)
         ids = [planner]
         for name, value in (
@@ -852,7 +852,7 @@ class ContextProfile:
     required_context: tuple[str, ...] = ()
     assumption_warnings: tuple[str, ...] = ()
 
-    def validate(self) -> "ContextProfile":
+    def validate(self) -> ContextProfile:
         _require_text("profile", self.profile)
         _validate_texts("assumptions", self.assumptions)
         _validate_texts("required_context", self.required_context)
@@ -891,7 +891,7 @@ class PrivacyPolicy:
     denied_scopes: tuple[str, ...] = ()
     export_consent: bool = False
 
-    def validate(self) -> "PrivacyPolicy":
+    def validate(self) -> PrivacyPolicy:
         allowed = set(_validate_texts("allowed_scopes", self.allowed_scopes))
         denied = set(_validate_texts("denied_scopes", self.denied_scopes))
         _validate_bool("export_consent", self.export_consent)
@@ -925,7 +925,7 @@ class HostileInputAssessment:
     indicators: tuple[str, ...] = ()
     quarantined: bool = False
 
-    def validate(self) -> "HostileInputAssessment":
+    def validate(self) -> HostileInputAssessment:
         _require_text("source", self.source)
         _validate_texts("indicators", self.indicators)
         _validate_bool("quarantined", self.quarantined)
@@ -934,7 +934,7 @@ class HostileInputAssessment:
         return self
 
     @classmethod
-    def assess(cls, source: str, content: str) -> "HostileInputAssessment":
+    def assess(cls, source: str, content: str) -> HostileInputAssessment:
         _require_text("source", source)
         if not isinstance(content, str):
             raise ContractValidationError("content must be a string")
@@ -967,7 +967,7 @@ class ScenarioEnsemble:
     confidence: str = "unknown"
     unknowns: tuple[str, ...] = ()
 
-    def validate(self) -> "ScenarioEnsemble":
+    def validate(self) -> ScenarioEnsemble:
         if not self.scenarios:
             raise ContractValidationError("scenarios must not be empty")
         total = 0.0
@@ -1020,7 +1020,7 @@ class WorkforceGovernance:
     hostile_input: HostileInputAssessment | None = None
     scenarios: ScenarioEnsemble | None = None
 
-    def validate(self) -> "WorkforceGovernance":
+    def validate(self) -> WorkforceGovernance:
         for field in dataclasses.fields(self):
             policy = getattr(self, field.name)
             if policy is not None:
@@ -1052,7 +1052,7 @@ class WorkforceGovernance:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "WorkforceGovernance":
+    def from_dict(cls, value: Mapping[str, Any]) -> WorkforceGovernance:
         """Restore a serialized policy envelope without accepting extra fields."""
 
         if not isinstance(value, Mapping):

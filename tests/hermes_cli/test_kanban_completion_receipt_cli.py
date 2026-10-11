@@ -189,7 +189,7 @@ def manual_worktree(tmp_path, monkeypatch):
 def test_manual_claim_persists_actual_branch_and_base_for_clean_completion(
     manual_worktree, reuse,
 ):
-    repo, tid, base = manual_worktree
+    _repo, tid, base = manual_worktree
     branch = "codex/manual-receipt"
     if reuse:
         with kbc.connect_closing() as conn:
@@ -218,7 +218,7 @@ def test_manual_claim_persists_actual_branch_and_base_for_clean_completion(
 def test_manual_claim_cannot_turn_invalid_base_or_real_changes_into_no_change(
     manual_worktree, evidence, caller, capsys,
 ):
-    repo, tid, base = manual_worktree
+    _repo, tid, base = manual_worktree
     branch = "codex/manual-receipt"
     with kbc.connect_closing() as conn:
         workspace = kbw.resolve_workspace(kb.get_task(conn, tid))

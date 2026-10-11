@@ -466,7 +466,7 @@ def test_federation_audit_is_reachable_through_real_cli(tmp_path):
     result = subprocess.run(
         [sys.executable, '-m', 'hermes_cli.main', 'federation', 'audit', '--json'],
         cwd=MANIFEST.parents[2], env=environment, capture_output=True, text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)

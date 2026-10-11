@@ -1,4 +1,5 @@
 """Validate authored plan circulation independently of Blender exports."""
+import itertools
 import json
 from pathlib import Path
 OUT=Path(__file__).resolve().parents[2]/'public/lunar-city/interior-plans-v1'
@@ -12,7 +13,7 @@ for plan in data['plans']:
    x,z,w,d=void['rect'];cx,_,cz=solid['center'];sx,_,sz=solid['size']
    assert cx+sx/2<=x+1e-8 or cx-sx/2>=x+w-1e-8 or cz+sz/2<=z+1e-8 or cz-sz/2>=z+d-1e-8,(plan['id'],solid['id'],'floor closes reserved void')
  for route in plan['routes']:
-  for a,b in zip(route,route[1:]):
+  for a,b in itertools.pairwise(route):
    checked+=1
    for solid in plan['solids']:
     if solid['kind'] not in ['wall','desk','bench','planter']:continue

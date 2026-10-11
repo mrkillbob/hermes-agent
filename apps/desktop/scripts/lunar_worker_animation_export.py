@@ -93,5 +93,4 @@ if (ROOT/'pause-finishing-for-review.json').exists():
   if callback and bpy.app.timers.is_registered(callback):
    bpy.app.timers.unregister(callback)
   (ROOT/'finish-review-pause-status.json').write_text(json.dumps({'asset':asset,'status':'paused_after_saved_export_for_visual_review'})+'\n')
-  return None
  bpy.app.timers.register(pause_finish_queue,first_interval=.1)

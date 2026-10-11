@@ -167,7 +167,7 @@ def test_empty_configured_capabilities_disable_handoffs(monkeypatch):
 def test_handoff_acknowledges_the_effective_assignee(monkeypatch):
     from gateway.specialist_handoff import HandoffResult
     from gateway.specialist_routing import RouteKind, SpecialistRouteDecision
-    import gateway.specialist_handoff as specialist_handoff
+    from gateway import specialist_handoff
 
     adapter = _adapter(monkeypatch)
     adapter._classify_specialist_event = AsyncMock(

@@ -90,7 +90,7 @@ def test_touch_activity_persist_errors_are_swallowed(monkeypatch):
 
 def test_touch_activity_hard_interrupts_worker_after_lease_loss(monkeypatch):
     import agent.interrupt_compat as _agent_interrupt_compat
-    import tools.kanban_tools as kanban_tools
+    from tools import kanban_tools
 
     agent = _agent_with_db()
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_deadbeef")

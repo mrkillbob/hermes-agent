@@ -12,7 +12,7 @@ from hermes_state import SessionDB
 
 def _git(args: list[str], cwd: Path) -> None:
     result = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
 

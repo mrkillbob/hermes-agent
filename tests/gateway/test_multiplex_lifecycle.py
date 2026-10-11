@@ -120,7 +120,7 @@ def test_gateway_starts_one_ticker_for_the_complete_served_set(tmp_path, monkeyp
 def test_second_gateway_logs_non_owner_and_starts_no_dispatch_loop(tmp_path, monkeypatch, caplog):
     """The singleton lock loser reports its role and exits before constructing a dispatcher."""
     from gateway import kanban_watchers
-    from hermes_cli import kanban_db as kanban_db
+    from hermes_cli import kanban_db as kanban_db  # noqa: PLC0414
     import hermes_cli.config as config_mod
 
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))

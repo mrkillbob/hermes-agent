@@ -98,7 +98,7 @@ class TaskTelemetry:
         return result
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "TaskTelemetry":
+    def from_dict(cls, value: Mapping[str, Any]) -> TaskTelemetry:
         if not isinstance(value, Mapping):
             raise ProtocolError("telemetry must be an object")
         return cls(
@@ -124,7 +124,7 @@ class RunnerTelemetry:
         object.__setattr__(self, "metrics_updated_at", _optional_finite_nonnegative_float(self.metrics_updated_at, "metrics_updated_at"))
 
     @classmethod
-    def from_task(cls, telemetry: TaskTelemetry, *, updated_at: float) -> "RunnerTelemetry":
+    def from_task(cls, telemetry: TaskTelemetry, *, updated_at: float) -> RunnerTelemetry:
         return cls(
             last_output_tokens=telemetry.output_tokens,
             last_output_duration_ms=telemetry.duration_ms,
@@ -145,7 +145,7 @@ class RunnerTelemetry:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "RunnerTelemetry":
+    def from_dict(cls, value: Mapping[str, Any]) -> RunnerTelemetry:
         if not isinstance(value, Mapping):
             raise ProtocolError("telemetry must be an object")
         return cls(
@@ -182,7 +182,7 @@ class TaskRequirement:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "TaskRequirement":
+    def from_dict(cls, value: Mapping[str, Any]) -> TaskRequirement:
         if not isinstance(value, Mapping):
             raise ProtocolError("requirement must be an object")
         value = _body_mapping(value)
@@ -224,7 +224,7 @@ class RunnerCapability:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "RunnerCapability":
+    def from_dict(cls, value: Mapping[str, Any]) -> RunnerCapability:
         if not isinstance(value, Mapping):
             raise ProtocolError("runner capability must be an object")
         value = _body_mapping(value)
@@ -269,7 +269,7 @@ class FleetTask:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "FleetTask":
+    def from_dict(cls, value: Mapping[str, Any]) -> FleetTask:
         if not isinstance(value, Mapping):
             raise ProtocolError("fleet task must be an object")
         value = _body_mapping(value)

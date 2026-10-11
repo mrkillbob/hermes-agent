@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import agent.learning_vault as learning_vault
+from agent import learning_vault
 from agent.learning_vault import read_vault_learning
 
 

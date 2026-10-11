@@ -119,7 +119,7 @@ class GroupedCICoordinator:
             if self._prepare_group is not None:
                 try:
                     self._prepare_group(group)
-                except Exception:  # noqa: BLE001 - one failed group must not cancel others.
+                except Exception:
                     outcomes.update(
                         {
                             job.identity: CIAuditOutcome(
@@ -158,7 +158,7 @@ class GroupedCICoordinator:
     def _run_one(self, job: CIAuditJob, expected_manifest_digest: str) -> CIAuditOutcome:
         try:
             receipt = self._runner_factory().run(job.identity, job.worktree)
-        except Exception as error:  # noqa: BLE001 - preserve an outcome for every queued exact head.
+        except Exception as error:
             # Keep the typed exception and its bounded message in the outcome.
             # The caller cannot manufacture a receipt when the runner failed
             # before returning one, but it must still be able to distinguish a

@@ -41,7 +41,7 @@ def isolated_kanban_home(tmp_path, monkeypatch):
 def test_exact_runtime_snapshot_lowers_configured_performance_cap(tmp_path):
     root = tmp_path / "private-project"
     root.mkdir()
-    scan = priority.ProcessScan(
+    priority.ProcessScan(
         snapshots=(
             priority.ProcessSnapshot(
                 pid=41,

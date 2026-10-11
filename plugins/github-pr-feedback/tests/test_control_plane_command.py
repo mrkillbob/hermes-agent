@@ -29,7 +29,7 @@ def test_control_plane_command_ignores_worktree_module_shadow(tmp_path):
     result = subprocess.run(
         ["/bin/sh", "-c", command + " --version"], cwd=workspace,
         env=build_subprocess_env(scrub_secrets=False, inherit_profile_home=False, extra={"HERMES_KANBAN_HERMES_PYTHON": str(python), "PYTHONPATH": str(source)}),
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=20, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert "WRONG_WORKTREE_CONTROL_PLANE" not in result.stdout

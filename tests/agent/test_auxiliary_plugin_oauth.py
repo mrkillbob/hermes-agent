@@ -11,7 +11,7 @@ from providers.base import ProviderProfile
 @pytest.mark.parametrize("auth_type", ["oauth_external", "oauth_device_code"])
 @pytest.mark.parametrize("explicit", [False, True])
 def test_registry_oauth_route_uses_profile_client_and_own_credential(monkeypatch, auth_type, explicit):
-    import hermes_cli.auth as auth
+    from hermes_cli import auth
     import providers
 
     calls = []
@@ -49,7 +49,7 @@ def test_registry_oauth_route_uses_profile_client_and_own_credential(monkeypatch
 
 
 def test_failed_oauth_profile_hook_leaves_the_route_unavailable(monkeypatch, caplog):
-    import hermes_cli.auth as auth
+    from hermes_cli import auth
     import providers
 
     class Profile(ProviderProfile):

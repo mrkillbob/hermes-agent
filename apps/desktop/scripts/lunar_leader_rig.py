@@ -65,9 +65,7 @@ for vertex in body.data.vertices:
  p=body.matrix_world@vertex.co;z=p.z/h;x=p.x/h;y=(p.y-cy)/h
  if asset=='elephant-memory' and abs(x)>.23 and z>.45:
   weights={'hand.L' if x>0 else 'hand.R':1.0}
- elif asset=='elephant-memory' and y<-.17 and abs(x)<.12 and z>.43:
-  weights={'head':1.0}
- elif z>head_z:
+ elif asset=='elephant-memory' and y<-.17 and abs(x)<.12 and z>.43 or z>head_z:
   weights={'head':1.0}
  elif z>neck_z and abs(x)<.20:
   t=max(0,min(1,(z-neck_z)/.07));weights={'head':t,'neck':1-t}

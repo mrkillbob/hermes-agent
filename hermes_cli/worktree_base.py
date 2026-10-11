@@ -38,7 +38,7 @@ def resolve_worktree_base(
             timeout=timeout,
             cwd=repo_root,
             stdin=subprocess.DEVNULL,
-            env=noninteractive_git_env(),
+            env=noninteractive_git_env(), check=False,
         )
 
     def _ref_exists(ref: str) -> bool:

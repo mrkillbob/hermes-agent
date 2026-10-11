@@ -146,7 +146,7 @@ def _write_txn():
     return write_txn
 
 
-def _expiry_timestamp(expires_at: datetime | int | float | None) -> int | None:
+def _expiry_timestamp(expires_at: datetime | float | None) -> int | None:
     if expires_at is None:
         return None
     if isinstance(expires_at, datetime):
@@ -243,7 +243,7 @@ class CapabilityRegistry:
         *,
         profile_id: str,
         signature: CapabilitySignature,
-        expires_at: datetime | int | float | None = None,
+        expires_at: datetime | float | None = None,
     ) -> int:
         """Register one closed baseline declaration for compatibility with the router."""
         self._validate_profile_id(profile_id)
@@ -279,7 +279,7 @@ class CapabilityRegistry:
         self,
         profile_id: str,
         *,
-        expires_at: datetime | int | float | None = None,
+        expires_at: datetime | float | None = None,
     ) -> int:
         """Return one active row for the exact trusted declaration generation.
 

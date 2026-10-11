@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 import shlex
 
@@ -20,7 +21,7 @@ def pid_matches_task_worker(pid: int, task_id: str) -> bool:
     query = f"work kanban task {task_id}"
     return any(
         flag in {"-q", "--query"} and value == query
-        for flag, value in zip(argv, argv[1:])
+        for flag, value in itertools.pairwise(argv)
     )
 
 

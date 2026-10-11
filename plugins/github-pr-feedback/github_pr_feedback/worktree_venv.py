@@ -31,7 +31,7 @@ def select_environment(repository: Path, workspace: Path, allowed_roots: tuple[P
             probe = subprocess.run(
                 [str(python), '-I', '-c', "import sys; print('.'.join(map(str, sys.version_info[:3])))"],
                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
-                cwd=repository,
+                cwd=repository, check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
             continue

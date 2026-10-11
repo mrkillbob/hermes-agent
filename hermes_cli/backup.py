@@ -14,7 +14,7 @@ import time
 import zipfile
 import zlib
 from contextlib import contextmanager, suppress
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from itertools import chain
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
@@ -658,7 +658,6 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
                 total_bytes += abs_path.stat().st_size
             except (PermissionError, OSError, ValueError) as exc:
                 errors.append(f"{arcname}: {exc}")
-    incomplete_marked = not errors
     if errors and default_generated:
         incomplete_path = out_path.with_name(
             f"{out_path.stem}{_INCOMPLETE_RUN_BACKUP_SUFFIX}{out_path.suffix}"
@@ -666,7 +665,6 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
         try:
             os.replace(out_path, incomplete_path)
             out_path = incomplete_path
-            incomplete_marked = True
         except OSError as exc:
             logger.warning("Could not mark incomplete backup %s: %s", out_path, exc)
     elapsed = time.monotonic() - t0
@@ -1293,7 +1291,7 @@ def _create_quick_snapshot_locked(
         )
         return True
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     base_snap_id = f"{ts}-{label}" if label else ts
     snap_id = base_snap_id
     suffix = 2

@@ -186,7 +186,7 @@ def test_protected_control_command_executes_in_spawned_environment(monkeypatch, 
     result = subprocess.run(
         ["/bin/sh", "-c", command], cwd=workspace,
         env=build_subprocess_env(captured["env"]),
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("Python ")
@@ -227,7 +227,7 @@ def test_control_callback_imports_dispatcher_source_from_unrelated_workspace(
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     stripped = subprocess.run(
         [
@@ -242,7 +242,7 @@ def test_control_callback_imports_dispatcher_source_from_unrelated_workspace(
         env=env,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert stripped.returncode != 0
     assert "No module named" in stripped.stderr
@@ -265,7 +265,7 @@ def test_control_callback_imports_dispatcher_source_from_unrelated_workspace(
         env=env,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=10, check=False,
     )
     assert owner.returncode == 0, owner.stderr
     assert owner.stdout.strip() == str(

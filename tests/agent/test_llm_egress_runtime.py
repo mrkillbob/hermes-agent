@@ -326,7 +326,7 @@ def test_codex_generated_context_is_redacted_without_using_untrusted_budget(tmp_
         + "Protocol sample: c2VjcmV0LXBheWxvYWQ=\n"
     )
 
-    authorized, receipt = authorize_agent_sdk_kwargs(
+    _authorized, receipt = authorize_agent_sdk_kwargs(
         agent,
         {
             "model": "gpt-5.6-terra",
@@ -4554,7 +4554,7 @@ def test_protected_skill_view_uses_exact_local_source_grant(tmp_path, monkeypatc
         payload["_source_path"] = str(selected_source)
         payload["content"] = selected_source.read_text(encoding="utf-8")
         messages[1]["content"] = json.dumps(payload)
-        authorized, receipt = authorize_agent_sdk_kwargs(agent, {"model": "test-model", "messages": messages})
+        authorized, _receipt = authorize_agent_sdk_kwargs(agent, {"model": "test-model", "messages": messages})
         assert authorized["messages"][1]["content"] == payload["content"]
         assert "missing_credential_files" not in authorized["messages"][1]["content"]
         assert str(selected_source) not in json.dumps(authorized)
@@ -4620,14 +4620,14 @@ def test_head_match_workflow_uses_actual_git_without_source_receipts(tmp_path):
     for expected, status in ((head, 0), ("0" * 40, 1)):
         result = subprocess.run(
             [sys.executable, "-c", _GIT_HEAD_MATCH_CODE, expected], cwd=workspace,
-            capture_output=True, text=True, env=env, timeout=10,
+            capture_output=True, text=True, env=env, timeout=10, check=False,
         )
         assert result.returncode == status
         assert result.stdout == result.stderr == ""
     assert set(workspace.iterdir()) == {workspace / ".git"}
     missing = subprocess.run(
         [sys.executable, "-c", _GIT_HEAD_MATCH_CODE, head], cwd=tmp_path,
-        capture_output=True, text=True, env=env, timeout=10,
+        capture_output=True, text=True, env=env, timeout=10, check=False,
     )
     assert missing.returncode == 1
     assert missing.stdout == missing.stderr == ""

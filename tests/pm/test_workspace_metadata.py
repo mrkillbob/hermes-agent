@@ -5,8 +5,8 @@ import tomllib
 
 from pm import workspace
 from pm.environment import managed_environment
-from tests.pm.test_workspace import layout as layout  # noqa: F401
-from tests.pm.test_environment_build import locked_project as locked_project  # noqa: F401
+from tests.pm.test_workspace import layout as layout  # noqa: PLC0414
+from tests.pm.test_environment_build import locked_project as locked_project  # noqa: PLC0414
 
 
 def test_generated_core_version_satisfies_plugin_without_mutating_source(layout):

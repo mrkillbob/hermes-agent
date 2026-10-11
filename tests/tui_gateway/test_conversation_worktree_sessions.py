@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import tui_gateway.server as server
+from tui_gateway import server
 
 
 @dataclass(frozen=True)
@@ -58,7 +58,7 @@ def test_session_project_repo_gets_its_own_worktree_policy(monkeypatch, tmp_path
 
     configured = tmp_path / "lunabot"
     selected = tmp_path / "hermes-agent"
-    selected_common = tmp_path / "hermes-common"
+    tmp_path / "hermes-common"
     configured.mkdir()
     selected.mkdir()
     policy = ConversationWorktreePolicy(
@@ -278,7 +278,6 @@ def test_session_create_defers_worktree_until_first_prompt(monkeypatch):
 
     assert "error" not in response
     result = response["result"]
-    root = result["stored_session_id"]
     assert calls == []
     assert result["info"]["cwd"] == server._completion_cwd({"cwd": "/stable"})
     assert scheduled == [(result["session_id"], server._completion_cwd({"cwd": "/stable"}))]

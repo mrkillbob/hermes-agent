@@ -653,7 +653,6 @@ class MergeController:
                 )
             # A transport error cannot prove that GitHub rejected the write.
             # Canonical readback below remains the only completion authority.
-            pass
         try:
             readback = self._github.get_merge_state(self._policy.repository, number)
         except GitHubClientError as error:

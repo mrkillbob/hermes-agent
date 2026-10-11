@@ -301,7 +301,7 @@ def run(arm: str, model: str, reps: int, pythonpath: str, only=None, only_rep=No
     for rep in range(reps):
         if only_rep is not None and rep != only_rep:
             continue
-        for name in TASKS:
+        for name, task in TASKS.items():
             if only and name not in only:
                 continue
             run_id = f"{name}-r{rep}"
@@ -341,7 +341,7 @@ mode = "overwrite"
                 "HERMES_HOME": str(HOME),
                 "HERMES_NEMO_RELAY_PLUGINS_TOML": str(relay_config),
             })
-            q = TASKS[name].replace("{WORK}", str(work))
+            q = task.replace("{WORK}", str(work))
             if _resolve_clean_source(str(source_root))[1] != source_sha:
                 raise SystemExit("evaluated source changed during battery")
             t0 = time.time()
@@ -350,7 +350,7 @@ mode = "overwrite"
                     [sys.executable, "-m", "hermes_cli.main", "chat", "--query", q,
                      "--quiet", "--max-turns", "30", "--accept-hooks", "--model", model],
                     cwd=work, env=env, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", timeout=600)
+                    encoding="utf-8", errors="replace", timeout=600, check=False)
                 out = (p.stdout or "").strip()
                 rc = p.returncode
             except subprocess.TimeoutExpired:

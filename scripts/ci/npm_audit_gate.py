@@ -29,7 +29,7 @@ def blocking_advisories(report: dict) -> dict[str, str]:
 def main(directory: str) -> int:
     cmd = ["npm", "audit", "--json"]
     kwargs = dict(cwd=directory, capture_output=True, encoding="utf-8", errors="replace")
-    proc = subprocess.run(cmd, **kwargs)
+    proc = subprocess.run(cmd, **kwargs, check=False)
     report = json.loads(proc.stdout or "{}")
     if "vulnerabilities" not in report:
         print(f"::error::npm audit produced no report: {proc.stdout[:500]}{proc.stderr[:500]}")

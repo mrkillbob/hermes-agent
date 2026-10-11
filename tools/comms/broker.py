@@ -97,9 +97,7 @@ def _write_endpoint(server: _BrokerServer) -> Path:
             "broker_id": server.broker_id,
             "protocol_version": BROKER_PROTOCOL_VERSION,
             "pid": os.getpid(),
-            "pid_start_time_us": int(
-                round(psutil.Process(os.getpid()).create_time() * 1_000_000)
-            ),
+            "pid_start_time_us": round(psutil.Process(os.getpid()).create_time() * 1_000_000),
         }),
         encoding="utf-8",
     )
@@ -195,7 +193,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if not self._authorized():
             self._write(401, {"error": "unauthorized"})
@@ -266,7 +264,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._write(404, {"error": "not found"})
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         if self.path != "/send":
             self._write(404, {"error": "not found"})
             return

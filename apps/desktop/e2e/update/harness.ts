@@ -208,11 +208,15 @@ export function appEnv(facts: InstallFacts, extra: Record<string, string> = {}):
 
 /** A user who configured a custom OpenAI-compatible endpoint (the scripted provider). */
 export function configureProvider(facts: InstallFacts, providerUrl: string): void {
+  const config = path.join(facts.hermesHome, 'config.yaml')
+  // Keep the seed's top-level `update:` block (the install's `--set-channel main` record): the
+  // specs publish commits on main, never a release, so the stable default would offer nothing.
+  const update = /^update:\n(?:[ \t].*\n?)*/m.exec(readText(config))?.[0] ?? ''
   // These scenarios exercise Desktop install/update lifecycle, not Kanban.
   // Do not let the boot readiness gate launch an unrelated long-lived gateway.
   fs.writeFileSync(
-    path.join(facts.hermesHome, 'config.yaml'),
-    providerConfigYaml(providerUrl, 'kanban:\n  dispatch_in_gateway: false\n')
+    config,
+    providerConfigYaml(providerUrl, `${update && !update.endsWith('\n') ? `${update}\n` : update}kanban:\n  dispatch_in_gateway: false\n`)
   )
   fs.writeFileSync(path.join(facts.hermesHome, '.env'), 'MOCK_API_KEY=update-e2e-key\n')
 }

@@ -8,7 +8,7 @@ from tests.scripts.desktop_update.test_desktop_update_windows_marker import MARK
 from tests.scripts.desktop_update.test_desktop_update_windows_marker import _BODIES
 from tests.scripts.desktop_update.test_desktop_update_windows_marker import _creation_time
 from tests.scripts.desktop_update.test_desktop_update_windows_marker import _run
-from tests.scripts.desktop_update.test_desktop_update_windows_marker import sleeper as sleeper
+from tests.scripts.desktop_update.test_desktop_update_windows_marker import sleeper as sleeper  # noqa: PLC0414
 
 
 @pytest.mark.platforms('windows')

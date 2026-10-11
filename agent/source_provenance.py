@@ -38,7 +38,7 @@ class SourceProvenanceError(ValueError):
 class SourceProvenanceContext:
     """Per-call identity available only while a trusted file read executes."""
 
-    registry: "SourceProvenanceRegistry"
+    registry: SourceProvenanceRegistry
     session_id: str
     turn_id: str
     request_id: str
@@ -59,7 +59,7 @@ def active_source_provenance() -> SourceProvenanceContext | None:
 
 @contextmanager
 def activate_source_provenance(
-    registry: "SourceProvenanceRegistry",
+    registry: SourceProvenanceRegistry,
     *,
     session_id: str,
     turn_id: str,
@@ -204,7 +204,7 @@ class SourceProvenanceRegistry:
         return grant
 
     @contextmanager
-    def request_scope(self, request_id: str) -> Iterator["SourceProvenanceRegistry"]:
+    def request_scope(self, request_id: str) -> Iterator[SourceProvenanceRegistry]:
         """Bound grants to one request and clear them on every exit path."""
 
         if not isinstance(request_id, str) or not request_id:

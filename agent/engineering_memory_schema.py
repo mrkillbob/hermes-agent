@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -128,14 +128,14 @@ def _timestamp(mapping: Mapping[str, Any], field_name: str, *, required: bool) -
         parsed = value
     elif isinstance(value, str):
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value)
         except ValueError as exc:
             raise EngineeringMemorySchemaError(f"{field_name}: invalid timestamp") from exc
     else:
         raise EngineeringMemorySchemaError(f"{field_name}: expected ISO timestamp")
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _metadata(mapping: Mapping[str, Any], field_name: str) -> dict[str, Any]:
@@ -156,7 +156,7 @@ def _metadata(mapping: Mapping[str, Any], field_name: str) -> dict[str, Any]:
 
 
 def _iso(value: datetime | None) -> str | None:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if value else None
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z") if value else None
 
 
 @dataclass(frozen=True)
@@ -191,7 +191,7 @@ class EngineeringMemoryRecord:
     body: str = ""
 
     @classmethod
-    def from_mapping(cls, mapping: Mapping[str, Any], *, source_path: Path | None = None) -> "EngineeringMemoryRecord":
+    def from_mapping(cls, mapping: Mapping[str, Any], *, source_path: Path | None = None) -> EngineeringMemoryRecord:
         unknown = set(mapping) - _FIELDS
         if unknown:
             raise EngineeringMemorySchemaError(f"unknown fields: {', '.join(sorted(unknown))}")

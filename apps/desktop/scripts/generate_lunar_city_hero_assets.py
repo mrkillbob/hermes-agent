@@ -26,7 +26,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import generate_lunar_city_baseline as lunar  # noqa: E402
+import generate_lunar_city_baseline as lunar
 
 
 ROOT = SCRIPT_DIR.parents[0]
@@ -450,7 +450,6 @@ def sculpted_limb(name, start, end, radius_a, radius_b, mat, target, asset_id, r
     start_v = Vector(start)
     end_v = Vector(end)
     axis = end_v - start_v
-    length = max(axis.length, 0.001)
     direction = axis.normalized()
     reference = Vector((0, 0, 1))
     if abs(direction.dot(reference)) > 0.96:

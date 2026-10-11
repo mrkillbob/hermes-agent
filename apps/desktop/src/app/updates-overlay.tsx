@@ -1,6 +1,9 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useState } from 'react'
 
+import { SETTINGS_ROUTE } from '@/app/routes'
+import { SETTING_IDS } from '@/app/settings/settings-manifest'
+import { settingsSearchTargetQuery } from '@/app/settings/settings-search'
 import { BrandMark } from '@/components/brand-mark'
 import { SyncStatusCard } from '@/components/sync-status-card'
 import { Button } from '@/components/ui/button'
@@ -46,6 +49,7 @@ import {
   dismissDiscontinuedNotice,
   resetUpdateApplyState,
   setUpdateOverlayOpen,
+  sourceUpdateChannel,
   type UpdateApplyState
 } from '@/store/updates'
 
@@ -194,6 +198,7 @@ function IdleView({
   version: DesktopVersionInfo | null
 }) {
   const { t } = useI18n()
+  const clientStatus = useStore($updateStatus)
   const u = t.updates
 
   if (!status && checking) {
@@ -219,7 +224,26 @@ function IdleView({
     )
   }
 
-  const details = version ? <VersionDetails version={version} /> : null
+  // The channel is chosen in Settings (with its confirm step); here it is named, with a way there.
+  const changeChannel = (
+    <button
+      className="text-primary underline-offset-2 hover:underline"
+      onClick={() => {
+        setUpdateOverlayOpen(false)
+        window.location.hash = `#${SETTINGS_ROUTE}?${settingsSearchTargetQuery({ view: 'about', setting: SETTING_IDS.about.updates })}`
+      }}
+      type="button"
+    >
+      {t.settings.about.channel.change}
+    </button>
+  )
+
+  // Only where Settings shows a selector: a custom branch or an older runtime gets the label alone.
+  // The row names the CLIENT's channel (VersionDetails reads $updateStatus), so the link follows the
+  // client status even while the overlay is showing a remote backend's update.
+  const details = version ? (
+    <VersionDetails channelAction={sourceUpdateChannel(clientStatus) ? changeChannel : undefined} version={version} />
+  ) : null
 
   // App-installer check-unknown (OS checker unavailable): NOT "no updates"
   // and NOT a generic error — the OS also installs updates automatically on

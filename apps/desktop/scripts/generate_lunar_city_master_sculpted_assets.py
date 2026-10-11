@@ -24,8 +24,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import generate_lunar_city_baseline as lunar  # noqa: E402
-import generate_lunar_city_hero_assets as hero  # noqa: E402
+import generate_lunar_city_baseline as lunar
+import generate_lunar_city_hero_assets as hero
 
 
 ROOT = SCRIPT_DIR.parents[0]

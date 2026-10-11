@@ -75,7 +75,7 @@ def test_script_killed_right_after_spawning_the_update_leaves_a_live_marker(tmp_
         hold.touch()
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline and subprocess.run(
-                ['tasklist', '/FI', f'PID eq {delegate}', '/NH'], capture_output=True, text=True,
+                ['tasklist', '/FI', f'PID eq {delegate}', '/NH'], capture_output=True, text=True, check=False,
         ).stdout.find(str(delegate)) >= 0:
             time.sleep(0.2)
         while marker.exists():   # the custodian releases once the delegate is gone
@@ -87,5 +87,5 @@ def test_script_killed_right_after_spawning_the_update_leaves_a_live_marker(tmp_
     finally:
         hold.touch()
         if script.poll() is None:
-            subprocess.run(['taskkill', '/T', '/F', '/PID', str(script.pid)], capture_output=True)
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(script.pid)], capture_output=True, check=False)
             script.wait()

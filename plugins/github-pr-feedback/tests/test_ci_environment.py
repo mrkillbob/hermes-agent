@@ -20,7 +20,7 @@ def test_safe_path_ci_imports_only_its_explicit_worktree_helpers(tmp_path, monke
     monkeypatch.setenv('PYTHONSAFEPATH', '1')
     monkeypatch.setenv('PYTHONPATH', str(foreign))
     result = subprocess.run([sys.executable, '-P', str(script)], cwd=foreign,
-                            env=ci_environment(repo), capture_output=True, text=True)
+                            env=ci_environment(repo), capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == ['verified-worktree', 'verified-root', True]
 

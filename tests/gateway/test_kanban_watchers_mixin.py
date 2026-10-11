@@ -38,7 +38,7 @@ def test_gateway_dispatcher_stuck_warning_names_guard_reason(monkeypatch, caplog
     held = kbd.DispatchResult(respawn_guarded=[("t_held", "active_pr")])
     runner = object.__new__(kw.GatewayKanbanWatchersMixin)
     runner._running = True
-    monkeypatch.setattr(runner, "_kanban_dispatcher_boot", lambda: (lambda: {}, object(), {}))
+    monkeypatch.setattr(runner, "_kanban_dispatcher_boot", lambda: (dict, object(), {}))
 
     class _Dispatcher:
         def __init__(self, *a, **k):
@@ -65,7 +65,7 @@ def test_gateway_dispatcher_stuck_warning_names_guard_reason(monkeypatch, caplog
     monkeypatch.setattr(kw, "_to_thread_process_service", _direct)
     monkeypatch.setattr(kw, "_kanban_dispatch_allowed", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(kw, "_resolve_auto_decompose_settings", lambda load_config: (False, 0))
-    monkeypatch.setattr(kbd, "reap_worker_zombies", lambda: [])
+    monkeypatch.setattr(kbd, "reap_worker_zombies", list)
     monkeypatch.setattr(kw.asyncio, "sleep", _sleep)
 
     with caplog.at_level(logging.WARNING, logger=kw.logger.name):

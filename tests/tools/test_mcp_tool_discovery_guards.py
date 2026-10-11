@@ -57,7 +57,7 @@ class TestMCPDiscoveryCrossProcessLock:
     @pytest.fixture(autouse=True)
     def _fast_retries(self):
         """Override retry constants so tests are fast."""
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         orig_max = mcp_tool._MCP_DISCOVERY_LOCK_MAX_RETRIES
         orig_delay = mcp_tool._MCP_DISCOVERY_LOCK_RETRY_DELAY_S
         mcp_tool._MCP_DISCOVERY_LOCK_MAX_RETRIES = 3
@@ -83,7 +83,7 @@ class TestMCPDiscoveryCrossProcessLock:
             with patch("tools.mcp_tool_loop._try_acquire_mcp_discovery_lock", mock_acquire), \
                  patch("tools.mcp_tool._MCP_AVAILABLE", True), \
                  patch("tools.mcp_tool_config._load_mcp_config", return_value=mock_config), \
-                 patch("tools.mcp_tool_discovery.register_mcp_servers", return_value=["mcp__test_srv__ping"]) as reg_spy:
+                 patch("tools.mcp_tool_discovery.register_mcp_servers", return_value=["mcp__test_srv__ping"]):
                 result = discover_mcp_tools()
             assert result == ["mcp__test_srv__ping"]
             release_spy.assert_called_once()
@@ -99,6 +99,6 @@ class TestMCPDiscoveryCrossProcessLock:
              patch("tools.mcp_tool_config._load_mcp_config", return_value=mock_config), \
              patch("tools.mcp_tool_discovery.register_mcp_servers") as reg_spy, \
              patch("tools.mcp_tool_registration._existing_tool_names", return_value=[]):
-            result = discover_mcp_tools()
+            discover_mcp_tools()
         # Must still run local discovery
         reg_spy.assert_called_once_with(mock_config)

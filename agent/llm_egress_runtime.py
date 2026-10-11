@@ -326,7 +326,7 @@ def egress_enforcement_enabled() -> bool:
 
 # Benchmark-backed per-profile model route table, installed at startup by
 # install_performance_route_table() when a route artifact is configured.
-_PERFORMANCE_ROUTE_TABLE: "Any | None" = None
+_PERFORMANCE_ROUTE_TABLE: Any | None = None
 
 
 def install_performance_route_table(table: Any) -> None:

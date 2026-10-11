@@ -4,6 +4,7 @@ Run with Blender's Python, not the application's Python:
   Blender.app/Contents/MacOS/Blender --background --python generate_lunar_city_baseline.py
 """
 
+import itertools
 import json
 from math import atan2, cos, pi, sin
 from pathlib import Path
@@ -294,7 +295,6 @@ def terrain(target, mat):
         for x in range(steps + 1):
             px = (x / steps - 0.5) * size
             py = (y / steps - 0.5) * size
-            radius = (px * px + py * py) ** 0.5
             height = ground_height(px, py)
             verts.append((px, py, height))
     for y in range(steps):
@@ -590,7 +590,7 @@ def character(name, location, leader, characters, mats, kit=None, role=None, per
         trim_key = f"role_trim_{accent or 'cyan'}"
         if trim_key not in kit:
             trim_key = "role_trim_cyan"
-        visor = instance_asset(
+        instance_asset(
             kit["visor"],
             f"{name}_visor",
             characters,
@@ -605,7 +605,7 @@ def character(name, location, leader, characters, mats, kit=None, role=None, per
             (radius * 0.72, 0.035, 0.055),
         )
     else:
-        visor = cube(
+        cube(
             f"{name}_visor",
             (x, y - (0.3 if child else 0.39), z + height + (0.35 if child else 0.45)),
             (0.15 if child else 0.2, 0.04, 0.08 if child else 0.11),
@@ -826,9 +826,9 @@ def main():
     ]
     ribbon("road-network-primary", roads_points, 1.4, mats["road"], roads)
     curve("road-network-glow", [(x, y, z + 0.05) for x, y, z in roads_points], 0.055, mats["glass"], roads)
-    for a, b in zip(roads_points, roads_points[1:]):
-        ax, ay, az = a
-        bx, by, bz = b
+    for a, b in itertools.pairwise(roads_points):
+        ax, ay, _az = a
+        bx, by, _bz = b
         steps = max(2, int(((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5 / 1.3))
         yaw = atan2(by - ay, bx - ax)
         for step in range(steps):

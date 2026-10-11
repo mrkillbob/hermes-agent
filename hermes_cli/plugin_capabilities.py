@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -223,7 +223,7 @@ def record_consent(plugin_id: str, granted: Iterable[str], declared: Iterable[st
         granted_capabilities = sorted(_known(c for c in merged if isinstance(c, str)))
         consent = {
             "hash": capability_set_hash(_known(declared)),
-            "granted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "granted_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
 
         updates: dict[tuple[str, ...], Any] = {

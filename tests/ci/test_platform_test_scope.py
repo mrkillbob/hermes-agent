@@ -31,7 +31,7 @@ def test_native_scope_preserves_full_coverage_and_rejects_invalid_scope(tmp_path
         child = subprocess.run(
             [sys.executable, str(SCRIPT), "plan", "--workflow", workflow, "--scope", scope],
             capture_output=True, text=True, timeout=15,
-            env={**os.environ, "GITHUB_OUTPUT": str(output)},
+            env={**os.environ, "GITHUB_OUTPUT": str(output)}, check=False,
         )
         return child, dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
 

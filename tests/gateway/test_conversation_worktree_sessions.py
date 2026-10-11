@@ -619,7 +619,7 @@ async def test_production_factory_first_contact_fails_before_gateway_state_mutat
     tmp_path, monkeypatch
 ):
     """Returning None for an enabled policy would publish a source-cwd route."""
-    import agent.runtime_cwd as runtime_cwd
+    from agent import runtime_cwd
     from agent.runtime_cwd import resolve_agent_cwd, set_session_cwd
     from gateway.run import GatewayRunner
 
@@ -665,7 +665,7 @@ async def test_production_factory_new_failure_preserves_all_old_gateway_state(
     tmp_path, monkeypatch, manager
 ):
     """A disabled manager fallback during /new must not rotate any state."""
-    import agent.runtime_cwd as runtime_cwd
+    from agent import runtime_cwd
     from agent.runtime_cwd import resolve_agent_cwd, set_session_cwd
     from gateway.session import _default_conversation_worktree_manager_factory
 

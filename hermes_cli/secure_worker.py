@@ -16,7 +16,7 @@ import stat
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
 
@@ -45,7 +45,7 @@ class PackPolicy:
     excluded_segments: tuple[str, ...]
 
     @classmethod
-    def from_json(cls, path: str | os.PathLike[str]) -> "PackPolicy":
+    def from_json(cls, path: str | os.PathLike[str]) -> PackPolicy:
         data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         return cls(
             policy_version=str(data["policy_version"]),
@@ -73,7 +73,7 @@ class WorkerImageLock:
     requirements_sha256: str
 
     @classmethod
-    def from_json(cls, path: str | os.PathLike[str]) -> "WorkerImageLock":
+    def from_json(cls, path: str | os.PathLike[str]) -> WorkerImageLock:
         data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         lock = cls(
             schema=str(data["schema"]),
@@ -113,7 +113,7 @@ class PackManifest:
     total_bytes: int
 
     @classmethod
-    def from_path(cls, path: str | os.PathLike[str]) -> "PackManifest":
+    def from_path(cls, path: str | os.PathLike[str]) -> PackManifest:
         data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         return cls(
             schema=str(data["schema"]),
@@ -518,7 +518,7 @@ def destroy_context_pack(
     receipt = {
         "schema": "hermes.secure-worker.destroy-receipt.v1",
         "status": status,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "source_commit": manifest.source_commit,
         "manifest_sha256": manifest_sha,
     }
@@ -787,7 +787,7 @@ def audit_profile_boundary(
         valid, attestation_reason = _valid_privacy_attestation(
             privacy_attestation,
             provider,
-            now or datetime.now(timezone.utc),
+            now or datetime.now(UTC),
         )
         if not valid:
             reasons.append(attestation_reason)

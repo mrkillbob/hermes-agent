@@ -27,7 +27,7 @@ def test_closed_reporting_pipe_does_not_disable_import_timeout(tmp_path):
     }))
     env = {"HOME": str(tmp_path), "HERMES_HOME": str(tmp_path / "home"), "PATH": os.environ["PATH"]}
     result = subprocess.run([sys.executable, "-I", str(runner), str(spec)], cwd=tmp_path, env=env,
-                            capture_output=True, text=True, timeout=3)
+                            capture_output=True, text=True, timeout=3, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     results = {entry["id"]: entry for entry in json.loads(out.read_text())}
     assert results["closed_pipe"]["type"] == "Timeout"

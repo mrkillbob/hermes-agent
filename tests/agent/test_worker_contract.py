@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 from agent.worker_contract import (
     ContractValidationError,
@@ -215,8 +215,8 @@ def test_job_contract_is_scoped_and_time_bounded():
     )
 
     assert contract.to_dict()["requires_review"] is True
-    assert contract.is_active(datetime(2026, 8, 30, 12, 30, tzinfo=timezone.utc))
-    assert not contract.is_active(datetime(2026, 8, 30, 13, 0, tzinfo=timezone.utc))
+    assert contract.is_active(datetime(2026, 8, 30, 12, 30, tzinfo=UTC))
+    assert not contract.is_active(datetime(2026, 8, 30, 13, 0, tzinfo=UTC))
 
     with pytest.raises(ContractValidationError, match="expires_at"):
         JobContract(
@@ -241,8 +241,8 @@ def test_emergency_authority_expires_and_cannot_be_nonrevocable():
         expires_at="2026-08-30T12:15:00Z",
     )
 
-    assert authority.is_active(datetime(2026, 8, 30, 12, 5, tzinfo=timezone.utc))
-    assert not authority.is_active(datetime(2026, 8, 30, 12, 15, tzinfo=timezone.utc))
+    assert authority.is_active(datetime(2026, 8, 30, 12, 5, tzinfo=UTC))
+    assert not authority.is_active(datetime(2026, 8, 30, 12, 15, tzinfo=UTC))
 
     with pytest.raises(ContractValidationError, match="revocable"):
         EmergencyAuthority(
@@ -296,7 +296,7 @@ def test_memory_policy_is_bounded_and_expiry_is_observable():
         retention="bounded",
         retention_seconds=60,
     )
-    created = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+    created = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
     assert policy.is_retained(created, created + timedelta(seconds=30))
     assert not policy.is_retained(created, created + timedelta(seconds=61))
 
@@ -310,7 +310,7 @@ def test_trust_vector_decays_dimensions_without_an_aggregate_score():
         updated_at="2026-08-30T12:00:00Z",
         decay_half_life_seconds=60,
     )
-    decayed = vector.decayed(datetime(2026, 8, 30, 12, 1, tzinfo=timezone.utc))
+    decayed = vector.decayed(datetime(2026, 8, 30, 12, 1, tzinfo=UTC))
     assert decayed.dimensions["accuracy"] == pytest.approx(0.5)
     assert "score" not in decayed.to_dict()
 

@@ -183,7 +183,7 @@ def test_interrupted_append_recovers_without_reading_history(tmp_path, monkeypat
         builtins.open = interrupted_open
         _append_gzip_member_atomically({str(target)!r}, _build_gzip_member('lost\\n'))
     """)
-    assert subprocess.run([sys.executable, "-c", script]).returncode == 99
+    assert subprocess.run([sys.executable, "-c", script], check=False).returncode == 99
     real_open = builtins.open
     def guarded_open(name, mode="r", *args, **kwargs):
         if str(name) == str(target):

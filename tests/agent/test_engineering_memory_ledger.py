@@ -43,7 +43,7 @@ def test_candidate_round_trips_and_transition_is_audited(tmp_path: Path) -> None
         "em-1", "approved", reviewer="human", reason="Receipt checked", evidence_refs=("receipt-1",)
     )
     assert approved.status == "approved"
-    assert list(ledger.iter_records(statuses={"approved"}))[0].record_id == "em-1"
+    assert next(iter(ledger.iter_records(statuses={"approved"}))).record_id == "em-1"
     audit = (tmp_path / "vault" / ".audit.jsonl").read_text(encoding="utf-8")
     assert '"to_status": "approved"' in audit
 

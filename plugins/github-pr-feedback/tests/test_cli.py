@@ -44,7 +44,7 @@ from github_pr_feedback.repair_controller import pr_repair_attribution_line
 
 
 def test_single_merge_handoff_uses_deployment_executor_on_every_path(monkeypatch):
-    import github_pr_feedback.cli as cli
+    from github_pr_feedback import cli
 
     merge_policy = SimpleNamespace(repository="acme/widgets", post_merge=object())
     policy = SimpleNamespace(
@@ -960,7 +960,6 @@ def test_retry_deployment_recovers_completed_merge_without_receipt_and_holds_sca
 
         def latest_deployment_receipt(self, _repository, _pr_number):
             assert state["entered"] and not state["exited"]
-            return None
 
         def completed_merge_receipt(self, _repository, _pr_number):
             assert state["entered"] and not state["exited"]

@@ -11,7 +11,8 @@ for row in rows:
  if (folder/'generation.json').exists():continue
  (ROOT/'generation-batch-status.json').write_text(json.dumps({'current':row['id'],'stage':'generating','started':time.time()})+'\n')
  with (folder/'generation.log').open('w') as log:
-  result=subprocess.run([sys.executable,str(SCRIPT),'generate','--runtime',str(RUNTIME),'--output',str(folder)],stdout=log,stderr=subprocess.STDOUT)
+  # health: allow HX006 -- long-running asset generation job
+  result=subprocess.run([sys.executable,str(SCRIPT),'generate','--runtime',str(RUNTIME),'--output',str(folder)],stdout=log,stderr=subprocess.STDOUT, check=False)
  if result.returncode:
   (ROOT/'generation-batch-status.json').write_text(json.dumps({'current':row['id'],'stage':'failed','returncode':result.returncode})+'\n')
   raise SystemExit(result.returncode)

@@ -20,7 +20,12 @@ _LOCK_POLL_SECONDS = 0.05
 
 
 def is_junction(path: Path) -> bool:
-    """Keep junctions opaque even before Python 3.12's Path.is_junction exists."""
+    """Keep junctions opaque even before Python 3.12's Path.is_junction exists.
+
+    A missing path is not a junction, matching ``os.path.isjunction``: callers probe slots that
+    do not exist yet (a first plugin install) and must get False, not a crash. Other errors
+    (an unreadable destination) propagate rather than being read as "not a junction".
+    """
     if os.name != "nt":
         return False
     try:
@@ -57,7 +62,7 @@ def native(path: str | os.PathLike[str]) -> str:
     text = os.fspath(path)
     if text.startswith(_VERBATIM_UNC):
         return "\\\\" + text[len(_VERBATIM_UNC):]
-    return text[len(_VERBATIM):] if text.startswith(_VERBATIM) else text
+    return text.removeprefix(_VERBATIM)
 
 
 def lock_fd(fd: int, *, wait: bool, timeout: float | None = None) -> bool:

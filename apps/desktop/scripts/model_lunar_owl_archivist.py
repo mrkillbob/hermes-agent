@@ -156,7 +156,7 @@ def build():
             tuft=oval('Ear tuft',(side*(.43+j*.027),.02,2.36+j*.039),(.058,.07,.20-j*.02),brown,16,10)
             tuft.rotation_euler.y=side*(.38+j*.12)
     cord('Spectacle bridge',[(-.059,-.59,2.04),(0,-.615,2.073),(.059,-.59,2.04)],.014,gold)
-    beak=oval('Hooked beak',(0,-.51,1.86),(.094,.113,.151),black)
+    oval('Hooked beak',(0,-.51,1.86),(.094,.113,.151),black)
     # Layered crown and rear plumage, with deterministic slight variation.
     rng=random.Random(41)
     for row in range(9):

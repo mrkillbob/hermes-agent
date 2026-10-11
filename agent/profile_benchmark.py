@@ -338,9 +338,7 @@ class CandidatePromotionGate:
         """Record only a local receipt; unavailable scorers cause no call or transition."""
         now = int(self._clock())
         status: BenchmarkStatus = "unavailable"
-        if not self._proposal_matches_candidate(proposal):
-            status = "rejected"
-        elif not self._independent_scorer(proposal, scorer_model):
+        if not self._proposal_matches_candidate(proposal) or not self._independent_scorer(proposal, scorer_model):
             status = "rejected"
         elif not scorer_available:
             status = "unavailable"

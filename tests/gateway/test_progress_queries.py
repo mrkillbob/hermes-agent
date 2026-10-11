@@ -981,7 +981,7 @@ def test_progress_snapshot_includes_committed_wal_without_touching_source_sideca
 
 def test_progress_snapshot_race_fails_unavailable(kanban_home, monkeypatch):
     import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
-    import gateway.progress_queries as progress_queries
+    from gateway import progress_queries
 
     with _hermes_cli_kanban_db_connect.connect(board=BOARD) as conn:
         root = _task(conn, "Exception Burndown", status="done")
@@ -1004,7 +1004,7 @@ def test_progress_snapshot_race_fails_unavailable(kanban_home, monkeypatch):
 
 
 def test_snapshot_copy_reads_only_captured_bytes_and_rejects_append(tmp_path, monkeypatch):
-    import gateway.progress_queries as progress_queries
+    from gateway import progress_queries
 
     source = tmp_path / "source.db"
     destination = tmp_path / "snapshot.db"

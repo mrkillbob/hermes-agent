@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import tools.kanban_tools as kanban_tools
+from tools import kanban_tools
 from contextlib import contextmanager
 from hermes_cli import kanban_db_dispatch as dispatch
 

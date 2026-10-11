@@ -1562,7 +1562,6 @@ def test_ledger_enables_bounded_busy_waits_and_wal_autocheckpoint(
 def test_ledger_startup_sets_busy_timeout_before_wal_and_retries_transient_open(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    calls: list[str] = []
     connect_attempts = 0
 
     class Cursor:
