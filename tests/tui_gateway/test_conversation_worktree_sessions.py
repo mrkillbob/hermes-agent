@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import tui_gateway.server as server
+from tui_gateway import server
 
 
 @dataclass(frozen=True)

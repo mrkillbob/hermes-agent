@@ -5,7 +5,7 @@ import json
 import shutil
 import sys
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from pathlib import Path
 
 import pytest
@@ -221,7 +221,7 @@ def test_rendered_ox_profile_passes_when_every_boundary_is_present(
     assert config["mcp_servers"]["secure-github-staging"]["args"] == [
         "-E", "-P", "-m", "hermes_cli.secure_github_broker"
     ]
-    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=UTC)
 
     report = audit_profile_boundary(
         config,
@@ -247,7 +247,7 @@ def test_admission_receipt_rejects_audit_to_launch_mutation(
     source_repo: Path, tmp_path: Path, policy: PackPolicy
 ) -> None:
     pack, manifest, config = _built_remote_boundary(source_repo, tmp_path, policy)
-    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=UTC)
     report = audit_profile_boundary(
         config,
         pack_root=pack,
@@ -367,7 +367,7 @@ def test_remote_profile_mutations_fail_closed(
     source_repo: Path, tmp_path: Path, policy: PackPolicy, mutation, reason: str
 ) -> None:
     pack, manifest, config = _built_remote_boundary(source_repo, tmp_path, policy)
-    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=UTC)
     mutation(config, tmp_path)
     report = audit_profile_boundary(
         config,
@@ -387,7 +387,7 @@ def test_remote_profile_denies_docker_down_without_host_fallback(
     source_repo: Path, tmp_path: Path, policy: PackPolicy
 ) -> None:
     pack, manifest, config = _built_remote_boundary(source_repo, tmp_path, policy)
-    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=UTC)
     report = audit_profile_boundary(
         config,
         pack_root=pack,
@@ -432,7 +432,7 @@ def test_remote_profile_denies_missing_invalid_or_stale_attestation(
     attestation: dict[str, object] | None,
 ) -> None:
     pack, manifest, config = _built_remote_boundary(source_repo, tmp_path, policy)
-    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=UTC)
     report = audit_profile_boundary(
         config,
         pack_root=pack,
@@ -486,7 +486,7 @@ def test_remote_profile_denies_pack_without_exact_manifest_and_policy_proof(
             excluded_segments=policy.excluded_segments,
         )
 
-    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=UTC)
     report = audit_profile_boundary(
         render_ox_profile(pack, "/pinned/python", "owner", "staging", PINNED_IMAGE),
         pack_root=pack,
@@ -624,7 +624,7 @@ def test_remote_audit_rejects_symlinked_broker_executable(
     broker_link = tmp_path / "broker-python"
     broker_link.symlink_to(Path(sys.executable).resolve())
     config["mcp_servers"]["secure-github-staging"]["command"] = str(broker_link)
-    now = datetime(2026, 8, 23, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 23, 20, 0, tzinfo=UTC)
     report = audit_profile_boundary(
         config,
         pack_root=pack,

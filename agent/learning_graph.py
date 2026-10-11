@@ -19,7 +19,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Optional
 
@@ -121,7 +121,7 @@ def _to_int_ts(value: Any) -> Optional[int]:
         except ValueError:
             parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
+                parsed = parsed.replace(tzinfo=UTC)
             return int(parsed.timestamp())
     except Exception:
         return None

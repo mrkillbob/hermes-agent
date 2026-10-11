@@ -64,7 +64,7 @@ def test_generic_completion_hook_uses_its_task_id(tmp_path, monkeypatch):
 @pytest.mark.parametrize("case", ["none", "wrong_head", "wrong_base", "stale", "valid", "non_ci", "running", "failed", "retired"])
 def test_registered_ci_completion_gate_uses_durable_exact_dispatch(tmp_path, monkeypatch, case):
     from hermes_cli.plugins import get_pre_tool_call_block_message
-    import hermes_cli.lifecycle as lifecycle
+    from hermes_cli import lifecycle
 
     control = tmp_path / "control"
     monkeypatch.setenv("HERMES_CONTROL_HOME", str(control))

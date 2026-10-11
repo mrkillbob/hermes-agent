@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .supplementary_ci import SupplementaryPlan
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 import re
 import subprocess
@@ -228,7 +228,7 @@ class PullRequest:
             if not isinstance(self.updated_at, datetime) or self.updated_at.tzinfo is None:
                 raise ValueError("updated_at must be a timezone-aware datetime")
             object.__setattr__(
-                self, "updated_at", self.updated_at.astimezone(timezone.utc)
+                self, "updated_at", self.updated_at.astimezone(UTC)
             )
         object.__setattr__(
             self, "author_login", _nonempty_string(self.author_login, "author_login")
@@ -693,7 +693,7 @@ def _not_before(value: object) -> datetime:
         raise ValueError("not_before must be ISO-8601") from error
     if boundary.tzinfo is None:
         raise ValueError("not_before must include a timezone")
-    return boundary.astimezone(timezone.utc)
+    return boundary.astimezone(UTC)
 
 
 def _term_matches(body: str, term: str) -> int:

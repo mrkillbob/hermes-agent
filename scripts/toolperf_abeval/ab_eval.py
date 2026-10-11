@@ -168,7 +168,7 @@ def _safe_config(value: object) -> object:
 
 def _endpoint_environment_digest() -> str:
     # Read provider metadata in the evaluation home without changing this process.
-    probe = """
+    probe = r"""
 import hashlib, json, os, re
 from pathlib import Path
 from dotenv import dotenv_values
@@ -513,7 +513,7 @@ def report(models):
                 if not rows:
                     continue
                 n = len(rows)
-                mean = lambda k: sum(r.get(k, 0) for r in rows) / n  # noqa: E731
+                mean = lambda k: sum(r.get(k, 0) for r in rows) / n
                 okp = 100 * sum(r["ok"] for r in rows) / n
                 print(f"{task:20s} | {arm:8s} | {n:2d} {okp:3.0f}% "
                       f"{mean('llm'):5.1f} {mean('tools'):5.1f} {mean('errs'):5.1f} "

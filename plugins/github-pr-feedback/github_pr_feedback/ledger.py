@@ -121,7 +121,7 @@ class MaintenanceReceipt:
     status: str
     summary: str
     completed_at: datetime
-    command_evidence: tuple["MaintenanceCommandEvidence", ...] = ()
+    command_evidence: tuple[MaintenanceCommandEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

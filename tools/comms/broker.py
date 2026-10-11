@@ -195,7 +195,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if not self._authorized():
             self._write(401, {"error": "unauthorized"})
@@ -266,7 +266,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._write(404, {"error": "not found"})
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         if self.path != "/send":
             self._write(404, {"error": "not found"})
             return

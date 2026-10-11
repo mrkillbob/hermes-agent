@@ -671,7 +671,7 @@ class SessionEntry:
         )
 
 
-def build_channel_continuity_note(entry: "SessionEntry", source: SessionSource) -> Optional[str]:
+def build_channel_continuity_note(entry: SessionEntry, source: SessionSource) -> Optional[str]:
     """One-line continuity hint for long-lived Slack/Discord channels/threads.
 
     After an auto-reset the agent could bind a new request to an unrelated recent session; this
@@ -782,10 +782,10 @@ class _SessionFlight:
     def __init__(self) -> None:
         self.event = threading.Event()
         self.closed = False
-        self.result: Optional["SessionEntry"] = None
+        self.result: Optional[SessionEntry] = None
         self.error: Optional[BaseException] = None
         self.post_actions: list[
-            tuple[Callable[["SessionEntry"], "SessionEntry"], threading.Event, list, list]
+            tuple[Callable[[SessionEntry], SessionEntry], threading.Event, list, list]
         ] = []
 
 
@@ -801,7 +801,7 @@ class _RouteChecks:
 @dataclass
 class _RouteDecision:
     """What the locked apply-phase decided for one routing transition."""
-    entry: Optional["SessionEntry"] = None
+    entry: Optional[SessionEntry] = None
     needs_save: bool = False
     # Healthy-path saves take the single-row UPSERT fast path; structural
     # transitions (recover/create) keep the full rewrite.
@@ -813,7 +813,7 @@ class _RouteDecision:
     reset_had_activity: bool = False
     prev_session_id: Optional[str] = None
 
-    def schedule_reset(self, reason: str, ended: "SessionEntry", had_activity: bool) -> None:
+    def schedule_reset(self, reason: str, ended: SessionEntry, had_activity: bool) -> None:
         """Record that *ended* is auto-reset for *reason* (ends its row, seeds the successor)."""
         self.reset_reason = reason
         self.reset_had_activity = had_activity

@@ -777,7 +777,7 @@ class LocalGitRepository:
             raise ValueError("head SHA is not a full Git object ID")
         if not repository.strip() or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", lane):
             raise ValueError("maintenance workspace identity is invalid")
-        digest = sha256(f"{repository}\0{head_sha}\0{lane}".encode("utf-8")).hexdigest()
+        digest = sha256(f"{repository}\0{head_sha}\0{lane}".encode()).hexdigest()
         workspace = self._worktree_root / f"maintenance-{digest}"
         admission = self._capacity.reserve(workspace) if self._capacity else nullcontext()
         with admission:
@@ -1403,13 +1403,13 @@ class ScanController:
             ):
                 try:
                     actions_enabled = self._github.actions_enabled(repository)
-                except Exception:  # noqa: BLE001 - an uncertain gate must fail closed.
+                except Exception:
                     actions_state_unavailable = True
             try:
                 pull_requests = self._github.list_open_pull_requests(
                     repository, target.owner_login
                 )
-            except Exception:  # noqa: BLE001 - an adapter failure must not admit work.
+            except Exception:
                 skipped["github_error"] += 1
                 continue
             self._reconcile_closed_pr_tasks(repository, pull_requests)
@@ -1455,7 +1455,7 @@ class ScanController:
                     )
                     if sample_checks.billing_blocked:
                         actions_enabled = False
-                except Exception:  # noqa: BLE001 - uncertain sample keeps prior gate value.
+                except Exception:
                     pass
             admitted_pull_requests: list[PullRequest] = []
             for pull_request in pull_requests:
@@ -1867,7 +1867,7 @@ class ScanController:
             if code in {"permission_denied", "authentication", "rate_limited", "metadata_incomplete"}:
                 return f"agent_label_{code}"
             return "agent_label_github_error"
-        except Exception:  # noqa: BLE001 - a label write must fail closed.
+        except Exception:
             return "agent_label_error"
         return None
 
@@ -1889,7 +1889,7 @@ class ScanController:
                 if feedback_items or need_current_for_ci
                 else None
             )
-        except Exception:  # noqa: BLE001 - canonical read failures fail closed.
+        except Exception:
             return None
         return current, feedback_items
 
@@ -1920,7 +1920,7 @@ class ScanController:
             feedback_items = self._github.list_actionable_feedback(
                 current.base_repository, current.number, expected_head_sha=current.head_sha
             )
-        except Exception:  # noqa: BLE001 - uncertain readiness must fail closed.
+        except Exception:
             return "github_error"
         admission = self._policy.admit_pull_request(current)
         if not admission.admitted or admission.target is None:
@@ -2007,7 +2007,7 @@ class ScanController:
             current = self._github.get_pull_request(
                 audit.identity.repository, audit.identity.pr_number
             )
-        except Exception:  # noqa: BLE001 - canonical identity is required.
+        except Exception:
             return "github_error"
         admission = self._policy.admit_pull_request(current)
         if not admission.admitted or admission.target is None:
@@ -2028,7 +2028,7 @@ class ScanController:
                 base_head = self._github.get_branch_head(
                     current.base_repository, current.base_branch
                 )
-            except Exception:  # noqa: BLE001 - stale-base repair must fail closed.
+            except Exception:
                 return "base_state_unavailable"
             if base_head.casefold() != current.base_sha.casefold():
                 return "base_refresh_required"
@@ -2083,7 +2083,7 @@ class ScanController:
             promote_task = getattr(self._kanban, "promote_task", None)
             if promote_task is not None and self._policy.auto_dispatch:
                 promote_task(self._policy.board or "", task_id)
-        except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
+        except Exception as error:
             if self._policy.debug:
                 print(
                     f"DEBUG ci-repair dispatch fail pr={receipt.pr_number}: "
@@ -2117,7 +2117,7 @@ class ScanController:
                 current = self._github.get_pull_request(
                     listed.base_repository, listed.number
                 )
-            except Exception:  # noqa: BLE001 - canonical state is required.
+            except Exception:
                 return "github_error"
         admission = self._policy.admit_pull_request(current)
         if not admission.admitted or admission.target is None:
@@ -2218,7 +2218,7 @@ class ScanController:
             promote_task = getattr(self._kanban, "promote_task", None)
             if promote_task is not None and self._policy.auto_dispatch:
                 promote_task(self._policy.board or "", task_id)
-        except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
+        except Exception as error:
             if self._policy.debug:
                 print(
                     f"DEBUG task-create dispatch fail pr={receipt.pr_number}: "
@@ -2328,7 +2328,7 @@ class ScanController:
             feedback_items = self._github.list_actionable_feedback(
                 receipt.repository, receipt.pr_number, expected_head_sha=receipt.head_sha
             )
-        except Exception:  # noqa: BLE001 - an adapter failure must not admit work.
+        except Exception:
             skipped["github_error"] += 1
             return None
         feedback = next(
@@ -2433,7 +2433,7 @@ class ScanController:
                 base_head = self._github.get_branch_head(
                     current.base_repository, current.base_branch
                 )
-            except Exception:  # noqa: BLE001 - stale-base repair must fail closed.
+            except Exception:
                 base_head = None
             if base_head_cache is not None:
                 base_head_cache[cache_key] = base_head
@@ -2489,7 +2489,7 @@ class ScanController:
             promote_task = getattr(self._kanban, "promote_task", None)
             if promote_task is not None and self._policy.auto_dispatch:
                 promote_task(self._policy.board or "", task_id)
-        except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
+        except Exception as error:
             if self._policy.debug:
                 print(
                     f"DEBUG task-create dispatch fail pr={receipt.pr_number}: "

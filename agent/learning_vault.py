@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from agent.skill_utils import parse_frontmatter
+from datetime import UTC
 
 
 MAX_NOTE_BYTES = 16 * 1024
@@ -69,7 +70,7 @@ def _timestamp(metadata: dict[str, Any], path: Path) -> Optional[int]:
 
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
+                parsed = parsed.replace(tzinfo=UTC)
             return int(parsed.timestamp())
         except (ValueError, OverflowError):
             continue

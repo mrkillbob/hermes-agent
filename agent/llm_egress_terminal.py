@@ -2056,7 +2056,7 @@ def _project_git_diff_name_only_terminal_result(text: str) -> str | None:
         candidate = raw_line.strip()
         if not candidate:
             continue
-        normalized = candidate[2:] if candidate.startswith("./") else candidate
+        normalized = candidate.removeprefix("./")
         path = PurePosixPath(normalized)
         if (
             path.is_absolute()
@@ -2092,7 +2092,7 @@ def _project_git_diff_name_only_terminal_result(text: str) -> str | None:
 
 
 def _safe_repo_relative_path(value: str) -> str | None:
-    normalized = value[2:] if value.startswith("./") else value
+    normalized = value.removeprefix("./")
     path = PurePosixPath(normalized)
     if (
         not normalized

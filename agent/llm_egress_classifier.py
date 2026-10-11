@@ -302,7 +302,7 @@ def _project_bound_search_files(value: str) -> GeneratedContextSegment:
         for raw_path in raw_files[:100]:
             if not isinstance(raw_path, str) or not raw_path or len(raw_path) > 512:
                 continue
-            normalized = raw_path[2:] if raw_path.startswith("./") else raw_path
+            normalized = raw_path.removeprefix("./")
             path = PurePosixPath(normalized)
             if (
                 path.is_absolute()

@@ -31,7 +31,7 @@ def federated_enabled(config: Mapping[str, object] | None) -> bool:
     return bool(isinstance(federated, Mapping) and federated.get("enabled") is True)
 
 
-def fleet_task_from_kanban(task) -> "FleetTask":
+def fleet_task_from_kanban(task) -> FleetTask:
     """Convert a local Kanban row to metadata safe to send to the coordinator."""
     from hermes_cli.fleet_protocol import FleetTask, TaskRequirement
 

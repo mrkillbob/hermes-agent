@@ -128,7 +128,7 @@ class SessionWorktreesMixin:
         root_session_id: str,
         *,
         state: str,
-        allowed_current_states: Tuple[str, ...],
+        allowed_current_states: tuple[str, ...],
         failure_phase: Optional[str] = None,
         failure_message: Optional[str] = None,
     ) -> ConversationWorktreeRecord:

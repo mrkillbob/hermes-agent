@@ -361,7 +361,7 @@ _NOUS_RECOMMENDED_CACHE_TTL: int = 600  # seconds (10 minutes)
 _nous_recommended_cache: dict[tuple[str, str], tuple[dict[str, Any], float]] = {}
 
 
-def _nous_recommended_disk_path() -> "Path":
+def _nous_recommended_disk_path() -> Path:
     from hermes_constants import get_hermes_home
     return get_hermes_home() / "cache" / "nous_recommended_cache.json"
 

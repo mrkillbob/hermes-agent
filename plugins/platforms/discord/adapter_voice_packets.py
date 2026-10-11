@@ -97,7 +97,7 @@ class VoicePacketMixin:
         nonce[:4] = payload_with_nonce[-4:]
         encrypted = bytes(payload_with_nonce[:-4])
         try:
-            import nacl.secret  # noqa: E402 — delayed import, only in voice path
+            import nacl.secret
             box = nacl.secret.Aead(secret_key)
             decrypted = box.decrypt(encrypted, header, bytes(nonce))
             self._nacl_fail_streak = 0

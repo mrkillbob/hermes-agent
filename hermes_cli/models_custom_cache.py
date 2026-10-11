@@ -33,7 +33,7 @@ def _custom_endpoint_fingerprint(
 
 
 def _cache_entry_valid(
-    entry: Any, fp: str, *, allow_empty: bool = False) -> "TypeGuard[dict[str, Any]]":
+    entry: Any, fp: str, *, allow_empty: bool = False) -> TypeGuard[dict[str, Any]]:
     """Well-formed cache row for fingerprint *fp*. Requires a numeric ``at`` so corrupt disk state
     degrades to a cache miss instead of raising; empty model lists are valid only when the caller
     opts into an authoritative empty catalog."""

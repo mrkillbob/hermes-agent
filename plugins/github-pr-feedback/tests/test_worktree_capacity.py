@@ -609,7 +609,7 @@ def test_accounted_retained_slot_is_reused_in_same_namespace(fresh_pool):
 
 
 def test_all_unknown_slots_overflow_retains_shared_budget_gate(fresh_pool, monkeypatch):
-    import github_pr_feedback.controller as controller
+    from github_pr_feedback import controller
     source, pool, receipt, namespace, capacity, _, calls = fresh_pool
     for slot in range(2):
         pool._slot_path(receipt, slot, namespace).mkdir(parents=True)
@@ -625,7 +625,7 @@ def test_all_unknown_slots_overflow_retains_shared_budget_gate(fresh_pool, monke
 
 @pytest.mark.parametrize('phase', ['allocating', 'uncertain', 'wrong_device'])
 def test_registered_candidate_rejection_never_skips_or_overflows(fresh_pool, phase):
-    import github_pr_feedback.controller as controller
+    from github_pr_feedback import controller
     source, pool, receipt, namespace, capacity, _, calls = fresh_pool
     candidate = pool._slot_path(receipt, 0, namespace)
     capacity.reserve(candidate)

@@ -293,7 +293,7 @@ class DoctorProbe:
                 # Older Hermes launchers expose the same exact install path
                 # through --version; keep the path check below as the authority.
                 result = self._runner.run([executable, "--version"])
-        except Exception:  # noqa: BLE001 - doctor reports failure and continues.
+        except Exception:
             return False
         if result.returncode != 0:
             return False
@@ -1379,7 +1379,7 @@ def _scan(ctx: Any, args: Any = None) -> int:
                 PooledLocalGitRepository(
                     ledger, ledger.path.parent / "worktree-pool"
                 ).reconcile_leases(KanbanSubprocessClient())
-            except Exception:  # noqa: BLE001 - proactive release is an optimization,
+            except Exception:
                 # never allowed to block the scan it runs ahead of; a slot left
                 # leased simply falls back to its lease timeout.
                 pass
@@ -2706,9 +2706,7 @@ def _merge_maintainer_task(
         "report_only": merge_policy.report_only,
     }
     key = hashlib.sha256(
-        f"{merge_policy.repository}\0{pull_request.number}\0{pull_request.head_sha}".encode(
-            "utf-8"
-        )
+        f"{merge_policy.repository}\0{pull_request.number}\0{pull_request.head_sha}".encode()
     ).hexdigest()
     return KanbanTask(
         title=f"PR merge readiness: {merge_policy.repository}#{pull_request.number}",
@@ -2759,9 +2757,7 @@ def _review_required_task(
 
     target = policy.targets[merge_policy.repository]
     key = hashlib.sha256(
-        f"{merge_policy.repository}\0{pull_request.number}\0{pull_request.head_sha}".encode(
-            "utf-8"
-        )
+        f"{merge_policy.repository}\0{pull_request.number}\0{pull_request.head_sha}".encode()
     ).hexdigest()
     # Materialize a verified exact-head worktree so the reviewer sees the
     # precise commit being reviewed rather than the main clone's HEAD.

@@ -202,7 +202,7 @@ class Heartbeat:
             # with a burst of missed polls or overlap requests.
             self._stop.wait(max(0.0, self.interval - (time.monotonic() - started)))
 
-    def __enter__(self) -> "Heartbeat":
+    def __enter__(self) -> Heartbeat:
         self._inflight_since: float | None = None
         self._thread.start()
         return self

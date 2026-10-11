@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from pathlib import Path
 
 import hermes_yaml as yaml
@@ -304,7 +304,7 @@ def cmd_attest(args: argparse.Namespace) -> int:
     if args.ttl_minutes < 1 or args.ttl_minutes > 120:
         print("DENY: attestation TTL must be between 1 and 120 minutes")
         return 1
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = {
         "schema": "hermes.secure-worker.privacy-attestation.v1",
         "provider": args.provider,

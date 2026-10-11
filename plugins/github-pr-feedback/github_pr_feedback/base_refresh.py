@@ -128,7 +128,7 @@ class DeterministicBaseRefresher:
             return BaseRefreshResult("handoff", "workspace_unavailable")
         try:
             initial = self._github.get_merge_state(identity.repository, identity.pr_number)
-        except Exception:  # noqa: BLE001 - uncertain canonical identity fails closed.
+        except Exception:
             return BaseRefreshResult("handoff", "identity_unavailable")
         if not _matches_initial(identity, initial):
             return BaseRefreshResult("handoff", "identity_race")
@@ -189,7 +189,7 @@ class DeterministicBaseRefresher:
             before_push = self._github.get_merge_state(
                 identity.repository, identity.pr_number
             )
-        except Exception:  # noqa: BLE001 - uncertain canonical identity fails closed.
+        except Exception:
             self._restore_exact_head(worktree, identity.head_sha)
             return BaseRefreshResult("handoff", "identity_unavailable")
         if not _matches_initial(identity, before_push):
@@ -213,7 +213,7 @@ class DeterministicBaseRefresher:
             after_push = self._github.get_merge_state(
                 identity.repository, identity.pr_number
             )
-        except Exception:  # noqa: BLE001 - retain pushed state for reconciliation.
+        except Exception:
             return BaseRefreshResult(
                 "reconciliation_pending",
                 "identity_unavailable_after_push",
@@ -235,7 +235,7 @@ class DeterministicBaseRefresher:
                 identity.pr_number,
                 _receipt_comment(identity, resolved, receipt_id),
             )
-        except Exception:  # noqa: BLE001 - retain pushed state for reconciliation.
+        except Exception:
             return BaseRefreshResult(
                 "reconciliation_pending", "comment_unavailable", resolved, receipt_id
             )

@@ -57,7 +57,7 @@ class TestMCPDiscoveryCrossProcessLock:
     @pytest.fixture(autouse=True)
     def _fast_retries(self):
         """Override retry constants so tests are fast."""
-        import tools.mcp_tool as mcp_tool
+        from tools import mcp_tool
         orig_max = mcp_tool._MCP_DISCOVERY_LOCK_MAX_RETRIES
         orig_delay = mcp_tool._MCP_DISCOVERY_LOCK_RETRY_DELAY_S
         mcp_tool._MCP_DISCOVERY_LOCK_MAX_RETRIES = 3

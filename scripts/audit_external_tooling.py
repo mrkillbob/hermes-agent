@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Callable, Protocol, cast
@@ -515,7 +515,7 @@ def run_audits(
 
     return {
         "schema_version": "hermes_external_tooling_audit_v1",
-        "audited_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "audited_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "repository": {
             "path": str(repo_root),
             "head": head,

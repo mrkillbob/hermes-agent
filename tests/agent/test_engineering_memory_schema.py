@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 import pytest
 
@@ -94,9 +94,9 @@ def test_bounded_body_and_unknown_fields_are_rejected() -> None:
 
 def test_rendered_record_uses_utc_and_preserves_evidence() -> None:
     record = EngineeringMemoryRecord.from_mapping(
-        _mapping(observed_at=datetime(2026, 9, 21, 12, tzinfo=timezone.utc))
+        _mapping(observed_at=datetime(2026, 9, 21, 12, tzinfo=UTC))
     )
     restored = parse_markdown_record(render_markdown_record(record))
 
-    assert restored.observed_at.tzinfo == timezone.utc
+    assert restored.observed_at.tzinfo == UTC
     assert restored.evidence_refs == ("tests/gateway/test_timeout.py::test_timeout",)
