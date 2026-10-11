@@ -525,6 +525,11 @@ function Invoke-HermesUpdate {
         throw "Installed update --help failed: $helpText"
     }
     if ($helpText -match '--yes') { $updateArgs += "--yes" }
+    # This fixture advances serve.git/main to an unpublished HEAD (or NEXT). An official-origin
+    # checkout otherwise follows the stable release channel and waits for a newer release;
+    # older updaters do not accept --branch, so ask the installed binary first (as
+    # e2e-assets/source-update-command.sh does for the POSIX legs).
+    if ($helpText -match '(^|[\s\[])--branch([=\s]|$)') { $updateArgs += @("--branch", "main") }
     New-Item -ItemType Directory -Path (Join-Path $WorkRoot "logs") -Force | Out-Null
     $log = Join-Path $WorkRoot "logs\update.log"
     $hangLog = Join-Path $WorkRoot "logs\update-hang-processes.txt"
