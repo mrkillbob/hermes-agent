@@ -67,7 +67,7 @@ def write_terminal_report(
     project = settings.get("projects", {}).get(board) if settings else None
     if not settings or not project or event_kind not in ELIGIBLE_EVENTS:
         return False
-    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0)
     payload = {
         "schema": "exampleapp_agent_report_v1",
         "agent": "hermes",

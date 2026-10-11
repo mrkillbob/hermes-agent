@@ -19,7 +19,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Optional
 
@@ -100,7 +100,6 @@ def _load_usage() -> dict[str, dict[str, Any]]:
 
         return load_usage()
     except Exception:
-        path = get_hermes_home() / "skills" / ".usage.json"
         try:
             return json.loads((get_hermes_home() / "skills" / ".usage.json").read_text(encoding="utf-8-sig"))
         except Exception:
@@ -119,9 +118,9 @@ def _to_int_ts(value: Any) -> Optional[int]:
         try:
             return int(float(s))
         except ValueError:
-            parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(s)
             if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
+                parsed = parsed.replace(tzinfo=UTC)
             return int(parsed.timestamp())
     except Exception:
         return None

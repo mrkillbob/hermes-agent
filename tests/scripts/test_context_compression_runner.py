@@ -81,7 +81,7 @@ def test_runner_resolves_root_strips_separator_and_rejects_stale_report(tmp_path
          "--harness", "harness", "--hermes-root", "hermes", "--output", "out/report.json",
          "--", sys.executable, "write_report.py"],
         cwd=tmp_path, env={**os.environ, "REPORT": json.dumps(_report(source_sha))},
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
 
     if mutation:
@@ -102,7 +102,7 @@ def test_runner_rejects_dirty_evaluated_tree(tmp_path: Path) -> None:
     result = subprocess.run(
         [sys.executable, str(RUNNER), "--battery-definition", str(tmp_path / "battery.json"), "--harness", str(harness), "--hermes-root", str(root),
          "--output", str(tmp_path / "out.json"), "--", "true"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     assert result.returncode != 0
     assert "must be clean" in result.stderr
@@ -113,7 +113,7 @@ def test_runner_rejects_nonfinite_timeout(tmp_path: Path) -> None:
         [sys.executable, "scripts/compression_eval/run_context_compression_eval.py",
          "--harness", str(tmp_path), "--hermes-root", str(tmp_path),
          "--output", str(tmp_path / "out.json"), "--timeout-seconds", "nan", "--", "true"],
-        cwd=Path(__file__).parents[2], capture_output=True, text=True,
+        cwd=Path(__file__).parents[2], capture_output=True, text=True, check=False,
     )
     assert result.returncode != 0
     assert "finite and positive" in result.stderr
@@ -129,7 +129,7 @@ def test_runner_bounds_harness_timeout(tmp_path: Path) -> None:
         [sys.executable, str(RUNNER), "--battery-definition", str(tmp_path / "battery.json"), "--harness", str(harness), "--hermes-root", str(root),
          "--output", str(tmp_path / "out.json"), "--timeout-seconds", "0.1",
          sys.executable, "-c", "import time; time.sleep(2)"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
 
     assert result.returncode != 0
@@ -148,7 +148,7 @@ def test_output_cannot_delete_source_file(tmp_path):
     result = subprocess.run(
         [sys.executable, str(RUNNER), "--battery-definition", str(tmp_path / "battery.json"), "--harness", str(harness), "--hermes-root", str(root),
          "--output", str(output), "--", sys.executable, "-c", "pass"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     assert result.returncode != 0
     assert output.read_bytes() == before

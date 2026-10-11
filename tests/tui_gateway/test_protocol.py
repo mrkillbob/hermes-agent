@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from tests.tui_gateway.protocol_fixtures import (
-    _restore_stdout as _restore_stdout, capture as capture, server as server,
+    _restore_stdout as _restore_stdout, capture as capture, server as server,  # noqa: PLC0414
 )
 
 
@@ -1196,7 +1196,7 @@ def test_idle_reaper_rearms_missing_ws_orphan_timer(server, monkeypatch, tmp_pat
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30, check=False,
     )
     assert successor.returncode == 0, successor.stderr
     assert [entry["session_id"] for entry in active_session_registry_snapshot(home)] == [sibling_sid]

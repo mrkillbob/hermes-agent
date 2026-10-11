@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-import github_pr_feedback.controller as controller
+from github_pr_feedback import controller
 from github_pr_feedback.controller import (
     ExactHeadUnavailable,
     LocalGitRepository,

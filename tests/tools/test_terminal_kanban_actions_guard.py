@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-import hermes_cli.config as config
+from hermes_cli import config
 from tools import approval, terminal_tool
 from tools.approval_context import reset_current_session_key, set_current_session_key
 

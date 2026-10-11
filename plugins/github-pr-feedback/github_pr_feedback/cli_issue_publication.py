@@ -32,7 +32,7 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 _NODE = re.compile(
     r"tests/(?:[A-Za-z0-9_]+/)*test_[A-Za-z0-9_]+\.py::test_[A-Za-z0-9_]+"
 )
-_UNSAFE = re.compile(r"broker|live|integration|smoke|slow|submit|order|account", re.I)
+_UNSAFE = re.compile(r"broker|live|integration|smoke|slow|submit|order|account", re.IGNORECASE)
 _TEMPLATE_IDS = {
     "dedupe_marker",
     "summary",

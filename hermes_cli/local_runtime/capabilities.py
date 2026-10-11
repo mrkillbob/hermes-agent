@@ -37,7 +37,7 @@ def is_managed_provider(provider: str, base_url: str = "") -> bool:
     return False
 
 
-def _props_modalities(model_id: str, *, endpoint: "tuple[str, str] | None" = None) -> "bool | None":
+def _props_modalities(model_id: str, *, endpoint: tuple[str, str] | None = None) -> bool | None:
     """Ask the running server whether this loaded child sees images. None when the server is down,
     the model isn't loaded, or the build doesn't report modalities. Recovery callers may
     pin an already verified local endpoint instead of borrowing the managed root."""
@@ -53,7 +53,7 @@ def _props_modalities(model_id: str, *, endpoint: "tuple[str, str] | None" = Non
     return None
 
 
-def managed_model_supports_vision(model_id: str, *, endpoint: "tuple[str, str] | None" = None) -> "bool | None":
+def managed_model_supports_vision(model_id: str, *, endpoint: tuple[str, str] | None = None) -> bool | None:
     """Ground-truth vision capability for a staged model, or None when the model isn't ours /
     nothing is known (caller keeps falling through)."""
     if not model_id:

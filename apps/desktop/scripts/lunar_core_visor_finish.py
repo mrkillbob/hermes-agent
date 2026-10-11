@@ -22,7 +22,7 @@ def panel(name,cx,cz,width,height,radius,offset,mat):
  for f in [i/24 for i in range(25)]:
   for x,z in edge:
    x=cx+(x-cx)*f;z=cz+(z-cz)*f
-   hit,normal,_,_=tree.ray_cast(Vector((x,-1,z)),Vector((0,1,0)),2)
+   hit,_normal,_,_=tree.ray_cast(Vector((x,-1,z)),Vector((0,1,0)),2)
    if hit is None:raise RuntimeError('Visor ray missed front shell at '+str((x,z,hit)))
    verts.append((x,-.255+.30*x*x-offset,z))
  n=len(edge);faces=[]

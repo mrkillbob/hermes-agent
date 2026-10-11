@@ -303,7 +303,7 @@ def test_constructed_receipts_or_approvals_cannot_bypass_durable_promotion_evide
 
 def test_candidate_lifecycle_rejects_all_skips_and_reversals(tmp_path):
     now = [1_000]
-    requests, gate, proposal, cases = _candidate(tmp_path, now)
+    requests, _gate, proposal, _cases = _candidate(tmp_path, now)
     receipt_hash = _digest("legal-transition-receipt")
     illegal = (
         ("candidate", "verified"),

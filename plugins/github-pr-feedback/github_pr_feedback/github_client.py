@@ -125,7 +125,7 @@ class GitHubRequestGate(AbstractContextManager["GitHubRequestGate"]):
         self._entry_lock_held = False
         self._process_lock_held = False
 
-    def __enter__(self) -> "GitHubRequestGate":
+    def __enter__(self) -> GitHubRequestGate:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # Acquire the per-gate lock before the shared process lock.  The file
         # lock is acquired before the process lock so separate Hermes
@@ -570,7 +570,7 @@ class GitHubClient:
         actions_permissions_gh_config_dir: Path | None = None,
         actions_permissions_repositories: frozenset[str] = frozenset(),
         environ: Mapping[str, str] | None = None,
-    ) -> "GitHubClient":
+    ) -> GitHubClient:
         """Build a client bound only to the configured Hermes bot credential."""
 
         try:
@@ -1524,7 +1524,7 @@ class GitHubClient:
         if latest.get("status") != "completed" or latest.get("conclusion") != "success":
             return None
         try:
-            completed_at = datetime.fromisoformat(latest["completed_at"].replace("Z", "+00:00"))
+            completed_at = datetime.fromisoformat(latest["completed_at"])
         except (AttributeError, TypeError, ValueError, KeyError) as error:
             raise GitHubClientError("Required CI gate completion was unavailable") from error
         if completed_at.tzinfo is None:
@@ -1564,7 +1564,7 @@ class GitHubClient:
             return None
         try:
             started_at = datetime.fromisoformat(
-                workflow["run_started_at"].replace("Z", "+00:00")
+                workflow["run_started_at"]
             )
         except (AttributeError, TypeError, ValueError, KeyError) as error:
             raise GitHubClientError("Required CI run start was unavailable") from error

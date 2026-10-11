@@ -986,7 +986,7 @@ def test_mergeability_lag_releases_lease_without_a_failed_ci_receipt(tmp_path, l
 
     github = LaggingGitHub(merge_state())
     inspector = FakeInspector()
-    runner, ledger, commands = build_runner(tmp_path, github=github, inspector=inspector)
+    runner, ledger, _commands = build_runner(tmp_path, github=github, inspector=inspector)
     identity = CIAuditIdentity("acme/widgets", 17, BASE_SHA, HEAD_SHA)
     with pytest.raises(MergeStateStillComputingError):
         runner.run(identity, worktree)

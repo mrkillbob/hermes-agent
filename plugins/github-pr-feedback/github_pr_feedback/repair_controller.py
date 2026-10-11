@@ -591,7 +591,7 @@ class RepairController:
             task = _actions_needed_task(self._policy, receipt, target.local_path, pull)
             task_id = self._kanban.create_or_get_task(task)
             self._ledger.finalize(receipt, task_id, lease)
-        except Exception as error:  # noqa: BLE001 - retain retryable dispatch failure.
+        except Exception as error:
             try:
                 self._ledger.fail(
                     receipt, str(error) or "actions-needed dispatch failed", lease

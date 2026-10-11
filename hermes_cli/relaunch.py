@@ -124,7 +124,8 @@ def relaunch(
     if sys.platform == "win32":
         import subprocess
         try:
-            result = subprocess.run(new_argv)
+            # health: allow HX006 -- re-runs hermes itself; the child is the session and ends when the user quits
+            result = subprocess.run(new_argv, check=False)
             sys.exit(result.returncode)
         except KeyboardInterrupt:
             sys.exit(130)

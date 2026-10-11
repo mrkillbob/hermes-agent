@@ -20,7 +20,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import generate_lunar_city_baseline as lunar  # noqa: E402
+import generate_lunar_city_baseline as lunar
 
 
 OUTPUT = SCRIPT_DIR.parents[0] / "public" / "lunar-city"

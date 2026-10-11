@@ -25,7 +25,7 @@
     "check": "npm run --ws check",
     "fix": "npm run --ws fix",
     "audit:high": "npm audit --audit-level=high",
-    "prepare": "node -e \"const {existsSync}=require('fs');const {spawnSync}=require('child_process');if(existsSync('.git'))process.exit(spawnSync('lefthook',['install'],{stdio:'inherit',shell:true}).status??1)\""
+    "prepare": "node -e \"const {existsSync}=require('fs');const {spawnSync}=require('child_process');if(existsSync('.git'))spawnSync('lefthook',['install'],{stdio:'inherit',shell:true})\""
   },
   "repository": {
     "type": "git",
@@ -38,13 +38,15 @@
   "homepage": "https://github.com/NousResearch/Hermes-Agent#readme",
   "devDependencies": {
     "@eslint/js": "9.39.5",
+    "eslint": "10.12.0",
     "eslint-plugin-perfectionist": "5.10.0",
     "eslint-plugin-react-hooks": "7.1.1",
     "eslint-plugin-unused-imports": "4.4.1",
     "globals": "17.7.0",
     "ip-address": "10.7.2",
     "node-gyp": "13.0.2",
-    "lefthook": "^2.1.14",
+    "lefthook": "2.1.14",
+    "typescript": "6.0.3",
     "typescript-eslint": "8.64.0"
   },
   "overrides": {

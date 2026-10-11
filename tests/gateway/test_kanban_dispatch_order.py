@@ -38,7 +38,7 @@ def test_ready_dispatch_precedes_auto_decompose(monkeypatch, tmp_path):
         },
     )
     monkeypatch.setattr(kb, "list_boards", lambda include_archived=False: [{"slug": "default"}])
-    monkeypatch.setattr(dispatcher, "reap_worker_zombies", lambda: [])
+    monkeypatch.setattr(dispatcher, "reap_worker_zombies", list)
     monkeypatch.setattr(dispatcher, "dispatch_once", lambda *args, **kwargs: calls.append("dispatch"))
     monkeypatch.setattr(dispatcher, "has_spawnable_ready", lambda conn: False)
     monkeypatch.setattr(dispatcher, "review_dispatch_enabled", lambda: False)
@@ -92,7 +92,7 @@ def decomposition_tick(monkeypatch, tmp_path):
                    "auto_decompose": True, "auto_decompose_per_tick": 1},
     })
     monkeypatch.setattr(kb, "list_boards", lambda **kw: [{"slug": "default"}])
-    monkeypatch.setattr(dispatcher, "reap_worker_zombies", lambda: [])
+    monkeypatch.setattr(dispatcher, "reap_worker_zombies", list)
     monkeypatch.setattr(dispatcher, "dispatch_once", lambda *a, **kw: None)
     monkeypatch.setattr(dispatcher, "has_spawnable_ready", lambda conn: False)
     monkeypatch.setattr(dispatcher, "review_dispatch_enabled", lambda: False)

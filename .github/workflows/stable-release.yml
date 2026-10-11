@@ -269,6 +269,7 @@ jobs:
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
       macos: ${{ steps.plan.outputs.macos }}
+      baseline: ${{ steps.plan.outputs.baseline }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
@@ -303,6 +304,7 @@ jobs:
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
       macos: ${{ steps.plan.outputs.macos }}
+      baseline: ${{ steps.plan.outputs.baseline }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
@@ -337,6 +339,7 @@ jobs:
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
       macos: ${{ steps.plan.outputs.macos }}
+      baseline: ${{ steps.plan.outputs.baseline }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
@@ -400,9 +403,10 @@ jobs:
         run: python -m scripts.releases.stable candidate-manifest
 
   windows-packaged:
-    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: Windows signed-package acceptance
     needs: transitions-win32
+    # Without a published stable baseline there is no OLD package to upgrade from.
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && needs.transitions-win32.outputs.baseline != 'none' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.transitions-win32.outputs.windows) }}
@@ -417,9 +421,10 @@ jobs:
       bundle-arch: ${{ matrix.arch }}
 
   macos-packaged-arm64:
-    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: macOS arm64 signed-package acceptance
     needs: transitions-darwin-arm64
+    # Without a published stable baseline there is no OLD package to upgrade from.
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && needs.transitions-darwin-arm64.outputs.baseline != 'none' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.transitions-darwin-arm64.outputs.macos) }}
@@ -434,9 +439,10 @@ jobs:
       bundle-arch: ${{ matrix.arch }}
 
   macos-packaged-x64:
-    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: macOS x64 signed-package acceptance
     needs: transitions-darwin-x64
+    # Without a published stable baseline there is no OLD package to upgrade from.
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && needs.transitions-darwin-x64.outputs.baseline != 'none' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.transitions-darwin-x64.outputs.macos) }}

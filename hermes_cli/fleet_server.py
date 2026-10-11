@@ -134,7 +134,7 @@ class _FleetHandler(BaseHTTPRequestHandler):
         decoded = decode_message(envelope, expected_kind=kind)
         return decoded
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+    def do_GET(self) -> None:
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return
@@ -156,7 +156,7 @@ class _FleetHandler(BaseHTTPRequestHandler):
             return
         self._respond(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
-    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+    def do_POST(self) -> None:
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return

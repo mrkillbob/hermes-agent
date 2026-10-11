@@ -181,7 +181,7 @@ def test_run_conversation_flushes_assistant_tool_call_before_execution():
 @pytest.mark.parametrize("tool_name", ["kanban_complete", "kanban_block", "kanban_schedule"])
 def test_kanban_worker_exits_after_durable_successful_completion(monkeypatch, tool_name):
     """A completed worker must not make another provider call and keep working."""
-    import tools.kanban_tools as kanban_tools
+    from tools import kanban_tools
 
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_completed")
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "715")
@@ -1001,7 +1001,7 @@ def test_flush_atomic_mixed_repair_and_append_rollback_on_failure(tmp_path, monk
     agent = _make_agent()
     db_path = tmp_path / "state.db"
     session_id = "sess-atomic-rollback"
-    db = _attach_real_session_db(agent, db_path, session_id)
+    _attach_real_session_db(agent, db_path, session_id)
 
     messages = [
         {"role": "user", "content": "summarize"},

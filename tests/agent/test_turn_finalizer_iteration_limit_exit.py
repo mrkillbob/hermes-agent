@@ -283,7 +283,7 @@ def test_bounded_fallback_blocks_kanban_task_when_interrupted(monkeypatch):
     agent = _LimitAgent()
 
     # Budget exhausted (60/60), interrupted, no fallback-eligible exit_reason
-    result = finalize_turn(
+    finalize_turn(
         agent,
         final_response=None,
         api_call_count=60,
@@ -327,7 +327,7 @@ def test_bounded_fallback_blocks_kanban_task_when_failed(monkeypatch):
     monkeypatch.setattr("hermes_cli.kanban_db.block_task", block)
     agent = _LimitAgent()
 
-    result = finalize_turn(
+    finalize_turn(
         agent,
         final_response=None,
         api_call_count=60,
@@ -366,7 +366,7 @@ def test_bounded_fallback_does_not_fire_without_kanban_task(monkeypatch):
     monkeypatch.setattr("hermes_cli.kanban_db_dispatch._record_task_failure", record)
     agent = _LimitAgent()
 
-    result = finalize_turn(
+    finalize_turn(
         agent,
         final_response=None,
         api_call_count=60,
@@ -441,7 +441,7 @@ def test_guardrail_halt_forwards_worker_fence(monkeypatch):
     agent = _LimitAgent(budget_remaining=60)
     agent._tool_guardrail_halt_decision = SimpleNamespace(
         tool_name="terminal", code="same_tool_failure_halt",
-        to_metadata=lambda: {},
+        to_metadata=dict,
     )
 
     _finalize(agent, final_response="stopped", exit_reason="guardrail_halt", api_call_count=1)
@@ -463,7 +463,7 @@ def test_bounded_fallback_does_not_fire_when_budget_not_exhausted(monkeypatch):
     agent = _LimitAgent(budget_remaining=60)
 
     # api_call_count=10, max_iterations=60 — budget NOT exhausted
-    result = finalize_turn(
+    finalize_turn(
         agent,
         final_response=None,
         api_call_count=10,

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 import json
 import re
 from pathlib import Path
@@ -73,7 +73,7 @@ def seed_discovery_evidence(
     """Seed bounded structural facts; private source/config payloads stay local."""
     packet = {
         "schema": "discovery_evidence_v1",
-        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "observed_at": datetime.now(UTC).isoformat(),
         "department": _safe_identifier(department.get("id")),
         "board": _safe_identifier(department.get("board")),
         "assigned_role": {
@@ -95,7 +95,7 @@ def seed_discovery_evidence(
         if not re.fullmatch(r"[0-9a-f]{40}", head):
             raise ValueError("invalid revision shape")
         packet["source_revision"] = head
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, subprocess.SubprocessError):
         packet["source_revision_unverified"] = "revision unavailable"
     try:
         registry = source / "configs/federation/roles.json"
@@ -136,7 +136,7 @@ def seed_discovery_evidence(
             )
             if value
         ]
-    except (OSError, ValueError, TypeError) as error:
+    except (OSError, ValueError, TypeError):
         packet["assigned_role"]["unverified"] = "registry unavailable"
     relevant = [
         task
@@ -211,7 +211,7 @@ def discovery_body(spec: dict, department: dict) -> str:
     )
 def seed_revenue_evidence(source: Path, workspace: Path) -> None:
     """Keep bounded readiness facts in the scratch workspace, not private payloads."""
-    packet = {"observed_at": datetime.now(timezone.utc).isoformat(), "configs": {}}
+    packet = {"observed_at": datetime.now(UTC).isoformat(), "configs": {}}
     for name in ("model_routing_policy", "cron_fleet"):
         config = source / "config" / (name + ".json")
         try:
@@ -248,7 +248,7 @@ def main():
     boards = dict.fromkeys([spec['board'], *spec.get('project_boards', {}).values()])
     for board in boards:
         tasks.extend({**task, '_discovery_board': board} for task in run(args.hermes, 'kanban', '--board', board, 'list', '--json'))
-    day = datetime.now(timezone.utc).date().isoformat()
+    day = datetime.now(UTC).date().isoformat()
     sys.path.insert(0, str(root))
     from hermes_cli.kanban_db import kanban_db_path
     for board in boards:

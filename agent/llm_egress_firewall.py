@@ -1113,7 +1113,6 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
             return False
         for match in _BASE64_CANDIDATE.finditer(value):
             candidate = match.group(1)
-            prefix = value[max(0, match.start() - 16) : match.start()].lower()
             source_control_window = value[
                 max(0, match.start() - 48) : min(len(value), match.end() + 16)
             ]
@@ -1225,7 +1224,7 @@ def _source_text_for_base64_scan(
         # trailing assignment marker attached. Strip only that marker; a
         # padded encoded value remains unchanged and fail-closed.
         candidate = match.group(1)
-        source_atom = candidate[:-1] if candidate.endswith("=") else candidate
+        source_atom = candidate.removesuffix("=")
         source_control_window = source_text[
             max(0, match.start() - 256) : min(len(source_text), match.end() + 32)
         ]
@@ -1310,7 +1309,7 @@ def _source_text_for_base64_scan(
         match: re.Match[str], source_text: str
     ) -> bool:
         candidate = match.group(1)
-        source_atom = candidate[:-1] if candidate.endswith("=") else candidate
+        source_atom = candidate.removesuffix("=")
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{2,191}", source_atom) is None:
             return False
         line_start = source_text.rfind("\n", 0, match.start()) + 1
@@ -1708,11 +1707,11 @@ def _contains_grant_substring(grant_content: bytes, candidate: bytes) -> bool:
         if window >= 32:
             source_windows = {
                 variant[offset : offset + window]
-                for offset in range(0, len(variant) - window + 1)
+                for offset in range(len(variant) - window + 1)
             }
             if any(
                 candidate[offset : offset + window] in source_windows
-                for offset in range(0, len(candidate) - window + 1)
+                for offset in range(len(candidate) - window + 1)
             ):
                 return True
     return False
@@ -2610,8 +2609,8 @@ __all__ = [
     "OutboundText",
     "SanitizedSegment",
     "SourceBoundSegment",
-    "SourcePresentationSegment",
     "SourceGrant",
+    "SourcePresentationSegment",
     "TypedOutboundRequest",
     "UntrustedProvenanceSegment",
     "ValidatedToolSyntaxSegment",

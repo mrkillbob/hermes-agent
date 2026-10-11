@@ -4,7 +4,7 @@ Carried from upstream core tests into a focused module to retain fork source-hea
 """
 import pytest
 from tests.hermes_cli.test_kanban_core_functionality import (
-    kanban_home as kanban_home,
+    kanban_home as kanban_home,  # noqa: PLC0414
     _drive_protocol_violation,
     _drive_nonzero_crash,
 )

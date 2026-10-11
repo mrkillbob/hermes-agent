@@ -38,7 +38,7 @@ def test_every_catalog_file_resolves():
         try:
             with urllib.request.urlopen(url, timeout=30) as r:
                 files = {f["path"]: f.get("size") for f in json.load(r)}
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             problems.append(f"{entry.id}: repo {entry.repo} unreachable ({exc})")
             continue
         for variant in entry.variants:

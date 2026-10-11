@@ -128,7 +128,7 @@ def import_reference(asset_id: str, kind: str, filename: str, index: int) -> dic
         obj["lunar_city_asset_id"] = asset_id
         obj["reference_only"] = True
     label(asset_id, (x, row_y - 1.35, 0.05), 0.14 if kind == "building" else 0.16)
-    low, high, dims = bounds(meshes)
+    _low, _high, dims = bounds(meshes)
     return {
         "id": asset_id,
         "kind": kind,

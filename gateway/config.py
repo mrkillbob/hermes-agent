@@ -99,7 +99,7 @@ def _env_multiplex_profiles_override(environ: Optional[Mapping[str, str]] = None
 ON_ALL_ADAPTERS_DOWN_POLICIES = ("exit", "stay_alive")
 
 
-def _env_on_all_adapters_down_override() -> "str | None":
+def _env_on_all_adapters_down_override() -> str | None:
     """GATEWAY_ON_ALL_ADAPTERS_DOWN operator override: 'exit'/'stay_alive' for a recognized token.
 
     ``None`` when unset, blank, or unrecognized so the caller keeps the config.yaml value
@@ -307,7 +307,7 @@ class Platform(Enum):
         return pseudo
 
     @classmethod
-    def _scan_bundled_plugin_platforms(cls) -> "tuple[set, dict]":
+    def _scan_bundled_plugin_platforms(cls) -> tuple[set, dict]:
         """Directory names of bundled platform plugins under ``plugins/platforms/``, plus a map of
         manifest ``name:`` keys that differ from their directory (alias -> directory name). Aliases
         never shadow a directory name, so the directory stays the canonical platform value."""
@@ -424,7 +424,7 @@ class ChannelOverride:
 # authenticate another way and must never be skipped for a missing token.
 # Platforms absent from this map authenticate some other way (session files, port-bound webhooks,
 # api_key-only) and must never be skipped for a missing token. See #64674.
-PLATFORM_TOKEN_ENV_NAMES: dict["Platform", str] = {
+PLATFORM_TOKEN_ENV_NAMES: dict[Platform, str] = {
     Platform.TELEGRAM: "TELEGRAM_BOT_TOKEN",
     Platform.DISCORD: "DISCORD_BOT_TOKEN",
     Platform.SLACK: "SLACK_BOT_TOKEN",
@@ -915,7 +915,7 @@ def load_gateway_config() -> GatewayConfig:
     return config
 
 
-def _validate_gateway_config(config: "GatewayConfig") -> None:
+def _validate_gateway_config(config: GatewayConfig) -> None:
     """Validate and sanitize a loaded GatewayConfig in place (after all sources are merged)."""
     try:
         # Reject known-weak placeholder tokens. Ported from openclaw/openclaw#64586: users who copy

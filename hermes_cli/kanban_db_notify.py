@@ -392,7 +392,6 @@ def claim_unseen_events_for_sub(
         old_cursor = int(row["last_event_id"])
         existing_owner = row["notify_claim_owner"]
         claimed_at = row["notify_claimed_at"]
-        claimed_cursor = row["notify_claimed_cursor"]
         claim_active = (
             isinstance(existing_owner, str)
             and bool(existing_owner)

@@ -52,11 +52,11 @@ def test_marker_with_a_live_delegate_is_handed_to_it_at_finish(tmp_path: Path) -
     # delegate becomes the owner (canonical body, started_at kept, no delegate line).
     pid_file = tmp_path / 'delegate.pid'
     try:
-        code, out, _, result, home = _handoff(tmp_path, HANDOFF_DELEGATE=str(pid_file))
+        code, out, _, _result, home = _handoff(tmp_path, HANDOFF_DELEGATE=str(pid_file))
         assert code == 0, out
         marker = (home / '.hermes-update-in-progress').read_bytes().decode().split('\n')
         assert marker[0] == pid_file.read_text(encoding='utf-8-sig'), marker
         assert marker[2].startswith('ct:') and marker[3:] == [''], marker
     finally:
         if pid_file.exists():
-            subprocess.run(['taskkill', '/F', '/PID', pid_file.read_text(encoding='utf-8-sig')], capture_output=True)
+            subprocess.run(['taskkill', '/F', '/PID', pid_file.read_text(encoding='utf-8-sig')], capture_output=True, check=False)

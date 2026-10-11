@@ -33,7 +33,6 @@ bpy.ops.object.select_all(action='DESELECT');body.select_set(True);bpy.context.v
 atlas=bpy.data.images.new(asset+' | finish atlas',width=2048,height=2048,alpha=False)
 atlas.colorspace_settings.name='sRGB'
 for material in body.data.materials:
- material=material
  nodes=material.node_tree.nodes;links=material.node_tree.links;shader=nodes.get('Principled BSDF');out=nodes.get('Material Output')
  emit=nodes.new('ShaderNodeEmission')
  if shader.inputs['Base Color'].is_linked:links.new(shader.inputs['Base Color'].links[0].from_socket,emit.inputs['Color'])

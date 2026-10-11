@@ -143,7 +143,7 @@ def test_baseline_unhardened_git_fires_sinks(malicious_repo):
     """Sanity: without hardening the payload actually fires — proves the repo
     is armed and the test can detect a regression."""
     repo, marker = malicious_repo
-    subprocess.run(["git", "-C", str(repo), "diff", "HEAD"], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "diff", "HEAD"], capture_output=True, check=False)
     fired = _fired(marker)
     assert "fsmonitor" in fired and "extdiff" in fired, fired
 
@@ -222,7 +222,7 @@ def test_index_reading_probes_and_kanban_gc_git_are_safe(malicious_repo, tmp_pat
     worktree_ops._cleanup_failed_worktree_add(str(repo), tmp_path / "wt3", "safe3")
     assert _fired(marker) == []
     branches = subprocess.run(["git", "-C", str(repo), "branch", "--format=%(refname:short)"],
-                              capture_output=True, text=True, env=_CLEAN_GIT_ENV).stdout.split()
+                              capture_output=True, text=True, env=_CLEAN_GIT_ENV, check=False).stdout.split()
     assert not {"safe2", "pr-1", "safe3"} & set(branches)  # the deletions ran
 
     for key, value in {"remote.origin.url": "ssh://git@example.invalid/x.git",
@@ -449,7 +449,7 @@ def test_conditional_home_include_uses_the_effective_child_home(tmp_path):
     # Exercise the real hardened child with that same effective HOME.
     result = subprocess.run(
         ["git", "-C", str(repo), "worktree", "add", "-b", "safe", str(tmp_path / "wt"), "HEAD"],
-        capture_output=True, text=True, timeout=30, env=hardened)
+        capture_output=True, text=True, timeout=30, env=hardened, check=False)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "wt" / "README").read_text(encoding="utf-8") == "hi\n"
     assert list(tmp_path.glob("HOME-FILTER.*")) == []

@@ -101,6 +101,7 @@ def test_progress_output_tolerates_legacy_stdout_encoding(tmp_path: Path) -> Non
         stderr=subprocess.STDOUT,
         text=True,
         timeout=60,
+        check=False,
     )
 
     assert proc.returncode == 0, proc.stdout
@@ -131,7 +132,7 @@ def test_shard_selector_is_not_forwarded_to_test_processes(tmp_path: Path) -> No
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        timeout=60,
+        timeout=60, check=False,
     )
 
     assert proc.returncode == 0, proc.stdout
@@ -225,6 +226,7 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
         encoding="utf-8",
         errors="replace",
         timeout=60,
+        check=False,
     )
 
     assert handoff.exists(), (
@@ -290,7 +292,7 @@ def test_detached_grandchild_is_killed_by_runner(tmp_path: Path) -> None:
         [sys.executable, str(repo_root / "scripts" / "run_tests_parallel.py"),
          "--paths", str(probe_dir), "-j", "1", "--file-timeout", "30"],
         cwd=probe_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        encoding="utf-8", errors="replace", timeout=60,
+        encoding="utf-8", errors="replace", timeout=60, check=False,
     )
     pid = json.loads(handoff.read_text(encoding="utf-8-sig"))["pid"]
     deadline = time.monotonic() + 5.0
@@ -341,6 +343,7 @@ def _run_runner(probe_dir: Path, *extra: str) -> subprocess.CompletedProcess:
         encoding="utf-8",
         errors="replace",
         timeout=60,
+        check=False,
     )
 
 
@@ -360,6 +363,7 @@ def test_help_prints_usage_without_discovering_or_running_tests(
         encoding="utf-8",
         errors="replace",
         timeout=10,
+        check=False,
     )
 
     assert proc.returncode == 0, proc.stdout
@@ -441,6 +445,7 @@ def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:
         stderr=subprocess.STDOUT,
         text=True,
         timeout=60,
+        check=False,
     )
 
     assert proc.returncode == 0, proc.stdout
@@ -499,7 +504,7 @@ def test_runner_selection_records_actual_test_identity(tmp_path, form, expected)
     }[form]
     runner = _probe_root(tmp_path) / "scripts/run_tests_parallel.py"
     result = subprocess.run([sys.executable, str(runner), *arguments, "-j", "1", "--file-timeout", "30"],
-                            cwd=tmp_path, capture_output=True, text=True, encoding="utf-8", timeout=60)
+                            cwd=tmp_path, capture_output=True, text=True, encoding="utf-8", timeout=60, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     assert sorted(path.name for path in receipt.iterdir()) == expected
 
@@ -529,7 +534,7 @@ def test_passthrough_ignore_drops_files_the_runner_hands_pytest_explicitly(
             "path": ["--ignore=tests/probe/test_gated_skipme.py"]}[ignore]
     runner = root / "scripts/run_tests_parallel.py"
     result = subprocess.run([sys.executable, str(runner), *pick, "-j", "1", "--file-timeout", "30", "--", *flag],
-                            cwd=tmp_path, capture_output=True, text=True, encoding="utf-8", timeout=60)
+                            cwd=tmp_path, capture_output=True, text=True, encoding="utf-8", timeout=60, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     assert sorted(path.name for path in receipt.iterdir()) == ["keep"], result.stdout
     assert "excluded 1 test file" in result.stdout, result.stdout
@@ -615,6 +620,7 @@ def test_files_from_dash_reads_the_list_from_stdin(tmp_path: Path) -> None:
         input=f"{probe_dir / 'test_flagprobe.py'}\n",
         cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         encoding="utf-8", errors="replace", timeout=60,
+        check=False,
     )
     assert proc.returncode == 0, proc.stdout
     assert "Running 1 test files" in proc.stdout, proc.stdout
@@ -667,7 +673,7 @@ def test_canonical_runner_confines_explicit_scratch(tmp_path: Path) -> None:
             [shutil.which("bash"), str(root / "scripts" / "run_tests.sh"), str(probe),
              "-o", "cache_dir=" + str(tmp_path / "pytest-cache")],
             cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, timeout=60,
+            text=True, timeout=60, check=False,
         )
         assert proc.returncode == 0, proc.stdout
         assert scratch.is_dir()

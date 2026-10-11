@@ -121,7 +121,7 @@ class MaintenanceReceipt:
     status: str
     summary: str
     completed_at: datetime
-    command_evidence: tuple["MaintenanceCommandEvidence", ...] = ()
+    command_evidence: tuple[MaintenanceCommandEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +187,7 @@ def deployment_owner(nonce: int) -> str:
     if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce <= 0:
         raise ValueError("deployment owner nonce must be a positive integer")
     try:
-        start_time_us = int(round(psutil.Process(os.getpid()).create_time() * 1_000_000))
+        start_time_us = round(psutil.Process(os.getpid()).create_time() * 1_000_000)
     except (OSError, ValueError, psutil.Error):
         return f"post-merge-unknown:{os.getpid()}:{nonce}"
     if start_time_us <= 0:
@@ -209,7 +209,7 @@ def _deployment_owner_is_alive(owner: str) -> bool:
     expected_start_time_us = int(match.group("start_time_us"))
     try:
         process = psutil.Process(pid)
-        actual_start_time_us = int(round(process.create_time() * 1_000_000))
+        actual_start_time_us = round(process.create_time() * 1_000_000)
     except (psutil.NoSuchProcess, psutil.ZombieProcess):
         return False
     except (psutil.AccessDenied, OSError, ValueError, psutil.Error):

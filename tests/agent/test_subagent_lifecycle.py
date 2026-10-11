@@ -1,7 +1,7 @@
 """Contract tests for the public plugin subagent lifecycle API."""
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -51,7 +51,7 @@ class FakeChild:
 
 
 def _active_workforce_contracts():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     stamp = lambda value: value.isoformat().replace("+00:00", "Z")
     constitution = WorkerConstitution(
         profile="researcher",

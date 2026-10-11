@@ -31,6 +31,7 @@ import hermes_cli.web_server_lifecycle as _web_server_lifecycle
 import hermes_cli.web_server_memory as _web_server_memory
 import hermes_cli.web_server_messaging as _web_server_messaging
 import hermes_cli.web_server_sessions as _web_server_sessions
+from datetime import UTC
 
 
 # ---------------------------------------------------------------------------
@@ -2847,7 +2848,6 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert _is_anthropic_frontier_tier(None) is False
 
 
-
 # ---------------------------------------------------------------------------
 # _build_schema_from_config tests
 # ---------------------------------------------------------------------------
@@ -3962,7 +3962,7 @@ class TestGatewayUpdatedAtContract:
         assert isinstance(value, str)
         parsed = datetime.fromisoformat(value)
         assert parsed.tzinfo is not None
-        assert parsed == datetime.fromtimestamp(epoch, tz=timezone.utc)
+        assert parsed == datetime.fromtimestamp(epoch, tz=UTC)
 
 
     def test_remote_health_numeric_updated_at_normalized(self, monkeypatch):

@@ -118,7 +118,7 @@ class SubagentHandle:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "SubagentHandle":
+    def from_dict(cls, value: Mapping[str, Any]) -> SubagentHandle:
         try:
             data = dict(value)
             constitution = data.get("constitution")

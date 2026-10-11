@@ -13,7 +13,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path, PurePosixPath
 from typing import Mapping
 from urllib.parse import quote
@@ -63,7 +63,7 @@ class BrokerConfig:
             raise BrokerError("staging audit path must be absolute")
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> "BrokerConfig":
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> BrokerConfig:
         env = os.environ if environ is None else environ
         token = env.get("HERMES_STAGING_GITHUB_TOKEN", "").strip()
         if not token:
@@ -157,7 +157,7 @@ class GitHubStagingBroker:
         ).hexdigest()[:24]
         row = {
             "schema": "hermes.secure-worker.github-broker-receipt.v1",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "operation": operation,
             "status": status,
             "repository_id": repository_id,

@@ -22,7 +22,7 @@ def test_junction_detection_remains_opaque_and_permission_errors_propagate(tmp_p
     command = str(Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe")
     result = subprocess.run(
         [command, "/d", "/c", "mklink", "/J", str(junction), str(target)],
-        capture_output=True, text=True, timeout=15,
+        capture_output=True, text=True, timeout=15, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     try:

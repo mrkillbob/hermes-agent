@@ -198,14 +198,14 @@ async def _run_sync_extract_terminable(provider, fetch_urls: list[str], format: 
             if parent_conn.poll():
                 status, payload = parent_conn.recv()
                 if status == "timeout":
-                    raise asyncio.TimeoutError
+                    raise TimeoutError
                 if status == "error":
                     raise RuntimeError(payload)
                 return payload
             if not process.is_alive():
                 raise RuntimeError(f"sync extract provider exited with status {process.exitcode}")
             if deadline is not None and asyncio.get_running_loop().time() >= deadline:
-                raise asyncio.TimeoutError
+                raise TimeoutError
             await asyncio.sleep(0.01)
     finally:
         parent_conn.close()
@@ -232,7 +232,7 @@ async def _dispatch_extract(provider, fetch_urls: list[str], format: Optional[st
             # Use a process boundary so timeout really releases its network
             # resources instead of accumulating stuck SDK threads.
             results = await _run_sync_extract_terminable(provider, fetch_urls, format, timeout)
-    except asyncio.TimeoutError as exc:  # hanging backend — bounded, never a stalled tool call
+    except TimeoutError:  # hanging backend — bounded, never a stalled tool call
         logger.warning("web_extract provider '%s' timed out after %.0fs for %d URL(s)",
                        provider.name, timeout, len(fetch_urls))
         failed = [_result_entry(u, f"Extract timed out after {timeout:.0f}s via {provider.name}")

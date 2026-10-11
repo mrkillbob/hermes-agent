@@ -54,7 +54,7 @@ def audit(base: str, head: str) -> dict:
         try:
             completed = subprocess.run(
                 ['npm', 'audit', '--package-lock-only', '--ignore-scripts', '--audit-level=high', '--json'],
-                cwd=directory, capture_output=True, text=True, timeout=180,
+                cwd=directory, capture_output=True, text=True, timeout=180, check=False,
             )
             entry['exit_code'] = completed.returncode
             report = json.loads(completed.stdout)

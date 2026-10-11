@@ -125,13 +125,13 @@ def test_worker_readiness_ignores_malformed_user_override(tmp_path, monkeypatch)
     plugin = worker / "plugins/github-pr-feedback"
     plugin.mkdir(parents=True)
     (plugin / "plugin.yaml").write_text("name: github-pr-feedback\nprovides_hooks: [\n", encoding="utf-8")
-    monkeypatch.setattr(importlib.metadata, "entry_points", lambda: [])
+    monkeypatch.setattr(importlib.metadata, "entry_points", list)
 
     assert worker_contract_enabled(tmp_path, "worker") is True
 
 
 def test_worker_readiness_rejects_portable_manifest_hooks(tmp_path, monkeypatch):
-    import github_pr_feedback.worker_contract as worker_contract
+    from github_pr_feedback import worker_contract
 
     worker = tmp_path / "profiles/worker"
     worker.mkdir(parents=True)
@@ -153,7 +153,7 @@ def test_worker_readiness_rejects_portable_manifest_hooks(tmp_path, monkeypatch)
 def test_worker_readiness_applies_project_plugin_opt_in(
     tmp_path, monkeypatch, project_enabled, expected
 ):
-    import github_pr_feedback.worker_contract as worker_contract
+    from github_pr_feedback import worker_contract
 
     worker = tmp_path / "profiles/worker"
     worker.mkdir(parents=True)
@@ -174,7 +174,7 @@ def test_worker_readiness_applies_project_plugin_opt_in(
 
 
 def test_worker_readiness_rejects_categorized_project_override(tmp_path, monkeypatch):
-    import github_pr_feedback.worker_contract as worker_contract
+    from github_pr_feedback import worker_contract
 
     worker = tmp_path / "profiles/worker"
     worker.mkdir(parents=True)

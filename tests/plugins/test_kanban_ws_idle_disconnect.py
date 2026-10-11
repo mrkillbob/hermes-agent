@@ -204,7 +204,7 @@ async def test_stream_events_reuses_connection_and_closes_after_disconnect(
         wait_calls += 1
         awaitable.close()
         if wait_calls <= 2:
-            raise asyncio.TimeoutError
+            raise TimeoutError
         return {"type": "websocket.disconnect"}
 
     monkeypatch.setattr(mod.asyncio, "wait_for", _poll_twice_then_disconnect)
@@ -248,7 +248,7 @@ async def test_stream_events_without_since_baselines_at_current_max(monkeypatch)
         wait_calls += 1
         awaitable.close()
         if wait_calls <= 2:
-            raise asyncio.TimeoutError
+            raise TimeoutError
         return {"type": "websocket.disconnect"}
 
     monkeypatch.setattr(mod.asyncio, "wait_for", _baseline_then_fetch_then_disconnect)
@@ -296,7 +296,7 @@ async def test_stream_events_closes_connection_when_cancelled(monkeypatch):
         wait_calls += 1
         if wait_calls == 1:
             awaitable.close()
-            raise asyncio.TimeoutError
+            raise TimeoutError
         return await awaitable
 
     monkeypatch.setattr(mod.asyncio, "wait_for", _poll_once_then_wait)

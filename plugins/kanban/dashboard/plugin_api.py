@@ -179,7 +179,7 @@ def get_dispatcher_readiness():
 
 # --- Connection / board helpers ---------------------------------------------
 
-def _ws_upgrade_authorized(ws: "WebSocket") -> bool:
+def _ws_upgrade_authorized(ws: WebSocket) -> bool:
     """Authorize a WS upgrade via the dashboard's canonical gate (``web_server_chat._ws_auth_ok``:
     ``?token=`` / ``?ticket=`` / ``?internal=``) so this endpoint can never drift from core
     auth; accepts when the dashboard isn't importable (bare-FastAPI test harness)."""
@@ -567,7 +567,7 @@ async def upload_task_attachment(
         dest_path = _collision_free_path(dest_dir, safe_name)  # foo.pdf → foo (1).pdf …
         total = 0  # stream in chunks with a hard size cap so one upload can't fill the disk
         try:
-            with open(dest_path, "wb") as out:
+            with open(dest_path, "wb") as out:  # noqa: ASYNC230 -- chunked local write of the upload stream; open() is non-blocking in practice
                 while chunk := await file.read(1024 * 1024):
                     total += len(chunk)
                     if total > KANBAN_ATTACHMENT_MAX_BYTES:
@@ -2020,7 +2020,7 @@ async def stream_events(ws: WebSocket):
                 msg = await asyncio.wait_for(ws.receive(), timeout=_EVENT_POLL_SECONDS)
                 if msg["type"] == "websocket.disconnect":
                     return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass  # no client message — poll the DB
             cursor, events = await tail.poll(cursor)
             if events:

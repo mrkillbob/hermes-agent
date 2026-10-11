@@ -46,7 +46,7 @@ def test_curator_quarantines_prompt_injection_and_secrets(tmp_path: Path) -> Non
 def test_curator_groups_conflicts_but_requires_human_approval(tmp_path: Path) -> None:
     ledger = EngineeringMemoryLedger(tmp_path / "vault")
     curator = EngineeringMemoryCurator(ledger)
-    first = curator.stage(_record("one"))
+    curator.stage(_record("one"))
     second = curator.stage(_record("two"))
 
     assert ledger.get("one").status == "needs_review"

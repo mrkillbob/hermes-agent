@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 import json
 import os
 from pathlib import Path
@@ -29,7 +29,7 @@ def write_source_stamp(root: Path, *, adopted: bool = False) -> dict | None:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"], cwd=root,
-            capture_output=True, timeout=3,
+            capture_output=True, timeout=3, check=False,
         )
         # This is a pathname, not a token: preserve whitespace in its final
         # component and remove only the newline Git appends to its output.
@@ -54,7 +54,7 @@ def write_source_stamp(root: Path, *, adopted: bool = False) -> dict | None:
         "commit": info.commit,
         "commitDate": info.commit_date,
         "branch": info.branch,
-        "builtAt": datetime.now(timezone.utc).isoformat(),
+        "builtAt": datetime.now(UTC).isoformat(),
         "dirty": info.dirty,
         "source": "git",
         "distribution": None,
@@ -118,7 +118,7 @@ def refresh_bootstrap_receipt(root: Path, stamp: dict) -> None:
         "pinnedCommit": stamp["commit"],
         # A detached checkout keeps the branch it was installed from.
         "pinnedBranch": stamp["branch"] or previous.get("pinnedBranch"),
-        "completedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "completedAt": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
     }
     fd, tmp_name = tempfile.mkstemp(dir=root, prefix=".hermes-bootstrap-complete.", suffix=".tmp")
     try:

@@ -723,7 +723,7 @@ class LocalCIRunner:
             ).is_file():
                 raise CIValidationError("frontend lock inputs are missing")
             command_specs.extend(
-                (
+                
                     (argv, frontend, {})
                     for argv in (
                         ("npm", "ci"),
@@ -731,7 +731,7 @@ class LocalCIRunner:
                         ("npm", "test"),
                         ("npm", "run", "build"),
                     )
-                )
+                
             )
 
         if is_hermes_contract(manifest_bytes):

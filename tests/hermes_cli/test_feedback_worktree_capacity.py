@@ -21,7 +21,7 @@ def _run_capacity_suite():
         env=build_subprocess_env(
             inherit_profile_home=False,
             extra={"HERMES_DISABLE_LAZY_INSTALLS": "1"},
-        ),
+        ), check=False,
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
