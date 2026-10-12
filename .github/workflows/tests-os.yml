@@ -211,6 +211,12 @@ jobs:
           # starves cold child startup before the fixture's idle deadline.
           HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (github.repository == 'NousResearch/hermes-agent' && '16' || (runner.arch == 'ARM64' && '2' || '4')) || '' }}
           HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
+          # Real powershell.exe children are slow to start on the standard
+          # fork runner at 4 workers: test_windows_build_deps.py and
+          # test_desktop_update_runtime_unicode.py hit the 300s default, and a
+          # file killed by the timeout is never retried. 300 is the runner's
+          # own default, so non-Windows lanes are unchanged.
+          HERMES_TEST_FILE_TIMEOUT: ${{ matrix.marker == 'windows' && '900' || '300' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
           OPENROUTER_API_KEY: ''
