@@ -1,0 +1,13 @@
+# osv-scanner config for the root uv.lock (read from the lockfile's directory).
+#
+# uv.lock lists this project as `hermes-agent` 0.0.0 (editable source). OSV matches that
+# name+version against advisories filed for the *published* PyPI package, whose affected ranges
+# are open-ended ("up to 0.12.0", "up to 2026.4.30"), so every upstream advisory is reported
+# against our own source tree. Ignore only the project's own entry; real dependencies are
+# still scanned.
+[[PackageOverrides]]
+name = "hermes-agent"
+version = "0.0.0"
+ecosystem = "PyPI"
+ignore = true
+reason = "The project itself (editable root package in uv.lock), not a dependency. Upstream hermes-agent advisories match its 0.0.0 placeholder version."
