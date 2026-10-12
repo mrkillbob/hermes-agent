@@ -41,9 +41,10 @@ appendFileSync(process.env.PROBE_CALLS, JSON.stringify(process.argv.slice(2)) + 
 ${body}`)
 }
 
-function expectStopped(f, expectedCode) {
-  assert.throws(() => prepareNodeDependencies({ source: f.source, workspaces: ['apps/desktop'], env: f.env, reuse: true }), error => {
-    assert.match(error.message, /npm config get node-options failed.*15-second limit.*stopped/)
+function expectStopped(f, expectedCode, nodeOptionsProbeTimeoutMs) {
+  assert.throws(() => prepareNodeDependencies({ source: f.source, workspaces: ['apps/desktop'], env: f.env, reuse: true,
+    nodeOptionsProbeTimeoutMs }), error => {
+    assert.match(error.message, /npm config get node-options failed.*-second limit.*stopped/)
     if (expectedCode === 'ETIMEDOUT') {
       assert.equal(error.cause.code, expectedCode)
       assert.equal(error.cause.stdout, 'null\n', 'partial output must not become a resolved setting')
@@ -55,12 +56,12 @@ function expectStopped(f, expectedCode) {
   assert.equal(existsSync(join(f.source, 'node_modules/.hermes-node-deps.native-toolchain')), false)
 }
 
-test('partial null followed by a hung npm probe fails closed at the existing deadline', { timeout: 60000 }, t => {
+test('partial null followed by a hung npm probe fails closed at the deadline', { timeout: 30000 }, t => {
   const f = fixture(t)
   fakeNpm(f, String.raw`process.stdout.write('null\n'); setInterval(() => {}, 1000)` )
   const before = performance.now()
-  expectStopped(f, 'ETIMEDOUT')
-  assert.ok(performance.now() - before >= 12000, 'exercise the real 15-second probe, not an injected error')
+  expectStopped(f, 'ETIMEDOUT', 3000)
+  assert.ok(performance.now() - before >= 2500, 'exercise the real spawn timeout, not an injected error')
 })
 
 test('nonzero npm probe preserves its cause and never starts installation', t => {

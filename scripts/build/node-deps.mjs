@@ -100,16 +100,20 @@ function desktopCompilerPreload(source, selected) {
   return path
 }
 
-function installNodeOptions(node, npm, source, env, preload) {
+// The probe is a local config read, but a cold Windows runner (fresh npm unpack,
+// antivirus scan) has taken longer than 15s; it still must fail closed.
+const NODE_OPTIONS_PROBE_TIMEOUT_MS = 60000
+
+function installNodeOptions(node, npm, source, env, preload, timeout = NODE_OPTIONS_PROBE_TIMEOUT_MS) {
   // Read only this effective setting through npm's own config precedence. Avoid
   // copying user config or replacing user preload/memory/debugging options.
   let configured
   try {
     configured = execFileSync(node, [npm, 'config', 'get', 'node-options'],
-      { cwd: source, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 }).trim()
+      { cwd: source, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout }).trim()
   } catch (cause) {
     // Partial stdout is not an authoritative result, even if it says 'null'.
-    throw new Error('npm config get node-options failed (15-second limit); dependency preparation stopped', { cause })
+    throw new Error(`npm config get node-options failed (${timeout / 1000}-second limit); dependency preparation stopped`, { cause })
   }
   const existing = configured && configured !== 'null' ? configured : env.NODE_OPTIONS ?? ''
   if (typeof existing !== 'string') throw new Error('npm node-options must be a string')
@@ -151,7 +155,8 @@ export function verifyDesktopWindowsBinding(source, { env = process.env, platfor
 }
 
 /** Install the full requested workspace union in one strict, locked operation. */
-export function prepareNodeDependencies({ source, workspaces, env = process.env, reuse = false, install = true, nativeToolchain }) {
+export function prepareNodeDependencies({ source, workspaces, env = process.env, reuse = false, install = true, nativeToolchain,
+  nodeOptionsProbeTimeoutMs }) {
   source = resolve(source)
   if (!Array.isArray(workspaces) || workspaces.length === 0) {
     throw new Error('Select at least one workspace; implicit all-workspace installation is not allowed')
@@ -177,7 +182,7 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env,
     if (range && !satisfies(version, range)) throw new Error(`${name} ${version} violates ${range}`)
   }
   const preload = desktopCompilerPreload(source, selected)
-  const nodeOptions = preload ? installNodeOptions(node, npm, source, env, preload) : undefined
+  const nodeOptions = preload ? installNodeOptions(node, npm, source, env, preload, nodeOptionsProbeTimeoutMs) : undefined
   const args = ['ci', '--no-audit', '--no-fund', '--engine-strict', '--include=dev',
     '--include=optional', '--include-workspace-root=true',
     ...selected.flatMap(workspace => ['--workspace', workspace]),
