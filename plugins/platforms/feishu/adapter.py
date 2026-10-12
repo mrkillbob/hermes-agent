@@ -2817,11 +2817,6 @@ class FeishuAdapter(BasePlatformAdapter):
     async def _handle_webhook_request(self, request: Any) -> Any:
         remote_ip = (getattr(request, "remote", None) or "unknown")
 
-        # Rate-limit key is app_id:path:remote_ip (matches openclaw key structure).
-        if not self._check_webhook_rate_limit(f"{self._app_id}:{self._webhook_path}:{remote_ip}"):
-            logger.warning("[Feishu] Webhook rate limit exceeded for %s", remote_ip)
-            return self._webhook_reject(remote_ip, "429", 429, "Too Many Requests")
-
         headers = getattr(request, "headers", {}) or {}
         content_type = str(headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
         if content_type and content_type != "application/json":  # Feishu always sends JSON
@@ -2877,6 +2872,11 @@ class FeishuAdapter(BasePlatformAdapter):
             return self._webhook_reject(
                 remote_ip, "400-encrypted", 400, json_msg="encrypted webhook payloads are not supported",
             )
+
+        # Only authenticated event deliveries may consume the bounded per-peer quota.
+        if not self._check_webhook_rate_limit(f"{self._app_id}:{self._webhook_path}:{remote_ip}"):
+            logger.warning("[Feishu] Webhook rate limit exceeded for %s", remote_ip)
+            return self._webhook_reject(remote_ip, "429", 429, "Too Many Requests")
 
         self._clear_webhook_anomaly(remote_ip)
 
