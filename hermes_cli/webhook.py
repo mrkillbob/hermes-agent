@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict
 
 from hermes_constants import display_hermes_home
-from utils import atomic_json_write
+from utils import atomic_json_write, restrict_credential_file_permissions
 from hermes_cli.config import cfg_get
 
 
@@ -50,7 +50,9 @@ def _subscriptions_lock():
 def _load_subscriptions_unlocked() -> dict[str, dict]:
     """Read one complete store snapshot; unreadable or malformed files read as empty."""
     try:
-        raw = _subscriptions_path().read_bytes()
+        path = _subscriptions_path()
+        restrict_credential_file_permissions(path)
+        raw = path.read_bytes()
     except OSError:
         return {}
     try:

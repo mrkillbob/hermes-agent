@@ -406,6 +406,21 @@ def read_json_or_empty(path: str | Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def restrict_credential_file_permissions(path: str | Path, *, file_stat: os.stat_result | None = None) -> None:
+    """Migrate legacy secret-file modes; warn if a read-only store prevents tightening."""
+    if os.name != "posix":
+        return  # Windows ACLs do not map to these mode bits.
+    p = Path(path)
+    try:
+        mode = (file_stat or p.stat()).st_mode
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            p.chmod(0o600)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning("Could not restrict credential file permissions for %s: %s", p, exc)
+
+
 def warn_if_credential_file_broadly_readable(path: str | Path, *, label: str = "", log: logging.Logger | None = None) -> bool:
     """Warn when a credential file is group/world-readable; True when a warning was emitted.
 
