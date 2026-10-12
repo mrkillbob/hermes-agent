@@ -61,19 +61,21 @@ def _stream_through_relay(tmp_path, monkeypatch, response_body: bytes, *, finali
     subscriber_name = "test.openai_stream"
     events = []
     relay_finalizer_started = threading.Event()
-    allow_relay_finalizer = threading.Event()
     relay_finalizer_finished = threading.Event()
     run_relay_finalizer = relay_llm.ManagedLlmStream._relay_finalizer
 
-    def run_synchronized_relay_finalizer(managed_stream, attempt):
+    def run_observed_relay_finalizer(managed_stream, attempt):
+        # Relay calls this INLINE on the consumer thread's own event loop, so it must never wait on
+        # the consumer: when Relay reaches EOF while the consumer is still inside ``__next__`` for the
+        # last chunk, the finalizer already runs before the consumer sees that chunk (the ordering
+        # under test) and a wait for the consumer to "release" it self-deadlocked for 30s.
         relay_finalizer_started.set()
-        assert allow_relay_finalizer.wait(30), "consumer did not release Relay's finalizer"
         try:
             return run_relay_finalizer(managed_stream, attempt)
         finally:
             relay_finalizer_finished.set()
 
-    monkeypatch.setattr(relay_llm.ManagedLlmStream, "_relay_finalizer", run_synchronized_relay_finalizer)
+    monkeypatch.setattr(relay_llm.ManagedLlmStream, "_relay_finalizer", run_observed_relay_finalizer)
 
     count_chunk = chat_completion_helpers._StreamingCall._count_chunk
 
@@ -81,14 +83,14 @@ def _stream_through_relay(tmp_path, monkeypatch, response_body: bytes, *, finali
         # Relay's producer is pumped by the consumer thread's OWN event loop (``ManagedLlmStream.
         # __next__`` -> ``run_until_complete``), so the finalizer can only start while that loop runs.
         # Blocking the consumer thread here and waiting for it therefore deadlocked whenever the loop
-        # had not reached EOF yet (~1 run in 6). Instead: release the finalizer and PUMP THE STREAM'S
-        # LOOP until it has completed, then hand the chunk to the consumer. That is a real
-        # happens-before (finalizer done -> consumer sees chunk) on every schedule, not a retry lottery.
+        # had not reached EOF yet (~1 run in 6). Instead: PUMP THE STREAM'S LOOP until the finalizer
+        # has completed (immediately, if it already ran), then hand the chunk to the consumer. That is
+        # a real happens-before (finalizer done -> consumer sees chunk) on every schedule, not a retry
+        # lottery.
         if finalize_before(chunk):
             import asyncio
 
             stream = self.managed_stream_holder["stream"]
-            allow_relay_finalizer.set()
             # A schedule probe may hold the provider generator at this chunk until the consumer has
             # taken it (adverse consumer-first ordering); release it so the pump below can reach EOF.
             gate = getattr(stream, "_review_gate", None)
