@@ -176,7 +176,10 @@ def test_dead_owner_marker_is_reclaimed_and_released(tmp_path: Path) -> None:
 @pytest.mark.platforms('windows')
 def test_ui_profile_sweep_keeps_dirs_of_live_handoffs(tmp_path: Path, sleeper: subprocess.Popen) -> None:
     live = tmp_path / f'hermes-update-ui-{sleeper.pid}'
-    dead = tmp_path / f'hermes-update-ui-{_dead_pid()}'
+    # Windows recycles the PID of an exited child within seconds, so on a busy runner the script
+    # can find "the dead owner" alive again (seen: hermes-update-ui-6352 survived the sweep). It
+    # only issues PIDs that are multiples of 4, so the PID after an exited child's is never live.
+    dead = tmp_path / f'hermes-update-ui-{_dead_pid() + 1}'
     live.mkdir(); dead.mkdir()
     home = tmp_path / 'home'; home.mkdir()
     result = subprocess.run(
