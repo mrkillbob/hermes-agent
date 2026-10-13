@@ -156,8 +156,9 @@ _DEFAULT_WEBHOOK_PATH = "/feishu/webhook"
 _FEISHU_DEDUP_TTL_SECONDS = 24 * 60 * 60          # 24 hours — matches openclaw
 _FEISHU_SENDER_NAME_TTL_SECONDS = 10 * 60          # 10 minutes sender-name cache
 _FEISHU_WEBHOOK_MAX_BODY_BYTES = 1 * 1024 * 1024   # 1 MB body limit
-_FEISHU_WEBHOOK_RATE_WINDOW_SECONDS = 60            # sliding window for rate limiter
-_FEISHU_WEBHOOK_RATE_LIMIT_MAX = 120               # max requests per window per IP — matches openclaw
+_FEISHU_WEBHOOK_RATE_WINDOW_SECONDS = 60            # fixed window for rate limiters
+_FEISHU_WEBHOOK_RATE_LIMIT_MAX = 120               # max authenticated event deliveries per window per IP
+_FEISHU_WEBHOOK_INGRESS_RATE_LIMIT_MAX = 120        # max pre-auth request admissions per window per IP
 _FEISHU_WEBHOOK_RATE_MAX_KEYS = 4096               # max tracked keys (prevents unbounded growth)
 _FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS = 30          # max seconds to read request body
 _FEISHU_WEBHOOK_ANOMALY_THRESHOLD = 25             # consecutive error responses before WARNING log
@@ -1319,6 +1320,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._dedup_persist_lock = asyncio.Lock()
         self._sender_name_cache: dict[str, tuple[str, float]] = {}  # sender_id → (name, expire_at)
         self._webhook_rate_counts: dict[str, tuple[int, float]] = {}  # rate_key → (count, window_start)
+        self._webhook_ingress_rate_counts: dict[str, tuple[int, float]] = {}
         self._webhook_anomaly_counts: dict[str, tuple[int, str, float]] = {}  # ip → (count, last_status, first_seen)
         self._card_action_tokens: dict[str, float] = {}  # token → first_seen_time
         # Inbound events that arrived before the loop was ready; one drainer thread replays them.
@@ -2604,18 +2606,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
     # --- Webhook server and security ---
     def _record_webhook_anomaly(self, remote_ip: str, status: str) -> None:
-        """Count consecutive error responses per IP (openclaw createWebhookAnomalyTracker); WARN every threshold."""
-        now = time.time()
-        count, _last_status, first_seen = self._webhook_anomaly_counts.get(remote_ip) or (0, "", now)
-        if count and now - first_seen >= _FEISHU_WEBHOOK_ANOMALY_TTL_SECONDS:
-            count, first_seen = 0, now  # TTL expired — start fresh
-        count += 1
-        if count % _FEISHU_WEBHOOK_ANOMALY_THRESHOLD == 0:
-            logger.warning(
-                "[Feishu] Webhook anomaly: %d consecutive error responses (%s) from %s over the last %.0fs",
-                count, status, remote_ip, now - first_seen,
-            )
-        self._webhook_anomaly_counts[remote_ip] = (count, status, first_seen)
+        from .webhook_limits import record_webhook_anomaly
+
+        record_webhook_anomaly(
+            self._webhook_anomaly_counts, remote_ip, status, now=time.time(),
+            ttl_seconds=_FEISHU_WEBHOOK_ANOMALY_TTL_SECONDS, threshold=_FEISHU_WEBHOOK_ANOMALY_THRESHOLD,
+            max_keys=_FEISHU_WEBHOOK_RATE_MAX_KEYS, log=logger,
+        )
 
     def _clear_webhook_anomaly(self, remote_ip: str) -> None:
         """Reset the anomaly counter for remote_ip after a successful request."""
@@ -2817,10 +2814,11 @@ class FeishuAdapter(BasePlatformAdapter):
     async def _handle_webhook_request(self, request: Any) -> Any:
         remote_ip = (getattr(request, "remote", None) or "unknown")
 
-        # Rate-limit key is app_id:path:remote_ip (matches openclaw key structure).
-        if not self._check_webhook_rate_limit(f"{self._app_id}:{self._webhook_path}:{remote_ip}"):
-            logger.warning("[Feishu] Webhook rate limit exceeded for %s", remote_ip)
-            return self._webhook_reject(remote_ip, "429", 429, "Too Many Requests")
+        # Bound unauthenticated work separately from the event-delivery quota.
+        rate_key = f"{self._app_id}:{self._webhook_path}:{remote_ip}"
+        if not self._check_webhook_rate_limit(rate_key, pre_auth=True):
+            logger.warning("[Feishu] Webhook ingress rate limit exceeded for %s", remote_ip)
+            return self._webhook_reject(remote_ip, "429-ingress", 429, "Too Many Requests")
 
         headers = getattr(request, "headers", {}) or {}
         content_type = str(headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
@@ -2878,6 +2876,11 @@ class FeishuAdapter(BasePlatformAdapter):
                 remote_ip, "400-encrypted", 400, json_msg="encrypted webhook payloads are not supported",
             )
 
+        # Only authenticated event deliveries may consume the bounded per-peer quota.
+        if not self._check_webhook_rate_limit(rate_key):
+            logger.warning("[Feishu] Webhook rate limit exceeded for %s", remote_ip)
+            return self._webhook_reject(remote_ip, "429", 429, "Too Many Requests")
+
         self._clear_webhook_anomaly(remote_ip)
 
         event_type = str((payload.get("header") or {}).get("event_type") or "")
@@ -2920,31 +2923,16 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Signature verification raised an exception", exc_info=True)
             return False
 
-    def _check_webhook_rate_limit(self, rate_key: str) -> bool:
-        """Sliding-window limiter keyed by "{app_id}:{path}:{remote_ip}" (openclaw); table capped, fail-closed."""
-        now = time.time()
-        entry = self._webhook_rate_counts.get(rate_key)
-        if entry is not None:
-            count, window_start = entry
-            if now - window_start < _FEISHU_WEBHOOK_RATE_WINDOW_SECONDS:
-                if count >= _FEISHU_WEBHOOK_RATE_LIMIT_MAX:
-                    return False
-                self._webhook_rate_counts[rate_key] = (count + 1, window_start)
-                return True
-        # New window or new key — prune stale entries when at capacity.
-        if len(self._webhook_rate_counts) >= _FEISHU_WEBHOOK_RATE_MAX_KEYS:
-            for k in [k for k, (_, ws) in self._webhook_rate_counts.items() if now - ws >= _FEISHU_WEBHOOK_RATE_WINDOW_SECONDS]:
-                del self._webhook_rate_counts[k]
-            # Still full → deny untracked keys (fail closed): the table only fills this far under
-            # abuse, and letting untracked requests through would bypass the limiter entirely.
-            if rate_key not in self._webhook_rate_counts and len(self._webhook_rate_counts) >= _FEISHU_WEBHOOK_RATE_MAX_KEYS:
-                logger.warning(
-                    "[Feishu] Webhook rate-limit table at capacity (%d keys) — denying untracked key",
-                    _FEISHU_WEBHOOK_RATE_MAX_KEYS,
-                )
-                return False
-        self._webhook_rate_counts[rate_key] = (1, now)
-        return True
+    def _check_webhook_rate_limit(self, rate_key: str, *, pre_auth: bool = False) -> bool:
+        """Independent ingress/delivery tables with the same bounded fixed-window semantics."""
+        from .webhook_limits import admit_webhook_request
+
+        counts = self._webhook_ingress_rate_counts if pre_auth else self._webhook_rate_counts
+        limit = _FEISHU_WEBHOOK_INGRESS_RATE_LIMIT_MAX if pre_auth else _FEISHU_WEBHOOK_RATE_LIMIT_MAX
+        return admit_webhook_request(
+            counts, rate_key, now=time.time(), window_seconds=_FEISHU_WEBHOOK_RATE_WINDOW_SECONDS,
+            max_requests=limit, max_keys=_FEISHU_WEBHOOK_RATE_MAX_KEYS, log=logger,
+        )
 
     # --- Text batching ---
     @staticmethod
