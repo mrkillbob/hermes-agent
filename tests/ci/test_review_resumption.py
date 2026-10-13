@@ -14,8 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from hermes_yaml import safe_load
-
 ROOT = Path(__file__).resolve().parents[2]
 HEAD = "a" * 40
 OLD = "b" * 40
@@ -646,13 +644,23 @@ def test_label_completion_reconciliation_does_not_revive_ineligible_work(tmp_pat
     assert data["mutations"] == [], process.stdout + process.stderr
 
 
-def test_label_and_review_retry_writers_share_the_same_per_pr_concurrency_key():
-    label = safe_load((ROOT / ".github/workflows/label-rerun.yml").read_text(encoding="utf-8-sig"))
-    review = safe_load((ROOT / ".github/workflows/review-resumption.yml").read_text(encoding="utf-8-sig"))
-    label_group = label["concurrency"]["group"]
-    review_group = review["jobs"]["resume"]["concurrency"]["group"]
-    shared_prefix = review_group.split("${{ matrix.number }}")[0]
-    assert label_group.startswith(shared_prefix)
-    assert "github.event.pull_request.number" in label_group
-    assert "github.event.workflow_run.pull_requests[0].number" in label_group
-    assert label["concurrency"]["cancel-in-progress"] is False
+def test_native_completion_does_not_duplicate_a_queued_label_retry(tmp_path):
+    data = label_snapshot()
+    data["comments"] = []
+    data["pr"]["labels"][0]["name"] = "ci-reviewed"
+    data["timeline"][0]["label"]["name"] = "ci-reviewed"
+    data["jobs"] = [{"name": "Review label gate / Review label gate", "conclusion": "failure"}]
+    process, queued = invoke(tmp_path, data, "resume")
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert queued["runs"][0]["status"] == "queued"
+    assert queued["mutations"] == [f"repos/{REPO}/actions/runs/11/rerun-failed-jobs"]
+    event = {"event_name": "workflow_run", "workflow_run": {
+        "event": "pull_request_review", "head_sha": HEAD,
+        "pull_requests": [{"number": 8, "head": {"sha": HEAD}}]}}
+    process, discovered = invoke(tmp_path, queued, "resume", event)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert json.loads(process.stdout) == {"include": [{"number": 8, "head": HEAD}]}
+    process, duplicate = invoke(tmp_path, discovered, "resume")
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert duplicate["mutations"] == queued["mutations"]
+    assert duplicate["runs"][0]["status"] == "queued"
