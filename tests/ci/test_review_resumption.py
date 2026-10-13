@@ -91,11 +91,21 @@ route = args[1]
 path = route.split("?")[0]
 if data.get("api_error"):
     sys.exit(1)
+if data.get("review_api_error") and path.endswith("/reviews"):
+    sys.exit(1)
 if "--method" in args:
     assert args[args.index("--method") + 1] == "POST", args
     assert path.endswith(("/rerun", "/rerun-failed-jobs")), path
+    if data.get("rerun_denied"):
+        sys.exit(1)
     data["mutations"].append(path)
     data["runs"][0]["status"] = "queued"
+    if data.get("stale_after_post"):
+        data["runs"][0]["status"] = "completed"
+    if "/actions/jobs/" in path:
+        for job in data["jobs"]:
+            if str(job.get("id")) == path.split("/actions/jobs/", 1)[1].split("/", 1)[0]:
+                job.update(status="queued", conclusion=None)
     result = {}
 elif path == "graphql":
     request = json.load(sys.stdin)
@@ -106,6 +116,8 @@ elif path == "graphql":
                           "nodes": data["threads"]}}}}}
 elif path.endswith(f"/pulls/{data['pr']['number']}"):
     data["pr_reads"] += 1
+    if data.get("clear_after_read") and data["pr_reads"] >= data["clear_after_read"]:
+        data["threads"] = []
     result = data["pr"]
     if data.get("move_after_read") and data["pr_reads"] >= data["move_after_read"]:
         result = dict(result, head=dict(result["head"], sha="b" * 40))
@@ -121,18 +133,37 @@ elif path.endswith(f"/issues/{data['pr']['number']}/reactions"):
 elif "/commits/" in path:
     if data.get("commit_error"):
         sys.exit(1)
-    result = {"sha": data["commits"][path.rsplit("/", 1)[-1]]}
+    result = data.get("runtime_commit") if "/git/commits/" in path else {"sha": data["commits"][path.rsplit("/", 1)[-1]]}
 elif path.endswith(f"/issues/{data['pr']['number']}/timeline"):
     result = data["timeline"]
 elif path.endswith("/pulls"):
     result = [data["pr"]]
+elif path.endswith("/contents/.github/workflows/ci.yaml"):
+    if data.get("definition_api_error"):
+        sys.exit(1)
+    result = {"type": "file", "path": ".github/workflows/ci.yaml", "sha": "c" * 40}
+    if data.get("workflow_mismatch") and not route.endswith("ref=main"):
+        result["sha"] = "d" * 40
+elif path == "repos/mrkillbob/hermes-agent":
+    result = {"default_branch": "main"}
+elif "/actions/jobs/" in path:
+    result = next(job for job in data["jobs"] if str(job.get("id")) == path.rsplit("/", 1)[-1])
+    result = dict(result, **data.get("actual_job_patch", {}))
+    for key in data.get("actual_job_omit", []):
+        result.pop(key, None)
 elif "/actions/runs/" in path and path.endswith("/jobs"):
     jobs = data["jobs"] if path.endswith("/11/jobs") else []
+    if "/attempts/" in path:
+        attempt_number = path.split("/attempts/", 1)[1].split("/", 1)[0]
+        jobs = data.get("jobs_by_attempt", {}).get(attempt_number, data.get("attempt_jobs", data["jobs"]))
+    elif "filter=all" in route:
+        jobs = data.get("history_jobs", data["jobs"])
     result = {"jobs": jobs, "total_count": len(jobs)}
 elif path.endswith("/actions/runs/11"):
     result = data["runs"][0]
 elif "/actions/runs/11/attempts/" in path:
-    result = data.get("attempt", data["runs"][0])
+    attempt_number = path.rsplit("/", 1)[-1]
+    result = data.get("attempts", {}).get(attempt_number, data.get("attempt", data["runs"][0]))
 elif "/actions/workflows/" in path:
     data["run_reads"] = data.get("run_reads", 0) + 1
     workflow = path.split("/actions/workflows/", 1)[1].split("/", 1)[0]
@@ -626,7 +657,8 @@ def test_held_review_consumer_recovers_replaced_pending_label_event(tmp_path):
     process, recovered = invoke(tmp_path, data, "resume")
     assert process.returncode == 0, process.stdout + process.stderr
     assert recovered["mutations"] == [f"repos/{REPO}/actions/runs/11/rerun-failed-jobs"]
-    assert json.loads(process.stdout.splitlines()[-1])["state"] == "pending"
+    process, _ = invoke(tmp_path, data)
+    assert verdict(process) == "pending"
     recovered["runs"][0].update(status="completed", run_attempt=2)
     recovered["attempt"] = {**recovered["runs"][0], "run_started_at": "2026-10-13T00:20:00Z"}
     process, duplicate = invoke(tmp_path, recovered, "resume")

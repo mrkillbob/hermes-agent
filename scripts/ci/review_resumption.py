@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 
 from scripts.ci.review_admission import GitHub, MetadataError, arguments, inspect
+from scripts.ci.review_aggregate import MAX_METADATA_ATTEMPT
+from scripts.ci.source_attempts import MAX_SOURCE_ATTEMPTS, source_budget
 
 # Aliases share one logical lane: a healthy new wrapper replaces the old entry.
 WORKFLOW_GROUPS = (("ci.yaml",), ("docker-pr.yml", "docker.yml"), ("nix-pr.yml", "nix.yml"),
@@ -15,7 +17,6 @@ WORKFLOW_GROUPS = (("ci.yaml",), ("docker-pr.yml", "docker.yml"), ("nix-pr.yml",
                    ("pm-bundle-pr.yml", "pm-bundle.yml"), ("termux-verify-pr.yml", "termux-verify.yml"),
                    ("sandbox-image.yml",), ("windows-bundle-sdk.yml",))
 WORKFLOWS = tuple(workflow for group in WORKFLOW_GROUPS for workflow in group)
-MAX_ATTEMPT = 3  # At most two automatic retry requests per original run.
 
 
 def matches(run: dict, pr: dict, workflow: str) -> bool:
@@ -37,20 +38,22 @@ def latest_run(api: GitHub, pr: dict, workflows: tuple[str, ...]) -> tuple[dict,
     return max(qualified, key=lambda item: item[0]["id"]) if qualified else None
 
 
-def retry_kind(run: dict, jobs: list) -> str | None:
-    if run["status"] != "completed" or run["run_attempt"] >= MAX_ATTEMPT or not jobs:
+def retry_kind(api: GitHub, pr: dict, run: dict, workflow: str, jobs: list) -> str | None:
+    if run["status"] != "completed" or run["run_attempt"] >= MAX_METADATA_ATTEMPT or not jobs:
         return None
     failed = {job["name"] for job in jobs if job["conclusion"] == "failure"}
-    if "Review admission" in failed:
+    if "Review admission" in failed and source_budget(api, pr, run, workflow)[0] < MAX_SOURCE_ATTEMPTS:
         return "rerun"
     return None
 
 
 def resume(api: GitHub, number: int, head: str) -> list[dict]:
-    verdict, pr = inspect(api, number, head)
+    from scripts.ci.review_aggregate import resume as resume_aggregate, review_state
+
+    verdict, pr = review_state(api, number, head)
+    actions = resume_aggregate(api, number, head, verdict, pr)
     if verdict["state"] != "clean":
-        return [{"pr": number, **verdict, "action": "hold"}]
-    actions = []
+        return [*actions, {"pr": number, **verdict, "action": "hold"}]
     for group in WORKFLOW_GROUPS:
         selected = latest_run(api, pr, group)
         if selected is None:
@@ -58,7 +61,7 @@ def resume(api: GitHub, number: int, head: str) -> list[dict]:
             continue
         run, workflow = selected
         jobs = api.pages(f"actions/runs/{run['id']}/jobs", "jobs", filter="latest")
-        kind = retry_kind(run, jobs)
+        kind = retry_kind(api, pr, run, workflow, jobs)
         if kind is None:
             actions.append({"run": run["id"], "action": "none", "reason": "Run needs no automatic retry"})
             continue
@@ -73,7 +76,7 @@ def resume(api: GitHub, number: int, head: str) -> list[dict]:
         live_verdict, live_pr = inspect(api, number, head)
         if (live_verdict["state"] != "clean" or not matches(live_run, live_pr, workflow)
                 or live_run["run_attempt"] != run["run_attempt"]
-                or retry_kind(live_run, live_jobs) != kind):
+                or retry_kind(api, live_pr, live_run, workflow, live_jobs) != kind):
             actions.append({"run": run["id"], "action": "hold", "reason": "Metadata changed before retry"})
             continue
         api.request(f"repos/{api.repo}/actions/runs/{run['id']}/{kind}", post=True)
@@ -110,6 +113,7 @@ def discover(api: GitHub) -> list[dict]:
 
 def main() -> int:
     args = arguments(__doc__, discovery=True)
+    label_failed = False
     try:
         api = GitHub(args.repo)
         if args.discover:
@@ -126,14 +130,24 @@ def main() -> int:
             # replace pending same-group events. This is the single label retry
             # implementation. Bootstrap runs keep their original label authority;
             # gated runs recheck substantive admission before label retries.
-            for action in resume_labels(api, args.pr, args.head):
+            # Eligible labels retain priority: a metadata-only attempt must not
+            # consume run-e2e's timestamp without executing its selected lanes.
+            # Label read failure remains visible but cannot suppress invalidation.
+            try:
+                label_actions = resume_labels(api, args.pr, args.head)
+            except (MetadataError, KeyError, TypeError, ValueError, OSError, subprocess.TimeoutExpired) as error:
+                label_failed = True
+                label_actions = [{"action": "hold", "authority": "maintainer-label", "reason": type(error).__name__}]
+            for action in label_actions:
                 print(json.dumps(action))
+            if api.write_count:
+                return int(label_failed)  # Do not rely on immediately consistent run GETs.
             for action in resume(api, args.pr, args.head):
                 print(json.dumps(action))
     except (MetadataError, KeyError, TypeError, ValueError, OSError, subprocess.TimeoutExpired) as error:
         print(json.dumps({"action": "hold", "reason": type(error).__name__}))
         return 1
-    return 0
+    return int(label_failed)
 
 
 if __name__ == "__main__":

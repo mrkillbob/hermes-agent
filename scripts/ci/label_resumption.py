@@ -6,7 +6,9 @@ import json
 import subprocess
 
 from scripts.ci.review_admission import GitHub, MetadataError, arguments, inspect, timestamp
-from scripts.ci.review_resumption import MAX_ATTEMPT, WORKFLOW_GROUPS, latest_run, matches
+from scripts.ci.review_resumption import WORKFLOW_GROUPS, latest_run, matches
+from scripts.ci.review_aggregate import MAX_METADATA_ATTEMPT
+from scripts.ci.source_attempts import MAX_SOURCE_ATTEMPTS, source_budget
 
 LABEL_WORKFLOW_GROUPS = WORKFLOW_GROUPS[:3]
 LABELS = {"run-e2e", "ci-reviewed"}
@@ -36,22 +38,25 @@ def label_state(api: GitHub, number: int, head: str) -> tuple[dict, dict]:
 
 def retry_kind(api: GitHub, pr: dict, run: dict, workflow: str, labels: dict) -> str | None:
     if (not matches(run, pr, workflow) or run["status"] != "completed"
-            or run["run_attempt"] >= MAX_ATTEMPT):
+            or run["run_attempt"] >= MAX_METADATA_ATTEMPT):
         return None
-    attempt = api.request(f"repos/{api.repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}")
-    if (attempt["id"] != run["id"] or attempt["run_attempt"] != run["run_attempt"]
-            or not matches(attempt, pr, workflow) or attempt["status"] != "completed"):
-        raise MetadataError("Latest attempt identity or state changed")
-    # The original run timestamp can persist across retries. Only this exact
-    # attempt's timestamp proves that it already had a chance to read the label.
+    count, started = source_budget(api, pr, run, workflow)
+    if count >= MAX_SOURCE_ATTEMPTS:
+        return None
+    # A metadata-only attempt cannot read labels in source lanes. Anchor their
+    # freshness to the most recent nonexempt execution, not the latest total attempt.
     unread = {name for name, label in labels.items()
-              if timestamp(label["created_at"]) > timestamp(attempt["run_started_at"])}
+              if timestamp(label["created_at"]) > timestamp(started)}
     if not unread:
         return None
     jobs = api.pages(f"actions/runs/{run['id']}/jobs", "jobs", filter="latest")
     if not jobs:
         raise MetadataError("No retryable PR job context; mutable dispatch is forbidden")
-    if any(job["name"] == "Review admission" for job in jobs):
+    gated = any(job["name"] == "Review admission" for job in jobs)
+    if not gated and workflow == "ci.yaml" and run.get("referenced_workflows"):
+        history = api.pages(f"actions/runs/{run['id']}/jobs", "jobs", filter="all")
+        gated = any(job["name"] == "Review admission" for job in history)
+    if gated:
         # Bootstrap runs without an admission job keep their original label
         # authority. Once the gate exists, labels cannot consume retry budget
         # before both substantive current-head passes are clear.

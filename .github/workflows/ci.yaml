@@ -513,6 +513,10 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
     steps:
@@ -526,22 +530,50 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        id: aggregate-source
         with:
-          ref: ${{ github.sha }}
+          # A nonclean same-head review may rerun ONLY this job and its timing
+          # dependent. Fork PRs therefore execute trusted metadata code only.
+          ref: ${{ github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request' && github.event.repository.default_branch || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: false
+      - name: Live review admission before aggregation
+        if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 -m scripts.ci.review_admission --repo "$REVIEW_REPO" --pr "$REVIEW_PR" --head "$REVIEW_HEAD"
       - name: Evaluate job results
         id: evaluate
+        # Even after a held live read, safely record whether source/label lanes
+        # passed. Restoration must never consume a failed lane's label retry.
+        if: >-
+          (github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request' &&
+           !cancelled() && steps.aggregate-source.outcome == 'success') || success()
         # Shared with the stable orchestrator (scripts/ci/required_results.py
         # is imported there). NEEDS is the toJSON(needs) context; RELEASE
         # switches the gate into strict mode for release runs.
         env:
           NEEDS: ${{ toJSON(needs) }}
           RELEASE: ${{ inputs.release }}
-          PULL_REQUEST: ${{ github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request' }}
         run: |
           args=()
           if [ "$RELEASE" = true ]; then args+=(--release); fi
-          if [ "$PULL_REQUEST" = true ]; then args+=(--pull-request); fi
+          # Trusted bootstrap main may predate --pull-request. The static first
+          # step already requires an actual successful PR admission record.
           printf '%s' "$NEEDS" | python3 scripts/ci/required_results.py "${args[@]}"
+      - name: Live review admission before success
+        if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 -m scripts.ci.review_admission --repo "$REVIEW_REPO" --pr "$REVIEW_PR" --head "$REVIEW_HEAD"
 
   # ─────────────────────────────────────────────────────────────────────
   # CI timing report: collect per-job/step durations from the GitHub API,
@@ -559,10 +591,15 @@ jobs:
     if: ${{ needs.review-admission.result == 'success' && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
+          ref: ${{ github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request' && github.event.repository.default_branch || github.sha }}
+          persist-credentials: false
           fetch-depth: 1
           sparse-checkout: scripts/ci/timings_report.py
           sparse-checkout-cone-mode: false

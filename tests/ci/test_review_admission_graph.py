@@ -194,14 +194,75 @@ def test_actual_aggregate_step_passes_explicit_qualified_pr_context(tmp_path, st
         needs["review-admission"] = {"result": state}
     ctx = context(needs=needs)
     steps = load(WORKFLOWS / "ci.yaml")["jobs"]["all-checks-pass"]["steps"]
-    step = next(item for item in steps if item.get("id") == "evaluate")
-    env = {key: gha.to_string(gha.render(value, ctx)) for key, value in step["env"].items()}
+    # The trusted main helper may predate --pull-request. The static precheck
+    # enforces qualified PR admission before that legacy-compatible evaluator.
+    step = steps[0] if state != "success" else next(item for item in steps if item.get("id") == "evaluate")
+    env = {key: gha.to_string(gha.render(value, ctx)) for key, value in step.get("env", {}).items()}
     environment = {**os.environ, **env, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
                    "GITHUB_OUTPUT": str(tmp_path / "output")}
     result = subprocess.run(["bash", "-eo", "pipefail", "-c", gha.render(step["run"], ctx)],
                             cwd=ROOT, env=environment, capture_output=True, text=True,
                             timeout=10, check=False)
     assert result.returncode == (0 if state == "success" else 1), result.stdout + result.stderr
+
+
+def test_required_aggregate_and_dependent_report_fetch_only_trusted_fork_pr_source():
+    workflow = load(WORKFLOWS / "ci.yaml")
+    for name in ("all-checks-pass", "ci-timings"):
+        job = workflow["jobs"][name]
+        assert set(job["permissions"].values()) == {"read"}
+        checkout = next(step for step in job["steps"] if "actions/checkout@" in step.get("uses", ""))
+        options = checkout["with"]
+        assert gha.render(options["ref"], context()) == "main"
+        assert options["persist-credentials"] is False
+        assert options["fetch-depth"] == 1
+        assert options["sparse-checkout"].startswith("scripts/ci")
+        assert gha.render(options["ref"], {**context("push"), "github": {**context("push")["github"], "sha": OLD}}) == OLD
+
+
+@pytest.mark.parametrize("kind", ["request", "eyes", "changes_requested", "finding", "unknown", "no_security"])
+def test_active_ci_final_live_read_prevents_same_head_stale_success(tmp_path, kind):
+    from tests.ci.test_review_aggregate import LIVE_STEPS, hold
+
+    data = snapshot()
+    state_file, environment = transport(tmp_path, data)
+    steps = load(WORKFLOWS / "ci.yaml")["jobs"]["all-checks-pass"]["steps"]
+    checks = [step for step in steps if step.get("name") in LIVE_STEPS]
+    assert len(checks) == 2, "Aggregate must check live review before evaluation and immediately before success"
+    environment["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{environment['PATH']}"
+    for index, step in enumerate(checks):
+        assert gha.condition(step["if"], context())
+        env = {key: gha.to_string(gha.render(value, context())) for key, value in step["env"].items()}
+        result = subprocess.run(["bash", "-eo", "pipefail", "-c", gha.render(step["run"], context())],
+                                cwd=ROOT, env={**environment, **env}, text=True,
+                                capture_output=True, timeout=30, check=False)
+        assert result.returncode == index, result.stdout + result.stderr
+        data = json.loads(state_file.read_text())
+        hold(data, kind)
+        state_file.write_text(json.dumps(data))
+    assert data["mutations"] == []
+
+
+def test_live_aggregate_review_reads_are_inactive_outside_qualified_pr():
+    from tests.ci.test_review_aggregate import LIVE_STEPS
+
+    checks = [step for step in load(WORKFLOWS / "ci.yaml")["jobs"]["all-checks-pass"]["steps"]
+              if step.get("name") in LIVE_STEPS]
+    assert len(checks) == 2
+    for event, repository in (("push", FORK), ("workflow_call", FORK), ("pull_request", "NousResearch/hermes-agent")):
+        assert not [step for step in checks if gha.condition(step["if"], context(event, repository))]
+
+
+@pytest.mark.parametrize("checkout", ["success", "failure", "skipped"])
+def test_held_live_read_evaluates_results_only_after_trusted_source_checkout(checkout):
+    workflow = load(WORKFLOWS / "ci.yaml")
+    step = next(item for item in workflow["jobs"]["all-checks-pass"]["steps"] if item.get("id") == "evaluate")
+    ctx = context()
+    ctx["__status__"]["success"] = False  # The first live metadata read held.
+    ctx["steps"] = {"aggregate-source": {"outcome": checkout}}
+    assert gha.condition(step["if"], ctx) is (checkout == "success")
+    ctx["github"]["event_name"] = "push"
+    assert not gha.condition(step["if"], ctx), "Non-PR failure behavior must remain unchanged"
 
 
 @pytest.mark.parametrize("patch,expected", [

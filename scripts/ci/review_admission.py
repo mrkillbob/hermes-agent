@@ -51,6 +51,7 @@ class GitHub:
         if repo != REPOSITORY:
             raise MetadataError("Review admission is qualified for this fork only")
         self.repo = repo
+        self.write_count = 0
 
     def request(self, route: str, *, post: bool = False, payload: dict | None = None):
         args = ["gh", "api", route]
@@ -62,6 +63,8 @@ class GitHub:
                                 text=True, capture_output=True, timeout=30, check=False)
         if result.returncode:
             raise MetadataError(f"GitHub API request failed: {route.split('?')[0]}")
+        if post:
+            self.write_count += 1
         return json.loads(result.stdout) if result.stdout.strip() else {}
 
     def pages(self, route: str, key: str | None = None, **params) -> list:
