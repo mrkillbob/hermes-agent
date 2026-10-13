@@ -150,6 +150,13 @@ jobs:
           # Per-slice key preserves the duration updates from each matrix job.
           key: test-durations-unit-${{ github.run_id }}-${{ matrix.slice.index }}
 
+      - name: Check the checkout is clean
+        # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
+        # leaves an untracked or modified file in the checkout is reported here. Runs only when
+        # every earlier step passed: a step that failed midway can leave its own temp files
+        # (a half-extracted download, a worktree its later cleanup never removed).
+        uses: ./.github/actions/check-clean-worktree
+
   e2e:
     if: inputs.e2e
     # Keep the process-heavy suite in one job, as upstream does. The fork
@@ -255,6 +262,13 @@ jobs:
           path: test_durations.json
           key: test-durations-e2e-${{ github.run_id }}
 
+      - name: Check the checkout is clean
+        # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
+        # leaves an untracked or modified file in the checkout is reported here. Runs only when
+        # every earlier step passed: a step that failed midway can leave its own temp files
+        # (a half-extracted download, a worktree its later cleanup never removed).
+        uses: ./.github/actions/check-clean-worktree
+
   e2e-upgrade-plan:
     # One e2e-upgrade shard per suite directory: the files directly under
     # tests/e2e/core/upgrade ("core") plus every subdirectory that holds
@@ -271,7 +285,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
-          sparse-checkout: tests/e2e/core/upgrade
+          # The clean-worktree step below loads its action from the checkout.
+          sparse-checkout: |
+            tests/e2e/core/upgrade
+            .github/actions/check-clean-worktree
       - name: List suite directories
         id: plan
         run: |
@@ -286,6 +303,13 @@ jobs:
           PY
           )
           echo "shards=$shards" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Check the checkout is clean
+        # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
+        # leaves an untracked or modified file in the checkout is reported here. Runs only when
+        # every earlier step passed: a step that failed midway can leave its own temp files
+        # (a half-extracted download, a worktree its later cleanup never removed).
+        uses: ./.github/actions/check-clean-worktree
 
   e2e-upgrade:
     if: inputs.e2e_upgrade
@@ -487,3 +511,9 @@ jobs:
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
+      - name: Check the checkout is clean
+        # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
+        # leaves an untracked or modified file in the checkout is reported here. Runs only when
+        # every earlier step passed: a step that failed midway can leave its own temp files
+        # (a half-extracted download, a worktree its later cleanup never removed).
+        uses: ./.github/actions/check-clean-worktree

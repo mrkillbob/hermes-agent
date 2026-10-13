@@ -847,7 +847,7 @@ class Task:
     status: str
     priority: int
     created_by: Optional[str]
-    created_at: int
+    created_at: Optional[int]  # None only for an unparseable stamp
     started_at: Optional[int]
     completed_at: Optional[int]
     workspace_kind: str
@@ -901,6 +901,7 @@ class Task:
         text_value = lambda col, value: _lossy_text(value) if col in text_columns else value
         return cls(
             **{col: text_value(col, row[col]) for col in _TASK_REQUIRED_COLUMNS},
+            **{col: _to_epoch(g(col)) for col in _TASK_EPOCH_COLUMNS},
             **{col: text_value(col, g(col)) for col in _TASK_OPTIONAL_COLUMNS},
             **{col: text_value(col, g(col)) or None for col in _TASK_EMPTY_IS_NULL_COLUMNS},
             # Pre-migration fallbacks (spawn_failures / last_spawn_error) are only
@@ -924,14 +925,15 @@ def is_federated_task(task: Task) -> bool:
 
 # Columns every schema version has (KeyError if the SELECT omitted them).
 _TASK_REQUIRED_COLUMNS = (
-    "id", "title", "body", "assignee", "status", "priority", "created_by", "created_at",
-    "started_at", "completed_at", "workspace_kind", "workspace_path", "claim_lock", "claim_expires",
+    "id", "title", "body", "assignee", "status", "priority", "created_by",
+    "workspace_kind", "workspace_path", "claim_lock",
 )
+_TASK_EPOCH_COLUMNS = ("created_at", "started_at", "completed_at", "claim_expires", "last_heartbeat_at")
 # Later-added columns read as NULL when absent from the row.
 _TASK_OPTIONAL_COLUMNS = (
     "branch_name", "workspace_base_ref", "workspace_base_sha", "project_id", "tenant",
     "result", "idempotency_key", "worker_pid",
-    "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
+    "max_runtime_seconds", "current_run_id", "workflow_template_id",
     "current_step_key", "max_retries", "completion_contract",
 )
 # Text columns where "" is stored/read as "not set".
@@ -967,13 +969,13 @@ class Run:
         return cls(
             **{
                 col: row[col] for col in (
-                    "task_id", "profile", "step_key", "status", "claim_lock", "claim_expires",
-                    "worker_pid", "max_runtime_seconds", "last_heartbeat_at", "outcome", "summary", "error",
+                    "task_id", "profile", "step_key", "status", "claim_lock",
+                    "worker_pid", "max_runtime_seconds", "outcome", "summary", "error",
                 )
             },
+            **{col: _to_epoch(row[col]) for col in ("claim_expires", "last_heartbeat_at", "ended_at")},
             id=int(row["id"]),
-            started_at=int(row["started_at"]),
-            ended_at=_opt_int(row["ended_at"]),
+            started_at=_to_epoch(row["started_at"]) or 0,
             metadata=_json_or(row["metadata"]),
         )
 
@@ -990,7 +992,7 @@ class Comment:
     def from_row(cls, r: sqlite3.Row) -> Comment:
         return cls(
             id=r["id"], task_id=r["task_id"], author=r["author"],
-            body=_lossy_text(r["body"]), created_at=r["created_at"],
+            body=_lossy_text(r["body"]), created_at=_to_epoch(r["created_at"]) or 0,
         )
 
 
@@ -1012,7 +1014,7 @@ class Attachment:
         return cls(
             id=r["id"], task_id=r["task_id"], filename=r["filename"],
             stored_path=r["stored_path"], content_type=r["content_type"],
-            size=r["size"] or 0, uploaded_by=r["uploaded_by"], created_at=r["created_at"],
+            size=r["size"] or 0, uploaded_by=r["uploaded_by"], created_at=_to_epoch(r["created_at"]) or 0,
         )
 
 
@@ -1030,7 +1032,7 @@ class Event:
         run_id = _row_get(row, "run_id")
         return cls(
             id=row["id"], task_id=row["task_id"], kind=row["kind"],
-            payload=_json_or(row["payload"]), created_at=row["created_at"], run_id=_opt_int(run_id),
+            payload=_json_or(row["payload"]), created_at=_to_epoch(row["created_at"]) or 0, run_id=_opt_int(run_id),
         )
 
 
@@ -2855,10 +2857,10 @@ def release_stale_claims(
         host_local = claim_is_host_local(
             row["claim_lock"], pid=row["worker_pid"], task_id=row["id"],
         )
-        hb = row["last_heartbeat_at"]
+        hb = _to_epoch(row["last_heartbeat_at"])
         # Backstop: a heartbeat older than the max-stale threshold means no
         # observable progress — reclaim even if the PID is alive (logic loop).
-        heartbeat_stale = hb is not None and (now - int(hb)) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
+        heartbeat_stale = hb is not None and (now - hb) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
         if (
             host_local
             and row["worker_pid"]
@@ -2899,8 +2901,8 @@ def release_stale_claims(
                 payload={
                     "stale_lock": row["claim_lock"],
                     "worker_pid": _opt_int(row["worker_pid"]),
-                    "claim_expires": int(row["claim_expires"]),
-                    "last_heartbeat_at": _opt_int(row["last_heartbeat_at"]),
+                    "claim_expires": _to_epoch(row["claim_expires"]),
+                    "last_heartbeat_at": hb,
                     "now": now,
                     "host_local": host_local,
                     "heartbeat_stale": bool(heartbeat_stale),
@@ -2961,9 +2963,9 @@ def _extend_live_stale_claim(conn: sqlite3.Connection, row: sqlite3.Row, now: in
                 "reason": "pid_alive",
                 "worker_pid": int(row["worker_pid"]),
                 "claim_lock": row["claim_lock"],
-                "claim_expires_was": int(row["claim_expires"]),
+                "claim_expires_was": _to_epoch(row["claim_expires"]),
                 "claim_expires_now": new_expires,
-                "last_heartbeat_at": _opt_int(row["last_heartbeat_at"]),
+                "last_heartbeat_at": _to_epoch(row["last_heartbeat_at"]),
             },
             run_id=run_id,
         )
@@ -5148,7 +5150,7 @@ def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, no
     for row in role_rows:
         first = _first_line(row["summary"], 200) or "(no summary)"
         lines.append(
-            f"- {row['id']} — {row['title']} ({_ctx_stamp(int(row['ended_at']), now)}): {first}"
+            f"- {row['id']} — {row['title']} ({_ctx_stamp(_to_epoch(row['ended_at']) or 0, now)}): {first}"
         )
     lines.append("")
 
@@ -5242,9 +5244,7 @@ def _to_epoch(val) -> Optional[int]:
 def task_age(task: Task) -> dict:
     """Return age metrics for a single task. All values are seconds or None."""
     now = int(time.time())
-    _c = _to_epoch(task.created_at)
-    _s = _to_epoch(task.started_at)
-    _co = _to_epoch(task.completed_at)
+    _c, _s, _co = task.created_at, task.started_at, task.completed_at  # from_row coerced
     return {
         "created_age_seconds": now - _c if _c is not None else None,
         "started_age_seconds": now - _s if _s is not None else None,

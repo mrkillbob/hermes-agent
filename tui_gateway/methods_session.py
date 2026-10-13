@@ -789,18 +789,17 @@ class _Resume:
                       conversation_worktree_historical=self.conversation_worktree_historical,
                       conversation_root_lease=self.conversation_root_lease)
         if follows_profile:
-            record.update(
-                follow_profile_config=True,
-                composer_override_profile=(model_config.get("composer_override_profile")
-                                            if overrides and overrides.get("model_override") else None),
-            )
+            record.update(follow_profile_config=True, composer_override_profile=(
+                model_config.get("composer_override_profile") if overrides and overrides.get("model_override") else None))
         return record
 
     def claim(self, sid: str, record: dict) -> dict | None:
-        """Register ``record`` live under the resume lock, or reuse a concurrent winner's session."""
+        """Register under the resume lock or reuse its winner, then repair a named profile's saved cwd."""
         live = _claim_or_reuse_live(sid, self.target, record, None)
         if live is None:
             self.conversation_root_lease = None  # the registered runtime owns it now
+            if self.profile_home and not self.lazy:
+                _hydrate_session_cwd(sid, self.target, self.db, self.profile_home)
             return None
         return _resume_reuse_live(self, *live)
 
@@ -1156,7 +1155,8 @@ def _resume_eager(ctx: _Resume) -> dict:
         try:
             with _profile_build_scope(ctx.profile_home):
                 _init_session(sid, ctx.target, agent, history, cols=ctx.cols, cwd=ctx.profile_resume_cwd,
-                              session_db=ctx.db, source=source, explicit_cwd=bool(ctx.profile_resume_cwd),
+                              session_db=ctx.db, source=source, profile_home=ctx.profile_home,
+                              explicit_cwd=bool(ctx.profile_resume_cwd),
                               conversation_worktree=ctx.conversation_worktree,
                               conversation_worktree_historical=ctx.conversation_worktree_historical,
                               conversation_root_lease=ctx.conversation_root_lease)
@@ -1219,7 +1219,7 @@ def _(rid, params: dict) -> dict:
         if (resp := _resume_guard(ctx)) is not None:
             return resp
         ctx.recorded_cwd = _resumable_stored_cwd(_str_param(ctx.found, "cwd"), ctx.profile_home)
-        ctx.profile_resume_cwd = ctx.recorded_cwd or _profile_workspace_cwd(ctx.profile_home)
+        ctx.profile_resume_cwd = ctx.recorded_cwd or _profile_default_cwd(ctx.profile_home)
         # Fast path: reuse a session live IN THIS PROFILE (never another profile's runtime).
         with _session_resume_lock:
             live = _find_live_session_by_key(ctx.target, ctx.profile_home)
