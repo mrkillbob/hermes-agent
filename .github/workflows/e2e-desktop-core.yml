@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       reply_identity_diagnostic:
-        description: Run only the affected synthetic steer case with bounded identity diagnostics.
+        description: Run three executions of only the affected synthetic steer case with bounded identity diagnostics.
         type: boolean
         default: true
   workflow_call:
@@ -90,7 +90,7 @@ jobs:
         run: |
           args=()
           if [ "$CORE_DIAGNOSTIC" = 1 ]; then
-            args+=(reply-settle-paths.spec.ts --grep 'a steer at every point of a tool turn, then reload and switch back$' --workers=1)
+            args+=(reply-settle-paths.spec.ts --grep 'a steer at every point of a tool turn, then reload and switch back$' --workers=1 --repeat-each=3)
           fi
           xvfb-run -a --server-args="-screen 0 1280x1024x24" \
             npx playwright test -c e2e/core/playwright.config.ts "${args[@]}"

@@ -377,6 +377,21 @@ test('a steer at every point of a tool turn, then reload and switch back', async
       await settled(page, ws, A(12))
       session.expectUserMarkers.push(U(12))
       await assertTranscriptOracle(page, ws, provider, session, 'tool turn live')
+      if (process.env.CORE_DIAGNOSTIC === '1') {
+        await test
+          .info()
+          .attach('reply-live-identity-diagnostics', {
+            body: Buffer.from(
+              JSON.stringify({
+                version: 1,
+                frames: await captureReplyFrames(page),
+                events: projectReplyEvents(ws.events)
+              })
+            ),
+            contentType: 'application/json'
+          })
+          .catch(() => undefined)
+      }
       await page.reload()
       await expect(viewport(page)).toContainText(A(12), { timeout: 60_000 })
       await installDuplicateSampler(page, process.env.CORE_DIAGNOSTIC === '1')
