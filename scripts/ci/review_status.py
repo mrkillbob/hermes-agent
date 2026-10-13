@@ -117,7 +117,7 @@ def check_identity(check: dict, head: str, identity: str, check_id: int | None =
 
 
 def owned_checks(api, head: str, proof: dict, own: dict, proved_runs: set):
-    checks = api.pages(f"commits/{head}/check-runs", key="check_runs", filter="all")
+    checks = api.pages(f"commits/{head}/check-runs", key="check_runs", filter="all", check_name=NAME)
     if len(checks) > 200:
         raise MetadataError("Check-run proof bound exceeded")
     seen_ids, seen_executions = set(), set()

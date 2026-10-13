@@ -3,6 +3,7 @@
 from copy import deepcopy
 import json
 from types import SimpleNamespace
+from urllib.parse import parse_qs
 
 import pytest
 
@@ -66,8 +67,13 @@ class FakeAPI(GitHub):
             page = int(route.rsplit("=", 1)[1])
             return deepcopy(self.prs[(page - 1) * 100:page * 100])
         if "/commits/" in route and "/check-runs?" in route:
-            assert "filter=all" in route
-            return {"total_count": len(self.checks), "check_runs": deepcopy(self.checks)}
+            query = parse_qs(route.split("?", 1)[1])
+            assert query["filter"] == ["all"]
+            assert query["check_name"] == [status.NAME]
+            checks = [check for check in self.checks if check["name"] == status.NAME]
+            page = int(query["page"][0])
+            return {"total_count": len(checks),
+                    "check_runs": deepcopy(checks[(page - 1) * 100:page * 100])}
         if verb == "POST":
             check = dict(payload, id=10 + len(self.checks),
                          app={"id": status.APP_ID, "slug": status.APP_SLUG})
@@ -272,6 +278,23 @@ def test_open_pr_bound_fails_closed():
     with pytest.raises(MetadataError, match="bound"):
         status.discover(api, ENV)
     assert writes(api) == []
+
+
+def test_unrelated_ci_checks_do_not_exhaust_review_proof_bound():
+    api = FakeAPI()
+    api.checks = [{"id": index, "name": "Ordinary CI"} for index in range(300)]
+    assert status.publish(api, HEAD, ENV)["state"] == "success"
+    assert len(writes(api)) == 2
+    assert api.checks[-1]["conclusion"] == "success"
+
+
+def test_accumulated_review_checks_still_hold_at_the_declared_bound():
+    api = FakeAPI()
+    api.checks = [{"id": index, "name": status.NAME} for index in range(200)]
+    verdict = status.publish(api, HEAD, ENV)
+    assert verdict["state"] == "failure"
+    assert [row[0] for row in writes(api)] == ["POST"]
+    assert api.checks[-1]["conclusion"] == "failure"
 
 
 def test_cli_discovery_exports_matrix_and_cannot_skip_guard(monkeypatch, tmp_path, capsys):

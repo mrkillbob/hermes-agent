@@ -72,9 +72,8 @@ def resume(api: GitHub, number: int, head: str) -> list[dict]:
     return actions
 
 
-def discover(api: GitHub) -> list[dict]:
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8-sig"))
-    if os.environ["GITHUB_EVENT_NAME"] == "issue_comment":
+def discover_event(api: GitHub, event_name: str, event: dict) -> list[dict]:
+    if event_name == "issue_comment":
         from scripts.ci.review_activity import CODEX_APP_ID, is_summary
         from scripts.ci.review_admission import CODEX_USER_ID
 
@@ -85,18 +84,30 @@ def discover(api: GitHub) -> list[dict]:
             return []
         pr = api.pr(issue["number"])
         return [{"number": pr["number"], "head": pr["head"]["sha"]}] if pr["state"] == "open" else []
-    if os.environ["GITHUB_EVENT_NAME"] == "workflow_run":
+    if event_name == "workflow_run":
         run = event["workflow_run"]
         if run["event"] not in ("pull_request", "pull_request_review", "pull_request_review_comment"):
             return []
+        from scripts.ci.review_status import open_prs, positive
+
+        associated = {positive(pr["number"]) for pr in run["pull_requests"]}
+        # Native completion payloads can retain an earlier head or omit PR
+        # associations. They wake reconciliation; live API heads define targets.
+        prs = open_prs(api)
         return [{"number": pr["number"], "head": pr["head"]["sha"]}
-                for pr in run["pull_requests"] if pr["head"]["sha"] == run["head_sha"]]
-    if os.environ["GITHUB_EVENT_NAME"] != "schedule":
+                for pr in sorted(prs, key=lambda item: item["number"])
+                if not associated or pr["number"] in associated]
+    if event_name != "schedule":
         raise MetadataError("Unsupported reconciliation event")
-    prs = api.pages("pulls", state="open")
-    if len(prs) > 200:
-        raise MetadataError("Open PRs exceed the bounded reconciliation matrix")
-    return [{"number": pr["number"], "head": pr["head"]["sha"]} for pr in prs]
+    from scripts.ci.review_status import open_prs
+
+    return [{"number": pr["number"], "head": pr["head"]["sha"]}
+            for pr in sorted(open_prs(api), key=lambda item: item["number"])]
+
+
+def discover(api: GitHub) -> list[dict]:
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8-sig"))
+    return discover_event(api, os.environ["GITHUB_EVENT_NAME"], event)
 
 
 def main() -> int:

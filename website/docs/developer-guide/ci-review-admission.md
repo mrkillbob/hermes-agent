@@ -54,13 +54,18 @@ or used as substitutes for either required public pass.
 
 `Review CI wake-up` preserves unprivileged native PR/review/review-comment events.
 The trusted `Review CI resumption` controller consumes `workflow_run`, canonical
-PR `issue_comment` creation/edits and a 15-minute scheduled reconciliation. These
-controller events load workflow/source from the default branch. It checks out no
+PR `issue_comment` creation/edits/deletions and a 15-minute scheduled reconciliation. These
+controller events load workflow/source from the default branch and check out the
+immutable event SHA. It checks out no
 PR code, sparsely checks out only trusted `scripts/ci` at depth one, executes
 no PR artifacts, and uses existing metadata reads plus
 `actions: write` for bounded retry requests. It needs no new secrets or settings.
 
-The scheduled path covers thread resolution, empty native PR associations and
+Known native completion events select unique live open-PR heads, rather than
+retaining stale payload heads. Empty native associations immediately reconcile
+the bounded live open-PR set. Unknown event kinds are ignored.
+
+The scheduled path covers thread resolution, missed native events and
 the brief delay between a completion-summary edit and its clean reaction. GitHub
 Actions has no review-thread-resolution or reaction trigger. The controller
 re-reads producer state, reactions, reviews, findings, live PR head and target run
@@ -127,6 +132,12 @@ shared-head branch-protection behavior. Those remain hosted qualification gates.
 The [Checks API](https://docs.github.com/en/rest/checks/runs) documents write
 permissions, commit-scoped results and same-name retention limits; API-created
 checks under the shared Actions App still need production-event qualification.
+
+The 200-record proof bound applies only to this fixed check name; unrelated CI
+checks do not consume it. Fresh failure-first publication still creates a new
+record per execution. After 200 retained named records, the next execution holds
+rather than mutating historical records or reusing an old success. This limit
+remains explicit; the draft does not promise indefinite automatic operation.
 
 ## Rollout and remaining limits
 
