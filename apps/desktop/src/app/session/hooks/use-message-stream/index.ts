@@ -1099,6 +1099,7 @@ export function useMessageStream({
           messages: nextMessages,
           adoptedRunningTurn: false,
           heartbeatSettledStreamId: null,
+          heartbeatSettledAt: null,
           streamId: null,
           pendingBranchGroup: null,
           awaitingResponse: false,

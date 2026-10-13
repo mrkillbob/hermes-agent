@@ -39,6 +39,7 @@ import {
 } from '../utils'
 
 import type { GatewayEventContext } from './types'
+import { needsSettledPrefixCatchup } from './session-info-recovery'
 
 /**
  * Whether a `session.info` payload's `stored_session_id` may be treated as the
@@ -341,6 +342,13 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
           const busy = Boolean(payload!.running)
 
           if (state.busy === busy && (busy || !state.awaitingResponse)) {
+            // Keep a short reorder grace, then recover a permanently lost
+            // completion from durable history. The marker is consumed once;
+            // no timer, repeated fetch, or background-session fanout.
+            if (needsSettledPrefixCatchup(state, isActiveEvent, Date.now())) {
+              recoveredIncompleteTurn = true
+              return { ...state, heartbeatSettledAt: null }
+            }
             return state
           }
 
@@ -417,8 +425,8 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
           // this heartbeat (#119569). The bubble still settles here, but a
           // stream bubble that kept streamed output is remembered so the late
           // frame settles onto it instead of appending a duplicate. That
-          // turn's output is on screen, so it skips the stored-history
-          // hydrate too: fired now, it can race the gateway commit and drop
+          // retained prefix gets a short reorder grace before any history
+          // catch-up: an immediate read can race the gateway commit and drop
           // the just-delivered reply from view until reload.
           const messages = finalizeInterruptedMessages(state.messages, state.streamId, occurredAt)
 
@@ -442,6 +450,7 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
             // empty placeholders; on the normal path message.complete
             // already settled everything and this is a no-op.
             heartbeatSettledStreamId,
+            heartbeatSettledAt: heartbeatSettledStreamId ? Date.now() : null,
             messages,
             pendingBranchGroup: null,
             streamId: null,
@@ -461,16 +470,17 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
         // not one per tick.
         scheduleSessionsRefresh()
 
-        // The transcript catch-up IS scoped, and skipped when a streamed
-        // bubble survived the settle (its late complete owns it, see above).
+        // The transcript catch-up IS scoped. A retained prefix first gets a
+        // reorder grace; a subsequent idle heartbeat catches up once if its
+        // complete frame never arrived.
         // The stream died, but the turn itself may have completed and been
         // persisted, so refetch stored history for the session actually on
         // screen; a background session reads its history when the user opens
         // it, and hydrating every one of them here would fan a REST call out
         // per idle session.
-        if (recoveredIncompleteTurn && isActiveEvent) {
-          void hydrateFromStoredSession(3, nextState.storedSessionId, sessionId)
-        }
+      }
+      if (recoveredIncompleteTurn && isActiveEvent) {
+        void hydrateFromStoredSession(3, nextState.storedSessionId, sessionId)
       }
     }
 
