@@ -98,16 +98,16 @@ async function main() {
   log(`launched Electron pid=${appPid}`)
 
   const page = await pickAppWindow(app, log)
-
-  await prepareWindowForInput(app, page)
-  log('[zoom] app window prepared at 100%')
-
   await runUpdateWindowChat(app, page, {
     mockUrl: process.env.HERMES_E2E_MOCK_URL, outDir: proofDir,
     expectCommit: oldSha,
     origin, root, executable: exePath, userData,
+    prepare: async () => {
+      await prepareWindowForInput(app, page)
+      log('[zoom] app window prepared at 100%')
+      await shot(page, '01-app-booted')
+    },
   })
-  await shot(page, '01-app-booted')
 
   if (nativeHandoff) {
     fs.writeFileSync(path.join(proofDir, 'old-chat-ready.json'), JSON.stringify({ pid: appPid, exe: exePath, oldSha }) + '\n')

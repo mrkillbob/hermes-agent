@@ -77,15 +77,13 @@ log(`launched Electron pid=${oldPid}`);
 fs.writeFileSync(path.join(values['chat-out'], 'old-pid'), `${oldPid}\n`);
 
 const page = await pickAppWindow(app, log);
-
-await prepareWindowForInput(app, page);
-
 await runUpdateWindowChat(app, page, {
   mockUrl: values['mock-url'], outDir: values['chat-out'],
   expectCommit: values['old-sha'],
   origin: 'bundled', executable: appBin,
   root: path.resolve(path.dirname(appBin), '..', 'Resources', 'agent-payload'),
   userData: launchEnv.HERMES_DESKTOP_USER_DATA_DIR,
+  prepare: () => prepareWindowForInput(app, page),
 });
 await shot(page, '01-app-booted');
 

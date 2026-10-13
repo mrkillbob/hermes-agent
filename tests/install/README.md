@@ -94,6 +94,16 @@ leg even when version, health, and update receipts passed. Existing plugin and
 user-state preservation checks remain required. The mock configuration writer
 preserves unrelated settings, including the controlled update feed.
 
+Each chat also retains `desktop-chat-<phase>-selection.json`: a bounded timeline
+of the three legacy local composer model/provider/source keys, their writes,
+and outgoing `session.create` model/provider categories. Only the smoke fixture's
+`mock-model` and `custom` identifiers are retained; every other nonempty string
+is recorded as `non-fixture`, without a hash or its original text. It records no prompts,
+RPC IDs, URLs, credentials or unrelated preferences. Observation starts after
+window attachment; earlier initialization and remote-scoped composer keys are
+not captured. Unsupported or closed renderers are marked unavailable. This is
+diagnostic evidence: it makes no model selection, config or inference requests.
+
 ## Post-build artifact smoke
 
 `desktop-bundled-release.yml` calls `desktop-bundle-smoke.yml` on fresh native
