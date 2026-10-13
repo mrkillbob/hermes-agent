@@ -1,6 +1,7 @@
 """Loading legacy webhook secrets repairs broad POSIX file modes."""
 
 import json
+import os
 import stat
 
 import pytest
@@ -31,20 +32,14 @@ def test_loading_legacy_subscriptions_restricts_permissions(tmp_path, monkeypatc
 
 @pytest.mark.platforms("posix")
 def test_read_only_legacy_store_warns_without_losing_subscriptions(tmp_path, monkeypatch, caplog):
-    from pathlib import Path
-
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     path = tmp_path / "webhook_subscriptions.json"
     data = {"demo": {"secret": "inert-test-secret", "prompt": "test"}}
     path.write_text(json.dumps(data))
     path.chmod(0o644)
-    original_chmod = Path.chmod
+    def readonly_chmod(_fd, _mode):
+        raise PermissionError("read-only test store")
 
-    def readonly_chmod(candidate, mode, **kwargs):
-        if candidate == path:
-            raise PermissionError("read-only test store")
-        return original_chmod(candidate, mode, **kwargs)
-
-    monkeypatch.setattr(Path, "chmod", readonly_chmod)
+    monkeypatch.setattr(os, "fchmod", readonly_chmod)
     assert _load_subscriptions() == data
     assert "Could not restrict credential file permissions" in caplog.text

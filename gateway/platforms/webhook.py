@@ -213,6 +213,7 @@ class WebhookAdapter(BasePlatformAdapter):
         self._static_routes: dict[str, dict] = extra.get("routes", {})
         self._dynamic_routes: dict[str, dict] = {}
         self._dynamic_routes_stat: Optional[tuple] = None
+        self._dynamic_routes_read_failed = False
         self._dynamic_permissions_stat: Optional[tuple] = None
         self._dynamic_permissions_retry_at = 0.0
         self._routes: dict[str, dict] = dict(self._static_routes)
@@ -424,6 +425,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 self._dynamic_routes, self._routes = {}, dict(self._static_routes)
                 logger.debug("[webhook] Dynamic subscriptions file removed, cleared dynamic routes")
             self._dynamic_routes_stat = None
+            self._dynamic_routes_read_failed = False
             self._dynamic_permissions_stat = None
             self._dynamic_permissions_retry_at = 0.0
             return
@@ -433,24 +435,30 @@ class WebhookAdapter(BasePlatformAdapter):
         permission_key = (subs_path, st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size,
                           st.st_mode, st.st_ctime_ns, st.st_uid, st.st_gid)
         now = time.monotonic()
-        if permission_key != self._dynamic_permissions_stat or now >= self._dynamic_permissions_retry_at:
+        permission_due = permission_key != self._dynamic_permissions_stat or now >= self._dynamic_permissions_retry_at
+        if permission_due:
             self._dynamic_permissions_stat = permission_key
             # A bounded retry lets an unchanged store recover after a read-only mount becomes writable.
             self._dynamic_permissions_retry_at = now + _PERMISSION_RETRY_SECONDS
             restrict_credential_file_permissions(subs_path, file_stat=st)
         stat_key = (st.st_mtime_ns, st.st_size, st.st_ino)
-        if stat_key == self._dynamic_routes_stat:
+        if stat_key == self._dynamic_routes_stat and not (self._dynamic_routes_read_failed and permission_due):
             return  # No change
         try:
             data = json.loads(subs_path.read_text(encoding="utf-8-sig"))
         except ValueError as e:
             # Keep the last good snapshot, and remember this version so it is parsed once, not per POST.
             self._dynamic_routes_stat = stat_key
+            self._dynamic_routes_read_failed = False
             logger.error("[webhook] Failed to parse dynamic routes: %s", e)
             return
         except OSError as e:
+            # Inaccessible legacy stores stay intact; retry/log once per repair interval or metadata change.
+            self._dynamic_routes_stat = stat_key
+            self._dynamic_routes_read_failed = True
             logger.error("[webhook] Failed to read dynamic routes: %s", e)
             return
+        self._dynamic_routes_read_failed = False
         if not isinstance(data, dict):
             self._dynamic_routes_stat = stat_key  # keep the last good snapshot; parse this version once
             return

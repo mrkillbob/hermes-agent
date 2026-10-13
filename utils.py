@@ -406,25 +406,39 @@ def read_json_or_empty(path: str | Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _open_credential_permission_descriptor(path: Path) -> int:
+    """Never create/truncate or follow the final entry; allow write-only legacy recovery."""
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK") or not hasattr(os, "fchmod"):
+        raise OSError(errno.ENOTSUP, "Descriptor-bound permission repair is unavailable")
+    flags = os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        return os.open(path, os.O_RDONLY | flags)
+    except PermissionError:
+        return os.open(path, os.O_WRONLY | flags)
+
+
 def restrict_credential_file_permissions(path: str | Path, *, file_stat: os.stat_result | None = None) -> None:
-    """Migrate direct regular secret-file modes; leave links and other entry types alone."""
+    """Repair only the observed regular inode; inaccessible legacy files stay untouched."""
     if os.name != "posix":
         return  # Windows ACLs do not map to these mode bits.
     p = Path(path)
     try:
         # A caller's cached stat may have followed a symlink; inspect the entry itself.
-        mode = p.lstat().st_mode
-        if not stat.S_ISREG(mode):
+        observed = p.lstat()
+        if not stat.S_ISREG(observed.st_mode) or not observed.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
             return
-        if mode & (stat.S_IRWXG | stat.S_IRWXO):
-            if os.chmod in os.supports_follow_symlinks:
-                p.chmod(0o600, follow_symlinks=False)
-            else:
-                p.chmod(0o600)
+        fd = _open_credential_permission_descriptor(p)
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
+                raise OSError(errno.EAGAIN, "Credential file identity changed before permission repair")
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
     except FileNotFoundError:
         return
     except OSError as exc:
-        logger.warning("Could not restrict credential file permissions for %s: %s", p, exc)
+        logger.warning("Could not restrict credential file permissions for %s: %s; operator repair may be required", p, exc)
 
 
 def warn_if_credential_file_broadly_readable(path: str | Path, *, label: str = "", log: logging.Logger | None = None) -> bool:

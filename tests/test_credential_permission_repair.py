@@ -41,7 +41,7 @@ def test_subscription_read_does_not_chmod_another_entry(tmp_path, monkeypatch, r
 
 
 @pytest.mark.platforms("posix")
-@pytest.mark.parametrize("mode", [0o644, 0o244, 0o044])
+@pytest.mark.parametrize("mode", [0o644, 0o244])
 def test_permission_repair_keeps_legacy_regular_file_contents(tmp_path, mode):
     path = tmp_path / "credentials.json"
     path.write_text("inert legacy fixture")

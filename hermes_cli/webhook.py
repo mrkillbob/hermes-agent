@@ -28,6 +28,10 @@ class SubscriptionMutationConflict(RuntimeError):
     """The route changed after a caller took the snapshot it intended to replace."""
 
 
+class SubscriptionStoreReadError(RuntimeError):
+    """An existing store cannot supply a safe snapshot for mutation."""
+
+
 def _subscriptions_path() -> Path:
     from hermes_constants import get_hermes_home
     return get_hermes_home() / _SUBSCRIPTIONS_FILENAME
@@ -47,18 +51,29 @@ def _subscriptions_lock():
             yield
 
 
-def _load_subscriptions_unlocked() -> dict[str, dict]:
-    """Read one complete store snapshot; unreadable or malformed files read as empty."""
+def _load_subscriptions_unlocked(*, for_mutation: bool = False) -> dict[str, dict]:
+    """Tolerate unavailable read-only snapshots, but never publish them as empty stores."""
+    path = _subscriptions_path()
+    error = "Webhook subscription store could not be read as a JSON object; file left unchanged. Restore access or repair the store and retry."
     try:
-        path = _subscriptions_path()
         restrict_credential_file_permissions(path)
         raw = path.read_bytes()
-    except OSError:
+    except FileNotFoundError as exc:
+        if for_mutation and path.is_symlink():
+            raise SubscriptionStoreReadError(error) from exc
+        return {}
+    except OSError as exc:
+        if for_mutation:
+            raise SubscriptionStoreReadError(error) from exc
         return {}
     try:
         data = json.loads(raw.decode("utf-8-sig"))
-    except ValueError:
+    except ValueError as exc:
+        if for_mutation:
+            raise SubscriptionStoreReadError(error) from exc
         return {}
+    if for_mutation and not isinstance(data, dict):
+        raise SubscriptionStoreReadError(error)
     return data if isinstance(data, dict) else {}
 
 
@@ -77,7 +92,7 @@ def _save_subscriptions_unlocked(subs: dict[str, dict]) -> None:
 def _mutate_subscriptions(mutate: Callable[[dict[str, dict]], Any]) -> Any:
     """Lock, re-read, mutate and atomically publish one complete store snapshot."""
     with _subscriptions_lock():
-        subscriptions = _load_subscriptions_unlocked()
+        subscriptions = _load_subscriptions_unlocked(for_mutation=True)
         result = mutate(subscriptions)
         _save_subscriptions_unlocked(subscriptions)
         return result
@@ -174,7 +189,11 @@ def webhook_command(args):
         return
     handler = _ACTIONS.get(sub)
     if handler is not None:
-        handler(args)
+        try:
+            handler(args)
+        except SubscriptionStoreReadError as exc:
+            print(f"Error: {exc}")
+            raise SystemExit(1) from exc
 
 
 def _cmd_subscribe(args):
