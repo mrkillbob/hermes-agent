@@ -61,6 +61,14 @@ keyed on the skill files' signatures, so a change written by another process is 
 itself converges at the next rebuild boundary (compaction). Legacy prompts retain their original
 host-before-context anchor, so prompts persisted before the reorder still validate.
 
+On routes protected by the egress firewall, skill-change rows pass the same strict sanitized-text
+checks as other user-message context. A rejected description becomes a names-only row; a rejected
+name is replaced by a content-free omission notice. Change accounting uses that projected index,
+so unchanged projected rows are announced once, including after a fresh agent loads the transcript.
+The producer does not grant generated-context trust to skill-file text. Existing sidecars retain
+their original bytes and do not acquire trust retroactively; an old rejected sidecar can still
+block its session. Newly emitted notes use the projection without changing the cached system prompt.
+
 When `skip_context_files` is set (e.g., subagent delegation), SOUL.md is not loaded and the hardcoded `DEFAULT_AGENT_IDENTITY` is used instead.
 
 ### Concrete example: assembled system prompt
