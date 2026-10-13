@@ -188,7 +188,8 @@ class ClaudeLaunchContext:
         """Consume native JSON in memory; never expose its private metadata."""
         try:
             result = subprocess.run([self.executable, "auth", "status"],
-                                    cwd=self.cwd, env=environment, capture_output=True,
+                                    cwd=self.cwd, env=environment, stdin=subprocess.DEVNULL,
+                                    capture_output=True,
                                     text=True, timeout=timeout, check=False)
             if len(result.stdout) > 65536:
                 raise TransportError("execution_context_unavailable")

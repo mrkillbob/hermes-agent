@@ -332,6 +332,9 @@ def test_launcher_uses_same_filtered_context_and_no_substantive_cutoffs(launch_c
         monkeypatch.setenv(name, 'never-print')
     calls, child = fake_launch(monkeypatch, auth_status(subscriptionType='max'))
     proc = ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
+    import subprocess
+    assert calls[0][2].get('stdin') == subprocess.DEVNULL
+    assert calls[1][2]['stdin'] == subprocess.PIPE
     assert calls[0][2]['env'] == calls[1][2]['env']
     assert calls[0][2]['cwd'] == calls[1][2]['cwd'] == launch_contract.cwd
     assert not any(name.startswith('ANTHROPIC') or name.startswith('CLAUDE') for name in calls[1][2]['env'])
