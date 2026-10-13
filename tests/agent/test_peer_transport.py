@@ -211,3 +211,48 @@ def test_wire_does_not_silently_default_missing_version():
         record.pop("version")
         with pytest.raises(TransportError):
             decode(json.dumps(record).encode())
+
+
+def test_stale_epoch_cannot_terminalize_newer_mail_or_lease(tmp_path):
+    box = Mailbox(tmp_path / "mail.db")
+    current = route(binding="new-session", epoch=2)
+    box.store(message(), current)
+    assert box.claim(route(), now=11) is None
+    assert box.status("m1")["disposition"] == "pending"
+    assert box.status("m1")["attempts"] == 0
+    active = box.claim(current, now=12)
+    assert active is not None
+    assert box.claim(route(), now=100) is None
+    assert box.status("m1")["token"] == active.token
+    box.evidence(active, "processed", now=101)
+    assert box.status("m1")["processed"]
+
+
+def test_same_epoch_wrong_binding_cannot_destroy_mail(tmp_path):
+    box = Mailbox(tmp_path / "mail.db")
+    box.store(message(), route(binding="current"))
+    assert box.claim(route(binding="other"), now=11) is None
+    assert box.status("m1")["disposition"] == "pending"
+    assert box.claim(route(binding="current"), now=11)
+
+
+def test_stream_reservation_fences_competing_connections_before_io(tmp_path):
+    path = tmp_path / "mail.db"
+    first = Mailbox(path)
+    other = Mailbox(path)
+    first.store(message(), route())
+    first.store(message(message_id="m2"), route())
+    reserved = first.claim_stream(route(), now=11, lease_seconds=1)
+    assert first.status("m1")["disposition"] == "stream_reserved"
+    assert other.claim_stream(route(), now=50) is None
+    assert other.status("m2")["attempts"] == 0
+    assert not first.status("m1")["queued"]
+    assert other.defer(reserved)
+    assert first.status("m1")["attempts"] == 0
+    renewed = first.claim_stream(route(), now=51)
+    assert renewed.token != reserved.token
+    with pytest.raises(TransportError):
+        other.park(reserved)
+    first.park(renewed)
+    assert not other.defer(renewed)
+    assert first.status("m1")["disposition"] == "awaiting_result"

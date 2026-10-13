@@ -89,3 +89,169 @@ def test_malformed_result_never_establishes_processing():
         adapter.observe(b'{"type":"result","session_id":"session-1"}')
     with pytest.raises(TransportError):
         adapter.send(delivery(message_id="m2"))
+
+
+PEERS = ("mira", "claude", "hermes", "codex", "stackchan", "homelab", "lunabot")
+
+
+@pytest.mark.parametrize("sender,recipient", [(a, b) for a in PEERS for b in PEERS if a != b])
+def test_bound_fake_endpoints_round_trip_after_lost_ack_without_model_or_hub(tmp_path, sender, recipient):
+    from agent.peer_transport import Mailbox
+    outgoing = Mailbox(tmp_path / "out.db")
+    incoming = Mailbox(tmp_path / "in.db")
+    return_mail = Mailbox(tmp_path / "return.db")
+    bound = Route(recipient, "recipient-session", 1, "selected-conversation")
+    reply_bound = Route(sender, "sender-session", 1, "selected-conversation")
+    request = Envelope("request", sender, recipient, "selected-conversation", "task-nonce",
+                       "task_request", b"offline-benign-nonce", 10, 100)
+    handled = []
+
+    def persist_then_queue(wire, binding):
+        assert binding == bound.binding
+        original = Envelope.decode(wire)
+        if incoming.receive(original, bound, authenticated_sender=sender, now=11):
+            assert incoming.begin_handling(original.message_id, bound, now=11)
+            handled.append(original)
+        return True
+
+    endpoint = QueueEndpoint(bound, persist_then_queue)
+    outgoing.store(request, bound)
+    first = outgoing.claim(bound, now=11, lease_seconds=1)
+    assert endpoint.send(first) == "queued"
+    # Simulate a lost admission/storage acknowledgement and transport restart.
+    outgoing.close()
+    outgoing = Mailbox(tmp_path / "out.db")
+    replay = outgoing.claim(bound, now=13, lease_seconds=1)
+    assert replay.envelope == request
+    assert endpoint.send(replay) == "queued"
+    assert handled == [request]
+    ack = incoming.finish_handling("request", bound, stage="processed")
+    outgoing.acknowledge(replay, ack, authenticated_peer=recipient, now=13)
+    reply = Envelope("reply", recipient, sender, request.conversation_id, request.correlation_id,
+                     "task_result", request.payload, 13, 100, in_reply_to=request.message_id)
+    incoming.store(reply, reply_bound)
+    returning = incoming.claim(reply_bound, now=14)
+    return_endpoint = QueueEndpoint(reply_bound, lambda wire, binding:
+                                   return_mail.receive(Envelope.decode(wire), reply_bound,
+                                                       authenticated_sender=recipient, now=14))
+    assert return_endpoint.send(returning) == "queued"
+    assert return_mail.status("reply", direction="in")["payload"] == request.payload
+    assert reply.sender == recipient and reply.recipient == sender
+    assert reply.in_reply_to == request.message_id
+    assert not outgoing.status("request")["accepted"]
+    outgoing.close()
+    incoming.close()
+    return_mail.close()
+
+
+def result_frame(uuid="result-1"):
+    return json.dumps({"type": "result", "session_id": "session-1", "uuid": uuid,
+                       "is_error": False, "result": "nonce"}).encode()
+
+
+def test_raw_stream_does_not_readmit_completed_input_before_receipt(tmp_path):
+    from agent.peer_transport import Mailbox
+    box = Mailbox(tmp_path / "mail.db")
+    box.store(delivery().envelope, delivery().route)
+    pipe = io.StringIO()
+    adapter = OwnedStream(pipe, delivery().route)
+    first = box.claim(delivery().route, now=11, lease_seconds=1)
+    adapter.send(first)
+    assert adapter.observe(result_frame()).stage == "processed"
+    replay = box.claim(delivery().route, now=13)
+    with pytest.raises(TransportError):
+        adapter.send(replay)
+    assert len(pipe.getvalue().splitlines()) == 1
+
+
+def test_bound_stream_busy_defers_unoffered_mail_without_burning_attempts(tmp_path):
+    from agent.peer_transport import Mailbox
+    box = Mailbox(tmp_path / "mail.db", max_attempts=2)
+    box.store(delivery().envelope, delivery().route)
+    box.store(delivery(message_id="m2").envelope, delivery().route)
+    adapter = OwnedStream(io.StringIO(), delivery().route, mailbox=box)
+    first = box.claim(delivery().route, now=11, lease_seconds=1)
+    adapter.send(first)
+    for now in (13, 15, 17):
+        waiting = box.claim(delivery().route, now=now, lease_seconds=1)
+        assert waiting.envelope.message_id == "m2"
+        with pytest.raises(TransportError):
+            adapter.send(waiting)
+        assert box.status("m2")["attempts"] == 0
+    observed = adapter.observe(result_frame())
+    box.evidence(observed.delivery, "processed", now=30)
+    assert box.status("m1")["processed"]
+    assert box.status("m1")["attempts"] == 1
+    assert box.status("m2")["disposition"] == "pending"
+
+
+def test_durable_stream_holds_before_io_and_does_not_replay_after_result(tmp_path):
+    from agent.peer_transport import Mailbox
+    box = Mailbox(tmp_path / "mail.db")
+    box.store(delivery().envelope, delivery().route)
+    box.store(delivery(message_id="m2").envelope, delivery().route)
+    pipe = io.StringIO()
+    adapter = OwnedStream(pipe, delivery().route, mailbox=box)
+    first = adapter.deliver_next(now=11, lease_seconds=1)
+    assert first.envelope.message_id == "m1"
+    assert adapter.deliver_next(now=13) is None
+    assert box.status("m2")["attempts"] == 0
+    assert box.status("m1")["disposition"] == "awaiting_result"
+    assert not box.status("m1")["queued"]
+    echoed = adapter.observe(json.dumps({"type": "user", "session_id": "session-1", "uuid": "m1"}).encode())
+    box.evidence(echoed.delivery, echoed.stage, now=14)
+    assert box.status("m1")["disposition"] == "awaiting_result"
+    assert box.status("m1")["queued"]
+    observed = adapter.observe(result_frame())
+    # Persist the receipt before another input; memory alone is not restart evidence.
+    assert adapter.deliver_next(now=15) is None
+    assert box.status("m2")["attempts"] == 0
+    box.evidence(observed.delivery, "processed", now=16)
+    assert box.status("m1")["processed"]
+    assert adapter.deliver_next(now=17).envelope.message_id == "m2"
+    assert [json.loads(line)["uuid"] for line in pipe.getvalue().splitlines()] == ["m1", "m2"]
+
+
+def test_uncertain_partial_stream_write_remains_held_after_mailbox_restart(tmp_path):
+    from agent.peer_transport import Mailbox
+    class PartialPipe(io.StringIO):
+        def write(self, wire):
+            return super().write(wire[:5])
+    path = tmp_path / "mail.db"
+    box = Mailbox(path)
+    box.store(delivery().envelope, delivery().route)
+    adapter = OwnedStream(PartialPipe(), delivery().route, mailbox=box)
+    with pytest.raises(TransportError):
+        adapter.deliver_next(now=11)
+    box.close()
+    box = Mailbox(path)
+    assert box.claim(delivery().route, now=50) is None
+    assert box.status("m1")["disposition"] == "awaiting_result"
+    assert not box.status("m1")["queued"] and not box.status("m1")["processed"]
+
+
+def test_recreated_bound_stream_cannot_pass_uncertain_session_mail(tmp_path):
+    from agent.peer_transport import Mailbox
+    path = tmp_path / "mail.db"
+    box = Mailbox(path)
+    box.store(delivery().envelope, delivery().route)
+    box.store(delivery(message_id="m2").envelope, delivery().route)
+    old = OwnedStream(io.StringIO(), delivery().route, mailbox=box)
+    first = old.deliver_next(now=11, lease_seconds=1)
+    box.close()
+    box = Mailbox(path)
+    pipe = io.StringIO()
+    recreated = OwnedStream(pipe, delivery().route, mailbox=box)
+    assert recreated.deliver_next(now=30) is None
+    assert box.status("m2")["attempts"] == 0
+    assert pipe.getvalue() == ""
+    # Even a direct claim/send cannot bypass persisted route-level backpressure.
+    other = box.claim(delivery().route, now=31)
+    with pytest.raises(TransportError):
+        recreated.send(other)
+    assert box.status("m2")["attempts"] == 0
+    assert recreated.observe(result_frame()) is None
+    observed = old.observe(result_frame())
+    assert observed.delivery == first
+    box.evidence(observed.delivery, "processed", now=32)
+    assert recreated.deliver_next(now=33).envelope.message_id == "m2"

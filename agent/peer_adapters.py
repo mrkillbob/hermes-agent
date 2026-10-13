@@ -25,37 +25,65 @@ class OwnedStream:
     only. A session-matching result proves handling for the sole outstanding
     input, never receipt persistence, accepted work or confirmed cancellation.
     A lost stream must be reconciled before reusing this session.
+
+    Durable controllers must bind their mailbox and use deliver_next, or send a
+    current claim through the bound adapter. Before pipe I/O it parks the claim;
+    this surface has no recipient-side durable dedup, so uncertainty never
+    becomes automatic replay. Raw unbound send is framing-only qualification.
     """
 
-    def __init__(self, stdin, route: Route):
+    def __init__(self, stdin, route: Route, *, mailbox=None):
         route.validate()
         self.stdin = stdin
         self.route = route
+        self.mailbox = mailbox
         self.active = None
         self.results = set()
+        self.admitted = set()
         self.lock = Lock()
 
     def send(self, delivery: Delivery):
         with self.lock:
-            if delivery.route != self.route or delivery.envelope.recipient != self.route.peer:
-                raise TransportError("stream route mismatch")
-            if delivery.envelope.conversation_id != self.route.conversation_id:
-                raise TransportError("stream conversation mismatch")
-            if len(self.results) >= 1024:
-                raise TransportError("stream replay bound reached; reconcile session")
+            return self._send(delivery)
+
+    def deliver_next(self, *, now, lease_seconds=30):
+        """Backpressure before claim; mailbox reservation before non-idempotent I/O."""
+        if self.mailbox is None:
+            raise TransportError("durable stream requires a bound mailbox")
+        with self.lock:
             if self.active is not None:
-                raise TransportError("stream busy; hold in durable mailbox")
-            frame = {"type": "user", "session_id": self.route.binding,
-                     "uuid": delivery.envelope.message_id,
-                     "message": {"role": "user", "content": delivery.envelope.encode().decode()}}
-            # Claim before writing: a partial write is uncertain, never an implicit retry.
-            self.active = delivery
-            wire = json.dumps(frame, separators=(",", ":")) + "\n"
-            written = self.stdin.write(wire)
-            if written != len(wire):
-                raise TransportError("partial stream write; reconcile owned session")
-            self.stdin.flush()
-            return "queued"
+                return None
+            if len(self.admitted) >= 1024:
+                raise TransportError("stream replay bound reached; reconcile session")
+            delivery = self.mailbox.claim_stream(self.route, now=now, lease_seconds=lease_seconds)
+            if delivery is not None:
+                self._send(delivery)
+            return delivery
+
+    def _send(self, delivery):
+        if delivery.route != self.route or delivery.envelope.recipient != self.route.peer:
+            raise TransportError("stream route mismatch")
+        if delivery.envelope.conversation_id != self.route.conversation_id:
+            raise TransportError("stream conversation mismatch")
+        if delivery.envelope.message_id in self.admitted:
+            raise TransportError("stream input already admitted; reconcile receipt")
+        if self.active is not None or len(self.admitted) >= 1024:
+            if self.mailbox is not None:
+                self.mailbox.defer(delivery)
+            raise TransportError("stream busy or replay bound reached; hold in mailbox")
+        frame = {"type": "user", "session_id": self.route.binding,
+                 "uuid": delivery.envelope.message_id,
+                 "message": {"role": "user", "content": delivery.envelope.encode().decode()}}
+        wire = json.dumps(frame, separators=(",", ":")) + "\n"
+        if self.mailbox is not None:
+            self.mailbox.park(delivery)
+        self.active = delivery
+        self.admitted.add(delivery.envelope.message_id)
+        written = self.stdin.write(wire)
+        if written != len(wire):
+            raise TransportError("partial stream write; reconcile owned session")
+        self.stdin.flush()
+        return "queued"
 
     def observe(self, raw: bytes):
         if len(raw) > 1024 * 1024:

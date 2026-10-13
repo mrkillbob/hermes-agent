@@ -217,12 +217,34 @@ class Mailbox:
         return self._insert(envelope, route, "in")
 
     def claim(self, route, *, now, lease_seconds=30):
+        return self._lease(route, now, lease_seconds, stream=False)
+
+    def claim_stream(self, route, *, now, lease_seconds=30):
+        """One durable reservation per physical session, including across restart."""
+        return self._lease(route, now, lease_seconds, stream=True)
+
+    def _stream_busy(self, route, *, exempt=None):
+        rows = self.db.execute("""SELECT id,token,disposition FROM peer_mail
+            WHERE direction='out' AND peer=? AND binding=? AND epoch=?
+            AND disposition IN ('stream_reserved','awaiting_result')""",
+            (route.peer, route.binding, route.epoch)).fetchall()
+        return any(not (exempt is not None and row["disposition"] == "stream_reserved"
+                       and row["id"] == exempt.envelope.message_id and row["token"] == exempt.token)
+                   for row in rows)
+
+    def _lease(self, route, now, lease_seconds, *, stream):
         route.validate()
         if type(lease_seconds) is not int or not 1 <= lease_seconds <= 300:
             raise TransportError("invalid lease")
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            delivery = self._claim(route, now, lease_seconds)
+            delivery = None
+            if not stream or not self._stream_busy(route):
+                delivery = self._claim(route, now, lease_seconds)
+                if stream and delivery is not None:
+                    self.db.execute("""UPDATE peer_mail SET disposition='stream_reserved'
+                        WHERE direction='out' AND id=? AND token=?""",
+                        (delivery.envelope.message_id, delivery.token))
             self.db.execute("COMMIT")
             return delivery
         except BaseException:
@@ -236,8 +258,13 @@ class Mailbox:
             envelope = Envelope.decode(row["wire"])
             if envelope.conversation_id != route.conversation_id:
                 continue
+            # A lagging controller cannot fence a newer incarnation, even on expiry.
+            if row["epoch"] > route.epoch:
+                continue
+            if row["epoch"] == route.epoch and row["binding"] != route.binding:
+                continue
             reason = None
-            if row["binding"] != route.binding or row["epoch"] != route.epoch:
+            if row["epoch"] < route.epoch:
                 reason = "route_changed"
             elif now >= envelope.expires_at:
                 reason = "expired"
@@ -256,19 +283,57 @@ class Mailbox:
             return Delivery(envelope, route, token)
         return None
 
+    def _delivery_key(self, delivery):
+        delivery.route.validate()
+        if (delivery.route.conversation_id != delivery.envelope.conversation_id
+                or delivery.route.peer != delivery.envelope.recipient):
+            raise TransportError("delivery route mismatch")
+        return (delivery.envelope.message_id, delivery.envelope.digest, delivery.route.peer,
+                delivery.route.binding, delivery.route.epoch, delivery.token)
+
+    def park(self, delivery):
+        """Persist uncertainty before non-idempotent stream I/O; never auto-replay.
+
+        The lease token remains the receipt identity even after lease expiry.
+        Unknown delivery/partial writes require owner reconciliation, not retries.
+        """
+        key = self._delivery_key(delivery)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            changed = 0
+            if self._stream_busy(delivery.route, exempt=delivery):
+                self.defer(delivery)
+            else:
+                changed = self.db.execute("""UPDATE peer_mail SET disposition='awaiting_result'
+                    WHERE direction='out' AND id=? AND digest=? AND peer=? AND binding=?
+                    AND epoch=? AND token=? AND disposition IN ('pending','stream_reserved')""",
+                    key).rowcount
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+        if changed != 1:
+            raise TransportError("stale or already held stream delivery")
+
+    def defer(self, delivery):
+        """Undo an unoffered claim on backpressure; admitted mail cannot be deferred."""
+        return self.db.execute("""UPDATE peer_mail SET attempts=attempts-1,
+            token=NULL,lease_until=0,disposition='pending' WHERE direction='out' AND id=? AND digest=?
+            AND peer=? AND binding=? AND epoch=? AND token=? AND attempts>0
+            AND disposition IN ('pending','stream_reserved') AND queued=0""",
+            self._delivery_key(delivery)).rowcount == 1
+
     def evidence(self, delivery, stage, *, now):
         """Trusted adapter evidence only. Stages are independent facts, not a ladder."""
         if stage not in STAGES:
             raise TransportError("unsupported evidence stage")
-        if delivery.route.conversation_id != delivery.envelope.conversation_id:
-            raise TransportError("evidence conversation mismatch")
         status = "pending" if stage == "queued" else "delivered"
         changed = self.db.execute(f"""UPDATE peer_mail SET {stage}=1,
-            disposition=CASE WHEN disposition='delivered' THEN disposition ELSE ? END
+            disposition=CASE WHEN disposition='delivered' THEN disposition
+                WHEN disposition='awaiting_result' AND ?='pending' THEN disposition ELSE ? END
             WHERE direction='out' AND id=? AND digest=? AND peer=? AND binding=?
-            AND epoch=? AND token=? AND disposition IN ('pending','delivered')""",
-            (status, delivery.envelope.message_id, delivery.envelope.digest, delivery.route.peer,
-             delivery.route.binding, delivery.route.epoch, delivery.token)).rowcount
+            AND epoch=? AND token=? AND disposition IN ('pending','delivered','awaiting_result')""",
+            (status, status, *self._delivery_key(delivery))).rowcount
         if changed != 1:
             raise TransportError("stale or mismatched delivery evidence")
 
