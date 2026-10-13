@@ -691,3 +691,25 @@ def test_label_completion_reconciliation_does_not_revive_ineligible_work(tmp_pat
     data.update({key: value for key, value in patch.items() if key not in ("pr", "run")})
     process, data = invoke(tmp_path, data, "label")
     assert data["mutations"] == [], process.stdout + process.stderr
+
+
+def test_native_completion_does_not_duplicate_a_queued_label_retry(tmp_path):
+    data = label_snapshot()
+    data["comments"] = []
+    data["pr"]["labels"][0]["name"] = "ci-reviewed"
+    data["timeline"][0]["label"]["name"] = "ci-reviewed"
+    data["jobs"] = [{"name": "Review label gate / Review label gate", "conclusion": "failure"}]
+    process, queued = invoke(tmp_path, data, "resume")
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert queued["runs"][0]["status"] == "queued"
+    assert queued["mutations"] == [f"repos/{REPO}/actions/runs/11/rerun-failed-jobs"]
+    event = {"event_name": "workflow_run", "workflow_run": {
+        "event": "pull_request_review", "head_sha": HEAD,
+        "pull_requests": [{"number": 8, "head": {"sha": HEAD}}]}}
+    process, discovered = invoke(tmp_path, queued, "resume", event)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert json.loads(process.stdout) == {"include": [{"number": 8, "head": HEAD}]}
+    process, duplicate = invoke(tmp_path, discovered, "resume")
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert duplicate["mutations"] == queued["mutations"]
+    assert duplicate["runs"][0]["status"] == "queued"
