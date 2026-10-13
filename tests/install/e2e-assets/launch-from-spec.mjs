@@ -164,17 +164,17 @@ async function main() {
   });
   if (!values['no-update']) await installSourceBranchProbe(app);
   const window = await pickAppWindow(app, log);
-  await window.screenshot({ path: `${values.spec}.window.png` }).catch(() => {});
-
-  await prepareWindowForInput(app, window);
-  log('[zoom] app window prepared at 100%');
-
-  phase('old-chat');
   await runUpdateWindowChat(app, window, {
     mockUrl: values['mock-url'], outDir: values['chat-out'],
     expectCommit: values['old-sha'],
     root: values['repo-dir'], origin: 'source', executable: launch.executablePath,
     userData: launchEnv.HERMES_DESKTOP_USER_DATA_DIR,
+    prepare: async () => {
+      phase('old-chat');
+      await window.screenshot({ path: `${values.spec}.window.png` }).catch(() => {});
+      await prepareWindowForInput(app, window);
+      log('[zoom] app window prepared at 100%');
+    },
   });
 
   if (values['no-update']) {
