@@ -8,6 +8,7 @@ pyright/gopls/etc. to be installed in CI.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -182,17 +183,20 @@ async def test_cancelled_start_hard_kills_sigterm_ignoring_descendant(tmp_path: 
             await asyncio.wait_for(start, timeout=0.05)
 
         deadline = asyncio.get_running_loop().time() + 15.0
-        while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
-            assert asyncio.get_running_loop().time() < deadline
-            await asyncio.sleep(0.01)
+        # Successful cleanup can reap the child between the identity and status probes.
+        with contextlib.suppress(psutil.NoSuchProcess):
+            while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.01)
         assert client.state == "error"
         assert client._proc is None
     finally:
         if not start.done():
             start.cancel()
             await asyncio.gather(start, return_exceptions=True)
-        if child is not None and child.is_running():
-            child.kill()
+        with contextlib.suppress(psutil.NoSuchProcess):
+            if child is not None and child.is_running():
+                child.kill()
 
 
 @pytest.mark.asyncio
