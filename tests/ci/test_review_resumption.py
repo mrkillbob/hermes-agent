@@ -14,8 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from hermes_yaml import safe_load
-
 ROOT = Path(__file__).resolve().parents[2]
 HEAD = "a" * 40
 OLD = "b" * 40
@@ -370,6 +368,8 @@ def test_new_healthy_run_before_retry_leaves_old_run_alone(tmp_path):
 
 @pytest.mark.parametrize("event", [
     {"event_name": "schedule"},
+    {"event_name": "workflow_run", "workflow_run": {"event": "pull_request", "head_sha": HEAD,
+                                                     "pull_requests": [{"number": 8, "head": {"sha": HEAD}}]}},
     {"event_name": "workflow_run", "workflow_run": {"event": "pull_request_review", "head_sha": HEAD,
                                                      "pull_requests": [{"number": 8, "head": {"sha": HEAD}}]}},
 ])
@@ -644,15 +644,3 @@ def test_label_completion_reconciliation_does_not_revive_ineligible_work(tmp_pat
     data.update({key: value for key, value in patch.items() if key not in ("pr", "run")})
     process, data = invoke(tmp_path, data, "label")
     assert data["mutations"] == [], process.stdout + process.stderr
-
-
-def test_label_and_review_retry_writers_share_the_same_per_pr_concurrency_key():
-    label = safe_load((ROOT / ".github/workflows/label-rerun.yml").read_text(encoding="utf-8-sig"))
-    review = safe_load((ROOT / ".github/workflows/review-resumption.yml").read_text(encoding="utf-8-sig"))
-    label_group = label["concurrency"]["group"]
-    review_group = review["jobs"]["resume"]["concurrency"]["group"]
-    shared_prefix = review_group.split("${{ matrix.number }}")[0]
-    assert label_group.startswith(shared_prefix)
-    assert "github.event.pull_request.number" in label_group
-    assert "github.event.workflow_run.pull_requests[0].number" in label_group
-    assert label["concurrency"]["cancel-in-progress"] is False

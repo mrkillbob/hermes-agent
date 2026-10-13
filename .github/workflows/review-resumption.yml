@@ -10,6 +10,7 @@ on:
   workflow_run:
     workflows:
       - Review CI wake-up
+      - Label rerun
       - CI
       - Docker Build, Test, and Publish
       - Nix flake check

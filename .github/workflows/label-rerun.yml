@@ -1,62 +1,21 @@
 name: Label rerun
 
-# When the ``ci-reviewed`` label is added to a PR, rerun all failed jobs in
-# the latest pull-request CI run. This re-evaluates ``review-labels`` (which
-# now sees the label) and GitHub reruns the dependent ``all-checks-pass`` gate.
-#
-# When the ``run-e2e`` label is added, rerun the head commit's CI, Docker and
-# Nix runs in full. Their ``detect`` job reads the PR's labels through the API
-# (a rerun replays the original event payload), so the rerun turns the Docker
-# and Nix slow lanes on (scripts/ci/classify_changes.py). Upstream PR E2E stays
-# off; public forks retain the classified PR E2E lanes, including run-e2e overrides.
-#
-# Completion events reconcile either label added while a run was active.
-# The exact latest attempt must predate the live label addition before retry.
-#
-# The review comment updates without help. The poller in
-# ci-review-comment.yml watches the CI run through the API. It gets the
-# rerun results.
-
+# A pull_request event uses candidate workflow code. This file only wakes the
+# default-branch Review CI resumption controller, which reads live maintainer
+# labels and exact-head run metadata before requesting any retry.
 on:
   pull_request:
     types: [labeled]
-  workflow_run:
-    workflows: [CI, "Docker Build, Test, and Publish", "Nix flake check"]
-    types: [completed]
 
-permissions:
-  contents: read
-  actions: write
-  pull-requests: read
-
-# Share the review controller's PR key so actual retries cannot overlap.
-concurrency:
-  group: review-ci-resume-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
-  rerun-labels:
-    name: Reconcile maintainer labels on the exact PR head
+  wake-up:
     if: >-
       github.repository == 'mrkillbob/hermes-agent' &&
-      ((github.event_name == 'pull_request' && contains(fromJSON('["run-e2e", "ci-reviewed"]'), github.event.label.name)) ||
-       (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' &&
-        github.event.workflow_run.pull_requests[0].number))
+      contains(fromJSON('["run-e2e", "ci-reviewed"]'), github.event.label.name)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 2
     steps:
-      - name: Check out trusted metadata controller
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-          fetch-depth: 1
-          sparse-checkout: scripts/ci
-          sparse-checkout-cone-mode: false
-      - name: Retry eligible completed attempts that predate live label additions
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REVIEW_REPO: ${{ github.repository }}
-          REVIEW_PR: ${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
-          REVIEW_HEAD: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
-        run: python3 -m scripts.ci.label_resumption --repo "$REVIEW_REPO" --pr "$REVIEW_PR" --head "$REVIEW_HEAD"
+      - name: Wake trusted label reconciliation
+        run: echo 'Maintainer labels changed; the trusted controller will re-evaluate them.'
