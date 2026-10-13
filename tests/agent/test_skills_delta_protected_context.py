@@ -120,3 +120,24 @@ def test_protected_note_respects_transport_specific_aggregate_bound(monkeypatch,
         setattr(agent, key, value)
     assert _note(agent, []) == ""
     assert not hasattr(agent, "_skills_index_told")
+
+
+def test_optional_note_leaves_request_budget_for_user_context(tmp_path, monkeypatch):
+    rendered = "Run checks. " * 16_000
+    user_context = "Run checks. " * 6_000
+    monkeypatch.setattr("agent.system_prompt._skills_prompt", lambda _: "<available_skills>\n    - helper: Run checks.\n</available_skills>")
+    monkeypatch.setattr("agent.skills_index_delta._render", lambda *_: rendered)
+    # Individually safe spans can still exceed the final request budget together.
+    with pytest.raises(EgressBlocked):
+        _decision(tmp_path, compose_user_api_content(user_context, "", rendered))
+    note = _note(_agent(), [])
+    assert note == ""
+    assert _decision(tmp_path, compose_user_api_content(user_context, "", note) or user_context).allowed
+
+
+def test_optional_note_reserves_smaller_serialized_request_budget(monkeypatch):
+    monkeypatch.setattr("agent.system_prompt._skills_prompt", lambda _: "<available_skills>\n    - helper: Run checks.\n</available_skills>")
+    monkeypatch.setattr("agent.skills_index_delta._render", lambda *_: "Run checks. " * 3_000)
+    agent = _agent()
+    agent._llm_egress_max_serialized_bytes = 65_536
+    assert _note(agent, []) == ""
