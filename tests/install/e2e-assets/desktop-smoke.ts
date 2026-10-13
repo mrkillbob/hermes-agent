@@ -12,6 +12,7 @@ import { z } from 'zod'
 import { resolveDesktopHermesHome } from '../../../apps/desktop/electron/data-paths.mjs'
 import { applyBundleEnvironment } from '../../../apps/desktop/scripts/bundle-env.mjs'
 import { type ChatIdentity, readChatIdentity, runDesktopChatSmoke, waitForChatReady } from '../../../tests-js/scripts/desktop-chat-smoke.ts'
+import { beginSelectionCapture, type SelectionCapture } from '../../../tests-js/scripts/desktop-selection-diagnostics.ts'
 import { assertBackendOrigin, localBackendProcess, readBundledBundleEnv, readInstallationCommit } from '../../../tests-js/scripts/desktop-smoke-process.ts'
 import { validateMockUrl, writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config.ts'
 import { type MockServer, startMockServer } from '../../../tests-js/scripts/mock-server.ts'
@@ -284,6 +285,7 @@ export async function runInstalledDesktopSmoke(options: SmokeOptions, launchApp:
   let mock: MockServer | undefined
   let app: ElectronApplication | undefined
   let page: Page | undefined
+  let selectionCapture: SelectionCapture | undefined
   let predictedHome: string | undefined
   const consoleLines: string[] = []
   try {
@@ -325,6 +327,7 @@ export async function runInstalledDesktopSmoke(options: SmokeOptions, launchApp:
     app.process().stderr?.on('data', (chunk: Buffer): void => { consoleLines.push(redact(chunk.toString())) })
 
     page = await pickAppWindow(app, (message: string): void => { consoleLines.push(redact(message)) })
+    selectionCapture = await beginSelectionCapture(page, out, options.phase)
     page.on('pageerror', (error: Error): void => { consoleLines.push(redact(error.message)) })
     await prepareWindowForInput(app, page)
     await waitForChatReady(page)
@@ -350,11 +353,13 @@ export async function runInstalledDesktopSmoke(options: SmokeOptions, launchApp:
     if (provenanceCommit !== options['expect-commit']) { throw new Error('Installed commit differs from --expect-commit') }
     // Trace only chat actions. Connection probes can return credential-bearing logs.
     await app.context().tracing.start({ screenshots: true, snapshots: false, sources: false })
-    const chat = await runDesktopChatSmoke(page, { mockUrl, phase: options.phase, outDir: out, expectCommit: options['expect-commit'], provenanceCommit })
+    const chat = await runDesktopChatSmoke(page, { mockUrl, phase: options.phase, outDir: out, expectCommit: options['expect-commit'], provenanceCommit, selectionCapture })
     fs.writeFileSync(receiptPath, `${JSON.stringify({ ...chat, status: 'closing' }, null, 2)}\n`)
     const result = { ...chat, origin: options.origin, root: options.root, executable: options.exe, running, predictedHome,
       localModeConfigured: true, backend: { ...backend, command: redact(backend.command) }, launchKind: options.phase === 'new' ? 'post-update-launch' : 'installed-launch' }
     await app.context().tracing.stop({ path: path.join(out, `desktop-chat-${options.phase}.zip`) })
+    await selectionCapture.stop()
+    selectionCapture = undefined
     await gracefulClose(app)
     app = undefined
     fs.writeFileSync(receiptPath, `${JSON.stringify(result, null, 2)}\n`)
@@ -365,6 +370,7 @@ export async function runInstalledDesktopSmoke(options: SmokeOptions, launchApp:
       executable: options.exe, expectedCommit: options['expect-commit'], error: redact(String(error)) }, null, 2)}\n`)
     throw error
   } finally {
+    await selectionCapture?.stop()
     fs.writeFileSync(path.join(out, `desktop-app-${options.phase}.log`), consoleLines.join('\n'))
     try {
       captureBackendLogs([...new Set([...candidateSmokeHermesHomes(options.home, options['user-data']), ...(predictedHome ? [predictedHome] : [])])], out, options.phase)
