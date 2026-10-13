@@ -38,8 +38,8 @@ import {
   sessionInfoStatePatch
 } from '../utils'
 
+import { needsSettledPrefixCatchup, scheduleSettledPrefixCatchup } from './session-info-recovery'
 import type { GatewayEventContext } from './types'
-import { needsSettledPrefixCatchup } from './session-info-recovery'
 
 /**
  * Whether a `session.info` payload's `stored_session_id` may be treated as the
@@ -342,13 +342,15 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
           const busy = Boolean(payload!.running)
 
           if (state.busy === busy && (busy || !state.awaitingResponse)) {
-            // Keep a short reorder grace, then recover a permanently lost
-            // completion from durable history. The marker is consumed once;
-            // no timer, repeated fetch, or background-session fanout.
+            // A prefix settled while in the background (or whose timer found it
+            // there) is recovered by the first idle heartbeat after the user
+            // returns. The marker is consumed once; no repeated fetch.
             if (needsSettledPrefixCatchup(state, isActiveEvent, Date.now())) {
               recoveredIncompleteTurn = true
+
               return { ...state, heartbeatSettledAt: null }
             }
+
             return state
           }
 
@@ -470,15 +472,19 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
         // not one per tick.
         scheduleSessionsRefresh()
 
-        // The transcript catch-up IS scoped. A retained prefix first gets a
-        // reorder grace; a subsequent idle heartbeat catches up once if its
-        // complete frame never arrived.
-        // The stream died, but the turn itself may have completed and been
-        // persisted, so refetch stored history for the session actually on
-        // screen; a background session reads its history when the user opens
-        // it, and hydrating every one of them here would fan a REST call out
-        // per idle session.
+        // A retained prefix recovers from this terminal transition itself: a
+        // settled session may emit no further session.info, so one bounded
+        // timer catches up if its complete frame never arrived.
+        if (isActiveEvent && typeof nextState.heartbeatSettledAt === 'number') {
+          scheduleSettledPrefixCatchup(deps, sessionId, nextState.heartbeatSettledAt)
+        }
       }
+
+      // The transcript catch-up IS scoped. The stream died, but the turn itself
+      // may have completed and been persisted, so refetch stored history for
+      // the session actually on screen; a background session reads its history
+      // when the user opens it, and hydrating every one of them here would fan
+      // a REST call out per idle session.
       if (recoveredIncompleteTurn && isActiveEvent) {
         void hydrateFromStoredSession(3, nextState.storedSessionId, sessionId)
       }

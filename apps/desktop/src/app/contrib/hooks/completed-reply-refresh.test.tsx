@@ -617,7 +617,7 @@ it('does not let an older finalizer retire the newest refresh observation', asyn
   expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
 })
 
-it('catches up a retained prefix after idle heartbeats when completion was lost', async () => {
+it('catches up a retained prefix from the terminal transition alone when completion was lost', async () => {
   render(<Harness fallback />)
   act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
   send('message.start')
@@ -625,6 +625,7 @@ it('catches up a retained prefix after idle heartbeats when completion was lost'
   await act(async () => {
     await vi.advanceTimersByTimeAsync(100)
   })
+  // The only session.info an idle foreground session is guaranteed to emit.
   send('session.info', { running: false, stored_session_id: STORED })
   expect(vi.mocked(getLatestSessionMessages)).not.toHaveBeenCalled()
   vi.mocked(getLatestSessionMessages).mockResolvedValue({
@@ -633,11 +634,6 @@ it('catches up a retained prefix after idle heartbeats when completion was lost'
   })
   await act(async () => {
     await vi.advanceTimersByTimeAsync(2500)
-    stream.handleGatewayEvent({
-      session_id: RUNTIME,
-      type: 'session.info',
-      payload: { running: false, stored_session_id: STORED }
-    })
   })
   expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
   expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
@@ -691,6 +687,40 @@ it('waits for reorder grace and keeps background prefix recovery unconsumed', as
   send('session.info', { running: false, stored_session_id: STORED })
   expect(getLatestSessionMessages).not.toHaveBeenCalled()
   expect($sessionStates.get()[RUNTIME].heartbeatSettledAt).toBe(settledAt)
+})
+
+it('recovers a prefix settled in the background on the first idle heartbeat after the user returns', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  act(() => {
+    cache.activeSessionIdRef.current = 'other-runtime'
+  })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2500)
+  })
+  expect(getLatestSessionMessages).not.toHaveBeenCalled()
+  vi.mocked(getLatestSessionMessages).mockResolvedValue({
+    session_id: STORED,
+    messages: [...history, { id: 4, role: 'assistant', content: FINAL, timestamp: 4 }]
+  })
+  act(() => {
+    cache.activeSessionIdRef.current = RUNTIME
+  })
+  await act(async () => {
+    stream.handleGatewayEvent({
+      session_id: RUNTIME,
+      type: 'session.info',
+      payload: { running: false, stored_session_id: STORED }
+    })
+  })
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+  expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
 })
 
 it('does not fetch the previous prefix after a new turn starts', async () => {
