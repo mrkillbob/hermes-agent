@@ -619,6 +619,9 @@ _PER_TURN_RESET_STATE: tuple[tuple[str, Any], ...] = (
 
 def _reset_per_turn_agent_state(agent: Any) -> None:
     """Reset retry counters, guardrails, iteration and run budgets at turn start."""
+    agent._skills_index_pending_delivery = None
+    agent._skills_index_delivery = None
+    agent._skills_index_note = ""
     for name, value in _PER_TURN_RESET_STATE:
         setattr(agent, name, value)
     agent._turn_failed_file_mutations = {}
@@ -857,9 +860,10 @@ def _merge_gateway_notes(
     append a durable text part instead."""
     _surface_note = consume_surface_switch_note(agent)
     _surface_metadata = take_surface_switch_metadata(agent)
+    _skills_note = consume_skills_index_note(agent)
     _turn_notes = "\n\n".join(
         part for part in (consume_gateway_turn_context_notes(agent), _surface_note,
-                          consume_skills_index_note(agent)) if part
+                          _skills_note) if part
     )
     if _surface_note and _surface_metadata and 0 <= current_turn_user_idx < len(messages):
         user_msg = messages[current_turn_user_idx]
@@ -884,7 +888,13 @@ def _merge_gateway_notes(
             from agent.session_persistence import _durable_content
             user_msg["_surface_switch_durable_content"] = _durable_content(_gw_turn_content)
         append_notes_to_multimodal_content(_gw_turn_content, _turn_notes)
+        if _skills_note:
+            from agent.skills_index_delivery import bind_skills_note
+            bind_skills_note(agent, messages[current_turn_user_idx], _skills_note, part=_gw_turn_content[-1])
         return plugin_user_context
+    if _skills_note and 0 <= current_turn_user_idx < len(messages):
+        from agent.skills_index_delivery import bind_skills_note
+        bind_skills_note(agent, messages[current_turn_user_idx], _skills_note)
     return (
         plugin_user_context + "\n\n" + _turn_notes if plugin_user_context else _turn_notes
     )
@@ -964,6 +974,8 @@ def _stamp_api_content_sidecar(
     has_api_backfill = _api_content is not None and _api_content != durable_content
     if has_api_backfill:
         _turn_user_msg["api_content"] = _api_content
+        from agent.skills_index_delivery import bind_skills_sidecar
+        bind_skills_sidecar(agent, _turn_user_msg, _api_content)
     if not has_api_backfill and not display_metadata:
         return
 
@@ -1287,6 +1299,9 @@ def build_api_messages(
 
     has_current = isinstance(current_turn_user_idx, int) and 0 <= current_turn_user_idx < len(messages)
     current_turn_message = messages[current_turn_user_idx] if has_current else None
+    if isinstance(current_turn_message, dict):
+        from agent.skills_index_delivery import revalidate_skills_note
+        revalidate_skills_note(agent, current_turn_message)
 
     # Replay consumers canonicalize the persisted prefix on read; the request copy must
     # carry the same bytes or a resume diverges mid-prefix. Only the rows BEFORE this

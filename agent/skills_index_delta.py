@@ -144,6 +144,10 @@ def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) 
     embedder-supplied prompt), and announcing the whole catalog there would only add noise. MoA and
     codex_app_server turns never stamp the ``api_content`` sidecar, so the note could not be read
     back from the transcript; those modes skip it, like the surface-switch note."""
+    agent._skills_index_pending_delivery = None
+    agent._skills_index_delivery = None
+    agent._skills_index_note = ""
+    previous_told = getattr(agent, "_skills_index_told", None)
     if getattr(agent, "provider", None) == "moa" or getattr(agent, "api_mode", None) == "codex_app_server":
         return False
     stored = index_entries(prompt)
@@ -197,6 +201,8 @@ def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) 
             return False
     agent._skills_index_told = (key, ({n: _shown(n, r) for n, r in added.items()}, frozenset(removed)))
     agent._skills_index_note = note
+    # Process-local producer data, never recovered from a visible marker or sidecar.
+    agent._skills_index_pending_delivery = (note, dict(added), frozenset(removed), key, previous_told)
     logger.info(
         "Session %s: skills changed (+%d/-%d) since the system prompt was built; delivering the "
         "change as a turn note (prefix cache preserved).",
