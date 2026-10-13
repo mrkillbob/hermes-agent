@@ -63,6 +63,7 @@ DEFAULT_HOST = None
 DEFAULT_PORT = 8644
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
+_PERMISSION_RETRY_SECONDS = 60.0
 _RATE_WINDOW_SECONDS = 60.0
 # Hosts that only serve same-machine connections; anything else is a public bind.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "ip6-localhost", "ip6-loopback"})
@@ -212,6 +213,8 @@ class WebhookAdapter(BasePlatformAdapter):
         self._static_routes: dict[str, dict] = extra.get("routes", {})
         self._dynamic_routes: dict[str, dict] = {}
         self._dynamic_routes_stat: Optional[tuple] = None
+        self._dynamic_permissions_stat: Optional[tuple] = None
+        self._dynamic_permissions_retry_at = 0.0
         self._routes: dict[str, dict] = dict(self._static_routes)
         self._runner = None
         self._v1_signature_warned: set[str] = set()  # routes already warned about legacy V1 (once per route)
@@ -421,9 +424,20 @@ class WebhookAdapter(BasePlatformAdapter):
                 self._dynamic_routes, self._routes = {}, dict(self._static_routes)
                 logger.debug("[webhook] Dynamic subscriptions file removed, cleared dynamic routes")
             self._dynamic_routes_stat = None
+            self._dynamic_permissions_stat = None
+            self._dynamic_permissions_retry_at = 0.0
             return
         from utils import restrict_credential_file_permissions
-        restrict_credential_file_permissions(subs_path, file_stat=st)
+        # Repair before the content fast path so mode-only broadening is noticed. Cache failures
+        # too: unchanged read-only stores must not produce a chmod/warning on every pre-auth POST.
+        permission_key = (subs_path, st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size,
+                          st.st_mode, st.st_ctime_ns, st.st_uid, st.st_gid)
+        now = time.monotonic()
+        if permission_key != self._dynamic_permissions_stat or now >= self._dynamic_permissions_retry_at:
+            self._dynamic_permissions_stat = permission_key
+            # A bounded retry lets an unchanged store recover after a read-only mount becomes writable.
+            self._dynamic_permissions_retry_at = now + _PERMISSION_RETRY_SECONDS
+            restrict_credential_file_permissions(subs_path, file_stat=st)
         stat_key = (st.st_mtime_ns, st.st_size, st.st_ino)
         if stat_key == self._dynamic_routes_stat:
             return  # No change
