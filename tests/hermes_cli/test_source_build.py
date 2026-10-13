@@ -376,7 +376,13 @@ def test_module_cli_builds_the_requested_products(source_products, desktop, monk
 
     root, acquired = source_products
     monkeypatch.setattr(sys, "argv", ["source_build", "--source", str(root)] + (["--desktop"] if desktop else []))
-    # run_module exercises __main__ while substituting only tool acquisition.
+    # run_module exercises __main__ while substituting only tool acquisition. A fresh import inside it
+    # rebinds the package attribute, which monkeypatch does not restore with sys.modules, so later
+    # string-path patches would hit a different module than `from hermes_cli.source_build import ...`.
+    import importlib
+
+    import hermes_cli
+    monkeypatch.setattr(hermes_cli, "source_build", importlib.import_module("hermes_cli.source_build"))
     monkeypatch.delitem(sys.modules, "hermes_cli.source_build", raising=False)
     runpy.run_module("hermes_cli.source_build", run_name="__main__")
     assert acquired == ["npm"]
