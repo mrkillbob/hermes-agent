@@ -422,6 +422,8 @@ class WebhookAdapter(BasePlatformAdapter):
                 logger.debug("[webhook] Dynamic subscriptions file removed, cleared dynamic routes")
             self._dynamic_routes_stat = None
             return
+        from utils import restrict_credential_file_permissions
+        restrict_credential_file_permissions(subs_path, file_stat=st)
         stat_key = (st.st_mtime_ns, st.st_size, st.st_ino)
         if stat_key == self._dynamic_routes_stat:
             return  # No change

@@ -705,7 +705,8 @@ class ResponseStore:
                 db_path = str(get_hermes_home() / "response_store.db")
         self._db_path: Optional[str] = db_path if db_path != ":memory:" else None
         try:
-            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+            from gateway.platforms.api_server_response_store import connect_response_store, tighten_response_store_file_permissions
+            self._conn = connect_response_store(db_path)
         except Exception:
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._db_path = None
@@ -719,18 +720,7 @@ class ResponseStore:
             "CREATE TABLE IF NOT EXISTS conversations (name TEXT PRIMARY KEY, response_id TEXT NOT NULL)")
         self._conn.commit()
         # Conversation history lives here: owner-only perms, once at init (not per commit).
-        self._tighten_file_permissions()
-
-    def _tighten_file_permissions(self) -> None:
-        """Force owner-only permissions on the DB and SQLite sidecars."""
-        if not self._db_path:
-            return
-        for candidate in (Path(self._db_path), Path(f"{self._db_path}-wal"), Path(f"{self._db_path}-shm")):
-            try:
-                if candidate.exists():
-                    candidate.chmod(0o600)
-            except OSError:
-                logger.debug("Failed to restrict response store permissions for %s", candidate, exc_info=True)
+        tighten_response_store_file_permissions(self._db_path)
 
     def get(self, response_id: str) -> Optional[dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
