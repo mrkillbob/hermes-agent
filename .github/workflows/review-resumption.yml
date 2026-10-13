@@ -56,6 +56,11 @@ jobs:
 
   resume:
     needs: discover
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      actions: write
     if: >-
       needs.discover.outputs.matrix != '' && needs.discover.outputs.matrix != '{"include": []}'
     strategy:
