@@ -73,13 +73,13 @@ test('records initialization and session selection order without changing writes
     const { events } = JSON.parse(fs.readFileSync(path.join(out, 'desktop-chat-old-selection.json'), 'utf8'))
     const creation = events.find((event: Record<string, unknown>) => event.event === 'session-create')!
 
-    expect(creation).toMatchObject({ model: 'anthropic/claude-opus-4.6', provider: 'openrouter', elapsedMs: 10,
+    expect(creation).toMatchObject({ model: 'non-fixture', provider: 'non-fixture', elapsedMs: 10,
       composer: { source: 'default' } })
     expect(events.at(-1)).toMatchObject({ elapsedMs: 20, composer: { model: 'mock-model', provider: 'custom' } })
     expect(events.map((event: Record<string, unknown>) => event.sequence)).toEqual(events.map((_: unknown, index: number) => index + 1))
     expect(f.sent).toEqual([frame])
     expect(f.storage.getItem('hermes.desktop.composer.model')).toBe('mock-model')
-    expect(JSON.stringify(events)).not.toMatch(/private prompt|private-key|messages|api_key/)
+    expect(JSON.stringify(events)).not.toMatch(/anthropic\/claude-opus-4.6|openrouter|private prompt|private-key|messages|api_key/)
     closed = true
     await capture.checkpoint('failed')
     const unavailable = fs.readFileSync(path.join(out, 'desktop-chat-old-selection.json'), 'utf8')
@@ -124,8 +124,30 @@ test('bounds evidence, filters secrets and ignores other preferences and non-cre
 
     expect(evidence.events).toHaveLength(64)
     expect(evidence.dropped).toBeGreaterThan(0)
-    expect(evidence.events.find(event => event.event === 'session-create')).toMatchObject({ model: 'mock-model', provider: 'custom', composer: { model: null, provider: null } })
+    expect(evidence.events.find(event => event.event === 'session-create')).toMatchObject({ model: 'mock-model', provider: 'custom', composer: { model: 'non-fixture', provider: 'non-fixture' } })
     expect(JSON.stringify(evidence)).not.toMatch(/private|password|sensitive|example\.test|internal\.example|unrelated/)
     expect(f.sent).toHaveLength(5)
   } finally { f.observer.stop() }
 })
+
+test.each(['inert-short-key', 'lab-node:4321', 'a.b/c_d-7', 'x'.repeat(128)])(
+  'categorizes every non-fixture string on storage and RPC paths (%s)', value => {
+    const f = fixture()
+
+    try {
+      f.storage.setItem('hermes.desktop.composer.model', value)
+      f.storage.setItem('hermes.desktop.composer.provider', value)
+      const frame = JSON.stringify({ method: 'session.create', params: { model: value, provider: value } })
+
+      f.socket.send(frame)
+      const evidence = f.observer.checkpoint('complete')
+      const creation = evidence.events.find(event => event.event === 'session-create')
+
+      expect(creation).toMatchObject({ model: 'non-fixture', provider: 'non-fixture',
+        composer: { model: 'non-fixture', provider: 'non-fixture' } })
+      expect(JSON.stringify(evidence)).not.toContain(value)
+      expect(f.sent).toEqual([frame])
+      expect(f.storage.getItem('hermes.desktop.composer.model')).toBe(value)
+    } finally { f.observer.stop() }
+  },
+)

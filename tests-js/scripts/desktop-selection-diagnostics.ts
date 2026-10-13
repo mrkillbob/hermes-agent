@@ -28,18 +28,17 @@ export function installSelectionObserver(
   let dropped = 0
   let active = true
 
-  const identifier = (value: unknown): string | null => typeof value === 'string'
-    && /^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}$/.test(value)
-    && !/(?:^|[/:])(?:https?:|sk-|ghp_|github_pat_|bearer)/i.test(value)
-    && !/(?:^|[/:])[a-z][a-z0-9+.-]*:\//i.test(value)
-    && !/^[a-zA-Z0-9_-]{32,}$/.test(value) ? value : null
+  // A string's shape cannot establish that it contains no credentials or URL.
+  // Keep only the two identifiers owned by the inert smoke configuration.
+  const identifier = (value: unknown, fixture: 'mock-model' | 'custom'): string | null =>
+    typeof value !== 'string' || value === '' ? null : value === fixture ? fixture : 'non-fixture'
 
   const selection = () => {
     try {
       const source = target.localStorage.getItem(keys[2])
 
-      return { model: identifier(target.localStorage.getItem(keys[0])),
-        provider: identifier(target.localStorage.getItem(keys[1])),
+      return { model: identifier(target.localStorage.getItem(keys[0]), 'mock-model'),
+        provider: identifier(target.localStorage.getItem(keys[1]), 'custom'),
         source: source === 'manual' || source === 'default' ? source : null }
     } catch {
       return { model: null, provider: null, source: null }
@@ -68,8 +67,8 @@ export function installSelectionObserver(
         const request = JSON.parse(data)
 
         if (request?.method === 'session.create') {
-          record('session-create', { model: identifier(request.params?.model),
-            provider: identifier(request.params?.provider), composer: selection() })
+          record('session-create', { model: identifier(request.params?.model, 'mock-model'),
+            provider: identifier(request.params?.provider, 'custom'), composer: selection() })
         }
       } catch { /* Non-JSON frames remain unchanged. */ }
     }
