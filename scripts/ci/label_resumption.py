@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import subprocess
 
-from scripts.ci.review_admission import GitHub, MetadataError, arguments, timestamp
-from scripts.ci.review_resumption import MAX_ATTEMPT, matches
+from scripts.ci.review_admission import GitHub, MetadataError, arguments, inspect, timestamp
+from scripts.ci.review_resumption import MAX_ATTEMPT, WORKFLOW_GROUPS, latest_run, matches
 
-WORKFLOWS = ("ci.yaml", "docker.yml", "nix.yml")
+LABEL_WORKFLOW_GROUPS = WORKFLOW_GROUPS[:3]
 LABELS = {"run-e2e", "ci-reviewed"}
 REVIEW_JOB_NAMES = {"Review label gate", "Review label gate / Review label gate"}
 
@@ -34,13 +34,6 @@ def label_state(api: GitHub, number: int, head: str) -> tuple[dict, dict]:
     return pr, labels
 
 
-def latest_run(api: GitHub, pr: dict, workflow: str) -> dict | None:
-    runs = api.pages(f"actions/workflows/{workflow}/runs", "workflow_runs",
-                     event="pull_request", head_sha=pr["head"]["sha"])
-    qualified = [run for run in runs if matches(run, pr, workflow)]
-    return max(qualified, key=lambda item: item["id"]) if qualified else None
-
-
 def retry_kind(api: GitHub, pr: dict, run: dict, workflow: str, labels: dict) -> str | None:
     if (not matches(run, pr, workflow) or run["status"] != "completed"
             or run["run_attempt"] >= MAX_ATTEMPT):
@@ -58,6 +51,13 @@ def retry_kind(api: GitHub, pr: dict, run: dict, workflow: str, labels: dict) ->
     jobs = api.pages(f"actions/runs/{run['id']}/jobs", "jobs", filter="latest")
     if not jobs:
         raise MetadataError("No retryable PR job context; mutable dispatch is forbidden")
+    if any(job["name"] == "Review admission" for job in jobs):
+        # Bootstrap runs without an admission job keep their original label
+        # authority. Once the gate exists, labels cannot consume retry budget
+        # before both substantive current-head passes are clear.
+        verdict, _ = inspect(api, pr["number"], pr["head"]["sha"])
+        if verdict["state"] != "clean":
+            return None
     if "run-e2e" in unread:
         return "rerun"
     failed = {job["name"] for job in jobs if job["conclusion"] == "failure"}
@@ -71,13 +71,16 @@ def resume(api: GitHub, number: int, head: str) -> list[dict]:
     if not labels:
         return [{"action": "none", "reason": "No live maintainer label addition"}]
     actions = []
-    for workflow in WORKFLOWS:
-        run = latest_run(api, pr, workflow)
-        kind = retry_kind(api, pr, run, workflow, labels) if run is not None else None
+    for group in LABEL_WORKFLOW_GROUPS:
+        selected = latest_run(api, pr, group)
+        if selected is None:
+            continue
+        run, workflow = selected
+        kind = retry_kind(api, pr, run, workflow, labels)
         if kind is None:
             continue
-        newest = latest_run(api, pr, workflow)
-        if newest is None or newest["id"] != run["id"]:
+        newest = latest_run(api, pr, group)
+        if newest is None or newest[0]["id"] != run["id"] or newest[1] != workflow:
             continue
         live_run = api.request(f"repos/{api.repo}/actions/runs/{run['id']}")
         live_pr, live_labels = label_state(api, number, head)

@@ -5,12 +5,13 @@ Behavior tests: tests/ci/test_required_results.py
 
 Input: the JSON ``toJSON(needs)`` of the all-checks-pass job on stdin.
 Failures always fail the gate. A skipped or missing update/E2E consumer also
-fails whenever ``detect.outputs`` selects its lane. Other skips additionally
-fail in release mode unless the job is in :data:`EXCLUDED_JOBS` (PR-only jobs
+fails whenever ``detect.outputs`` selects its lane. Qualified fork PRs also
+require a successful ``review-admission`` when every source lane skipped.
+Other skips fail in release mode unless the job is in :data:`EXCLUDED_JOBS` (PR-only jobs
 that cannot run on a tag event, plus the deferred Desktop E2E). The OSV scan
 is advisory in its findings only — its execution is required.
 
-    echo "$NEEDS" | python3 scripts/ci/required_results.py [--release]
+    echo "$NEEDS" | python3 scripts/ci/required_results.py [--release] [--pull-request]
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ _UPDATE_CONSUMER_LANES = {
 def evaluate_gate(
     needs: dict[str, dict[str, Any]] | None,
     release: bool = False,
+    pull_request: bool = False,
 ) -> dict[str, Any]:
     """Verdict for a ``needs`` context; see the module docstring.
 
@@ -54,6 +56,8 @@ def evaluate_gate(
     lanes = (entries.get("detect") or {}).get("outputs") or {}
     required = {job for job, keys in _UPDATE_CONSUMER_LANES.items()
                 if any(lanes.get(key) in ("true", True) for key in keys)}
+    if pull_request:
+        required.add("review-admission")
     if not entries:
         failed.append("<no-needs>")
     failed.extend(required - entries.keys())
@@ -97,10 +101,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Strict mode: a skipped excluded job is the only tolerated skip.",
     )
+    parser.add_argument(
+        "--pull-request", action="store_true",
+        help="Qualified fork PR: substantive review admission must exist and succeed.",
+    )
     args = parser.parse_args(argv)
 
     needs = json.load(sys.stdin)
-    verdict = evaluate_gate(needs, release=args.release)
+    verdict = evaluate_gate(needs, release=args.release, pull_request=args.pull_request)
     compact = compact_results(needs)
 
     output_file = os.environ.get("GITHUB_OUTPUT")

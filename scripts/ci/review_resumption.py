@@ -9,8 +9,12 @@ from pathlib import Path
 
 from scripts.ci.review_admission import GitHub, MetadataError, arguments, inspect
 
-WORKFLOWS = ("ci.yaml", "docker.yml", "nix.yml", "plugin-catalog-ci.yml", "install-e2e.yml",
-             "pm-bundle.yml", "termux-verify.yml", "sandbox-image.yml", "windows-bundle-sdk.yml")
+# Aliases share one logical lane: a healthy new wrapper replaces the old entry.
+WORKFLOW_GROUPS = (("ci.yaml",), ("docker-pr.yml", "docker.yml"), ("nix-pr.yml", "nix.yml"),
+                   ("plugin-catalog-ci.yml",), ("install-e2e-pr.yml", "install-e2e.yml"),
+                   ("pm-bundle-pr.yml", "pm-bundle.yml"), ("termux-verify-pr.yml", "termux-verify.yml"),
+                   ("sandbox-image.yml",), ("windows-bundle-sdk.yml",))
+WORKFLOWS = tuple(workflow for group in WORKFLOW_GROUPS for workflow in group)
 MAX_ATTEMPT = 3  # At most two automatic retry requests per original run.
 
 
@@ -22,6 +26,15 @@ def matches(run: dict, pr: dict, workflow: str) -> bool:
             and run["head_repository"]["full_name"] == head["repo"]["full_name"]
             and any(item["number"] == pr["number"] and item["head"]["sha"] == head["sha"]
                     for item in run["pull_requests"]))
+
+
+def latest_run(api: GitHub, pr: dict, workflows: tuple[str, ...]) -> tuple[dict, str] | None:
+    qualified = []
+    for workflow in workflows:
+        runs = api.pages(f"actions/workflows/{workflow}/runs", "workflow_runs",
+                         event="pull_request", head_sha=pr["head"]["sha"])
+        qualified.extend((run, workflow) for run in runs if matches(run, pr, workflow))
+    return max(qualified, key=lambda item: item[0]["id"]) if qualified else None
 
 
 def retry_kind(run: dict, jobs: list) -> str | None:
@@ -38,23 +51,19 @@ def resume(api: GitHub, number: int, head: str) -> list[dict]:
     if verdict["state"] != "clean":
         return [{"pr": number, **verdict, "action": "hold"}]
     actions = []
-    for workflow in WORKFLOWS:
-        runs = api.pages(f"actions/workflows/{workflow}/runs", "workflow_runs",
-                         event="pull_request", head_sha=head)
-        qualified = [run for run in runs if matches(run, pr, workflow)]
-        if not qualified:
-            actions.append({"workflow": workflow, "action": "none", "reason": "No qualified PR run"})
+    for group in WORKFLOW_GROUPS:
+        selected = latest_run(api, pr, group)
+        if selected is None:
+            actions.append({"workflow": group[0], "action": "none", "reason": "No qualified PR run"})
             continue
-        run = max(qualified, key=lambda item: item["id"])
+        run, workflow = selected
         jobs = api.pages(f"actions/runs/{run['id']}/jobs", "jobs", filter="latest")
         kind = retry_kind(run, jobs)
         if kind is None:
             actions.append({"run": run["id"], "action": "none", "reason": "Run needs no automatic retry"})
             continue
-        latest_runs = api.pages(f"actions/workflows/{workflow}/runs", "workflow_runs",
-                               event="pull_request", head_sha=head)
-        latest_ids = [item["id"] for item in latest_runs if matches(item, pr, workflow)]
-        if not latest_ids or max(latest_ids) != run["id"]:
+        latest = latest_run(api, pr, group)
+        if latest is None or latest[0]["id"] != run["id"] or latest[1] != workflow:
             actions.append({"run": run["id"], "action": "none", "reason": "A newer PR run exists"})
             continue
         # Re-evaluate live review, producer, PR identity and the latest attempt just
@@ -115,8 +124,8 @@ def main() -> int:
 
             # Any surviving writer must reconcile live label state: GitHub can
             # replace pending same-group events. This is the single label retry
-            # implementation, preserving independent maintainer authority during
-            # bootstrap while substantive admission remains unwired.
+            # implementation. Bootstrap runs keep their original label authority;
+            # gated runs recheck substantive admission before label retries.
             for action in resume_labels(api, args.pr, args.head):
                 print(json.dumps(action))
             for action in resume(api, args.pr, args.head):

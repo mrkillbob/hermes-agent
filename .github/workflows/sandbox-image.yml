@@ -37,9 +37,39 @@ env:
   IMAGE_NAME: nousresearch/hermes-sandbox
 
 jobs:
+  # Metadata only. No PR source/actions are fetched before admission succeeds.
+  # Outside this fork's PR policy every step is a no-op, preserving caller behavior.
+  review-admission:
+    name: Review admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Check out trusted default-branch evaluator
+        if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: false
+      - name: Evaluate current full-head Code and Security review
+        if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 -m scripts.ci.review_admission --repo "$REVIEW_REPO" --pr "$REVIEW_PR" --head "$REVIEW_HEAD"
+
   # PR code: secret-free build + smoke per arch.
   build:
-    if: github.repository == 'NousResearch/hermes-agent'
+    needs: [review-admission]
+    if: ${{ needs.review-admission.result == 'success' && (github.repository == 'NousResearch/hermes-agent') }}
     strategy:
       fail-fast: false
       matrix:
@@ -75,8 +105,8 @@ jobs:
 
   # Trusted source only; the sole Docker Hub credential boundary.
   publish:
-    if: github.repository == 'NousResearch/hermes-agent' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish))
-    needs: [build]
+    if: ${{ needs.review-admission.result == 'success' && (github.repository == 'NousResearch/hermes-agent' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish))) }}
+    needs: [review-admission, build]
     environment: container-publish
     strategy:
       fail-fast: false
@@ -129,8 +159,8 @@ jobs:
 
   # Registry-side stitch of the two digests into one tagged manifest list.
   merge:
-    if: ${{ !cancelled() && github.repository == 'NousResearch/hermes-agent' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish)) }}
-    needs: [publish]
+    if: ${{ needs.review-admission.result == 'success' && (!cancelled() && github.repository == 'NousResearch/hermes-agent' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish))) }}
+    needs: [review-admission, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: container-publish

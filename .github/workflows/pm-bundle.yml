@@ -31,20 +31,6 @@ on:
         required: false
         type: string
         default: ''
-  pull_request:
-    paths:
-      - 'pm/**'
-      - '!pm/**/*.md'
-      - 'scripts/bundles/**'
-      - 'scripts/ci/desktop_build_cache.py'
-      - '.github/actions/desktop-build-cache/**'
-      - 'scripts/windows-build-deps.ps1'
-      - 'scripts/build/windows-deps.ps1'
-      - '.github/actions/setup-windows-build-deps/**'
-      - 'uv.lock'
-      - 'pyproject.toml'
-      - '.github/workflows/pm-bundle.yml'
-
 permissions:
   contents: read
 

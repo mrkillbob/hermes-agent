@@ -50,6 +50,35 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Metadata only. No PR source/actions are fetched before admission succeeds.
+  # Outside this fork's PR policy every step is a no-op, preserving caller behavior.
+  review-admission:
+    name: Review admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Check out trusted default-branch evaluator
+        if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: false
+      - name: Evaluate current full-head Code and Security review
+        if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 -m scripts.ci.review_admission --repo "$REVIEW_REPO" --pr "$REVIEW_PR" --head "$REVIEW_HEAD"
+
   # ─────────────────────────────────────────────────────────────────────
   # detect: run the classifier once. Every downstream job reads its outputs
   # to decide whether to run. On push/dispatch the classifier fails open
@@ -61,6 +90,8 @@ jobs:
   # tag is not a meaningful applicability signal.
   # ─────────────────────────────────────────────────────────────────────
   detect:
+    needs: [review-admission]
+    if: ${{ needs.review-admission.result == 'success' }}
     name: Detect affected areas
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -170,10 +201,10 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   tests:
     name: Python tests
-    needs: detect
+    needs: [review-admission, detect]
     # Its E2E jobs are lanes of their own: a lane the classifier sets must reach
     # its job whatever `python` says (tests/ci/test_update_ci_routing.py).
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true'
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.python == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true') }}
     uses: ./.github/workflows/tests.yml
     with:
       # NousResearch runs the full unit suite on one 32-core runner. Forks
@@ -195,8 +226,8 @@ jobs:
   # This fork's Windows-native advisory callers retain visible results.
   tests-os:
     name: OS-specific tests
-    needs: detect
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.desktop_updater == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true'
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.python == 'true' || needs.detect.outputs.desktop_updater == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true') }}
     uses: ./.github/workflows/tests-os.yml
     with:
       platform_scope: ${{ needs.detect.outputs.os_tests_scope }}
@@ -210,8 +241,8 @@ jobs:
 
   tests-windows-advisory:
     name: Windows-only tests (advisory)
-    needs: detect
-    if: (needs.detect.outputs.python == 'true' || needs.detect.outputs.desktop_updater == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true') && needs.detect.outputs.advisory_windows == 'true'
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' && ((needs.detect.outputs.python == 'true' || needs.detect.outputs.desktop_updater == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true') && needs.detect.outputs.advisory_windows == 'true') }}
     uses: ./.github/workflows/tests-os.yml
     with:
       platform_scope: windows
@@ -222,9 +253,9 @@ jobs:
 
   lint:
     name: Python lints
-    needs: detect
+    needs: [review-admission, detect]
     # frontend too: the code-health ratchet in lint.yml also covers TypeScript.
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.frontend == 'true'
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.python == 'true' || needs.detect.outputs.frontend == 'true') }}
     uses: ./.github/workflows/lint.yml
     with:
       event_name: ${{ needs.detect.outputs.event_name }}
@@ -232,40 +263,40 @@ jobs:
 
   js-tests:
     name: JS & TS checks
-    needs: detect
-    if: needs.detect.outputs.frontend == 'true'
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.frontend == 'true') }}
     uses: ./.github/workflows/js-tests.yml
 
   rust-tests:
     name: Rust tests
-    needs: detect
+    needs: [review-admission, detect]
     # Only for PRs that touch a Rust crate. `.rs` is under apps/, so these
     # changes used to run the TypeScript matrix and nothing that compiles them.
-    if: needs.detect.outputs.rust == 'true'
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.rust == 'true') }}
     uses: ./.github/workflows/rust-tests.yml
 
   bootstrap-installer:
     name: Bootstrap installer
-    needs: detect
+    needs: [review-admission, detect]
     # The bootstrap-installer path: install.sh, the pin fragments it embeds,
     # and the version stamp it ships. The PowerShell installer's native tests
     # are platforms("windows") pytest files and run in tests-os.
-    if: needs.detect.outputs.bootstrap == 'true'
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.bootstrap == 'true') }}
     uses: ./.github/workflows/bootstrap-installer.yml
     with:
       platform_scope: ${{ needs.detect.outputs.bootstrap_tests_scope }}
 
   bootstrap-windows-advisory:
     name: Windows-only bootstrap installer (advisory)
-    needs: detect
-    if: needs.detect.outputs.bootstrap == 'true' && needs.detect.outputs.advisory_windows == 'true'
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.bootstrap == 'true' && needs.detect.outputs.advisory_windows == 'true') }}
     uses: ./.github/workflows/bootstrap-installer.yml
     with:
       platform_scope: windows
 
   e2e-desktop:
     name: Desktop E2E
-    needs: detect
+    needs: [review-admission, detect]
     # python_prod (not python): the Playwright suite exercises the built app
     # + `hermes serve` backend, which never import anything under tests/.
     # Tests-only PRs (~17% of commits) skip this 5-minute job — the longest
@@ -278,21 +309,21 @@ jobs:
     # occurred") — every ci.yaml run repo-wide dispatched 0 jobs from
     # 24f5a60ed1 until this line changed. To re-enable, restore:
     #   if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
-    if: ${{ github.event_name == 'workflow_call' }}
+    if: ${{ needs.review-admission.result == 'success' && (github.event_name == 'workflow_call') }}
     uses: ./.github/workflows/e2e-desktop.yml
 
   e2e-desktop-core:
     name: Desktop core E2E
-    needs: detect
+    needs: [review-admission, detect]
     # The deterministic core suite (apps/desktop/e2e/core): transcript
     # integrity, boot/respawn/orphans, clarify+approval. Run it on PRs so
     # lifecycle and profile-routing regressions are found before merge; retries 0.
-    if: ${{ needs.detect.outputs.e2e_desktop_core == 'true' || (github.repository != 'NousResearch/hermes-agent' && (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true')) }}
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.e2e_desktop_core == 'true' || (github.repository != 'NousResearch/hermes-agent' && (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true'))) }}
     uses: ./.github/workflows/e2e-desktop-core.yml
 
   e2e-desktop-update:
     name: Desktop update E2E
-    needs: detect
+    needs: [review-admission, detect]
     # apps/desktop/e2e/update: a real install.sh install + packaged Desktop,
     # first run, "Update now" hand-off/relaunch, concurrent-update refusal.
     # Required when it runs: a PR that touches the Desktop update path (the
@@ -300,79 +331,84 @@ jobs:
     # the Linux e2e-upgrade shards and the Windows install + update journey
     # (tests / tests-os, gated on e2e_upgrade), it is skipped — and the skip
     # counts as success — when the PR does not touch that path.
-    if: ${{ needs.detect.outputs.e2e_desktop_update == 'true' || (github.repository != 'NousResearch/hermes-agent' && (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true')) }}
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.e2e_desktop_update == 'true' || (github.repository != 'NousResearch/hermes-agent' && (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true'))) }}
     uses: ./.github/workflows/e2e-desktop-update.yml
 
   docs-site:
     name: Docs Site
-    needs: detect
-    if: needs.detect.outputs.site == 'true'
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.site == 'true') }}
     uses: ./.github/workflows/docs-site-checks.yml
 
   history-check:
     name: Deny unrelated histories
-    needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request'
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.event_name == 'pull_request') }}
     uses: ./.github/workflows/history-check.yml
 
   contributor-check:
     name: Check contributors
-    needs: detect
-    if: needs.detect.outputs.python == 'true'
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.python == 'true') }}
     uses: ./.github/workflows/contributor-check.yml
 
   uv-lockfile:
     name: Check uv.lock
-    needs: detect
+    needs: [review-admission, detect]
     # Gated: `uv lock --check` re-resolves the whole dependency graph against
     # PyPI, so on every PR it spent a network round-trip — and, on a registry
     # blip, a blocking red X — for diffs that cannot desync the lockfile
     # (docs, frontend, prose). Only pyproject.toml / uv.lock can. A
     # `.github/` change still forces it on via the classifier's fail-open.
-    if: needs.detect.outputs.uv_lock == 'true'
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.uv_lock == 'true') }}
     uses: ./.github/workflows/uv-lockfile-check.yml
 
   infographic-check:
     name: Check no committed infographics
-    needs: detect
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' }}
     uses: ./.github/workflows/infographic-check.yml
 
   profile-artifact-check:
     name: Profile artifact check
-    needs: detect
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' }}
     uses: ./.github/workflows/profile-artifact-check.yml
 
   icons-freshness-check:
     name: Icon assets freshness
-    needs: detect
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' }}
     uses: ./.github/workflows/icons-freshness-check.yml
 
   case-collision-check:
     name: Check no case-colliding filenames
-    needs: detect
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' }}
     uses: ./.github/workflows/case-collision-check.yml
 
   lazy-deps-guard:
     name: No production imports of the tools.lazy_deps stub
-    needs: detect
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' }}
     uses: ./.github/workflows/lazy-deps-guard.yml
 
   lockfile-diff:
     name: package-lock.json diff
-    needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request' && needs.detect.outputs.npm_lock == 'true'
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.event_name == 'pull_request' && needs.detect.outputs.npm_lock == 'true') }}
     uses: ./.github/workflows/lockfile-diff.yml
 
   docker-lint:
     name: Lint Docker scripts
-    needs: detect
-    if: needs.detect.outputs.docker_meta == 'true'
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.docker_meta == 'true') }}
     uses: ./.github/workflows/docker-lint.yml
 
   supply-chain:
     name: Supply-chain scan
-    needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request' && (needs.detect.outputs.scan == 'true' || needs.detect.outputs.deps == 'true' || needs.detect.outputs.npm_lock == 'true')
+    needs: [review-admission, detect]
+    if: ${{ needs.review-admission.result == 'success' && (needs.detect.outputs.event_name == 'pull_request' && (needs.detect.outputs.scan == 'true' || needs.detect.outputs.deps == 'true' || needs.detect.outputs.npm_lock == 'true')) }}
     permissions:
       contents: read
       pull-requests: read
@@ -385,8 +421,8 @@ jobs:
 
   review-labels:
     name: Review label gate
-    needs: [detect, supply-chain]
-    if: always() && needs.detect.outputs.event_name == 'pull_request' && (needs.detect.outputs.ci_review == 'true' || needs.detect.outputs.mcp_catalog == 'true' || needs.supply-chain.outputs.critical_findings == 'true')
+    needs: [review-admission, detect, supply-chain]
+    if: ${{ needs.review-admission.result == 'success' && (always() && needs.detect.outputs.event_name == 'pull_request' && (needs.detect.outputs.ci_review == 'true' || needs.detect.outputs.mcp_catalog == 'true' || needs.supply-chain.outputs.critical_findings == 'true')) }}
     permissions:
       contents: read
       pull-requests: read
@@ -398,6 +434,7 @@ jobs:
       supply_chain: ${{ needs.supply-chain.outputs.critical_findings == 'true' }}
 
   osv-scanner:
+    needs: [review-admission]
     name: OSV scan
     permissions:
       actions: read
@@ -405,7 +442,7 @@ jobs:
       security-events: write
     # PR scans use the artifact/review-status path below. Direct main pushes
     # are scanned by osv-scanner.yml's push trigger so they can publish SARIF.
-    if: github.event_name == 'pull_request'
+    if: ${{ needs.review-admission.result == 'success' && (github.event_name == 'pull_request') }}
     uses: ./.github/workflows/osv-scanner.yml
     with:
       # A literal false avoids re-evaluation across nested reusable-workflow
@@ -442,6 +479,7 @@ jobs:
   all-checks-pass:
     name: ${{ github.repository == 'NousResearch/hermes-agent' && 'All required checks pass (v2)' || 'All required checks pass' }}
     needs:
+      - review-admission
       - detect
       - tests
       - tests-os
@@ -478,6 +516,15 @@ jobs:
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
     steps:
+      - name: Require successful substantive PR admission before fetching source
+        if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+        env:
+          REVIEW_ADMISSION_RESULT: ${{ needs.review-admission.result }}
+        run: |
+          if [ "$REVIEW_ADMISSION_RESULT" != success ]; then
+            echo "::error::Current-head Code and Security review admission is not clean."
+            exit 1
+          fi
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -489,9 +536,11 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
           RELEASE: ${{ inputs.release }}
+          PULL_REQUEST: ${{ github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request' }}
         run: |
           args=()
           if [ "$RELEASE" = true ]; then args+=(--release); fi
+          if [ "$PULL_REQUEST" = true ]; then args+=(--pull-request); fi
           printf '%s' "$NEEDS" | python3 scripts/ci/required_results.py "${args[@]}"
 
   # ─────────────────────────────────────────────────────────────────────
@@ -506,8 +555,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   ci-timings:
     name: CI timing report
-    needs: [all-checks-pass]
-    if: always()
+    needs: [review-admission, all-checks-pass]
+    if: ${{ needs.review-admission.result == 'success' && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

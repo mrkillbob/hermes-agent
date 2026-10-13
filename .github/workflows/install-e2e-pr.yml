@@ -1,0 +1,83 @@
+name: Install & Update E2E PR
+
+# PR-only entry. Release/push/manual callers keep the original workflow unchanged.
+on:
+  pull_request:
+    # The install/update surface: derived from 60 days of commits whose subject
+    # names update/install/pm/bootstrap/relaunch. Keep it to code a real
+    # install or `hermes update` executes; hermes_cli/main.py and friends are
+    # deliberately absent (they change daily and are covered by e2e-upgrade).
+    paths:
+      - 'scripts/install*'
+      - 'scripts/desktop-update/**'
+      - 'setup-hermes.*'
+      - 'hermes_bootstrap.py'
+      - 'pm/**'
+      - '!pm/**/*.md'
+      - 'hermes_cli/update*'
+      - 'hermes_cli/*update*'
+      - 'hermes_cli/pm*'
+      - 'hermes_cli/*install*'
+      - 'hermes_cli/_early_recovery*.py'
+      - 'hermes_cli/_launchers.py'
+      - 'hermes_cli/managed_uv.py'
+      - 'hermes_cli/venv_sync.py'
+      - 'hermes_cli/relaunch.py'
+      - 'hermes_cli/gateway.py'
+      - 'gateway/status.py'
+      - 'apps/bootstrap-installer/**'
+      - 'apps/desktop/electron/*update*'
+      - 'apps/desktop/electron/updater/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tests/install/**'
+      - 'scripts/sandbox/generate-e2e-matrix.mjs'
+      - 'scripts/sandbox/pick-release-tags.sh'
+      - 'scripts/ci/setup_toolchain.py'
+      - '.github/actions/setup-pm/**'
+      - '.github/workflows/install-e2e*.yml'
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  # Metadata only. No PR source/actions are fetched before admission succeeds.
+  # Outside this fork's PR policy every step is a no-op, preserving caller behavior.
+  review-admission:
+    name: Review admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Check out trusted default-branch evaluator
+        if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: false
+      - name: Evaluate current full-head Code and Security review
+        if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPO: ${{ github.repository }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 -m scripts.ci.review_admission --repo "$REVIEW_REPO" --pr "$REVIEW_PR" --head "$REVIEW_HEAD"
+
+  checks:
+    name: PR checks
+    needs: review-admission
+    if: needs.review-admission.result == 'success'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/install-e2e.yml

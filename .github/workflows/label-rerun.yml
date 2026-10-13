@@ -21,13 +21,14 @@ on:
   pull_request:
     types: [labeled]
   workflow_run:
-    workflows: [CI, "Docker Build, Test, and Publish", "Nix flake check"]
+    workflows: [CI, "Docker Build, Test, and Publish", "Nix flake check", "Docker Build, Test, and Publish PR", "Nix flake check PR"]
     types: [completed]
 
 permissions:
   contents: read
   actions: write
   pull-requests: read
+  issues: read
 
 # Share the review controller's PR key so actual retries cannot overlap.
 concurrency:

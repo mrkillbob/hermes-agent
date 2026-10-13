@@ -86,7 +86,10 @@ def test_scheduled_and_main_r2_consumers_skip_without_credentials():
     assert r2_steps and all(needs_r2_credentials(s) for s in r2_steps)
 
     termux = load("termux-verify.yml")
-    assert termux["on"]["push"]["branches"] == ["main"] and "pull_request" in termux["on"]
+    assert termux["on"]["push"]["branches"] == ["main"]
+    pr_entry = load("termux-verify-pr.yml")
+    assert "pull_request" in pr_entry["on"] and "pull_request" not in termux["on"]
+    assert pr_entry["jobs"]["checks"]["uses"] == "./.github/workflows/termux-verify.yml"
     native = termux["jobs"]["native-runtime"]
     probe = termux["jobs"][native["needs"]]
     assert probe["environment"] == "release-signing"

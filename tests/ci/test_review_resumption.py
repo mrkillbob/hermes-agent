@@ -126,16 +126,18 @@ elif path.endswith(f"/issues/{data['pr']['number']}/timeline"):
     result = data["timeline"]
 elif path.endswith("/pulls"):
     result = [data["pr"]]
-elif path.endswith("/actions/runs/11/jobs"):
-    result = {"jobs": data["jobs"], "total_count": len(data["jobs"])}
+elif "/actions/runs/" in path and path.endswith("/jobs"):
+    jobs = data["jobs"] if path.endswith("/11/jobs") else []
+    result = {"jobs": jobs, "total_count": len(jobs)}
 elif path.endswith("/actions/runs/11"):
     result = data["runs"][0]
 elif "/actions/runs/11/attempts/" in path:
     result = data.get("attempt", data["runs"][0])
 elif "/actions/workflows/" in path:
     data["run_reads"] = data.get("run_reads", 0) + 1
-    result = {"workflow_runs": data["runs"] if path.endswith("ci.yaml/runs") else [],
-              "total_count": len(data["runs"]) if path.endswith("ci.yaml/runs") else 0}
+    workflow = path.split("/actions/workflows/", 1)[1].split("/", 1)[0]
+    matching = data.get("workflow_runs", {}).get(workflow, data["runs"] if workflow == "ci.yaml" else [])
+    result = {"workflow_runs": matching, "total_count": len(matching)}
     if data.get("newer_run") and data["run_reads"] > 1 and path.endswith("ci.yaml/runs"):
         result = {"workflow_runs": [dict(data["runs"][0], id=12, status="in_progress")], "total_count": 1}
 else:
@@ -656,3 +658,38 @@ def test_label_and_review_retry_writers_share_the_same_per_pr_concurrency_key():
     assert "github.event.pull_request.number" in label_group
     assert "github.event.workflow_run.pull_requests[0].number" in label_group
     assert label["concurrency"]["cancel-in-progress"] is False
+
+
+def test_gated_run_label_waits_for_both_reviews_without_consuming_retry_cap(tmp_path):
+    data = label_snapshot()
+    data["jobs"].append({"name": "Review admission", "conclusion": "failure"})
+    data["comments"] = []
+    process, held = invoke(tmp_path, data, "label")
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert held["mutations"] == []
+    held["comments"] = [activity_comment()]
+    process, resumed = invoke(tmp_path, held, "label")
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert resumed["mutations"] == [f"repos/{REPO}/actions/runs/11/rerun"]
+
+
+def test_public_clean_wrapper_completion_resumes_full_pr_run(tmp_path):
+    data = snapshot()
+    data["runs"] = [dict(run_info(), path=".github/workflows/docker-pr.yml")]
+    data["workflow_runs"] = {"docker-pr.yml": data["runs"]}
+    data["jobs"] = [{"name": "Review admission", "conclusion": "failure"}]
+    process, resumed = invoke(tmp_path, data, "resume")
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert resumed["mutations"] == [f"repos/{REPO}/actions/runs/11/rerun"]
+
+
+@pytest.mark.parametrize("command", ["label", "resume"])
+def test_wrapper_replacement_prevents_reviving_old_alias_run(tmp_path, command):
+    data = label_snapshot()
+    data["runs"] = [dict(run_info(), path=".github/workflows/docker.yml")]
+    replacement = dict(data["runs"][0], id=12, path=".github/workflows/docker-pr.yml", status="in_progress")
+    data["workflow_runs"] = {"docker.yml": data["runs"], "docker-pr.yml": [replacement]}
+    data["jobs"] = [{"name": "Review admission", "conclusion": "failure"}]
+    process, quiet = invoke(tmp_path, data, command)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert quiet["mutations"] == []

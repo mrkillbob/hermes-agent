@@ -2,10 +2,12 @@
 title: CI review admission and resumption
 ---
 
-This candidate evaluates the canonical **public Code Review and Security Review
-producer** and implements bounded resumption. Universal early admission is not
-wired yet. Normal PR CI triggers remain intact until the trusted evaluator is
-available on the default branch and its hosted metadata access is qualified.
+The bootstrap candidate provides the canonical public Code/Security evaluator
+and bounded resumption. The stacked early-admission candidate additionally wires
+every substantive `mrkillbob/hermes-agent` PR entry before PR source, classifiers,
+local actions or reusable test lanes execute. Its gates intentionally hold while
+trusted default-branch helpers or qualified public Security evidence are missing.
+Other repositories and non-PR events retain their existing behavior.
 
 ## Exact-head public evidence
 
@@ -48,6 +50,49 @@ The same completed security v1 shape was observed on PRs #217, #220 and #207.
 Private reviews outside this public producer cannot be inferred from these records
 or used as substitutes for either required public pass.
 
+## Early admission coverage
+
+Every entry uses a read-only inline job named exactly `Review admission`, so the
+resumption controller sees that unprefixed job name. It checks out only the
+trusted default branch's `scripts/ci` at depth one, without persisted credentials,
+then evaluates the original PR number and full head SHA. It has only
+`contents: read`, `pull-requests: read` and `issues: read`; the last scope covers
+PR-level reaction reads. No PR code, local action, artifact, environment secret,
+inherited secret or App credential participates in admission.
+
+| PR entry | Substantive consumers |
+| --- | --- |
+| `ci.yaml` | Classifier, all reusable unit/native/E2E/lint/security lanes, human review-label gate and timing report |
+| `docker-pr.yml` | Original Docker classifier/build/test jobs via `docker.yml` |
+| `nix-pr.yml` | Original Nix classifier and flake checks via `nix.yml` |
+| `install-e2e-pr.yml` | Original install/update planners, native matrices and report via `install-e2e.yml` |
+| `pm-bundle-pr.yml` | Original native payload matrix via `pm-bundle.yml` |
+| `termux-verify-pr.yml` | Original contracts and TUI checks via `termux-verify.yml` |
+| `plugin-catalog-ci.yml` | Structural and pinned-source validation |
+| `sandbox-image.yml` | Existing source/host-qualified image jobs |
+| `windows-bundle-sdk.yml` | Existing native SDK matrix |
+
+The five PR wrappers retain the original filters and default PR inputs; their
+children no longer have independent PR triggers. Their called jobs keep the
+original read ceilings and inherit no release secrets. Original push, scheduled,
+manual and stable-release bodies stay intact. The secret-free stable CI caller
+adds only `issues: read` so its inline admission job does not exceed the reusable
+caller ceiling; deployment, signing and R2 grants are unchanged.
+
+CI's required aggregate retains its existing check name, waits for admission and
+runs a static admission precheck before fetching PR source. Failure, cancellation,
+skip, pending, missing and unknown admission all fail that precheck. The shared
+aggregate evaluator also receives explicit qualified-PR context and rejects a
+missing/skipped admission record; historical main/release contexts remain valid.
+Every `always()`/`!cancelled()` source consumer has its own admission dependency
+and success condition. Non-policy admission steps are no-ops, so original implicit
+success dependencies and upstream behavior are preserved.
+
+GitHub documents both [dependency skip propagation](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds)
+and the [implicit success check](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions).
+Reusable workflows retain the [caller's GitHub context and permission ceiling](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations),
+which is why release workflows are protected through separate PR wrappers.
+
 ## Trusted resumption
 
 `Review CI wake-up` preserves unprivileged native review/review-comment events.
@@ -65,6 +110,9 @@ re-reads producer state, reactions, reviews, findings, live PR head and target r
 immediately before each write. New running work or a moved head stops the retry.
 
 Runs must match the exact head, head repository, workflow path and PR association.
+The live review comment also observes the Docker PR wrapper. Old entries and
+their new PR wrappers share one logical lane: the newest qualified
+run across both aliases wins, so an active wrapper cannot revive an older entry.
 A newer run or a healthy active run is left alone. A failed `Review admission`
 job requires a full rerun so held downstream lanes can start. Writes serialize
 only per PR; each original run receives at most two automatic retries. Metadata
@@ -76,7 +124,12 @@ The existing maintainer `Label rerun` workflow and any surviving scheduled/revie
 writer call the same `label_resumption.py` implementation. This compensates for
 GitHub replacing a pending same-group label event, even when substantive review
 remains held during bootstrap. There is one label retry implementation and no
-second competing retry algorithm. `ci-reviewed` stays independent human
+second competing retry algorithm. Bootstrap runs without a `Review admission`
+job retain their original label behavior. When that job is present, label retries
+recheck the same substantive review verdict before every write, holding without
+consuming the retry cap until both passes clear. The admission evaluator never
+requires the human label, so the two authorities cannot create a cycle.
+`ci-reviewed` stays independent human
 approval and is never added automatically. Legacy label retries remain available
 during bootstrap, but do not establish substantive review completion. Native
 label additions and completed CI/Docker/Nix events use that trusted helper.
@@ -96,15 +149,25 @@ cancels, resolves findings, merges or changes settings.
 
 ## Rollout and remaining limits
 
-Bootstrap in two stages: first make this trusted producer evaluator/controller
-available on the default branch, including the shared label retry helper, and
-verify the existing read token's hosted metadata access; then add a required early `Review admission` job before every
-PR-controlled lane. Include it in the aggregate gate so a hold cannot become a
-green all-skipped run. Preserve classification and every PR source/host/security
-guard, and apply substantive admission to the shared label retry helper only
-after the producer is qualified. Until that second stage, label compatibility
-remains independent and cannot establish substantive completion.
-Do not make a candidate PR depend on a script that is not yet on the default branch.
+Deliver in two phases: land the independently reviewed bootstrap evaluator and
+controllers first (PR #237), with their explicit hosted metadata read permissions;
+then land this stacked gate wiring after current-head Code and Security producer
+behavior and hosted token reads are qualified. The wiring candidate does depend
+on the trusted default-branch helper and intentionally holds while it is absent.
+It contains no inline evaluator, exemption, private-review substitute or fail-open
+bootstrap switch.
+
+The authenticated settings audit found automatic Security Review disabled. Its
+exact human approval to enable it is pending outside this source patch. No setting,
+App/OAuth permission, secret or installation is changed here. A Code-only activity
+summary or a manually requested Security pass recorded only as Code remains held.
+Qualified public Security completion must actually appear before admission clears.
+
+This is a stacked candidate on `18ec23e8a360f511650bbe67b3c107ce039ed88e`. Publishing
+it as a draft does not activate default-branch controllers or qualify the producer.
+Missing helper/security evidence will keep its PR checks visibly failed/held until
+the bootstrap and producer dependencies are met. Existing PR-context runs can then
+be retried in full by the trusted controller; no mutable branch dispatch is used.
 
 Code-only or stale/missing Security Review records remain blocked under the
 both-required policy. Resolving findings cannot manufacture a clean witness: a
@@ -114,6 +177,6 @@ when both current-head completion records and the fresh witness already exist.
 No private task, reaction, label or successful CI substitutes for missing evidence.
 
 Run the inert API fixtures with the canonical explicit interpreter and one worker:
-`HERMES_PYTHON="$PWD/.venv/bin/python" scripts/run_tests.sh -j 1 tests/ci/test_review_resumption.py`.
+`HERMES_PYTHON="$PWD/.venv/bin/python" scripts/run_tests.sh -j 1 tests/ci/test_review_resumption.py tests/ci/test_review_admission_graph.py tests/ci/test_required_results.py tests/ci/test_workflow_job_graph.py`.
 The unchanged PTY-helper regression now lives beside its helper at
 `tests/e2e/core/terminal/test_pty_harness.py`; it opens no PTY and launches no Hermes.
