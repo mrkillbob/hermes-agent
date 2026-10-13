@@ -14,6 +14,7 @@ export interface UpdateWindowChatOptions {
   root: string
   executable: string
   userData: string
+  prepare?: () => Promise<void>
 }
 
 export interface UpdateWindowProcess {

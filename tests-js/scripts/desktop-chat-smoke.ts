@@ -5,6 +5,7 @@ import path from 'node:path'
 import { type ConsoleMessage, errors, expect, type Locator, type Page } from '@playwright/test'
 import { z } from 'zod'
 
+import { beginSelectionCapture, type SelectionCapture } from './desktop-selection-diagnostics.ts'
 import { validateMockUrl } from './mock-provider-config.ts'
 import { MOCK_REPLY } from './mock-server.ts'
 
@@ -17,6 +18,7 @@ export interface DesktopChatSmokeOptions {
   expectCommit?: string
   provenanceCommit?: string
   observePrompts?: () => Promise<readonly string[]>
+  selectionCapture?: SelectionCapture
 }
 
 export interface ChatIdentity {
@@ -401,9 +403,11 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
   }
 
   page.on('console', onConsole)
+  const selectionCapture = options.selectionCapture ?? await beginSelectionCapture(page, outDir, phase)
 
   try {
     const composer = await waitForChatReady(page)
+    await selectionCapture.checkpoint('chat-ready')
     const identity = await readChatIdentity(page)
 
     if (expectCommit) { assertChatCommit(identity, expectCommit, options.provenanceCommit) }
@@ -428,7 +432,9 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
     await expect.poll(async (): Promise<string> => composerText(composer), {
       timeout: 15_000, message: 'The composer must hold the typed prompt before Enter (did the editor accept input?)',
     }).toContain(prompt)
+    await selectionCapture.checkpoint('before-submit')
     await composer.press('Enter')
+    await selectionCapture.checkpoint('after-submit')
     await expect.poll(async (): Promise<string> => composerText(composer),
     { timeout: 90_000, message: 'The submitted draft must clear before the idle control proves completion' }).toBe('')
     let witnessIndex = -1
@@ -446,6 +452,7 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
     // Stop and the streaming marker must settle even when all reply text arrived.
     await expect(page.locator('[data-slot="composer-root"] button[aria-label="Start voice conversation"]:visible, [data-slot="composer-root"] button[type="submit"][aria-label="Send"]:visible')).toBeVisible({ timeout: 90_000 })
     const pair = newCompletedPair(await readTranscript(page), beforeIds, prompt)
+    await selectionCapture.checkpoint('complete')
 
     if (!pair) {
       throw new Error('New transcript pair disappeared before the turn completed')
@@ -463,11 +470,13 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
 
     return receipt
   } catch (error) {
+    await selectionCapture.checkpoint('failed')
     await page.screenshot({ path: screenshot }).catch((): void => {})
     fs.writeFileSync(evidencePath, `${await rendererEvidence(page, consoleLines)}\n`)
     fs.writeFileSync(receiptPath, `${JSON.stringify({ status: 'failed', phase, expectedCommit: expectCommit ?? null, prompt, error: String(error) }, null, 2)}\n`)
     throw error
   } finally {
+    if (!options.selectionCapture) { await selectionCapture.stop() }
     page.off('console', onConsole)
   }
 }

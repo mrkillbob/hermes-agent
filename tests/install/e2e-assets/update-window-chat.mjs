@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readChatIdentity, runDesktopChatSmoke, waitForChatReady } from '../../../tests-js/scripts/desktop-chat-smoke.ts';
+import { beginSelectionCapture } from '../../../tests-js/scripts/desktop-selection-diagnostics.ts';
 import { assertBackendOrigin, localBackendProcess, readInstallationCommit } from '../../../tests-js/scripts/desktop-smoke-process.ts';
 
 /**
@@ -37,12 +38,15 @@ export function assertUpdateWindowProcess(running, options) {
  * @param {import('@playwright/test').ElectronApplication} app
  * @param {import('@playwright/test').Page} page
  * @param {{mockUrl: string, outDir: string, expectCommit: string,
- *   origin: 'source'|'bundled', root: string, executable: string, userData: string}} options
+ *   origin: 'source'|'bundled', root: string, executable: string, userData: string,
+ *   prepare?: () => Promise<void>}} options
  */
 export async function runUpdateWindowChat(app, page, options) {
   const receiptPath = path.join(options.outDir, 'desktop-chat-old.json');
   fs.mkdirSync(options.outDir, { recursive: true });
+  const selectionCapture = await beginSelectionCapture(page, options.outDir, 'old');
   try {
+    await options.prepare?.();
     const running = await app.evaluate(({ app: electronApp }) => ({
       pid: process.pid, executable: process.execPath, resources: process.resourcesPath,
       userData: electronApp.getPath('userData'),
@@ -60,7 +64,7 @@ export async function runUpdateWindowChat(app, page, options) {
     assertUpdateWindowBackendOrigin(backend, identity, options.root, options.origin);
     const provenanceCommit = readInstallationCommit(options.root, options.origin);
     if (provenanceCommit !== options.expectCommit) throw new Error('Installed OLD commit differs from the expected commit');
-    const chat = await runDesktopChatSmoke(page, { ...options, phase: 'old', provenanceCommit });
+    const chat = await runDesktopChatSmoke(page, { ...options, phase: 'old', provenanceCommit, selectionCapture });
     const result = { ...chat, origin: options.origin, root: options.root,
       executable: options.executable, appPid: running.pid,
       backend: { pid: backend.pid, parentPid: backend.parentPid, executable: backend.executable },
@@ -68,10 +72,15 @@ export async function runUpdateWindowChat(app, page, options) {
       launchKind: 'pre-update-window' };
     fs.writeFileSync(receiptPath, JSON.stringify(result, null, 2) + '\n');
   } catch (error) {
+    await selectionCapture.checkpoint('failed').catch(() => {});
     await page.screenshot({ path: path.join(options.outDir, 'desktop-chat-old-failed.png') }).catch(() => {});
-    fs.writeFileSync(receiptPath, JSON.stringify({ status: 'failed', phase: 'old',
-      expectedCommit: options.expectCommit, origin: options.origin, root: options.root,
-      error: String(error) }, null, 2) + '\n');
+    try {
+      fs.writeFileSync(receiptPath, JSON.stringify({ status: 'failed', phase: 'old',
+        expectedCommit: options.expectCommit, origin: options.origin, root: options.root,
+        error: String(error) }, null, 2) + '\n');
+    } catch { /* Failure evidence must not replace the original checkpoint error. */ }
     throw error;
+  } finally {
+    await selectionCapture.stop().catch(() => {});
   }
 }
