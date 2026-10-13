@@ -38,6 +38,14 @@ _END_REASONS = {
     "paused": {"cancelled", "policy_hold", "unknown"},
     "reclaimed": {"claim_reclaimed", "worker_lost", "timeout", "unknown"},
     "blocked": {"policy_hold", "provider_unavailable", "unknown"}, "unknown": {"unknown"},
+    # Preserve existing durable run labels; none grants acceptance or quiescence.
+    "review_requested": {"review_requested", "unknown"},
+    "changes_requested": {"changes_requested", "unknown"},
+    "stale": {"claim_stale", "unknown"}, "spawn_failed": {"spawn_failed", "unknown"},
+    "rate_limited": {"rate_limited", "unknown"}, "gave_up": {"retry_exhausted", "unknown"},
+    "workspace_deferred": {"workspace_deferred", "unknown"},
+    "watchdog_blocked": {"policy_hold", "unknown"}, "watchdog_deferred": {"policy_hold", "unknown"},
+    "routed_to_repair_profile": {"repair_routed", "unknown"}, "scheduled": {"scheduled", "unknown"},
 }
 
 

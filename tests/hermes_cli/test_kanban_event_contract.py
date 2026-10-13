@@ -88,6 +88,7 @@ def test_sequence_gaps_are_valid_and_scope_separates_ids():
     data.update(scope_id=OTHER_SCOPE, causation_id=None)
     other = event(contract, seq=11, event_identity=data)
     assert first["event_id"] != later["event_id"] != other["event_id"]
+    assert first["event_id"] != other["event_id"]
 
 
 def test_builder_and_validator_detach_caller_owned_objects():
@@ -245,3 +246,43 @@ def test_unknown_token_counts_stay_unknown():
     details["tokens_after"] = 0
     with pytest.raises(contract.ContractError):
         event(contract, "context.compacted", event_payload=details)
+
+
+@pytest.mark.parametrize("outcome,reason", [
+    ("review_requested", "review_requested"),
+    ("changes_requested", "changes_requested"),
+    ("stale", "unknown"),
+    ("spawn_failed", "unknown"),
+    ("rate_limited", "rate_limited"),
+    ("gave_up", "retry_exhausted"),
+    ("workspace_deferred", "workspace_deferred"),
+    ("watchdog_blocked", "policy_hold"),
+    ("watchdog_deferred", "policy_hold"),
+    ("routed_to_repair_profile", "repair_routed"),
+    ("scheduled", "scheduled"),
+])
+def test_legacy_terminal_classifications_are_preserved_as_observations(outcome, reason):
+    contract = load_contract()
+    details = {"outcome": outcome, "reason_code": reason, "receipt_ref": None, "diagnostic_ref": None}
+    record = event(contract, "run.ended", event_payload=details)
+    assert record["payload"]["outcome"] == outcome
+    assert record["payload"]["reason_code"] == reason
+    assert record["payload"]["receipt_ref"] is None
+    assert "accepted" not in record["payload"]
+    assert "termination_confirmed" not in record["payload"]
+
+
+@pytest.mark.parametrize("outcome", ["review_requested", "changes_requested", "stale", "spawn_failed"])
+def test_legacy_nonacceptance_outcomes_cannot_be_relabelled_completed(outcome):
+    contract = load_contract()
+    details = {"outcome": outcome, "reason_code": "completed", "receipt_ref": None, "diagnostic_ref": None}
+    with pytest.raises(contract.ContractError):
+        event(contract, "run.ended", event_payload=details)
+
+
+@pytest.mark.parametrize("outcome", [None, "running", "skipped", "future_outcome"])
+def test_missing_nonterminal_or_unqualified_outcomes_are_not_promoted(outcome):
+    contract = load_contract()
+    details = {"outcome": outcome, "reason_code": "unknown", "receipt_ref": None, "diagnostic_ref": None}
+    with pytest.raises(contract.ContractError):
+        event(contract, "run.ended", event_payload=details)
