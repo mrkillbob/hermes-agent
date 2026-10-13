@@ -34,10 +34,13 @@ def positive(value) -> int:
 
 def run_proof(api, run_id: int, attempt: int, source: str, branch: str) -> dict:
     run = api.request(f"repos/{api.repo}/actions/runs/{run_id}/attempts/{attempt}")
+    path = run["path"]
+    # Actions may append @ref; source SHA and default branch are bound separately.
+    workflow_file = path.partition("@")[0] if isinstance(path, str) else None
     if (run["id"] != run_id or run["run_attempt"] != attempt
             or run["repository"]["full_name"] != REPOSITORY
             or run["head_sha"] != source or run["head_branch"] != branch
-            or run["path"] != WORKFLOW or run["event"] not in EVENTS):
+            or workflow_file != WORKFLOW or run["event"] not in EVENTS):
         raise MetadataError("Server Actions execution proof mismatch")
     return run
 

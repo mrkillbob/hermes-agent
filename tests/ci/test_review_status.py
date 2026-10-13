@@ -105,6 +105,26 @@ def writes(api):
     return [row for row in api.calls if row[0] in ("POST", "PATCH")]
 
 
+@pytest.mark.parametrize("suffix", ["@main", "@refs/heads/main"])
+def test_ref_suffixed_server_path_allows_discovery_and_publication(suffix):
+    api = FakeAPI()
+    api.run["path"] = status.WORKFLOW + suffix
+    assert status.discover(api, ENV) == {"include": [{"head": HEAD}]}
+    assert status.publish(api, HEAD, ENV)["state"] == "success"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("path", ".github/workflows/other.yml@main"),
+    ("head_sha", "c" * 40), ("head_branch", "topic"),
+])
+def test_ref_suffix_does_not_relax_other_execution_proofs(field, value):
+    api = FakeAPI()
+    api.run["path"] = status.WORKFLOW + "@main"
+    api.run[field] = value
+    assert status.publish(api, HEAD, ENV)["state"] == "failure"
+    assert writes(api) == []
+
+
 @pytest.mark.parametrize("field,value", [
     ("GITHUB_REPOSITORY", "other/repo"), ("GITHUB_REF", "refs/heads/topic"),
     ("GITHUB_SHA", "abc"), ("GITHUB_RUN_ID", "0"), ("GITHUB_RUN_ATTEMPT", "-1"),
