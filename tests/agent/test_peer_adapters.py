@@ -255,3 +255,239 @@ def test_recreated_bound_stream_cannot_pass_uncertain_session_mail(tmp_path):
     assert observed.delivery == first
     box.evidence(observed.delivery, "processed", now=32)
     assert recreated.deliver_next(now=33).envelope.message_id == "m2"
+
+
+@pytest.fixture
+def launch_contract(tmp_path):
+    import hashlib
+    import os
+    from agent import peer_adapters as adapters
+    binary = tmp_path / 'claude'
+    binary.write_bytes(b'fake executable, never executed')
+    return adapters.ClaudeLaunchContext(
+        str(binary), hashlib.sha256(binary.read_bytes()).hexdigest(),
+        os.getuid(), os.environ['HOME'], os.environ.get('SHELL', ''),
+        str(__import__('pathlib').Path.cwd()), frozenset({'pro', 'max'}))
+
+
+def auth_status(**changes):
+    record = dict(loggedIn=True, authMethod='claude.ai', apiProvider='firstParty',
+                  subscriptionType='pro', email='private@example.invalid',
+                  orgId='private-org', configDirectory='private-path')
+    record.update(changes)
+    return record
+
+
+class FakeClaudeProcess:
+    def __init__(self):
+        self.stdin = io.StringIO()
+        self.stdout = io.StringIO()
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+    def wait(self, timeout=None):
+        self.returncode = 0 if self.returncode is None else self.returncode
+        return self.returncode
+    def terminate(self):
+        self.terminated = True
+    def kill(self):
+        self.killed = True
+
+
+def fake_launch(monkeypatch, status, exit_code=0):
+    from agent import peer_adapters as adapters
+    import subprocess
+    calls = []
+    child = FakeClaudeProcess()
+    def run(args, **kwargs):
+        calls.append(('preflight', args, kwargs))
+        return subprocess.CompletedProcess(args, exit_code, json.dumps(status), 'private stderr')
+    def spawn(args, **kwargs):
+        calls.append(('spawn', args, kwargs))
+        return child
+    monkeypatch.setattr(adapters.subprocess, 'run', run)
+    monkeypatch.setattr(adapters.subprocess, 'Popen', spawn)
+    return calls, child
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('changes', [dict(loggedIn=False), dict(loggedIn=1),
+    dict(authMethod='apiKey'), dict(apiProvider='bedrock'),
+    dict(subscriptionType=None), dict(subscriptionType='unknown')])
+def test_launcher_blocks_unqualified_context_without_leaking_status(launch_contract, monkeypatch, changes):
+    from agent.peer_adapters import ClaudeProcess
+    calls, _ = fake_launch(monkeypatch, auth_status(**changes))
+    with pytest.raises(TransportError, match='execution_context_unavailable') as error:
+        ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
+    assert [call[0] for call in calls] == ['preflight']
+    assert 'private' not in str(error.value)
+    assert 'login' not in str(error.value).lower()
+
+
+@pytest.mark.platforms('posix')
+def test_launcher_uses_same_filtered_context_and_no_substantive_cutoffs(launch_contract, monkeypatch):
+    from agent.peer_adapters import ClaudeProcess
+    for name in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+                 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'):
+        monkeypatch.setenv(name, 'never-print')
+    calls, child = fake_launch(monkeypatch, auth_status(subscriptionType='max'))
+    proc = ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
+    assert calls[0][2]['env'] == calls[1][2]['env']
+    assert calls[0][2]['cwd'] == calls[1][2]['cwd'] == launch_contract.cwd
+    assert not any(name.startswith('ANTHROPIC') or name.startswith('CLAUDE') for name in calls[1][2]['env'])
+    args = calls[1][1]
+    assert '--restricted' in args and args[args.index('--tools') + 1] == ''
+    assert args[args.index('--mcp-config') + 1] == '{"mcpServers":{}}'
+    assert not set(args).intersection({'--max-budget-usd', '--max-turns', '--max-tokens', '--effort'})
+    assert not child.stdin.closed
+    proc.cancel()
+    assert child.terminated and child.stdin.closed and child.stdout.closed
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('field,value', [('sha256', '0' * 64), ('uid', -1), ('home', '/wrong'), ('shell', '/wrong'), ('cwd', '/wrong')])
+def test_launcher_rejects_host_contract_mismatch_before_auth(launch_contract, monkeypatch, field, value):
+    from dataclasses import replace
+    from agent.peer_adapters import ClaudeProcess
+    calls, _ = fake_launch(monkeypatch, auth_status())
+    with pytest.raises(TransportError, match='execution_context_unavailable'):
+        ClaudeProcess.launch(replace(launch_contract, **{field: value}), delivery().route)
+    assert not calls
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('usage', [{}, {'sonnet': {'provider': 'api'}}, {'sonnet': {'provider': 'firstParty'}, 'other': {'provider': 'bedrock'}}])
+def test_launcher_holds_non_subscription_result_and_reaps(launch_contract, monkeypatch, usage):
+    from dataclasses import replace
+    from agent.peer_adapters import ClaudeProcess
+    _, child = fake_launch(monkeypatch, auth_status())
+    route = Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation')
+    proc = ClaudeProcess.launch(launch_contract, route)
+    proc.stream.send(replace(delivery(), route=route))
+    with pytest.raises(TransportError, match='provider_unverified'):
+        proc.observe(json.dumps(dict(type='result', session_id=route.binding, uuid='r1', is_error=False, modelUsage=usage)).encode())
+    assert proc.stream.active is not None
+    assert child.terminated and child.stdout.closed
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('exit_code,expected', [(0, 'completed'), (1, 'process_failed')])
+def test_launcher_requires_correlated_result_and_exit(launch_contract, monkeypatch, exit_code, expected):
+    from dataclasses import replace
+    from agent.peer_adapters import ClaudeProcess
+    _, child = fake_launch(monkeypatch, auth_status())
+    route = Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation')
+    proc = ClaudeProcess.launch(launch_contract, route)
+    proc.stream.send(replace(delivery(), route=route))
+    event = dict(type='result', session_id=route.binding, uuid='r1', is_error=False, modelUsage={'sonnet': {'provider':'firstParty'}})
+    assert proc.observe(json.dumps({**event, 'session_id':'other'}).encode()) is None
+    assert proc.observe(json.dumps(event).encode()).outcome == 'completed'
+    assert not child.stdin.closed
+    child.returncode = exit_code
+    assert proc.finish().outcome == expected
+    assert child.stdin.closed and child.stdout.closed
+
+
+@pytest.mark.platforms('posix')
+def test_launcher_missing_result_cannot_complete(launch_contract, monkeypatch):
+    from agent.peer_adapters import ClaudeProcess
+    _, child = fake_launch(monkeypatch, auth_status())
+    proc = ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
+    assert proc.finish().outcome == 'result_missing'
+    assert child.stdout.closed
+
+
+@pytest.mark.platforms('posix')
+def test_launcher_invalid_auth_output_never_spawns_or_leaks(launch_contract, monkeypatch):
+    from agent.peer_adapters import ClaudeProcess
+    import agent.peer_adapters as adapters
+    import subprocess
+    calls, _ = fake_launch(monkeypatch, auth_status())
+    monkeypatch.setattr(adapters.subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess(a, 1, 'private malformed', 'private stderr'))
+    with pytest.raises(TransportError) as error:
+        ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
+    assert 'private' not in str(error.value)
+    assert not calls
+
+
+@pytest.mark.platforms('posix')
+def test_launcher_cancel_kills_reaps_and_preserves_uncertain_reservation(launch_contract, monkeypatch, tmp_path):
+    from dataclasses import replace
+    from agent.peer_adapters import ClaudeProcess
+    from agent.peer_transport import Mailbox
+    import subprocess
+    _, child = fake_launch(monkeypatch, auth_status())
+    original_wait = child.wait
+    def wait(timeout=None):
+        if not child.killed:
+            raise subprocess.TimeoutExpired('private argv', timeout)
+        return original_wait(timeout)
+    child.wait = wait
+    route = Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation')
+    box = Mailbox(tmp_path / 'mail.db')
+    box.store(delivery().envelope, route)
+    proc = ClaudeProcess.launch(launch_contract, route, mailbox=box)
+    proc.stream.deliver_next(now=11)
+    proc.cancel(cleanup_timeout=0.01)
+    assert child.killed and child.returncode == 0
+    assert box.status('m1')['disposition'] == 'awaiting_result'
+    assert box.claim_stream(route, now=50) is None
+    assert child.stdin.closed and child.stdout.closed
+
+
+@pytest.mark.platforms('posix')
+def test_launcher_operational_timeout_is_non_success_and_cleans_up(launch_contract, monkeypatch):
+    from agent.peer_adapters import ClaudeProcess
+    import subprocess
+    _, child = fake_launch(monkeypatch, auth_status())
+    original_wait = child.wait
+    def wait(timeout=None):
+        if not child.terminated:
+            raise subprocess.TimeoutExpired('private argv', timeout)
+        return original_wait(timeout)
+    child.wait = wait
+    proc = ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
+    assert proc.finish(timeout=0.01).outcome == 'process_timeout'
+    assert child.terminated and child.stdout.closed
+
+
+@pytest.mark.platforms('posix')
+def test_launcher_instructs_recipient_to_decode_without_granting_authority(launch_contract, monkeypatch):
+    from agent.peer_adapters import ClaudeProcess
+    calls, _ = fake_launch(monkeypatch, auth_status())
+    proc = ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
+    args = calls[-1][1]
+    assert '--append-system-prompt' in args
+    instruction = args[args.index('--append-system-prompt') + 1]
+    assert 'base64' in instruction and 'original sender' in instruction
+    assert 'approval' in instruction and 'grant' in instruction
+    proc.cancel()
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('operation', ['finish', 'cancel'])
+def test_launcher_broken_pipe_close_cannot_skip_reaping(launch_contract, monkeypatch, operation):
+    from agent.peer_adapters import ClaudeProcess
+    _, child = fake_launch(monkeypatch, auth_status())
+    class BrokenClose(io.StringIO):
+        def close(self):
+            super().close()
+            raise BrokenPipeError('private pipe detail')
+    child.stdin = BrokenClose()
+    proc = ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
+    getattr(proc, operation)()
+    assert child.returncode == 0
+    assert child.stdin.closed and child.stdout.closed
+
+
+@pytest.mark.platforms('posix')
+def test_launcher_terminate_race_still_reaps_and_closes_pipes(launch_contract, monkeypatch):
+    from agent.peer_adapters import ClaudeProcess
+    _, child = fake_launch(monkeypatch, auth_status())
+    def terminate():
+        raise ProcessLookupError('private detail')
+    child.terminate = terminate
+    proc = ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
+    proc.cancel()
+    assert child.returncode == 0
+    assert child.stdin.closed and child.stdout.closed
