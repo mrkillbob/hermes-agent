@@ -267,6 +267,11 @@ when both current-head completion records and the fresh witness already exist.
 No private task, reaction, label or successful CI substitutes for missing evidence.
 
 Run the inert API fixtures with the canonical explicit interpreter and one worker:
-`HERMES_PYTHON="$PWD/.venv/bin/python" scripts/run_tests.sh -j 1 tests/ci/test_review_resumption.py tests/ci/test_review_aggregate.py tests/ci/test_review_admission_graph.py tests/ci/test_required_results.py tests/ci/test_workflow_job_graph.py`.
+`HERMES_PYTHON="$PWD/.venv/bin/python" scripts/run_tests.sh -j 1 tests/ci/test_review_resumption.py tests/ci/test_review_aggregate.py tests/ci/test_review_admission_cli.py tests/ci/test_required_results.py`.
+The admission CLI suite executes the production evaluator and controller with an
+inert GitHub transport. It does not parse workflow source or emulate GitHub's
+expression engine. Dependency, trigger, permission, checkout and concurrency
+wiring require source review and actual hosted qualification; these local CLI
+contracts do not establish that hosted wiring is correct.
 The unchanged PTY-helper regression now lives beside its helper at
 `tests/e2e/core/terminal/test_pty_harness.py`; it opens no PTY and launches no Hermes.
