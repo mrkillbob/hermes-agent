@@ -76,3 +76,47 @@ def test_unprotected_delta_preserves_description(monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
     monkeypatch.setattr("agent.system_prompt._skills_prompt", lambda _: "<available_skills>\n    - old: Run checks.\n    - archify: Create HTML diagrams.\n</available_skills>")
     assert "Create HTML diagrams." in _note(_agent("openrouter"), [])
+
+
+def test_protected_large_delta_uses_transport_segments_and_replays_once(tmp_path, monkeypatch):
+    rows = {f"check-{'.'.join(str(index))}-helper": ("Run checks. " * 8).rstrip() for index in range(400)}
+    current = "<available_skills>\n    - old: Run checks.\n" + "\n".join(
+        f"    - {name}: {description}" for name, description in rows.items()
+    ) + "\n</available_skills>"
+    monkeypatch.setattr("agent.system_prompt._skills_prompt", lambda _: current)
+    agent = _agent()
+    note = _note(agent, [])
+    assert 32_768 < len(note.encode("utf-8")) < 262_144
+    assert all(f"    - {name}: {description}" in note for name, description in rows.items())
+    wire = compose_user_api_content("Run checks.", "", note)
+    assert _decision(tmp_path, wire).allowed
+    history = [{"role": "user", "content": "Run checks.", "api_content": wire}]
+    assert _note(agent, history) == ""
+    assert _note(_agent(), history) == ""
+
+
+@pytest.mark.parametrize("rendered", [
+    "Run checks. " * 22_000,
+    "Run checks. " * 3_000 + "token=super-secret-value",
+    "Run checks. " * 3_000 + "cHJpdmF0ZSBtZW1v",
+])
+def test_protected_large_note_still_enforces_aggregate_bound_and_scans(monkeypatch, rendered):
+    monkeypatch.setattr("agent.system_prompt._skills_prompt", lambda _: "<available_skills>\n    - helper: Run checks.\n</available_skills>")
+    monkeypatch.setattr("agent.skills_index_delta._render", lambda *_: rendered)
+    agent = _agent()
+    assert _note(agent, []) == ""
+    assert not hasattr(agent, "_skills_index_told")
+
+
+@pytest.mark.parametrize("settings", [
+    {"_llm_egress_max_sanitized_bytes": 1_024},
+    {"_llm_egress_aux_task": "vision"},
+])
+def test_protected_note_respects_transport_specific_aggregate_bound(monkeypatch, settings):
+    monkeypatch.setattr("agent.system_prompt._skills_prompt", lambda _: "<available_skills>\n    - helper: Run checks.\n</available_skills>")
+    monkeypatch.setattr("agent.skills_index_delta._render", lambda *_: "Run checks. " * 3_000)
+    agent = _agent()
+    for key, value in settings.items():
+        setattr(agent, key, value)
+    assert _note(agent, []) == ""
+    assert not hasattr(agent, "_skills_index_told")

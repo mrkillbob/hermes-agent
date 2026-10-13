@@ -181,7 +181,13 @@ def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) 
     if protected:
         from agent.llm_egress_firewall import SanitizedTextRejected, validate_sanitized_text
         try:
-            validate_sanitized_text(note)
+            # This is a complete logical span, not one transport segment.
+            # Scan across row boundaries while retaining the transport's
+            # aggregate bound; its final gate still bounds every split piece.
+            validate_sanitized_text(note, max_bytes=int(getattr(
+                agent, "_llm_egress_max_sanitized_bytes",
+                32_768 if getattr(agent, "_llm_egress_aux_task", "") == "vision" else 262_144,
+            )))
         except SanitizedTextRejected:
             logger.warning("Skills index delta withheld by outbound policy")
             return False

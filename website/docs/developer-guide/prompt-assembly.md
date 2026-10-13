@@ -65,6 +65,8 @@ On routes protected by the egress firewall, skill-change rows pass the same stri
 checks as other user-message context. A rejected description becomes a names-only row; a rejected
 name is replaced by a content-free omission notice. Change accounting uses that projected index,
 so unchanged projected rows are announced once, including after a fresh agent loads the transcript.
+The complete note is scanned across row boundaries under the transport's aggregate byte cap;
+the transport can split admissible large notes into independently bounded segments.
 The producer does not grant generated-context trust to skill-file text. Existing sidecars retain
 their original bytes and do not acquire trust retroactively; an old rejected sidecar can still
 block its session. Newly emitted notes use the projection without changing the cached system prompt.
