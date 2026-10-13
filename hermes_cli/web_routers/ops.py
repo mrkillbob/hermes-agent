@@ -234,7 +234,7 @@ async def create_webhook(body: WebhookCreate, profile: Optional[str] = None):
     def _save():
         try:
             published = wh._replace_subscription(name, route, expected)
-        except wh.SubscriptionMutationConflict as exc:
+        except (wh.SubscriptionMutationConflict, wh.SubscriptionStoreReadError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _webhook_route_summary(name, published, wh._get_webhook_base_url())
 
@@ -261,7 +261,10 @@ async def delete_webhook(name: str, profile: Optional[str] = None):
         def remove(subscriptions):
             del subscriptions[_webhook_key_in(subscriptions, name)]
 
-        wh._mutate_subscriptions(remove)
+        try:
+            wh._mutate_subscriptions(remove)
+        except wh.SubscriptionStoreReadError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     await config_scoped_to_thread(profile, _run)
     return {"ok": True}
@@ -279,7 +282,10 @@ async def set_webhook_enabled(name: str, body: WebhookEnabledToggle, profile: Op
             subscriptions[key]["enabled"] = bool(body.enabled)
             return key
 
-        return wh._mutate_subscriptions(toggle)
+        try:
+            return wh._mutate_subscriptions(toggle)
+        except wh.SubscriptionStoreReadError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     key = await config_scoped_to_thread(profile, _run)
     return {"ok": True, "name": key, "enabled": bool(body.enabled)}

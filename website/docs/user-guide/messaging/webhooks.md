@@ -534,6 +534,8 @@ hermes webhook test github-issues --payload '{"issue": {"number": 42, "title": "
 - Static routes from `config.yaml` always take precedence over dynamic ones with the same name
 - Dynamic subscriptions use the same route format and capabilities as static routes (events, prompt templates, skills, delivery)
 - Create, update, enable/disable, and remove operations are serialized and atomically replace the store; a stale concurrent update is rejected rather than restoring a route another operation removed or disabled
+- Updates require a readable JSON object. An unreadable, malformed, or dangling linked store is left unchanged; CLI commands exit with an error and dashboard updates return a conflict. Restore access or repair the store before retrying.
+- On POSIX, legacy broad permissions are repaired through a no-follow file descriptor bound to the inspected regular file. Linked stores are still readable, but their targets are not permission-repaired. If safe descriptor access is unavailable (for example an owner-unreadable and owner-unwritable `0044` store), Hermes warns and leaves it intact for operator permission repair; the gateway retains its last good routes on read failure. Unchanged failed reads retry at most once per minute; file metadata changes trigger an immediate retry.
 - Rebinding an existing route with `--route-profile` rotates its HMAC secret automatically. A caller with the old profile's secret cannot authenticate the rebound route; pass a different `--secret` only when the receiving service requires an operator-chosen value
 - No gateway restart required — subscribe and it's immediately live
 
