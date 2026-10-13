@@ -407,14 +407,20 @@ def read_json_or_empty(path: str | Path) -> dict:
 
 
 def restrict_credential_file_permissions(path: str | Path, *, file_stat: os.stat_result | None = None) -> None:
-    """Migrate legacy secret-file modes; warn if a read-only store prevents tightening."""
+    """Migrate direct regular secret-file modes; leave links and other entry types alone."""
     if os.name != "posix":
         return  # Windows ACLs do not map to these mode bits.
     p = Path(path)
     try:
-        mode = (file_stat or p.stat()).st_mode
+        # A caller's cached stat may have followed a symlink; inspect the entry itself.
+        mode = p.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            return
         if mode & (stat.S_IRWXG | stat.S_IRWXO):
-            p.chmod(0o600)
+            if os.chmod in os.supports_follow_symlinks:
+                p.chmod(0o600, follow_symlinks=False)
+            else:
+                p.chmod(0o600)
     except FileNotFoundError:
         return
     except OSError as exc:
