@@ -4,6 +4,8 @@ name: Review CI wake-up
 # so no write token or PR-controlled source belongs here. The default-branch
 # review-resumption controller re-reads live metadata before requesting a retry.
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed, ready_for_review, converted_to_draft]
   pull_request_review:
     types: [submitted, edited, dismissed]
   pull_request_review_comment:
@@ -15,7 +17,8 @@ jobs:
   wake-up:
     if: >-
       github.repository == 'mrkillbob/hermes-agent' &&
-      ((github.event_name == 'pull_request_review' && github.event.review.user.id == 199175422) ||
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'pull_request_review' && github.event.review.user.id == 199175422) ||
        (github.event_name == 'pull_request_review_comment' && github.event.comment.user.id == 199175422))
     runs-on: ubuntu-latest
     timeout-minutes: 2

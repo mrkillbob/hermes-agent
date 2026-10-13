@@ -52,10 +52,15 @@ class GitHub:
             raise MetadataError("Review admission is qualified for this fork only")
         self.repo = repo
 
-    def request(self, route: str, *, post: bool = False, payload: dict | None = None):
+    def request(self, route: str, *, post: bool = False, payload: dict | None = None,
+                method: str | None = None):
         args = ["gh", "api", route]
-        if post:
-            args += ["--method", "POST"]
+        if method is not None and method not in ("GET", "POST", "PATCH"):
+            raise MetadataError("Unsupported GitHub API method")
+        if post and method not in (None, "POST"):
+            raise MetadataError("Conflicting GitHub API methods")
+        if method or post:
+            args += ["--method", method or "POST"]
         if payload is not None:
             args += ["--input", "-"]
         result = subprocess.run(args, input=json.dumps(payload) if payload else None,

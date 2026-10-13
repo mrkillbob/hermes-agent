@@ -368,6 +368,8 @@ def test_new_healthy_run_before_retry_leaves_old_run_alone(tmp_path):
 
 @pytest.mark.parametrize("event", [
     {"event_name": "schedule"},
+    {"event_name": "workflow_run", "workflow_run": {"event": "pull_request", "head_sha": HEAD,
+                                                     "pull_requests": [{"number": 8, "head": {"sha": HEAD}}]}},
     {"event_name": "workflow_run", "workflow_run": {"event": "pull_request_review", "head_sha": HEAD,
                                                      "pull_requests": [{"number": 8, "head": {"sha": HEAD}}]}},
 ])
@@ -378,13 +380,60 @@ def test_native_and_scheduled_discovery_use_exact_pr_identity(tmp_path, event):
     assert data["mutations"] == []
 
 
-def test_unbound_native_event_waits_for_scheduled_reconciliation(tmp_path):
+def test_unbound_native_event_reconciles_live_open_prs_immediately(tmp_path):
     event = {"event_name": "workflow_run", "workflow_run": {
         "event": "pull_request_review", "head_sha": HEAD, "pull_requests": []}}
     process, data = invoke(tmp_path, snapshot(), "resume", event)
     assert process.returncode == 0, process.stderr
+    assert json.loads(process.stdout) == {"include": [{"number": 8, "head": HEAD}]}
+    assert data["mutations"] == []
+
+
+def test_native_completion_deduplicates_associations_and_uses_live_head(tmp_path):
+    event = {"event_name": "workflow_run", "workflow_run": {
+        "event": "pull_request_review_comment", "head_sha": OLD,
+        "pull_requests": [{"number": 8, "head": {"sha": OLD}},
+                          {"number": 8, "head": {"sha": OLD}}]}}
+    process, data = invoke(tmp_path, snapshot(), "resume", event)
+    assert process.returncode == 0, process.stderr
+    assert json.loads(process.stdout) == {"include": [{"number": 8, "head": HEAD}]}
+    assert data["mutations"] == []
+
+
+def test_native_closed_association_does_not_target_an_unrelated_open_pr(tmp_path):
+    event = {"event_name": "workflow_run", "workflow_run": {
+        "event": "pull_request", "head_sha": HEAD,
+        "pull_requests": [{"number": 9, "head": {"sha": HEAD}}]}}
+    process, data = invoke(tmp_path, snapshot(), "resume", event)
+    assert process.returncode == 0, process.stderr
     assert json.loads(process.stdout) == {"include": []}
     assert data["mutations"] == []
+
+
+@pytest.mark.parametrize("event_name", ["schedule", "workflow_run"])
+def test_reconciliation_discovery_is_bounded_and_has_unique_live_prs(event_name):
+    from scripts.ci.review_admission import MetadataError
+    from scripts.ci.review_resumption import discover_event
+
+    class DiscoveryAPI:
+        repo = REPO
+
+        def __init__(self, prs):
+            self.prs = prs
+
+        def request(self, route):
+            page = int(route.rsplit("=", 1)[1])
+            return self.prs[(page - 1) * 100:page * 100]
+
+    event = {"workflow_run": {"event": "pull_request_review", "pull_requests": []}}
+    prs = [{"number": number, "state": "open", "head": {"sha": HEAD}}
+           for number in range(1, 202)]
+    with pytest.raises(MetadataError, match="bound"):
+        discover_event(DiscoveryAPI(prs), event_name, event)
+    with pytest.raises(MetadataError, match="duplicate"):
+        discover_event(DiscoveryAPI([prs[0], prs[0]]), event_name, event)
+    assert discover_event(DiscoveryAPI([prs[1], prs[0]]), event_name, event) == [
+        {"number": 1, "head": HEAD}, {"number": 2, "head": HEAD}]
 
 
 def test_controller_reconciles_through_shared_label_owner_without_duplicates(tmp_path):

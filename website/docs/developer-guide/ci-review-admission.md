@@ -3,9 +3,11 @@ title: CI review admission and resumption
 ---
 
 This candidate evaluates the canonical **public Code Review and Security Review
-producer** and implements bounded resumption. Universal early admission is not
-wired yet. Normal PR CI triggers remain intact until the trusted evaluator is
-available on the default branch and its hosted metadata access is qualified.
+producer** and implements bounded resumption and a candidate commit-scoped review
+publisher. Its additional required check is inactive until hosted qualification.
+PR-defined admission jobs are useful operational gates, but a candidate can edit
+their workflow definition. They cannot establish trusted invocation or guarantee
+that every PR-controlled job waits for review.
 
 ## Exact-head public evidence
 
@@ -50,15 +52,20 @@ or used as substitutes for either required public pass.
 
 ## Trusted resumption
 
-`Review CI wake-up` preserves unprivileged native review/review-comment events.
+`Review CI wake-up` preserves unprivileged native PR/review/review-comment events.
 The trusted `Review CI resumption` controller consumes `workflow_run`, canonical
-PR `issue_comment` creation/edits and a 15-minute scheduled reconciliation. These
-controller events load workflow/source from the default branch. It checks out no
+PR `issue_comment` creation/edits/deletions and a 15-minute scheduled reconciliation. These
+controller events load workflow/source from the default branch and check out the
+immutable event SHA. It checks out no
 PR code, sparsely checks out only trusted `scripts/ci` at depth one, executes
 no PR artifacts, and uses existing metadata reads plus
 `actions: write` for bounded retry requests. It needs no new secrets or settings.
 
-The scheduled path covers thread resolution, empty native PR associations and
+Known native completion events select unique live open-PR heads, rather than
+retaining stale payload heads. Empty native associations immediately reconcile
+the bounded live open-PR set. Unknown event kinds are ignored.
+
+The scheduled path covers thread resolution, missed native events and
 the brief delay between a completion-summary edit and its clean reaction. GitHub
 Actions has no review-thread-resolution or reaction trigger. The controller
 re-reads producer state, reactions, reviews, findings, live PR head and target run
@@ -72,8 +79,9 @@ reads are bounded to ten 100-item pages and reconciliation to 200 open PRs.
 Exceeding limits fails visibly. Mergeability, aggregate `BLOCKED`, CI failure and
 absent CI never determine whether substantive review is clear.
 
-The existing maintainer `Label rerun` workflow and any surviving scheduled/review
-writer call the same `label_resumption.py` implementation. This compensates for
+`Label rerun` is a source-free, unprivileged PR-label wake-up. Its completion wakes
+the existing default-branch controller; the label event itself cannot request a
+retry. The controller calls the shared `label_resumption.py` implementation. This compensates for
 GitHub replacing a pending same-group label event, even when substantive review
 remains held during bootstrap. There is one label retry implementation and no
 second competing retry algorithm. `ci-reviewed` stays independent human
@@ -86,24 +94,64 @@ the exact latest attempt, irrespective of the waking event kind. A run left acti
 full after completion only if its latest attempt started before the live label
 addition. The attempt API prevents retained original-run timestamps from causing
 duplicate retries. Removed labels, moved heads, newer healthy replacements,
-missing PR associations and the retry cap suppress writes. Both label and review
-writers share the same per-PR concurrency key and never cancel healthy runs.
+missing PR associations and the retry cap suppress writes. The single controller
+serializes both retry modes per PR and never cancels healthy runs.
 The unsafe mutable-branch
 dispatch fallback was removed: it raced pushes and skipped PR-only supply-chain,
 OSV, review-label, history and lockfile guards. No-run/zero-job cases need a
 separate qualified PR-context creation path. No controller action dispatches,
 cancels, resolves findings, merges or changes settings.
 
+## Candidate required review publisher
+
+`Current review status` loads from the default branch on main pushes, PR issue
+comments and workflow completions. It checks out the immutable event revision,
+reads metadata only and never executes candidate code or downloaded artifacts.
+The publisher job has `contents`, `pull-requests`, `issues` and `actions` read
+access plus `checks: write`; it has no Actions write access. Its discovery job
+uses only read access. Existing reconciliation supplies the scheduled fallback,
+so this change adds no timer or retry writer.
+
+The proposed context is `Current Code and Security Review`, tied to GitHub Actions
+App ID `15368`. A commit-scoped result must include every open PR sharing that SHA,
+across base branches, because branch protection cannot distinguish those PRs by
+check context. Each execution starts with a failure before reading review state;
+only complete, stable, clear metadata can promote its own check to success.
+Per-head serialization, bounded all-result pagination and repeated live metadata
+reads reduce stale-state risk. They do not make GitHub metadata reads and the final
+check update atomic, or remove the delay before a new wake-up starts.
+An ambiguous success-update response prompts a best-effort failure rollback on
+the already verified owned check. If rollback cannot be confirmed, the outcome
+is reported as uncertain; an API outage cannot guarantee replacement of success.
+
+Runtime run metadata, the workflow path, source SHA and check namespace identify
+the expected publisher. GitHub Actions App identity is shared by other workflows;
+these assertions do not alone prove exclusive write authority. Inert fixtures
+cannot qualify that ownership, GitHub's treatment of successive check runs, or
+shared-head branch-protection behavior. Those remain hosted qualification gates.
+The [Checks API](https://docs.github.com/en/rest/checks/runs) documents write
+permissions, commit-scoped results and same-name retention limits; API-created
+checks under the shared Actions App still need production-event qualification.
+
+The 200-record proof bound applies only to this fixed check name; unrelated CI
+checks do not consume it. Fresh failure-first publication still creates a new
+record per execution. After 200 retained named records, the next execution holds
+rather than mutating historical records or reusing an old success. This limit
+remains explicit; the draft does not promise indefinite automatic operation.
+
 ## Rollout and remaining limits
 
 Bootstrap in two stages: first make this trusted producer evaluator/controller
 available on the default branch, including the shared label retry helper, and
-verify the existing read token's hosted metadata access; then add a required early `Review admission` job before every
-PR-controlled lane. Include it in the aggregate gate so a hold cannot become a
-green all-skipped run. Preserve classification and every PR source/host/security
-guard, and apply substantive admission to the shared label retry helper only
-after the producer is qualified. Until that second stage, label compatibility
-remains independent and cannot establish substantive completion.
+verify hosted metadata access. Normal protected admission of trusted controller
+and publisher source precedes its default-branch execution. Before activating the
+additional required context, qualify publisher ownership, shared-SHA behavior and
+hosted check selection through benign read/transition checks. Preserve every
+existing ruleset field and required context; add no bypass or broader App scope.
+If ownership cannot be established within the existing App boundary, leave the
+context inactive and report that blocker. PR-side gates cannot repair workflow
+origin trust. Until qualification, label compatibility remains independent and
+cannot establish substantive completion.
 Do not make a candidate PR depend on a script that is not yet on the default branch.
 
 Code-only or stale/missing Security Review records remain blocked under the

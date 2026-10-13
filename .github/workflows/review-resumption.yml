@@ -6,10 +6,11 @@ on:
   # issue_comment also loads the default-branch workflow. Canonical activity
   # summaries are created/edited even when a clean pass submits no review.
   issue_comment:
-    types: [created, edited]
+    types: [created, edited, deleted]
   workflow_run:
     workflows:
       - Review CI wake-up
+      - Label rerun
       - CI
       - Docker Build, Test, and Publish
       - Nix flake check
@@ -42,7 +43,7 @@ jobs:
       - name: Checkout trusted default branch
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
           sparse-checkout: scripts/ci
@@ -77,7 +78,7 @@ jobs:
       - name: Checkout trusted default branch
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
           sparse-checkout: scripts/ci
