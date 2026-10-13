@@ -38,6 +38,7 @@ import {
 } from './harness'
 import { assertTranscriptOracle, installDuplicateSampler, type OracleTarget } from './oracle'
 import { gate, type ScriptedProvider, startScriptedProvider } from './provider'
+import { captureReplyFrames, projectReplyEvents } from './reply-diagnostics'
 
 // Review after every turn, so a review fork is in flight during the next one.
 const REVIEW_EVERY_TURN = `memory:
@@ -119,12 +120,23 @@ async function withApp(
   writeProviderHome(sandbox.hermesHome, provider.url, extraYaml)
   const { app, page } = await launchCoreApp(coreAppEnv(sandbox))
   const ws = recordWebSockets(page)
+  const capture = label === 'steer-matrix' && process.env.CORE_DIAGNOSTIC === '1'
 
   try {
     await waitForInteractive(app, page)
-    await installDuplicateSampler(page)
+    await installDuplicateSampler(page, capture)
     await body({ app, page, provider, sandbox, ws })
   } finally {
+    if (capture) {
+      const frames = await captureReplyFrames(page)
+      await test
+        .info()
+        .attach('reply-identity-diagnostics', {
+          body: Buffer.from(JSON.stringify({ version: 1, frames, events: projectReplyEvents(ws.events) })),
+          contentType: 'application/json'
+        })
+        .catch(() => undefined)
+    }
     await app.close().catch(() => undefined)
     await provider.close()
     sandbox.cleanup()
@@ -367,7 +379,7 @@ test('a steer at every point of a tool turn, then reload and switch back', async
       await assertTranscriptOracle(page, ws, provider, session, 'tool turn live')
       await page.reload()
       await expect(viewport(page)).toContainText(A(12), { timeout: 60_000 })
-      await installDuplicateSampler(page)
+      await installDuplicateSampler(page, process.env.CORE_DIAGNOSTIC === '1')
       await assertTranscriptOracle(page, ws, provider, session, 'tool turn after reload')
     })
 

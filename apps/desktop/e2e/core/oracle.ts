@@ -58,105 +58,124 @@ export function userMarkerFor(marker: string): string {
 // ─── Transient duplicate / order sampler ────────────────────────────────
 
 /** Idempotent; re-run after every reload (the observer dies with the document). */
-export async function installDuplicateSampler(page: Page): Promise<void> {
-  await page.evaluate(source => {
-    const w = window as any
+export async function installDuplicateSampler(page: Page, captureFrames = false): Promise<void> {
+  await page.evaluate(
+    ({ source, captureFrames }) => {
+      const w = window as any
 
-    if (w.__coreSampler) {
-      return
-    }
-
-    const re = new RegExp(source, 'g')
-    w.__coreSampler = {
-      samples: 0,
-      violations: [] as { marker: string; count: number; text: string }[],
-      order: [] as { detail: string; text: string }[]
-    }
-    // "x|y": x has been seen above y. A later frame with y above x is a flip.
-    const above = new Set<string>()
-    let scheduled = false
-
-    const orderViolation = (detail: string, text: string) => {
-      if (w.__coreSampler.order.length < 20) {
-        w.__coreSampler.order.push({
-          detail,
-          at: Math.round(performance.now()),
-          route: location.hash,
-          text: text.replace(/\s+/g, ' ').slice(0, 600)
-        })
+      if (w.__coreSampler) {
+        return
       }
-    }
 
-    const sample = () => {
-      scheduled = false
-      const viewports = [...document.querySelectorAll('[data-slot="aui_thread-viewport"]')] as HTMLElement[]
+      const re = new RegExp(source, 'g')
+      w.__coreSampler = {
+        samples: 0,
+        violations: [] as { marker: string; count: number; text: string }[],
+        order: [] as { detail: string; text: string }[]
+      }
+      if (captureFrames) w.__coreSampler.frames = []
+      // "x|y": x has been seen above y. A later frame with y above x is a flip.
+      const above = new Set<string>()
+      let scheduled = false
 
-      for (const viewport of viewports) {
-        if (viewport.getClientRects().length === 0) {
-          continue
+      const orderViolation = (detail: string, text: string) => {
+        if (w.__coreSampler.order.length < 20) {
+          w.__coreSampler.order.push({
+            detail,
+            at: Math.round(performance.now()),
+            route: location.hash,
+            text: text.replace(/\s+/g, ' ').slice(0, 600)
+          })
         }
+      }
 
-        const text = viewport.innerText
-        w.__coreSampler.samples++
-        const counts = new Map<string, number>()
+      const sample = () => {
+        scheduled = false
+        const viewports = [...document.querySelectorAll('[data-slot="aui_thread-viewport"]')] as HTMLElement[]
 
-        for (const match of text.match(re) ?? []) {
-          counts.set(match, (counts.get(match) ?? 0) + 1)
-        }
-
-        // Message order, top to bottom by first appearance. Reasoning is left
-        // out: live and history place the thinking block differently.
-        const sequence = [...counts.keys()].filter(marker => !marker.startsWith('R'))
-
-        sequence.forEach((marker, index) => {
-          const prompt = marker.replace(/^A(\d+)i?-/, 'U$1-')
-
-          if (prompt !== marker && sequence.indexOf(prompt) > index) {
-            orderViolation(`reply ${marker} rendered above its prompt ${prompt}`, text)
+        for (const viewport of viewports) {
+          if (viewport.getClientRects().length === 0) {
+            continue
           }
 
-          for (const later of sequence.slice(index + 1)) {
-            if (above.has(`${later}|${marker}`)) {
-              orderViolation(`${marker} moved above ${later}`, text)
+          const text = viewport.innerText
+          w.__coreSampler.samples++
+          if (captureFrames && !w.__coreSampler.violations.length) {
+            // Synthetic-test identity/marker history, never full transcript text.
+            const rows = [...viewport.querySelectorAll('[data-message-id]')].slice(0, 64).map(el => ({
+              id: (el.getAttribute('data-message-id') ?? '').slice(0, 96),
+              role: el.getAttribute('data-role'),
+              markers: ((el as HTMLElement).innerText?.match(re) ?? []).slice(0, 16)
+            }))
+            w.__coreSampler.frames.push({
+              at: Math.round(performance.now()),
+              wallTime: Date.now(),
+              route: /^#\/20\d{6}_\d{6}_[a-f0-9]{6}$/.test(location.hash) ? location.hash : '',
+              rows
+            })
+            if (w.__coreSampler.frames.length > 20) w.__coreSampler.frames.shift()
+          }
+          const counts = new Map<string, number>()
+
+          for (const match of text.match(re) ?? []) {
+            counts.set(match, (counts.get(match) ?? 0) + 1)
+          }
+
+          // Message order, top to bottom by first appearance. Reasoning is left
+          // out: live and history place the thinking block differently.
+          const sequence = [...counts.keys()].filter(marker => !marker.startsWith('R'))
+
+          sequence.forEach((marker, index) => {
+            const prompt = marker.replace(/^A(\d+)i?-/, 'U$1-')
+
+            if (prompt !== marker && sequence.indexOf(prompt) > index) {
+              orderViolation(`reply ${marker} rendered above its prompt ${prompt}`, text)
             }
 
-            above.add(`${marker}|${later}`)
-          }
-        })
+            for (const later of sequence.slice(index + 1)) {
+              if (above.has(`${later}|${marker}`)) {
+                orderViolation(`${marker} moved above ${later}`, text)
+              }
 
-        for (const [marker, count] of counts) {
-          if (count > 1 && w.__coreSampler.violations.length < 20) {
-            // Where the copies live: one bubble with doubled text vs two bubbles.
-            const bubbles = (
-              [
-                ...viewport.querySelectorAll(
-                  '[data-slot="aui_user-message-root"], [data-slot="aui_assistant-message-root"]'
-                )
-              ] as HTMLElement[]
-            )
-              .filter(el => el.innerText.includes(marker))
-              .map(el => `${el.getAttribute('data-slot')}#${el.getAttribute('data-message-id') ?? el.id ?? ''}`)
+              above.add(`${marker}|${later}`)
+            }
+          })
 
-            w.__coreSampler.violations.push({
-              marker,
-              count,
-              at: Math.round(performance.now()),
-              route: location.hash,
-              bubbles,
-              text: text.replace(/\s+/g, ' ').slice(0, 600)
-            })
+          for (const [marker, count] of counts) {
+            if (count > 1 && w.__coreSampler.violations.length < 20) {
+              // Where the copies live: one bubble with doubled text vs two bubbles.
+              const bubbles = (
+                [
+                  ...viewport.querySelectorAll(
+                    '[data-slot="aui_user-message-root"], [data-slot="aui_assistant-message-root"]'
+                  )
+                ] as HTMLElement[]
+              )
+                .filter(el => el.innerText.includes(marker))
+                .map(el => `${el.getAttribute('data-slot')}#${el.getAttribute('data-message-id') ?? el.id ?? ''}`)
+
+              w.__coreSampler.violations.push({
+                marker,
+                count,
+                at: Math.round(performance.now()),
+                route: location.hash,
+                bubbles,
+                text: text.replace(/\s+/g, ' ').slice(0, 600)
+              })
+            }
           }
         }
       }
-    }
 
-    new MutationObserver(() => {
-      if (!scheduled) {
-        scheduled = true
-        requestAnimationFrame(sample)
-      }
-    }).observe(document.body, { childList: true, subtree: true, characterData: true })
-  }, ANY_MARKER_RE.source)
+      new MutationObserver(() => {
+        if (!scheduled) {
+          scheduled = true
+          requestAnimationFrame(sample)
+        }
+      }).observe(document.body, { childList: true, subtree: true, characterData: true })
+    },
+    { source: ANY_MARKER_RE.source, captureFrames }
+  )
 }
 
 async function samplerViolations(page: Page): Promise<{ order: any[]; samples: number; violations: any[] }> {

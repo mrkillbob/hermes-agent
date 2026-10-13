@@ -12,8 +12,18 @@ name: E2E Desktop core
 # it was wired in.
 
 on:
+  # Manual diagnostics run only the one affected synthetic scenario.
+  workflow_dispatch:
+    inputs:
+      reply_identity_diagnostic:
+        description: Run only the affected synthetic steer case with bounded identity diagnostics.
+        type: boolean
+        default: true
   workflow_call:
     inputs:
+      reply_identity_diagnostic:
+        type: boolean
+        default: false
       concurrency_scope:
         description: Caller namespace for independent reusable E2E runs.
         type: string
@@ -78,10 +88,15 @@ jobs:
       - name: Run the core suite under xvfb
         working-directory: apps/desktop
         run: |
+          args=()
+          if [ "$CORE_DIAGNOSTIC" = 1 ]; then
+            args+=(reply-settle-paths.spec.ts --grep '^a steer at every point of a tool turn, then reload and switch back$' --workers=1)
+          fi
           xvfb-run -a --server-args="-screen 0 1280x1024x24" \
-            npx playwright test -c e2e/core/playwright.config.ts
+            npx playwright test -c e2e/core/playwright.config.ts "${args[@]}"
         env:
           CI: 'true'
+          CORE_DIAGNOSTIC: ${{ inputs.reply_identity_diagnostic && '1' || '0' }}
           HERMES_E2E_PYTHON: ${{ steps.pm.outputs.python-path }}
           # The pack step above ran: a missing release/linux-unpacked is a failure, not a skip.
           HERMES_E2E_REQUIRE_PACKAGED: '1'
@@ -91,7 +106,7 @@ jobs:
           ANTHROPIC_API_KEY: ''
 
       - name: Upload failure artifacts
-        if: failure() || cancelled()
+        if: failure() || cancelled() || inputs.reply_identity_diagnostic
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-core-e2e-${{ github.sha }}
