@@ -488,8 +488,9 @@ def test_a_held_lock_file_is_recorded_without_reading_it(tmp_path, monkeypatch):
     assert report["ok"] is True and report["tolerated_deleted"] == ["profiles/p/gateway.lock"]
 
 
-def test_the_running_gateways_state_record_may_change_but_not_vanish(tmp_path):
-    """The update restarts the gateway, so gateway_state.json's pid/start_time must move."""
+def test_the_running_gateways_state_record_is_advisory_not_judged(tmp_path):
+    """The update restarts the gateway, so gateway_state.json's pid/start_time must move; the fork keeps the file
+    out of the judged set (a live heartbeat), so losing it never fails the verification."""
     home = tmp_path / "home"
     home.mkdir()
     (home / "gateway_state.json").write_text('{"pid": 1}', encoding="utf-8")
@@ -498,7 +499,7 @@ def test_the_running_gateways_state_record_may_change_but_not_vanish(tmp_path):
     assert vus.verify_home(str(home), snap)["ok"] is True
     os.remove(home / "gateway_state.json")
     report = vus.verify_home(str(home), snap)
-    assert report["deleted"] == ["gateway_state.json"] and report["ok"] is False
+    assert report["ok"] is True and report["deleted"] == []
 
 
 def test_any_sqlite_database_is_judged_by_rows_not_bytes(tmp_path):
