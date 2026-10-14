@@ -1,15 +1,20 @@
 """Bind a newly produced skills note to its live envelope across late route changes.
 
-Ownership stays in memory for this turn. Persisted markers cannot create it.
+Ownership of the live envelope stays in memory for this turn. Persisted markers cannot create it.
 
 Until a request carrying the raw note has been built, a protected route projects the live message and
-its durable row once (sticky). After that, bytes a provider may already have received are history: the
-raw note is remembered in memory, and a protected route (a fallback, this turn or a later one) projects
-only its own outgoing request copy, wherever the note sits in it.
+its durable row once (sticky), and an unprotected route restores a note that was staged projected.
+After that, bytes a provider may already have received are history: a protected route (a fallback, this
+turn or a later one) projects only its own outgoing request copy.
+
+That projection is structural, not remembered. A note an agent attached has one shape (a canonical
+note that ends the replayed sidecar of a string turn, or the last text part of a multimodal turn, set
+off by a blank line), so any request copy, from any agent over any transcript, projects the same bytes
+for the same note: nothing is lost when the agent is rebuilt, and text a user typed or pasted into their
+own message is never read as a note.
 """
 from dataclasses import dataclass
 from typing import Any
-
 
 
 @dataclass
@@ -20,6 +25,8 @@ class _Delivery:
     removed: frozenset[str]
     key: int
     previous_told: Any
+    raw_added: dict[str, str]
+    raw_removed: frozenset[str]
     part: dict | None = None
     content: list | None = None
     expected: str | None = None
@@ -45,6 +52,14 @@ def bind_skills_sidecar(agent, message, sidecar):
             delivery.expected = sidecar
 
 
+def _note_budget(agent):
+    """One quarter of the smaller request cap: what skills notes may spend of a protected request."""
+    aggregate = int(getattr(agent, "_llm_egress_max_sanitized_bytes",
+                            32_768 if getattr(agent, "_llm_egress_aux_task", "") == "vision" else 262_144))
+    serialized = int(getattr(agent, "_llm_egress_max_serialized_bytes", 262_144))
+    return min(aggregate, serialized) // 4
+
+
 def _project_note(agent, raw_added, raw_removed):
     from agent.llm_egress_firewall import SanitizedTextRejected, validate_sanitized_text
     from agent.skills_index_delta import _OMITTED_KEY, _OMITTED_NOTICE, _project_entries, _render
@@ -55,11 +70,8 @@ def _project_note(agent, raw_added, raw_removed):
         added[_OMITTED_KEY] = _OMITTED_NOTICE
     removed = frozenset(name for name in withdrawn if name != _OMITTED_KEY)
     note = _render(added, set(removed))
-    aggregate = int(getattr(agent, "_llm_egress_max_sanitized_bytes",
-                            32_768 if getattr(agent, "_llm_egress_aux_task", "") == "vision" else 262_144))
-    serialized = int(getattr(agent, "_llm_egress_max_serialized_bytes", 262_144))
     try:
-        validate_sanitized_text(note, max_bytes=min(aggregate, serialized) // 4)
+        validate_sanitized_text(note, max_bytes=_note_budget(agent))
     except SanitizedTextRejected:
         return "", None
     return note, (added, removed)
@@ -96,140 +108,228 @@ def _owned_text(message, delivery):
     return current
 
 
-def _remember_sent(agent, delivery):
-    """Process-local record that a request carrying this raw note was built for an unprotected route.
+def _note_start(text):
+    """Where the canonical skills note that ends ``text`` begins, else None.
 
-    Only the producer writes it, and only after such a build, so text that was never sent as a note
-    cannot be repaired by it. Keyed on the whole text that was sent, so a user who quotes the note
-    in some other message is not mistaken for the row that carried it. An entry lives while its row
-    is in the transcript (see :func:`project_sent_skills_notes`), never by count.
+    An agent attaches a note after a blank line (or alone); anything else that merely ends in the same
+    bytes, such as a user quoting a note mid-sentence, is not one. Only a note that survives a parse and
+    re-render byte for byte counts, so a malformed or truncated note is left alone.
     """
-    sent = getattr(agent, "_skills_index_sent_notes", None)
-    if not isinstance(sent, dict):
-        sent = agent._skills_index_sent_notes = {}
-    sent.pop(delivery.expected, None)  # A, B, A again: the latest occurrence is the newest.
-    sent[delivery.expected] = (delivery.note, dict(delivery.added), delivery.removed, delivery.message.get("content"))
+    from agent.skills_index_delta import _NOTE_PREFIX, _parse, _render
+
+    start = text.rfind(_NOTE_PREFIX)
+    if start < 0 or (start and not text[:start].endswith("\n\n")):
+        return None
+    note = text[start:]
+    return start if _render(*_parse(note[len(_NOTE_PREFIX):])) == note else None
 
 
-def _user_texts(message):
-    content = message.get("content") if message.get("role") == "user" else None
-    if isinstance(content, str):
-        return (content,)
-    if isinstance(content, list):
-        return tuple(p["text"] for p in content if isinstance(p, dict) and isinstance(p.get("text"), str))
-    return ()
+def _parse_note(note):
+    from agent.skills_index_delta import _NOTE_PREFIX, _parse
+
+    return _parse(note[len(_NOTE_PREFIX):])
 
 
-def _rewrite_user_texts(message, rewrite):
-    """``message`` with ``rewrite(text, ordinal)`` applied to each user text; the same dict when unchanged."""
-    texts = _user_texts(message)
-    new = [rewrite(text, ordinal) for ordinal, text in enumerate(texts)]
-    if new == list(texts):
-        return message
-    if isinstance(message["content"], str):
-        return {**message, "content": new[0]}
-    ordinal = iter(new)
-    return {**message, "content": [
-        {**p, "text": next(ordinal)} if isinstance(p, dict) and isinstance(p.get("text"), str) else p
-        for p in message["content"]]}
+def _text_of(message, part):
+    content = message["content"]
+    return content if part is None else content[part]["text"]
 
 
-def _carrier(sent, text):
-    """The remembered sent text ``text`` ends with; the longest wins when one carrier ends another."""
-    return max((key for key in sent if text.endswith(key)), key=len, default=None)
+def _note_slots(api_messages, sidecar_rows):
+    """``(message index, text-part index or None, note start)`` for every note an agent attached.
 
-
-def restore_sent_sidecars(agent, messages):
-    """Put a remembered string row's ``api_content`` back into ``content``.
-
-    A string turn carries its note only in the sidecar, and a context engine's selection hands back
-    clones whose sidecar the persistence stripping then drops; ``build_api_messages`` substitutes it for
-    the same reason. Only a sidecar that is exactly a remembered sent text is restored, and only while
-    the row still holds the content it had when that text was sent: a context engine that replaced the
-    text (a summary, say) keeps its selection instead of getting the old sidecar back.
+    A string turn carries its note in the replayed sidecar, so only a row whose content came from one
+    counts; the user's own text is never searched. A multimodal turn carries it as one of its last two
+    text parts (the note part, then the turn's context part).
     """
-    sent = getattr(agent, "_skills_index_sent_notes", None)
-    if not sent:
-        return messages
+    slots = []
+    for i, m in enumerate(api_messages):
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            if i in sidecar_rows and (start := _note_start(content)) is not None:
+                slots.append((i, None, start))
+        elif isinstance(content, list):
+            texts = [n for n, p in enumerate(content) if isinstance(p, dict) and isinstance(p.get("text"), str)]
+            # The note part is followed by at most the turn's one context part.
+            for n in reversed(texts[-2:]):
+                if (start := _note_start(content[n]["text"])) is not None:
+                    slots.append((i, n, start))
+                    break
+    return slots
 
-    def unedited(m):
-        entry = sent.get(m.get("api_content"))
-        return entry is not None and m.get("content") == entry[3]
 
-    restored = [{**m, "content": m["api_content"]}
-                if m.get("role") == "user" and isinstance(m.get("content"), str) and unedited(m) else m
-                for m in messages]
-    return messages if all(a is b for a, b in zip(restored, messages)) else restored
+def remember_newest_skills_note(agent, api_messages, sidecar_rows):
+    """Record the raw difference the newest note in the canonical request carries.
 
-
-def project_sent_skills_notes(agent, api_messages, *, prune=False):
-    """Return ``api_messages`` with every remembered raw note projected for a protected route.
-
-    Request-copy only: matching user rows (or text parts) are replaced by new dicts, never mutated, so
-    the live transcript, the durable rows and the primary route's cached bytes stay as they were sent.
-    Only the newest remembered note is projected, and only at its last occurrence in the request; every
-    superseded note, and any earlier row carrying the same text, is omitted. That keeps the notes of a
-    long session inside a single note's share of the request budget. Keyed on the sent text rather than
-    row identity because a context engine's selection can hand back clones that carry none, and because a
-    note sent on an earlier turn is history by now.
-
-    ``prune`` is for the full canonical request only: a note whose row compaction has removed is
-    forgotten, while one still in the transcript is kept however many notes were sent. A context
-    engine's selection may drop rows that are still history, so it never prunes.
+    A context engine's selection can drop that note's row; :func:`keep_newest_skills_note` then
+    restores its difference. It is derived from the same transcript that produced the request, so it
+    adds no trust beyond the note itself.
     """
-    sent = getattr(agent, "_skills_index_sent_notes", None)
-    if not sent:
-        return api_messages
-    if prune:
-        texts = [t for m in api_messages for t in _user_texts(m)]
-        for key in [key for key in sent if not any(t.endswith(key) for t in texts)]:
-            del sent[key]
-        if not sent:
-            return api_messages
+    slots = _note_slots(api_messages, sidecar_rows)
+    if not slots:
+        agent._skills_index_newest_carrier = None
+        return
+    i, part, start = slots[-1]
+    agent._skills_index_newest_carrier = _parse_note(_text_of(api_messages[i], part)[start:])
+
+
+def restore_sidecar_content(messages):
+    """Put a string row's replayed sidecar back into ``content`` when it carries a skills note.
+
+    A context engine's selection hands back clones whose sidecar the persistence stripping then
+    drops, and ``build_api_messages`` substitutes it for the same reason. Only a sidecar that extends
+    the row's current content is restored: a context engine that replaced the text (a summary, say)
+    keeps its selection. Returns the messages and the indices that were restored.
+    """
+    out, restored = [], set()
+    for i, m in enumerate(messages):
+        content, sidecar = m.get("content"), m.get("api_content")
+        if (m.get("role") == "user" and isinstance(content, str) and isinstance(sidecar, str)
+                and sidecar.startswith(content + "\n\n") and _note_start(sidecar) is not None):
+            out.append({**m, "content": sidecar})
+            restored.add(i)
+        else:
+            out.append(m)
+    return (out, frozenset(restored)) if restored else (messages, frozenset())
+
+
+def project_skills_notes(agent, api_messages, sidecar_rows=frozenset()):
+    """Return ``api_messages`` with every skills note projected for a protected route.
+
+    Request-copy only: rows are replaced by new dicts, never mutated, so the live transcript, the durable
+    rows and the primary route's cached bytes stay as they were sent. Each note is projected in place
+    and deterministically, so a route that is activated again later receives the same bytes for every
+    earlier note and only the new note is appended. Notes together may spend one note's share of the
+    request budget; past that the oldest are withheld first.
+    """
     from agent.chat_completion_helpers import _destination_requires_egress_firewall
 
     if not _destination_requires_egress_firewall(agent):
         return api_messages
-    newest = next(reversed(sent))
-    projected = _project_note(agent, *sent[newest][1:3])[0]
-    # A selection may drop the newest note's own row; the newest difference then rides the last
-    # surviving carrier of an older note, so the fallback route still learns what changed.
-    last = max(((i, n) for i, m in enumerate(api_messages) for n, t in enumerate(_user_texts(m))
-                if _carrier(sent, t) is not None), default=None)
+    slots = _note_slots(api_messages, sidecar_rows)
+    if not slots:
+        return api_messages
+    notes = [_project_note(agent, *_parse_note(_text_of(api_messages[i], part)[start:]))[0]
+             for i, part, start in slots]
+    sizes = [len(n.encode("utf-8")) for n in notes]
+    for k in range(len(notes)):
+        if sum(sizes) <= _note_budget(agent):
+            break
+        notes[k], sizes[k] = "", 0
+    out = list(api_messages)
+    for (i, part, start), note in zip(slots, notes, strict=True):
+        text = _text_of(out[i], part)
+        new = text[:start] + note if note else text[:start].removesuffix("\n\n")
+        if new == text:
+            continue
+        if part is None:
+            out[i] = {**out[i], "content": new}
+        else:
+            parts = list(out[i]["content"])
+            parts[part] = {**parts[part], "text": new}
+            out[i] = {**out[i], "content": [p for n, p in enumerate(parts) if n != part or new]}
+    return api_messages if all(a is b for a, b in zip(out, api_messages, strict=True)) else out
 
-    def rewrite_at(index):
-        def rewrite(text, ordinal):
-            key = _carrier(sent, text)
-            if key is None:
-                return text
-            keep = projected if (index, ordinal) == last else ""
-            return text[:-len(sent[key][0])] + keep
-        return rewrite
 
-    return [_rewrite_user_texts(m, rewrite_at(i)) for i, m in enumerate(api_messages)]
+def keep_newest_skills_note(agent, api_messages):
+    """Make sure a protected selection still carries the newest difference.
+
+    A context engine may keep an older note's row and drop the newest one's; the newest note says
+    what the system prompt's index no longer shows, so it rides the last user row of the selection.
+    """
+    from agent.chat_completion_helpers import _destination_requires_egress_firewall
+
+    newest = getattr(agent, "_skills_index_newest_carrier", None)
+    if not newest or not _destination_requires_egress_firewall(agent):
+        return api_messages
+    note = _project_note(agent, *newest)[0]
+    every_row = frozenset(range(len(api_messages)))
+    if not note or any(_text_of(api_messages[i], part)[start:] == note
+                       for i, part, start in _note_slots(api_messages, every_row)):
+        return api_messages
+    last = next((i for i in range(len(api_messages) - 1, -1, -1) if api_messages[i].get("role") == "user"), None)
+    if last is None:
+        return api_messages
+    content = api_messages[last].get("content")
+    new = (content + "\n\n" + note if isinstance(content, str) else
+           [*content, {"type": "text", "text": note}] if isinstance(content, list) else None)
+    if new is None:
+        return api_messages
+    return [{**m, "content": new} if i == last else m for i, m in enumerate(api_messages)]
+
+
+def _rewrite_owned(agent, delivery, message, current, new_note):
+    """Replace the owned span's note with ``new_note`` on the live message and, by CAS, its durable row."""
+    from agent.session_persistence import _durable_content, durable_user_row_content
+
+    content = message.get("content")
+    rewritten = current[:-len(delivery.note)] + new_note
+    if rewritten == current:
+        return
+    db = getattr(agent, "_session_db", None)
+    row_id = message.get("_row_id")
+    if db is not None:
+        if isinstance(row_id, bool) or not isinstance(row_id, int):
+            raise RuntimeError("Live skills projection has no durable row identity")
+        if delivery.part is None:
+            durable, sidecar = durable_user_row_content(agent, message, message.get("content"), rewritten)
+            expected, old_sidecar = durable_user_row_content(agent, message, message.get("content"), current)
+            written = db.compare_and_set_user_message_projection(
+                agent.session_id, row_id, expected_content=expected, expected_api_content=old_sidecar,
+                content=durable, api_content=sidecar,
+            )
+        else:
+            updated = [dict(p, text=rewritten) if p is delivery.part else p for p in content]
+            in_place = getattr(agent, "_last_compaction_in_place", False)
+            durable = updated if in_place else _durable_content(updated)
+            expected = content if in_place else _durable_content(content)
+            written = db.compare_and_set_user_message_projection(
+                agent.session_id, row_id, expected_content=expected, expected_api_content=message.get("api_content"),
+                content=durable, api_content=message.get("api_content"),
+            )
+        if written != 1:
+            raise RuntimeError("Live skills projection durable row changed")
+    if delivery.part is None:
+        message["api_content"] = rewritten
+    else:
+        delivery.part["text"] = rewritten
 
 
 def revalidate_skills_note(agent, message):
-    """Project only the authenticated live producer span for the actual bound route.
+    """Bind the owned live producer span to the actual route.
 
-    Before any request carrying the raw note was built, projection is sticky: the live message and its
-    durable row are rewritten once, and a replaced/copied envelope expires ownership, leaving ordinary
-    final-gate rejection intact. Durable write failure stops the request. Once a request carrying the
-    raw note has been built, those bytes may already be with a provider and in its cached prefix: the
-    note is remembered and nothing is rewritten; :func:`project_sent_skills_notes` handles protected
-    routes on the request copy.
+    Before any request carrying the raw note was built, the rewrite is sticky: on a protected route the
+    live message and its durable row are projected once, and on an unprotected route a note that was
+    staged projected (the session started on a protected route) is restored to the full difference. A
+    replaced/copied envelope expires ownership, leaving ordinary final-gate rejection intact. Durable
+    write failure stops the request. Once a request carrying the raw note has been built, those bytes may
+    already be with a provider and in its cached prefix, so nothing is rewritten;
+    :func:`project_skills_notes` handles protected routes on the request copy.
     """
     from agent.chat_completion_helpers import _destination_requires_egress_firewall
-    from agent.session_persistence import _durable_content, _persist_lock, durable_user_row_content
-    from agent.skills_index_delta import _shown
+    from agent.session_persistence import _persist_lock
+    from agent.skills_index_delta import _render, _shown
 
     delivery = getattr(agent, "_skills_index_delivery", None)
     if not isinstance(delivery, _Delivery) or delivery.message is not message or delivery.projected:
         return
     if not _destination_requires_egress_firewall(agent):
+        if not delivery.raw_built:
+            raw_note = _render(delivery.raw_added, set(delivery.raw_removed))
+            with _persist_lock(agent):
+                current = _owned_text(message, delivery)
+                if current is None:
+                    return
+                if raw_note != delivery.note:
+                    _rewrite_owned(agent, delivery, message, current, raw_note)
+                    delivery.expected = message.get("api_content") if delivery.part is None else delivery.part["text"]
+                    delivery.note = raw_note
+                    agent._skills_index_told = (delivery.key, (
+                        {name: _shown(name, row) for name, row in delivery.raw_added.items()}, delivery.raw_removed))
         if _owned_text(message, delivery) is not None:
             delivery.raw_built = True
-            _remember_sent(agent, delivery)
         return
     if delivery.raw_built:
         return
@@ -237,37 +337,8 @@ def revalidate_skills_note(agent, message):
         current = _owned_text(message, delivery)
         if current is None:
             return
-        content = message.get("content")
-        note, delta = _project_note(agent, delivery.added, delivery.removed)
-        projected = current[:-len(delivery.note)] + note
-        db = getattr(agent, "_session_db", None)
-        if projected != current:
-            row_id = message.get("_row_id")
-            if db is not None:
-                if isinstance(row_id, bool) or not isinstance(row_id, int):
-                    raise RuntimeError("Live skills projection has no durable row identity")
-                if delivery.part is None:
-                    durable, sidecar = durable_user_row_content(agent, message, message.get("content"), projected)
-                    expected, old_sidecar = durable_user_row_content(agent, message, message.get("content"), current)
-                    written = db.compare_and_set_user_message_projection(
-                        agent.session_id, row_id, expected_content=expected, expected_api_content=old_sidecar,
-                        content=durable, api_content=sidecar,
-                    )
-                else:
-                    updated = [dict(p, text=projected) if p is delivery.part else p for p in content]
-                    in_place = getattr(agent, "_last_compaction_in_place", False)
-                    durable = updated if in_place else _durable_content(updated)
-                    expected = content if in_place else _durable_content(content)
-                    written = db.compare_and_set_user_message_projection(
-                        agent.session_id, row_id, expected_content=expected, expected_api_content=message.get("api_content"),
-                        content=durable, api_content=message.get("api_content"),
-                    )
-                if written != 1:
-                    raise RuntimeError("Live skills projection durable row changed")
-            if delivery.part is None:
-                message["api_content"] = projected
-            else:
-                delivery.part["text"] = projected
+        note, delta = _project_note(agent, delivery.raw_added, delivery.raw_removed)
+        _rewrite_owned(agent, delivery, message, current, note)
         agent._skills_index_told = (
             (delivery.key, ({name: _shown(name, row) for name, row in delta[0].items()}, delta[1]))
             if delta is not None else delivery.previous_told

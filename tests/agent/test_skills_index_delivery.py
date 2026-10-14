@@ -14,10 +14,10 @@ PROMPT = "<available_skills>\n    - old: Run checks.\n</available_skills>"
 CURRENT = "<available_skills>\n    - old: Run checks.\n    - archify: Create HTML diagrams.\n</available_skills>"
 
 
-def _stage(monkeypatch, *, multimodal=False, user="Run checks.", hook="Run checks."):
+def _stage(monkeypatch, *, multimodal=False, user="Run checks.", hook="Run checks.", provider="openrouter"):
     monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
     monkeypatch.setattr("agent.system_prompt._skills_prompt", lambda _: CURRENT)
-    agent = SimpleNamespace(provider="openrouter", api_mode="chat_completions", session_id="test",
+    agent = SimpleNamespace(provider=provider, api_mode="chat_completions", session_id="test",
                             _current_turn_timestamp=1.0, ephemeral_system_prompt="",
                             _copy_reasoning_content_for_api=lambda *_: None,
                             _should_sanitize_tool_calls=lambda: False)
@@ -89,7 +89,8 @@ def test_route_projection_never_admits_unrelated_unsafe_text(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("expiry", ["copied-message", "changed-envelope", "new-turn"])
-def test_expired_live_ownership_cannot_repair_marker_text(tmp_path, monkeypatch, expiry):
+def test_expired_live_ownership_leaves_the_live_row_alone_and_only_the_request_copy_is_projected(
+        tmp_path, monkeypatch, expiry):
     agent, message = _stage(monkeypatch)
     if expiry == "copied-message":
         message = dict(message)
@@ -97,9 +98,12 @@ def test_expired_live_ownership_cannot_repair_marker_text(tmp_path, monkeypatch,
         message["api_content"] = "Run checks.\n\n" + message["api_content"]
     else:
         stage_skills_index_note(agent, PROMPT, [])  # New turn expires the old record.
+    live = _live(message)
     agent.provider = "nous"
-    with pytest.raises(EgressBlocked):
-        _decision(tmp_path, flatten_message_text(_wire(agent, message)))
+    text = flatten_message_text(_wire(agent, message))
+    assert "Create HTML diagrams." not in text
+    assert _decision(tmp_path, text).allowed
+    assert _live(message) == live  # Without ownership nothing is written back to the message or its row.
 
 
 def test_durable_row_mismatch_stops_projection_and_preserves_original(tmp_path, monkeypatch):
@@ -209,8 +213,9 @@ def test_route_orchestration_rebuild_projects_owned_note(tmp_path, monkeypatch, 
 def test_unrevalidated_route_rebuild_control_is_blocked(tmp_path, monkeypatch):
     agent, message = _stage(monkeypatch)
     agent.provider = "nous"
-    # Inert control for the former route-binding gap: no outgoing provider call.
+    # Inert control: with neither the live revalidation nor the request projection the raw note is blocked.
     monkeypatch.setattr("agent.skills_index_delivery.revalidate_skills_note", lambda *_: None)
+    monkeypatch.setattr("agent.skills_index_delivery.project_skills_notes", lambda _agent, messages, rows=(): messages)
     with pytest.raises(EgressBlocked):
         _decision(tmp_path, _wire(agent, message))
 
@@ -267,8 +272,10 @@ def test_compaction_rewritten_row_does_not_inherit_ownership(tmp_path, monkeypat
     rewritten = {**message, "content": message["content"] + " "}  # Merged into the tail: a new content object.
     assert _reanchor(agent, [rewritten], rewritten["content"]) == 0
     agent.provider = "nous"
-    with pytest.raises(EgressBlocked):
-        _decision(tmp_path, flatten_message_text(_wire(agent, rewritten)))
+    live = _live(rewritten)
+    text = flatten_message_text(_wire(agent, rewritten))
+    assert _decision(tmp_path, text).allowed  # The request copy is projected like any other note,
+    assert _live(rewritten) == live  # but a row this agent does not own is never written back.
 
 
 @pytest.mark.parametrize("multimodal", [False, True])
@@ -296,7 +303,7 @@ def test_context_selection_clones_cannot_reintroduce_a_sent_note(tmp_path, monke
     assert _live(message) == live
 
 
-def test_a_context_engine_replacement_is_not_overwritten_by_the_remembered_sidecar(tmp_path, monkeypatch):
+def test_a_context_engine_replacement_is_not_overwritten_by_the_row_sidecar(tmp_path, monkeypatch):
     import logging
 
     from agent.conversation_loop import _apply_context_engine_selection
@@ -312,7 +319,11 @@ def test_a_context_engine_replacement_is_not_overwritten_by_the_remembered_sidec
     api = build_api_messages(agent, [message], current_turn_user_idx=0, ext_prefetch_cache="",
                              plugin_user_context="", moa_config=None, active_system_prompt="")[0]
     out = _apply_context_engine_selection(agent, api, [message], message, logger=logging.getLogger("t"))
-    assert out[0]["content"] == "Summary of the earlier turns."  # The engine's selection is what it chose.
+    text = out[0]["content"]
+    assert text.startswith("Summary of the earlier turns.")  # The engine's text is what it chose,
+    assert "Run checks." not in text  # the row's old injected context is not brought back,
+    assert "    - archify" in text and "Create HTML diagrams." not in text  # and the fallback still learns the change.
+    assert _decision(tmp_path, text).allowed
 
 
 @pytest.mark.parametrize("multimodal", [False, True])
@@ -337,15 +348,71 @@ def test_sent_note_stays_projected_in_history_while_a_fallback_persists(tmp_path
     assert flatten_message_text(restored[0]["content"]) == sent
 
 
-def test_text_never_sent_as_a_note_is_not_repaired(tmp_path, monkeypatch):
+@pytest.mark.parametrize("multimodal", [False, True])
+@pytest.mark.parametrize("preflushed", [False, True])
+def test_a_note_staged_for_a_protected_route_is_restored_when_an_unprotected_route_binds(
+        tmp_path, monkeypatch, multimodal, preflushed):
+    from agent.session_persistence import _durable_content
+
+    agent, message = _stage(monkeypatch, multimodal=multimodal, provider="nous")  # The main route is protected.
+    staged = _live(message)
+    assert "    - archify" in staged and "Create HTML diagrams." not in staged  # Staged names-only.
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("test", source="cli")
+        if preflushed:
+            message["_row_id"] = db.append_message("test", "user", _durable_content(message["content"]),
+                                                  api_content=message.get("api_content"))
+            agent._session_db = db
+        agent.provider = "openrouter"  # The voice turn binds its own, unprotected provider before the first request.
+        text = flatten_message_text(_wire(agent, message))
+        assert "    - archify: Create HTML diagrams." in text  # No discovery is lost on that route.
+        assert _live(message) == text
+        if preflushed:
+            stored = db.get_messages("test")[0]
+            assert flatten_message_text(stored.get("api_content") or stored["content"]) == text
+        agent.provider = "nous"  # A later fallback to the protected route projects the copy only.
+        projected = flatten_message_text(_wire(agent, message))
+        assert "Create HTML diagrams." not in projected and _decision(tmp_path, projected).allowed
+        assert _live(message) == text
+    finally:
+        db.close()
+
+
+def test_a_user_pasting_a_whole_earlier_message_is_not_mistaken_for_the_carrier(monkeypatch):
     agent, message = _stage(monkeypatch)
-    copy = dict(message)  # Nothing was built for an unprotected route, so nothing is remembered.
+    flatten_message_text(_wire(agent, message))  # The primary route received the raw note.
+    paste = {"role": "user", "content": "Why did you say this?\n\n" + message["api_content"]}
+    history = [message, {"role": "assistant", "content": "Done."}, paste]
     agent.provider = "nous"
-    with pytest.raises(EgressBlocked):
-        _decision(tmp_path, flatten_message_text(_wire(agent, copy)))
+    api = build_api_messages(agent, history, current_turn_user_idx=2, ext_prefetch_cache="",
+                             plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+    assert "Create HTML diagrams." not in flatten_message_text(api[0]["content"])  # The carrier is projected,
+    assert api[2]["content"] == paste["content"]  # and the whole earlier message pasted by the user is theirs.
 
 
-def test_sent_notes_live_as_long_as_their_rows_are_in_the_transcript(tmp_path, monkeypatch):
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_a_rebuilt_agent_projects_notes_it_never_sent(tmp_path, monkeypatch, multimodal):
+    agent, message = _stage(monkeypatch, multimodal=multimodal)
+    assert "Create HTML diagrams." in flatten_message_text(_wire(agent, message))  # The main route got the raw note.
+    live = _live(message)
+    # A gateway restart, eviction or per-turn agent: nothing in memory remembers what was sent.
+    fresh = SimpleNamespace(provider="nous", api_mode="chat_completions", session_id="test",
+                            _current_turn_timestamp=1.0, ephemeral_system_prompt="",
+                            _copy_reasoning_content_for_api=lambda *_: None,
+                            _should_sanitize_tool_calls=lambda: False)
+    history = [message, {"role": "assistant", "content": "Done."}, {"role": "user", "content": "Next."}]
+    api = build_api_messages(fresh, history, current_turn_user_idx=2, ext_prefetch_cache="",
+                             plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+    text = flatten_message_text(api[0]["content"])
+    assert "Create HTML diagrams." not in text
+    assert "    - archify" in text
+    assert _decision(tmp_path, text).allowed
+    assert _live(message) == live  # The primary route's history is exactly what it was sent.
+
+
+def _history_of_raw_notes(monkeypatch, turns):
+    """An agent on its main route and a ``build`` of the protected request over a growing history."""
     monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
     agent = SimpleNamespace(provider="openrouter", api_mode="chat_completions", session_id="test",
                             _current_turn_timestamp=1.0, ephemeral_system_prompt="",
@@ -357,7 +424,8 @@ def test_sent_notes_live_as_long_as_their_rows_are_in_the_transcript(tmp_path, m
                                   plugin_user_context="", moa_config=None, active_system_prompt="")[0]
 
     history = []
-    for turn in range(10):  # More distinct sent notes than any fixed cap would keep.
+
+    def send(turn):  # The main route receives the raw note of this turn.
         skills = "".join(f"    - skill{n}: Create HTML diagrams.\n" for n in range(turn + 1))
         monkeypatch.setattr("agent.system_prompt._skills_prompt",
                             lambda _, skills=skills: f"<available_skills>\n    - old: Run checks.\n{skills}</available_skills>")
@@ -365,22 +433,49 @@ def test_sent_notes_live_as_long_as_their_rows_are_in_the_transcript(tmp_path, m
         assert stage_skills_index_note(agent, PROMPT, [])
         context = _merge_gateway_notes(agent, [message], 0, "")
         _stamp_api_content_sidecar(agent, [message], 0, "", context, preflight_compressed=False)
-        history += [message]
-        assert "Create HTML diagrams." in flatten_message_text(build(history)[-1]["content"])  # Sent raw.
-        history += [{"role": "assistant", "content": "Done."}]
+        history.append(message)
+        assert "Create HTML diagrams." in flatten_message_text(build(history)[-1]["content"])
+        history.append({"role": "assistant", "content": "Done."})
+
+    for turn in range(turns):
+        send(turn)
+    return agent, history, build, send
+
+
+def _notes_in(api):
+    return [flatten_message_text(m["content"]) for m in api
+            if m["role"] == "user" and "skills available in this conversation" in flatten_message_text(m["content"])]
+
+
+def test_a_fallback_keeps_every_earlier_projected_note_byte_for_byte(tmp_path, monkeypatch):
+    agent, history, build, send = _history_of_raw_notes(monkeypatch, 5)
+    final = {"role": "user", "content": "Last."}
     sent = {m["api_content"] for m in history if m["role"] == "user"}
     agent.provider = "nous"
-    final = {"role": "user", "content": "Last."}
-    api = build(history + [final])
-    assert not any("Create HTML diagrams." in flatten_message_text(m["content"]) for m in api if m["role"] == "user")
-    assert all(m["api_content"] in sent for m in history if m["role"] == "user")  # Sent bytes untouched.
-    assert _decision(tmp_path, flatten_message_text(api[0]["content"])).allowed
-    notes = [m for m in api if m["role"] == "user" and "skills available in this conversation" in flatten_message_text(m["content"])]
-    assert len(notes) == 1  # Superseded notes are omitted, so they cannot add up past one note's budget.
-    assert "skill9" in flatten_message_text(notes[0]["content"])  # The newest note carries the full difference.
-    assert len(agent._skills_index_sent_notes) == 10  # Every row is still in the transcript.
-    build(history[-4:] + [final])  # Compaction removed the older rows.
-    assert len(agent._skills_index_sent_notes) == 2
+    first = build(history + [final])
+    assert len(_notes_in(first)) == 5  # Each earlier note stays where it was sent, projected.
+    assert not any("Create HTML diagrams." in flatten_message_text(m["content"]) for m in first)
+    assert all(_decision(tmp_path, flatten_message_text(m["content"])).allowed for m in first if m["role"] == "user")
+    agent.provider = "openrouter"
+    for turn in range(5, 8):  # The primary keeps working and sends more notes.
+        send(turn)
+    agent.provider = "nous"  # The fallback is activated again.
+    again = build(history + [final])
+    assert again[:len(first) - 1] == first[:-1]  # What this route already received is unchanged: its cache holds.
+    assert len(_notes_in(again)) == 8 and "skill7" in _notes_in(again)[-1]
+    assert all(m["api_content"] in sent or "Turn " in m["content"] for m in history if m["role"] == "user")
+
+
+def test_projected_notes_share_one_notes_budget_and_the_oldest_are_withheld_first(tmp_path, monkeypatch):
+    agent, history, build, _ = _history_of_raw_notes(monkeypatch, 10)
+    agent.provider = "nous"
+    agent._llm_egress_max_serialized_bytes = 2_800  # A note may spend a quarter: 700 bytes in all.
+    api = build(history + [{"role": "user", "content": "Last."}])
+    notes = [n[n.index("[System:"):] for n in _notes_in(api)]
+    assert 1 < len(notes) < 10 and "skill9" in notes[-1]  # Several fit, the newest survives, the oldest went first.
+    assert sum(len(n.encode()) for n in notes) <= 700
+    assert next(m["content"] for m in api if m["role"] == "user").startswith("Turn 0.")  # Withheld notes keep their rows.
+    assert all(_decision(tmp_path, flatten_message_text(m["content"])).allowed for m in api if m["role"] == "user")
 
 
 def _sent_deltas(monkeypatch, turns):
@@ -436,8 +531,8 @@ def test_the_newest_delta_survives_a_selection_that_drops_its_carrier(monkeypatc
     out = _apply_context_engine_selection(agent, build(conversation), conversation, conversation[-1],
                                           logger=logging.getLogger("t"))
     notes = _skills_notes(out)
-    assert len(notes) == 1
-    assert "beta" in notes[0] and "alpha" not in notes[0]  # The fallback still learns the latest difference.
+    assert len(notes) == 2  # The retained row keeps its own note; the newest difference rides the last row.
+    assert "alpha" in notes[0] and "beta" in notes[-1]
 
 
 @pytest.mark.parametrize("texts", [
@@ -446,8 +541,8 @@ def test_the_newest_delta_survives_a_selection_that_drops_its_carrier(monkeypatc
 ])
 def test_a_repeated_delta_is_the_newest_note_in_a_protected_request(monkeypatch, texts):
     notes = _send_deltas(monkeypatch, list(zip(texts, ["alpha", "beta", "alpha"])))
-    assert len(notes) == 1
-    assert "alpha" in notes[0] and "beta" not in notes[0]  # The latest delta, once, and not the stale one.
+    assert len(notes) == 3  # Every note stays where it was sent,
+    assert "alpha" in notes[-1] and "beta" not in notes[-1]  # and the last one, which the model reads, is alpha.
 
 
 def test_a_user_quoting_a_sent_note_is_not_mistaken_for_the_row_that_carried_it(monkeypatch):
@@ -465,5 +560,3 @@ def test_a_user_quoting_a_sent_note_is_not_mistaken_for_the_row_that_carried_it(
     api = build(history)
     assert "Create HTML diagrams." not in flatten_message_text(api[0]["content"])  # The carrier is projected.
     assert api[2]["content"] == quote["content"]  # The quotation is the user's own text.
-    build([quote])  # Compaction removed the carrier; the quotation must not keep its provenance alive.
-    assert not agent._skills_index_sent_notes

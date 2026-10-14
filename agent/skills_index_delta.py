@@ -161,6 +161,7 @@ def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) 
         return False
     from agent.chat_completion_helpers import _destination_requires_egress_firewall
     protected = _destination_requires_egress_firewall(agent)
+    raw_stored, raw_current = stored, current
     if protected:
         stored = _project_entries(stored, announce_omissions=False)
         current = _project_entries(current, announce_omissions=True)
@@ -182,6 +183,11 @@ def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) 
              if name not in stored or _shown(name, stored[name]) != _shown(name, row)}
     removed = set(stored) - set(current)
     note = _render(added, removed)
+    # What an unprotected route would be sent. The route can still change before the first request
+    # (a voice turn binds its own provider), so the full difference is kept beside the projected one.
+    raw_added = {name: row for name, row in raw_current.items()
+                 if name not in raw_stored or _shown(name, raw_stored[name]) != _shown(name, row)}
+    raw_removed = frozenset(set(raw_stored) - set(raw_current))
     if protected:
         from agent.llm_egress_firewall import SanitizedTextRejected, validate_sanitized_text
         try:
@@ -202,7 +208,8 @@ def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) 
     agent._skills_index_told = (key, ({n: _shown(n, r) for n, r in added.items()}, frozenset(removed)))
     agent._skills_index_note = note
     # Process-local producer data, never recovered from a visible marker or sidecar.
-    agent._skills_index_pending_delivery = (note, dict(added), frozenset(removed), key, previous_told)
+    agent._skills_index_pending_delivery = (note, dict(added), frozenset(removed), key, previous_told,
+                                            dict(raw_added), raw_removed)
     logger.info(
         "Session %s: skills changed (+%d/-%d) since the system prompt was built; delivering the "
         "change as a turn note (prefix cache preserved).",

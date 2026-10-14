@@ -1317,6 +1317,7 @@ def build_api_messages(
     canonical_messages = canonicalize_replay_history(messages[:split], now=turn_now) + messages[split:]
 
     api_messages = []
+    sidecar_rows: set[int] = set()  # request rows whose content is agent-composed bytes, not the user's text
     for idx, msg in enumerate(canonical_messages):
         # Structural clone, NOT msg.copy(): in-place transforms below must not reach
         # persisted history via nested containers; see _clone_message_for_send.
@@ -1337,6 +1338,7 @@ def build_api_messages(
                 # Reuse the prologue's stamp so sidecar and wire cannot drift
                 # and every pass this turn sends identical bytes.
                 api_msg["content"] = _api_content
+                sidecar_rows.add(len(api_messages))
             else:
                 # Callers that bypass the prologue stamping: compose live.
                 _composed = compose_user_api_content(
@@ -1344,6 +1346,7 @@ def build_api_messages(
                 )
                 if _composed is not None:
                     api_msg["content"] = _composed
+                    sidecar_rows.add(len(api_messages))
         elif (
             isinstance(_api_content, str) and _api_content
             and msg.get("role") in ("user", "assistant")
@@ -1352,6 +1355,7 @@ def build_api_messages(
             # prefix stays byte-stable. User rows carry the injection sidecar; user
             # and assistant rows may carry a sanitize-divergence sidecar.
             api_msg["content"] = _api_content
+            sidecar_rows.add(len(api_messages))
 
         # Pass reasoning back to the API for ALL assistant messages so multi-turn
         # reasoning context is preserved.
@@ -1384,8 +1388,9 @@ def build_api_messages(
     apply_rejected_thinking_suppression(agent, api_messages)
 
     # A note a provider already received stays as sent in history; a protected route's copy is projected.
-    from agent.skills_index_delivery import project_sent_skills_notes
-    api_messages = project_sent_skills_notes(agent, api_messages, prune=True)
+    from agent.skills_index_delivery import project_skills_notes, remember_newest_skills_note
+    remember_newest_skills_note(agent, api_messages, sidecar_rows)
+    api_messages = project_skills_notes(agent, api_messages, sidecar_rows)
 
     # Final system message = cached prompt + ephemeral additions (API-time only).
     # Plugin/recall context goes into the user message, never the system prompt: the
