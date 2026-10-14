@@ -392,3 +392,22 @@ def test_a_repeated_delta_is_the_newest_note_in_a_protected_request(tmp_path, mo
     assert len(notes) == 1
     assert "alpha" in notes[0] and "beta" not in notes[0]  # The latest delta, once, and not the stale one.
     assert _decision(tmp_path, flatten_message_text(api[0]["content"])).allowed
+
+
+def test_a_user_quoting_a_sent_note_is_not_mistaken_for_the_row_that_carried_it(monkeypatch):
+    agent, message = _stage(monkeypatch)
+    flatten_message_text(_wire(agent, message))  # The primary route received the raw note.
+    note = agent._skills_index_delivery.note
+    quote = {"role": "user", "content": f"What does this mean? {note}"}
+    history = [message, {"role": "assistant", "content": "Done."}, quote]
+
+    def build(messages):
+        return build_api_messages(agent, messages, current_turn_user_idx=len(messages) - 1, ext_prefetch_cache="",
+                                  plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+
+    agent.provider = "nous"
+    api = build(history)
+    assert "Create HTML diagrams." not in flatten_message_text(api[0]["content"])  # The carrier is projected.
+    assert api[2]["content"] == quote["content"]  # The quotation is the user's own text.
+    build([quote])  # Compaction removed the carrier; the quotation must not keep its provenance alive.
+    assert not agent._skills_index_sent_notes

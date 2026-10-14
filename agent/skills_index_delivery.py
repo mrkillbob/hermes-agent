@@ -100,14 +100,15 @@ def _remember_sent(agent, delivery):
     """Process-local record that a request carrying this raw note was built for an unprotected route.
 
     Only the producer writes it, and only after such a build, so text that was never sent as a note
-    cannot be repaired by it. An entry lives while its row is in the transcript (see
-    :func:`project_sent_skills_notes`), never by count.
+    cannot be repaired by it. Keyed on the whole text that was sent, so a user who quotes the note
+    in some other message is not mistaken for the row that carried it. An entry lives while its row
+    is in the transcript (see :func:`project_sent_skills_notes`), never by count.
     """
     sent = getattr(agent, "_skills_index_sent_notes", None)
     if not isinstance(sent, dict):
         sent = agent._skills_index_sent_notes = {}
-    sent.pop(delivery.note, None)  # A, B, A again: the latest occurrence is the newest.
-    sent[delivery.note] = (dict(delivery.added), delivery.removed)
+    sent.pop(delivery.expected, None)  # A, B, A again: the latest occurrence is the newest.
+    sent[delivery.expected] = (delivery.note, dict(delivery.added), delivery.removed)
 
 
 def _user_texts(message):
@@ -140,9 +141,9 @@ def project_sent_skills_notes(agent, api_messages, *, prune=False):
     the live transcript, the durable rows and the primary route's cached bytes stay as they were sent.
     Only the newest remembered note is projected, and only at its last occurrence in the request; every
     superseded note, and any earlier row carrying the same text, is omitted. That keeps the notes of a
-    long session inside a single note's share of the request budget. Keyed on the note's bytes
-    because a context engine's selection can hand back clones that carry no identity, and because a note
-    sent on an earlier turn is history by now.
+    long session inside a single note's share of the request budget. Keyed on the sent text rather than
+    row identity because a context engine's selection can hand back clones that carry none, and because a
+    note sent on an earlier turn is history by now.
 
     ``prune`` is for the full canonical request only: a note whose row compaction has removed is
     forgotten, while one still in the transcript is kept however many notes were sent. A context
@@ -153,8 +154,8 @@ def project_sent_skills_notes(agent, api_messages, *, prune=False):
         return api_messages
     if prune:
         texts = [t for m in api_messages for t in _user_texts(m)]
-        for raw in [raw for raw in sent if not any(t.endswith(raw) for t in texts)]:
-            del sent[raw]
+        for key in [key for key in sent if not any(t.endswith(key) for t in texts)]:
+            del sent[key]
         if not sent:
             return api_messages
     from agent.chat_completion_helpers import _destination_requires_egress_firewall
@@ -162,16 +163,17 @@ def project_sent_skills_notes(agent, api_messages, *, prune=False):
     if not _destination_requires_egress_firewall(agent):
         return api_messages
     newest = next(reversed(sent))
-    projected = _project_note(agent, *sent[newest])[0]
+    projected = _project_note(agent, *sent[newest][1:])[0]
     last = max(((i, n) for i, m in enumerate(api_messages) for n, t in enumerate(_user_texts(m))
                 if t.endswith(newest)), default=None)
 
     def rewrite_at(index):
         def rewrite(text, ordinal):
-            raw = next((raw for raw in sent if text.endswith(raw)), None)
-            if raw is None:
+            key = next((key for key in sent if text.endswith(key)), None)
+            if key is None:
                 return text
-            return text[:-len(raw)] + (projected if raw == newest and (index, ordinal) == last else "")
+            keep = projected if key == newest and (index, ordinal) == last else ""
+            return text[:-len(sent[key][0])] + keep
         return rewrite
 
     return [_rewrite_user_texts(m, rewrite_at(i)) for i, m in enumerate(api_messages)]
