@@ -379,6 +379,27 @@ def test_a_note_staged_for_a_protected_route_is_restored_when_an_unprotected_rou
         db.close()
 
 
+def test_a_multimodal_note_survives_the_session_store_round_trip(tmp_path, monkeypatch):
+    from agent.session_persistence import _db_flush_row
+
+    agent, message = _stage(monkeypatch, multimodal=True)
+    assert "Create HTML diagrams." in flatten_message_text(_wire(agent, message))  # The main route got the raw note.
+    row = _db_flush_row(agent, message, True)  # The list envelope is stored as flat text.
+    assert isinstance(row["content"], str)
+    # A later process resumes the session on a protected route.
+    resumed = {"role": "user", "content": row["content"], "api_content": row["api_content"]}
+    history = [resumed, {"role": "assistant", "content": "Done."}, {"role": "user", "content": "Next."}]
+    fresh = SimpleNamespace(provider="nous", api_mode="chat_completions", session_id="test",
+                            _current_turn_timestamp=1.0, ephemeral_system_prompt="",
+                            _copy_reasoning_content_for_api=lambda *_: None,
+                            _should_sanitize_tool_calls=lambda: False)
+    api = build_api_messages(fresh, history, current_turn_user_idx=2, ext_prefetch_cache="",
+                             plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+    text = flatten_message_text(api[0]["content"])
+    assert "Create HTML diagrams." not in text and "    - archify" in text
+    assert _decision(tmp_path, text).allowed
+
+
 def test_a_context_part_that_ends_like_a_note_does_not_shadow_the_real_note_part(tmp_path, monkeypatch):
     from agent.skills_index_delta import _render
 
