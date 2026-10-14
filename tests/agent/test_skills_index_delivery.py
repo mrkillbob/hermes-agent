@@ -296,6 +296,25 @@ def test_context_selection_clones_cannot_reintroduce_a_sent_note(tmp_path, monke
     assert _live(message) == live
 
 
+def test_a_context_engine_replacement_is_not_overwritten_by_the_remembered_sidecar(tmp_path, monkeypatch):
+    import logging
+
+    from agent.conversation_loop import _apply_context_engine_selection
+
+    class Summarizing:  # Replaces the row's text but, like any clone, keeps its persistence fields.
+        def select_context(self, api_messages, conversation_messages=None, incoming_message=None, budget_tokens=0):
+            return [{**conversation_messages[0], "content": "Summary of the earlier turns."}]
+
+    agent, message = _stage(monkeypatch)
+    assert "Create HTML diagrams." in flatten_message_text(_wire(agent, message))  # Main route sent the raw note.
+    agent.context_compressor = Summarizing()
+    agent.provider = "nous"
+    api = build_api_messages(agent, [message], current_turn_user_idx=0, ext_prefetch_cache="",
+                             plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+    out = _apply_context_engine_selection(agent, api, [message], message, logger=logging.getLogger("t"))
+    assert out[0]["content"] == "Summary of the earlier turns."  # The engine's selection is what it chose.
+
+
 @pytest.mark.parametrize("multimodal", [False, True])
 def test_sent_note_stays_projected_in_history_while_a_fallback_persists(tmp_path, monkeypatch, multimodal):
     agent, message = _stage(monkeypatch, multimodal=multimodal)

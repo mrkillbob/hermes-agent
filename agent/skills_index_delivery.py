@@ -108,7 +108,7 @@ def _remember_sent(agent, delivery):
     if not isinstance(sent, dict):
         sent = agent._skills_index_sent_notes = {}
     sent.pop(delivery.expected, None)  # A, B, A again: the latest occurrence is the newest.
-    sent[delivery.expected] = (delivery.note, dict(delivery.added), delivery.removed)
+    sent[delivery.expected] = (delivery.note, dict(delivery.added), delivery.removed, delivery.message.get("content"))
 
 
 def _user_texts(message):
@@ -144,13 +144,20 @@ def restore_sent_sidecars(agent, messages):
 
     A string turn carries its note only in the sidecar, and a context engine's selection hands back
     clones whose sidecar the persistence stripping then drops; ``build_api_messages`` substitutes it for
-    the same reason. Only a sidecar that is exactly a remembered sent text is restored.
+    the same reason. Only a sidecar that is exactly a remembered sent text is restored, and only while
+    the row still holds the content it had when that text was sent: a context engine that replaced the
+    text (a summary, say) keeps its selection instead of getting the old sidecar back.
     """
     sent = getattr(agent, "_skills_index_sent_notes", None)
     if not sent:
         return messages
+
+    def unedited(m):
+        entry = sent.get(m.get("api_content"))
+        return entry is not None and m.get("content") == entry[3]
+
     restored = [{**m, "content": m["api_content"]}
-                if m.get("role") == "user" and isinstance(m.get("content"), str) and m.get("api_content") in sent else m
+                if m.get("role") == "user" and isinstance(m.get("content"), str) and unedited(m) else m
                 for m in messages]
     return messages if all(a is b for a, b in zip(restored, messages)) else restored
 
@@ -184,7 +191,7 @@ def project_sent_skills_notes(agent, api_messages, *, prune=False):
     if not _destination_requires_egress_firewall(agent):
         return api_messages
     newest = next(reversed(sent))
-    projected = _project_note(agent, *sent[newest][1:])[0]
+    projected = _project_note(agent, *sent[newest][1:3])[0]
     last = max(((i, n) for i, m in enumerate(api_messages) for n, t in enumerate(_user_texts(m))
                 if _carrier(sent, t) == newest), default=None)
 
