@@ -30,10 +30,12 @@ failed or unknown Code Review evidence holds. Findings from a Security pass stil
 block through the finding guards below.
 
 Completion alone does not prove clean. The canonical PR-level `+1` reaction must
-have been created strictly after the completion times of the rows present, the
-summary update and the latest current-head review submissions. Any canonical
-`eyes` reaction holds. An old retained thumbs-up, another user's reaction, or
-ambiguous same-second ordering cannot clear admission. The Code Review row remains
+not be older than the completion times of the rows present and the latest
+current-head review submissions by more than 5 seconds: Codex writes the
+thumbs-up, the Completed time and the summary edit as separate writes, so a
+clean thumbs-up can land just before them. The summary comment's own edit time
+is not a boundary. Any canonical `eyes` reaction holds. An old retained
+thumbs-up or another user's reaction cannot clear admission. The Code Review row remains
 mandatory when no formal review submission exists on a clean pass.
 
 The ordinary review guards remain: code and security submissions retain their
