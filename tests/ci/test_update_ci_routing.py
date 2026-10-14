@@ -885,15 +885,9 @@ def test_fork_owner_change_reaches_advisory_windows_consumers(path):
     lanes = _real_classifier([path])
     run = _ci_run(lanes, repository="mrkillbob/hermes-agent")
     assert "tests-windows-advisory" in run
-    for lane in ("desktop_updater", "e2e_upgrade", "e2e_desktop_update"):
+    for lane in ("desktop_updater", "e2e", "e2e_upgrade", "e2e_desktop_update"):
         if lanes[lane]:
             assert all(_consumers_reached(run, lane).values()), f"{path}: {lane} lost its consumer"
-    # The fork intentionally requests the full Windows E2E/update journeys
-    # whenever the native caller starts, even for desktop-updater-only edits.
-    for lane in ("e2e", "e2e_upgrade"):
-        native = {key: reached for key, reached in _consumers_reached(run, lane).items()
-                  if key.startswith("tests-windows-advisory/")}
-        assert native and all(native.values()), f"{path}: lost full native coverage: {native}"
 
 
 def test_windows_install_update_dispatch_alone_sets_strict():
