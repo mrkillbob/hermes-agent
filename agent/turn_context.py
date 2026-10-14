@@ -1385,7 +1385,7 @@ def build_api_messages(
 
     # A note a provider already received stays as sent in history; a protected route's copy is projected.
     from agent.skills_index_delivery import project_sent_skills_notes
-    api_messages = project_sent_skills_notes(agent, api_messages)
+    api_messages = project_sent_skills_notes(agent, api_messages, prune=True)
 
     # Final system message = cached prompt + ephemeral additions (API-time only).
     # Plugin/recall context goes into the user message, never the system prompt: the

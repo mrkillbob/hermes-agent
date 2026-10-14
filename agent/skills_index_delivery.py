@@ -10,7 +10,6 @@ only its own outgoing request copy, wherever the note sits in it.
 from dataclasses import dataclass
 from typing import Any
 
-_SENT_NOTES_MAX = 8
 
 
 @dataclass
@@ -101,28 +100,45 @@ def _remember_sent(agent, delivery):
     """Process-local record that a request carrying this raw note was built for an unprotected route.
 
     Only the producer writes it, and only after such a build, so text that was never sent as a note
-    cannot be repaired by it.
+    cannot be repaired by it. An entry lives while its row is in the transcript (see
+    :func:`project_sent_skills_notes`), never by count.
     """
     sent = getattr(agent, "_skills_index_sent_notes", None)
     if not isinstance(sent, dict):
         sent = agent._skills_index_sent_notes = {}
-    sent.pop(delivery.note, None)
     sent[delivery.note] = (dict(delivery.added), delivery.removed)
-    while len(sent) > _SENT_NOTES_MAX:
-        sent.pop(next(iter(sent)))
 
 
-def project_sent_skills_notes(agent, api_messages):
+def _user_texts(message):
+    content = message.get("content") if message.get("role") == "user" else None
+    if isinstance(content, str):
+        return (content,)
+    if isinstance(content, list):
+        return tuple(p["text"] for p in content if isinstance(p, dict) and isinstance(p.get("text"), str))
+    return ()
+
+
+def project_sent_skills_notes(agent, api_messages, *, prune=False):
     """Return ``api_messages`` with every remembered raw note projected for a protected route.
 
     Request-copy only: matching user rows (or text parts) are replaced by new dicts, never mutated, so
     the live transcript, the durable rows and the primary route's cached bytes stay as they were sent.
     Keyed on the note's bytes because a context engine's selection can hand back clones that carry no
     identity, and because a note sent on an earlier turn is history by now.
+
+    ``prune`` is for the full canonical request only: a note whose row compaction has removed is
+    forgotten, while one still in the transcript is kept however many notes were sent. A context
+    engine's selection may drop rows that are still history, so it never prunes.
     """
     sent = getattr(agent, "_skills_index_sent_notes", None)
     if not sent:
         return api_messages
+    if prune:
+        texts = [t for m in api_messages for t in _user_texts(m)]
+        for raw in [raw for raw in sent if not any(t.endswith(raw) for t in texts)]:
+            del sent[raw]
+        if not sent:
+            return api_messages
     from agent.chat_completion_helpers import _destination_requires_egress_firewall
 
     if not _destination_requires_egress_firewall(agent):
@@ -137,8 +153,7 @@ def project_sent_skills_notes(agent, api_messages):
         content = message.get("content") if message.get("role") == "user" else None
         if isinstance(content, str) and swap(content) != content:
             message = {**message, "content": swap(content)}
-        elif isinstance(content, list) and any(isinstance(p, dict) and isinstance(p.get("text"), str)
-                                               and swap(p["text"]) != p["text"] for p in content):
+        elif isinstance(content, list) and any(swap(t) != t for t in _user_texts(message)):
             message = {**message, "content": [
                 {**p, "text": swap(p["text"])} if isinstance(p, dict) and isinstance(p.get("text"), str) else p
                 for p in content]}

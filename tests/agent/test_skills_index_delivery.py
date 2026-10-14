@@ -323,3 +323,38 @@ def test_text_never_sent_as_a_note_is_not_repaired(tmp_path, monkeypatch):
     agent.provider = "nous"
     with pytest.raises(EgressBlocked):
         _decision(tmp_path, flatten_message_text(_wire(agent, copy)))
+
+
+def test_sent_notes_live_as_long_as_their_rows_are_in_the_transcript(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    agent = SimpleNamespace(provider="openrouter", api_mode="chat_completions", session_id="test",
+                            _current_turn_timestamp=1.0, ephemeral_system_prompt="",
+                            _copy_reasoning_content_for_api=lambda *_: None,
+                            _should_sanitize_tool_calls=lambda: False)
+
+    def build(messages):
+        return build_api_messages(agent, messages, current_turn_user_idx=len(messages) - 1, ext_prefetch_cache="",
+                                  plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+
+    history = []
+    for turn in range(10):  # More distinct sent notes than any fixed cap would keep.
+        skills = "".join(f"    - skill{n}: Create HTML diagrams.\n" for n in range(turn + 1))
+        monkeypatch.setattr("agent.system_prompt._skills_prompt",
+                            lambda _, skills=skills: f"<available_skills>\n    - old: Run checks.\n{skills}</available_skills>")
+        message = {"role": "user", "content": f"Turn {turn}."}
+        assert stage_skills_index_note(agent, PROMPT, [])
+        context = _merge_gateway_notes(agent, [message], 0, "")
+        _stamp_api_content_sidecar(agent, [message], 0, "", context, preflight_compressed=False)
+        history += [message]
+        assert "Create HTML diagrams." in flatten_message_text(build(history)[-1]["content"])  # Sent raw.
+        history += [{"role": "assistant", "content": "Done."}]
+    sent = {m["api_content"] for m in history if m["role"] == "user"}
+    agent.provider = "nous"
+    final = {"role": "user", "content": "Last."}
+    api = build(history + [final])
+    assert not any("Create HTML diagrams." in flatten_message_text(m["content"]) for m in api if m["role"] == "user")
+    assert all(m["api_content"] in sent for m in history if m["role"] == "user")  # Sent bytes untouched.
+    assert _decision(tmp_path, flatten_message_text(api[0]["content"])).allowed
+    assert len(agent._skills_index_sent_notes) == 10  # Every row is still in the transcript.
+    build(history[-4:] + [final])  # Compaction removed the older rows.
+    assert len(agent._skills_index_sent_notes) == 2
