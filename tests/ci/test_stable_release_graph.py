@@ -152,10 +152,15 @@ def test_lane_inputs_reach_the_workflows_they_configure():
     for name in ("candidates-darwin-arm64", "candidates-darwin-x64", "candidates-win32-arm64",
                  "candidates-win32-x64", "candidates-win32-bundle", "candidates-termux"):
         assert jobs[name]["with"]["skip-tests"] == "${{ !fromJSON(needs.admit.outputs.lanes).smoke }}", name
-    # The Store submission follows the windows lane.
-    assert jobs["publish-bundles"]["with"]["store"] == "${{ fromJSON(needs.admit.outputs.lanes).windows }}"
+    # Which Windows packages the shared builds make follows the two Windows lanes, and the Store
+    # submission follows the Store lane.
+    store_off = "${{ !fromJSON(needs.admit.outputs.lanes)['windows-store'] }}"
+    for name in ("candidates-win32-arm64", "candidates-win32-x64", "candidates-win32-bundle"):
+        assert jobs[name]["with"]["skip-signed"] == "${{ !fromJSON(needs.admit.outputs.lanes).windows }}", name
+        assert jobs[name]["with"]["skip-store"] == store_off, name
+    assert jobs["publish-bundles"]["with"]["skip-store"] == store_off
     desktop = workflow("desktop-bundled-release.yml")["jobs"]
-    assert "inputs.store" in desktop["stable-store"]["if"]
+    assert "inputs.skip-store" in desktop["stable-store"]["if"]
     assert {"lanes", "jobs"} <= set(jobs["admit"]["outputs"])
     for name in ("acceptance", "publication", "complete"):
         gate_step = next(step for step in jobs[name]["steps"]
@@ -164,6 +169,18 @@ def test_lane_inputs_reach_the_workflows_they_configure():
                                     "LANES": "${{ needs.admit.outputs.lanes }}"}
         gated = gate_step["run"].split(" gate ", 1)[1].split()
         assert set(gated) <= set(direct_needs(jobs, name)), name
+
+
+def test_a_store_only_build_is_handed_no_signing_variables():
+    """after-pack and electron-builder sign whenever AZURE_SIGN_* are set; the Azure login is skipped
+    with the signed lane, so the build step must see them empty."""
+    jobs = workflow("desktop-bundled-release.yml")["jobs"]
+    step = next(step for step in jobs["build-win32-x64-release"]["steps"] if step.get("name") == "Build and package")
+    azure = {key: value for key, value in step["env"].items() if key.startswith("AZURE_") and key != "AZURE_TOKEN_CREDENTIALS"}
+    assert set(azure) == {"AZURE_SIGN_ENDPOINT", "AZURE_SIGN_ACCOUNT", "AZURE_SIGN_PROFILE", "AZURE_SIGN_PUBLISHER",
+                          "AZURE_CLIENT_ID", "AZURE_TENANT_ID"}
+    for key, value in azure.items():
+        assert value == f"${{{{ inputs.skip-signed != true && vars.{key} || '' }}}}", key
 
 
 def test_admit_emits_the_same_lanes_and_jobs_the_gate_reads(tmp_path):
@@ -469,3 +486,18 @@ def test_the_builds_table_render_cannot_block_the_release_and_has_its_r2_inputs(
     assert str(step.get("continue-on-error")).lower() == "true"  # base YAML loader: a string
     assert {"CLOUDFLARE_R2_ACCOUNT_ID", "CLOUDFLARE_R2_ACCESS_KEY_ID", "CLOUDFLARE_R2_SECRET_ACCESS_KEY",
             "CLOUDFLARE_R2_BUCKET", "CLOUDFLARE_R2_PUBLIC_URL", "RELEASE_CLAIM_TAG"} <= set(step["env"])
+
+
+@pytest.mark.parametrize("arch", ["arm64", "x64"])
+def test_macos_smoke_runs_without_a_receipt_outside_the_candidate_phase(arch):
+    """Only a candidate stages a receipt; a canary's skipped stage-receipt must not skip the smoke,
+    or its publish gate (which needs every job to succeed) fails on every canary."""
+    smoke = workflow("desktop-bundled-release.yml")["jobs"][f"smoke-darwin-{arch}"]["if"]
+    base = {"validate": {"result": "success", "outputs": {"sha": "a" * 40, f"darwin-{arch}": "true"}},
+            f"build-darwin-{arch}": {"result": "success"}}
+    inputs = {"release-phase": "", "upload_release": True, "skip-tests": False}
+    skipped = {**base, f"stage-receipt-darwin-{arch}": {"result": "skipped"}}
+    staged = {**base, f"stage-receipt-darwin-{arch}": {"result": "success"}}
+    assert gate(smoke, inputs, skipped)
+    assert not gate(smoke, {**inputs, "release-phase": "candidate"}, skipped)
+    assert gate(smoke, {**inputs, "release-phase": "candidate"}, staged)

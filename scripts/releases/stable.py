@@ -34,12 +34,33 @@ SMOKE_TARGETS = {"smoke-darwin-arm64": "macos/arm64", "smoke-darwin-x64": "macos
                  "smoke-win32-arm64": "windows/arm64", "smoke-win32-x64": "windows/x64"}
 
 
+# Stable releases are cut from ``main`` or from a ``release/*`` maintenance branch.
+RELEASE_LINE_BRANCHES = ("main", "release/*")
+
+
+def release_line_refspecs(remote_prefix: str) -> list[str]:
+    """Fetch refspecs that mirror every release-line branch under ``refs/remotes/<remote_prefix>/``."""
+    return [f"+refs/heads/{branch}:refs/remotes/{remote_prefix}/{branch}"
+            for branch in RELEASE_LINE_BRANCHES]
+
+
+def release_line_contains(commit: str, remote_prefix: str) -> list[str]:
+    """The git command that lists the fetched release-line branches holding ``commit``.
+
+    Empty output means the commit is on no release line. Git matches the
+    ``release/*`` pattern across the slash, so ``release/0.22.1`` qualifies.
+    """
+    return ["git", "for-each-ref", "--contains", commit, "--format=%(refname)",
+            *(f"refs/remotes/{remote_prefix}/{branch}" for branch in RELEASE_LINE_BRANCHES)]
+
+
 def admit_claim(tag: str, commit: str, *, on_main) -> dict:
     """Admit a release from its attempt ref. The checkout version is not read.
 
     ``main`` carries ``0.0.0`` on purpose, so the version and the attempt come
     from ``rc.<N>-vX.Y.Z`` and the only question about the commit is whether
-    it is on ``main``.
+    it is on a release line: ``main`` or a ``release/*`` branch. ``on_main`` is
+    that predicate; the name predates release branches.
     """
     from scripts.releases.versioning import parse_attempt_ref
 
@@ -48,7 +69,7 @@ def admit_claim(tag: str, commit: str, *, on_main) -> dict:
         raise ValueError(f"{tag} is not a claim tag")
     version, attempt = parsed
     if not on_main(commit):
-        raise ValueError(f"{commit} is not on main")
+        raise ValueError(f"{commit} is not on main or a release/* branch")
     return {"claim_tag": tag, "tag": f"v{version}", "version": version, "attempt": attempt,
             "commit": commit}
 
@@ -227,7 +248,8 @@ def validate_candidates(manifest: dict, tag: str, commit: str, public_base: str,
     never is.
     """
     rows = _validated_rows(manifest, tag, commit, public_base, release_epoch, archive=archive)
-    if not rows:
+    # A Store-only release has no package rows: the Store bundle is a file, never an update target.
+    if not rows and not manifest.get("files"):
         raise ValueError("Candidate manifest has no packages")
     # Which targets a release must carry is its claim's business (require_targets_match_claim),
     # not the manifest's: a release may build any subset of the lanes.
@@ -427,7 +449,7 @@ def validate_claim(metadata: object, *, version: str, attempt: int, commit: str)
         raise ValueError("Stable claim metadata is invalid")
     base = {*expected, "autopublish", "claimEpoch"}
     legacy = {"skipBundles", "skipTests"}
-    shapes = ({*base, "lanes"}, {*base, *legacy}, {*base, *legacy, "includeMacosIntel"},
+    shapes = ({*base, "lanes"}, {*base, "lanes", "lanesRevision"}, {*base, *legacy}, {*base, *legacy, "includeMacosIntel"},
               {*base, *legacy, "includeTermux"}, {*base, *legacy, "includeMacosIntel", "includeTermux"})
     if set(metadata) not in shapes:
         raise ValueError("Stable claim metadata is invalid")
@@ -541,14 +563,10 @@ def check_claim(env: dict, run=output) -> dict:
     if (remote_commit != commit or remote_object != local_object
             or (expected_object and remote_object != expected_object)):
         raise ValueError("Stable claim tag moved")
-    run(["git", "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+    run(["git", "fetch", "origin", *release_line_refspecs("origin")])
 
     def on_main(sha: str) -> bool:
-        try:
-            run(["git", "merge-base", "--is-ancestor", sha, "origin/main"])
-        except subprocess.CalledProcessError:
-            return False
-        return True
+        return bool(run(release_line_contains(sha, "origin")))
 
     admitted = admit_claim(claim_tag, commit, on_main=on_main)
     raw_metadata = run(["git", "tag", "-l", claim_tag, "--format=%(contents)"])
@@ -594,7 +612,7 @@ def final_context(env: dict, run=output) -> tuple[str, str, dict]:
             or not refs.get(f"refs/tags/{tag}")):
         raise ValueError("Final release tag custody changed")
 
-    run(["git", "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main",
+    run(["git", "fetch", "origin", *release_line_refspecs("origin"),
          f"+refs/tags/{claim_tag}:refs/tags/{claim_tag}",
          f"+refs/tags/{tag}:refs/tags/{tag}"])
     for receipt, expected_object in ((claim_tag, claim_object),
@@ -602,7 +620,8 @@ def final_context(env: dict, run=output) -> tuple[str, str, dict]:
         local_object = run(["git", "rev-parse", f"refs/tags/{receipt}"])
         if local_object != expected_object or run(["git", "cat-file", "-t", local_object]) != "tag":
             raise ValueError("Final release local tag differs from the remote")
-    run(["git", "merge-base", "--is-ancestor", commit, "origin/main"])
+    if not run(release_line_contains(commit, "origin")):
+        raise ValueError(f"{commit} is not on main or a release/* branch")
     claim = _claim_metadata(
         run(["git", "tag", "-l", claim_tag, "--format=%(contents)"]),
         version=admitted["version"], attempt=admitted["attempt"], commit=commit,
@@ -795,7 +814,9 @@ def candidate_manifest(env: dict) -> None:
     handoffs = lane_set.handoffs(lanes, CANDIDATE_HANDOFFS)
     # A call the claim did not build never ran, so it has no smoke to record.
     runs = lane_set.jobs_to_run(lanes)
-    calls = {call: job for call, job in CALL_SMOKE_JOBS.items() if runs[call]}
+    # A call whose package is not a target (the Store variant is not install-smoked) has no smoke.
+    built = lane_set.targets(lanes)
+    calls = {call: job for call, job in CALL_SMOKE_JOBS.items() if runs[call] and SMOKE_TARGETS[job] in built}
     smoke = {job: {"result": "skipped"} for job in CALL_SMOKE_JOBS.values()}
     if lane_set.runs_smokes(lanes):
         ran = {job: {"result": (needs.get(call) or {}).get("result")} for call, job in calls.items()}
@@ -813,7 +834,7 @@ def candidate_manifest(env: dict) -> None:
               includes=list(CANDIDATE_INCLUDES))
         out = root / "release-candidates.json"
         assemble(root, tag, commit, base, out, smoke_results=smoke,
-                 release_epoch=claim["claim_epoch"], archive=archive, handoffs=handoffs)
+                 release_epoch=claim["claim_epoch"], archive=archive, lanes=lanes)
         digest = hashlib.sha256(out.read_bytes()).hexdigest()
     emit({"manifest-url": f"{base}/releases/tag/{archive}/release-candidates.json",
           "manifest-sha256": digest}, env)

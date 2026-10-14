@@ -33,7 +33,7 @@ def _copy_fixture_source(source: Path) -> None:
     # the agent runtime stays out of this small install fixture.
     (source / "agent").mkdir()
     for name in ("__init__.py", "jiter_preload.py", "i18n.py", "i18n_layers.py", "i18n_languages.py",
-                 "secret_scope.py", "provider_media.py", "file_safety.py"):
+                 "secret_scope.py", "provider_media.py", "file_safety.py", "safe_worker_policy.py"):
         shutil.copy2(ROOT / "agent" / name, source / "agent" / name)
     (source / "gateway").mkdir()
     for name in ("__init__.py", "config.py", "config_loader.py", "shutdown_watchdog.py", "restart.py"):

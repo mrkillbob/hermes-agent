@@ -11,7 +11,6 @@ import contextlib
 import os
 import shutil
 import sys
-import uuid
 
 from agent.i18n import t
 from hermes_constants import get_hermes_home
@@ -489,20 +488,21 @@ class CLISessionMixin:
         from hermes_cli.cli_model_switch_mixin import _resolve_cli_reasoning
         old_session_id = self.session_id
         new_session_start = datetime.now()
-        new_session_id = f"{new_session_start.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        # The gateway's new session; getattr: tests drive new_session unbound (main's mint then).
+        fresh_session_id = getattr(self, "_new_session_id", new_session_id)(new_session_start)
         managed_new = getattr(self, "_conversation_worktree_manager", None) is not None
         new_reasoning_config = _parse_reasoning_config(
             CLI_CONFIG["agent"].get("reasoning_effort", ""))
         if managed_new:
             def persist_new():
                 self._session_db.create_session(
-                    session_id=new_session_id, cwd=os.getcwd(),
+                    session_id=fresh_session_id, cwd=os.getcwd(),
                     source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                     model=self.model,
                     model_config={"max_iterations": self.max_turns,
                                   "reasoning_config": new_reasoning_config})
 
-            if not self._prepare_conversation_root(new_session_id, before_commit=persist_new):
+            if not self._prepare_conversation_root(fresh_session_id, before_commit=persist_new):
                 return False
         _boundary_snapshot = None
         if self.agent:
@@ -531,7 +531,7 @@ class CLISessionMixin:
             self._discard_session_if_empty(old_session_id)
 
         self.session_start = new_session_start
-        self.session_id = new_session_id
+        self.session_id = fresh_session_id
         # getattr: tests drive new_session unbound against a SimpleNamespace stand-in.
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
         self.conversation_history = []
