@@ -78,7 +78,7 @@ def main() -> None:
     client.runtime_command = lambda *args, **kwargs: [str(worker_python), "-I", "-c", worker_code]
     pm.sync_venv(explicit=True, project_root=root)
     selected = selected_venv(root)
-    assert selected and selected.is_relative_to(Path(os.environ["HERMES_HOME"]))
+    assert selected and selected.is_relative_to(Path(os.environ["HERMES_HOME"]).resolve())
     store = paths.store_root()
     entry = store / "python-fixture"
     python = entry / "bin" / "python3"

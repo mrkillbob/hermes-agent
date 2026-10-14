@@ -138,7 +138,7 @@ def test_target_worktree_owns_admission_and_fork_comparison(installation, monkey
     assert status["behind"] == 3
     assert status["hermesRoot"] == str(linked)
     assert check_for_updates(install_root=root, home=home, cache_path=cache)["supported"] is False
-    assert requests == [MAIN_CHANNEL, "/repos/fixture/fork/commits/feature%2Fgui",
+    assert requests == ["/repos/fixture/fork/commits/feature%2Fgui",
                         f"/repos/fixture/fork/compare/{head}...{target}"]
     assert all(not any(arg in {"fetch", "checkout", "reset", "update-ref", "stash"} for arg in cmd) for cmd in commands)
     assert git("rev-parse", "HEAD", cwd=linked) == head
@@ -161,7 +161,7 @@ def test_counts_are_honest_without_fetch(installation, tip_kind, compare, expect
     assert status["behind"] == expected
     assert status["updateAvailable"] is (expected != 0)
     if tip_kind != "unknown":
-        assert requests == [MAIN_CHANNEL, "/repos/fixture/fork/commits/main"]
+        assert requests == ["/repos/fixture/fork/commits/main"]
 
 
 def test_cache_force_expiry_and_passive_opt_out(installation, monkeypatch):
@@ -180,29 +180,29 @@ def test_cache_force_expiry_and_passive_opt_out(installation, monkeypatch):
     responses[url] = (503, {})
     (root / "dirty.txt").write_text("carried work")
     assert check()["dirty"] is True
-    assert requests.count(url) == requests.count(MAIN_CHANNEL) == 1
+    assert requests.count(url) == 1
     assert check(force=True)["error"] == "fetch-failed"
     clock[0] += 3599
     assert check()["error"] == "fetch-failed"
-    assert requests.count(url) == requests.count(MAIN_CHANNEL) == 2
+    assert requests.count(url) == 2
     clock[0] += 2
     responses[url] = (200, head)
     assert check()["behind"] == 0
-    assert requests.count(url) == requests.count(MAIN_CHANNEL) == 3
+    assert requests.count(url) == 3
     clock[0] += 86401
     assert check()["behind"] == 0
-    assert requests.count(url) == requests.count(MAIN_CHANNEL) == 4
+    assert requests.count(url) == 4
     from hermes_cli.config import atomic_config_write, require_readable_config_before_write
     config = require_readable_config_before_write(home / "config.yaml")
     config["updates"]["check"] = False
     atomic_config_write(home / "config.yaml", config)
     assert check(passive=True)["behind"] is None
     assert check()["behind"] == 0
-    assert requests.count(url) == requests.count(MAIN_CHANNEL) == 4
+    assert requests.count(url) == 4
     git("commit", "--allow-empty", "-m", "moved")
     responses[url] = (200, git("rev-parse", "HEAD"))
     assert check()["behind"] == 0
-    assert requests.count(url) == requests.count(MAIN_CHANNEL) == 5
+    assert requests.count(url) == 5
 
 
 def test_explicit_and_current_branch_heal_only_after_confirmed_absence(installation, monkeypatch):
@@ -218,7 +218,7 @@ def test_explicit_and_current_branch_heal_only_after_confirmed_absence(installat
     assert failed["branch"] == "deleted"
     assert failed["error"] == "fetch-failed"
     assert git("branch", "--show-current", cwd=linked) == "feature/gui"
-    assert requests == [MAIN_CHANNEL]
+    assert requests == []
 
 
 @pytest.mark.parametrize("selection", ["explicit", "configured", "current", "detached"])
@@ -291,14 +291,14 @@ def test_channel_failure_never_probes_or_heals_a_branch(installation, name, fail
     assert json.loads(branch_file.read_text())["branch"] == "deleted"
 
 
-def test_unpublished_main_record_follows_the_branch(installation):
-    """A 404 for main.json keeps a checkout updating via git: the configured
-    branch is probed exactly as for a published source-branch channel, and the
-    Desktop branch setting is left alone."""
+def test_main_follows_the_branch_without_reading_a_channel_record(installation):
+    """main IS the git branch: no R2 record is requested (a regional WAF can answer
+    it 403), the configured branch is probed, and the Desktop branch setting is left alone."""
     from hermes_cli.source_check import check_for_updates
 
     _root, linked, home, _base, head, responses, requests, _git = installation
-    responses[MAIN_CHANNEL] = (404, source_channel("main", "fixture/fork"))
+    # Even a record that would answer is never read.
+    responses[MAIN_CHANNEL] = (403, {"message": "blocked by WAF"})
     branch_path = "/repos/fixture/fork/commits/desktop-choice"
     responses[branch_path] = (200, head)
     branch_file = home / "desktop-update.json"
@@ -309,7 +309,7 @@ def test_unpublished_main_record_follows_the_branch(installation):
     assert status.get("branch") == "desktop-choice", status
     assert status.get("targetSha") == head, status
     assert status["behind"] == 0
-    assert requests == [MAIN_CHANNEL, branch_path]
+    assert requests == [branch_path]
     assert json.loads(branch_file.read_text())["branch"] == "desktop-choice"
 
 
@@ -385,7 +385,7 @@ def test_never_pushed_branch_keeps_its_pin(installation, pinned_by):
         assert json.loads(branch_file.read_text()) == {"branch": "local-work"}
     else:
         assert not branch_file.exists()
-    assert requests == [MAIN_CHANNEL]
+    assert requests == []
 
 
 @pytest.mark.parametrize("merge", ["fast-forward", "rebase", "unmerged"])
@@ -442,7 +442,7 @@ def test_source_admission_is_stamp_owned_not_path_owned(installation, mechanism)
     responses["/repos/fixture/fork/commits/feature%2Fgui"] = (200, head)
     status = check_for_updates(install_root=linked, home=home)
     assert status["supported"] is (mechanism in ("self", None))
-    assert requests == ([MAIN_CHANNEL, "/repos/fixture/fork/commits/feature%2Fgui"]
+    assert requests == (["/repos/fixture/fork/commits/feature%2Fgui"]
                         if status["supported"] else [])
     empty = home / "no-source"
     empty.mkdir()
@@ -489,7 +489,7 @@ def test_malformed_optional_changelog_and_cache_do_not_hide_the_update(installat
     data["status"] = None
     cache.write_text(json.dumps(data))
     assert check_for_updates(install_root=root, home=home, cache_path=cache)["behind"] == 2
-    assert requests == [MAIN_CHANNEL, "/repos/fixture/fork/commits/main",
+    assert requests == ["/repos/fixture/fork/commits/main",
                         f"/repos/fixture/fork/compare/{head}...{'a' * 40}"] * 2
 
 
@@ -581,3 +581,26 @@ def test_other_main_api_failures_do_not_use_git_fallback(installation, tmp_path,
     sha, missing, failure = _branch_tip("fixture/fork", "main", root, "git")
     assert sha is None and missing is False and failure
     assert git("rev-parse", "HEAD") == head
+
+
+@pytest.mark.parametrize("on,release,rollback", [("head", "base", True), ("base", "head", False)])
+def test_stable_release_the_checkout_already_contains_is_a_rollback(installation, tmp_path, on, release, rollback):
+    """A release HEAD contains is a move back (#137714); an older checkout is a real update."""
+    from hermes_cli.source_check import check_for_updates
+
+    root, _linked, home, base, head, responses, _requests, git = installation
+    shas = {"base": base, "head": head}
+    bare = tmp_path / "origin.git"
+    git("clone", "-q", "--bare", str(root), str(bare), cwd=tmp_path)
+    git("tag", "v1.2.3", shas[release], cwd=bare)
+    git("remote", "set-url", "origin", str(bare))
+    git("checkout", "-q", "--detach", shas[on])
+    api = "/repos/NousResearch/hermes-agent"
+    responses[f"{api}/releases/latest"] = (200, {"draft": False, "prerelease": False, "tag_name": "v1.2.3"})
+    responses[f"{api}/commits/v1.2.3"] = (200, {"sha": shas[release]})
+
+    status = check_for_updates(install_root=root, home=home, channel="stable", force=True)
+
+    assert status.get("targetSha") == shas[release], status
+    assert status["updateAvailable"] is True
+    assert status["rollback"] is rollback

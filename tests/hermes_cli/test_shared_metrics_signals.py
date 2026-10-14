@@ -48,6 +48,17 @@ def _dead_pid() -> int:
 
 # ---- tool unavailable ----
 
+
+def test_the_v4_schema_admits_every_builtin_tool_name_as_unavailable():
+    """A tool the harness can report as unavailable must be one the committed ingestion schema allows."""
+    from toolsets import BUILTIN_TOOL_NAMES
+
+    from tests.hermes_cli.test_relay_shared_metrics import _schema_validator
+
+    counter = _schema_validator().schema["$defs"]["tool_unavailable_counter"]
+    allowed = set(counter["properties"]["dimensions"]["properties"]["tool_name"]["enum"])
+    assert not BUILTIN_TOOL_NAMES - allowed
+
 def test_only_a_disabled_shipped_builtin_is_reported(monkeypatch):
     monkeypatch.setattr("tools.skill_provenance.is_background_review", lambda: False)
     route = {"model": "m", "provider": "openrouter"}
