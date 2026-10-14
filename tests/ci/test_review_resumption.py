@@ -504,7 +504,7 @@ def test_actual_running_activity_holds_with_canonical_eyes(tmp_path):
 
 @pytest.mark.parametrize("patch", [
     {"reactions": []},
-    {"reactions": [{"user": BOT, "content": "+1", "created_at": "2026-10-13T01:28:03Z"}]},
+    {"reactions": [{"user": BOT, "content": "+1", "created_at": "2026-10-13T01:27:50Z"}]},
     {"reactions": [{"user": {"id": 123}, "content": "+1", "created_at": "2026-10-13T01:28:06Z"}]},
     {"reactions": [{"user": BOT, "content": "eyes", "created_at": "2026-10-13T01:00:00Z"}]},
 ])

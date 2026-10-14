@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->"
 CODEX_APP_ID = 1144995
 KINDS = {"📝 **Code Review**": "code", "🔒 **Security Review**": "security"}
 STATUS = re.compile(r'(✅ \*\*Completed\*\*|🔄 \*\*Running\*\* since) '
                     r'<relative-time datetime="([^"]+)">([^<]+)</relative-time>')
+# Codex stamps the Completed row and posts its thumbs-up as separate writes, so the
+# thumbs-up of a finished review can land a couple of seconds before the row's time.
+WITNESS_SKEW = timedelta(seconds=5)
 SECURITY_MARKER = re.compile(r"<!-- codex-security-review:v1 (\{[^\n]*\}) -->")
 
 
@@ -95,8 +98,9 @@ def clean_witness(activity: dict, reactions: list, user_id: int, latest_reviews:
     canonical = [reaction for reaction in reactions if reaction["user"]["id"] == user_id]
     if any(reaction["content"] == "eyes" for reaction in canonical):
         return False
-    boundary = max([time(activity["updated_at"]),
-                    *(time(row["at"]) for row in activity["passes"].values()),
+    # The summary comment's updated_at is deliberately not a boundary: Codex edits it after
+    # the thumbs-up, and a rerun is already caught by its Running row or a new completion time.
+    boundary = max([*(time(row["at"]) for row in activity["passes"].values()),
                     *(time(review["submitted_at"]) for review in latest_reviews.values())])
-    return any(reaction["content"] == "+1" and time(reaction["created_at"]) > boundary
+    return any(reaction["content"] == "+1" and time(reaction["created_at"]) > boundary - WITNESS_SKEW
                for reaction in canonical)
