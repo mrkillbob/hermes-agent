@@ -129,7 +129,11 @@ def active_profile_may_override_home(hermes_root: str) -> bool:
 
 
 def _default_home() -> str:
-    return os.path.join(os.path.expanduser("~"), ".hermes")
+    # hermes_constants is stdlib-only and import-safe by contract, so the platform default (Windows
+    # %LOCALAPPDATA%, HERMES_DATA_DIR_SUFFIX) has one definition even before the heavy imports.
+    from hermes_constants import get_process_hermes_home
+
+    return str(get_process_hermes_home())
 
 
 def _resolved_home() -> str:
