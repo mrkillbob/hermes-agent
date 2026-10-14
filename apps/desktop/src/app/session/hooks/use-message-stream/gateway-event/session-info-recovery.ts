@@ -90,10 +90,11 @@ export async function recoverSettledPrefix(deps: GatewayEventDeps, sessionId: st
 export function scheduleSettledPrefixCatchup(
   deps: GatewayEventDeps,
   sessionId: string,
-  settledAt: null | number | undefined,
-  active: boolean
+  settledAt: null | number | undefined
 ) {
-  if (!active || typeof settledAt !== 'number') {
+  // Read the pane at call time, not the event's isActiveEvent: this terminal
+  // event may be the one that rebinds the pane to a rebuilt runtime.
+  if (deps.activeSessionIdRef.current !== sessionId || typeof settledAt !== 'number') {
     return
   }
 

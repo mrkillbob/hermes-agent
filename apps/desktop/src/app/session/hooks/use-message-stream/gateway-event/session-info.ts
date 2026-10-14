@@ -478,7 +478,7 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
         // A retained prefix recovers from this terminal transition itself: a
         // settled session may emit no further session.info, so one bounded
         // timer catches up if its complete frame never arrived.
-        scheduleSettledPrefixCatchup(deps, sessionId, nextState.heartbeatSettledAt, isActiveEvent)
+        scheduleSettledPrefixCatchup(deps, sessionId, nextState.heartbeatSettledAt)
       }
 
       // The transcript catch-up IS scoped. The stream died, but the turn itself
