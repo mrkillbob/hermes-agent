@@ -634,7 +634,7 @@ def _persist_branch_seed(session: dict) -> None:
                 # Do not leave an empty or partial row that would prevent the
                 # first real submit from retrying the complete seed.
                 with contextlib.suppress(Exception):
-                    db.delete_session(key)
+                    db.discard_unadmitted_session(key)
             _workdir_reraise_disk_full(exc, "branch seed persist failed")
 
 
