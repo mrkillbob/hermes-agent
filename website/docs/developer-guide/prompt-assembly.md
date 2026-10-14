@@ -61,6 +61,25 @@ keyed on the skill files' signatures, so a change written by another process is 
 itself converges at the next rebuild boundary (compaction). Legacy prompts retain their original
 host-before-context anchor, so prompts persisted before the reorder still validate.
 
+On routes protected by the egress firewall, skill-change rows pass the same strict sanitized-text
+checks as other user-message context. A rejected description becomes a names-only row; a rejected
+name is replaced by a content-free omission notice. Change accounting uses that projected index,
+so unchanged projected rows are announced once, including after a fresh agent loads the transcript.
+The complete note is scanned across row boundaries and may use at most one quarter of the smaller
+sanitized-aggregate or serialized-request byte cap (64 KiB with default settings), reserving space
+for user text, history and framing. The transport can split admissible large notes into independently
+bounded segments. This producer budget does not guarantee that other context fits; the final gate
+still scans and limits the complete request. Over-budget optional notes remain withheld.
+The producer does not grant generated-context trust to skill-file text. Existing sidecars retain
+their original bytes and do not acquire trust retroactively; an old rejected sidecar can still
+block its session. Newly emitted notes use the projection without changing the cached system prompt.
+Voice and fallback routes bind after turn assembly. A process-local producer record binds the
+new note to its exact current-turn sidecar or multimodal text part. Request construction rechecks
+that owned span against the actual route, making any projection sticky for the rest of the turn
+and backfilling its addressed durable row before sending. Copied or changed envelopes expire
+ownership; historical markers cannot recreate it. Unrelated user and hook bytes are untouched.
+A failed or mismatched durable write stops the request rather than diverging from replay.
+
 When `skip_context_files` is set (e.g., subagent delegation), SOUL.md is not loaded and the hardcoded `DEFAULT_AGENT_IDENTITY` is used instead.
 
 ### Concrete example: assembled system prompt

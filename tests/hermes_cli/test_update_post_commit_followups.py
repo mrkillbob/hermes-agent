@@ -125,7 +125,7 @@ def test_failed_web_build_does_not_skip_the_tui(tmp_path, monkeypatch, capsys):
         source_build.build_update_products(tmp_path, desktop=False)
     assert built == ["tui"]
     assert [name for name, _ in failure.value.failures] == ["web UI build"]
-    assert "npm run build exited 1" in str(failure.value)
+    assert "web UI build: npm exited 1" in str(failure.value)
 
 
 def test_failed_config_migration_is_owed_and_later_maintenance_runs(tmp_path, monkeypatch, capsys):

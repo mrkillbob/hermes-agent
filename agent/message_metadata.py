@@ -39,12 +39,15 @@ ABSORBED_MESSAGE_UIDS = "_absorbed_message_uids"
 # (``messages.tool_call_uid``). The provider-facing ``id`` is untouched; these never reach the wire.
 TOOL_CALL_UIDS = "_tool_call_uids"
 TOOL_CALL_UID = "_tool_call_uid"
+# Set on a multimodal user row when an agent appended a skills note part to it: the part list carries no other
+# proof the note is the agent's rather than text the user pasted (a string turn proves it through its sidecar).
+SKILLS_NOTE_CARRIER = "_skills_note_carrier"
 PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset(
     # Membership is the real contract, NOT the leading underscore: the chat-completions transport happens
     # to sweep underscore keys, but turn_context.py pops this set from every outgoing copy and a strict
     # backend 400s on any key it does not know.
     {"timestamp", "display_kind", "display_metadata", "_row_id", "_submit_row_session_id",
-     MERGED_TURN_PREFIX, MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID,
+     MERGED_TURN_PREFIX, MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID, SKILLS_NOTE_CARRIER,
      # The alternation repair's row counts: an in-place compaction reads them off the live dict.
      MERGED_DURABLE_ROWS, UNNAMED_DURABLE_ROWS, RETIRED_DURABLE_ROWS}
 ) | REPAIR_BOOKKEEPING_FIELDS

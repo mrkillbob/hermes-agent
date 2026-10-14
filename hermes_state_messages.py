@@ -19,6 +19,7 @@ from agent.message_metadata import (
     index_tool_call_uids, message_uid_or_none, resolve_tool_call_uid, mint_uid, stamp_message_uid)
 from agent.message_sanitization import _sanitize_surrogates, coalesce_tool_call_id
 from hermes_cli.timefmt import coerce_epoch
+from hermes_state_user_projection import UserMessageProjectionMixin
 from hermes_state_common import (
     _COMPRESSION_LOCK_ROW_SQL, _ENDED_ROW_SQL, _RESET_END_REASONS, _RESET_END_REASONS_SQL, _ended_by_compression,
     _json_or, _legacy_reset_child_sql, _placeholders, _sql_json_extract)
@@ -100,7 +101,7 @@ def _stale_holder(row, now: float) -> bool:
     return float(row["expires_at"]) <= now or _compression_lock_holder_process_is_dead(row["holder"])
 
 
-class SessionMessagesMixin:
+class SessionMessagesMixin(UserMessageProjectionMixin):
     """Message append/replace/rewind, reactions, resume conversations, replay dedupe."""
 
     def _bump_conversation_generation(self, conn, session_id: str, end_reason: str) -> None:
@@ -1140,17 +1141,6 @@ class SessionMessagesMixin:
             "(SELECT id FROM messages WHERE session_id = ? AND role = 'user' AND active = 1 "
             "ORDER BY id DESC LIMIT 1) AND content IS ?",
             (self._encode_display_metadata(display_metadata), session_id, self._encode_content(content)))
-
-    def set_user_message_content(self, session_id: str, row_id: int, content: Any) -> int:
-        """Rewrite the content of ONE known active user row. Used when a user turn was written at submit
-        time (before the agent ran) and the turn prologue then rewrote the prompt it persists (@-file
-        expansion, native image parts): the early row must show what the transcript will replay, not the
-        raw keystrokes, and the turn must not append a second row for the same input."""
-        if not session_id or isinstance(row_id, bool) or not isinstance(row_id, int) or row_id <= 0:
-            return 0
-        return self._write_rowcount(
-            "UPDATE messages SET content = ? WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1",
-            (self._encode_content(content), row_id, session_id))
 
     def deactivate_message(self, session_id: str, row_id: int) -> int:
         """Deactivate ONE known row (id-addressed, idempotent; returns the affected row count). Used by
