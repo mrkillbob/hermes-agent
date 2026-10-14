@@ -689,3 +689,43 @@ def test_a_resumed_multimodal_note_survives_a_context_engine_selection(tmp_path,
     text = flatten_message_text(out[0]["content"])
     assert "Create HTML diagrams." not in text and "    - archify" in text
     assert _decision(tmp_path, text).allowed
+
+
+def test_a_pasted_note_in_a_stored_multimodal_message_is_still_the_users_text_after_resume(tmp_path, monkeypatch):
+    from agent.session_persistence import _db_flush_row
+    from agent.skills_index_delta import _render
+
+    pasted = "Why did it say this?\n\n" + _render({"other": "    - other: Create HTML diagrams."}, set())
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    agent = SimpleNamespace(provider="nous", api_mode="chat_completions", session_id="test",
+                            _current_turn_timestamp=1.0, ephemeral_system_prompt="",
+                            _copy_reasoning_content_for_api=lambda *_: None,
+                            _should_sanitize_tool_calls=lambda: False)
+    message = {"role": "user", "content": [{"type": "text", "text": "Look."}, {"type": "text", "text": pasted}]}
+    row = _db_flush_row(agent, message, True)  # No agent attached a note to this message.
+    assert row["api_content"] is None
+    resumed = {"role": "user", "content": row["content"], "api_content": row["api_content"]}
+    history = [resumed, {"role": "assistant", "content": "Done."}, {"role": "user", "content": "Next."}]
+    api = build_api_messages(agent, history, current_turn_user_idx=2, ext_prefetch_cache="",
+                             plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+    assert api[0]["content"] == row["content"]
+
+
+def test_a_restored_newest_note_spends_the_shared_budget(monkeypatch):
+    import logging
+
+    from agent.conversation_loop import _apply_context_engine_selection
+
+    class Selecting:  # Keeps the first turn's rows and the final user row, dropping the second turn.
+        def select_context(self, api_messages, conversation_messages=None, incoming_message=None, budget_tokens=0):
+            return conversation_messages[:2] + conversation_messages[-1:]
+
+    agent, history, build = _sent_deltas(monkeypatch, [("Turn 0.", "alpha"), ("Turn 1.", "beta")])
+    conversation = history + [{"role": "user", "content": "Last."}]
+    first = _skills_notes(build(conversation))[0]
+    first = first[first.index("[System:"):]
+    agent._llm_egress_max_serialized_bytes = 4 * (len(first.encode()) + 1)  # One note fits, two do not.
+    agent.context_compressor = Selecting()
+    out = _apply_context_engine_selection(agent, build(conversation), conversation, conversation[-1],
+                                          logger=logging.getLogger("t"))
+    assert len(_skills_notes(out)) == 1  # The retained note spent the budget; the newest is withheld, not added on top.

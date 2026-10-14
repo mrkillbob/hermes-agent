@@ -271,8 +271,10 @@ def keep_newest_skills_note(agent, api_messages):
         return api_messages
     note = _project_note(agent, *newest)[0]
     every_row = frozenset(range(len(api_messages)))
-    if not note or any(_text_of(api_messages[i], part)[start:] == note
-                       for i, part, start in _note_slots(api_messages, every_row)):
+    present = [_text_of(api_messages[i], part)[start:] for i, part, start in _note_slots(api_messages, every_row)]
+    # The retained notes have already spent part of the one shared notes budget.
+    if (not note or note in present
+            or sum(len(n.encode("utf-8")) for n in present) + len(note.encode("utf-8")) > _note_budget(agent)):
         return api_messages
     last = next((i for i in range(len(api_messages) - 1, -1, -1) if api_messages[i].get("role") == "user"), None)
     if last is None:
