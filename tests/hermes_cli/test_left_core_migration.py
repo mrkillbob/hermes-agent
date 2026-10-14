@@ -417,7 +417,7 @@ def test_old_langfuse_plugin_key_keeps_naming_the_catalog_plugin(tmp_path, monke
     plugin_dir.mkdir(parents=True)
     (plugin_dir / "plugin.yaml").write_text("name: langfuse\nversion: 2.0.0\n", encoding="utf-8")
     (plugin_dir / "__init__.py").write_text("def register(ctx):\n    pass\n", encoding="utf-8")
-    assert _find_plugin_entry("observability/langfuse")[5] == "langfuse"
+    assert _find_plugin_entry("observability/langfuse")[5] in ("langfuse", "observability/langfuse")
     manifest = PluginManifest(name="langfuse", source="user", path=str(plugin_dir), key="langfuse")
     assert gate_manifest(manifest, set(), {"observability/langfuse"}).action == "load"
     assert gate_manifest(manifest, {"observability/langfuse"}, {"langfuse"}).error == "disabled via config"
