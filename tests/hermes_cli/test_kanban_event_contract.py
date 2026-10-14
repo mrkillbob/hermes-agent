@@ -248,6 +248,15 @@ def test_unknown_token_counts_stay_unknown():
         event(contract, "context.compacted", event_payload=details)
 
 
+@pytest.mark.parametrize("method", ["measured", "estimate_rough"])
+def test_named_counting_method_requires_a_count(method):
+    contract = load_contract()
+    details = payload("context.compacted")
+    details.update(tokens_before=None, tokens_after=None, token_count_method=method)
+    with pytest.raises(contract.ContractError):
+        event(contract, "context.compacted", event_payload=details)
+
+
 @pytest.mark.parametrize("outcome,reason", [
     ("review_requested", "review_requested"),
     ("changes_requested", "changes_requested"),

@@ -187,8 +187,9 @@ def _context(value: Any, *, compacted: bool = False) -> None:
         _require(method in ("measured", "estimate_rough", "unknown"), "payload.token_count_method")
         for field in ("tokens_before", "tokens_after"):
             _integer(row[field], f"payload.{field}", nullable=True)
-        if method == "unknown":
-            _require(row["tokens_before"] is None and row["tokens_after"] is None, "payload.token_count_method")
+        counted = row["tokens_before"] is not None or row["tokens_after"] is not None
+        # A named counting method needs a count to describe; unknown must carry none.
+        _require(counted == (method != "unknown"), "payload.token_count_method")
 
 
 _PAYLOAD_VALIDATORS = {
