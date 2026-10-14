@@ -194,9 +194,10 @@ def requested_after(comments: list, activity: dict) -> bool:
             continue
         requested = timestamp(comment.get("updated_at") or comment["created_at"])
         for match in matches:
-            review = activity["passes"].get("security" if match[1] else "code")
-            # Independent passes cannot complete each other's requests. Equal
-            # second timestamps cannot establish that completion followed a request.
+            if match[1]:
+                continue  # Security review is advisory here, so its request cannot hold admission.
+            review = activity["passes"].get("code")
+            # Equal second timestamps cannot establish that completion followed a request.
             if review is None or timestamp(review["at"]) <= requested:
                 return True
     return False

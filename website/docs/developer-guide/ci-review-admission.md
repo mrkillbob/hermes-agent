@@ -13,22 +13,27 @@ that every PR-controlled job waits for review.
 
 The evaluator accepts activity only from immutable GitHub user ID `199175422`
 and App ID `1144995`, with the exact `codex-pull-request-review-summary` marker,
-known table format, and the matching repository/PR comment identity. Both Code
-Review and Security Review must have completed rows for the live head. A Code
-Review-only summary remains pending, even if it has a thumbs-up.
+known table format, and the matching repository/PR comment identity. Only Code Review gates
+admission: it must have a completed row for the live head. A missing, running or
+superseded Code Review row holds, even if the PR has a thumbs-up.
 
-Security also requires the observed `codex-security-review:v1` JSON marker with
-the full head SHA, repository, PR number and completed status. Abbreviated table
-commits are resolved through GitHub's commit API and compared with the full live
-head; a prefix match alone is never admission. Missing, ambiguous, superseded,
-running, failed or unknown evidence holds. The JSON's merge-gate setting and
-severity threshold do not waive this fork's substantive finding guards.
+Security Review is advisory. The producer on this fork runs Code Review
+automatically and does not run Security Review, which the fork covers through its
+own review process, so requiring it could never clear. A Security row or the
+observed `codex-security-review:v1` JSON marker is still parsed, and a marker
+naming another repository or PR, or an unknown marker version, holds as unknown
+evidence. But a missing, running or superseded Security record, and an explicit
+`@codex security review` request, never hold. Abbreviated table commits are
+resolved through GitHub's commit API and compared with the full live head; a
+prefix match alone is never admission. Missing, ambiguous, superseded, running,
+failed or unknown Code Review evidence holds. Findings from a Security pass still
+block through the finding guards below.
 
 Completion alone does not prove clean. The canonical PR-level `+1` reaction must
-have been created strictly after both completion times, the summary update and
-the latest current-head review submissions. Any canonical `eyes` reaction holds.
-An old retained thumbs-up, another user's reaction, or ambiguous same-second
-ordering cannot clear admission. Both activity rows and the security JSON remain
+have been created strictly after the completion times of the rows present, the
+summary update and the latest current-head review submissions. Any canonical
+`eyes` reaction holds. An old retained thumbs-up, another user's reaction, or
+ambiguous same-second ordering cannot clear admission. The Code Review row remains
 mandatory when no formal review submission exists on a clean pass.
 
 The ordinary review guards remain: code and security submissions retain their
@@ -154,11 +159,12 @@ origin trust. Until qualification, label compatibility remains independent and
 cannot establish substantive completion.
 Do not make a candidate PR depend on a script that is not yet on the default branch.
 
-Code-only or stale/missing Security Review records remain blocked under the
-both-required policy. Resolving findings cannot manufacture a clean witness: a
-fresh qualified clean result may still be required when the previous completed
-pass reported findings. Reconciliation can resume on final thread resolution
-when both current-head completion records and the fresh witness already exist.
+A missing or stale Security Review record no longer blocks; a missing, running or
+stale Code Review record does. Resolving findings cannot manufacture a clean
+witness: a fresh qualified clean result may still be required when the previous
+completed pass reported findings. Reconciliation can resume on final thread
+resolution when the current-head Code Review completion record and the fresh
+witness already exist.
 No private task, reaction, label or successful CI substitutes for missing evidence.
 
 Run the inert API fixtures with the canonical explicit interpreter and one worker:
