@@ -220,6 +220,22 @@ def test_late_change_after_own_check_read_prevents_success(change):
     assert [row[0] for row in writes(api)] == (["POST", "PATCH"] if change == "moved" else ["POST"])
 
 
+def test_cohort_change_during_final_read_stays_pending():
+    api = FakeAPI()
+    original = api.snapshot
+    reads = {"n": 0}
+
+    def late_pr(number, head):
+        reads["n"] += 1
+        if reads["n"] == 3:
+            api.prs.append(pr(2))
+        return original(number, head)
+
+    api.snapshot = late_pr
+    assert status.publish(api, HEAD, ENV)["state"] == "pending"
+    assert [row[0] for row in writes(api)] == ["POST"]
+
+
 def test_metadata_outage_after_post_fails_the_check():
     api = FakeAPI()
 

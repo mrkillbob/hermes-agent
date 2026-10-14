@@ -226,8 +226,10 @@ def publish(api, head: str, env: dict) -> dict:
         if cohort(api, head) != numbers:
             return {"state": "pending", "reason": "Cohort changed", "head": head}
         verdict = cohort_verdict(api, head, numbers)
-        if verdict != "clean" or cohort(api, head) != numbers:
+        if verdict != "clean":
             return held(api, own, head, verdict)
+        if cohort(api, head) != numbers:
+            return {"state": "pending", "reason": "Cohort changed", "head": head}
         promotion_attempted = True
         updated = api.request(f"repos/{api.repo}/check-runs/{own['id']}", method="PATCH",
                               payload={"status": "completed", "conclusion": "success",
