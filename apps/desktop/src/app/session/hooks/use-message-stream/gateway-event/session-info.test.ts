@@ -237,6 +237,39 @@ describe('handleSessionInfoEvent rebuilt-runtime re-bind', () => {
     expect($selectedStoredSessionId.get()).toBe('stored-1')
   })
 
+  it('schedules the prefix catch-up when the terminal info also rebinds the pane', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const ctx = rebuiltRuntimeInfo('stored-1', { busy: false })
+      ctx.payload = { ...ctx.payload, running: false } as typeof ctx.payload
+
+      const live = {
+        ...createClientSessionState('stored-1'),
+        busy: true,
+        messages: [{ id: 'assistant-stream-1', parts: [{ text: 'The completed', type: 'text' }], role: 'assistant' }],
+        streamId: 'assistant-stream-1',
+        turnLive: true
+      } as unknown as ClientSessionState
+
+      let current = live
+
+      ctx.deps.updateSessionState = vi.fn((_id, updater) => {
+        current = updater(current)
+        ctx.deps.sessionStateByRuntimeIdRef.current.set('runtime-new', current)
+
+        return current
+      }) as unknown as typeof ctx.deps.updateSessionState
+
+      handleSessionInfoEvent(ctx)
+      await vi.advanceTimersByTimeAsync(2100)
+
+      expect(ctx.deps.hydrateFromStoredSession).toHaveBeenCalledWith(3, 'stored-1', 'runtime-new')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it.each([
     ['busy', { busy: true }],
     ['awaiting a response', { awaitingResponse: true }],

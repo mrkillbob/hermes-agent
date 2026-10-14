@@ -188,6 +188,9 @@ export interface ClientSessionState {
    *  heartbeat (#119569); when it lands it settles onto this bubble instead of
    *  appending a duplicate. Cleared by the next message.start or complete. */
   heartbeatSettledStreamId?: null | string
+  /** Epoch ms of a heartbeat-settled prefix still waiting for its complete
+   *  frame. A later idle heartbeat performs one bounded history catch-up. */
+  heartbeatSettledAt?: null | number
   /** A blocking clarify prompt is waiting on the user for this session. Drives
    *  the sidebar "needs input" indicator; cleared when the turn resumes/ends. */
   needsInput: boolean
