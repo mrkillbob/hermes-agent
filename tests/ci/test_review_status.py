@@ -252,6 +252,24 @@ def test_pr_closing_during_snapshot_read_stays_pending():
     assert [row[0] for row in writes(api)] == ["POST"]
 
 
+def test_blocked_pr_closing_after_snapshot_stays_pending():
+    api = FakeAPI()
+    api.prs.append(pr(2))
+    original = api.snapshot
+
+    def blocked_then_closed(number, head):
+        snap = original(number, head)
+        if number == 1:
+            snap["reviews"][0]["state"] = "CHANGES_REQUESTED"
+        if number == 2:
+            api.prs[:] = [row for row in api.prs if row["number"] != 2]
+        return snap
+
+    api.snapshot = blocked_then_closed
+    assert status.publish(api, HEAD, ENV)["state"] == "pending"
+    assert [row[0] for row in writes(api)] == ["POST"]
+
+
 def test_lost_creation_response_still_settles_the_created_check():
     api = FakeAPI()
     original = api.request

@@ -167,7 +167,10 @@ def cohort_verdict(api, head: str, numbers: set[int]) -> str:
         return "pending"
     if states == {"clean"}:
         return "clean"
-    return "pending" if states <= {"clean", "pending"} else "failure"
+    if states <= {"clean", "pending"}:
+        return "pending"
+    # A hold read from a stale snapshot says nothing about a cohort that moved since.
+    return "failure" if cohort(api, head) == numbers else "pending"
 
 
 def completed_at() -> str:
