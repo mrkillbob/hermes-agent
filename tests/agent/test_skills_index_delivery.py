@@ -379,6 +379,20 @@ def test_a_note_staged_for_a_protected_route_is_restored_when_an_unprotected_rou
         db.close()
 
 
+def test_a_context_part_that_ends_like_a_note_does_not_shadow_the_real_note_part(tmp_path, monkeypatch):
+    from agent.skills_index_delta import _render
+
+    lookalike = _render({"other": "    - other: Something else."}, set())  # Plugin context may end in a note's shape.
+    agent, message = _stage(monkeypatch, multimodal=True, hook="Context.\n\n" + lookalike)
+    assert "Create HTML diagrams." in flatten_message_text(_wire(agent, message))  # The main route got the raw note,
+    live = _live(message)  # which sits just before the context part.
+    agent.provider = "nous"
+    text = flatten_message_text(_wire(agent, message))
+    assert "Create HTML diagrams." not in text and "    - archify" in text
+    assert _decision(tmp_path, text).allowed
+    assert _live(message) == live
+
+
 def test_a_user_pasting_a_whole_earlier_message_is_not_mistaken_for_the_carrier(monkeypatch):
     agent, message = _stage(monkeypatch)
     flatten_message_text(_wire(agent, message))  # The primary route received the raw note.

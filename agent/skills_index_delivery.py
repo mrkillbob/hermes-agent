@@ -152,11 +152,11 @@ def _note_slots(api_messages, sidecar_rows):
                 slots.append((i, None, start))
         elif isinstance(content, list):
             texts = [n for n, p in enumerate(content) if isinstance(p, dict) and isinstance(p.get("text"), str)]
-            # The note part is followed by at most the turn's one context part.
-            for n in reversed(texts[-2:]):
+            # The note part is followed by at most the turn's one context part, and that part's own text
+            # may end in a note's shape, so every candidate is a slot rather than only the last.
+            for n in texts[-2:]:
                 if (start := _note_start(content[n]["text"])) is not None:
                     slots.append((i, n, start))
-                    break
     return slots
 
 
@@ -171,7 +171,8 @@ def remember_newest_skills_note(agent, api_messages, sidecar_rows):
     if not slots:
         agent._skills_index_newest_carrier = None
         return
-    i, part, start = slots[-1]
+    last = slots[-1][0]
+    i, part, start = next(slot for slot in slots if slot[0] == last)  # The note part precedes the context part.
     agent._skills_index_newest_carrier = _parse_note(_text_of(api_messages[i], part)[start:])
 
 
@@ -219,17 +220,19 @@ def project_skills_notes(agent, api_messages, sidecar_rows=frozenset()):
             break
         notes[k], sizes[k] = "", 0
     out = list(api_messages)
+    edited: dict[int, list] = {}  # message index -> its parts, with a dropped part held as None until the end
     for (i, part, start), note in zip(slots, notes, strict=True):
-        text = _text_of(out[i], part)
+        text = _text_of(api_messages[i], part)
         new = text[:start] + note if note else text[:start].removesuffix("\n\n")
         if new == text:
             continue
         if part is None:
-            out[i] = {**out[i], "content": new}
-        else:
-            parts = list(out[i]["content"])
-            parts[part] = {**parts[part], "text": new}
-            out[i] = {**out[i], "content": [p for n, p in enumerate(parts) if n != part or new]}
+            out[i] = {**api_messages[i], "content": new}
+            continue
+        parts = edited.setdefault(i, list(api_messages[i]["content"]))
+        parts[part] = {**parts[part], "text": new} if new else None
+    for i, parts in edited.items():
+        out[i] = {**api_messages[i], "content": [p for p in parts if p is not None]}
     return api_messages if all(a is b for a, b in zip(out, api_messages, strict=True)) else out
 
 
