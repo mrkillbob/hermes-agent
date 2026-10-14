@@ -1504,6 +1504,13 @@ def _render_skills_index(
             if name not in seen:
                 seen.add(name)
                 index_lines.append(f"    - {name}: {desc}" if desc else f"    - {name}")
+    from agent.oneshot_footprint import ONESHOT_SKILLS_LOAD_GUIDANCE, is_single_query_session
+    if is_single_query_session():
+        return (
+            ONESHOT_SKILLS_LOAD_GUIDANCE
+            + "\n<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>"
+            + hidden_note
+        )
     return (
         "## Skills\n"
         "Before replying, scan the skills below. If a skill matches or is even partially relevant to your "
@@ -1523,6 +1530,11 @@ def _render_skills_index(
         "Only proceed without loading a skill if genuinely none are relevant to the task."
         + hidden_note
     )
+
+
+def _oneshot_prompt_variant() -> bool:
+    from agent.oneshot_footprint import is_single_query_session
+    return is_single_query_session()
 
 
 def _build_skills_system_prompt_inner(
@@ -1547,7 +1559,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())), compact_all_categories,
-        tuple(plugin_rows),
+        _oneshot_prompt_variant(), tuple(plugin_rows),
     )
     snapshot = _load_skills_snapshot(skills_dir, manifest)
     app_gated = snapshot is not None and any(
