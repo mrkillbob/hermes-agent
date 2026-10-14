@@ -291,6 +291,7 @@ def test_context_selection_clones_cannot_reintroduce_a_sent_note(tmp_path, monke
     out = _apply_context_engine_selection(agent, api, [message], message, logger=logging.getLogger("t"))
     text = flatten_message_text(out[0]["content"])
     assert "Create HTML diagrams." not in text
+    assert "    - archify" in text  # The fallback still learns what changed, string turns included.
     assert _decision(tmp_path, text).allowed
     assert _live(message) == live
 
@@ -363,7 +364,8 @@ def test_sent_notes_live_as_long_as_their_rows_are_in_the_transcript(tmp_path, m
     assert len(agent._skills_index_sent_notes) == 2
 
 
-def test_a_repeated_delta_is_the_newest_note_in_a_protected_request(tmp_path, monkeypatch):
+def _send_deltas(monkeypatch, turns):
+    """Build a history where each ``(user text, skill)`` turn sent its own raw delta on the main route."""
     monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
     agent = SimpleNamespace(provider="openrouter", api_mode="chat_completions", session_id="test",
                             _current_turn_timestamp=1.0, ephemeral_system_prompt="",
@@ -375,10 +377,10 @@ def test_a_repeated_delta_is_the_newest_note_in_a_protected_request(tmp_path, mo
                                   plugin_user_context="", moa_config=None, active_system_prompt="")[0]
 
     history = []
-    for turn, skill in enumerate(["alpha", "beta", "alpha"]):  # The same delta comes round again.
+    for text, skill in turns:
         monkeypatch.setattr("agent.system_prompt._skills_prompt",
                             lambda _, skill=skill: f"<available_skills>\n    - old: Run checks.\n    - {skill}: Create HTML diagrams.\n</available_skills>")
-        message = {"role": "user", "content": f"Turn {turn}."}
+        message = {"role": "user", "content": text}
         assert stage_skills_index_note(agent, PROMPT, [])
         context = _merge_gateway_notes(agent, [message], 0, "")
         _stamp_api_content_sidecar(agent, [message], 0, "", context, preflight_compressed=False)
@@ -386,12 +388,18 @@ def test_a_repeated_delta_is_the_newest_note_in_a_protected_request(tmp_path, mo
         build(history)  # Sent raw to the primary route.
         history += [{"role": "assistant", "content": "Done."}]
     agent.provider = "nous"
-    api = build(history + [{"role": "user", "content": "Last."}])
-    notes = [flatten_message_text(m["content"]) for m in api
-             if m["role"] == "user" and "skills available in this conversation" in flatten_message_text(m["content"])]
+    return [flatten_message_text(m["content"]) for m in build(history + [{"role": "user", "content": "Last."}])
+            if m["role"] == "user" and "skills available in this conversation" in flatten_message_text(m["content"])]
+
+
+@pytest.mark.parametrize("texts", [
+    ["Turn 0.", "Turn 1.", "Turn 2."],
+    ["Turn 0.", "Turn 1.", "Re: Turn 0."],  # The newest carrier's text ends with the first carrier's.
+])
+def test_a_repeated_delta_is_the_newest_note_in_a_protected_request(monkeypatch, texts):
+    notes = _send_deltas(monkeypatch, list(zip(texts, ["alpha", "beta", "alpha"])))
     assert len(notes) == 1
     assert "alpha" in notes[0] and "beta" not in notes[0]  # The latest delta, once, and not the stale one.
-    assert _decision(tmp_path, flatten_message_text(api[0]["content"])).allowed
 
 
 def test_a_user_quoting_a_sent_note_is_not_mistaken_for_the_row_that_carried_it(monkeypatch):

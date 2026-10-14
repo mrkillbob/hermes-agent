@@ -134,6 +134,27 @@ def _rewrite_user_texts(message, rewrite):
         for p in message["content"]]}
 
 
+def _carrier(sent, text):
+    """The remembered sent text ``text`` ends with; the longest wins when one carrier ends another."""
+    return max((key for key in sent if text.endswith(key)), key=len, default=None)
+
+
+def restore_sent_sidecars(agent, messages):
+    """Put a remembered string row's ``api_content`` back into ``content``.
+
+    A string turn carries its note only in the sidecar, and a context engine's selection hands back
+    clones whose sidecar the persistence stripping then drops; ``build_api_messages`` substitutes it for
+    the same reason. Only a sidecar that is exactly a remembered sent text is restored.
+    """
+    sent = getattr(agent, "_skills_index_sent_notes", None)
+    if not sent:
+        return messages
+    restored = [{**m, "content": m["api_content"]}
+                if m.get("role") == "user" and isinstance(m.get("content"), str) and m.get("api_content") in sent else m
+                for m in messages]
+    return messages if all(a is b for a, b in zip(restored, messages)) else restored
+
+
 def project_sent_skills_notes(agent, api_messages, *, prune=False):
     """Return ``api_messages`` with every remembered raw note projected for a protected route.
 
@@ -165,11 +186,11 @@ def project_sent_skills_notes(agent, api_messages, *, prune=False):
     newest = next(reversed(sent))
     projected = _project_note(agent, *sent[newest][1:])[0]
     last = max(((i, n) for i, m in enumerate(api_messages) for n, t in enumerate(_user_texts(m))
-                if t.endswith(newest)), default=None)
+                if _carrier(sent, t) == newest), default=None)
 
     def rewrite_at(index):
         def rewrite(text, ordinal):
-            key = next((key for key in sent if text.endswith(key)), None)
+            key = _carrier(sent, text)
             if key is None:
                 return text
             keep = projected if key == newest and (index, ordinal) == last else ""

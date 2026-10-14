@@ -1315,8 +1315,9 @@ def _apply_context_engine_selection(
         # The engine may hand back the ``conversation_messages`` clones (or its own dicts) that still
         # carry persistence-only fields; the request copy was stripped BEFORE this hook, so strip the
         # selection too or those fields reach the provider. Dicts without them pass through as-is.
+        from agent.skills_index_delivery import project_sent_skills_notes, restore_sent_sidecars
+        selected = restore_sent_sidecars(agent, selected)
         stripped = [without_persistence_fields(m) for m in selected]
-        from agent.skills_index_delivery import project_sent_skills_notes
         # The selection can be raw clones of the transcript; a protected route must not see a sent note.
         return project_sent_skills_notes(
             agent, selected if all(a is b for a, b in zip(stripped, selected)) else stripped)
