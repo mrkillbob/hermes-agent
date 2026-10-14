@@ -83,7 +83,8 @@ def test_managed_env_hermes_can_check_for_updates(updated):
     sb = updated["sb"]
     exe = _venv_hermes(sb)
     assert Path(exe).is_file(), f"harness: selected generation ships no hermes console script: {exe}"
-    cp = sb.run([exe, "update", "--check"], timeout=300)
+    # This fixture publishes local main; stable release lookup tests a different source.
+    cp = sb.run([exe, "update", "--check", "--branch", "main"], timeout=300)
     assert cp.returncode == 0 and "Not a git repository" not in cp.stdout + cp.stderr, (
         "`hermes update --check` from the managed environment: " + (cp.stdout + cp.stderr).strip()[-400:]
         + "\n" + I.describe(cp))

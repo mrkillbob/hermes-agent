@@ -28,6 +28,8 @@ _ADDED_HEAD = "Now available or updated (load with skill_view(name) when relevan
 _REMOVED_HEAD = "No longer available:"
 _ACCURATE_AGAIN = " The skills listed in the system prompt are accurate again; earlier skill-change notes are superseded."
 _ROW = "    - "
+_OMITTED_NOTICE = "One or more skill entries were withheld by outbound policy."
+_OMITTED_KEY = ""  # Accounting only; never emitted as a loadable skill name.
 
 _BLOCK_RE = re.compile(r"<available_skills>\n?(.*?)</available_skills>", re.DOTALL)
 _NAMES_ONLY_RE = re.compile(r"\[names only\]:\s*(.+)$")
@@ -64,8 +66,11 @@ def _render(added: dict[str, str], removed: set[str]) -> str:
     if not added and not removed:
         return f"{_NOTE_PREFIX}{_ACCURATE_AGAIN}]"
     parts = [_NOTE_PREFIX]
-    if added:
-        parts += [_ADDED_HEAD, *(added[name] or f"{_ROW}{name}" for name in sorted(added))]
+    names = sorted(name for name in added if name != _OMITTED_KEY)
+    if names:
+        parts += [_ADDED_HEAD, *(added[name] or f"{_ROW}{name}" for name in names)]
+    if _OMITTED_KEY in added:
+        parts.append(_OMITTED_NOTICE)
     if removed:
         parts.append(f"{_REMOVED_HEAD} {', '.join(sorted(removed))}")
     return "\n".join(parts) + "]"
@@ -87,7 +92,35 @@ def _parse(note: str) -> _Delta:
             tail = line[len(_REMOVED_HEAD):].removesuffix("]")
             removed = {n.strip() for n in tail.split(",") if n.strip()}
             break
+    if any(line.removesuffix("]") == _OMITTED_NOTICE for line in lines[1:]):
+        added[_OMITTED_KEY] = _OMITTED_NOTICE
     return added, frozenset(removed)
+
+
+def _project_entries(entries: dict[str, str], *, announce_omissions: bool) -> dict[str, str]:
+    """Keep protected notes on the existing untrusted-text admission path.
+
+    Skill descriptions are file/plugin input, not authenticated generated spans.
+    A names-only row retains discovery without exempting that input from scans.
+    """
+    from agent.llm_egress_firewall import SanitizedTextRejected, validate_sanitized_text
+
+    projected: dict[str, str] = {}
+    for name, row in entries.items():
+        if name == _OMITTED_KEY:
+            projected[name] = _OMITTED_NOTICE
+            continue
+        try:
+            name_row = validate_sanitized_text(f"{_ROW}{name}")
+        except SanitizedTextRejected:
+            if announce_omissions:
+                projected[_OMITTED_KEY] = _OMITTED_NOTICE
+            continue
+        try:
+            projected[name] = validate_sanitized_text(row) if row else ""
+        except SanitizedTextRejected:
+            projected[name] = name_row
+    return projected
 
 
 def _announced(conversation_history: Any) -> _Delta:
@@ -111,6 +144,10 @@ def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) 
     embedder-supplied prompt), and announcing the whole catalog there would only add noise. MoA and
     codex_app_server turns never stamp the ``api_content`` sidecar, so the note could not be read
     back from the transcript; those modes skip it, like the surface-switch note."""
+    agent._skills_index_pending_delivery = None
+    agent._skills_index_delivery = None
+    agent._skills_index_note = ""
+    previous_told = getattr(agent, "_skills_index_told", None)
     if getattr(agent, "provider", None) == "moa" or getattr(agent, "api_mode", None) == "codex_app_server":
         return False
     stored = index_entries(prompt)
@@ -122,9 +159,17 @@ def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) 
     except Exception:
         logger.debug("skills index delta: current index unavailable", exc_info=True)
         return False
+    from agent.chat_completion_helpers import _destination_requires_egress_firewall
+    protected = _destination_requires_egress_firewall(agent)
+    raw_stored, raw_current = stored, current
+    if protected:
+        stored = _project_entries(stored, announce_omissions=False)
+        current = _project_entries(current, announce_omissions=True)
     told = getattr(agent, "_skills_index_told", None)
     key = hash(prompt)
     told_added, told_removed = told[1] if isinstance(told, tuple) and told[0] == key else _announced(conversation_history)
+    if protected:
+        told_added = _project_entries(told_added, announce_omissions=True)
     # What the model believes it can load: the prompt's index as amended by the newest note, row text
     # included so a changed description counts as a change. A rebuilt prompt (compaction) that now
     # lists what an earlier note announced needs no further note.
@@ -137,8 +182,34 @@ def stage_skills_index_note(agent: Any, prompt: Any, conversation_history: Any) 
     added = {name: row for name, row in current.items()
              if name not in stored or _shown(name, stored[name]) != _shown(name, row)}
     removed = set(stored) - set(current)
+    note = _render(added, removed)
+    # What an unprotected route would be sent. The route can still change before the first request
+    # (a voice turn binds its own provider), so the full difference is kept beside the projected one.
+    raw_added = {name: row for name, row in raw_current.items()
+                 if name not in raw_stored or _shown(name, raw_stored[name]) != _shown(name, row)}
+    raw_removed = frozenset(set(raw_stored) - set(raw_current))
+    if protected:
+        from agent.llm_egress_firewall import SanitizedTextRejected, validate_sanitized_text
+        try:
+            # This is a complete logical span, not one transport segment.
+            # The optional note may spend at most a quarter of the smaller
+            # request cap, reserving the rest for user/history/framing. This
+            # is a producer budget, not an admission grant: the final gate
+            # still scans and bounds the complete request and every piece.
+            aggregate_cap = int(getattr(
+                agent, "_llm_egress_max_sanitized_bytes",
+                32_768 if getattr(agent, "_llm_egress_aux_task", "") == "vision" else 262_144,
+            ))
+            serialized_cap = int(getattr(agent, "_llm_egress_max_serialized_bytes", 262_144))
+            validate_sanitized_text(note, max_bytes=min(aggregate_cap, serialized_cap) // 4)
+        except SanitizedTextRejected:
+            logger.warning("Skills index delta withheld by outbound policy")
+            return False
     agent._skills_index_told = (key, ({n: _shown(n, r) for n, r in added.items()}, frozenset(removed)))
-    agent._skills_index_note = _render(added, removed)
+    agent._skills_index_note = note
+    # Process-local producer data, never recovered from a visible marker or sidecar.
+    agent._skills_index_pending_delivery = (note, dict(added), frozenset(removed), key, previous_told,
+                                            dict(raw_added), raw_removed)
     logger.info(
         "Session %s: skills changed (+%d/-%d) since the system prompt was built; delivering the "
         "change as a turn note (prefix cache preserved).",

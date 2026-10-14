@@ -376,7 +376,13 @@ def test_module_cli_builds_the_requested_products(source_products, desktop, monk
 
     root, acquired = source_products
     monkeypatch.setattr(sys, "argv", ["source_build", "--source", str(root)] + (["--desktop"] if desktop else []))
-    # run_module exercises __main__ while substituting only tool acquisition.
+    # run_module exercises __main__ while substituting only tool acquisition. A fresh import inside it
+    # rebinds the package attribute, which monkeypatch does not restore with sys.modules, so later
+    # string-path patches would hit a different module than `from hermes_cli.source_build import ...`.
+    import importlib
+
+    import hermes_cli
+    monkeypatch.setattr(hermes_cli, "source_build", importlib.import_module("hermes_cli.source_build"))
     monkeypatch.delitem(sys.modules, "hermes_cli.source_build", raising=False)
     runpy.run_module("hermes_cli.source_build", run_name="__main__")
     assert acquired == ["npm"]
@@ -418,3 +424,57 @@ def test_packaged_desktop_is_reused_only_while_it_names_head(tmp_path, monkeypat
     receipt_current["value"] = True
     subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "two"], check=True)
     assert not reused()
+
+
+@pytest.mark.parametrize("binary", ["python", "node"])
+def test_failure_diagnostic_retains_child_cause_instead_of_custody_wrapper(binary):
+    from hermes_cli.source_build import ProductBuildError
+
+    command = [binary, "-I", "-c", "wrapper-line\n" * 1000, "3", "node", "node-deps.mjs"]
+    failure = subprocess.CalledProcessError(1, command, output="npm error ERESOLVE inert-dependency-cause")
+    report = str(ProductBuildError([("Node dependencies", failure)]))
+    assert "inert-dependency-cause" in report[-6000:]
+    assert "wrapper-line" not in report
+    assert len(report) < 3000
+
+
+def test_failure_diagnostic_bounds_and_redacts_child_output():
+    from hermes_cli.source_build import ProductBuildError
+
+    failure = subprocess.CalledProcessError(1, ["node", "private-command-argument"],
+                                           output="noise\n" * 2000 + "API_KEY=ghp_" + "a1b2c3d4" * 5 + "\npublic-inert-cause")
+    report = str(ProductBuildError([("Node dependencies", failure)]))
+    assert "public-inert-cause" in report
+    assert "ghp_" + "a1b2c3d4" * 5 not in report
+    assert "private-command-argument" not in report
+    assert len(report) < 3000
+
+
+def test_failure_diagnostic_source_paths_keep_unicode_spaces_as_argv(tmp_path, monkeypatch):
+    from hermes_cli.source_build import run_source_script
+
+    root = tmp_path / "José Müller 漢字 dir"
+    captured = []
+    monkeypatch.setattr("hermes_cli.source_build.run_in_custody", lambda source, command, label, **kwargs: captured.append((source, command, kwargs)))
+    monkeypatch.setattr("hermes_cli.source_build.shutil.which", lambda *_args, **_kwargs: "/inert/node")
+    run_source_script(root, "scripts/build/node-deps.mjs", "--source", str(root), env={"PATH": ""}, label="Inert build")
+    source, command, kwargs = captured[0]
+    assert source == root and kwargs["cwd"] == root
+    assert command == ["/inert/node", str(root / "scripts/build/node-deps.mjs"), "--source", str(root)]
+
+
+@pytest.mark.parametrize("stream,cap", [("output", 1500), ("stderr", 500)])
+def test_failure_diagnostic_redacts_credentials_crossing_tail_boundary(stream, cap):
+    from hermes_cli.source_build import ProductBuildError
+
+    inert_key = "ghp_" + "z9y8x7w6" * 5
+    # The prefix would be clipped, leaving almost the entire credential bare.
+    text = "noise\nAPI_KEY=" + inert_key + "\n" + "x" * (cap - 54) + "\npublic output"
+    # Control: clipping first destroys the identifying prefix while retaining
+    # a long credential fragment that the existing redactor cannot identify.
+    from agent.redact import redact_sensitive_text
+    assert "z9y8x7w6" * 4 in redact_sensitive_text(text[-cap:], force=True)
+    failure = subprocess.CalledProcessError(1, ["node"], **{stream: text})
+    report = str(ProductBuildError([("Node dependencies", failure)]))
+    assert "z9y8x7w6" * 4 not in report
+    assert "public output" in report

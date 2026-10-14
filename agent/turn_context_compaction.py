@@ -120,6 +120,9 @@ def _reanchor(agent: Any, messages: list[Any], user_message: Any) -> int:
 
     idx = reanchor_current_turn_user_idx(messages, user_message)
     agent._persist_user_message_idx = idx
+    if idx >= 0:
+        from agent.skills_index_delivery import rebind_skills_note
+        rebind_skills_note(agent, messages[idx])
     return idx
 
 
