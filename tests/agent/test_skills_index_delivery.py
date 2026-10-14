@@ -361,3 +361,34 @@ def test_sent_notes_live_as_long_as_their_rows_are_in_the_transcript(tmp_path, m
     assert len(agent._skills_index_sent_notes) == 10  # Every row is still in the transcript.
     build(history[-4:] + [final])  # Compaction removed the older rows.
     assert len(agent._skills_index_sent_notes) == 2
+
+
+def test_a_repeated_delta_is_the_newest_note_in_a_protected_request(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    agent = SimpleNamespace(provider="openrouter", api_mode="chat_completions", session_id="test",
+                            _current_turn_timestamp=1.0, ephemeral_system_prompt="",
+                            _copy_reasoning_content_for_api=lambda *_: None,
+                            _should_sanitize_tool_calls=lambda: False)
+
+    def build(messages):
+        return build_api_messages(agent, messages, current_turn_user_idx=len(messages) - 1, ext_prefetch_cache="",
+                                  plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+
+    history = []
+    for turn, skill in enumerate(["alpha", "beta", "alpha"]):  # The same delta comes round again.
+        monkeypatch.setattr("agent.system_prompt._skills_prompt",
+                            lambda _, skill=skill: f"<available_skills>\n    - old: Run checks.\n    - {skill}: Create HTML diagrams.\n</available_skills>")
+        message = {"role": "user", "content": f"Turn {turn}."}
+        assert stage_skills_index_note(agent, PROMPT, [])
+        context = _merge_gateway_notes(agent, [message], 0, "")
+        _stamp_api_content_sidecar(agent, [message], 0, "", context, preflight_compressed=False)
+        history += [message]
+        build(history)  # Sent raw to the primary route.
+        history += [{"role": "assistant", "content": "Done."}]
+    agent.provider = "nous"
+    api = build(history + [{"role": "user", "content": "Last."}])
+    notes = [flatten_message_text(m["content"]) for m in api
+             if m["role"] == "user" and "skills available in this conversation" in flatten_message_text(m["content"])]
+    assert len(notes) == 1
+    assert "alpha" in notes[0] and "beta" not in notes[0]  # The latest delta, once, and not the stale one.
+    assert _decision(tmp_path, flatten_message_text(api[0]["content"])).allowed

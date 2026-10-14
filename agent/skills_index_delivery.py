@@ -106,6 +106,7 @@ def _remember_sent(agent, delivery):
     sent = getattr(agent, "_skills_index_sent_notes", None)
     if not isinstance(sent, dict):
         sent = agent._skills_index_sent_notes = {}
+    sent.pop(delivery.note, None)  # A, B, A again: the latest occurrence is the newest.
     sent[delivery.note] = (dict(delivery.added), delivery.removed)
 
 
@@ -118,14 +119,30 @@ def _user_texts(message):
     return ()
 
 
+def _rewrite_user_texts(message, rewrite):
+    """``message`` with ``rewrite(text, ordinal)`` applied to each user text; the same dict when unchanged."""
+    texts = _user_texts(message)
+    new = [rewrite(text, ordinal) for ordinal, text in enumerate(texts)]
+    if new == list(texts):
+        return message
+    if isinstance(message["content"], str):
+        return {**message, "content": new[0]}
+    ordinal = iter(new)
+    return {**message, "content": [
+        {**p, "text": next(ordinal)} if isinstance(p, dict) and isinstance(p.get("text"), str) else p
+        for p in message["content"]]}
+
+
 def project_sent_skills_notes(agent, api_messages, *, prune=False):
     """Return ``api_messages`` with every remembered raw note projected for a protected route.
 
     Request-copy only: matching user rows (or text parts) are replaced by new dicts, never mutated, so
     the live transcript, the durable rows and the primary route's cached bytes stay as they were sent.
-    Only the newest remembered note is projected; superseded ones are omitted, which keeps the notes of a
-    long session inside a single note's share of the request budget. Keyed on the note's bytes because a context engine's selection can hand back clones that carry no
-    identity, and because a note sent on an earlier turn is history by now.
+    Only the newest remembered note is projected, and only at its last occurrence in the request; every
+    superseded note, and any earlier row carrying the same text, is omitted. That keeps the notes of a
+    long session inside a single note's share of the request budget. Keyed on the note's bytes
+    because a context engine's selection can hand back clones that carry no identity, and because a note
+    sent on an earlier turn is history by now.
 
     ``prune`` is for the full canonical request only: a note whose row compaction has removed is
     forgotten, while one still in the transcript is kept however many notes were sent. A context
@@ -144,26 +161,20 @@ def project_sent_skills_notes(agent, api_messages, *, prune=False):
 
     if not _destination_requires_egress_firewall(agent):
         return api_messages
-    # Each note states the full difference against the system prompt and supersedes the earlier ones, so a
-    # protected request carries only the newest, within one note's budget; older sent notes are omitted.
     newest = next(reversed(sent))
-    projections = [(raw, _project_note(agent, added, removed)[0] if raw == newest else "")
-                   for raw, (added, removed) in sent.items()]
+    projected = _project_note(agent, *sent[newest])[0]
+    last = max(((i, n) for i, m in enumerate(api_messages) for n, t in enumerate(_user_texts(m))
+                if t.endswith(newest)), default=None)
 
-    def swap(text):
-        return next((text[:-len(raw)] + note for raw, note in projections if text.endswith(raw)), text)
+    def rewrite_at(index):
+        def rewrite(text, ordinal):
+            raw = next((raw for raw in sent if text.endswith(raw)), None)
+            if raw is None:
+                return text
+            return text[:-len(raw)] + (projected if raw == newest and (index, ordinal) == last else "")
+        return rewrite
 
-    out = []
-    for message in api_messages:
-        content = message.get("content") if message.get("role") == "user" else None
-        if isinstance(content, str) and swap(content) != content:
-            message = {**message, "content": swap(content)}
-        elif isinstance(content, list) and any(swap(t) != t for t in _user_texts(message)):
-            message = {**message, "content": [
-                {**p, "text": swap(p["text"])} if isinstance(p, dict) and isinstance(p.get("text"), str) else p
-                for p in content]}
-        out.append(message)
-    return out
+    return [_rewrite_user_texts(m, rewrite_at(i)) for i, m in enumerate(api_messages)]
 
 
 def revalidate_skills_note(agent, message):
