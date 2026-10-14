@@ -180,6 +180,25 @@ def worker_user_content(db, conn, session_id, payload):
         (db._encode_content(payload['content']), _row_id(payload), session_id)).rowcount}
 
 
+def worker_user_projection(db, conn, session_id, payload):
+    """Addressed CAS of one live user row's content + sidecar, same guards as
+    ``SessionDB.compare_and_set_user_message_projection``."""
+    from hermes_state_messages import _scrub_surrogates
+    keys = {'row_id', 'expected_content', 'expected_api_content', 'content', 'api_content'}
+    if set(payload) != keys:
+        raise RuntimeStoreError('invalid_params')
+    content, api_content = payload['content'], payload['api_content']
+    expected, expected_api = payload['expected_content'], payload['expected_api_content']
+    expected_api = None if expected_api == expected else expected_api
+    api_content = None if api_content == content else api_content
+    return {'value': conn.execute(
+        "UPDATE messages SET content=?, api_content=? WHERE id=? AND session_id=? "
+        "AND role='user' AND active=1 AND content IS ? AND api_content IS ?",
+        (db._encode_content(content), _scrub_surrogates(api_content) if api_content is not None else None,
+         _row_id(payload), session_id, db._encode_content(expected),
+         _scrub_surrogates(expected_api) if expected_api is not None else None)).rowcount}
+
+
 WORKER_LIFECYCLE_HANDLERS = {
     'session.title': worker_title,
     'session.title_source': worker_title_source,
@@ -190,6 +209,7 @@ WORKER_LIFECYCLE_HANDLERS = {
     'session.api_content': worker_api_content,
     'session.message_api_content': worker_message_api_content,
     'session.user_content': worker_user_content,
+    'session.user_projection': worker_user_projection,
     'session.create': worker_create,
     'session.end': worker_end,
     'session.lifecycle': worker_lifecycle,

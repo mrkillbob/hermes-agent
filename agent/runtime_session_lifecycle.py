@@ -79,6 +79,13 @@ class RuntimeSessionLifecycleMixin:
         self._session(session_id)
         return self._apply('session.user_content', {'row_id': row_id, 'content': content})['value']
 
+    def compare_and_set_user_message_projection(self, session_id, row_id, *, expected_content,
+                                                expected_api_content, content, api_content):
+        self._session(session_id)
+        return self._apply('session.user_projection', {
+            'row_id': row_id, 'expected_content': expected_content, 'expected_api_content': expected_api_content,
+            'content': content, 'api_content': api_content})['value']
+
     def end_session(self, session_id, end_reason):
         self._session(session_id)
         self._apply('session.end', {'end_reason': end_reason})
