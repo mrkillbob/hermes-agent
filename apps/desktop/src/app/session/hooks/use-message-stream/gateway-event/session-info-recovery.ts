@@ -14,9 +14,19 @@ function holdsSettledPrefix(state: ClientSessionState, active: boolean): boolean
   )
 }
 
-/** A retained prefix gets a reorder grace before one foreground history read. */
-export function needsSettledPrefixCatchup(state: ClientSessionState, active: boolean, now: number): boolean {
+/**
+ * The marker of a retained prefix that has outlived its reorder grace and
+ * is due one foreground history read, else null.
+ */
+export function idleCatchupMarker(state: ClientSessionState, active: boolean, now: number): null | number {
   return holdsSettledPrefix(state, active) && now - state.heartbeatSettledAt! >= SETTLED_PREFIX_GRACE_MS
+    ? state.heartbeatSettledAt!
+    : null
+}
+
+/** The marker a settle stamps: set only when a streamed bubble was kept. */
+export function settledPrefixStamp(heartbeatSettledStreamId: null | string | undefined): null | number {
+  return heartbeatSettledStreamId ? Date.now() : null
 }
 
 /** One read per settle at a time; a failed read releases it so a later idle heartbeat can retry. */
@@ -28,10 +38,10 @@ const inFlight = new Map<string, number>()
  * connection gap that lost the completion can keep REST down too) it stays set,
  * and the next idle foreground heartbeat tries again.
  */
-export async function recoverSettledPrefix(deps: GatewayEventDeps, sessionId: string, settledAt: number) {
+export async function recoverSettledPrefix(deps: GatewayEventDeps, sessionId: string, settledAt: null | number) {
   const state = deps.sessionStateByRuntimeIdRef.current.get(sessionId)
 
-  if (inFlight.get(sessionId) === settledAt || !state || state.heartbeatSettledAt !== settledAt) {
+  if (settledAt === null || inFlight.get(sessionId) === settledAt || !state || state.heartbeatSettledAt !== settledAt) {
     return
   }
 
@@ -60,7 +70,16 @@ export async function recoverSettledPrefix(deps: GatewayEventDeps, sessionId: st
  * A session that is in the background at fire time keeps its marker for the
  * first idle heartbeat after the user returns.
  */
-export function scheduleSettledPrefixCatchup(deps: GatewayEventDeps, sessionId: string, settledAt: number) {
+export function scheduleSettledPrefixCatchup(
+  deps: GatewayEventDeps,
+  sessionId: string,
+  settledAt: null | number | undefined,
+  active: boolean
+) {
+  if (!active || typeof settledAt !== 'number') {
+    return
+  }
+
   setTimeout(() => {
     // The timer is the grace, so no clock re-check: timers may fire a
     // millisecond early against Date.now() and would strand the prefix.
