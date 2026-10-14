@@ -1,6 +1,10 @@
 """Bind a newly produced skills note to its live envelope across late route changes.
 
 Ownership stays in memory for this turn. Persisted markers cannot create it.
+
+Until a request carrying the raw note has been built, a protected route projects the live message and
+its durable row once (sticky). After that, bytes a provider may already have received are history: a
+later protected route (fallback) projects only its own outgoing request copy.
 """
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +22,7 @@ class _Delivery:
     content: list | None = None
     expected: str | None = None
     projected: bool = False
+    raw_built: bool = False
 
 
 def bind_skills_note(agent, message, note, *, part=None):
@@ -58,30 +63,72 @@ def _project_note(agent, delivery):
     return note, (added, removed)
 
 
+def rebind_skills_note(agent, message):
+    """Move ownership to compaction's copy of the current turn's row.
+
+    Compaction rebuilds protected-tail rows with shallow copies, so identity alone would expire a live
+    span. Only a copy that still holds the same ``content`` object and sidecar text inherits it; a
+    rewritten or unrelated row stays unowned and meets the ordinary final gate.
+    """
+    delivery = getattr(agent, "_skills_index_delivery", None)
+    if not isinstance(delivery, _Delivery) or delivery.message is message:
+        return
+    previous = delivery.message
+    if (isinstance(message, dict) and message.get("role") == "user"
+            and message.get("content") is previous.get("content")
+            and message.get("api_content") == previous.get("api_content")):
+        delivery.message = message
+
+
+def _owned_text(message, delivery):
+    """The live producer span's current text, or None once ownership has expired."""
+    if delivery.part is None:
+        current = message.get("api_content")
+    else:
+        content = message.get("content")
+        if content is not delivery.content or sum(p is delivery.part for p in content) != 1:
+            return None
+        current = delivery.part.get("text")
+    if not isinstance(current, str) or current != delivery.expected or not current.endswith(delivery.note):
+        return None
+    return current
+
+
 def revalidate_skills_note(agent, message):
     """Project only the authenticated live producer span for the actual bound route.
 
-    Projection is sticky. A replaced/copied envelope expires ownership, leaving
-    ordinary final-gate rejection intact. Durable write failure stops the request.
+    Before any request carrying the raw note was built, projection is sticky: the live message and its
+    durable row are rewritten once, and a replaced/copied envelope expires ownership, leaving ordinary
+    final-gate rejection intact. Durable write failure stops the request. Once a request carrying the
+    raw note has been built, those bytes may already be with a provider and in its cached prefix, so a
+    protected route gets ``(text, part_index)`` for its request copy only and nothing is rewritten.
     """
     from agent.chat_completion_helpers import _destination_requires_egress_firewall
     from agent.session_persistence import _durable_content, _persist_lock, durable_user_row_content
     from agent.skills_index_delta import _shown
 
     delivery = getattr(agent, "_skills_index_delivery", None)
-    if (not isinstance(delivery, _Delivery) or delivery.message is not message
-            or delivery.projected or not _destination_requires_egress_firewall(agent)):
-        return
+    if not isinstance(delivery, _Delivery) or delivery.message is not message or delivery.projected:
+        return None
+    if not _destination_requires_egress_firewall(agent):
+        delivery.raw_built = True
+        return None
+    if delivery.raw_built:
+        current = _owned_text(message, delivery)
+        if current is None:
+            return None
+        note, _ = _project_note(agent, delivery)
+        projected = current[:-len(delivery.note)] + note
+        if projected == current:
+            return None
+        index = None if delivery.part is None else next(
+            i for i, p in enumerate(message["content"]) if p is delivery.part)
+        return projected, index
     with _persist_lock(agent):
-        if delivery.part is None:
-            current = message.get("api_content")
-        else:
-            content = message.get("content")
-            if content is not delivery.content or sum(p is delivery.part for p in content) != 1:
-                return
-            current = delivery.part.get("text")
-        if not isinstance(current, str) or current != delivery.expected or not current.endswith(delivery.note):
-            return
+        current = _owned_text(message, delivery)
+        if current is None:
+            return None
+        content = message.get("content")
         note, delta = _project_note(agent, delivery)
         projected = current[:-len(delivery.note)] + note
         db = getattr(agent, "_session_db", None)

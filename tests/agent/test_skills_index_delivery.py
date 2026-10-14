@@ -32,6 +32,10 @@ def _stage(monkeypatch, *, multimodal=False, user="Run checks.", hook="Run check
     return agent, message
 
 
+def _live(message):
+    return flatten_message_text(message.get("api_content") or message["content"])
+
+
 def _wire(agent, message):
     return build_api_messages(agent, [message], current_turn_user_idx=0, ext_prefetch_cache="",
                               plugin_user_context="", moa_config=None, active_system_prompt="")[0][0]["content"]
@@ -43,8 +47,8 @@ def test_actual_bound_route_projects_current_note_and_persists_bytes(tmp_path, m
     from agent.session_persistence import _durable_content
 
     agent, message = _stage(monkeypatch, multimodal=multimodal)
-    original = flatten_message_text(_wire(agent, message))
-    assert "Create HTML diagrams." in original  # Main route compatibility.
+    original = _live(message)
+    assert "Create HTML diagrams." in original  # Main route compatibility; nothing has been built yet.
     db = SessionDB(tmp_path / "state.db")
     try:
         db.create_session("test", source="cli")
@@ -132,7 +136,7 @@ def test_durable_projection_cas_rejects_changed_sidecar_or_multimodal_row(tmp_pa
     from agent.session_persistence import _durable_content
 
     agent, message = _stage(monkeypatch, multimodal=multimodal)
-    original = flatten_message_text(_wire(agent, message))
+    original = _live(message)
     db = SessionDB(tmp_path / "state.db")
     try:
         db.create_session("test", source="cli")
@@ -209,3 +213,59 @@ def test_unrevalidated_route_rebuild_control_is_blocked(tmp_path, monkeypatch):
     monkeypatch.setattr("agent.skills_index_delivery.revalidate_skills_note", lambda *_: None)
     with pytest.raises(EgressBlocked):
         _decision(tmp_path, _wire(agent, message))
+
+
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_note_already_built_for_main_route_is_projected_on_fallback_copy_only(tmp_path, monkeypatch, multimodal):
+    from agent.session_persistence import _durable_content
+
+    agent, message = _stage(monkeypatch, multimodal=multimodal)
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("test", source="cli")
+        message["_row_id"] = db.append_message("test", "user", _durable_content(message["content"]),
+                                              api_content=message.get("api_content"))
+        agent._session_db = db
+        sent = flatten_message_text(_wire(agent, message))  # The main route's request carried the raw note.
+        assert "Create HTML diagrams." in sent
+        live, row, told = _live(message), db.get_messages("test")[0], agent._skills_index_told
+        agent.provider = "nous"  # A protected fallback after the provider already saw the raw note.
+        text = flatten_message_text(_wire(agent, message))
+        assert "Create HTML diagrams." not in text
+        assert "    - archify" in text
+        assert _decision(tmp_path, text).allowed
+        assert _live(message) == live  # Bytes already sent stay in the live message,
+        assert db.get_messages("test")[0] == row  # in the persisted transcript,
+        assert agent._skills_index_told == told  # and in the accounting.
+        agent.provider = "openrouter"
+        assert flatten_message_text(_wire(agent, message)) == sent  # The main route's cached prefix is intact.
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("built", [False, True])
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_compaction_copy_inherits_ownership_through_reanchor(tmp_path, monkeypatch, multimodal, built):
+    from agent.context_compressor import _fresh_compaction_message_copy
+    from agent.turn_context_compaction import _reanchor
+
+    agent, message = _stage(monkeypatch, multimodal=multimodal)
+    if built:
+        assert "Create HTML diagrams." in flatten_message_text(_wire(agent, message))
+    copy = _fresh_compaction_message_copy(message)  # In-loop compression rebuilds the protected tail.
+    assert _reanchor(agent, [copy], copy["content"]) == 0
+    agent.provider = "nous"
+    text = flatten_message_text(_wire(agent, copy))
+    assert "Create HTML diagrams." not in text
+    assert _decision(tmp_path, text).allowed
+
+
+def test_compaction_rewritten_row_does_not_inherit_ownership(tmp_path, monkeypatch):
+    from agent.turn_context_compaction import _reanchor
+
+    agent, message = _stage(monkeypatch)
+    rewritten = {**message, "content": message["content"] + " "}  # Merged into the tail: a new content object.
+    assert _reanchor(agent, [rewritten], rewritten["content"]) == 0
+    agent.provider = "nous"
+    with pytest.raises(EgressBlocked):
+        _decision(tmp_path, flatten_message_text(_wire(agent, rewritten)))
