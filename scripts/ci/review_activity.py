@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->"
 CODEX_APP_ID = 1144995
 KINDS = {"📝 **Code Review**": "code", "🔒 **Security Review**": "security"}
 STATUS = re.compile(r'(✅ \*\*Completed\*\*|🔄 \*\*Running\*\* since) '
                     r'<relative-time datetime="([^"]+)">([^<]+)</relative-time>')
+# Codex places its thumbs-up and edits its summary in the same moment, and on a manual request it can
+# react a second or two before the summary edit. A thumbs-up from an earlier review cannot fall this close
+# to a later completion, since a review takes far longer than this to run.
+WITNESS_SKEW = timedelta(seconds=10)
 SECURITY_MARKER = re.compile(r"<!-- codex-security-review:v1 (\{[^\n]*\}) -->")
 
 
@@ -98,5 +102,5 @@ def clean_witness(activity: dict, reactions: list, user_id: int, latest_reviews:
     boundary = max([time(activity["updated_at"]),
                     *(time(row["at"]) for row in activity["passes"].values()),
                     *(time(review["submitted_at"]) for review in latest_reviews.values())])
-    return any(reaction["content"] == "+1" and time(reaction["created_at"]) > boundary
+    return any(reaction["content"] == "+1" and time(reaction["created_at"]) > boundary - WITNESS_SKEW
                for reaction in canonical)
