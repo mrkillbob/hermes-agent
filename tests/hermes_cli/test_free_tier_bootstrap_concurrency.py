@@ -18,7 +18,7 @@ def test_concurrent_bootstrap_shares_record_and_broadcast(monkeypatch):
     monkeypatch.setattr(bootstrap, "_resolve_inference", lambda: "configured")
     monkeypatch.setattr(bootstrap, "_broadcast", calls.append)
     monkeypatch.setattr(anon_auth, "current_nous_state", lambda: None)
-    monkeypatch.setattr(anon_auth, "guest_enabled", lambda: False)
+    monkeypatch.setattr(anon_auth, "guest_allowed", lambda: False)
     original_wait = bootstrap._done.wait
     waiting = threading.Event()
     def wait(timeout):
