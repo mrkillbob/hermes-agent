@@ -4664,6 +4664,8 @@
                 "read_window_below",
                 "search_files",
                 "session_search",
+                "set_theme",
+                "setup_beat",
                 "setup_choose",
                 "show_tip",
                 "skill_manage",
