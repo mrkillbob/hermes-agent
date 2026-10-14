@@ -11,14 +11,19 @@ function holdsSettledPrefix(state: ClientSessionState, active: boolean): boolean
   )
 }
 
-/** The settle marker of a retained prefix that is past its reorder grace, else null. */
+/**
+ * The marker of a retained prefix that has outlived its reorder grace and
+ * is due one foreground history read, else null.
+ */
 export function idleCatchupMarker(state: ClientSessionState, active: boolean, now: number): null | number {
-  return needsSettledPrefixCatchup(state, active, now) ? state.heartbeatSettledAt! : null
+  return holdsSettledPrefix(state, active) && now - state.heartbeatSettledAt! >= SETTLED_PREFIX_GRACE_MS
+    ? state.heartbeatSettledAt!
+    : null
 }
 
-/** A retained prefix gets a reorder grace before one foreground history read. */
-export function needsSettledPrefixCatchup(state: ClientSessionState, active: boolean, now: number): boolean {
-  return holdsSettledPrefix(state, active) && now - state.heartbeatSettledAt! >= SETTLED_PREFIX_GRACE_MS
+/** The marker a settle stamps: set only when a streamed bubble was kept. */
+export function settledPrefixStamp(heartbeatSettledStreamId: null | string | undefined): null | number {
+  return heartbeatSettledStreamId ? Date.now() : null
 }
 
 /** One run per settle at a time. */
