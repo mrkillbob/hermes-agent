@@ -124,7 +124,7 @@ jobs:
       - name: Force all lanes on release
         # Overwrite the classifier outputs with 'true' when inputs.release.
         # ci_review stays raw: it only ever feeds the PR review-label gate.
-        # Upstream E2E runs on release/dispatch; public forks retain full PR/push journeys.
+        # Upstream E2E runs on release/dispatch; forks let the classifier pick E2E lanes per diff.
         id: gate-lanes
         env:
           RELEASE: ${{ inputs.release }}
@@ -179,11 +179,11 @@ jobs:
       # NousResearch runs the full unit suite on one 32-core runner. Forks
       # have standard 4-core runners, so use more, smaller slices there.
       slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 24 }}
-      # The fork runs the complete suite on parallel GitHub-hosted shards; PRs
-      # keep the same E2E coverage as main without requiring NousResearch runners.
+      # The fork runs the complete suite on parallel GitHub-hosted shards; E2E
+      # lanes still follow the diff classifier.
       e2e_mode: full
-      e2e: ${{ github.repository != 'NousResearch/hermes-agent' || needs.detect.outputs.e2e == 'true' }}
-      e2e_upgrade: ${{ github.repository != 'NousResearch/hermes-agent' || needs.detect.outputs.e2e_upgrade == 'true' }}
+      e2e: ${{ needs.detect.outputs.e2e == 'true' }}
+      e2e_upgrade: ${{ needs.detect.outputs.e2e_upgrade == 'true' }}
       strict_acceptance: ${{ inputs.strict_acceptance || '' }}
 
   # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
@@ -204,8 +204,8 @@ jobs:
       # (tests/test_desktop_update_windows_*.py) only when that surface
       # changed; unit-level platforms("windows") tests always run.
       desktop_updater: ${{ needs.detect.outputs.desktop_updater == 'true' }}
-      e2e: ${{ github.repository != 'NousResearch/hermes-agent' || needs.detect.outputs.e2e == 'true' }}
-      e2e_upgrade: ${{ github.repository != 'NousResearch/hermes-agent' || needs.detect.outputs.e2e_upgrade == 'true' }}
+      e2e: ${{ needs.detect.outputs.e2e == 'true' }}
+      e2e_upgrade: ${{ needs.detect.outputs.e2e_upgrade == 'true' }}
       strict_acceptance: ${{ inputs.strict_acceptance || '' }}
 
   tests-windows-advisory:
@@ -216,8 +216,8 @@ jobs:
     with:
       platform_scope: windows
       desktop_updater: ${{ needs.detect.outputs.desktop_updater == 'true' }}
-      e2e: ${{ github.repository != 'NousResearch/hermes-agent' || needs.detect.outputs.e2e == 'true' }}
-      e2e_upgrade: ${{ github.repository != 'NousResearch/hermes-agent' || needs.detect.outputs.e2e_upgrade == 'true' }}
+      e2e: ${{ needs.detect.outputs.e2e == 'true' }}
+      e2e_upgrade: ${{ needs.detect.outputs.e2e_upgrade == 'true' }}
       strict_acceptance: ${{ inputs.strict_acceptance || '' }}
 
   lint:
@@ -287,7 +287,7 @@ jobs:
     # The deterministic core suite (apps/desktop/e2e/core): transcript
     # integrity, boot/respawn/orphans, clarify+approval. Run it on PRs so
     # lifecycle and profile-routing regressions are found before merge; retries 0.
-    if: ${{ needs.detect.outputs.e2e_desktop_core == 'true' || (github.repository != 'NousResearch/hermes-agent' && (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true')) }}
+    if: ${{ needs.detect.outputs.e2e_desktop_core == 'true' }}
     uses: ./.github/workflows/e2e-desktop-core.yml
 
   e2e-desktop-update:
@@ -300,7 +300,7 @@ jobs:
     # the Linux e2e-upgrade shards and the Windows install + update journey
     # (tests / tests-os, gated on e2e_upgrade), it is skipped — and the skip
     # counts as success — when the PR does not touch that path.
-    if: ${{ needs.detect.outputs.e2e_desktop_update == 'true' || (github.repository != 'NousResearch/hermes-agent' && (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true')) }}
+    if: ${{ needs.detect.outputs.e2e_desktop_update == 'true' }}
     uses: ./.github/workflows/e2e-desktop-update.yml
 
   docs-site:
