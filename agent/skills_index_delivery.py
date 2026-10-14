@@ -123,7 +123,8 @@ def project_sent_skills_notes(agent, api_messages, *, prune=False):
 
     Request-copy only: matching user rows (or text parts) are replaced by new dicts, never mutated, so
     the live transcript, the durable rows and the primary route's cached bytes stay as they were sent.
-    Keyed on the note's bytes because a context engine's selection can hand back clones that carry no
+    Only the newest remembered note is projected; superseded ones are omitted, which keeps the notes of a
+    long session inside a single note's share of the request budget. Keyed on the note's bytes because a context engine's selection can hand back clones that carry no
     identity, and because a note sent on an earlier turn is history by now.
 
     ``prune`` is for the full canonical request only: a note whose row compaction has removed is
@@ -143,7 +144,11 @@ def project_sent_skills_notes(agent, api_messages, *, prune=False):
 
     if not _destination_requires_egress_firewall(agent):
         return api_messages
-    projections = [(raw, _project_note(agent, added, removed)[0]) for raw, (added, removed) in sent.items()]
+    # Each note states the full difference against the system prompt and supersedes the earlier ones, so a
+    # protected request carries only the newest, within one note's budget; older sent notes are omitted.
+    newest = next(reversed(sent))
+    projections = [(raw, _project_note(agent, added, removed)[0] if raw == newest else "")
+                   for raw, (added, removed) in sent.items()]
 
     def swap(text):
         return next((text[:-len(raw)] + note for raw, note in projections if text.endswith(raw)), text)

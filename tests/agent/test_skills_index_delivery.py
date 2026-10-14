@@ -355,6 +355,9 @@ def test_sent_notes_live_as_long_as_their_rows_are_in_the_transcript(tmp_path, m
     assert not any("Create HTML diagrams." in flatten_message_text(m["content"]) for m in api if m["role"] == "user")
     assert all(m["api_content"] in sent for m in history if m["role"] == "user")  # Sent bytes untouched.
     assert _decision(tmp_path, flatten_message_text(api[0]["content"])).allowed
+    notes = [m for m in api if m["role"] == "user" and "skills available in this conversation" in flatten_message_text(m["content"])]
+    assert len(notes) == 1  # Superseded notes are omitted, so they cannot add up past one note's budget.
+    assert "skill9" in flatten_message_text(notes[0]["content"])  # The newest note carries the full difference.
     assert len(agent._skills_index_sent_notes) == 10  # Every row is still in the transcript.
     build(history[-4:] + [final])  # Compaction removed the older rows.
     assert len(agent._skills_index_sent_notes) == 2
