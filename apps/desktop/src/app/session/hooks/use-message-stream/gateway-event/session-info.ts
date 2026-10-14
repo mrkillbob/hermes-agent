@@ -38,7 +38,7 @@ import {
   sessionInfoStatePatch
 } from '../utils'
 
-import { needsSettledPrefixCatchup, scheduleSettledPrefixCatchup } from './session-info-recovery'
+import { needsSettledPrefixCatchup, recoverSettledPrefix, scheduleSettledPrefixCatchup } from './session-info-recovery'
 import type { GatewayEventContext } from './types'
 
 /**
@@ -331,6 +331,8 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
       // message never arrived. The updater is invoked exactly once,
       // synchronously, by updateSessionState.
       let recoveredIncompleteTurn = false
+      // Set when this idle heartbeat finds a retained prefix past its grace.
+      let idleCatchupSettledAt: number | null = null
       // Set when THIS event ends a confirmed live turn, whether or not its
       // terminal message arrived. Drives the sidebar refresh; the hydrate
       // below stays gated on recoveredIncompleteTurn.
@@ -346,9 +348,9 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
             // there) is recovered by the first idle heartbeat after the user
             // returns. The marker is consumed once; no repeated fetch.
             if (needsSettledPrefixCatchup(state, isActiveEvent, Date.now())) {
-              recoveredIncompleteTurn = true
+              idleCatchupSettledAt = state.heartbeatSettledAt ?? null
 
-              return { ...state, heartbeatSettledAt: null }
+              return state
             }
 
             return state
@@ -487,6 +489,10 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
       // a REST call out per idle session.
       if (recoveredIncompleteTurn && isActiveEvent) {
         void hydrateFromStoredSession(3, nextState.storedSessionId, sessionId)
+      }
+
+      if (idleCatchupSettledAt !== null) {
+        void recoverSettledPrefix(deps, sessionId, idleCatchupSettledAt)
       }
     }
 

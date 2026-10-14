@@ -19,6 +19,39 @@ export function needsSettledPrefixCatchup(state: ClientSessionState, active: boo
   return holdsSettledPrefix(state, active) && now - state.heartbeatSettledAt! >= SETTLED_PREFIX_GRACE_MS
 }
 
+/** One read per settle at a time; a failed read releases it so a later idle heartbeat can retry. */
+const inFlight = new Map<string, number>()
+
+/**
+ * One bounded history read for a retained prefix. The marker is consumed only
+ * once an authoritative read succeeded: when every attempt fails (the same
+ * connection gap that lost the completion can keep REST down too) it stays set,
+ * and the next idle foreground heartbeat tries again.
+ */
+export async function recoverSettledPrefix(deps: GatewayEventDeps, sessionId: string, settledAt: number) {
+  const state = deps.sessionStateByRuntimeIdRef.current.get(sessionId)
+
+  if (inFlight.get(sessionId) === settledAt || !state || state.heartbeatSettledAt !== settledAt) {
+    return
+  }
+
+  inFlight.set(sessionId, settledAt)
+
+  try {
+    if (!(await deps.hydrateFromStoredSession(3, state.storedSessionId, sessionId))) {
+      return
+    }
+
+    deps.updateSessionState(sessionId, current =>
+      current.heartbeatSettledAt === settledAt ? { ...current, heartbeatSettledAt: null } : current
+    )
+  } finally {
+    if (inFlight.get(sessionId) === settledAt) {
+      inFlight.delete(sessionId)
+    }
+  }
+}
+
 /**
  * The terminal transition owns its recovery: a settled session may never emit
  * another event (heartbeats are RPC replies, not session.info), so waiting for
@@ -29,26 +62,12 @@ export function needsSettledPrefixCatchup(state: ClientSessionState, active: boo
  */
 export function scheduleSettledPrefixCatchup(deps: GatewayEventDeps, sessionId: string, settledAt: number) {
   setTimeout(() => {
-    if (deps.sessionStateByRuntimeIdRef.current.get(sessionId)?.heartbeatSettledAt !== settledAt) {
-      return
-    }
+    // The timer is the grace, so no clock re-check: timers may fire a
+    // millisecond early against Date.now() and would strand the prefix.
+    const state = deps.sessionStateByRuntimeIdRef.current.get(sessionId)
 
-    let consumed = false
-
-    const next = deps.updateSessionState(sessionId, state => {
-      // The timer is the grace, so no clock re-check: timers may fire a
-      // millisecond early against Date.now() and would strand the prefix.
-      if (state.heartbeatSettledAt !== settledAt || !holdsSettledPrefix(state, deps.activeSessionIdRef.current === sessionId)) {
-        return state
-      }
-
-      consumed = true
-
-      return { ...state, heartbeatSettledAt: null }
-    })
-
-    if (consumed) {
-      void deps.hydrateFromStoredSession(3, next.storedSessionId, sessionId)
+    if (state?.heartbeatSettledAt === settledAt && holdsSettledPrefix(state, deps.activeSessionIdRef.current === sessionId)) {
+      void recoverSettledPrefix(deps, sessionId, settledAt)
     }
   }, SETTLED_PREFIX_GRACE_MS)
 }

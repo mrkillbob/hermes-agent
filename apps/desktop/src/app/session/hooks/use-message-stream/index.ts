@@ -59,7 +59,7 @@ interface MessageStreamOptions {
     attempts?: number,
     storedSessionId?: string | null,
     runtimeSessionId?: string | null
-  ) => Promise<void>
+  ) => Promise<boolean | void>
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
   refreshSessions: () => Promise<void>
