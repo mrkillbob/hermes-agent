@@ -32,7 +32,9 @@ scripts/run_tests.sh -v --tb=long                       # pytest flags pass thro
   `HERMES_TEST_FILE_RETRIES=0` disables); a worker killed by signal or the file timeout is never
   retried (relaunching a runaway doubles the damage). Pass-on-retry is green but printed under `⚠ FLAKY`
   with both outputs — a bug to fix, not noise. Timing tests must not assume a quiet runner:
-  wall-clock bounds ≥ 2s, event-based sync, no `assert not _wait_until(...)` races.
+  wall-clock bounds ≥ 2s, event-based sync, no `assert not _wait_until(...)` races. A new
+  non-zero `time.sleep`/`asyncio.sleep` in a test fails the ratchet (HX013): wait on an Event or
+  poll with `tests.waiting.wait_until` / `async_wait_until`.
 - **Placement mirrors the source tree.** A test lives in `tests/<top-level source dir>/` (`tests/hermes_cli/`,
   `tests/agent/`, `tests/hermes_state/`, `tests/gateway/relay/`, ...); installer/updater script tests
   under `tests/scripts/{install,desktop_update}/`. Only tests of root-level modules (`batch_runner`,
@@ -133,6 +135,13 @@ latest); `assert not (set(moonshot_models) & coding_plan_only_models)` (no leak)
 catalog model has a context-length entry (relationship). If it reads like a snapshot, delete
 it; if it reads like a contract between two pieces of data, keep it. Reviewers reject new
 change-detectors; authors convert them before re-review.
+
+**One deliberate exception:** `tests/ci/test_prompt_surface.py` compares the freshly rendered system
+prompt and `tools[]` array with the committed `tests/fixtures/prompt_surface/` snapshot. It is the
+mechanism, not an accident: a change to what every session sends must carry the regenerated snapshot,
+which is what routes it to the `hermes-agent-core` approval that `CODEOWNERS` requires on that directory
+(`scripts/ci/prompt_surface.py` has the full contract). Regenerate with one command; do not loosen it into
+loose invariants, and do not copy the pattern to other data.
 
 ## Never read source code in tests
 

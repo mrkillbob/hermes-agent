@@ -41,6 +41,10 @@ Lanes:
   lives under ``apps/``, so without this lane a Rust change matched ``frontend``
   and only the TypeScript matrix ran.
 * ``mcp_catalog`` — bundled MCP catalog / installer review.
+* ``remote_backends`` — the SSH and Docker terminal backends against a real
+  sshd container and the runner's Docker daemon (remote-backends.yml). Every
+  other test of those backends is mocked, so a change to the backends, the
+  terminal tool, or the real-backend tests runs it on the PR.
 
 ``docker``, ``nix`` and the E2E lanes take most of the larger-runner minutes.
 An ordinary product change does not start them on a pull request. Every push
@@ -206,6 +210,19 @@ _FIXTURE_CONSUMER_LANES = ("python", "rust", "frontend", "desktop_updater")
 # and the crate's unit tests had never executed in CI at all.
 _RUST_PATHS = ("apps/bootstrap-installer/src-tauri/",)
 _RUST_FILENAMES = {"Cargo.toml", "Cargo.lock"}
+
+# The real SSH/Docker backend lane: the backends, the terminal tool that drives
+# them, the tests it runs, the sshd it starts, and the runner's env allowlist
+# that carries the sshd/image coordinates into each pytest process.
+_REMOTE_BACKEND_PATHS = (
+    "tools/environments/",
+    "tools/terminal_tool",
+    "tests/tools/test_ssh_environment.py",
+    "tests/tools/test_docker_backend_real.py",
+    "scripts/ci/start_test_sshd.sh",
+    "scripts/ci/test_sshd_container_setup.sh",
+    "scripts/run_tests.sh",
+)
 
 # The slow lanes and the paths that start each one on a pull request. A path
 # belongs here when the lane is the only CI that exercises it for real: the
@@ -633,6 +650,7 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         "rust": any(_is_rust(f) for f in files),
         "mcp_catalog": any(_is_mcp_catalog(f) for f in files),
         "ci_review": any(_is_ci_review(f) for f in files),
+        "remote_backends": any(f.startswith(_REMOTE_BACKEND_PATHS) for f in files),
         **{lane: run_e2e or on for lane, on in _slow_lanes(files).items()},
     }
     consumers = [c for f in files for c in _SHARED_FIXTURE_CONSUMERS.get(f, ())]
@@ -654,6 +672,7 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         ret["desktop_updater"] = True
         ret["rust"] = True
         ret["ci_review"] = True
+        ret["remote_backends"] = True
         ret.update(dict.fromkeys(_slow_lanes([]), True))
 
         # explicitly skip mcp catalog here. it's not needed unless those files are modified.

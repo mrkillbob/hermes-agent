@@ -308,8 +308,8 @@ class GatewayProfileReconcileMixin:
                 from hermes_state_registry import close_all_under
                 close_all_under(home)
             with _log_suppressed(logging.DEBUG, "memory-store release failed", exc_info=True):
-                from plugins.memory.holographic.store import MemoryStore
-                MemoryStore.release_all_under(home)
+                from plugins.memory import import_provider_module  # catalog plugin since it left core
+                import_provider_module("holographic", "store").MemoryStore.release_all_under(home)
             # The gateway's routed log files are a second holder the CLI-side delete cannot
             # reach (#130244). MCP handles were released before plugin eviction above; release
             # these log handles after the remaining teardown hooks finish writing.

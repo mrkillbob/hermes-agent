@@ -172,7 +172,7 @@ def _post_setup_langfuse() -> None:
     try:
         from hermes_cli.plugins_cmd import cmd_enable
         cmd_enable("observability/langfuse")
-    except (Exception, SystemExit) as exc:
+    except (Exception, SystemExit) as exc:  # health: allow BLE001 -- restored verbatim from upstream with the bundled Langfuse plugin; leaves core once its catalog entry is admitted
         _print_warning(f"    Could not enable plugin automatically: {exc}")
         _info_lines("Run manually: hermes plugins enable observability/langfuse")
         return

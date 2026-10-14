@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- restored verbatim from upstream with the bundled Langfuse plugin; leaves core once its catalog entry is admitted
 """Tests for the bundled observability/langfuse plugin."""
 from __future__ import annotations
 

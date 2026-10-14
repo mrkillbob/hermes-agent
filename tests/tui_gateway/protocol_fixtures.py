@@ -2,6 +2,7 @@
 
 import io
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,7 +17,7 @@ def _restore_stdout():
 
 
 @pytest.fixture()
-def server():
+def server(tmp_path):
     # The sys.modules mocks only need to cover the *initial* import — once
     # tui_gateway.server is cached, they are inert. Keeping them active for
     # the whole test poisons any module first imported inside a test body:
@@ -32,8 +33,11 @@ def server():
     # server's ``current_transport()`` never reads (first-in-process test sees ``_stdio_transport`` as caller).
     import tui_gateway.server_requests
     import tui_gateway.transport
+    import hermes_constants
     with patch.dict("sys.modules", {
-        "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test")),
+        "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value=Path(tmp_path) / "hermes_home"),
+                                      get_process_hermes_home=hermes_constants.get_process_hermes_home,
+                                      get_hermes_home_override=hermes_constants.get_hermes_home_override),
         "hermes_cli.env_loader": MagicMock(),
         "hermes_cli.banner": MagicMock(),
         "hermes_state": MagicMock(),

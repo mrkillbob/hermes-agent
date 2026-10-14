@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from langfuse import Langfuse, propagate_attributes
-except Exception:  # pragma: no cover - fail-open when optional dep is missing
+except Exception:  # pragma: no cover - fail-open when optional dep is missing  # health: allow BLE001 -- restored verbatim from upstream; this plugin leaves core with the catalog entry
     Langfuse = None
     propagate_attributes = None
 
@@ -107,7 +107,7 @@ def _failsafe(label: str):
     """Swallow + debug-log any exception: telemetry must never block the agent turn."""
     try:
         yield
-    except Exception as exc:  # pragma: no cover - fail-open
+    except Exception as exc:  # pragma: no cover - fail-open  # health: allow BLE001 -- restored verbatim from upstream; this plugin leaves core with the catalog entry
         _debug(f"{label} failed: {exc}")
 
 
@@ -140,7 +140,7 @@ def _redact_secrets(value: str) -> str:
     try:
         from agent.redact import redact_sensitive_text
         return redact_sensitive_text(value, force=True)
-    except Exception:
+    except Exception:  # health: allow BLE001 -- restored verbatim from upstream; this plugin leaves core with the catalog entry
         return value
 
 
@@ -284,7 +284,7 @@ def _build_client() -> Optional[Langfuse]:
 
     try:
         return Langfuse(**kwargs)
-    except Exception as exc:  # pragma: no cover - fail-open
+    except Exception as exc:  # pragma: no cover - fail-open  # health: allow BLE001 -- restored verbatim from upstream; this plugin leaves core with the catalog entry
         logger.warning("Could not initialize Langfuse client: %s", exc)
         return None
 
@@ -333,7 +333,7 @@ def _maybe_parse_json_string(value: str) -> Any:
         return value
     try:
         parsed, idx = json.JSONDecoder().raw_decode(stripped)
-    except Exception:
+    except Exception:  # health: allow BLE001 -- restored verbatim from upstream; this plugin leaves core with the catalog entry
         return value
     if not isinstance(parsed, (dict, list)):
         return value
@@ -507,7 +507,7 @@ def _canonical_usage_and_cost(canonical: Any, *, provider: str, model: str,
         if getattr(route, "billing_mode", "") == "subscription_included":
             return usage_details, cost_details
         cost = estimate_usage_cost(model, canonical, provider=provider, base_url=base_url, api_key="")
-    except Exception as exc:  # pragma: no cover - fail-open
+    except Exception as exc:  # pragma: no cover - fail-open  # health: allow BLE001 -- restored verbatim from upstream; this plugin leaves core with the catalog entry
         _debug(f"usage pricing failed: {exc}")
         return usage_details, cost_details
 
@@ -534,7 +534,7 @@ def _canonical_usage_and_cost(canonical: Any, *, provider: str, model: str,
             tokens = getattr(canonical, attr)
             if rate is not None and tokens:
                 cost_details[key] = float(Decimal(tokens) * rate / Decimal(1000000))
-    except Exception:  # pragma: no cover - canonical total remains usable
+    except Exception:  # pragma: no cover - canonical total remains usable  # health: allow BLE001,S110 -- restored verbatim from upstream; this plugin leaves core with the catalog entry
         pass
 
     return usage_details, cost_details
@@ -556,7 +556,7 @@ def _usage_and_cost(response: Any, *, provider: str, model: str, base_url: str, 
             **{attr: usage.get(attr, 0) for attr in ("input_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")},
         )
         return _canonical_usage_and_cost(canonical, provider=provider, model=model, base_url=base_url)
-    except Exception as exc:  # pragma: no cover - fail-open
+    except Exception as exc:  # pragma: no cover - fail-open  # health: allow BLE001 -- restored verbatim from upstream; this plugin leaves core with the catalog entry
         if usage is None:
             _debug(f"usage normalization failed: {exc}")
         return {}, {}
@@ -588,7 +588,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
             with propagate_attributes(session_id=session_id or task_key, trace_name="Hermes turn",
                                       tags=["hermes", "langfuse"]):
                 root_ctx, root_span = open_root()
-        except Exception:
+        except Exception:  # health: allow BLE001 -- restored verbatim from upstream; this plugin leaves core with the catalog entry
             root_ctx = None
     if root_ctx is None:
         root_ctx, root_span = open_root()
@@ -685,7 +685,7 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
                 with _failsafe(label):
                     getattr(state.root_span, method)(output=final_output)
         _end_root(state, "root end()")
-    except Exception as exc:  # pragma: no cover - fail-open
+    except Exception as exc:  # pragma: no cover - fail-open  # health: allow BLE001 -- restored verbatim from upstream; this plugin leaves core with the catalog entry
         _debug(f"finish trace failed: {exc}")
         with contextlib.suppress(Exception):  # last-chance end so the root still exports
             state.root_span.end()

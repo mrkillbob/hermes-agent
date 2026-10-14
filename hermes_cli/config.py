@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- restored verbatim from upstream with the bundled Langfuse plugin; leaves core once its catalog entry is admitted
 """Configuration management for Hermes Agent: config.yaml / .env loading, saving,
 validation, migration, and the ``hermes config`` command."""
 

@@ -75,6 +75,9 @@ outputs:
   ci_review_files:
     description: JSON list of CI-sensitive files changed by the pull request.
     value: ${{ steps.classify.outputs.ci_review_files }}
+  remote_backends:
+    description: Run the SSH and Docker terminal backends against a real sshd and Docker daemon.
+    value: ${{ steps.classify.outputs.remote_backends }}
 
 runs:
   using: composite
