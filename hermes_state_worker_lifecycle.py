@@ -161,12 +161,14 @@ def _row_id(payload):
 def worker_message_api_content(db, conn, session_id, payload):
     """Row-addressed sidecar backfill, same guards as ``SessionDB.set_message_api_content``."""
     from hermes_state_messages import _scrub_surrogates
-    if set(payload) != {'row_id', 'content', 'api_content'} or not isinstance(payload['api_content'], str):
+    if not {'row_id', 'content', 'api_content'} <= set(payload) <= {'row_id', 'content', 'api_content', 'display_metadata'} \
+            or not isinstance(payload['api_content'], str):
         raise RuntimeStoreError('invalid_params')
     return {'value': conn.execute(
-        "UPDATE messages SET api_content=? WHERE id=? AND session_id=? AND role='user' AND active=1 AND content IS ?",
-        (_scrub_surrogates(payload['api_content']), _row_id(payload), session_id,
-         db._encode_content(payload['content']))).rowcount}
+        "UPDATE messages SET api_content=?, display_metadata=COALESCE(?, display_metadata) "
+        "WHERE id=? AND session_id=? AND role='user' AND active=1 AND content IS ?",
+        (_scrub_surrogates(payload['api_content']), db._encode_display_metadata(payload.get('display_metadata')),
+         _row_id(payload), session_id, db._encode_content(payload['content']))).rowcount}
 
 
 def worker_user_content(db, conn, session_id, payload):
