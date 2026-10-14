@@ -5175,6 +5175,7 @@ export interface CanonicalProfileRow {
   ui_meta_revisions?: Record<string, number>
   ui_meta?: Record<string, unknown> | null
   has_avatar?: boolean
+  federation_role?: ProfileFederationRole | null
 }
 export interface CanonicalAttachedImageResult {
   name?: string | null

@@ -9488,6 +9488,17 @@
             "default": false,
             "title": "Has Avatar",
             "type": "boolean"
+          },
+          "federation_role": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileFederationRole"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
