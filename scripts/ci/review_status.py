@@ -155,18 +155,45 @@ def cohort(api, head: str) -> set[int]:
     return numbers
 
 
-def clear_cohort(api, head: str, numbers: set[int]) -> bool:
-    verdicts = [evaluate(api.snapshot(number, head), head)["state"]
-                for number in sorted(numbers)]
-    return all(state == "clean" for state in verdicts)
+def cohort_verdict(api, head: str, numbers: set[int]) -> str:
+    """clean when every PR clears, pending when the only holds are still-waiting
+    reviews, otherwise failure (a finding, requested changes or unusable metadata)."""
+    states = {evaluate(api.snapshot(number, head), head)["state"] for number in sorted(numbers)}
+    if states == {"clean"}:
+        return "clean"
+    return "pending" if states <= {"clean", "pending"} else "failure"
 
 
 def completed_at() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def settle(api, own: dict | None, summary: str) -> None:
+    """Best-effort: turn this execution's own in-progress check into a failure."""
+    if own is None:
+        return
+    try:
+        api.request(f"repos/{api.repo}/check-runs/{own['id']}", method="PATCH",
+                    payload={"status": "completed", "conclusion": "failure",
+                             "completed_at": completed_at(),
+                             "output": {"title": "Review admission held", "summary": summary}})
+    except FAILURES:
+        pass  # Left in progress, which never reads as a pass.
+
+
+def held(api, own: dict, head: str, verdict: str) -> dict:
+    if verdict == "pending":
+        return {"state": "pending", "reason": "Review still pending", "head": head}
+    settle(api, own, "A review finding or requested change holds admission.")
+    return {"state": "failure", "reason": "Review held", "head": head}
+
+
 def publish(api, head: str, env: dict) -> dict:
-    """Create fresh failure first; promote only this execution's stable cohort."""
+    """Create a fresh in-progress check; promote only this execution's stable cohort.
+
+    A review that is merely still running leaves the check in progress (pending,
+    not red); a real finding or unusable metadata completes it as a failure.
+    """
     own = None
     promotion_attempted = False
     try:
@@ -176,27 +203,31 @@ def publish(api, head: str, env: dict) -> dict:
         identity = external_id(api.repo, head, proof)
         own = api.request(f"repos/{api.repo}/check-runs", post=True,
                           payload={"name": NAME, "head_sha": head, "external_id": identity,
-                                   "status": "completed", "conclusion": "failure",
-                                   "completed_at": completed_at(),
-                                   "output": {"title": "Review admission held",
+                                   "status": "in_progress",
+                                   "output": {"title": "Review admission pending",
                                               "summary": "Current cohort has not been proven clear."}})
         check_identity(own, head, identity)
-        if own["status"] != "completed" or own["conclusion"] != "failure":
-            raise MetadataError("Fresh check did not record failure")
+        if own["status"] != "in_progress":
+            raise MetadataError("Fresh check did not record in-progress")
         proved_runs = {(proof["run_id"], proof["attempt"], proof["source"])}
         owned_checks(api, head, proof, own, proved_runs)
         numbers = cohort(api, head)
         for _ in range(2):
-            if cohort(api, head) != numbers or not clear_cohort(api, head, numbers):
-                return {"state": "failure", "reason": "Review held or cohort changed", "head": head}
+            if cohort(api, head) != numbers:
+                return {"state": "pending", "reason": "Cohort changed", "head": head}
+            verdict = cohort_verdict(api, head, numbers)
+            if verdict != "clean":
+                return held(api, own, head, verdict)
         owned_checks(api, head, proof, own, proved_runs)
         current = api.request(f"repos/{api.repo}/check-runs/{own['id']}")
         check_identity(current, head, identity, own["id"])
-        if current["status"] != "completed" or current["conclusion"] != "failure":
+        if current["status"] != "in_progress":
             raise MetadataError("Own check changed before promotion")
-        if (cohort(api, head) != numbers or not clear_cohort(api, head, numbers)
-                or cohort(api, head) != numbers):
-            return {"state": "failure", "reason": "Review held or cohort changed", "head": head}
+        if cohort(api, head) != numbers:
+            return {"state": "pending", "reason": "Cohort changed", "head": head}
+        verdict = cohort_verdict(api, head, numbers)
+        if verdict != "clean" or cohort(api, head) != numbers:
+            return held(api, own, head, verdict)
         promotion_attempted = True
         updated = api.request(f"repos/{api.repo}/check-runs/{own['id']}", method="PATCH",
                               payload={"status": "completed", "conclusion": "success",
@@ -218,6 +249,8 @@ def publish(api, head: str, env: dict) -> dict:
                     raise MetadataError("Failure rollback response mismatch")
             except FAILURES:
                 return {"state": "failure", "reason": "Promotion outcome uncertain; failure rollback unconfirmed", "head": head}
+        else:
+            settle(api, own, "Metadata unavailable or publisher proof invalid.")
         return {"state": "failure", "reason": "Metadata unavailable or publisher proof invalid", "head": head}
 
 
@@ -240,7 +273,7 @@ def main() -> int:
             return 0
         verdict = publish(api, args.head, dict(os.environ))
         print(json.dumps(verdict))
-        return 0 if verdict["state"] == "success" else 1
+        return 0 if verdict["state"] in ("success", "pending") else 1
     except FAILURES:
         print(json.dumps({"state": "failure", "reason": "Discovery metadata unavailable"}))
         return 1

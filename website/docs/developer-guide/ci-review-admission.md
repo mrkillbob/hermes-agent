@@ -122,8 +122,11 @@ so this change adds no timer or retry writer.
 The proposed context is `Current Code and Security Review`, tied to GitHub Actions
 App ID `15368`. A commit-scoped result must include every open PR sharing that SHA,
 across base branches, because branch protection cannot distinguish those PRs by
-check context. Each execution starts with a failure before reading review state;
-only complete, stable, clear metadata can promote its own check to success.
+check context. Each execution starts with an in-progress check before reading review state;
+only complete, stable, clear metadata can promote its own check to success. A
+review that is merely still running or awaiting its clean witness leaves the check
+in progress (pending, never a pass); a finding, requested changes or unusable
+metadata completes it as a failure.
 Per-head serialization, bounded all-result pagination and repeated live metadata
 reads reduce stale-state risk. They do not make GitHub metadata reads and the final
 check update atomic, or remove the delay before a new wake-up starts.
@@ -141,7 +144,7 @@ permissions, commit-scoped results and same-name retention limits; API-created
 checks under the shared Actions App still need production-event qualification.
 
 The 200-record proof bound applies only to this fixed check name; unrelated CI
-checks do not consume it. Fresh failure-first publication still creates a new
+checks do not consume it. Fresh in-progress-first publication still creates a new
 record per execution. After 200 retained named records, the next execution holds
 rather than mutating historical records or reusing an old success. This limit
 remains explicit; the draft does not promise indefinite automatic operation.
