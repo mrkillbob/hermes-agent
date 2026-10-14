@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- upstream sync: merges upstream's adapter-lifecycle changes with the fork's profile-scope and worktree handling; split is a follow-up refactor
 """Adapter connect/disconnect, fatal-error recovery, reconnect watcher and multiplex profile
 adapters for GatewayRunner (mixin bound via the MRO).
 

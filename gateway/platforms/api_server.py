@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- upstream sync: carries upstream's own growth of this facade (4612 lines upstream); behaviour already lives in siblings
 """OpenAI-compatible API server platform adapter (aiohttp).
 
 Serves /v1/chat/completions, /v1/responses, /v1/models, /v1/capabilities, /api/sessions,

@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- upstream sync: carries upstream's message-store growth next to the fork's tool-call and projection moves
 """Transcript persistence for SessionDB: message append/replace/rewind, reactions, resume assembly,
 replayed-user dedupe. Mixin bound via the MRO, built on SessionDB's _read_ctx/_execute_write/_read_* primitives."""
 
