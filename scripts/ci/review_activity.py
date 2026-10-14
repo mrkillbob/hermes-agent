@@ -72,16 +72,21 @@ def select_activity(comments: list, repo: str, number: int, user_id: int) -> dic
 
 
 def activity_hold(activity: dict | None, head: str) -> tuple[str, str] | None:
+    """Only the Code Review pass gates admission.
+
+    The Codex producer on this fork runs Code Review automatically and does not
+    run Security Review, which the fork reviews elsewhere. A Security row is
+    parsed for identity (select_activity) but never holds; its findings still
+    block through the thread and standalone-finding guards.
+    """
     if activity is None:
         return "pending", "No canonical public activity producer"
-    passes, security = activity["passes"], activity["security"]
-    if any(row["state"] != "completed" for row in passes.values()):
-        return "pending", "A public review pass is still running"
-    if set(passes) != {"code", "security"} or security is None:
-        return "pending", "Both code and security completion records are required"
-    if security["status"] != "completed":
-        return "pending", "Security review is not completed"
-    if security["headSha"] != head or any(row["sha"] != head for row in passes.values()):
+    code = activity["passes"].get("code")
+    if code is None:
+        return "pending", "A code completion record is required"
+    if code["state"] != "completed":
+        return "pending", "The public code review pass is still running"
+    if code["sha"] != head:
         return "pending", "Public review activity belongs to a superseded head"
     return None
 

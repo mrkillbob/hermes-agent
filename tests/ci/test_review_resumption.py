@@ -516,20 +516,71 @@ def test_completion_alone_or_stale_impostor_witness_cannot_clear(tmp_path, patch
     assert data["mutations"] == []
 
 
-@pytest.mark.parametrize("change", ["missing_security_row", "missing_security_json", "wrong_repo", "wrong_pr", "wrong_head"])
-def test_both_required_passes_and_security_identity_are_enforced(tmp_path, change):
+def drop_security_row(text):
+    return "\n".join(line for line in text.splitlines() if not line.startswith("| 🔒"))
+
+
+def drop_security_marker(text):
+    return "\n".join(line for line in text.splitlines() if not line.startswith("<!-- codex-security-review:"))
+
+
+@pytest.mark.parametrize("change", ["missing_row", "missing_row_and_marker", "marker_for_superseded_head", "running_row"])
+def test_security_record_is_advisory_and_never_blocks_admission(tmp_path, change):
     data = snapshot()
     body = data["comments"][0]["body"]
     changes = {
-        "missing_security_row": lambda text: "\n".join(line for line in text.splitlines() if not line.startswith("| 🔒")),
-        "missing_security_json": lambda text: "\n".join(line for line in text.splitlines() if not line.startswith("<!-- codex-security-review:")),
+        "missing_row": drop_security_row,
+        "missing_row_and_marker": lambda text: drop_security_marker(drop_security_row(text)),
+        "marker_for_superseded_head": lambda text: text.replace(f'"headSha":"{HEAD}"', f'"headSha":"{OLD}"'),
+        "running_row": lambda text: "\n".join(
+            line.replace("✅ **Completed**", "🔄 **Running** since") if line.startswith("| 🔒") else line
+            for line in text.splitlines()),
+    }
+    data["comments"][0]["body"] = changes[change](body)
+    process, data = invoke(tmp_path, data)
+    assert verdict(process) == "clean", process.stdout
+    assert data["mutations"] == []
+
+
+@pytest.mark.parametrize("change", ["wrong_repo", "wrong_pr"])
+def test_security_marker_identity_mismatch_is_still_rejected(tmp_path, change):
+    data = snapshot()
+    body = data["comments"][0]["body"]
+    changes = {
         "wrong_repo": lambda text: text.replace('"repository":"mrkillbob/hermes-agent"', '"repository":"other/repo"'),
         "wrong_pr": lambda text: text.replace('"pullRequestNumber":8', '"pullRequestNumber":9'),
-        "wrong_head": lambda text: text.replace(f'"headSha":"{HEAD}"', f'"headSha":"{OLD}"'),
     }
     data["comments"][0]["body"] = changes[change](body)
     process, data = invoke(tmp_path, data)
     assert verdict(process) != "clean"
+    assert data["mutations"] == []
+
+
+@pytest.mark.parametrize("change", ["missing_row", "running_row", "superseded_head"])
+def test_code_review_pass_is_required_for_the_live_head(tmp_path, change):
+    data = snapshot()
+    body = data["comments"][0]["body"]
+    changes = {
+        "missing_row": lambda text: "\n".join(line for line in text.splitlines() if not line.startswith("| 📝")),
+        "running_row": lambda text: "\n".join(
+            line.replace("✅ **Completed**", "🔄 **Running** since") if line.startswith("| 📝") else line
+            for line in text.splitlines()),
+        "superseded_head": lambda text: text.replace(f"`{HEAD[:7]}`", f"`{OLD[:7]}`", 1),
+    }
+    data["comments"][0]["body"] = changes[change](body)
+    data["commits"] = {HEAD[:7]: HEAD, OLD[:7]: OLD}
+    process, data = invoke(tmp_path, data)
+    assert verdict(process) == "pending", process.stdout
+    assert data["mutations"] == []
+
+
+def test_explicit_security_review_request_does_not_hold_admission(tmp_path):
+    data = snapshot()
+    data["comments"][0]["body"] = drop_security_marker(drop_security_row(data["comments"][0]["body"]))
+    data["comments"].append({"id": 101, "user": {"id": 123}, "body": "@codex security review",
+                             "created_at": "2026-10-13T00:30:00Z", "updated_at": "2026-10-13T00:30:00Z"})
+    process, data = invoke(tmp_path, data)
+    assert verdict(process) == "clean", process.stdout
     assert data["mutations"] == []
 
 
