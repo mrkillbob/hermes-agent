@@ -38,6 +38,12 @@ import {
   sessionInfoStatePatch
 } from '../utils'
 
+import {
+  idleCatchupMarker,
+  recoverSettledPrefix,
+  scheduleSettledPrefixCatchup,
+  settledPrefixStamp
+} from './session-info-recovery'
 import type { GatewayEventContext } from './types'
 
 /**
@@ -330,6 +336,8 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
       // message never arrived. The updater is invoked exactly once,
       // synchronously, by updateSessionState.
       let recoveredIncompleteTurn = false
+      // Set when this idle heartbeat finds a retained prefix past its grace.
+      let idleCatchupSettledAt: number | null = null
       // Set when THIS event ends a confirmed live turn, whether or not its
       // terminal message arrived. Drives the sidebar refresh; the hydrate
       // below stays gated on recoveredIncompleteTurn.
@@ -341,6 +349,11 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
           const busy = Boolean(payload!.running)
 
           if (state.busy === busy && (busy || !state.awaitingResponse)) {
+            // A prefix settled while in the background (or whose timer found it
+            // there) is recovered by the first idle heartbeat after the user
+            // returns. The marker is consumed once; no repeated fetch.
+            idleCatchupSettledAt = idleCatchupMarker(state, isActiveEvent, Date.now())
+
             return state
           }
 
@@ -417,8 +430,8 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
           // this heartbeat (#119569). The bubble still settles here, but a
           // stream bubble that kept streamed output is remembered so the late
           // frame settles onto it instead of appending a duplicate. That
-          // turn's output is on screen, so it skips the stored-history
-          // hydrate too: fired now, it can race the gateway commit and drop
+          // retained prefix gets a short reorder grace before any history
+          // catch-up: an immediate read can race the gateway commit and drop
           // the just-delivered reply from view until reload.
           const messages = finalizeInterruptedMessages(state.messages, state.streamId, occurredAt)
 
@@ -442,6 +455,7 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
             // empty placeholders; on the normal path message.complete
             // already settled everything and this is a no-op.
             heartbeatSettledStreamId,
+            heartbeatSettledAt: settledPrefixStamp(heartbeatSettledStreamId),
             messages,
             pendingBranchGroup: null,
             streamId: null,
@@ -461,17 +475,22 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
         // not one per tick.
         scheduleSessionsRefresh()
 
-        // The transcript catch-up IS scoped, and skipped when a streamed
-        // bubble survived the settle (its late complete owns it, see above).
-        // The stream died, but the turn itself may have completed and been
-        // persisted, so refetch stored history for the session actually on
-        // screen; a background session reads its history when the user opens
-        // it, and hydrating every one of them here would fan a REST call out
-        // per idle session.
-        if (recoveredIncompleteTurn && isActiveEvent) {
-          void hydrateFromStoredSession(3, nextState.storedSessionId, sessionId)
-        }
+        // A retained prefix recovers from this terminal transition itself: a
+        // settled session may emit no further session.info, so one bounded
+        // timer catches up if its complete frame never arrived.
+        scheduleSettledPrefixCatchup(deps, sessionId, nextState.heartbeatSettledAt)
       }
+
+      // The transcript catch-up IS scoped. The stream died, but the turn itself
+      // may have completed and been persisted, so refetch stored history for
+      // the session actually on screen; a background session reads its history
+      // when the user opens it, and hydrating every one of them here would fan
+      // a REST call out per idle session.
+      if (recoveredIncompleteTurn && isActiveEvent) {
+        void hydrateFromStoredSession(3, nextState.storedSessionId, sessionId)
+      }
+
+      void recoverSettledPrefix(deps, sessionId, idleCatchupSettledAt)
     }
 
     if (payload?.usage && (!explicitSid || isActiveEvent)) {

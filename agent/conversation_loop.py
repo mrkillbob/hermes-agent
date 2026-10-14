@@ -1315,8 +1315,13 @@ def _apply_context_engine_selection(
         # The engine may hand back the ``conversation_messages`` clones (or its own dicts) that still
         # carry persistence-only fields; the request copy was stripped BEFORE this hook, so strip the
         # selection too or those fields reach the provider. Dicts without them pass through as-is.
+        from agent.skills_index_delivery import keep_newest_skills_note, project_skills_notes, restore_sidecar_content
+        selected, sidecar_rows = restore_sidecar_content(selected)
         stripped = [without_persistence_fields(m) for m in selected]
-        return selected if all(a is b for a, b in zip(stripped, selected)) else stripped
+        # The selection can be raw clones of the transcript; a protected route must not see a sent note.
+        projected = project_skills_notes(
+            agent, selected if all(a is b for a, b in zip(stripped, selected)) else stripped, sidecar_rows)
+        return keep_newest_skills_note(agent, projected)
     logger.warning(
         "Context engine select_context returned an invalid value "
         "(not a non-empty list of dicts); ignoring (session=%s)", session_label,

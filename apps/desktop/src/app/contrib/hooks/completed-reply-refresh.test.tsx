@@ -119,15 +119,15 @@ function Harness({
 
   const hydrate = useCallback(
     async (attempts = 1, storedSessionId: string | null = STORED, runtimeSessionId: string | null = RUNTIME) => {
-      if (storedSessionId && runtimeSessionId) {
-        await hydrateStoredSessionTranscript({
-          attempts,
-          storedSessionId,
-          runtimeSessionId,
-          storedProfile: 'default',
-          updateSessionState
-        })
-      }
+      return storedSessionId && runtimeSessionId
+        ? hydrateStoredSessionTranscript({
+            attempts,
+            storedSessionId,
+            runtimeSessionId,
+            storedProfile: 'default',
+            updateSessionState
+          })
+        : false
     },
     [updateSessionState]
   )
@@ -615,4 +615,274 @@ it('does not let an older finalizer retire the newest refresh observation', asyn
   })
   expect(getLatestSessionMessages).toHaveBeenCalledTimes(3)
   expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+})
+
+it('catches up a retained prefix from the terminal transition alone when completion was lost', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  // The only session.info an idle foreground session is guaranteed to emit.
+  send('session.info', { running: false, stored_session_id: STORED })
+  expect(vi.mocked(getLatestSessionMessages)).not.toHaveBeenCalled()
+  vi.mocked(getLatestSessionMessages).mockResolvedValue({
+    session_id: STORED,
+    messages: [...history, { id: 4, role: 'assistant', content: FINAL, timestamp: 4 }]
+  })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2500)
+  })
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+  expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+  send('session.info', { running: false, stored_session_id: STORED })
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+  send('message.complete', { text: FINAL })
+  expect(
+    $sessionStates.get()[RUNTIME].messages.filter(message => chatMessageText(message).includes(FINAL))
+  ).toHaveLength(1)
+})
+
+it('cancels retained-prefix catch-up when the delayed completion arrives', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  send('message.complete', { text: FINAL })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2500)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  expect(getLatestSessionMessages).not.toHaveBeenCalled()
+  expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+})
+
+it('waits for reorder grace and keeps background prefix recovery unconsumed', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  const settledAt = $sessionStates.get()[RUNTIME].heartbeatSettledAt
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1000)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  expect(getLatestSessionMessages).not.toHaveBeenCalled()
+  act(() => {
+    cache.activeSessionIdRef.current = 'other-runtime'
+  })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  expect(getLatestSessionMessages).not.toHaveBeenCalled()
+  expect($sessionStates.get()[RUNTIME].heartbeatSettledAt).toBe(settledAt)
+})
+
+it('recovers a prefix settled in the background on the first idle heartbeat after the user returns', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  act(() => {
+    cache.activeSessionIdRef.current = 'other-runtime'
+  })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2500)
+  })
+  expect(getLatestSessionMessages).not.toHaveBeenCalled()
+  vi.mocked(getLatestSessionMessages).mockResolvedValue({
+    session_id: STORED,
+    messages: [...history, { id: 4, role: 'assistant', content: FINAL, timestamp: 4 }]
+  })
+  act(() => {
+    cache.activeSessionIdRef.current = RUNTIME
+  })
+  await act(async () => {
+    stream.handleGatewayEvent({
+      session_id: RUNTIME,
+      type: 'session.info',
+      payload: { running: false, stored_session_id: STORED }
+    })
+  })
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+  expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+})
+
+it('does not fetch the previous prefix after a new turn starts', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  send('message.start')
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2500)
+  })
+  send('session.info', { running: true, stored_session_id: STORED })
+  expect(getLatestSessionMessages).not.toHaveBeenCalled()
+  expect($sessionStates.get()[RUNTIME].heartbeatSettledStreamId).toBeNull()
+})
+
+it('does not overwrite a new turn with a delayed prefix catch-up result', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  const delayed = deferredHistory()
+  vi.mocked(getLatestSessionMessages).mockReturnValueOnce(delayed.promise)
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2500)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+  send('message.start')
+  send('message.delta', { text: 'New turn output.' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  const newer = $sessionStates.get()[RUNTIME].messages
+  await act(async () => {
+    delayed.resolve({ session_id: STORED, messages: completeHistory })
+  })
+  expect($sessionStates.get()[RUNTIME].messages).toBe(newer)
+  expect(screen.getByTestId('runtime').textContent).toContain('New turn output.')
+})
+
+it('retains the only streamed prefix when catch-up precedes the durable commit', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  vi.mocked(getLatestSessionMessages).mockResolvedValueOnce({ session_id: STORED, messages: history })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2500)
+    stream.handleGatewayEvent({
+      session_id: RUNTIME,
+      type: 'session.info',
+      payload: { running: false, stored_session_id: STORED }
+    })
+  })
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+  expect(screen.getByTestId('runtime').textContent).toContain('The completed')
+  send('message.complete', { text: FINAL })
+  expect(
+    $sessionStates.get()[RUNTIME].messages.filter(message => chatMessageText(message).includes(FINAL))
+  ).toHaveLength(1)
+})
+
+it('replaces the retained prefix with the durable answer instead of rendering both', async () => {
+  render(<Harness fallback />)
+  // An older backfilled page sits in front of the refreshed window.
+  const backfilled = [{ id: 0, role: 'user' as const, content: 'Earlier question', timestamp: 0 }, ...history]
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(backfilled) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  vi.mocked(getLatestSessionMessages).mockResolvedValue({
+    session_id: STORED,
+    messages: [...history, { id: 4, role: 'assistant', content: FINAL, timestamp: 4 }]
+  })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2500)
+  })
+  const replies = $sessionStates.get()[RUNTIME].messages.filter(message => message.role === 'assistant')
+  expect(replies.filter(message => chatMessageText(message).includes(FINAL))).toHaveLength(1)
+  expect(replies.some(message => chatMessageText(message) === 'The completed')).toBe(false)
+})
+
+it('keeps the catch-up marker when every history read fails and recovers on a later heartbeat', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  const settledAt = $sessionStates.get()[RUNTIME].heartbeatSettledAt
+  vi.mocked(getLatestSessionMessages).mockRejectedValue(new Error('rest unavailable'))
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(15000)
+  })
+  const attempted = vi.mocked(getLatestSessionMessages).mock.calls.length
+  expect(attempted).toBeGreaterThan(3)
+  expect($sessionStates.get()[RUNTIME].heartbeatSettledAt).toBe(settledAt)
+  // The retries are bounded: once exhausted, nothing keeps polling.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60000)
+  })
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(attempted)
+  vi.mocked(getLatestSessionMessages).mockReset()
+  vi.mocked(getLatestSessionMessages).mockResolvedValue({
+    session_id: STORED,
+    messages: [...history, { id: 4, role: 'assistant', content: FINAL, timestamp: 4 }]
+  })
+  await act(async () => {
+    stream.handleGatewayEvent({
+      session_id: RUNTIME,
+      type: 'session.info',
+      payload: { running: false, stored_session_id: STORED }
+    })
+  })
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+  expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+  expect($sessionStates.get()[RUNTIME].heartbeatSettledAt).toBeNull()
+})
+
+it('retries after a read that lands before the durable commit and replaces the prefix without another event', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  // First read succeeds but the answer is not committed yet; the next one has it.
+  vi.mocked(getLatestSessionMessages)
+    .mockResolvedValueOnce({ session_id: STORED, messages: history })
+    .mockResolvedValue({
+      session_id: STORED,
+      messages: [...history, { id: 4, role: 'assistant', content: FINAL, timestamp: 4 }]
+    })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2500)
+  })
+  expect($sessionStates.get()[RUNTIME].heartbeatSettledAt).not.toBeNull()
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500)
+  })
+  const replies = $sessionStates.get()[RUNTIME].messages.filter(message => message.role === 'assistant')
+  expect(replies.filter(message => chatMessageText(message).includes(FINAL))).toHaveLength(1)
+  expect(replies.some(message => chatMessageText(message) === 'The completed')).toBe(false)
+  expect($sessionStates.get()[RUNTIME].heartbeatSettledAt).toBeNull()
 })

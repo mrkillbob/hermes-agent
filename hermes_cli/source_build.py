@@ -124,7 +124,25 @@ class ProductBuildError(RuntimeError):
 
 def _failure_text(exc: BaseException) -> str:
     if isinstance(exc, subprocess.CalledProcessError):
-        return f"{' '.join(map(str, exc.cmd)) if isinstance(exc.cmd, (list, tuple)) else exc.cmd} exited {exc.returncode}"
+        from agent.redact import redact_sensitive_text
+
+        # Custody prepends a large Python -c program. Printing that argv pushes
+        # the actual child failure out of bounded installer/receipt diagnostics.
+        command = exc.cmd[0] if isinstance(exc.cmd, (list, tuple)) and exc.cmd else "command"
+        executable = Path(str(command)).name[:100]
+        output = exc.output or ""
+        stderr = exc.stderr or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        # Redact before clipping, retaining complete credential prefixes and
+        # assignment names even when they cross the diagnostic byte boundary.
+        tail = redact_sensitive_text(str(output), force=True)[-1500:]
+        if stderr:
+            tail += "\n" + redact_sensitive_text(str(stderr), force=True)[-500:]
+        detail = tail.strip()
+        return f"{executable} exited {exc.returncode}" + (f"\n{detail}" if detail else "")
     return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 

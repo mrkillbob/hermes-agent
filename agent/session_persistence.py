@@ -24,8 +24,8 @@ from agent.memory_manager import sanitize_context
 from agent.tool_dispatch_helpers import _is_multimodal_tool_result, _multimodal_text_summary
 from agent.trajectory import save_trajectory as _save_trajectory_to_file
 from agent.message_metadata import (
-    DB_ROW_SNAPSHOT, MERGED_TURN_PREFIX, REPAIR_BOOKKEEPING_FIELDS, TOOL_CALL_UID, copy_identity_fields,
-    tool_call_uid_from_history)
+    DB_ROW_SNAPSHOT, MERGED_TURN_PREFIX, REPAIR_BOOKKEEPING_FIELDS, SKILLS_NOTE_CARRIER, TOOL_CALL_UID,
+    copy_identity_fields, tool_call_uid_from_history)
 from agent.transcript_repair import sync_flushed_message_markers
 
 
@@ -133,6 +133,30 @@ def _durable_content(content: Any) -> Any:
     return "\n".join(txt) if txt else None
 
 
+def _multimodal_note_sidecar(content: Any) -> str | None:
+    """Plain-text sidecar for a multimodal user row that carries a skills note, else None.
+
+    The store keeps a part list as flat text, which would hide where an agent-attached note sits. A
+    sidecar with the parts joined by blank lines keeps the note in its recognisable shape, so a resumed
+    session projects it for a protected route like any other note (``skills_index_delivery``). Only a row an
+    agent appended the note to gets one (the caller checks ``SKILLS_NOTE_CARRIER``): a sidecar is what
+    authenticates a note, so a user's pasted look-alike must not acquire one on the way to the store.
+    """
+    if not isinstance(content, list):
+        return None
+    from agent.skills_index_delivery import _note_start
+
+    parts = [p for p in content if isinstance(p, dict) and (p.get("type") == "text" or p.get("type") in _IMAGE_PART_TYPES)]
+    pieces = [str(p.get("text", "")) if p.get("type") == "text" else "[screenshot]" for p in parts]
+    texts = [i for i, p in enumerate(parts) if isinstance(p.get("text"), str)]
+    carrier = next((i for i in texts[-2:] if _note_start(parts[i]["text"]) is not None), None)
+    if carrier is None:
+        return None
+    # The note ends the sidecar, as it does a string turn's, whatever context part followed it.
+    pieces.append(pieces.pop(carrier))
+    return "\n\n".join(pieces)
+
+
 def _persist_lock(agent):
     """Close and turn-start persistence can run on separate CLI threads: one critical section.
 
@@ -214,6 +238,8 @@ def _db_flush_row(agent, msg: dict, is_current_turn_user: bool) -> dict[str, Any
         timestamp = timestamp if ov_timestamp is None else ov_timestamp
     if api_content == content:
         api_content = None
+    if api_content is None and role == "user" and msg.get(SKILLS_NOTE_CARRIER):
+        api_content = _multimodal_note_sidecar(content)
     # get_messages_as_conversation replays rows through sanitize_context().strip(); capture the sent bytes
     # when they would differ (compared in wire form).
     if (
