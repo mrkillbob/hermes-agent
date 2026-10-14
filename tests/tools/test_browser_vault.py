@@ -385,6 +385,23 @@ class TestBrowserVaultTools:
             out = json.loads(browser_vault_tool.browser_vault_fill("vault_nope"))
         assert out["success"] is False
 
+    def test_enter_code_unknown_handle_points_at_a_registered_tool(self, store):
+        """The recovery hint must name a tool the model can actually call."""
+        from tools import browser_vault_tool
+        from toolsets import BUILTIN_TOOL_NAMES
+
+        with patch("agent.vault_store.get_vault_store", return_value=store), \
+             patch.object(browser_vault_tool, "_focus_bound_origin", lambda *a, **k: None), \
+             patch.object(browser_vault_tool, "_eval_js",
+                          side_effect=lambda t, e: {"success": True, "result": json.dumps(
+                              [{"index": 0, "type": "text", "name": "otp", "label": "Code",
+                                "autocomplete": "one-time-code"}]) if "querySelectorAll" in e
+                              else "https://acme.test/2fa"}):
+            out = json.loads(browser_vault_tool.browser_vault_enter_code("vault_nope", task_id="t"))
+        assert out["error_type"] == "unknown_handle"
+        named = set(re.findall(r"\bbrowser_vault\w*", out["error"]))
+        assert named and named <= BUILTIN_TOOL_NAMES
+
     def test_fill_success_returns_counts_only(self, store):
         from tools import browser_vault_tool
 

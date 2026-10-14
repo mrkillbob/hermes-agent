@@ -382,7 +382,7 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
             meta = None
         if meta is None:
             return json.dumps({"success": False, "error_type": "unknown_handle",
-                               "error": f"No vault item with handle {handle!r}. Use browser_vault_list."})
+                               "error": f"No vault item with handle {handle!r}. Use browser_vault with action=list."})
         if not meta.origin or meta.origin != origin:
             return json.dumps({"success": False, "error_type": "origin_mismatch",
                                "error": (f"Refused: current page origin ({origin}) does not match "
