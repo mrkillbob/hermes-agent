@@ -29,6 +29,7 @@ import {
   createCoreSandbox,
   currentSessionId,
   launchCoreApp,
+  quitCoreApp,
   recordWebSockets,
   sandboxProcesses,
   send,
