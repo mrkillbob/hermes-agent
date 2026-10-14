@@ -1,5 +1,6 @@
 """Private encouragement from an independently reviewed task, scoped to its implementer."""
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_db_context import _ctx_cap
 
 
 def recipient_before_completion(conn, task_id, prior_status):
@@ -32,7 +33,7 @@ def append_private_context(lines, conn, assignee):
             continue
         message = payload.get("message")
         if isinstance(message, str) and message.strip():
-            lines.extend(["## Private recognition", kb._ctx_cap(message),
+            lines.extend(["## Private recognition", _ctx_cap(message),
                           "_This is encouragement only. Re-verify the current task and keep all "
                           "safety, scope, and acceptance gates unchanged._", ""])
         break

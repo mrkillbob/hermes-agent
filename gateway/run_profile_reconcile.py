@@ -252,7 +252,7 @@ class GatewayProfileReconcileMixin:
             if isinstance(configs, dict):
                 configs.pop(name, None)
         if added or changed:
-            await self._after_profiles_added([(n, current[n]) for n in added + changed])
+            await self._after_profiles_added([(n, current[n]) for n in added + changed if n in current])
         result["served_profiles"] = self.served_profile_names()
         return result
 
