@@ -192,15 +192,17 @@ def project_sent_skills_notes(agent, api_messages, *, prune=False):
         return api_messages
     newest = next(reversed(sent))
     projected = _project_note(agent, *sent[newest][1:3])[0]
+    # A selection may drop the newest note's own row; the newest difference then rides the last
+    # surviving carrier of an older note, so the fallback route still learns what changed.
     last = max(((i, n) for i, m in enumerate(api_messages) for n, t in enumerate(_user_texts(m))
-                if _carrier(sent, t) == newest), default=None)
+                if _carrier(sent, t) is not None), default=None)
 
     def rewrite_at(index):
         def rewrite(text, ordinal):
             key = _carrier(sent, text)
             if key is None:
                 return text
-            keep = projected if key == newest and (index, ordinal) == last else ""
+            keep = projected if (index, ordinal) == last else ""
             return text[:-len(sent[key][0])] + keep
         return rewrite
 

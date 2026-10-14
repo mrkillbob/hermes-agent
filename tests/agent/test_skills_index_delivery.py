@@ -383,8 +383,8 @@ def test_sent_notes_live_as_long_as_their_rows_are_in_the_transcript(tmp_path, m
     assert len(agent._skills_index_sent_notes) == 2
 
 
-def _send_deltas(monkeypatch, turns):
-    """Build a history where each ``(user text, skill)`` turn sent its own raw delta on the main route."""
+def _sent_deltas(monkeypatch, turns):
+    """An agent and a history where each ``(user text, skill)`` turn sent its own raw delta on the main route."""
     monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
     agent = SimpleNamespace(provider="openrouter", api_mode="chat_completions", session_id="test",
                             _current_turn_timestamp=1.0, ephemeral_system_prompt="",
@@ -407,8 +407,37 @@ def _send_deltas(monkeypatch, turns):
         build(history)  # Sent raw to the primary route.
         history += [{"role": "assistant", "content": "Done."}]
     agent.provider = "nous"
-    return [flatten_message_text(m["content"]) for m in build(history + [{"role": "user", "content": "Last."}])
+    return agent, history, build
+
+
+def _skills_notes(messages):
+    return [flatten_message_text(m["content"]) for m in messages
             if m["role"] == "user" and "skills available in this conversation" in flatten_message_text(m["content"])]
+
+
+def _send_deltas(monkeypatch, turns):
+    """The skills notes a protected route receives after each turn sent its own raw delta."""
+    _, history, build = _sent_deltas(monkeypatch, turns)
+    return _skills_notes(build(history + [{"role": "user", "content": "Last."}]))
+
+
+def test_the_newest_delta_survives_a_selection_that_drops_its_carrier(monkeypatch):
+    import logging
+
+    from agent.conversation_loop import _apply_context_engine_selection
+
+    class Selecting:  # Keeps the first turn's rows and the final user row, dropping the second turn.
+        def select_context(self, api_messages, conversation_messages=None, incoming_message=None, budget_tokens=0):
+            return conversation_messages[:2] + conversation_messages[-1:]
+
+    agent, history, build = _sent_deltas(monkeypatch, [("Turn 0.", "alpha"), ("Turn 1.", "beta")])
+    agent.context_compressor = Selecting()
+    conversation = history + [{"role": "user", "content": "Last."}]
+    out = _apply_context_engine_selection(agent, build(conversation), conversation, conversation[-1],
+                                          logger=logging.getLogger("t"))
+    notes = _skills_notes(out)
+    assert len(notes) == 1
+    assert "beta" in notes[0] and "alpha" not in notes[0]  # The fallback still learns the latest difference.
 
 
 @pytest.mark.parametrize("texts", [
