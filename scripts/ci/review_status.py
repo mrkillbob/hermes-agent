@@ -158,7 +158,13 @@ def cohort(api, head: str) -> set[int]:
 def cohort_verdict(api, head: str, numbers: set[int]) -> str:
     """clean when every PR clears, pending when the only holds are still-waiting
     reviews, otherwise failure (a finding, requested changes or unusable metadata)."""
-    states = {evaluate(api.snapshot(number, head), head)["state"] for number in sorted(numbers)}
+    try:
+        states = {evaluate(api.snapshot(number, head), head)["state"] for number in sorted(numbers)}
+    except MetadataError:
+        # A PR that closed or moved mid-read is cohort churn, not unusable metadata.
+        if cohort(api, head) == numbers:
+            raise
+        return "pending"
     if states == {"clean"}:
         return "clean"
     return "pending" if states <= {"clean", "pending"} else "failure"

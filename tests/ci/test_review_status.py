@@ -236,6 +236,22 @@ def test_cohort_change_during_final_read_stays_pending():
     assert [row[0] for row in writes(api)] == ["POST"]
 
 
+def test_pr_closing_during_snapshot_read_stays_pending():
+    api = FakeAPI()
+    api.prs.append(pr(2))
+    original = api.snapshot
+
+    def closing(number, head):
+        if number == 2:
+            api.prs[:] = [row for row in api.prs if row["number"] != 2]
+            raise MetadataError("PR closed or expected head superseded")
+        return original(number, head)
+
+    api.snapshot = closing
+    assert status.publish(api, HEAD, ENV)["state"] == "pending"
+    assert [row[0] for row in writes(api)] == ["POST"]
+
+
 def test_metadata_outage_after_post_fails_the_check():
     api = FakeAPI()
 
