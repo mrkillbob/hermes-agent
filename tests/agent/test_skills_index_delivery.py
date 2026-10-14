@@ -32,6 +32,22 @@ def _stage(monkeypatch, *, multimodal=False, user="Run checks.", hook="Run check
     return agent, message
 
 
+def _flushed_sidecar(agent, message):
+    """The sidecar the turn-start flush stores for this row (it synthesizes one for a multimodal note)."""
+    from agent.session_persistence import _db_flush_row
+
+    return _db_flush_row(agent, message, True)["api_content"]
+
+
+def _same_bytes(stored, sent, multimodal):
+    """What the store replays is what was sent. A stored part list keeps its note last, set off by blank lines."""
+    stored = flatten_message_text(stored)
+    if multimodal:
+        assert sorted(stored.split()) == sorted(sent.split())
+    else:
+        assert stored == sent
+
+
 def _live(message):
     return flatten_message_text(message.get("api_content") or message["content"])
 
@@ -54,7 +70,7 @@ def test_actual_bound_route_projects_current_note_and_persists_bytes(tmp_path, m
         db.create_session("test", source="cli")
         if preflushed:
             message["_row_id"] = db.append_message("test", "user", _durable_content(message["content"]),
-                                                  api_content=message.get("api_content"))
+                                                  api_content=_flushed_sidecar(agent, message))
             agent._session_db = db
         # Voice and fallback both rebuild API messages after the active route binds.
         agent.provider = "nous"
@@ -67,10 +83,10 @@ def test_actual_bound_route_projects_current_note_and_persists_bytes(tmp_path, m
         agent.provider = "openrouter"
         assert flatten_message_text(_wire(agent, message)) == text  # Never restore raw data.
         if not preflushed:
-            db.append_message("test", "user", _durable_content(message["content"]), api_content=message.get("api_content"))
+            db.append_message("test", "user", _durable_content(message["content"]), api_content=_flushed_sidecar(agent, message))
         stored = db.get_messages("test")[0]
         replay = stored.get("api_content") or stored["content"]
-        assert flatten_message_text(replay) == text
+        _same_bytes(replay, text, multimodal)
         agent.provider = "nous"
         assert not stage_skills_index_note(agent, PROMPT, [stored])
     finally:
@@ -145,7 +161,7 @@ def test_durable_projection_cas_rejects_changed_sidecar_or_multimodal_row(tmp_pa
     try:
         db.create_session("test", source="cli")
         durable = _durable_content(message["content"])
-        row_id = db.append_message("test", "user", durable, api_content=message.get("api_content"))
+        row_id = db.append_message("test", "user", durable, api_content=_flushed_sidecar(agent, message))
         message["_row_id"] = row_id
         agent._session_db = db
         if multimodal:
@@ -229,7 +245,7 @@ def test_note_already_built_for_main_route_is_projected_on_fallback_copy_only(tm
     try:
         db.create_session("test", source="cli")
         message["_row_id"] = db.append_message("test", "user", _durable_content(message["content"]),
-                                              api_content=message.get("api_content"))
+                                              api_content=_flushed_sidecar(agent, message))
         agent._session_db = db
         sent = flatten_message_text(_wire(agent, message))  # The main route's request carried the raw note.
         assert "Create HTML diagrams." in sent
@@ -362,7 +378,7 @@ def test_a_note_staged_for_a_protected_route_is_restored_when_an_unprotected_rou
         db.create_session("test", source="cli")
         if preflushed:
             message["_row_id"] = db.append_message("test", "user", _durable_content(message["content"]),
-                                                  api_content=message.get("api_content"))
+                                                  api_content=_flushed_sidecar(agent, message))
             agent._session_db = db
         agent.provider = "openrouter"  # The voice turn binds its own, unprotected provider before the first request.
         text = flatten_message_text(_wire(agent, message))
@@ -370,7 +386,7 @@ def test_a_note_staged_for_a_protected_route_is_restored_when_an_unprotected_rou
         assert _live(message) == text
         if preflushed:
             stored = db.get_messages("test")[0]
-            assert flatten_message_text(stored.get("api_content") or stored["content"]) == text
+            _same_bytes(stored.get("api_content") or stored["content"], text, multimodal)
         agent.provider = "nous"  # A later fallback to the protected route projects the copy only.
         projected = flatten_message_text(_wire(agent, message))
         assert "Create HTML diagrams." not in projected and _decision(tmp_path, projected).allowed
@@ -501,16 +517,32 @@ def test_a_fallback_keeps_every_earlier_projected_note_byte_for_byte(tmp_path, m
     assert all(m["api_content"] in sent or "Turn " in m["content"] for m in history if m["role"] == "user")
 
 
-def test_projected_notes_share_one_notes_budget_and_the_oldest_are_withheld_first(tmp_path, monkeypatch):
+def test_projected_notes_share_one_notes_budget_and_the_newest_are_withheld_first(tmp_path, monkeypatch):
     agent, history, build, _ = _history_of_raw_notes(monkeypatch, 10)
     agent.provider = "nous"
     agent._llm_egress_max_serialized_bytes = 2_800  # A note may spend a quarter: 700 bytes in all.
     api = build(history + [{"role": "user", "content": "Last."}])
     notes = [n[n.index("[System:"):] for n in _notes_in(api)]
-    assert 1 < len(notes) < 10 and "skill9" in notes[-1]  # Several fit, the newest survives, the oldest went first.
+    assert 1 < len(notes) < 10 and not any("skill9" in n for n in notes)  # Several fit, filled from the oldest.
     assert sum(len(n.encode()) for n in notes) <= 700
     assert next(m["content"] for m in api if m["role"] == "user").startswith("Turn 0.")  # Withheld notes keep their rows.
     assert all(_decision(tmp_path, flatten_message_text(m["content"])).allowed for m in api if m["role"] == "user")
+
+
+def test_a_note_crossing_the_budget_does_not_rewrite_what_a_fallback_already_received(monkeypatch):
+    agent, history, build, send = _history_of_raw_notes(monkeypatch, 1)
+    final = {"role": "user", "content": "Last."}
+    agent.provider = "openrouter"
+    send(1)  # Each note lists every skill so far, so the second is a little larger than the first.
+    agent.provider = "nous"
+    sizes = [len(n[n.index("[System:"):].encode()) for n in _notes_in(build(history + [final]))]
+    assert len(sizes) == 2
+    # Each note fits alone but not together. The fallback has so far only been sent the first.
+    agent._llm_egress_max_serialized_bytes = 4 * (sizes[1] + 1)
+    first = build(history[:2] + [final])
+    again = build(history + [final])
+    assert again[:2] == first[:2]  # Its cached prefix is untouched; only the new note is withheld.
+    assert len(_notes_in(again)) == 1
 
 
 def _sent_deltas(monkeypatch, turns):
@@ -595,3 +627,65 @@ def test_a_user_quoting_a_sent_note_is_not_mistaken_for_the_row_that_carried_it(
     api = build(history)
     assert "Create HTML diagrams." not in flatten_message_text(api[0]["content"])  # The carrier is projected.
     assert api[2]["content"] == quote["content"]  # The quotation is the user's own text.
+
+
+def test_a_user_pasting_a_note_into_a_multimodal_message_keeps_their_text(monkeypatch):
+    from agent.skills_index_delta import _render
+
+    pasted = "Why did it say this?\n\n" + _render({"other": "    - other: Create HTML diagrams."}, set())
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    agent = SimpleNamespace(provider="nous", api_mode="chat_completions", session_id="test",
+                            _current_turn_timestamp=1.0, ephemeral_system_prompt="",
+                            _copy_reasoning_content_for_api=lambda *_: None,
+                            _should_sanitize_tool_calls=lambda: False)
+    content = [{"type": "text", "text": "Look."}, {"type": "text", "text": pasted}]
+    message = {"role": "user", "content": content}
+    api = build_api_messages(agent, [message], current_turn_user_idx=0, ext_prefetch_cache="",
+                             plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+    assert api[0]["content"] == content  # No note was staged, so nothing here is the agent's to rewrite.
+
+
+def test_the_synthesized_multimodal_sidecar_is_what_the_projection_compares_against(tmp_path, monkeypatch):
+    from agent.session_persistence import _db_flush_row
+
+    agent, message = _stage(monkeypatch, multimodal=True)
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("test", source="cli")
+        row = _db_flush_row(agent, message, True)  # The turn-start flush stores the sidecar it synthesizes.
+        message["_row_id"] = db.append_message("test", "user", row["content"], api_content=row["api_content"])
+        agent._session_db = db
+        agent.provider = "nous"  # A late voice or fallback route binds.
+        text = flatten_message_text(_wire(agent, message))
+        assert "Create HTML diagrams." not in text and _decision(tmp_path, text).allowed
+        stored = db.get_messages("test")[0]
+        assert "Create HTML diagrams." not in (stored.get("api_content") or stored["content"])
+    finally:
+        db.close()
+
+
+def test_a_resumed_multimodal_note_survives_a_context_engine_selection(tmp_path, monkeypatch):
+    import logging
+
+    from agent.conversation_loop import _apply_context_engine_selection
+    from agent.session_persistence import _db_flush_row
+
+    agent, message = _stage(monkeypatch, multimodal=True)
+    row = _db_flush_row(agent, message, True)
+    resumed = {"role": "user", "content": row["content"], "api_content": row["api_content"]}
+    history = [resumed, {"role": "assistant", "content": "Done."}, {"role": "user", "content": "Next."}]
+
+    class Keeping:
+        def select_context(self, api_messages, conversation_messages=None, incoming_message=None, budget_tokens=0):
+            return conversation_messages
+
+    fresh = SimpleNamespace(provider="nous", api_mode="chat_completions", session_id="test",
+                            _current_turn_timestamp=1.0, ephemeral_system_prompt="",
+                            _copy_reasoning_content_for_api=lambda *_: None,
+                            _should_sanitize_tool_calls=lambda: False, context_compressor=Keeping())
+    api = build_api_messages(fresh, history, current_turn_user_idx=2, ext_prefetch_cache="",
+                             plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+    out = _apply_context_engine_selection(fresh, api, history, history[-1], logger=logging.getLogger("t"))
+    text = flatten_message_text(out[0]["content"])
+    assert "Create HTML diagrams." not in text and "    - archify" in text
+    assert _decision(tmp_path, text).allowed

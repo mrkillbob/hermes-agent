@@ -23,7 +23,9 @@ from agent.memory_manager import build_memory_context_block
 from agent.memory_provider import is_trivial_prompt
 from agent.message_content import flatten_message_text
 from agent.skills_index_delta import stage_skills_index_note
-from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS, append_message, stamp_message_timestamp
+from agent.message_metadata import (
+    PERSISTENCE_ONLY_MESSAGE_FIELDS, SKILLS_NOTE_CARRIER, append_message, stamp_message_timestamp,
+)
 from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_native_anthropic_request_tokens_rough,
@@ -1322,6 +1324,8 @@ def build_api_messages(
         # Structural clone, NOT msg.copy(): in-place transforms below must not reach
         # persisted history via nested containers; see _clone_message_for_send.
         api_msg = _clone_message_for_send(msg)
+        if msg.get("role") == "user" and msg.get(SKILLS_NOTE_CARRIER):
+            sidecar_rows.add(len(api_messages))  # A multimodal row an agent appended a skills note part to.
         # api_content is bookkeeping (exact bytes sent), never a provider field — pop
         # it from EVERY outgoing copy. Persistence/display fields (display_*, _row_id,
         # timestamp) are local bookkeeping: strict OpenAI backends reject unknown keys

@@ -16,6 +16,8 @@ own message is never read as a note.
 from dataclasses import dataclass
 from typing import Any
 
+from agent.message_metadata import SKILLS_NOTE_CARRIER
+
 
 @dataclass
 class _Delivery:
@@ -39,6 +41,8 @@ def bind_skills_note(agent, message, note, *, part=None):
     agent._skills_index_pending_delivery = None
     if not pending or pending[0] != note:
         return
+    if part is not None:
+        message[SKILLS_NOTE_CARRIER] = True  # The part list carries no other proof the note is the agent's.
     agent._skills_index_delivery = _Delivery(
         message, *pending, part=part, content=message.get("content") if part else None,
         expected=part["text"] if part else None,
@@ -138,17 +142,18 @@ def _text_of(message, part):
 def _note_slots(api_messages, sidecar_rows):
     """``(message index, text-part index or None, note start)`` for every note an agent attached.
 
-    A string turn carries its note in the replayed sidecar, so only a row whose content came from one
-    counts; the user's own text is never searched. A multimodal turn carries it as one of its last two
-    text parts (the note part, then the turn's context part).
+    ``sidecar_rows`` are the rows an agent composed: a string turn's replayed sidecar, or a multimodal
+    turn it appended a note part to (``SKILLS_NOTE_CARRIER``). The user's own text is never searched.
+    A multimodal turn carries the note as one of its last two text parts (the note part, then the
+    turn's context part).
     """
     slots = []
     for i, m in enumerate(api_messages):
-        if m.get("role") != "user":
+        if m.get("role") != "user" or i not in sidecar_rows:
             continue
         content = m.get("content")
         if isinstance(content, str):
-            if i in sidecar_rows and (start := _note_start(content)) is not None:
+            if (start := _note_start(content)) is not None:
                 slots.append((i, None, start))
         elif isinstance(content, list):
             texts = [n for n, p in enumerate(content) if isinstance(p, dict) and isinstance(p.get("text"), str)]
@@ -176,23 +181,37 @@ def remember_newest_skills_note(agent, api_messages, sidecar_rows):
     agent._skills_index_newest_carrier = _parse_note(_text_of(api_messages[i], part)[start:])
 
 
+def _same_text_ignoring_layout(content, sidecar, start):
+    """Whether a stored flat ``content`` is the row whose sidecar ends in the note at ``start``.
+
+    The store flattens a part list with single newlines while its sidecar joins the parts with blank lines
+    and moves the note last, so the two only agree once the note and the whitespace between parts are set aside.
+    """
+    note = sidecar[start:]
+    return " ".join(content.replace(note, "", 1).split()) == " ".join(sidecar[:start].split())
+
+
 def restore_sidecar_content(messages):
     """Put a string row's replayed sidecar back into ``content`` when it carries a skills note.
 
     A context engine's selection hands back clones whose sidecar the persistence stripping then
     drops, and ``build_api_messages`` substitutes it for the same reason. Only a sidecar that extends
-    the row's current content is restored: a context engine that replaced the text (a summary, say)
-    keeps its selection. Returns the messages and the indices that were restored.
+    the row's current content (or restates a stored multimodal row) is restored: a context engine that
+    replaced the text (a summary, say) keeps its selection. Returns the messages and the indices that
+    were restored, plus the multimodal rows an agent appended a note part to.
     """
     out, restored = [], set()
     for i, m in enumerate(messages):
         content, sidecar = m.get("content"), m.get("api_content")
-        if (m.get("role") == "user" and isinstance(content, str) and isinstance(sidecar, str)
-                and sidecar.startswith(content + "\n\n") and _note_start(sidecar) is not None):
+        if m.get("role") == "user" and isinstance(content, list) and m.get(SKILLS_NOTE_CARRIER):
+            restored.add(i)
+        elif (m.get("role") == "user" and isinstance(content, str) and isinstance(sidecar, str)
+                and (start := _note_start(sidecar)) is not None
+                and (sidecar.startswith(content + "\n\n") or _same_text_ignoring_layout(content, sidecar, start))):
             out.append({**m, "content": sidecar})
             restored.add(i)
-        else:
-            out.append(m)
+            continue
+        out.append(m)
     return (out, frozenset(restored)) if restored else (messages, frozenset())
 
 
@@ -203,7 +222,8 @@ def project_skills_notes(agent, api_messages, sidecar_rows=frozenset()):
     rows and the primary route's cached bytes stay as they were sent. Each note is projected in place
     and deterministically, so a route that is activated again later receives the same bytes for every
     earlier note and only the new note is appended. Notes together may spend one note's share of the
-    request budget; past that the oldest are withheld first.
+    request budget. They fill it oldest first: a note is withheld when it does not fit after the ones
+    before it, so a new note never changes what an earlier row already received.
     """
     from agent.chat_completion_helpers import _destination_requires_egress_firewall
 
@@ -214,11 +234,13 @@ def project_skills_notes(agent, api_messages, sidecar_rows=frozenset()):
         return api_messages
     notes = [_project_note(agent, *_parse_note(_text_of(api_messages[i], part)[start:]))[0]
              for i, part, start in slots]
-    sizes = [len(n.encode("utf-8")) for n in notes]
-    for k in range(len(notes)):
-        if sum(sizes) <= _note_budget(agent):
-            break
-        notes[k], sizes[k] = "", 0
+    spent, budget = 0, _note_budget(agent)
+    for k, note in enumerate(notes):
+        size = len(note.encode("utf-8"))
+        if spent + size > budget:
+            notes[k] = ""
+        else:
+            spent += size
     out = list(api_messages)
     edited: dict[int, list] = {}  # message index -> its parts, with a dropped part held as None until the end
     for (i, part, start), note in zip(slots, notes, strict=True):
@@ -265,7 +287,7 @@ def keep_newest_skills_note(agent, api_messages):
 
 def _rewrite_owned(agent, delivery, message, current, new_note):
     """Replace the owned span's note with ``new_note`` on the live message and, by CAS, its durable row."""
-    from agent.session_persistence import _durable_content, durable_user_row_content
+    from agent.session_persistence import _durable_content, _multimodal_note_sidecar, durable_user_row_content
 
     content = message.get("content")
     rewritten = current[:-len(delivery.note)] + new_note
@@ -288,9 +310,12 @@ def _rewrite_owned(agent, delivery, message, current, new_note):
             in_place = getattr(agent, "_last_compaction_in_place", False)
             durable = updated if in_place else _durable_content(updated)
             expected = content if in_place else _durable_content(content)
+            # The flush stores a sidecar for a list that carries a note; the live message has none.
+            sidecar = message.get("api_content")
             written = db.compare_and_set_user_message_projection(
-                agent.session_id, row_id, expected_content=expected, expected_api_content=message.get("api_content"),
-                content=durable, api_content=message.get("api_content"),
+                agent.session_id, row_id, expected_content=expected,
+                expected_api_content=sidecar if sidecar is not None else _multimodal_note_sidecar(content),
+                content=durable, api_content=sidecar if sidecar is not None else _multimodal_note_sidecar(updated),
             )
         if written != 1:
             raise RuntimeError("Live skills projection durable row changed")
