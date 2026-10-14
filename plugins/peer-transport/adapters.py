@@ -13,7 +13,7 @@ from uuid import UUID
 from dataclasses import dataclass
 from threading import Lock
 
-from agent.peer_transport import Delivery, Route, TransportError
+from .transport import Delivery, Route, TransportError
 
 
 @dataclass(frozen=True)

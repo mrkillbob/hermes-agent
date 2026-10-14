@@ -4,8 +4,10 @@ import json
 
 import pytest
 
-from agent.peer_adapters import OwnedStream, QueueEndpoint
-from agent.peer_transport import Delivery, Envelope, Route, TransportError
+import tests.plugins.peer_transport_loader  # noqa: F401  (registers peer_transport_plugin)
+
+from peer_transport_plugin.adapters import OwnedStream, QueueEndpoint
+from peer_transport_plugin.transport import Delivery, Envelope, Route, TransportError
 
 
 def delivery(recipient="claude", **changes):
@@ -96,7 +98,7 @@ PEERS = ("mira", "claude", "hermes", "codex", "stackchan", "homelab", "lunabot")
 
 @pytest.mark.parametrize("sender,recipient", [(a, b) for a in PEERS for b in PEERS if a != b])
 def test_bound_fake_endpoints_round_trip_after_lost_ack_without_model_or_hub(tmp_path, sender, recipient):
-    from agent.peer_transport import Mailbox
+    from peer_transport_plugin.transport import Mailbox
     outgoing = Mailbox(tmp_path / "out.db")
     incoming = Mailbox(tmp_path / "in.db")
     return_mail = Mailbox(tmp_path / "return.db")
@@ -150,7 +152,7 @@ def result_frame(uuid="result-1"):
 
 
 def test_raw_stream_does_not_readmit_completed_input_before_receipt(tmp_path):
-    from agent.peer_transport import Mailbox
+    from peer_transport_plugin.transport import Mailbox
     box = Mailbox(tmp_path / "mail.db")
     box.store(delivery().envelope, delivery().route)
     pipe = io.StringIO()
@@ -165,7 +167,7 @@ def test_raw_stream_does_not_readmit_completed_input_before_receipt(tmp_path):
 
 
 def test_bound_stream_busy_defers_unoffered_mail_without_burning_attempts(tmp_path):
-    from agent.peer_transport import Mailbox
+    from peer_transport_plugin.transport import Mailbox
     box = Mailbox(tmp_path / "mail.db", max_attempts=2)
     box.store(delivery().envelope, delivery().route)
     box.store(delivery(message_id="m2").envelope, delivery().route)
@@ -186,7 +188,7 @@ def test_bound_stream_busy_defers_unoffered_mail_without_burning_attempts(tmp_pa
 
 
 def test_durable_stream_holds_before_io_and_does_not_replay_after_result(tmp_path):
-    from agent.peer_transport import Mailbox
+    from peer_transport_plugin.transport import Mailbox
     box = Mailbox(tmp_path / "mail.db")
     box.store(delivery().envelope, delivery().route)
     box.store(delivery(message_id="m2").envelope, delivery().route)
@@ -213,7 +215,7 @@ def test_durable_stream_holds_before_io_and_does_not_replay_after_result(tmp_pat
 
 
 def test_uncertain_partial_stream_write_remains_held_after_mailbox_restart(tmp_path):
-    from agent.peer_transport import Mailbox
+    from peer_transport_plugin.transport import Mailbox
     class PartialPipe(io.StringIO):
         def write(self, wire):
             return super().write(wire[:5])
@@ -231,7 +233,7 @@ def test_uncertain_partial_stream_write_remains_held_after_mailbox_restart(tmp_p
 
 
 def test_recreated_bound_stream_cannot_pass_uncertain_session_mail(tmp_path):
-    from agent.peer_transport import Mailbox
+    from peer_transport_plugin.transport import Mailbox
     path = tmp_path / "mail.db"
     box = Mailbox(path)
     box.store(delivery().envelope, delivery().route)
@@ -261,7 +263,7 @@ def test_recreated_bound_stream_cannot_pass_uncertain_session_mail(tmp_path):
 def launch_contract(tmp_path):
     import hashlib
     import os
-    from agent import peer_adapters as adapters
+    from peer_transport_plugin import adapters
     binary = tmp_path / 'claude'
     binary.write_bytes(b'fake executable, never executed')
     return adapters.ClaudeLaunchContext(
@@ -295,7 +297,7 @@ class FakeClaudeProcess:
 
 
 def fake_launch(monkeypatch, status, exit_code=0):
-    from agent import peer_adapters as adapters
+    from peer_transport_plugin import adapters
     import subprocess
     calls = []
     child = FakeClaudeProcess()
@@ -315,7 +317,7 @@ def fake_launch(monkeypatch, status, exit_code=0):
     dict(authMethod='apiKey'), dict(apiProvider='bedrock'),
     dict(subscriptionType=None), dict(subscriptionType='unknown')])
 def test_launcher_blocks_unqualified_context_without_leaking_status(launch_contract, monkeypatch, changes):
-    from agent.peer_adapters import ClaudeProcess
+    from peer_transport_plugin.adapters import ClaudeProcess
     calls, _ = fake_launch(monkeypatch, auth_status(**changes))
     with pytest.raises(TransportError, match='execution_context_unavailable') as error:
         ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
@@ -326,7 +328,7 @@ def test_launcher_blocks_unqualified_context_without_leaking_status(launch_contr
 
 @pytest.mark.platforms('posix')
 def test_launcher_uses_same_filtered_context_and_no_substantive_cutoffs(launch_contract, monkeypatch):
-    from agent.peer_adapters import ClaudeProcess
+    from peer_transport_plugin.adapters import ClaudeProcess
     for name in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
                  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'):
         monkeypatch.setenv(name, 'never-print')
@@ -351,7 +353,7 @@ def test_launcher_uses_same_filtered_context_and_no_substantive_cutoffs(launch_c
 @pytest.mark.parametrize('field,value', [('sha256', '0' * 64), ('uid', -1), ('home', '/wrong'), ('shell', '/wrong'), ('cwd', '/wrong')])
 def test_launcher_rejects_host_contract_mismatch_before_auth(launch_contract, monkeypatch, field, value):
     from dataclasses import replace
-    from agent.peer_adapters import ClaudeProcess
+    from peer_transport_plugin.adapters import ClaudeProcess
     calls, _ = fake_launch(monkeypatch, auth_status())
     with pytest.raises(TransportError, match='execution_context_unavailable'):
         ClaudeProcess.launch(replace(launch_contract, **{field: value}), delivery().route)
@@ -362,7 +364,7 @@ def test_launcher_rejects_host_contract_mismatch_before_auth(launch_contract, mo
 @pytest.mark.parametrize('usage', [{}, {'sonnet': {'provider': 'api'}}, {'sonnet': {'provider': 'firstParty'}, 'other': {'provider': 'bedrock'}}])
 def test_launcher_holds_non_subscription_result_and_reaps(launch_contract, monkeypatch, usage):
     from dataclasses import replace
-    from agent.peer_adapters import ClaudeProcess
+    from peer_transport_plugin.adapters import ClaudeProcess
     _, child = fake_launch(monkeypatch, auth_status())
     route = Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation')
     proc = ClaudeProcess.launch(launch_contract, route)
@@ -377,7 +379,7 @@ def test_launcher_holds_non_subscription_result_and_reaps(launch_contract, monke
 @pytest.mark.parametrize('exit_code,expected', [(0, 'completed'), (1, 'process_failed')])
 def test_launcher_requires_correlated_result_and_exit(launch_contract, monkeypatch, exit_code, expected):
     from dataclasses import replace
-    from agent.peer_adapters import ClaudeProcess
+    from peer_transport_plugin.adapters import ClaudeProcess
     _, child = fake_launch(monkeypatch, auth_status())
     route = Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation')
     proc = ClaudeProcess.launch(launch_contract, route)
@@ -393,7 +395,7 @@ def test_launcher_requires_correlated_result_and_exit(launch_contract, monkeypat
 
 @pytest.mark.platforms('posix')
 def test_launcher_missing_result_cannot_complete(launch_contract, monkeypatch):
-    from agent.peer_adapters import ClaudeProcess
+    from peer_transport_plugin.adapters import ClaudeProcess
     _, child = fake_launch(monkeypatch, auth_status())
     proc = ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
     assert proc.finish().outcome == 'result_missing'
@@ -402,8 +404,8 @@ def test_launcher_missing_result_cannot_complete(launch_contract, monkeypatch):
 
 @pytest.mark.platforms('posix')
 def test_launcher_invalid_auth_output_never_spawns_or_leaks(launch_contract, monkeypatch):
-    from agent.peer_adapters import ClaudeProcess
-    import agent.peer_adapters as adapters
+    from peer_transport_plugin.adapters import ClaudeProcess
+    import peer_transport_plugin.adapters as adapters
     import subprocess
     calls, _ = fake_launch(monkeypatch, auth_status())
     monkeypatch.setattr(adapters.subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess(a, 1, 'private malformed', 'private stderr'))
@@ -416,8 +418,8 @@ def test_launcher_invalid_auth_output_never_spawns_or_leaks(launch_contract, mon
 @pytest.mark.platforms('posix')
 def test_launcher_cancel_kills_reaps_and_preserves_uncertain_reservation(launch_contract, monkeypatch, tmp_path):
     from dataclasses import replace
-    from agent.peer_adapters import ClaudeProcess
-    from agent.peer_transport import Mailbox
+    from peer_transport_plugin.adapters import ClaudeProcess
+    from peer_transport_plugin.transport import Mailbox
     import subprocess
     _, child = fake_launch(monkeypatch, auth_status())
     original_wait = child.wait
@@ -440,7 +442,7 @@ def test_launcher_cancel_kills_reaps_and_preserves_uncertain_reservation(launch_
 
 @pytest.mark.platforms('posix')
 def test_launcher_operational_timeout_is_non_success_and_cleans_up(launch_contract, monkeypatch):
-    from agent.peer_adapters import ClaudeProcess
+    from peer_transport_plugin.adapters import ClaudeProcess
     import subprocess
     _, child = fake_launch(monkeypatch, auth_status())
     original_wait = child.wait
@@ -456,7 +458,7 @@ def test_launcher_operational_timeout_is_non_success_and_cleans_up(launch_contra
 
 @pytest.mark.platforms('posix')
 def test_launcher_instructs_recipient_to_decode_without_granting_authority(launch_contract, monkeypatch):
-    from agent.peer_adapters import ClaudeProcess
+    from peer_transport_plugin.adapters import ClaudeProcess
     calls, _ = fake_launch(monkeypatch, auth_status())
     proc = ClaudeProcess.launch(launch_contract, Route('claude', 'cfde2348-af28-45ac-811b-150279d0eccd', 1, 'conversation'))
     args = calls[-1][1]
@@ -470,7 +472,7 @@ def test_launcher_instructs_recipient_to_decode_without_granting_authority(launc
 @pytest.mark.platforms('posix')
 @pytest.mark.parametrize('operation', ['finish', 'cancel'])
 def test_launcher_broken_pipe_close_cannot_skip_reaping(launch_contract, monkeypatch, operation):
-    from agent.peer_adapters import ClaudeProcess
+    from peer_transport_plugin.adapters import ClaudeProcess
     _, child = fake_launch(monkeypatch, auth_status())
     class BrokenClose(io.StringIO):
         def close(self):
@@ -485,7 +487,7 @@ def test_launcher_broken_pipe_close_cannot_skip_reaping(launch_contract, monkeyp
 
 @pytest.mark.platforms('posix')
 def test_launcher_terminate_race_still_reaps_and_closes_pipes(launch_contract, monkeypatch):
-    from agent.peer_adapters import ClaudeProcess
+    from peer_transport_plugin.adapters import ClaudeProcess
     _, child = fake_launch(monkeypatch, auth_status())
     def terminate():
         raise ProcessLookupError('private detail')

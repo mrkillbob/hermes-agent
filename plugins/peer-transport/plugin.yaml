@@ -1,0 +1,3 @@
+name: peer-transport
+version: 0.1.0
+description: "Inactive durable peer mailbox and an opt-in Claude launcher adapter. Library only; registers no tools, hooks or commands."

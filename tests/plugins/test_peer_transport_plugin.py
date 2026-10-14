@@ -3,7 +3,9 @@ from dataclasses import replace
 
 import pytest
 
-from agent.peer_transport import Envelope, Mailbox, Route, TransportError
+import tests.plugins.peer_transport_loader  # noqa: F401  (registers peer_transport_plugin)
+
+from peer_transport_plugin.transport import Envelope, Mailbox, Route, TransportError
 
 
 def message(**changes):
@@ -113,7 +115,7 @@ def test_recipient_processing_claim_survives_restart_without_reinvocation(tmp_pa
 
 
 def test_authenticated_receipt_is_bound_to_digest_session_and_independent_facts(tmp_path):
-    from agent.peer_transport import Acknowledgement
+    from peer_transport_plugin.transport import Acknowledgement
     box = Mailbox(tmp_path / "mail.db")
     msg = message()
     box.store(msg, route())
@@ -184,7 +186,7 @@ def test_receiver_commits_processing_receipt_and_fences_conversation(tmp_path):
 
 
 def test_ambiguous_ack_and_malformed_controller_route_are_rejected():
-    from agent.peer_transport import Acknowledgement
+    from peer_transport_plugin.transport import Acknowledgement
     ack = Acknowledgement("m1", message().digest, route(), "queued").encode()
     with pytest.raises(TransportError):
         Acknowledgement.decode(ack.replace(b'"stage":"queued"', b'"stage":"queued","stage":"accepted"'))
@@ -204,7 +206,7 @@ def test_claim_only_touches_the_selected_conversation(tmp_path):
 
 def test_wire_does_not_silently_default_missing_version():
     import json
-    from agent.peer_transport import Acknowledgement
+    from peer_transport_plugin.transport import Acknowledgement
     for record, decode in [(json.loads(message().encode()), Envelope.decode),
                            (json.loads(Acknowledgement("m1", message().digest, route(), "queued").encode()),
                             Acknowledgement.decode)]:
