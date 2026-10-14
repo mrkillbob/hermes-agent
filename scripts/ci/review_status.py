@@ -187,6 +187,18 @@ def settle(api, own: dict | None, summary: str) -> None:
         pass  # Left in progress, which never reads as a pass.
 
 
+def find_created(api, head: str, identity: str | None) -> dict | None:
+    """Recover this execution's check when its creation response was lost."""
+    if identity is None:
+        return None
+    try:
+        checks = api.pages(f"commits/{head}/check-runs", key="check_runs", filter="all", check_name=NAME)
+    except FAILURES:
+        return None
+    return next((c for c in checks if c.get("external_id") == identity
+                 and c.get("app", {}).get("id") == APP_ID), None)
+
+
 def held(api, own: dict, head: str, verdict: str) -> dict:
     if verdict == "pending":
         return {"state": "pending", "reason": "Review still pending", "head": head}
@@ -200,7 +212,7 @@ def publish(api, head: str, env: dict) -> dict:
     A review that is merely still running leaves the check in progress (pending,
     not red); a real finding or unusable metadata completes it as a failure.
     """
-    own = None
+    own = identity = None
     promotion_attempted = False
     try:
         if SHA.fullmatch(head) is None:
@@ -258,7 +270,8 @@ def publish(api, head: str, env: dict) -> dict:
             except FAILURES:
                 return {"state": "failure", "reason": "Promotion outcome uncertain; failure rollback unconfirmed", "head": head}
         else:
-            settle(api, own, "Metadata unavailable or publisher proof invalid.")
+            settle(api, own or find_created(api, head, identity),
+                   "Metadata unavailable or publisher proof invalid.")
         return {"state": "failure", "reason": "Metadata unavailable or publisher proof invalid", "head": head}
 
 

@@ -252,6 +252,21 @@ def test_pr_closing_during_snapshot_read_stays_pending():
     assert [row[0] for row in writes(api)] == ["POST"]
 
 
+def test_lost_creation_response_still_settles_the_created_check():
+    api = FakeAPI()
+    original = api.request
+
+    def lossy(route, *, post=False, payload=None, method=None):
+        result = original(route, post=post, payload=payload, method=method)
+        if post:
+            raise MetadataError("Response lost after applied create")
+        return result
+
+    api.request = lossy
+    assert status.publish(api, HEAD, ENV)["state"] == "failure"
+    assert api.checks[0]["conclusion"] == "failure"
+
+
 def test_metadata_outage_after_post_fails_the_check():
     api = FakeAPI()
 
