@@ -59,7 +59,7 @@ interface MessageStreamOptions {
     attempts?: number,
     storedSessionId?: string | null,
     runtimeSessionId?: string | null
-  ) => Promise<void>
+  ) => Promise<boolean | void>
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
   refreshSessions: () => Promise<void>
@@ -1099,6 +1099,7 @@ export function useMessageStream({
           messages: nextMessages,
           adoptedRunningTurn: false,
           heartbeatSettledStreamId: null,
+          heartbeatSettledAt: null,
           streamId: null,
           pendingBranchGroup: null,
           awaitingResponse: false,

@@ -395,7 +395,12 @@ export async function reconcileTileTranscripts({
   }
 }
 
-/** Best-effort post-turn fallback when the live stream did not carry an answer. */
+/**
+ * Best-effort post-turn fallback when the live stream did not carry an answer.
+ * Resolves true once the stored transcript was applied or the result is no
+ * longer wanted (a newer turn took over), false when no authoritative read
+ * succeeded, so a caller holding a recovery marker knows whether to keep it.
+ */
 export async function hydrateStoredSessionTranscript({
   attempts,
   storedSessionId,
@@ -408,11 +413,11 @@ export async function hydrateStoredSessionTranscript({
   runtimeSessionId: string
   storedProfile: ProfileScope
   updateSessionState: ActiveTranscriptRefreshDeps['updateSessionState']
-}): Promise<void> {
+}): Promise<boolean> {
   const replay = pendingSessionReplay(runtimeSessionId)
 
   if (replay && !(await replay)) {
-    return
+    return false
   }
 
   const messagesAtRequest = $sessionStates.get()[runtimeSessionId]?.messages
@@ -427,7 +432,7 @@ export async function hydrateStoredSessionTranscript({
     }
 
     if (superseded()) {
-      return
+      return true
     }
 
     try {
@@ -435,13 +440,13 @@ export async function hydrateStoredSessionTranscript({
       const replayAtReturn = pendingSessionReplay(runtimeSessionId)
 
       if (replayAtReturn && !(await replayAtReturn)) {
-        return
+        return false
       }
 
       // This fallback belongs to the completed turn, not any subsequent turn
       // that ran during the read or retry delay. Its todo restore is stale too.
       if (superseded()) {
-        return
+        return true
       }
 
       // A zero-row page over the populated turn is a transient read, not the
@@ -457,7 +462,7 @@ export async function hydrateStoredSessionTranscript({
       )
 
       if (superseded()) {
-        return
+        return true
       }
 
       updateSessionState(
@@ -502,11 +507,13 @@ export async function hydrateStoredSessionTranscript({
         clearActiveSessionTodos(runtimeSessionId)
       }
 
-      return
+      return true
     } catch {
       // Best-effort fallback when live stream payloads are empty.
     }
   }
+
+  return false
 }
 
 /** Reconcile one persisted transcript snapshot into the currently viewed session. */

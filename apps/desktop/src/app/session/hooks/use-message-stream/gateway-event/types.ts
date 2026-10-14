@@ -39,7 +39,7 @@ export interface GatewayEventDeps {
     attempts?: number,
     storedSessionId?: string | null,
     runtimeSessionId?: string | null
-  ) => Promise<void>
+  ) => Promise<boolean | void>
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
   scheduleSessionsRefresh: () => void
