@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->"
 CODEX_APP_ID = 1144995
 KINDS = {"📝 **Code Review**": "code", "🔒 **Security Review**": "security"}
 STATUS = re.compile(r'(✅ \*\*Completed\*\*|🔄 \*\*Running\*\* since) '
                     r'<relative-time datetime="([^"]+)">([^<]+)</relative-time>')
+# Codex places its thumbs-up and edits its summary in the same moment, and on a manual request it can
+# react a second or two before the summary edit. A thumbs-up from an earlier review cannot fall this close
+# to a later completion, since a review takes far longer than this to run.
+WITNESS_SKEW = timedelta(seconds=10)
 SECURITY_MARKER = re.compile(r"<!-- codex-security-review:v1 (\{[^\n]*\}) -->")
 
 
@@ -72,16 +76,21 @@ def select_activity(comments: list, repo: str, number: int, user_id: int) -> dic
 
 
 def activity_hold(activity: dict | None, head: str) -> tuple[str, str] | None:
+    """Only the Code Review pass gates admission.
+
+    The Codex producer on this fork runs Code Review automatically and does not
+    run Security Review, which the fork reviews elsewhere. A Security row is
+    parsed for identity (select_activity) but never holds; its findings still
+    block through the thread and standalone-finding guards.
+    """
     if activity is None:
         return "pending", "No canonical public activity producer"
-    passes, security = activity["passes"], activity["security"]
-    if any(row["state"] != "completed" for row in passes.values()):
-        return "pending", "A public review pass is still running"
-    if set(passes) != {"code", "security"} or security is None:
-        return "pending", "Both code and security completion records are required"
-    if security["status"] != "completed":
-        return "pending", "Security review is not completed"
-    if security["headSha"] != head or any(row["sha"] != head for row in passes.values()):
+    code = activity["passes"].get("code")
+    if code is None:
+        return "pending", "A code completion record is required"
+    if code["state"] != "completed":
+        return "pending", "The public code review pass is still running"
+    if code["sha"] != head:
         return "pending", "Public review activity belongs to a superseded head"
     return None
 
@@ -93,5 +102,5 @@ def clean_witness(activity: dict, reactions: list, user_id: int, latest_reviews:
     boundary = max([time(activity["updated_at"]),
                     *(time(row["at"]) for row in activity["passes"].values()),
                     *(time(review["submitted_at"]) for review in latest_reviews.values())])
-    return any(reaction["content"] == "+1" and time(reaction["created_at"]) > boundary
+    return any(reaction["content"] == "+1" and time(reaction["created_at"]) > boundary - WITNESS_SKEW
                for reaction in canonical)

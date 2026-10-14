@@ -23,7 +23,9 @@ from agent.memory_manager import build_memory_context_block
 from agent.memory_provider import is_trivial_prompt
 from agent.message_content import flatten_message_text
 from agent.skills_index_delta import stage_skills_index_note
-from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS, append_message, stamp_message_timestamp
+from agent.message_metadata import (
+    PERSISTENCE_ONLY_MESSAGE_FIELDS, SKILLS_NOTE_CARRIER, append_message, stamp_message_timestamp,
+)
 from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_native_anthropic_request_tokens_rough,
@@ -619,6 +621,9 @@ _PER_TURN_RESET_STATE: tuple[tuple[str, Any], ...] = (
 
 def _reset_per_turn_agent_state(agent: Any) -> None:
     """Reset retry counters, guardrails, iteration and run budgets at turn start."""
+    agent._skills_index_pending_delivery = None
+    agent._skills_index_delivery = None
+    agent._skills_index_note = ""
     for name, value in _PER_TURN_RESET_STATE:
         setattr(agent, name, value)
     agent._turn_failed_file_mutations = {}
@@ -857,9 +862,10 @@ def _merge_gateway_notes(
     append a durable text part instead."""
     _surface_note = consume_surface_switch_note(agent)
     _surface_metadata = take_surface_switch_metadata(agent)
+    _skills_note = consume_skills_index_note(agent)
     _turn_notes = "\n\n".join(
         part for part in (consume_gateway_turn_context_notes(agent), _surface_note,
-                          consume_skills_index_note(agent)) if part
+                          _skills_note) if part
     )
     if _surface_note and _surface_metadata and 0 <= current_turn_user_idx < len(messages):
         user_msg = messages[current_turn_user_idx]
@@ -884,7 +890,13 @@ def _merge_gateway_notes(
             from agent.session_persistence import _durable_content
             user_msg["_surface_switch_durable_content"] = _durable_content(_gw_turn_content)
         append_notes_to_multimodal_content(_gw_turn_content, _turn_notes)
+        if _skills_note:
+            from agent.skills_index_delivery import bind_skills_note
+            bind_skills_note(agent, messages[current_turn_user_idx], _skills_note, part=_gw_turn_content[-1])
         return plugin_user_context
+    if _skills_note and 0 <= current_turn_user_idx < len(messages):
+        from agent.skills_index_delivery import bind_skills_note
+        bind_skills_note(agent, messages[current_turn_user_idx], _skills_note)
     return (
         plugin_user_context + "\n\n" + _turn_notes if plugin_user_context else _turn_notes
     )
@@ -964,6 +976,8 @@ def _stamp_api_content_sidecar(
     has_api_backfill = _api_content is not None and _api_content != durable_content
     if has_api_backfill:
         _turn_user_msg["api_content"] = _api_content
+        from agent.skills_index_delivery import bind_skills_sidecar
+        bind_skills_sidecar(agent, _turn_user_msg, _api_content)
     if not has_api_backfill and not display_metadata:
         return
 
@@ -1287,6 +1301,9 @@ def build_api_messages(
 
     has_current = isinstance(current_turn_user_idx, int) and 0 <= current_turn_user_idx < len(messages)
     current_turn_message = messages[current_turn_user_idx] if has_current else None
+    if isinstance(current_turn_message, dict):
+        from agent.skills_index_delivery import revalidate_skills_note
+        revalidate_skills_note(agent, current_turn_message)
 
     # Replay consumers canonicalize the persisted prefix on read; the request copy must
     # carry the same bytes or a resume diverges mid-prefix. Only the rows BEFORE this
@@ -1302,10 +1319,13 @@ def build_api_messages(
     canonical_messages = canonicalize_replay_history(messages[:split], now=turn_now) + messages[split:]
 
     api_messages = []
+    sidecar_rows: set[int] = set()  # request rows whose content is agent-composed bytes, not the user's text
     for idx, msg in enumerate(canonical_messages):
         # Structural clone, NOT msg.copy(): in-place transforms below must not reach
         # persisted history via nested containers; see _clone_message_for_send.
         api_msg = _clone_message_for_send(msg)
+        if msg.get("role") == "user" and msg.get(SKILLS_NOTE_CARRIER):
+            sidecar_rows.add(len(api_messages))  # A multimodal row an agent appended a skills note part to.
         # api_content is bookkeeping (exact bytes sent), never a provider field — pop
         # it from EVERY outgoing copy. Persistence/display fields (display_*, _row_id,
         # timestamp) are local bookkeeping: strict OpenAI backends reject unknown keys
@@ -1322,6 +1342,7 @@ def build_api_messages(
                 # Reuse the prologue's stamp so sidecar and wire cannot drift
                 # and every pass this turn sends identical bytes.
                 api_msg["content"] = _api_content
+                sidecar_rows.add(len(api_messages))
             else:
                 # Callers that bypass the prologue stamping: compose live.
                 _composed = compose_user_api_content(
@@ -1329,6 +1350,7 @@ def build_api_messages(
                 )
                 if _composed is not None:
                     api_msg["content"] = _composed
+                    sidecar_rows.add(len(api_messages))
         elif (
             isinstance(_api_content, str) and _api_content
             and msg.get("role") in ("user", "assistant")
@@ -1337,6 +1359,7 @@ def build_api_messages(
             # prefix stays byte-stable. User rows carry the injection sidecar; user
             # and assistant rows may carry a sanitize-divergence sidecar.
             api_msg["content"] = _api_content
+            sidecar_rows.add(len(api_messages))
 
         # Replay stored reasoning on every carrier the active route reads (and strip the
         # rest): message_sanitization.reasoning_replay_route owns the decision.
@@ -1366,6 +1389,11 @@ def build_api_messages(
     # survives fresh request construction / process resume via session model_config.
     from agent.anthropic_thinking_replay import apply_rejected_thinking_suppression
     apply_rejected_thinking_suppression(agent, api_messages)
+
+    # A note a provider already received stays as sent in history; a protected route's copy is projected.
+    from agent.skills_index_delivery import project_skills_notes, remember_newest_skills_note
+    remember_newest_skills_note(agent, api_messages, sidecar_rows)
+    api_messages = project_skills_notes(agent, api_messages, sidecar_rows)
 
     # Final system message = cached prompt + ephemeral additions (API-time only).
     # Plugin/recall context goes into the user message, never the system prompt: the
