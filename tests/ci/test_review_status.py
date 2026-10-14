@@ -83,10 +83,10 @@ class FakeAPI(GitHub):
             check_id = int(route.rsplit("/", 1)[1])
             check = next(row for row in self.checks if row["id"] == check_id)
             if verb == "PATCH":
-                if payload["conclusion"] == "failure" and self.rollback_fails:
+                if payload.get("conclusion") == "failure" and self.rollback_fails:
                     raise MetadataError("Rollback unavailable")
                 check.update(payload)
-                if payload["conclusion"] == "success" and self.ambiguous_success:
+                if payload.get("conclusion") == "success" and self.ambiguous_success:
                     raise MetadataError("Response lost after applied update")
             return deepcopy(check)
         raise AssertionError(route)
@@ -148,12 +148,13 @@ def test_invalid_server_execution_never_writes(field, value):
     assert writes(api) == []
 
 
-def test_fresh_failure_precedes_all_rich_reads_and_stable_own_patch_succeeds():
+def test_fresh_check_precedes_all_rich_reads_and_stable_own_patch_succeeds():
     api = FakeAPI()
     assert status.publish(api, HEAD, ENV)["state"] == "success"
     assert [row[0] for row in writes(api)] == ["POST", "PATCH"]
     first = writes(api)[0]
-    assert first[2]["conclusion"] == "failure"
+    assert first[2]["status"] == "in_progress"
+    assert "conclusion" not in first[2]
     assert first[2]["head_sha"] == HEAD
     assert SOURCE in first[2]["external_id"]
     assert all("/actions/runs/" in route or route == f"repos/{REPOSITORY}"
@@ -162,11 +163,27 @@ def test_fresh_failure_precedes_all_rich_reads_and_stable_own_patch_succeeds():
     assert api.checks[0]["conclusion"] == "success"
 
 
-def test_held_single_pr_stays_failure():
+def test_running_review_leaves_check_pending_not_red():
     api = FakeAPI()
     api.held.add(1)
-    assert status.publish(api, HEAD, ENV)["state"] == "failure"
+    assert status.publish(api, HEAD, ENV)["state"] == "pending"
     assert [row[0] for row in writes(api)] == ["POST"]
+    assert api.checks[0]["status"] == "in_progress"
+    assert "conclusion" not in api.checks[0]
+
+
+def test_requested_changes_fail_the_check():
+    api = FakeAPI()
+    original = api.snapshot
+
+    def blocked(number, head):
+        snap = original(number, head)
+        snap["reviews"][0]["state"] = "CHANGES_REQUESTED"
+        return snap
+
+    api.snapshot = blocked
+    assert status.publish(api, HEAD, ENV)["state"] == "failure"
+    assert [row[0] for row in writes(api)] == ["POST", "PATCH"]
     assert api.checks[0]["conclusion"] == "failure"
 
 
@@ -178,9 +195,9 @@ def test_every_open_pr_sharing_head_across_bases_must_clear(held):
     if held:
         api.held.add(1)
     verdict = status.publish(api, HEAD, ENV)
-    assert verdict["state"] == ("failure" if held else "success")
+    assert verdict["state"] == ("pending" if held else "success")
     assert {1, 2}.issubset(api.snapshots)
-    assert api.checks[0]["conclusion"] == verdict["state"]
+    assert api.checks[0].get("conclusion") == (None if held else "success")
 
 
 @pytest.mark.parametrize("change", ["moved", "added", "hold"])
@@ -197,11 +214,78 @@ def test_late_change_after_own_check_read_prevents_success(change):
                 api.held.add(1)
 
     api.on_read = mutate
-    assert status.publish(api, HEAD, ENV)["state"] == "failure"
+    assert status.publish(api, HEAD, ENV)["state"] != "success"
+    assert api.checks[0].get("conclusion") != "success"
+    # A moved head makes the snapshot read fail, which settles the check as a failure.
+    assert [row[0] for row in writes(api)] == (["POST", "PATCH"] if change == "moved" else ["POST"])
+
+
+def test_cohort_change_during_final_read_stays_pending():
+    api = FakeAPI()
+    original = api.snapshot
+    reads = {"n": 0}
+
+    def late_pr(number, head):
+        reads["n"] += 1
+        if reads["n"] == 3:
+            api.prs.append(pr(2))
+        return original(number, head)
+
+    api.snapshot = late_pr
+    assert status.publish(api, HEAD, ENV)["state"] == "pending"
     assert [row[0] for row in writes(api)] == ["POST"]
 
 
-def test_metadata_outage_after_post_leaves_failure():
+def test_pr_closing_during_snapshot_read_stays_pending():
+    api = FakeAPI()
+    api.prs.append(pr(2))
+    original = api.snapshot
+
+    def closing(number, head):
+        if number == 2:
+            api.prs[:] = [row for row in api.prs if row["number"] != 2]
+            raise MetadataError("PR closed or expected head superseded")
+        return original(number, head)
+
+    api.snapshot = closing
+    assert status.publish(api, HEAD, ENV)["state"] == "pending"
+    assert [row[0] for row in writes(api)] == ["POST"]
+
+
+def test_blocked_pr_closing_after_snapshot_stays_pending():
+    api = FakeAPI()
+    api.prs.append(pr(2))
+    original = api.snapshot
+
+    def blocked_then_closed(number, head):
+        snap = original(number, head)
+        if number == 1:
+            snap["reviews"][0]["state"] = "CHANGES_REQUESTED"
+        if number == 2:
+            api.prs[:] = [row for row in api.prs if row["number"] != 2]
+        return snap
+
+    api.snapshot = blocked_then_closed
+    assert status.publish(api, HEAD, ENV)["state"] == "pending"
+    assert [row[0] for row in writes(api)] == ["POST"]
+
+
+def test_lost_creation_response_still_settles_the_created_check():
+    api = FakeAPI()
+    original = api.request
+
+    def lossy(route, *, post=False, payload=None, method=None):
+        result = original(route, post=post, payload=payload, method=method)
+        if post:
+            raise MetadataError("Response lost after applied create")
+        return result
+
+    api.request = lossy
+    assert status.publish(api, HEAD, ENV)["state"] == "failure"
+    assert api.checks[0]["conclusion"] == "failure"
+
+
+def test_metadata_outage_after_post_fails_the_check():
     api = FakeAPI()
 
     def outage(route):
@@ -211,7 +295,7 @@ def test_metadata_outage_after_post_leaves_failure():
     api.on_read = outage
     assert status.publish(api, HEAD, ENV)["state"] == "failure"
     assert api.checks[0]["conclusion"] == "failure"
-    assert [row[0] for row in writes(api)] == ["POST"]
+    assert [row[0] for row in writes(api)] == ["POST", "PATCH"]
 
 
 @pytest.mark.parametrize("mismatch", ["app", "namespace", "duplicate"])
@@ -229,18 +313,18 @@ def test_unowned_or_duplicate_checks_are_never_mutated(mismatch):
     api.checks.append(deepcopy(historic))
     assert status.publish(api, HEAD, ENV)["state"] == "failure"
     assert api.checks[0] == historic
-    assert [row[0] for row in writes(api)] == ["POST"]
+    assert [row[0] for row in writes(api)] == ["POST", "PATCH"]
     assert api.checks[1]["conclusion"] == "failure"
 
 
-def test_same_execution_replay_creates_fresh_failure_and_cannot_reuse_success():
+def test_same_execution_replay_creates_fresh_check_and_cannot_reuse_success():
     api = FakeAPI()
     assert status.publish(api, HEAD, ENV)["state"] == "success"
     previous = deepcopy(api.checks[0])
     assert status.publish(api, HEAD, ENV)["state"] == "failure"
     assert api.checks[0] == previous
     assert api.checks[1]["conclusion"] == "failure"
-    assert [row[0] for row in writes(api)] == ["POST", "PATCH", "POST"]
+    assert [row[0] for row in writes(api)] == ["POST", "PATCH", "POST", "PATCH"]
 
 
 @pytest.mark.parametrize("rollback_fails", [False, True])
@@ -250,7 +334,7 @@ def test_applied_success_with_lost_response_attempts_owned_failure_rollback(roll
     api.rollback_fails = rollback_fails
     verdict = status.publish(api, HEAD, ENV)
     assert verdict["state"] == "failure"
-    assert [row[2]["conclusion"] for row in writes(api)] == ["failure", "success", "failure"]
+    assert [row[2].get("conclusion") for row in writes(api)] == [None, "success", "failure"]
     assert all(row[1].endswith("/10") for row in writes(api)[1:])
     if rollback_fails:
         assert "uncertain" in verdict["reason"]
@@ -313,7 +397,7 @@ def test_accumulated_review_checks_still_hold_at_the_declared_bound():
     api.checks = [{"id": index, "name": status.NAME} for index in range(200)]
     verdict = status.publish(api, HEAD, ENV)
     assert verdict["state"] == "failure"
-    assert [row[0] for row in writes(api)] == ["POST"]
+    assert [row[0] for row in writes(api)] == ["POST", "PATCH"]
     assert api.checks[-1]["conclusion"] == "failure"
 
 
