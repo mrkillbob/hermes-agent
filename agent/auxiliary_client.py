@@ -671,13 +671,12 @@ def _is_codex_spark(model: Optional[str], provider: Optional[str] = None) -> boo
 def _fixed_temperature_for_model(
     model: Optional[str], base_url: Optional[str] = None, provider: Optional[str] = None,
 ) -> "Optional[float] | object":
-    """``OMIT_TEMPERATURE`` (drop the key; Kimi/Moonshot), a fixed ``float``, or ``None``."""
+    """``OMIT_TEMPERATURE`` (drop the key; Kimi/Moonshot, Gemini 3.6+), a fixed ``float``, or ``None``."""
     if _temperature_route_key(provider, model, base_url) in _TEMPERATURE_REJECTED_ROUTES:
         return OMIT_TEMPERATURE
     bare = _bare_model(model)
-    if bare.startswith(("o3", "o4")) or (
-        bare.startswith("gpt-5") and not bare.startswith("gpt-5-chat")
-    ):
+    from agent.gemini_native_adapter import gemini_sampling_deprecated
+    if bare.startswith(("o3", "o4")) or (bare.startswith("gpt-5") and not bare.startswith("gpt-5-chat")) or gemini_sampling_deprecated(bare):
         return OMIT_TEMPERATURE
     if _is_kimi_model(model):
         logger.debug("Omitting temperature for Kimi model %r (server-managed)", model)

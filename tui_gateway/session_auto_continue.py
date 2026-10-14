@@ -77,10 +77,6 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
                     "marker is ownership evidence and the owner clears it", session_key,
                     marker.get("writer_pid"), os.getpid())
         return None
-    from agent.initiate_setup_prompt import intro_resends
-    if intro_resends(marker["prompt"], _session_source(session)):
-        clear_turn_marker(home, session_key)  # the desktop intro sends /initiate-setup again itself
-        return None
     enabled, freshness_secs, max_attempts = _auto_continue_config()
     age = time.time() - marker["started_at"]
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:

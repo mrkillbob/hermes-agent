@@ -2,6 +2,11 @@ name: Contributor Attribution Check
 
 on:
   workflow_call:
+    inputs:
+      commit:
+        description: Commit to test and build. Empty keeps the triggering commit.
+        type: string
+        default: ''
     outputs:
       review_status:
         description: "JSON array of review status objects"
@@ -20,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
+          ref: ${{ inputs.commit }}
           fetch-depth: 1
 
       - name: Check for unmapped contributor emails
@@ -27,7 +33,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number || '' }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_SHA: ${{ inputs.commit || github.event.pull_request.head.sha || github.sha }}
         run: |
           # Read commit metadata from GitHub instead of fetching the repository's full history.
           # Pull-request runs use the PR commit list. A post-merge push has no pull_request

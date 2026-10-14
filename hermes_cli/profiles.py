@@ -88,7 +88,6 @@ _CLONE_ALL_HISTORY_EXCLUDE_ROOT: frozenset[str] = frozenset({
 # seed_profile_skills() callers (fresh-create, `hermes update` all-profile sync, the
 # dashboard) skip bundled-skill seeding. Delete the file to opt back in.
 NO_BUNDLED_SKILLS_MARKER = ".no-bundled-skills"
-SETUP_PROFILE_MARKER = ".setup-profile.json"
 
 # Header seeded into a profile's empty .env so it owns a credentials file from day one.
 _PLACEHOLDER_ENV = (
@@ -771,22 +770,6 @@ def _read_config_model(profile_dir: Path) -> tuple:
     return _cached_profile_read(config_path, "config-model", _read)
 
 
-def launch_model_seed(source_cfg: dict) -> dict:
-    """The config a fresh profile needs to run the launch profile's model: its ``model`` block plus,
-    when that block points at a custom ``providers:`` gateway (self-hosted / local endpoint), that
-    provider's definition — ``model.provider: my-gateway`` alone is "Unknown provider" on the first
-    turn. ``{}`` when the launch profile has no model."""
-    model_cfg = source_cfg.get("model")
-    if not model_cfg:
-        return {}
-    seed = {"model": model_cfg}
-    providers = source_cfg.get("providers")
-    name = model_cfg.get("provider") if isinstance(model_cfg, dict) else None
-    if isinstance(providers, dict) and name in providers:
-        seed["providers"] = {name: providers[name]}
-    return seed
-
-
 def _seed_model_config(profile_dir: Path) -> None:
     """Copy (not link) the active profile's model block into a fresh profile so it is usable;
     profiles stay independent islands afterwards."""
@@ -796,6 +779,7 @@ def _seed_model_config(profile_dir: Path) -> None:
     with contextlib.suppress(Exception):  # creation must not fail over this; `hermes model` sets it later
         from hermes_constants import get_hermes_home
         from hermes_cli.config import atomic_config_write, read_user_config_raw
+        from hermes_cli.profile_model_seed import launch_model_seed
         source = get_hermes_home() / "config.yaml"
         seed = launch_model_seed(read_user_config_raw(source)) if source.is_file() else {}
         if seed:
@@ -1455,9 +1439,6 @@ def create_profile(
             _clone_all_into(source_dir, staging, canon)
         else:
             _bootstrap_profile_dir(staging, source_dir, sync_imports=sync_imports)
-        if source_dir is not None:
-            from hermes_cli.setup_profile import release_setup_copy, setup_marker_state
-            release_setup_copy(staging, setup_state=setup_marker_state(source_dir))
         if source_dir is not None and not clone_channels:
             from hermes_cli.profile_channels import strip_channel_settings
             stripped = strip_channel_settings(staging, include_state=clone_all, source_dir=source_dir)
@@ -2327,8 +2308,6 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
                     shutil.rmtree(child)
                 else:
                     child.unlink()
-        from hermes_cli.setup_profile import release_setup_copy, setup_marker_state
-        release_setup_copy(final_source, setup_state=setup_marker_state(final_source))
         shutil.move(str(final_source), str(profile_dir))
     return profile_dir
 

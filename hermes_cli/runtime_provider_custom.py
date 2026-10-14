@@ -136,7 +136,10 @@ def _shadowed_by_builtin(requested_norm: str) -> bool:
     return (canonical or "").strip().lower() == requested_norm
 
 
-def _match_new_style_provider(requested_norm: str, providers: dict[str, Any], *, metadata_only: bool = False) -> Optional[dict[str, Any]]:
+def _match_new_style_provider(
+    requested_norm: str, providers: dict[str, Any], *, metadata_only: bool = False,
+    resolve_credentials: bool = True,
+) -> Optional[dict[str, Any]]:
     """Scan ``providers:`` (new-style, keyed) for ``requested_norm``."""
     from hermes_cli.config import is_provider_enabled
     rp = _rp()
@@ -154,7 +157,7 @@ def _match_new_style_provider(requested_norm: str, providers: dict[str, Any], *,
         # Resolve credentials only after identity and endpoint validation. Merely scanning an
         # unrelated entry must not read its profile-scoped secret.
         key_env = _clean(entry.get("key_env") or entry.get("api_key_env"))
-        api_key = get_secret_str(key_env, "").strip() if key_env else ""
+        api_key = get_secret_str(key_env, "").strip() if key_env and resolve_credentials else ""
         result: dict[str, Any] = {"name": entry.get("name", ep_name), "base_url": base_url.strip(),
                                   "api_key": api_key or _clean(entry.get("api_key", "")), "model": entry.get("default_model", "")}
         # Command that PRINTS a short-lived credential; wrapped in a per-request token provider.
@@ -192,18 +195,29 @@ def _match_legacy_custom_provider(requested_norm: str, custom_providers, *, meta
     return None
 
 
-def _get_named_custom_provider(requested_provider: str, *, metadata_only: bool = False) -> Optional[dict[str, Any]]:
+def _get_named_custom_provider(
+    requested_provider: str, *, metadata_only: bool = False, config: Optional[dict[str, Any]] = None,
+    resolve_credentials: bool = True,
+) -> Optional[dict[str, Any]]:
+    """Resolve a named endpoint. ``metadata_only`` reads the config read-only and returns identity and
+    endpoint only. Creation-time config copying supplies its own config snapshot and skips credential
+    reads; ordinary runtime callers keep their existing scoped resolution."""
     requested_norm = _normalize_custom_provider_name(requested_provider or "")
     if not requested_norm or requested_norm == "auto" or _shadowed_by_builtin(requested_norm):
         return None
     rp = _rp()
-    if metadata_only:
-        from hermes_cli.config import load_config_readonly
-        config = load_config_readonly()
-    else:
-        config = rp.load_config()
+    if config is None:
+        if metadata_only:
+            from hermes_cli.config import load_config_readonly
+            config = load_config_readonly()
+        else:
+            config = rp.load_config()
     providers = config.get("providers")
-    found = _match_new_style_provider(requested_norm, providers, metadata_only=metadata_only) if isinstance(providers, dict) else None
+    found = (
+        _match_new_style_provider(
+            requested_norm, providers, metadata_only=metadata_only, resolve_credentials=resolve_credentials)
+        if isinstance(providers, dict) else None
+    )
     if found:
         return found
     if isinstance(config.get("custom_providers"), dict):
