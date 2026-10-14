@@ -25,3 +25,8 @@ def test_eyes_reaction_blocks_the_witness():
     reactions = [{"content": "+1", "created_at": "2026-10-14T06:17:36+00:00", "user": {"id": CODEX}},
                  {"content": "eyes", "created_at": "2026-10-14T06:17:37+00:00", "user": {"id": CODEX}}]
     assert not clean_witness(activity, reactions, CODEX, {})
+
+
+def test_thumbs_up_exactly_at_the_skew_limit_is_fresh_and_just_beyond_is_stale():
+    assert witness("2026-10-14T06:17:29.501987+00:00")
+    assert not witness("2026-10-14T06:17:29.501986+00:00")

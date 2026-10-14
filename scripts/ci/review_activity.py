@@ -102,5 +102,5 @@ def clean_witness(activity: dict, reactions: list, user_id: int, latest_reviews:
     # the thumbs-up, and a rerun is already caught by its Running row or a new completion time.
     boundary = max([*(time(row["at"]) for row in activity["passes"].values()),
                     *(time(review["submitted_at"]) for review in latest_reviews.values())])
-    return any(reaction["content"] == "+1" and time(reaction["created_at"]) > boundary - WITNESS_SKEW
+    return any(reaction["content"] == "+1" and time(reaction["created_at"]) >= boundary - WITNESS_SKEW
                for reaction in canonical)
