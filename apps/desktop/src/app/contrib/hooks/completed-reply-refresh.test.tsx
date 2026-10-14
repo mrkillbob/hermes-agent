@@ -831,10 +831,16 @@ it('keeps the catch-up marker when every history read fails and recovers on a la
   const settledAt = $sessionStates.get()[RUNTIME].heartbeatSettledAt
   vi.mocked(getLatestSessionMessages).mockRejectedValue(new Error('rest unavailable'))
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(5000)
+    await vi.advanceTimersByTimeAsync(15000)
   })
-  expect(getLatestSessionMessages).toHaveBeenCalledTimes(3)
+  const attempted = vi.mocked(getLatestSessionMessages).mock.calls.length
+  expect(attempted).toBeGreaterThan(3)
   expect($sessionStates.get()[RUNTIME].heartbeatSettledAt).toBe(settledAt)
+  // The retries are bounded: once exhausted, nothing keeps polling.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60000)
+  })
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(attempted)
   vi.mocked(getLatestSessionMessages).mockReset()
   vi.mocked(getLatestSessionMessages).mockResolvedValue({
     session_id: STORED,
@@ -849,5 +855,34 @@ it('keeps the catch-up marker when every history read fails and recovers on a la
   })
   expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
   expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+  expect($sessionStates.get()[RUNTIME].heartbeatSettledAt).toBeNull()
+})
+
+it('retries after a read that lands before the durable commit and replaces the prefix without another event', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  send('message.start')
+  send('message.delta', { text: 'The completed' })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('session.info', { running: false, stored_session_id: STORED })
+  // First read succeeds but the answer is not committed yet; the next one has it.
+  vi.mocked(getLatestSessionMessages)
+    .mockResolvedValueOnce({ session_id: STORED, messages: history })
+    .mockResolvedValue({
+      session_id: STORED,
+      messages: [...history, { id: 4, role: 'assistant', content: FINAL, timestamp: 4 }]
+    })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2500)
+  })
+  expect($sessionStates.get()[RUNTIME].heartbeatSettledAt).not.toBeNull()
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500)
+  })
+  const replies = $sessionStates.get()[RUNTIME].messages.filter(message => message.role === 'assistant')
+  expect(replies.filter(message => chatMessageText(message).includes(FINAL))).toHaveLength(1)
+  expect(replies.some(message => chatMessageText(message) === 'The completed')).toBe(false)
   expect($sessionStates.get()[RUNTIME].heartbeatSettledAt).toBeNull()
 })
