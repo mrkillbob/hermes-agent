@@ -1,0 +1,27 @@
+name: Review CI wake-up
+
+# Unprivileged native wake-up only. Review events use the PR workflow definition,
+# so no write token or PR-controlled source belongs here. The default-branch
+# review-resumption controller re-reads live metadata before requesting a retry.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed, ready_for_review, converted_to_draft]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+
+permissions: {}
+
+jobs:
+  wake-up:
+    if: >-
+      github.repository == 'mrkillbob/hermes-agent' &&
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'pull_request_review' && github.event.review.user.id == 199175422) ||
+       (github.event_name == 'pull_request_review_comment' && github.event.comment.user.id == 199175422))
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Wake trusted review reconciliation
+        run: echo 'Review metadata changed; the trusted controller will re-evaluate it.'
