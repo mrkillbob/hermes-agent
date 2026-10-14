@@ -1316,7 +1316,10 @@ def _apply_context_engine_selection(
         # carry persistence-only fields; the request copy was stripped BEFORE this hook, so strip the
         # selection too or those fields reach the provider. Dicts without them pass through as-is.
         stripped = [without_persistence_fields(m) for m in selected]
-        return selected if all(a is b for a, b in zip(stripped, selected)) else stripped
+        from agent.skills_index_delivery import project_sent_skills_notes
+        # The selection can be raw clones of the transcript; a protected route must not see a sent note.
+        return project_sent_skills_notes(
+            agent, selected if all(a is b for a, b in zip(stripped, selected)) else stripped)
     logger.warning(
         "Context engine select_context returned an invalid value "
         "(not a non-empty list of dicts); ignoring (session=%s)", session_label,

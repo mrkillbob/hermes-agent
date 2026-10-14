@@ -269,3 +269,57 @@ def test_compaction_rewritten_row_does_not_inherit_ownership(tmp_path, monkeypat
     agent.provider = "nous"
     with pytest.raises(EgressBlocked):
         _decision(tmp_path, flatten_message_text(_wire(agent, rewritten)))
+
+
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_context_selection_clones_cannot_reintroduce_a_sent_note(tmp_path, monkeypatch, multimodal):
+    import logging
+
+    from agent.conversation_loop import _apply_context_engine_selection
+
+    class Selecting:  # Hands back the raw transcript clones, a supported select_context() shape.
+        def select_context(self, api_messages, conversation_messages=None, incoming_message=None, budget_tokens=0):
+            return list(conversation_messages)
+
+    agent, message = _stage(monkeypatch, multimodal=multimodal)
+    assert "Create HTML diagrams." in flatten_message_text(_wire(agent, message))  # Main route sent the raw note.
+    live = _live(message)
+    agent.context_compressor = Selecting()
+    agent.provider = "nous"
+    api = build_api_messages(agent, [message], current_turn_user_idx=0, ext_prefetch_cache="",
+                             plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+    out = _apply_context_engine_selection(agent, api, [message], message, logger=logging.getLogger("t"))
+    text = flatten_message_text(out[0]["content"])
+    assert "Create HTML diagrams." not in text
+    assert _decision(tmp_path, text).allowed
+    assert _live(message) == live
+
+
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_sent_note_stays_projected_in_history_while_a_fallback_persists(tmp_path, monkeypatch, multimodal):
+    agent, message = _stage(monkeypatch, multimodal=multimodal)
+    sent = flatten_message_text(_wire(agent, message))  # Turn N: the primary received the raw note.
+    assert "Create HTML diagrams." in sent
+    live = _live(message)
+    stage_skills_index_note(agent, PROMPT, [message])  # Turn N+1 resets the delivery record.
+    history = [message, {"role": "assistant", "content": "Done."}, {"role": "user", "content": "Next."}]
+    agent.provider = "nous"  # The protected fallback stays active across turns.
+    api = build_api_messages(agent, history, current_turn_user_idx=2, ext_prefetch_cache="",
+                             plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+    text = flatten_message_text(api[0]["content"])
+    assert "Create HTML diagrams." not in text
+    assert "    - archify" in text
+    assert _decision(tmp_path, text).allowed
+    assert _live(message) == live  # The primary provider's cached bytes are untouched.
+    agent.provider = "openrouter"
+    restored = build_api_messages(agent, history, current_turn_user_idx=2, ext_prefetch_cache="",
+                                  plugin_user_context="", moa_config=None, active_system_prompt="")[0]
+    assert flatten_message_text(restored[0]["content"]) == sent
+
+
+def test_text_never_sent_as_a_note_is_not_repaired(tmp_path, monkeypatch):
+    agent, message = _stage(monkeypatch)
+    copy = dict(message)  # Nothing was built for an unprotected route, so nothing is remembered.
+    agent.provider = "nous"
+    with pytest.raises(EgressBlocked):
+        _decision(tmp_path, flatten_message_text(_wire(agent, copy)))

@@ -1299,10 +1299,9 @@ def build_api_messages(
 
     has_current = isinstance(current_turn_user_idx, int) and 0 <= current_turn_user_idx < len(messages)
     current_turn_message = messages[current_turn_user_idx] if has_current else None
-    request_projection = None
     if isinstance(current_turn_message, dict):
         from agent.skills_index_delivery import revalidate_skills_note
-        request_projection = revalidate_skills_note(agent, current_turn_message)
+        revalidate_skills_note(agent, current_turn_message)
 
     # Replay consumers canonicalize the persisted prefix on read; the request copy must
     # carry the same bytes or a resume diverges mid-prefix. Only the rows BEFORE this
@@ -1345,13 +1344,6 @@ def build_api_messages(
                 )
                 if _composed is not None:
                     api_msg["content"] = _composed
-            if request_projection is not None:
-                # A note already built for another route stays as it was sent; only this copy is projected.
-                _projected_text, _part_index = request_projection
-                if _part_index is None:
-                    api_msg["content"] = _projected_text
-                else:
-                    api_msg["content"][_part_index] = {**api_msg["content"][_part_index], "text": _projected_text}
         elif (
             isinstance(_api_content, str) and _api_content
             and msg.get("role") in ("user", "assistant")
@@ -1390,6 +1382,10 @@ def build_api_messages(
     # survives fresh request construction / process resume via session model_config.
     from agent.anthropic_thinking_replay import apply_rejected_thinking_suppression
     apply_rejected_thinking_suppression(agent, api_messages)
+
+    # A note a provider already received stays as sent in history; a protected route's copy is projected.
+    from agent.skills_index_delivery import project_sent_skills_notes
+    api_messages = project_sent_skills_notes(agent, api_messages)
 
     # Final system message = cached prompt + ephemeral additions (API-time only).
     # Plugin/recall context goes into the user message, never the system prompt: the

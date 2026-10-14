@@ -3,11 +3,14 @@
 Ownership stays in memory for this turn. Persisted markers cannot create it.
 
 Until a request carrying the raw note has been built, a protected route projects the live message and
-its durable row once (sticky). After that, bytes a provider may already have received are history: a
-later protected route (fallback) projects only its own outgoing request copy.
+its durable row once (sticky). After that, bytes a provider may already have received are history: the
+raw note is remembered in memory, and a protected route (a fallback, this turn or a later one) projects
+only its own outgoing request copy, wherever the note sits in it.
 """
 from dataclasses import dataclass
 from typing import Any
+
+_SENT_NOTES_MAX = 8
 
 
 @dataclass
@@ -43,12 +46,12 @@ def bind_skills_sidecar(agent, message, sidecar):
             delivery.expected = sidecar
 
 
-def _project_note(agent, delivery):
+def _project_note(agent, raw_added, raw_removed):
     from agent.llm_egress_firewall import SanitizedTextRejected, validate_sanitized_text
     from agent.skills_index_delta import _OMITTED_KEY, _OMITTED_NOTICE, _project_entries, _render
 
-    added = _project_entries(delivery.added, announce_omissions=True)
-    withdrawn = _project_entries({name: "" for name in delivery.removed}, announce_omissions=True)
+    added = _project_entries(raw_added, announce_omissions=True)
+    withdrawn = _project_entries({name: "" for name in raw_removed}, announce_omissions=True)
     if _OMITTED_KEY in withdrawn:
         added[_OMITTED_KEY] = _OMITTED_NOTICE
     removed = frozenset(name for name in withdrawn if name != _OMITTED_KEY)
@@ -94,14 +97,64 @@ def _owned_text(message, delivery):
     return current
 
 
+def _remember_sent(agent, delivery):
+    """Process-local record that a request carrying this raw note was built for an unprotected route.
+
+    Only the producer writes it, and only after such a build, so text that was never sent as a note
+    cannot be repaired by it.
+    """
+    sent = getattr(agent, "_skills_index_sent_notes", None)
+    if not isinstance(sent, dict):
+        sent = agent._skills_index_sent_notes = {}
+    sent.pop(delivery.note, None)
+    sent[delivery.note] = (dict(delivery.added), delivery.removed)
+    while len(sent) > _SENT_NOTES_MAX:
+        sent.pop(next(iter(sent)))
+
+
+def project_sent_skills_notes(agent, api_messages):
+    """Return ``api_messages`` with every remembered raw note projected for a protected route.
+
+    Request-copy only: matching user rows (or text parts) are replaced by new dicts, never mutated, so
+    the live transcript, the durable rows and the primary route's cached bytes stay as they were sent.
+    Keyed on the note's bytes because a context engine's selection can hand back clones that carry no
+    identity, and because a note sent on an earlier turn is history by now.
+    """
+    sent = getattr(agent, "_skills_index_sent_notes", None)
+    if not sent:
+        return api_messages
+    from agent.chat_completion_helpers import _destination_requires_egress_firewall
+
+    if not _destination_requires_egress_firewall(agent):
+        return api_messages
+    projections = [(raw, _project_note(agent, added, removed)[0]) for raw, (added, removed) in sent.items()]
+
+    def swap(text):
+        return next((text[:-len(raw)] + note for raw, note in projections if text.endswith(raw)), text)
+
+    out = []
+    for message in api_messages:
+        content = message.get("content") if message.get("role") == "user" else None
+        if isinstance(content, str) and swap(content) != content:
+            message = {**message, "content": swap(content)}
+        elif isinstance(content, list) and any(isinstance(p, dict) and isinstance(p.get("text"), str)
+                                               and swap(p["text"]) != p["text"] for p in content):
+            message = {**message, "content": [
+                {**p, "text": swap(p["text"])} if isinstance(p, dict) and isinstance(p.get("text"), str) else p
+                for p in content]}
+        out.append(message)
+    return out
+
+
 def revalidate_skills_note(agent, message):
     """Project only the authenticated live producer span for the actual bound route.
 
     Before any request carrying the raw note was built, projection is sticky: the live message and its
     durable row are rewritten once, and a replaced/copied envelope expires ownership, leaving ordinary
     final-gate rejection intact. Durable write failure stops the request. Once a request carrying the
-    raw note has been built, those bytes may already be with a provider and in its cached prefix, so a
-    protected route gets ``(text, part_index)`` for its request copy only and nothing is rewritten.
+    raw note has been built, those bytes may already be with a provider and in its cached prefix: the
+    note is remembered and nothing is rewritten; :func:`project_sent_skills_notes` handles protected
+    routes on the request copy.
     """
     from agent.chat_completion_helpers import _destination_requires_egress_firewall
     from agent.session_persistence import _durable_content, _persist_lock, durable_user_row_content
@@ -109,27 +162,20 @@ def revalidate_skills_note(agent, message):
 
     delivery = getattr(agent, "_skills_index_delivery", None)
     if not isinstance(delivery, _Delivery) or delivery.message is not message or delivery.projected:
-        return None
+        return
     if not _destination_requires_egress_firewall(agent):
-        delivery.raw_built = True
-        return None
+        if _owned_text(message, delivery) is not None:
+            delivery.raw_built = True
+            _remember_sent(agent, delivery)
+        return
     if delivery.raw_built:
-        current = _owned_text(message, delivery)
-        if current is None:
-            return None
-        note, _ = _project_note(agent, delivery)
-        projected = current[:-len(delivery.note)] + note
-        if projected == current:
-            return None
-        index = None if delivery.part is None else next(
-            i for i, p in enumerate(message["content"]) if p is delivery.part)
-        return projected, index
+        return
     with _persist_lock(agent):
         current = _owned_text(message, delivery)
         if current is None:
-            return None
+            return
         content = message.get("content")
-        note, delta = _project_note(agent, delivery)
+        note, delta = _project_note(agent, delivery.added, delivery.removed)
         projected = current[:-len(delivery.note)] + note
         db = getattr(agent, "_session_db", None)
         if projected != current:
