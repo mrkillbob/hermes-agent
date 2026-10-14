@@ -34,7 +34,7 @@ jobs:
     # This fork has no access to upstream's ubuntu-latest-32-core runner
     # group; it uses the standard runner. In NousResearch, match the full
     # process-heavy E2E lane's 32-core runner.
-    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-24.04' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1

@@ -26,7 +26,7 @@ concurrency:
 jobs:
   update:
     name: Desktop install/update E2E (Linux, ${{ matrix.cell }})
-    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     # Required whenever the e2e_desktop_update lane fires (see ci.yaml): it was
     # advisory until it proved stable, and every main push shard since has passed.
