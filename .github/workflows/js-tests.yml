@@ -126,3 +126,9 @@ jobs:
           HERMES_VERIFY_GET_WINDOWS_NATIVE: '1'
           npm_config_foreground_scripts: 'true'
         run: node ../../node_modules/vitest/vitest.mjs run --project electron scripts/node-pre-gyp-compat.test.mjs scripts/prepared-native-deps.test.mjs scripts/stage-native-deps.test.mjs e2e/fix-electron-tracing.unit.test.ts --maxWorkers=2
+      - name: Check the checkout is clean
+        # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
+        # leaves an untracked or modified file in the checkout is reported here. Runs only when
+        # every earlier step passed: a step that failed midway can leave its own temp files
+        # (a half-extracted download, a worktree its later cleanup never removed).
+        uses: ./.github/actions/check-clean-worktree
