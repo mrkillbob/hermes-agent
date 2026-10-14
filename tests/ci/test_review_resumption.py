@@ -504,7 +504,7 @@ def test_actual_running_activity_holds_with_canonical_eyes(tmp_path):
 
 @pytest.mark.parametrize("patch", [
     {"reactions": []},
-    {"reactions": [{"user": BOT, "content": "+1", "created_at": "2026-10-13T01:28:03Z"}]},
+    {"reactions": [{"user": BOT, "content": "+1", "created_at": "2026-10-13T01:20:00Z"}]},  # Minutes older: a previous review's.
     {"reactions": [{"user": {"id": 123}, "content": "+1", "created_at": "2026-10-13T01:28:06Z"}]},
     {"reactions": [{"user": BOT, "content": "eyes", "created_at": "2026-10-13T01:00:00Z"}]},
 ])
@@ -513,6 +513,19 @@ def test_completion_alone_or_stale_impostor_witness_cannot_clear(tmp_path, patch
     data.update(patch)
     process, data = invoke(tmp_path, data)
     assert verdict(process) == "pending"
+    assert data["mutations"] == []
+
+
+@pytest.mark.parametrize("created_at, expected", [
+    ("2026-10-13T01:28:03Z", "clean"),    # A second before the summary edit: Codex reacted first.
+    ("2026-10-13T01:27:56Z", "clean"),    # Eight seconds before: still the same moment.
+    ("2026-10-13T01:27:50Z", "pending"),  # Fourteen seconds before: an earlier review's thumbs-up.
+])
+def test_a_clean_thumbs_up_placed_moments_before_the_summary_edit_is_still_fresh(tmp_path, created_at, expected):
+    data = snapshot()
+    data["reactions"] = [{"id": 1, "user": BOT, "content": "+1", "created_at": created_at}]
+    process, data = invoke(tmp_path, data)
+    assert verdict(process) == expected, process.stdout
     assert data["mutations"] == []
 
 
