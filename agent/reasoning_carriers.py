@@ -91,7 +91,7 @@ def _route_reads(model: Any, base_url: Any) -> tuple[str, ...]:
     from utils import base_url_host_matches
 
     # Same gate as tool-call extra_content, so the two signature carriers can never disagree.
-    gemini = ("extra_content",) if _model_consumes_thought_signature(model) else ()
+    gemini = ("extra_content",) if _model_consumes_thought_signature(model, base_url) else ()
     copilot = ("reasoning_opaque", "reasoning_text") if base_url_host_matches(str(base_url or ""), "githubcopilot.com") else ()
     return gemini + copilot
 

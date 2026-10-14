@@ -81,3 +81,14 @@ def test_copilot_reasoning_and_function_signature_reach_only_copilot():
         assert "thought_signature" not in other["tool_calls"][0]["function"]
         assert all(d.get("type") != "hermes.native_assistant" for d in other.get("reasoning_details") or ())
     assert stored == snapshot
+
+
+def test_a_gemini_endpoint_keeps_the_message_signature_under_a_model_alias():
+    """The route is recognised by its host, so an alias without "gemini" in it still gets its signature back."""
+    stored = {"role": "assistant", "content": "391", "extra_content": {"google": {"thought_signature": "SIG"}}}
+    for base_url in ("https://generativelanguage.googleapis.com/v1beta/openai",
+                     "https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints/openapi"):
+        wire = shape_wire_carriers([stored], model="my-alias", base_url=base_url)[0]
+        assert wire["extra_content"] == {"google": {"thought_signature": "SIG"}}
+    other = shape_wire_carriers([stored], model="my-alias", base_url="https://api.fireworks.ai/inference/v1")[0]
+    assert "extra_content" not in other
