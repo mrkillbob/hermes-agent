@@ -5,7 +5,7 @@ name: Label rerun
 # rerun this head's CI so the new label is observed: `run-e2e` reruns the whole
 # run (the detect jobs must be recomputed to un-skip the slow lanes), while
 # `ci-reviewed` reruns only the failed jobs. A run that is still in progress
-# is left alone: nothing can be rerun until it finishes.
+# cannot be rerun, so wait for it to finish first.
 on:
   pull_request:
     types: [labeled]
@@ -14,6 +14,10 @@ permissions:
   actions: write
   contents: read
 
+concurrency:
+  group: label-rerun-${{ github.event.pull_request.number }}-${{ github.event.label.name }}
+  cancel-in-progress: true
+
 jobs:
   rerun-failed:
     if: >-
@@ -21,9 +25,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(fromJSON('["run-e2e", "ci-reviewed"]'), github.event.label.name)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 180
     steps:
-      - name: Rerun failed jobs for the labeled head
+      - name: Rerun CI for the labeled head
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -31,23 +35,37 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           LABEL: ${{ github.event.label.name }}
         run: |
-          for workflow in ci.yaml docker.yml nix.yml; do
-            run=$(gh run list --workflow "$workflow" --event pull_request \
-              --commit "$HEAD_SHA" --limit 1 \
-              --json databaseId,status,conclusion --jq '.[0] // empty')
-            [ -n "$run" ] || { echo "$workflow: no run for $HEAD_SHA"; continue; }
-            id=$(jq -r .databaseId <<<"$run")
-            status=$(jq -r .status <<<"$run")
-            conclusion=$(jq -r .conclusion <<<"$run")
+          # Runs are matched by head SHA and then by pull request, so another PR
+          # sharing the commit is never rerun.
+          find_run() {
+            gh api "repos/$GH_REPO/actions/workflows/$1/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=30" \
+              | jq -c --argjson pr "$PR_NUMBER" \
+                '[.workflow_runs[] | select(any(.pull_requests[]; .number == $pr))][0] // empty'
+          }
+          head_moved() {
             # A rerun of a superseded head can cancel the newer head's CI through
             # the shared concurrency group, so re-read the live head first.
             live=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
-            if [ "$live" != "$HEAD_SHA" ]; then
-              echo "PR head moved to $live; skipping"
+            [ "$live" != "$HEAD_SHA" ]
+          }
+          for workflow in ci.yaml docker.yml nix.yml; do
+            run=$(find_run "$workflow")
+            [ -n "$run" ] || { echo "$workflow: no run for $HEAD_SHA"; continue; }
+            id=$(jq -r .id <<<"$run")
+            if [ "$(jq -r .status <<<"$run")" != completed ]; then
+              echo "$workflow run $id is still running; waiting for it to finish"
+              gh run watch "$id" --interval 60 >/dev/null || true
+            fi
+            if head_moved; then
+              echo "PR head moved; skipping"
               break
             fi
-            if [ "$status" != completed ]; then
-              echo "$workflow run $id is $status; leaving it alone"
+            # Re-read after the wait: the run may have been rerun or replaced.
+            run=$(find_run "$workflow")
+            id=$(jq -r .id <<<"$run")
+            conclusion=$(jq -r .conclusion <<<"$run")
+            if [ "$(jq -r .status <<<"$run")" != completed ]; then
+              echo "$workflow run $id never finished; leaving it alone"
             elif [ "$LABEL" = run-e2e ]; then
               echo "$workflow run $id: rerunning everything for run-e2e"
               gh run rerun "$id"
