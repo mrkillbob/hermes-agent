@@ -412,7 +412,12 @@ def settle_gateway(inst: Install, old_pid: int, *, timeout: float = 180) -> dict
     """Wait for a gateway serving ``inst.target`` under a new PID; None if none shows up."""
     def serving():
         ident = identify(inst.hermes_home)
-        return ident if ident and ident.get("pid") != old_pid and ident.get("code_sha") == inst.target else None
+        if not ident or ident.get("pid") == old_pid or ident.get("code_sha") != inst.target:
+            return None
+        # Control-socket identify starts before the HTTP adapter; an old listener
+        # must not qualify the replacement either.
+        ready = health(inst.port)
+        return ident if ready and ready.get("pid") == ident.get("pid") else None
     try:
         return wait_for(serving, timeout=timeout, what="a relaunched gateway", interval=1.0)
     except AssertionError:
