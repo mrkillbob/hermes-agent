@@ -14,18 +14,20 @@ permissions:
   actions: write
   contents: read
 
-# One handler per PR at a time, queued rather than cancelled, so two labels
-# added together cannot race on the same completed run.
-concurrency:
-  group: label-rerun-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
-
 jobs:
   rerun-failed:
     if: >-
       github.repository == 'mrkillbob/hermes-agent' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(fromJSON('["run-e2e", "ci-reviewed"]'), github.event.label.name)
+    # On the job, so only the two maintainer labels enter the group: an unrelated
+    # label event must not displace a pending rerun. One handler per PR at a
+    # time, never cancelling the active one, so two labels added together cannot
+    # race on the same completed run. (GitHub keeps a single pending job per
+    # group, so re-adding the same label while another waits replaces the waiter.)
+    concurrency:
+      group: label-rerun-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
@@ -37,6 +39,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           LABEL: ${{ github.event.label.name }}
         run: |
+          set -euo pipefail
           # Runs are matched by head SHA and then by pull request, so another PR
           # sharing the commit is never rerun.
           find_run() {
@@ -44,11 +47,14 @@ jobs:
               | jq -c --argjson pr "$PR_NUMBER" \
                 '[.workflow_runs[] | select(any(.pull_requests[]; .number == $pr))][0] // empty'
           }
-          head_moved() {
-            # A rerun of a superseded head can cancel the newer head's CI through
-            # the shared concurrency group, so re-read the live head first.
-            live=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
-            [ "$live" != "$HEAD_SHA" ]
+          # A rerun of a superseded head can cancel the newer head's CI through
+          # the shared concurrency group, so re-read the live head first. Done as
+          # a plain assignment, not inside an `if`, so a failed lookup fails the
+          # job instead of looking like a moved head.
+          live_head() {
+            live=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid) \
+              || { echo "::error::could not read the live head of PR $PR_NUMBER"; exit 1; }
+            [ -n "$live" ] || { echo "::error::empty live head for PR $PR_NUMBER"; exit 1; }
           }
           for workflow in ci.yaml docker.yml nix.yml; do
             run=$(find_run "$workflow")
@@ -58,8 +64,9 @@ jobs:
               echo "$workflow run $id is still running; waiting for it to finish"
               gh run watch "$id" --interval 60 >/dev/null || true
             fi
-            if head_moved; then
-              echo "PR head moved; skipping"
+            live_head
+            if [ "$live" != "$HEAD_SHA" ]; then
+              echo "PR head moved to $live; skipping"
               break
             fi
             # Re-read after the wait: the run may have been rerun or replaced.
