@@ -44,7 +44,7 @@ def build_kanban_policy(connection, params, config):
                                  (task.id, task.current_run_id)).fetchone()
             if bound and json.loads(bound[0])['request_id'] != 'kanban:' + json.dumps([board, task.id, task.current_run_id], separators=(',', ':')):
                 raise RuntimeStoreError('stale_kanban_claim')
-            context = kb.build_worker_context(conn, task.id)
+            context = kb.build_worker_context(conn, task.id, include_role_history=False)
             skills = list(task.skills or ())
             if kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review':
                 # Same rule as the dispatcher's review lane: the reviewer always loads sdlc-review.
