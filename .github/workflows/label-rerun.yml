@@ -1,0 +1,46 @@
+name: Label rerun
+
+# CI reads the maintainer labels (run-e2e, ci-reviewed) while it runs, and the
+# CI workflows do not trigger on `labeled`. When a maintainer adds one of them,
+# rerun this head's failed jobs so the new label is observed. A run that is
+# still in progress is left alone: nothing can be rerun until it finishes.
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  rerun-failed:
+    if: >-
+      github.repository == 'mrkillbob/hermes-agent' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON('["run-e2e", "ci-reviewed"]'), github.event.label.name)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Rerun failed jobs for the labeled head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          for workflow in ci.yaml docker.yml nix.yml; do
+            run=$(gh run list --workflow "$workflow" --event pull_request \
+              --commit "$HEAD_SHA" --limit 1 \
+              --json databaseId,status,conclusion --jq '.[0] // empty')
+            [ -n "$run" ] || { echo "$workflow: no run for $HEAD_SHA"; continue; }
+            id=$(jq -r .databaseId <<<"$run")
+            status=$(jq -r .status <<<"$run")
+            conclusion=$(jq -r .conclusion <<<"$run")
+            if [ "$status" != completed ]; then
+              echo "$workflow run $id is $status; leaving it alone"
+            elif [ "$conclusion" = success ]; then
+              echo "$workflow run $id already passed"
+            else
+              echo "$workflow run $id ended $conclusion; rerunning failed jobs"
+              gh run rerun "$id" --failed
+            fi
+          done
