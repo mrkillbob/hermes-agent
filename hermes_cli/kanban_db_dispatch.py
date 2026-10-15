@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import signal
@@ -3245,6 +3246,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
 
     from hermes_cli.kanban_worker_routing import prepare_worker_route
 
+    env.pop("HERMES_KANBAN_ROUTE", None)
     routed_task = prepare_worker_route(task, env.get("HERMES_HOME"), env)
     cmd = _worker_argv(routed_task, profile_arg, env.get("HERMES_HOME"))
     # The worker is `-m hermes_cli.kanban_worker_client`: Hermes itself, with no console-script
@@ -3254,9 +3256,14 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # external worker (#112729): applied to the sanitized env, after every other decision stands.
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
     env = pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parent.parent)
-    if env.get("HERMES_KANBAN_LOCAL_ONLY") == "1" and "--toolsets" in cmd:
-        index = cmd.index("--toolsets") + 1
-        cmd[index] = ",".join(name for name in cmd[index].split(",") if name != "code_execution")
+    if env.get("HERMES_KANBAN_LOCAL_ONLY") == "1":
+        # The profile owner builds the agent, not this child: hand it the route resolved here, which
+        # no task column carries (local-first / explicit local pin / bridged process-local endpoint).
+        env["HERMES_KANBAN_ROUTE"] = json.dumps({
+            "provider": routed_task.provider_override, "model": routed_task.model_override,
+            "reasoning": routed_task.reasoning_effort,
+            "base_url": env.get("CUSTOM_BASE_URL") if routed_task.provider_override == "ollama" else None,
+        })
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.

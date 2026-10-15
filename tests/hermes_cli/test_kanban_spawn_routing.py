@@ -1,5 +1,6 @@
 """Regression tests for deterministic local-first Kanban worker routing."""
 
+import json
 import subprocess
 
 import pytest
@@ -91,7 +92,7 @@ def test_explicit_local_task_pin_beats_profile_local_first_route(provider) -> No
 def test_default_spawn_honors_explicit_local_pin_when_local_first_is_enabled(
     monkeypatch, tmp_path
 ) -> None:
-    """A per-card local recovery pin must reach the child argv unchanged."""
+    """A per-card local recovery pin must reach the profile owner unchanged."""
     root = tmp_path / ".hermes"
     profile = root / "profiles" / "researcher-a"
     profile.mkdir(parents=True)
@@ -122,6 +123,7 @@ fallback_model:
 
     def fake_popen(cmd, *args, **kwargs):
         captured["cmd"] = list(cmd)
+        captured["env"] = dict(kwargs.get("env") or {})
         return FakeProc()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
@@ -149,13 +151,9 @@ fallback_model:
     workspace.mkdir()
 
     assert kbd._default_spawn(task, str(workspace)) == 4245
-    model_index = captured["cmd"].index("-m")
-    provider_index = captured["cmd"].index("--provider")
-    assert captured["cmd"][model_index + 1] == "qwen3.6:35b-a3b"
-    assert captured["cmd"][provider_index + 1] == "ollama-launch"
-    reasoning_index = captured["cmd"].index("--reasoning")
-    assert captured["cmd"][reasoning_index + 1] == "none"
-    assert "gemma4:e2b-it-qat" not in captured["cmd"]
+    route = json.loads(captured["env"]["HERMES_KANBAN_ROUTE"])
+    assert (route["model"], route["provider"], route["reasoning"]) == ("qwen3.6:35b-a3b", "ollama-launch", "none")
+    assert "gemma4:e2b-it-qat" not in json.dumps(route)
 
 
 def test_default_spawn_bridges_process_local_provider_into_profile_worker(
@@ -213,13 +211,10 @@ def test_default_spawn_bridges_process_local_provider_into_profile_worker(
     workspace.mkdir()
 
     assert kbd._default_spawn(task, str(workspace)) == 4247
-    provider_index = captured["cmd"].index("--provider")
-    assert captured["cmd"][provider_index + 1] == "ollama"
+    route = json.loads(captured["env"]["HERMES_KANBAN_ROUTE"])
+    assert (route["provider"], route["base_url"]) == ("ollama", "http://127.0.0.1:11434/v1")
     assert captured["env"]["CUSTOM_BASE_URL"] == "http://127.0.0.1:11434/v1"
     assert captured["env"]["HERMES_KANBAN_LOCAL_ONLY"] == "1"
-    toolsets = captured["cmd"][captured["cmd"].index("--toolsets") + 1].split(",")
-    assert "terminal" in toolsets
-    assert "code_execution" not in toolsets
 
 
 def test_default_spawn_honors_explicit_remote_pin_when_local_first_is_enabled(
@@ -256,6 +251,7 @@ fallback_model:
 
     def fake_popen(cmd, *args, **kwargs):
         captured["cmd"] = list(cmd)
+        captured["env"] = dict(kwargs.get("env") or {})
         return FakeProc()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
@@ -283,11 +279,9 @@ fallback_model:
     workspace.mkdir()
 
     assert kbd._default_spawn(task, str(workspace)) == 4246
-    model_index = captured["cmd"].index("-m")
-    provider_index = captured["cmd"].index("--provider")
-    assert captured["cmd"][model_index + 1] == "gpt-5.6-terra"
-    assert captured["cmd"][provider_index + 1] == "openai-codex"
-    assert "gemma4:e2b-it-qat" not in captured["cmd"]
+    # No local route: the owner runs the card's own remote pin from its columns.
+    assert "HERMES_KANBAN_ROUTE" not in captured["env"]
+    assert "HERMES_KANBAN_LOCAL_ONLY" not in captured["env"]
 
 
 def test_default_spawn_pins_project_virtualenv_for_worker_commands(

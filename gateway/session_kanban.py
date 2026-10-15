@@ -19,7 +19,11 @@ def build_kanban_policy(connection, params, config):
         raise RuntimeStoreError('permission_denied')
     if actor.profile_id != authority.profile_id:
         raise RuntimeStoreError('profile_mismatch')
-    if (set(params) not in ({'board', 'task_id', 'run_id', 'claim_lock'}, {'board', 'task_id', 'run_id', 'claim_lock', 'db'})
+    claim_keys = {'board', 'task_id', 'run_id', 'claim_lock'}
+    route = params.get('route', {})
+    if (set(params) - {'db', 'route'} != claim_keys
+            or not isinstance(route, dict) or set(route) - {'provider', 'model', 'reasoning', 'base_url'}
+            or any(v is not None and (not isinstance(v, str) or not v) for v in route.values())
             or any(not isinstance(params[k], str) or not params[k] for k in ('board', 'task_id', 'claim_lock'))
             or type(params['run_id']) is not int):
         raise RuntimeStoreError('invalid_params')
@@ -49,7 +53,10 @@ def build_kanban_policy(connection, params, config):
         raise RuntimeStoreError('invalid_kanban_claim') from exc
     cwd = task.workspace_path
     params_policy = {'source': 'cli', 'cwd': cwd}
-    for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
+    # The dispatcher's resolved local route (local-first / explicit local pin) beats the card's own columns.
+    for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort),
+                        ('base_url', None)):
+        value = route.get(name) or value
         if value:
             params_policy[name] = value
     private = {}
@@ -65,7 +72,11 @@ def build_kanban_policy(connection, params, config):
     context['db'] = str(path)
     request = json.loads(policy.request_json)
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
-    return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(set(policy.toolsets) | {'kanban'})),
+    # A routed (local-only) worker never runs code_execution, as the CLI worker's --toolsets omitted it.
+    toolsets = set(policy.toolsets) | {'kanban'}
+    if route:
+        toolsets.discard('code_execution')
+    return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(toolsets)),
                    request_json=json.dumps(request, sort_keys=True), kanban_json=json.dumps(context)), private
 
 

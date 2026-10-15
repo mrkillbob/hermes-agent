@@ -188,7 +188,9 @@ def main():
             wire = json.dumps(peer.requests)
             turns = [r for r in peer.requests if r.get('tools')]
             prefixes = [json.dumps([m for m in r['messages'] if m['role'] in {'system', 'developer'}]) for r in turns]
-            receipt.update(goal_continuation=len(turns) >= 4, stable_prefix=len(set(prefixes)) == 1,
+            # The fork stops a completed worker without one more provider call (kanban_terminal_transition),
+            # so the goal loop's nudge-then-complete is three tool turns here, not upstream's four.
+            receipt.update(goal_continuation=len(turns) >= 3, stable_prefix=len(set(prefixes)) == 1,
                 retry_same_session=same, tools='kanban_complete' in wire,
                 task_context='KANBAN_TASK_SENTINEL' in wire, skill_context='KANBAN_SKILL_SENTINEL' in wire,
                 hook_effect=(home / 'hook-effect').exists())

@@ -8,6 +8,7 @@ except ModuleNotFoundError as exc:
         raise
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import sys
@@ -72,6 +73,8 @@ def _submit():
         params = {'board': os.environ['HERMES_KANBAN_BOARD'], 'task_id': os.environ['HERMES_KANBAN_TASK'],
             'run_id': int(os.environ['HERMES_KANBAN_RUN_ID']), 'claim_lock': os.environ['HERMES_KANBAN_CLAIM_LOCK']}
         board_db = os.environ['HERMES_KANBAN_DB']
+        if os.environ.get('HERMES_KANBAN_ROUTE'):
+            params['route'] = json.loads(os.environ['HERMES_KANBAN_ROUTE'])
         # Owner startup must never inherit this worker's task/tool/goal identity.
         for key in list(os.environ):
             if key.startswith('HERMES_KANBAN_') and key != 'HERMES_KANBAN_HOME':
