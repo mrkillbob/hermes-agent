@@ -53,6 +53,8 @@ DEFAULT = {
     "remote_backends": True,
 }
 
+NO_E2E = {**DEFAULT, **dict.fromkeys(("e2e", "e2e_upgrade", "e2e_desktop_core", "e2e_desktop_update"), False)}
+
 SLOW_LANES = {"docker", "nix", "e2e", "e2e_upgrade", "e2e_desktop_core", "e2e_desktop_update"}
 
 
@@ -314,7 +316,7 @@ CASES = {
     ),
     "workflow yml → ci_review (also fail-open all)": (
         [".github/workflows/typecheck.yml"],
-        DEFAULT,
+        NO_E2E,
     ),
     # The bootstrap installer lane: shell installer, dev-checkout wrapper,
     # and the Tauri app's non-Rust sources.
@@ -332,7 +334,7 @@ CASES = {
     ),
     "composite action → ci_review (also fail-open all)": (
         [".github/actions/retry/action.yml"],
-        DEFAULT,
+        NO_E2E,
     ),
     # Normal desktop source doesn't trigger ci_review.
     "desktop src → no ci_review": (
@@ -424,8 +426,18 @@ CASES = {
         _lanes(python=True, python_prod=False, scan=True, docker=True),
     ),
     # Fail open: CI-config / empty / blank diffs run everything.
-    ".github change → all": ([".github/workflows/tests.yml"], DEFAULT),
-    "action change → all": ([".github/actions/detect-changes/action.yml"], DEFAULT),
+    ".github e2e workflow change → its own lanes": (
+        [".github/workflows/tests.yml"], {**NO_E2E, "e2e": True, "e2e_upgrade": True}),
+    # Other CI config fails open for everything except the E2E suites, which
+    # follow the diff (or the run-e2e label).
+    ".github other change → all but e2e": (
+        [".github/workflows/lint.yml"],
+        NO_E2E,
+    ),
+    "action change → all but e2e": (
+        [".github/actions/detect-changes/action.yml"],
+        NO_E2E,
+    ),
     "empty diff → all": ([], DEFAULT),
     "blank lines → all": (["", "  "], DEFAULT),
 }
