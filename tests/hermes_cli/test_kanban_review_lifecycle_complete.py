@@ -191,7 +191,8 @@ def test_unreviewed_completion_does_not_earn_private_recognition(conn):
     )
 
 
-def test_next_task_context_shows_only_its_assignees_private_recognition(conn):
+@pytest.mark.parametrize("include_role_history", [True, False])
+def test_next_task_context_shows_only_its_assignees_private_recognition(conn, include_role_history):
     reviewed_task = kb.create_task(conn, title="Reviewed work", assignee="reviewer")
     with kb.write_txn(conn):
         kb._append_event(
@@ -210,10 +211,11 @@ def test_next_task_context_shows_only_its_assignees_private_recognition(conn):
         title="Implement another safe export",
         assignee="builder",
     )
-    builder_context = kb.build_worker_context(conn, next_builder_task)
-    assert "## Private recognition" in builder_context
-    assert "Strong work: your work passed independent review." in builder_context
-    assert "encouragement only" in builder_context
+    builder_context = kb.build_worker_context(conn, next_builder_task, include_role_history=include_role_history)
+    assert ("## Private recognition" in builder_context) is include_role_history
+    assert ("Strong work: your work passed independent review." in builder_context) is include_role_history
+    assert ("encouragement only" in builder_context) is include_role_history
+    assert "Strong work: your work passed independent review." in kb.build_worker_context(conn, next_builder_task)
 
     reviewer_task = kb.create_task(
         conn, title="Review another export", assignee="reviewer"

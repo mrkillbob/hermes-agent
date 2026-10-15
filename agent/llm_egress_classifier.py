@@ -558,6 +558,8 @@ def _typed_payload_mapping(
                 or value.get("name") == "read_file"
             )
         )
+        is_tool_result_shape = (value.get("role") == "tool"
+            or value.get("type") in {"function_call_output", "tool_result"})
         output_call_id = (
             value.get("tool_use_id")
             if value.get("type") == "tool_result"
@@ -566,144 +568,92 @@ def _typed_payload_mapping(
         is_recognized_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in syntax_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-                or (require_terminal_provenance and value.get("type") == "tool_result")
-            )
+            and is_tool_result_shape
         )
         is_elided_kanban_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in elided_kanban_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_kanban_attachment_result = (
             isinstance(output_call_id, str)
             and output_call_id in kanban_attachment_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_kanban_lifecycle_result = (
             isinstance(output_call_id, str)
             and output_call_id in kanban_lifecycle_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_search_projection_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in search_projection_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_tool_search_projection_result = (
             isinstance(output_call_id, str)
             and output_call_id in tool_search_projection_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_read_file_projection_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in read_file_projection_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") in {"function_call_output", "tool_result"}
-            )
+            and is_tool_result_shape
         )
         is_web_replay_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in web_replay_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_file_mutation_replay_result = (
             isinstance(output_call_id, str)
             and output_call_id in file_mutation_replay_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_scratch_read_file_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in scratch_read_file_tool_call_ids
-            and (value.get("role") == "tool" or value.get("type") == "function_call_output")
+            and is_tool_result_shape
         )
         is_git_workspace_diagnostic_result = (
             isinstance(output_call_id, str)
             and output_call_id in git_workspace_diagnostic_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_git_grep_projection_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in git_grep_projection_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_rg_projection_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in rg_projection_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_git_diff_name_only_projection_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in git_diff_name_only_projection_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_git_review_summary_projection_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in git_review_summary_projection_tool_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_pytest_terminal_result = (
             isinstance(output_call_id, str)
             and output_call_id in pytest_terminal_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_github_pr_feedback_terminal_result = (
             isinstance(output_call_id, str)
             and output_call_id in github_pr_feedback_terminal_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         is_kanban_assignees_result = (
             isinstance(output_call_id, str)
             and output_call_id in kanban_assignees_terminal_call_ids
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
         )
         github_list_limit = (
             github_list_terminal_call_limits.get(output_call_id)
@@ -738,7 +688,7 @@ def _typed_payload_mapping(
         is_plain_github_list_terminal_result = (
             isinstance(output_call_id, str)
             and output_call_id in plain_github_list_terminal_call_ids
-            and (value.get("role") == "tool" or value.get("type") == "function_call_output")
+            and is_tool_result_shape
         )
         combined_github_list_limit = (
             combined_github_list_terminal_call_limits.get(output_call_id)
@@ -761,7 +711,7 @@ def _typed_payload_mapping(
         is_terminal_replay_result = (
             isinstance(output_call_id, str)
             and output_call_id in terminal_replay_tool_call_ids
-            and (value.get("role") == "tool" or value.get("type") == "function_call_output")
+            and is_tool_result_shape
         )
         is_terminal_replay_call = (
             value.get("type") in {"function", "function_call"}
@@ -769,13 +719,7 @@ def _typed_payload_mapping(
             and isinstance(output_call_id, str)
             and output_call_id in terminal_replay_tool_call_ids
         )
-        is_tool_result_mapping = (
-            isinstance(output_call_id, str)
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
-        )
+        is_tool_result_mapping = is_tool_result_shape
         # A protected remote worker may only replay a tool result through one
         # of the exact call-id-bound projections above.  If a provider or
         # bridge hands us a tool result without the preceding recognized call,
@@ -838,13 +782,9 @@ def _typed_payload_mapping(
         is_untrusted_tool_result = (
             protected_kanban_context
             and is_tool_protocol_mapping
-            and isinstance(output_call_id, str)
             and source_metadata is None
             and not is_read_file_result
-            and (
-                value.get("role") == "tool"
-                or value.get("type") == "function_call_output"
-            )
+            and is_tool_result_shape
             and not any(
                 (
                     is_recognized_tool_result,
@@ -1115,11 +1055,23 @@ def _typed_payload_mapping_item(
     return
 
 
+def _project_structured_kanban_output(state, key, text, typed) -> bool:
+    projectors = {
+        'is_elided_kanban_tool_result': _project_bound_kanban_show,
+        'is_kanban_attachment_result': _project_bound_kanban_attachments,
+        'is_kanban_lifecycle_result': _project_bound_kanban_lifecycle,
+    }
+    for flag, project in projectors.items():
+        if state[flag]:
+            typed[key] = project(text or "")
+            return True
+    return False
+
+
 def _typed_payload_mapping_structured(
     state: Mapping[str, Any], key: Any, item: Any, typed: dict[Any, Any]
 ) -> bool:
     """Handle Responses-style structured tool output projections."""
-    value = state['value']
     grant_texts = state['grant_texts']
     used_grants = state['used_grants']
     protected_kanban_context = state['protected_kanban_context']
@@ -1137,7 +1089,6 @@ def _typed_payload_mapping_structured(
     is_git_workspace_diagnostic_result = state['is_git_workspace_diagnostic_result']
     is_github_pr_feedback_terminal_result = state['is_github_pr_feedback_terminal_result']
     is_kanban_assignees_result = state['is_kanban_assignees_result']
-    is_kanban_lifecycle_result = state['is_kanban_lifecycle_result']
     is_plain_github_list_terminal_result = state['is_plain_github_list_terminal_result']
     is_pytest_terminal_result = state['is_pytest_terminal_result']
     is_read_file_projection_tool_result = state['is_read_file_projection_tool_result']
@@ -1154,9 +1105,6 @@ def _typed_payload_mapping_structured(
         key in {"content", "output"}
         and isinstance(item, (list, Mapping))
     )
-    structured_text = (
-        _structured_tool_output_text(item) if is_structured_result else None
-    )
     if is_untrusted_tool_result and key in {"content", "output"}:
         violation_reasons = {
             reason
@@ -1171,8 +1119,7 @@ def _typed_payload_mapping_structured(
     structured_text = (
         _structured_tool_output_text(item) if is_structured_result else None
     )
-    if is_structured_result and is_kanban_lifecycle_result:
-        typed[key] = _project_bound_kanban_lifecycle(structured_text or "")
+    if is_structured_result and _project_structured_kanban_output(state, key, structured_text, typed):
         return True
     if is_kanban_assignees_result and structured_text is not None:
         projected = _project_kanban_assignees_terminal_result(structured_text)
@@ -1227,13 +1174,6 @@ def _typed_payload_mapping_structured(
         or is_read_file_projection_tool_result
         or is_scratch_read_file_tool_result
     ):
-        if (
-            is_read_file_projection_tool_result
-            and protected_kanban_context
-            and value.get("type") == "tool_result"
-        ):
-            typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
-            return True
         if (
             source_metadata is not None
             and not is_scratch_read_file_tool_result
@@ -1387,19 +1327,6 @@ def _typed_payload_mapping_scalar_content(
         # An exact call-id proves this is the local read tool's result,
         # but an error/denial has no source grant.  Replay only the
         # bounded outcome instead of treating the error text as source.
-        typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
-        return True
-    if (
-        is_read_file_projection_tool_result
-        and protected_kanban_context
-        and value.get("type") == "tool_result"
-        and key in {"content", "output"}
-        and isinstance(item, str)
-    ):
-        # Anthropic represents a tool result as a scalar ``content`` field.
-        # Keep the exact call binding, but never replay local file bytes on a
-        # protected remote route where an assistant turn may contain opaque
-        # encodings that the final firewall must reject.
         typed[key] = GeneratedContextSegment(_READ_FILE_REPLAY_ELISION)
         return True
     if (
@@ -1776,7 +1703,7 @@ def _structured_tool_output_text(value: Any) -> str | None:
     if not isinstance(item, Mapping) or set(item) != {"type", "text"}:
         return None
     text = item.get("text")
-    if item.get("type") != "input_text" or not isinstance(text, str):
+    if item.get("type") not in {"input_text", "text"} or not isinstance(text, str):
         return None
     return text
 

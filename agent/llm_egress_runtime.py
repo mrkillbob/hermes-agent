@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 
+from agent.remote_task_context import owned_remote_task, require_public_task_context, mark_local_task_context
 from agent.llm_egress_firewall import (
     AuthorizedEgress,
     CodexReasoningReplaySegment,
@@ -586,6 +587,8 @@ def _restore_source_provenance_sidecar(
             consumed_entries.add(entry_index)
         if changed:
             restored["messages"] = copied_messages
+        from agent.llm_egress_native import restore_native_source_sidecar
+        restored["messages"] = restore_native_source_sidecar(restored["messages"], sidecar, consumed_entries)
 
     def _restore_input_items(input_items: Any) -> tuple[Any, bool]:
         if not isinstance(input_items, list):
@@ -768,18 +771,17 @@ def authorize_agent_sdk_kwargs(
 ) -> tuple[dict[str, Any], AuthorizedEgress]:
     controls = {key: kwargs[key] for key in sdk_control_keys if key in kwargs}
     resolved_route = _route_for_agent(agent, route)
+    require_public_task_context(agent, route=resolved_route)
     route_provider = _route_field(resolved_route, "provider", "")
-    protected_provider_route = provider_uses_egress_firewall(route_provider)
-    protected_remote_marker = (
-        os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1"
-    )
+    protected_route = provider_uses_egress_firewall(route_provider) or owned_remote_task(agent, route=resolved_route)
+    protected_remote_marker = os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1"
     # The marker is deliberately process-local, but a fallback/reconstructed
     # worker still carries its task identity. Re-derive the protected Kanban
     # boundary from that durable identity plus the exact provider route so a
     # fallback cannot turn private task context into a repeated egress block.
     protected_kanban_remote = protected_remote_marker or (
         bool(str(os.environ.get("HERMES_KANBAN_TASK") or "").strip())
-        and protected_provider_route
+        and protected_route
     )
     sidecar = kwargs.get("_hermes_source_provenance")
     body = {
@@ -839,7 +841,7 @@ def authorize_agent_sdk_kwargs(
     # flag.  Without this route-derived guard, a large protected request raises
     # ValueError while typing, bypassing the firewall's content-free receipt
     # and triggering a provider fallback loop.
-    protected_remote_context = protected_remote_marker or protected_provider_route
+    protected_remote_context = protected_remote_marker or protected_route
     # Generated framing (system/developer messages and tool schema) is
     # application-owned.  It can use the established non-secret path/base64
     # redaction on every protected cloud route, including ordinary chat and
@@ -847,7 +849,7 @@ def authorize_agent_sdk_kwargs(
     # generated context and remain fail-closed.
     redact_protected_generated_context = (
         str(route_provider or "").strip().lower() == "openai-codex"
-        or protected_provider_route
+        or protected_route
     )
     typed_body = _typed_payload(
         body,
@@ -856,160 +858,160 @@ def authorize_agent_sdk_kwargs(
         sanitized_cap=sanitized_segment_cap,
         syntax_tool_call_ids=(
             _recognized_syntax_tool_call_ids(body)
-            if protected_kanban_remote or protected_provider_route
+            if protected_kanban_remote or protected_route
             else frozenset()
         ),
         pytest_terminal_call_ids=(
             _pytest_terminal_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         elided_kanban_tool_call_ids=(
             _recognized_tool_call_ids(body, _REMOTE_KANBAN_PROJECTION_TOOL_NAMES)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         kanban_attachment_tool_call_ids=(
             _recognized_tool_call_ids(body, _REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         kanban_lifecycle_tool_call_ids=(
             _recognized_tool_call_ids(body, _REMOTE_KANBAN_LIFECYCLE_TOOL_NAMES)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         search_projection_tool_call_ids=(
             _recognized_tool_call_ids(
                 body, _REMOTE_KANBAN_SEARCH_PROJECTION_TOOL_NAMES
             )
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         tool_search_projection_tool_call_ids=(
             _recognized_tool_call_ids(
                 body, _REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES
             )
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         read_file_projection_tool_call_ids=(
             _recognized_tool_call_ids(
                 body, _REMOTE_KANBAN_READ_FILE_PROJECTION_TOOL_NAMES
             )
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         web_replay_tool_call_ids=(
             _recognized_tool_call_ids(body, _REMOTE_KANBAN_WEB_REPLAY_TOOL_NAMES)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         file_mutation_replay_tool_call_ids=(
             _recognized_tool_call_ids(
                 body, _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES
             )
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         scratch_read_file_tool_call_ids=(
             _scratch_read_file_tool_call_ids(classification_body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         git_workspace_diagnostic_call_ids=(
             _git_workspace_diagnostic_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         git_grep_projection_tool_call_ids=(
             _git_grep_terminal_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         rg_projection_tool_call_ids=(
             _rg_terminal_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         git_diff_name_only_projection_tool_call_ids=(
             _git_diff_name_only_terminal_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         git_review_summary_projection_tool_call_ids=(
             _git_review_summary_terminal_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         github_pr_feedback_terminal_call_ids=(
             _github_pr_feedback_terminal_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         kanban_assignees_terminal_call_ids=(
             _kanban_assignees_terminal_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         github_list_terminal_call_limits=(
             _github_list_terminal_call_limits(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else None
         ),
         github_api_extract_call_limits=(
             _github_api_extract_call_limits(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else None
         ),
         github_api_paginate_call_limits=(
             _github_api_paginate_terminal_call_limits(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else None
         ),
         github_api_curl_terminal_call_ids=(
             _github_api_curl_terminal_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         plain_github_list_terminal_call_ids=(
             _plain_github_list_terminal_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         combined_github_list_terminal_call_limits=(
             _combined_github_list_terminal_call_limits(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else None
         ),
         combined_github_view_terminal_call_limits=(
             _combined_github_view_terminal_call_limits(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else None
         ),
         rejected_terminal_call_ids=(
             _rejected_terminal_call_ids(body)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         terminal_replay_tool_call_ids=(
             _recognized_tool_call_ids(body, _REMOTE_KANBAN_TERMINAL_REPLAY_TOOL_NAMES)
-            if protected_kanban_remote and protected_provider_route
+            if protected_kanban_remote and protected_route
             else frozenset()
         ),
         redact_readonly_tool_arguments=(
-            protected_kanban_remote and protected_provider_route
+            protected_kanban_remote and protected_route
         ),
         redact_terminal_arguments=(
-            protected_kanban_remote and protected_provider_route
+            protected_kanban_remote and protected_route
         ),
         native_nonterminal_call_ids=(
             _recognized_native_nonterminal_call_ids(body)
-            if protected_provider_route and not protected_kanban_remote
+            if protected_route and not protected_kanban_remote
             else frozenset()
         ),
         require_terminal_provenance=(
-            protected_provider_route and not protected_kanban_remote
+            protected_route and not protected_kanban_remote
         ),
         protected_kanban_context=protected_remote_context,
         redact_generated_context=redact_protected_generated_context,
@@ -1114,6 +1116,7 @@ def dispatch_authorized_agent_request(
     sdk_control_keys: Sequence[str] = _SDK_CONTROL_KEYS,
 ) -> Any:
     resolved_route = _route_for_agent(agent, route)
+    mark_local_task_context(agent, route=resolved_route)
     if not egress_enforcement_enabled():
         return callback({key: value for key, value in kwargs.items() if key not in _INTERNAL_EGRESS_KEYS})
     destination = classify_destination(

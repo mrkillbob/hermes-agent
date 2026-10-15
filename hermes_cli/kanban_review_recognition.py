@@ -22,8 +22,8 @@ def record_approval(conn, task_id, recipient, run_id):
         }, run_id=run_id)
 
 
-def append_private_context(lines, conn, assignee):
-    if not assignee:
+def append_private_context(lines, conn, assignee, *, include_role_history=True):
+    if not assignee or not include_role_history:
         return
     rows = conn.execute("SELECT payload FROM task_events WHERE kind = 'private_recognition' "
                         "ORDER BY id DESC LIMIT 500").fetchall()

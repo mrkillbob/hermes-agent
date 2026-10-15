@@ -36,6 +36,7 @@ from agent.image_token_cost import bind_image_token_cost
 from agent.surface_switch import take_surface_switch_metadata
 from agent.usage_anchor import anchored_context_tokens, restore_usage_anchor
 from agent.turn_author import parse_turn_author
+from agent.remote_task_context import compose_task_system_prompt, owned_remote_task, mark_local_task_context
 
 logger = logging.getLogger(__name__)
 
@@ -804,7 +805,8 @@ def _collect_pre_llm_call_context(
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
     runaway plugin can't inflate every subsequent turn's prompt."""
-    if getattr(agent, "_persist_disabled", False):
+    mark_local_task_context(agent)
+    if getattr(agent, "_persist_disabled", False) or owned_remote_task(agent):
         return ""
     try:
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
@@ -933,7 +935,8 @@ def _memory_turn_start_and_prefetch(
     """Notify memory providers of the new turn, then prefetch external memory once
     before the tool loop (skipped on trivial prompts with no semantic signal).
     Returns the prefetch text (``""`` when nothing was injected)."""
-    if not agent._memory_manager:
+    mark_local_task_context(agent)
+    if not agent._memory_manager or owned_remote_task(agent):
         return ""
     _query = _memory_query_text(original_user_message)
     # The author rides along so a provider can attribute THIS turn, not whoever opened the session.
@@ -1119,6 +1122,7 @@ def build_turn_context(
     from tools.skill_provenance import set_review_attended
     set_review_attended(getattr(agent, "_review_attended", False))
     agent._restore_primary_runtime()
+    mark_local_task_context(agent)
     _publish_runtime_main(agent)
     _refresh_mcp_tools_between_turns(agent)
 
@@ -1399,9 +1403,7 @@ def build_api_messages(
     # Final system message = cached prompt + ephemeral additions (API-time only).
     # Plugin/recall context goes into the user message, never the system prompt: the
     # prompt is built ONCE per session and replayed verbatim (stable cache prefix).
-    effective_system = active_system_prompt or ""
-    if agent.ephemeral_system_prompt:
-        effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+    effective_system = compose_task_system_prompt(agent, active_system_prompt)
     if effective_system:
         api_messages = [{"role": "system", "content": effective_system}] + api_messages
     return api_messages, effective_system

@@ -31,6 +31,7 @@ from agent.prompt_caching import (
 )
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
 from agent.runtime_cwd import resolve_agent_cwd
+from agent.remote_task_context import compose_task_system_prompt, owned_remote_task, mark_task_history_unverified, mark_local_task_context
 from agent.surface_switch import (
     identity_line_value, note_inert_pinned_tools, runtime_host_value, stage_surface_switch_note,
 )
@@ -752,6 +753,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     Mutates ``agent._cached_system_prompt`` and persists a freshly-built prompt on first
     build. Row states ``missing``/``null``/``empty``/``present`` are logged and DB
     failures log at WARNING so silent prefix-cache misses show in ``agent.log``."""
+    mark_task_history_unverified(agent, conversation_history)
     stored_prompt = None
     stored_state = "missing"
     session_row = None
@@ -803,6 +805,9 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         # Continuing session — reuse the exact system prompt from the
         # previous turn so the Anthropic cache prefix matches.
         agent._cached_system_prompt = stored_prompt
+        # The persisted bytes carry no public-context provenance. Prefix
+        # reconstruction below must not authorize a local prompt for remote use.
+        agent._remote_task_context_mode = None
         # The reused bytes may describe the surface this conversation STARTED on; correct that
         # at the tail of the request instead of rebuilding the prompt in front of it (#104414).
         announced_switch = stage_surface_switch_note(agent, stored_prompt, conversation_history)
@@ -1184,7 +1189,7 @@ def _sync_failover_system_message(agent, api_messages, active_system_prompt):
     if not isinstance(sp, str) or not sp:
         return active_system_prompt
     if api_messages and api_messages[0].get("role") == "system":
-        effective = (sp + "\n\n" + agent.ephemeral_system_prompt).strip() if agent.ephemeral_system_prompt else sp
+        effective = compose_task_system_prompt(agent, sp)
         if not _rewrite_system_content_blocks(api_messages[0], effective):
             api_messages[0]["content"] = effective
     return sp
@@ -1288,8 +1293,9 @@ def _apply_context_engine_selection(
 ) -> list[dict[str, Any]]:
     """Run the optional per-turn ``ContextEngine.select_context()`` hook, fail-open: any
     exception or invalid return yields ``api_messages`` unchanged; history is never mutated."""
+    mark_local_task_context(agent)
     engine = getattr(agent, "context_compressor", None)
-    if not _engine_overrides_hook(engine, "select_context"):
+    if owned_remote_task(agent) or not _engine_overrides_hook(engine, "select_context"):
         return api_messages
 
     session_label = getattr(agent, "session_id", None) or "-"

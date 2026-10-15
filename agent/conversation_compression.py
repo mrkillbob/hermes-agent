@@ -39,12 +39,12 @@ from agent.conversation_compression_telemetry import (
 from agent.memory_provider import PRE_COMPRESS_CHECKPOINT_API_VERSION
 from agent.model_metadata import estimate_messages_tokens_rough, estimate_request_tokens_rough
 from agent.session_activity import ActivityProvenance, normalize_activity_provenance
+from agent.remote_task_context import mark_task_history_unverified
 from agent.usage_anchor import set_usage_anchor
 from hermes_state_ids import new_session_id as mint_session_id
 from hermes_state_pidns import holder_namespace_token
 
 logger = logging.getLogger(__name__)
-
 
 @contextlib.contextmanager
 def _swallow(message: str, *, exc_info: bool = False):
@@ -53,7 +53,6 @@ def _swallow(message: str, *, exc_info: bool = False):
         yield
     except Exception as exc:
         logger.debug(message, exc_info=True) if exc_info else logger.debug(message, exc)
-
 
 # Terminal outcomes from host/hygiene timeout or cooldown writers. Detached heartbeat workers must not clobber these
 # (timeout unobservable). Seeing one latches the heartbeat silent so a later UNKNOWN rewrite can't re-arm a zombie.
@@ -76,7 +75,6 @@ COMPACTION_STATUS = f"🗜️ {COMPACTION_STATUS_MARKER} — summarizing earlier
 COMPACTION_HEARTBEAT_STATUS = f"🗜️ {COMPACTION_STATUS_MARKER} — still summarizing earlier conversation so I can continue..."
 
 COMPACTION_DONE_STATUS = "✓ Context compaction complete — continuing turn..."
-
 
 def _strip_marker_for_comparison(msgs: Any) -> Any:
     """Copy ``msgs`` with the ``_db_persisted`` marker removed for no-op comparison.
@@ -1656,6 +1654,7 @@ def _adopt_live_compression_child(
     confirmed = resolver(session_db, parent_session_id)
     if not confirmed or str(confirmed) != child_session_id:
         return None
+    mark_task_history_unverified(agent)
     agent.session_id = child_session_id
     _rebind_session_context(child_session_id)
     _hand_off_metrics_segment(parent_session_id, child_session_id)
@@ -4133,6 +4132,7 @@ def compress_context(
     overflow_reason: The error classifier's reason for the provider rejection an ``"overflow"`` attempt
     recovers from (``"context_overflow"``, ``"payload_too_large"``, ``"long_context_tier"``). Telemetry only.
     """
+    mark_task_history_unverified(agent)
     attempt = _begin_compression_attempt(
         agent, force=force, defer_notification=defer_context_engine_notification, trigger=trigger,
         approx_tokens=approx_tokens, overflow_reason=overflow_reason,

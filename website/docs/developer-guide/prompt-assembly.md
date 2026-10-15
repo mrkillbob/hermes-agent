@@ -34,6 +34,33 @@ The cached system prompt is assembled as three ordered tiers (see `agent/system_
 
 The final system prompt is then joined as: `stable` → `context` → `volatile`.
 
+Dispatcher-owned tasks on remote or unresolved inference routes use the default identity,
+generated execution guidance and their supplied assignment instead of ambient `SOUL.md`,
+project context, memory, auto-loaded skills, the local skills inventory or plugin prose.
+Include needed public instructions in the assignment. The renderer omits host/profile paths
+and directs tools to use relative paths in the assigned workspace. Local inference routes,
+interactive operators and inherited nonowner contexts retain the usual context selection.
+
+This selection is paired with the existing final source-bound request authorization on owned
+remote task routes, including providers outside the provider-wide protected list. Explicit
+tools still execute normally against the real workspace; their local results and task records
+are preserved. Only the provider replay is projected, and unapproved content can still stop a
+request. Disabling egress enforcement retains the operator's explicit bypass; it cannot qualify
+a private-data-free remote worker. A path-neutral prompt alone is not worker acceptance.
+
+A local task's cached prompt cannot become a public task prompt by switching providers.
+Remote fallback and restored prompts without verified public-context construction stop before
+dispatch rather than rewriting history. Retained history is also held after a local task turn,
+history restore or compression attempt, including an aborted compression, until a fresh task
+agent/session is constructed. Start that new session with its public brief. Remote-to-remote
+fallback can likewise stop if a model-identity rewrite no longer matches the verified prompt.
+
+Owned Bedrock Converse and Codex app-server calls stop until their native transports have
+supported request authorization; unrelated loopback metadata cannot prove those routes local.
+Owned remote auxiliary calls also stop because flattened canonical history does not carry the
+source-bound input proof used by main-turn tool replay. Supported main-turn relative tools and
+demonstrably local auxiliary routes retain their normal execution semantics.
+
 This ordering matters for precedence discussions:
 - skills are part of the **stable** tier
 - memory/profile snapshots are part of the **volatile** tier

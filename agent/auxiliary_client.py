@@ -2545,11 +2545,17 @@ def _auxiliary_egress_binding(
 ) -> tuple[Any, Any] | None:
     """Build the identity and route used to authorize protected auxiliary calls."""
     from agent.llm_egress_runtime import provider_uses_egress_firewall
+    from agent.remote_task_context import owned_remote_task
+    from agent.auxiliary_egress import auxiliary_route, guard_auxiliary_context
 
-    normalized_provider = _normalize_aux_provider(provider)
+    actual_route = auxiliary_route(client, provider=provider, model=model, api_mode=api_mode)
+    normalized_provider, client_base_url = actual_route.provider, actual_route.base_url
+    resolved_api_mode = actual_route.api_mode
+    owned_remote = owned_remote_task(actual_route)
     if (
         os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") != "1"
         and not provider_uses_egress_firewall(normalized_provider)
+        and not owned_remote
     ):
         return None
     from agent.source_provenance import DEFAULT_POLICY_DIGEST
@@ -2569,25 +2575,18 @@ def _auxiliary_egress_binding(
         or raw_runtime.get("llm_egress_policy_digest")
         or DEFAULT_POLICY_DIGEST
     )
-    client_base_url = str(getattr(client, "base_url", "") or "")
     from hermes_cli.runtime_provider_backends import _is_external_process_provider
 
-    preserve_local_marker = (
-        _is_external_process_provider(normalized_provider)
-        and client_base_url.strip().lower().startswith("acp://")
-    )
+    preserve_local_marker = (_is_external_process_provider(normalized_provider)
+        and client_base_url.strip().lower().startswith("acp://"))
     base_url = client_base_url
-    if not base_url.startswith(("http://", "https://")) and not preserve_local_marker:
+    if not owned_remote and not base_url.startswith(("http://", "https://")) and not preserve_local_marker:
         base_url = str(raw_runtime.get("base_url") or "")
-    if not base_url.startswith(("http://", "https://")) and not preserve_local_marker:
+    if not owned_remote and not base_url.startswith(("http://", "https://")) and not preserve_local_marker:
         base_url = {
             "openai-codex": "https://chatgpt.com/backend-api/codex",
             "anthropic": "https://api.anthropic.com/v1",
         }.get(normalized_provider, _NOUS_DEFAULT_BASE_URL)
-    resolved_api_mode = str(
-        api_mode
-        or ("codex_responses" if normalized_provider == "openai-codex" else "chat_completions")
-    )
     attrs = {
         "provider": normalized_provider,
         "model": str(model or ""),
@@ -2614,12 +2613,12 @@ def _auxiliary_egress_binding(
             _llm_egress_max_granted_conservative_tokens=666_667,
         )
     agent = SimpleNamespace(**attrs)
-    route = SimpleNamespace(
-        provider=normalized_provider,
-        model=str(model or ""),
-        base_url=base_url,
-        api_mode=resolved_api_mode,
-    )
+    route = actual_route
+    route.base_url = base_url
+    if resolved_api_mode == "bedrock_converse":
+        from agent.remote_task_context import guard_remote_task_transport
+        guard_remote_task_transport(agent, route=route)
+    guard_auxiliary_context(agent, route)
     return agent, route
 
 

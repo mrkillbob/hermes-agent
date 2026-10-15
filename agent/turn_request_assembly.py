@@ -17,6 +17,7 @@ from agent.message_sanitization import _sanitize_messages_surrogates
 from agent.usage_anchor import anchored_context_tokens
 from agent.prompt_caching import build_prompt_cache_plan, effective_cache_ttl
 from agent.turn_context import build_api_messages
+from agent.remote_task_context import task_prefill_messages
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -130,9 +131,10 @@ def assemble_api_request(
         _append_moa_context(agent, api_messages, moa_config, original_user_message)
 
     # Ephemeral prefill messages go right after the system prompt, API-call-time only.
-    if agent.prefill_messages:
+    prefills = task_prefill_messages(agent)
+    if prefills:
         sys_offset = 1 if (api_messages and api_messages[0].get("role") == "system") else 0
-        for idx, pfm in enumerate(agent.prefill_messages):
+        for idx, pfm in enumerate(prefills):
             # Structural clone: the in-place sanitizers below must not write
             # through into agent.prefill_messages' nested containers.
             api_messages.insert(sys_offset + idx, _clone_message_for_send(pfm))
