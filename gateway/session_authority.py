@@ -246,6 +246,8 @@ class SessionAuthority:
                 if transport is not None:
                     live.event_stream.fanout.detach(transport)
                 if not live.subscribers:
+                    from gateway.session_local_mcp import release_editor_mcp
+                    await asyncio.to_thread(release_editor_mcp, self, [session_id])
                     from gateway.session_acp_lifecycle import (
                         end_idle_acp_session, end_idle_viewer_session, reopen_if_reattached)
                     from gateway.session_runtime_workers import tracked_write
@@ -791,6 +793,10 @@ class SessionAuthority:
                 else:
                     from gateway.session_operator import check_local_input
                     check_local_input(self, ref, first)
+                # Editor MCP schema drift re-freezes here, at this admission's start (a turn boundary),
+                # once the head is authorized: a refused head spawns no server and commits no change.
+                from gateway.session_local_mcp import refreeze_editor_mcp
+                await refreeze_editor_mcp(self, ref, live)
                 # The first real turn reopens a finalized row (#85303): mounts are reads, and
                 # SessionStore would route a stamped row as stale onto a FRESH session. A write: off-loop,
                 # tracked so retirement and the shutdown close gate count it.
