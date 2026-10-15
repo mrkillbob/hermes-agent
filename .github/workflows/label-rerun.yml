@@ -22,11 +22,11 @@ jobs:
       contains(fromJSON('["run-e2e", "ci-reviewed"]'), github.event.label.name)
     # On the job, so only the two maintainer labels enter the group: an unrelated
     # label event must not displace a pending rerun. One handler per PR at a
-    # time, never cancelling the active one, so two labels added together cannot
-    # race on the same completed run. (GitHub keeps a single pending job per
-    # group, so re-adding the same label while another waits replaces the waiter.)
+    # time, queued rather than cancelled, so two labels added together cannot
+    # race on the same completed run and no request is dropped.
     concurrency:
       group: label-rerun-${{ github.event.pull_request.number }}
+      queue: max
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 180
