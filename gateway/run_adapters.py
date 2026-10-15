@@ -62,6 +62,13 @@ class _UnresolvedProfileHome:
 UNRESOLVED_PROFILE_HOME = _UnresolvedProfileHome()
 
 
+def _profile_adapter_kept(platform, platform_config) -> bool:
+    """Whether a rescan keeps a profile's *platform* adapter. LOCAL belongs to the profile's session
+    authority, not to config.yaml: evicting it drops every restored session's policy, so resuming one
+    later is refused."""
+    return platform == Platform.LOCAL or (platform_config is not None and platform_config.enabled)
+
+
 class GatewayAdapterLifecycleMixin:
     """Adapter lifecycle: connect/teardown, fatal recovery, reconnect watcher, multiplex profiles."""
 
@@ -1269,11 +1276,7 @@ class GatewayAdapterLifecycleMixin:
         connected = 0
         for platform, adapter in list(profile_map.items()):
             platform_config = profile_cfg.platforms.get(platform)
-            if platform_config is not None and platform_config.enabled:
-                continue
-            # LOCAL belongs to the profile's session authority, not to config.yaml: evicting it here
-            # drops the policies of every restored session, so resuming one later is refused.
-            if platform == Platform.LOCAL:
+            if _profile_adapter_kept(platform, platform_config):
                 continue
             profile_map.pop(platform, None)
             profile_signatures.pop(platform, None)
