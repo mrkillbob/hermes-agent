@@ -1000,8 +1000,8 @@ def _handle_show(args: dict, **kw) -> str:
             # Capped; full log via CLI.
             "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
             "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
-            # Same string build_worker_context hands the dispatcher at spawn time.
-            "worker_context": kb.build_worker_context(conn, tid),
+            # Keep worker reads task-scoped; operators retain the full context.
+            "worker_context": kb.build_worker_context(conn, tid, include_role_history=not bool(_default_task_id(None))),
         }
         for parent_id in parents:
             parent = kb.get_task(conn, parent_id)
