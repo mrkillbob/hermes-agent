@@ -318,12 +318,35 @@ def worker_exit_code(path, params):
     return worker_result(path, params).get('exit_code', 1)
 
 
+def _startup_task_context(agent, context):
+    """The bound admission's title/body is the remote assignment, not its private history."""
+    from agent.remote_task_context import owned_remote_task
+    if not owned_remote_task(agent):
+        return context['context']
+    # build_kanban_policy freezes this field from the claimed task's title/body.
+    # Legacy or malformed frames cannot substitute the full operator context.
+    brief = context.get('goal_text')
+    if not isinstance(brief, str) or not brief.strip():
+        raise ValueError('kanban_public_brief_unavailable')
+    return '\n\n'.join((brief,
+        "Use the current dispatcher-assigned working directory and workspace-relative paths. "
+        "Do not search for alternate worktrees or invent paths. If required evidence is unavailable, "
+        "report that exact gap and follow the assignment's allowed outcome.",
+        "Before your worker exits, call kanban_complete with a factual result, or call "
+        "kanban_block only for a concrete unresolved prerequisite. A no-op or unavailable-evidence "
+        "outcome is still a completion when the task permits it; never exit with only conversational text. "
+        "For an assigned Git worktree, a read-only/no-change handoff must set "
+        "metadata.repository_changes=false. A repository-changing handoff must set it true and provide "
+        "commit_sha, pushed_branch, repository, base_branch, and pr_url after the clean exact head is pushed."))
+
+
 def _run_task_turns(agent, frame, history, context):
+    task_context = _startup_task_context(agent, context)
     from agent.skill_commands import build_preloaded_skills_prompt
     skills, loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
     if missing and not loaded:
         raise ValueError('kanban_skills_unavailable')
-    prompt = '\n\n'.join(p for p in (skills, context['context'], frame['text']) if p)
+    prompt = '\n\n'.join(p for p in (skills, task_context, frame['text']) if p)
     result = agent.run_conversation(prompt, conversation_history=history)
 
     def recover(nudge):

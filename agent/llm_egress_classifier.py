@@ -570,6 +570,14 @@ def _typed_payload_mapping(
             and output_call_id in syntax_tool_call_ids
             and is_tool_result_shape
         )
+        # Ordinary native sessions retain their existing unique, preceding,
+        # registered nonterminal admission. Owned-task routes supply no such
+        # IDs: their results still require a task projection or source proof.
+        is_native_nonterminal_result = (
+            value.get("type") == "tool_result"
+            and isinstance(output_call_id, str)
+            and output_call_id in native_nonterminal_call_ids
+        )
         is_elided_kanban_tool_result = (
             isinstance(output_call_id, str)
             and output_call_id in elided_kanban_tool_call_ids
@@ -728,6 +736,7 @@ def _typed_payload_mapping(
         handled_tool_result = any(
             (
                 is_recognized_tool_result,
+                is_native_nonterminal_result,
                 is_elided_kanban_tool_result,
                 is_kanban_attachment_result,
                 is_kanban_lifecycle_result,
@@ -788,6 +797,7 @@ def _typed_payload_mapping(
             and not any(
                 (
                     is_recognized_tool_result,
+                    is_native_nonterminal_result,
                     is_elided_kanban_tool_result,
                     is_kanban_attachment_result,
                     is_kanban_lifecycle_result,

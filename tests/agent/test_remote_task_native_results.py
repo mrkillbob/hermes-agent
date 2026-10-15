@@ -105,3 +105,25 @@ def test_native_real_file_read_retains_verified_source(tmp_path, monkeypatch, ow
     assert '_source_provenance' not in replay
     assert request == original
     assert source.read_text() == 'first = 1\nsecond = 2\n'
+
+
+@pytest.mark.parametrize('name', ['memory', 'mcp__context_notes', 'tool_describe'])
+@pytest.mark.parametrize('blocks', [False, True])
+def test_operator_native_admission_cannot_replay_owned_task_private_context(tmp_path, owned_task, name, blocks):
+    text = 'Household preference: evening ferry.'
+    request = {'model': 'test-model', 'messages': [
+        {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'context-1', 'name': name, 'input': {}}]},
+        {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'context-1',
+            'content': [{'type': 'text', 'text': text}] if blocks else text}]}]}
+    original = deepcopy(request)
+    sent = []
+    if name == 'memory':
+        with pytest.raises(EgressBlocked) as blocked:
+            _dispatch_provider_request(_native_agent(tmp_path), request, lambda body: sent.append(dict(body)))
+        assert 'untrusted_provenance' in blocked.value.decision.reason_codes
+        assert not sent
+    else:
+        # Read aliases and catalog results already have bounded task projections.
+        _dispatch_provider_request(_native_agent(tmp_path), request, lambda body: sent.append(dict(body)))
+        assert len(sent) == 1 and 'evening ferry' not in json.dumps(sent)
+    assert request == original
