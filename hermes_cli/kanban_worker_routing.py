@@ -29,6 +29,9 @@ def prepare_worker_route(task, profile_home, env):
     if endpoint:
         env["CUSTOM_BASE_URL"] = endpoint
         provider = "ollama"
+    else:
+        # An ambient value belongs to some other bare-custom model; the local route must not inherit it.
+        env.pop("CUSTOM_BASE_URL", None)
     env["HERMES_KANBAN_LOCAL_ONLY"] = "1"
     return replace(task, provider_override=provider, model_override=model,
                    reasoning_effort=task.reasoning_effort or "none")
