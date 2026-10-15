@@ -1,5 +1,6 @@
 """Display and heartbeat phase of the request-local streaming monitor."""
 
+import logging
 import time
 from types import SimpleNamespace
 
@@ -21,6 +22,23 @@ class _CancellationState(dict):
 
 
 class StreamingWaitMonitor:
+    def _visible_text_delivered(self, error, tool_in_flight: bool) -> bool:
+        """True when recorded text proves the user saw output a retry would duplicate (#112419).
+
+        ``deltas_were_sent`` flips on any content delta, including ones no consumer displayed, so a
+        stream that dies after deltas but before visible text is reset to an undelivered failure.
+        """
+        if bool((getattr(self.agent, "_current_streamed_assistant_text", "") or "").strip()):
+            return True
+        if self.deltas_were_sent["yes"] and not tool_in_flight:
+            logging.getLogger("agent.chat_completion_helpers").warning(
+                "Stream died after deltas but before any visible text was delivered (0 chars, "
+                "no tool call in flight); treating as an undelivered stream failure: %s", error)
+            self._quiet(self.agent._reset_stream_delivery_tracking)
+            self.deltas_were_sent["yes"] = False
+            self.first_delta_fired["done"] = False
+        return False
+
     @property
     def _request_cancelled(self):
         return self.__dict__.get("_request_cancelled")

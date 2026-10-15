@@ -246,7 +246,8 @@ _CHUNKED_BASE64_CANDIDATE = re.compile(
     r"[A-Za-z0-9_+/=-]{2,4}(?![A-Za-z0-9_+/=-])"
 )
 _HERMES_TASK_ID = re.compile(r"^t_[0-9a-f]{8}$")
-_PROMPT_CACHE_KEY = re.compile(r"^pck_[0-9a-f]{24}$")
+# pck_ = prompt cache key; gwk_ = hashed gateway session id (agent/prompt_cache_scope.py). Both are bounded hex ids.
+_PROMPT_CACHE_KEY = re.compile(r"^(?:pck|gwk)_[0-9a-f]{24}$")
 _CODEX_ENCRYPTED_REASONING_REPLAY = re.compile(r"^gAAAA[A-Za-z0-9_=-]{20,}$")
 # Anthropic's extended-thinking `signature` field is a provider-issued
 # cryptographic value on each `thinking` content block. It has no fixed

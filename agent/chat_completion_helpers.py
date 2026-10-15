@@ -3819,16 +3819,7 @@ class _StreamingCall(StreamingWaitMonitor):
             return True
 
         _partial_tool_in_flight = bool(self.result.get("partial_tool_names")) or self.provider_tool_in_flight["yes"]
-        # ``deltas_were_sent`` flips on any content delta, including ones no consumer displayed; only
-        # recorded text proves the user saw something a retry would duplicate (#112419).
-        _visible_text_was_sent = bool((getattr(self.agent, "_current_streamed_assistant_text", "") or "").strip())
-        if self.deltas_were_sent["yes"] and not _partial_tool_in_flight and not _visible_text_was_sent:
-            logger.warning(
-                "Stream died after deltas but before any visible text was delivered (0 chars, "
-                "no tool call in flight); treating as an undelivered stream failure: %s", e)
-            self._quiet(self.agent._reset_stream_delivery_tracking)
-            self.deltas_were_sent["yes"] = False
-            self.first_delta_fired["done"] = False
+        _visible_text_was_sent = self._visible_text_delivered(e, _partial_tool_in_flight)
         if _partial_tool_in_flight:
             # A tool call has not executed yet, so a transient drop can safely retry even
             # when quiet-mode/test consumers suppress ordinary text callbacks.
