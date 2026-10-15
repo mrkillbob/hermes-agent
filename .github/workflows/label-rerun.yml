@@ -2,8 +2,10 @@ name: Label rerun
 
 # CI reads the maintainer labels (run-e2e, ci-reviewed) while it runs, and the
 # CI workflows do not trigger on `labeled`. When a maintainer adds one of them,
-# rerun this head's failed jobs so the new label is observed. A run that is
-# still in progress is left alone: nothing can be rerun until it finishes.
+# rerun this head's CI so the new label is observed: `run-e2e` reruns the whole
+# run (the detect jobs must be recomputed to un-skip the slow lanes), while
+# `ci-reviewed` reruns only the failed jobs. A run that is still in progress
+# is left alone: nothing can be rerun until it finishes.
 on:
   pull_request:
     types: [labeled]
@@ -26,6 +28,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LABEL: ${{ github.event.label.name }}
         run: |
           for workflow in ci.yaml docker.yml nix.yml; do
             run=$(gh run list --workflow "$workflow" --event pull_request \
@@ -35,8 +39,18 @@ jobs:
             id=$(jq -r .databaseId <<<"$run")
             status=$(jq -r .status <<<"$run")
             conclusion=$(jq -r .conclusion <<<"$run")
+            # A rerun of a superseded head can cancel the newer head's CI through
+            # the shared concurrency group, so re-read the live head first.
+            live=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+            if [ "$live" != "$HEAD_SHA" ]; then
+              echo "PR head moved to $live; skipping"
+              break
+            fi
             if [ "$status" != completed ]; then
               echo "$workflow run $id is $status; leaving it alone"
+            elif [ "$LABEL" = run-e2e ]; then
+              echo "$workflow run $id: rerunning everything for run-e2e"
+              gh run rerun "$id"
             elif [ "$conclusion" = success ]; then
               echo "$workflow run $id already passed"
             else
