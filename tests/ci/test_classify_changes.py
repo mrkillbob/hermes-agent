@@ -334,7 +334,7 @@ CASES = {
     ),
     "composite action → ci_review (also fail-open all)": (
         [".github/actions/retry/action.yml"],
-        NO_E2E,
+        DEFAULT,
     ),
     # Normal desktop source doesn't trigger ci_review.
     "desktop src → no ci_review": (
@@ -434,10 +434,9 @@ CASES = {
         [".github/workflows/lint.yml"],
         NO_E2E,
     ),
-    "action change → all but e2e": (
-        [".github/actions/detect-changes/action.yml"],
-        NO_E2E,
-    ),
+    # The orchestrator and the local actions every E2E workflow calls.
+    "action change → all": ([".github/actions/detect-changes/action.yml"], DEFAULT),
+    "ci.yaml change → all": ([".github/workflows/ci.yaml"], DEFAULT),
     "empty diff → all": ([], DEFAULT),
     "blank lines → all": (["", "  "], DEFAULT),
 }

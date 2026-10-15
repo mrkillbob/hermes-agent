@@ -413,6 +413,8 @@ _SHARED_HUBS = frozenset({
 })
 _E2E_LANES: dict[str, tuple[str, ...]] = {
     "e2e": (
+        ".github/workflows/ci.yaml",
+        ".github/actions/",
         *_PY_TEST_HARNESS,
         ".github/workflows/tests.yml",
         ".github/workflows/tests-os.yml",
@@ -422,6 +424,8 @@ _E2E_LANES: dict[str, tuple[str, ...]] = {
         "hermes_state",
     ),
     "e2e_upgrade": (
+        ".github/workflows/ci.yaml",
+        ".github/actions/",
         *_PY_TEST_HARNESS,
         ".github/workflows/tests.yml",
         ".github/workflows/tests-os.yml",
@@ -448,6 +452,8 @@ _E2E_LANES: dict[str, tuple[str, ...]] = {
         *_UPDATE_DEPENDENCIES,
     ),
     "e2e_desktop_core": (
+        ".github/workflows/ci.yaml",
+        ".github/actions/",
         *_DESKTOP_E2E_SHARED,
         ".github/workflows/e2e-desktop-core.yml",
         "apps/desktop/e2e/",
@@ -464,6 +470,8 @@ _E2E_LANES: dict[str, tuple[str, ...]] = {
         "apps/desktop/src/app/chat/sidebar/fleet-",
     ),
     "e2e_desktop_update": (
+        ".github/workflows/ci.yaml",
+        ".github/actions/",
         *_DESKTOP_E2E_SHARED,
         ".github/workflows/e2e-desktop-update.yml",
         "apps/desktop/e2e/update/",
