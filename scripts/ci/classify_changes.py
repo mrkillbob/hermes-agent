@@ -414,7 +414,11 @@ _SHARED_HUBS = frozenset({
 })
 _E2E_LANES: dict[str, tuple[str, ...]] = {
     "e2e": (
+        ".github/workflows/ci.yaml",
+        ".github/actions/",
         *_PY_TEST_HARNESS,
+        ".github/workflows/tests.yml",
+        ".github/workflows/tests-os.yml",
         "tests/e2e/",
         # The state.db torture chamber and the compaction/exactly-once
         # suites are the only tests that run real concurrent writers.
@@ -427,7 +431,12 @@ _E2E_LANES: dict[str, tuple[str, ...]] = {
         "tests/gateway/test_native_reply_crash_recovery.py",
     ),
     "e2e_upgrade": (
+        ".github/workflows/ci.yaml",
+        ".github/actions/",
         *_PY_TEST_HARNESS,
+        ".github/workflows/tests.yml",
+        ".github/workflows/tests-os.yml",
+        ".github/workflows/windows-install-update-e2e.yml",
         *_DEP_MANIFESTS,
         "tests/e2e/core/upgrade/",
         "tests/e2e/core/windows_update/",
@@ -452,7 +461,10 @@ _E2E_LANES: dict[str, tuple[str, ...]] = {
         *_UPDATE_DEPENDENCIES,
     ),
     "e2e_desktop_core": (
+        ".github/workflows/ci.yaml",
+        ".github/actions/",
         *_DESKTOP_E2E_SHARED,
+        ".github/workflows/e2e-desktop-core.yml",
         "apps/desktop/e2e/",
         "apps/desktop/electron/backend-",
         "apps/shared/src/",
@@ -467,7 +479,10 @@ _E2E_LANES: dict[str, tuple[str, ...]] = {
         "apps/desktop/src/app/chat/sidebar/fleet-",
     ),
     "e2e_desktop_update": (
+        ".github/workflows/ci.yaml",
+        ".github/actions/",
         *_DESKTOP_E2E_SHARED,
+        ".github/workflows/e2e-desktop-update.yml",
         "apps/desktop/e2e/update/",
         "apps/desktop/electron/updater",
         "apps/desktop/electron/update-",
@@ -682,7 +697,11 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         ret["rust"] = True
         ret["ci_review"] = True
         ret["remote_backends"] = True
-        ret.update(dict.fromkeys(_slow_lanes([]), True))
+        # Config edits fail open for docker/nix but not the E2E suites: those run
+        # when the diff touches their own paths (workflow files included) or
+        # the run-e2e label is set, so a workflow-only PR skips ~2.5h of
+        # Windows/Linux E2E runner time. An empty diff still runs everything.
+        ret.update(dict.fromkeys(_slow_lanes([]) if not files else ("docker", "nix"), True))
 
         # explicitly skip mcp catalog here. it's not needed unless those files are modified.
     return ret
