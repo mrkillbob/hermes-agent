@@ -151,7 +151,7 @@ fallback_model:
     workspace.mkdir()
 
     assert kbd._default_spawn(task, str(workspace)) == 4245
-    route = json.loads(captured["env"]["HERMES_KANBAN_ROUTE"])
+    route = json.loads(captured["cmd"][captured["cmd"].index("--route") + 1])
     assert (route["model"], route["provider"], route["reasoning"]) == ("qwen3.6:35b-a3b", "ollama-launch", "none")
     assert "gemma4:e2b-it-qat" not in json.dumps(route)
 
@@ -211,7 +211,7 @@ def test_default_spawn_bridges_process_local_provider_into_profile_worker(
     workspace.mkdir()
 
     assert kbd._default_spawn(task, str(workspace)) == 4247
-    route = json.loads(captured["env"]["HERMES_KANBAN_ROUTE"])
+    route = json.loads(captured["cmd"][captured["cmd"].index("--route") + 1])
     assert (route["provider"], route["base_url"]) == ("ollama", "http://127.0.0.1:11434/v1")
     assert captured["env"]["CUSTOM_BASE_URL"] == "http://127.0.0.1:11434/v1"
     assert captured["env"]["HERMES_KANBAN_LOCAL_ONLY"] == "1"
@@ -280,7 +280,7 @@ fallback_model:
 
     assert kbd._default_spawn(task, str(workspace)) == 4246
     # No local route: the owner runs the card's own remote pin from its columns.
-    assert "HERMES_KANBAN_ROUTE" not in captured["env"]
+    assert "--route" not in captured["cmd"]
     assert "HERMES_KANBAN_LOCAL_ONLY" not in captured["env"]
 
 

@@ -62,19 +62,19 @@ def main():
     from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
     rc = 1
     try:
-        rc = _submit()
+        rc = _submit(sys.argv[1:])
     finally:
         print(f'\n{KANBAN_WORKER_EXIT_TRAILER}{int(rc)}', file=sys.stderr, flush=True)
     return rc
 
 
-def _submit():
+def _submit(argv):
     try:
         params = {'board': os.environ['HERMES_KANBAN_BOARD'], 'task_id': os.environ['HERMES_KANBAN_TASK'],
             'run_id': int(os.environ['HERMES_KANBAN_RUN_ID']), 'claim_lock': os.environ['HERMES_KANBAN_CLAIM_LOCK']}
         board_db = os.environ['HERMES_KANBAN_DB']
-        if os.environ.get('HERMES_KANBAN_ROUTE'):
-            params['route'] = json.loads(os.environ['HERMES_KANBAN_ROUTE'])
+        if argv[:1] == ['--route']:
+            params['route'] = json.loads(argv[1])
         # Owner startup must never inherit this worker's task/tool/goal identity.
         for key in list(os.environ):
             if key.startswith('HERMES_KANBAN_') and key != 'HERMES_KANBAN_HOME':
