@@ -5,6 +5,7 @@ Source and supported launch settings are frozen per route, never process env.
 from __future__ import annotations
 
 import uuid
+import weakref
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
@@ -35,6 +36,9 @@ class LocalSessionAdapter(BasePlatformAdapter):
         return source.platform, source.chat_id, source.user_id, source.profile, source.chat_type
 
     def register_source(self, source):
+        # Names this adapter as the source's transport so ``_adapter_for_source`` resolves a served
+        # secondary's session here, not to the launch profile's LOCAL adapter (which has no policy for it).
+        source._transport_adapter_ref = weakref.ref(self)
         self.sources[source.chat_id] = source, self._identity(source)
 
     async def connect(self, *, is_reconnect=False):
