@@ -1271,6 +1271,10 @@ class GatewayAdapterLifecycleMixin:
             platform_config = profile_cfg.platforms.get(platform)
             if platform_config is not None and platform_config.enabled:
                 continue
+            # LOCAL belongs to the profile's session authority, not to config.yaml: evicting it here
+            # drops the policies of every restored session, so resuming one later is refused.
+            if platform == Platform.LOCAL:
+                continue
             profile_map.pop(platform, None)
             profile_signatures.pop(platform, None)
             for claim in (self._adapter_credential_claim(platform, adapter),
