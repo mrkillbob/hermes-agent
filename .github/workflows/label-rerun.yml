@@ -14,9 +14,11 @@ permissions:
   actions: write
   contents: read
 
+# One handler per PR at a time, queued rather than cancelled, so two labels
+# added together cannot race on the same completed run.
 concurrency:
-  group: label-rerun-${{ github.event.pull_request.number }}-${{ github.event.label.name }}
-  cancel-in-progress: true
+  group: label-rerun-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 jobs:
   rerun-failed:
