@@ -195,6 +195,9 @@ def test_kanban_worker_exits_after_durable_successful_completion(monkeypatch, to
     monkeypatch.setattr(kanban_tools, "heartbeat_current_worker_from_env", lambda **kwargs: False)
     monkeypatch.setattr(kanban_tools, "inject_new_comments_from_env", lambda *args, **kwargs: False)
     agent = _make_agent()
+    # This owned remote fixture needs the real public-context attestation;
+    # the generic helper's manually cached operator prompt has no provenance.
+    agent._cached_system_prompt = agent._build_system_prompt()
     agent.valid_tool_names.add(tool_name)
     tool_call = _mock_tool_call(name=tool_name, call_id="terminal-1")
     agent.client.chat.completions.create.return_value = _mock_response(

@@ -4973,7 +4973,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str, *, include_role
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)
     from hermes_cli.kanban_review_recognition import append_private_context
-    append_private_context(lines, conn, task.assignee)
+    append_private_context(lines, conn, task.assignee, include_role_history=include_role_history)
     _ctx_role_history(lines, conn, task, now, include_role_history=include_role_history)
     _ctx_comments(lines, list_comments(conn, task_id), now)
     return "\n".join(lines).rstrip() + "\n"

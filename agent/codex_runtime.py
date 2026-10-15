@@ -493,10 +493,8 @@ def _consume_user_interrupt(agent, active: bool = True) -> tuple[bool, Any]:
 
 def _codex_developer_instructions(agent) -> str:
     """The prompt composition the standard loop sends as its system message (turn_context order)."""
-    developer_instructions = getattr(agent, "_cached_system_prompt", None) or ""
-    if getattr(agent, "ephemeral_system_prompt", None):
-        developer_instructions = (developer_instructions + "\n\n" + agent.ephemeral_system_prompt).strip()
-    return developer_instructions
+    from agent.remote_task_context import compose_task_system_prompt
+    return compose_task_system_prompt(agent, getattr(agent, "_cached_system_prompt", None))
 
 
 # Durable codex thread binding: ``sessions.model_config.codex_thread_id`` (hermes_state), written after the
@@ -726,6 +724,8 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
                               effective_task_id: str, should_review_memory: bool = False) -> dict[str, Any]:
     """Hand the turn to a ``codex app-server`` subprocess and project its events into ``messages``.
     Returns the chat_completions result shape. The user message is ALREADY in ``messages`` — never append it again."""
+    from agent.remote_task_context import guard_remote_task_transport
+    guard_remote_task_transport(agent)
     # Defense in depth for compression.checkpoint_required: agent init refuses the combination, but
     # api_mode is mutable. Explicit-True check matches compress_context().
     if getattr(agent, "compression_checkpoint_required", False) is True:

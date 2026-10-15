@@ -33,6 +33,7 @@ from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
 from agent.errors import EmptyStreamError
 from agent.chat_completion_stream_monitor import StreamingWaitMonitor
 from agent.fast_mode import effective_request_overrides
+from agent.remote_task_context import compose_task_system_prompt, guard_remote_task_transport, task_prefill_messages, mark_local_task_context
 from agent.turn_context import substitute_api_content
 from agent.gemini_native_adapter import is_native_gemini_base_url
 # Remote endpoints must never be fingerprinted: the probe waterfall is only valid for local/LM-Studio/Ollama
@@ -778,18 +779,14 @@ def _bedrock_converse_call(api_kwargs: dict, *, stream: bool, on_stream_denied=N
     return finish(raw_response)
 
 
-_EGRESS_PROTECTED_PROVIDERS = frozenset(
-    {"anthropic", "openai-codex", "nous", "nous-portal", "nousresearch"}
-)
-
-
 def _destination_requires_egress_firewall(agent) -> bool:
-    """Return whether this route is under the protected egress contract."""
+    """Keep provider-wide protection and require it for an owned remote task."""
+    from agent.llm_egress_runtime import provider_uses_egress_firewall
+    from agent.remote_task_context import owned_remote_task
 
-    provider = str(getattr(agent, "provider", "") or "").strip().lower()
-    return provider in _EGRESS_PROTECTED_PROVIDERS or (
+    return provider_uses_egress_firewall(getattr(agent, "provider", "")) or (
         os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1"
-    )
+    ) or owned_remote_task(agent)
 
 
 def _attach_source_provenance_sidecar(
@@ -811,10 +808,10 @@ def _attach_source_provenance_sidecar(
 def _dispatch_provider_request(agent, request, callback):
     """Apply the exact provider-bound egress policy at a physical call site."""
 
+    mark_local_task_context(agent)
     # Native SDK callers can enter the provider path with a live Relay turn
     # before the normal conversation loop has stamped its per-request fields.
-    # Reuse that already-authoritative turn identity; never invent identity for
-    # an unmanaged call, which must remain fail-closed at the firewall.
+    # Reuse authoritative identity; unmanaged calls remain fail-closed.
     if _destination_requires_egress_firewall(agent) and not getattr(agent, "_current_turn_id", ""):
         from agent import relay_runtime
         active_turn = relay_runtime.active_turn()
@@ -862,6 +859,7 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
             lambda authorized: agent._anthropic_messages_create(authorized, client=request_client),
         )
     if agent.api_mode == "bedrock_converse":
+        guard_remote_task_transport(agent)
         return _bedrock_converse_call(api_kwargs, stream=False)
     if agent.provider == "moa":
         # MoA is a virtual provider backed by the in-process MoAClient facade — never
@@ -2316,12 +2314,10 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
             agent._sanitize_tool_calls_for_strict_api(api_msg, model=sanitize_model)
         api_messages.append(api_msg)
 
-    effective_system = agent._cached_system_prompt or ""
-    if agent.ephemeral_system_prompt:
-        effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+    effective_system = compose_task_system_prompt(agent, agent._cached_system_prompt)
     if effective_system:
         api_messages = [{"role": "system", "content": effective_system}] + api_messages
-    for idx, pfm in enumerate(agent.prefill_messages or ()):
+    for idx, pfm in enumerate(task_prefill_messages(agent)):
         api_messages.insert((1 if effective_system else 0) + idx, pfm.copy())
 
     # Compression/resume can orphan a tool result whose parent tool_call was summarized away.
@@ -2826,9 +2822,11 @@ class _BedrockStream:
         return _on
 
     def _open_stream(self, next_api_kwargs: dict[str, Any]):
+        guard_remote_task_transport(self.agent)
         return _bedrock_converse_call(dict(next_api_kwargs), stream=True, on_stream_denied=self._fall_back_to_converse)
 
     def _fall_back_to_converse(self, client, final_kwargs: dict, exc: Exception):
+        guard_remote_task_transport(self.agent)
         # InvokeModel-only IAM policies cannot stream; fall back inside the same Relay
         # attempt (one lifecycle boundary).
         from agent.bedrock_adapter import normalize_converse_response

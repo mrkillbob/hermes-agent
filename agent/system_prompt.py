@@ -50,16 +50,13 @@ GUARDED_EXECUTION_CONTRACT = (
 
 
 def _guarded_prompt_flags(agent: Any) -> tuple[bool, bool]:
-    """``(remote_kanban, guarded)``: a remote Kanban worker on a protected egress
-    route is always guarded (and additionally path-neutral); otherwise guarded mode
+    """``(remote_kanban, guarded)``: an owned remote Kanban worker
+    is always guarded (and additionally path-neutral); otherwise guarded mode
     is the explicit opt-in resolved by ``agent.coding_context.guarded_prompt_enabled``.
     """
-    from agent.llm_egress_runtime import provider_uses_egress_firewall
+    from agent.remote_task_context import owned_remote_task
 
-    remote_kanban = bool(
-        str(os.environ.get("HERMES_KANBAN_TASK") or "").strip()
-        and provider_uses_egress_firewall(agent.provider)
-    )
+    remote_kanban = owned_remote_task(agent)
     guarded = remote_kanban
     if not guarded and agent.valid_tool_names:
         try:
@@ -771,11 +768,16 @@ def _coding_parts(
 
 
 def _post_workspace_parts(agent: Any, *, remote_kanban: bool = False) -> list[str]:
-    """Blocks that follow the worktree-specific context: environment probe
-    (config.yaml agent.environment_probe; one line, nothing when clean, skipped
-    for remote backends), bot-mode protocol and platform hint. A remote Kanban
-    worker gets a path-neutral profile line instead of absolute host paths.
+    """Local context gets environment, bot-mode and platform hints. Owned remote
+    tasks get only generated workspace guidance, without ambient profile prose.
     """
+    if remote_kanban:
+        return [
+            "Work only in the current task workspace and use relative paths. "
+            "The assignment supplies the task context; local profile history, "
+            "memory and skill inventories are not included. Explicit tool calls "
+            "still run in the assigned workspace under the usual permissions."
+        ]
     parts: list[str] = []
     if not remote_kanban and getattr(agent, "_environment_probe", True):
         try:
@@ -785,12 +787,6 @@ def _post_workspace_parts(agent: Any, *, remote_kanban: bool = False) -> list[st
             pass  # Probe failure must never block prompt build.
     if getattr(agent, "_bot_mode_protocol", True):
         parts.extend(_bot_mode_parts(agent))
-    if remote_kanban:
-        active_profile = _active_profile_name(agent, _ambient_file_safety_profile_name)
-        parts.append(
-            f"Active Hermes profile: {active_profile}. Work only in the current "
-            "task workspace and use relative paths."
-        )
     parts.append(platform_hint(agent))
     return parts
 
@@ -828,18 +824,23 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     _cc_len = getattr(getattr(agent, "context_compressor", None), "context_length", None)
     _ctx_len = _cc_len if isinstance(_cc_len, int) and _cc_len > 0 else None
     # ── Stable tier ────────────────────────────────────────────────
-    stable_parts, _soul_loaded = _identity_parts(agent, _ctx_len)
+    _remote_kanban_prompt, _guarded_prompt = _guarded_prompt_flags(agent)
+    # Remote assignments carry their own reviewed brief. Ambient profile and
+    # project files can contain unrelated operator history, even without paths.
+    stable_parts, _soul_loaded = (
+        ([DEFAULT_AGENT_IDENTITY], False) if _remote_kanban_prompt
+        else _identity_parts(agent, _ctx_len)
+    )
     # The skill_view() pointer dangles without skill tools OR without the
     # hermes-agent skill installed, so the variant is chosen after the skills
     # index is built; this slot holds its position.
     _help_guidance_slot = len(stable_parts)
-    # A remote Kanban worker on a protected egress route is always guarded (and
-    # additionally path-neutral); otherwise guarded mode is the explicit opt-in
+    # An owned remote Kanban worker is guarded and path-neutral;
+    # otherwise guarded mode is the explicit opt-in
     # resolved by agent.coding_context.guarded_prompt_enabled.
-    _remote_kanban_prompt, _guarded_prompt = _guarded_prompt_flags(agent)
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS)
     stable_parts.extend(_guidance_parts(agent, guarded=_guarded_prompt))
-    skills_prompt = _skills_prompt(agent, guarded=_guarded_prompt)
+    skills_prompt = "" if _remote_kanban_prompt else _skills_prompt(agent, guarded=_guarded_prompt)
     # Skill-pointer variant requires BOTH skill_view AND the hermes-agent skill
     # in the rendered index (pure string check — inherits the index's stability).
     if "skill_view" in (agent.valid_tool_names or set()) and "- hermes-agent:" in skills_prompt:
@@ -860,7 +861,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ephemeral_system_prompt is injected at API-call time only, never cached.
     if system_message is not None:
         context_parts.append(system_message)
-    context_parts.extend(_context_files_part(agent, _ctx_len, _soul_loaded))
+    if not _remote_kanban_prompt:
+        context_parts.extend(_context_files_part(agent, _ctx_len, _soul_loaded))
     if coding_workspace_parts:
         context_parts.extend([*coding_workspace_parts, *coding_trailing_parts, *post_workspace_parts])
     else:
@@ -870,7 +872,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ── Volatile tier (most likely to differ on a rebuild; kept last so the stable prefix stays reusable) ──
     # Skills are runtime-mutable, so the index leads the volatile band: on a longest-prefix
     # backend an unchanged index stays inside the reused prefix; a changed one re-prefills from here.
-    volatile_parts: list[str] = [skills_prompt, _auto_load_skills_prompt(agent), *_memory_parts(agent)]
+    volatile_parts: list[str] = [] if _remote_kanban_prompt else [
+        skills_prompt, _auto_load_skills_prompt(agent), *_memory_parts(agent),
+    ]
     # Plugin sections are confined to one coarse anchor in the volatile tail so
     # a resumed process can reconstruct the stable prefix without re-running plugins.
     # A remote Kanban worker's request already crosses the protected egress boundary,
@@ -900,7 +904,13 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
     # Surface context-file truncation warnings in chat, not only in logs.
     for warning in drain_truncation_warnings():
         agent._emit_status(warning)
-    return "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
+    prompt = "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
+    remote, _ = _guarded_prompt_flags(agent)
+    agent._remote_task_context_mode = "public" if remote else "local"
+    # A diagnostic render of parts cannot certify cached bytes. Bind the
+    # context selection to this full prompt so replacing the cache invalidates it.
+    agent._remote_task_public_prompt = prompt if remote else None
+    return prompt
 
 
 def invalidate_system_prompt(agent: Any) -> None:

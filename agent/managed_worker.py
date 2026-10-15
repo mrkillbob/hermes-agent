@@ -358,6 +358,9 @@ def execute(frame, channel):
                 tool_start_callback=lambda call_id, name, args: channel.send('tool.start', **tool_frame(call_id, name, args)),
                 tool_complete_callback=lambda call_id, name, args, result: channel.send('tool.complete',
                                                                                          **tool_frame(call_id, name, args, result)))
+            # Keep launch-selected skills distinct from the ambient gateway /
+            # personality additions in construct_v1 for remote task projection.
+            agent._remote_task_ephemeral_system_prompt = policy.skills_prompt
             controls.agent = agent
             if controls.stopped.is_set():
                 from agent.interrupt_compat import request_hard_interrupt

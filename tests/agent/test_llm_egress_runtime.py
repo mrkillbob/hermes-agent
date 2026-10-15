@@ -2961,27 +2961,22 @@ def test_protected_kanban_runtime_sanitizes_tool_paths_before_egress(
     monkeypatch.setenv("HERMES_HOME", str(profile_home))
     agent = _agent(tmp_path / "egress")
 
-    authorized, _ = authorize_agent_sdk_kwargs(
-        agent,
-        {
-            "model": "test-model",
-            "messages": [
-                {
-                    "role": "tool",
-                    "content": (
-                        f"pwd={workspace} home={profile_home} "
-                        "other=/Users/private/repository/file.py"
-                    ),
-                }
-            ],
-        },
-    )
-
-    content = authorized["messages"][0]["content"]
+    from agent.llm_egress_runtime import _sanitize_protected_kanban_body
+    request = {
+        "model": "test-model",
+        "messages": [{"role": "tool", "content": (
+            f"pwd={workspace} home={profile_home} other=/Users/private/repository/file.py"
+        )}],
+    }
+    sanitized = _sanitize_protected_kanban_body(request)
+    content = sanitized["messages"][0]["content"]
     assert str(tmp_path) not in content
     assert "pwd=." in content
     assert "$HERMES_PROFILE_HOME" in content
     assert "<private-path>" in content
+    # Path minimization alone does not authorize a tool result without a call ID.
+    with pytest.raises(EgressBlocked):
+        authorize_agent_sdk_kwargs(agent, request)
 
 
 def test_protected_kanban_runtime_does_not_hide_encoded_payload(tmp_path, monkeypatch):

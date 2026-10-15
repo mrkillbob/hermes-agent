@@ -4951,14 +4951,14 @@ class TestRunConversation:
 
 
     def test_kanban_block_called_on_iteration_exhaustion(self, agent, monkeypatch):
-        """Regression: kanban worker must signal the dispatcher when its
-        iteration budget is exhausted. The task is parked as sticky
-        ``needs_input`` so unchanged work cannot silently respawn forever.
-        """
+        """Exhaustion must park an owned task as needs_input instead of silently respawning."""
         self._setup_agent(agent)
         agent.max_iterations = 2
 
         monkeypatch.setenv("HERMES_KANBAN_TASK", "t_test_task_123")
+        # Build the actual owned remote prompt instead of attesting the
+        # shared helper's manually cached operator SYSTEM.
+        agent._cached_system_prompt = agent._build_system_prompt()
 
         # Return a tool call for every iteration to exhaust the budget.
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")

@@ -348,7 +348,7 @@ def test_remote_kanban_worker_forces_compact_path_neutral_prompt(monkeypatch):
 
     assert "KANBAN_WORKER_LIFECYCLE" in parts["stable"]
     assert "/Users/" not in "\n".join(parts.values())
-    assert skills.call_args.kwargs["compact_all_categories"] is True
+    skills.assert_not_called()
     plugins.assert_not_called()
 
 
