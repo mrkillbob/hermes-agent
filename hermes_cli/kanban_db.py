@@ -4943,11 +4943,11 @@ def schedule_task(
 
 # --- Worker context builder (what a spawned worker sees) ---
 
-def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
+def build_worker_context(conn: sqlite3.Connection, task_id: str, *, include_role_history: bool = True) -> str:
     """Everything a worker should read about its task: header, body,
     attachments, prior attempts, done-parent handoffs, the assignee's recent
     work, comments. Lists are tail-capped and fields char-capped
-    (``_CTX_MAX_*``) so the prompt stays bounded on pathological boards."""
+    (``_CTX_MAX_*``); native workers disable role history for task-only context."""
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
@@ -4974,7 +4974,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     _ctx_parent_results(lines, conn, task_id, now)
     from hermes_cli.kanban_review_recognition import append_private_context
     append_private_context(lines, conn, task.assignee)
-    _ctx_role_history(lines, conn, task, now)
+    _ctx_role_history(lines, conn, task, now, include_role_history=include_role_history)
     _ctx_comments(lines, list_comments(conn, task_id), now)
     return "\n".join(lines).rstrip() + "\n"
 

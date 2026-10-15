@@ -179,9 +179,22 @@ def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str
         lines.append("")
 
 
-def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, now: int) -> None:
+def _ctx_role_history(
+    lines: list[str], conn: sqlite3.Connection, task: Task, now: int, *,
+    include_role_history: bool = True,
+) -> None:
     """The assignee's 5 most recent completed runs on OTHER tasks — implicit
     role continuity without wiring anything into SOUL.md / MEMORY.md."""
+    if not include_role_history:
+        # Other tasks are not prerequisites or instructions for this assignment.
+        # Keep them in the operator view instead of injecting them into a worker turn.
+        lines.extend([
+            "## Context scope",
+            "History from other tasks is omitted from this worker context. "
+            "This task's prior attempts, parent handoffs and comments remain available.",
+            "",
+        ])
+        return
     if not task.assignee:
         return
     role_rows = conn.execute(
