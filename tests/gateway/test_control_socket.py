@@ -73,6 +73,59 @@ def test_long_home_uses_pointer_fallback(tmp_path: Path):
     assert pointer == deep / "gateway.sock.path"
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_fallback_pointer_is_never_visible_partially_written(tmp_path, monkeypatch, existing):
+    """A cold client's discovery may run between opening the pointer and its first write."""
+    import os
+    import stat
+    from gateway import control_socket
+
+    home = tmp_path / "profile"
+    home.mkdir()
+    bind = tmp_path / "socket-directory" / "control.sock"
+    pointer = home / "gateway.sock.path"
+    previous = "/previous/control.sock"
+    if existing:
+        pointer.write_text(previous)
+        # A prior gateway version may have created this pointer under a permissive umask.
+        pointer.chmod(0o644)
+    monkeypatch.setattr(control_socket, "resolve_server_socket_path", lambda _home: (bind, pointer))
+
+    class Server:
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            pass
+
+    async def start_server(*_args, **kwargs):
+        Path(kwargs["path"]).touch()
+        return Server()
+
+    monkeypatch.setattr(asyncio, "start_unix_server", start_server)
+    original_fdopen = os.fdopen
+    observations = []
+
+    def observe_before_write(*args, **kwargs):
+        # Deterministically interleave a reader while the writer's fd is open.
+        observations.append(pointer.read_text() if pointer.exists() else None)
+        return original_fdopen(*args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", observe_before_write)
+
+    async def run():
+        server = GatewayControlServer(home)
+        assert await server.start()
+        try:
+            assert observations == [previous if existing else None]
+            assert pointer.read_text() == str(bind)
+            assert stat.S_IMODE(pointer.stat().st_mode) == 0o600
+        finally:
+            await server.stop()
+
+    _run(run())
+
+
 def test_client_resolution_prefers_direct_then_pointer(home: Path, tmp_path: Path):
     assert resolve_client_socket_path(home) is None
     # pointer file to an existing socket-ish file

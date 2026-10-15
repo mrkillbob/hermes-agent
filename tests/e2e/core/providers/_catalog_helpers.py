@@ -216,6 +216,14 @@ def write_home(root: Path, model: dict[str, Any], extra_cfg: dict[str, Any] | No
            "agent": {"api_max_retries": 1, "auto_recovery_cycles": 0}, "updates": {"check": False},
            **(extra_cfg or {})}
     (home / ".hermes" / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    # Startup can consult the generic OpenRouter picker catalog even for another provider.
+    # Supply synthetic metadata locally so that cold-cache GET cannot contaminate the strict
+    # foreign-provider egress sentinel. Inference routes, keys and assertions stay unchanged.
+    cache = home / ".hermes" / "cache"
+    cache.mkdir()
+    (cache / "openrouter_curated_catalog.json").write_text(json.dumps({
+        "fetched_at": time.time(), "curated": [["catalog-model-a", "Catalog fixture model"]],
+    }), encoding="utf-8")
     select_test_dependencies(home / ".hermes", REPO_ROOT)
     return home
 
