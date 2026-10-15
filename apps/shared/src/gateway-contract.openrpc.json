@@ -21109,6 +21109,61 @@
         "title": "InterruptStatus",
         "type": "string"
       },
+      "KanbanRoute": {
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Provider"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model"
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reasoning"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Base Url"
+          }
+        },
+        "title": "KanbanRoute",
+        "type": "object"
+      },
       "KanbanRunParams": {
         "additionalProperties": false,
         "properties": {
@@ -21139,6 +21194,17 @@
             ],
             "default": null,
             "title": "Db"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KanbanRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [

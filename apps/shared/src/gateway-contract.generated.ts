@@ -4777,6 +4777,13 @@ export interface KanbanRunParams {
   run_id: number
   claim_lock: string
   db?: string | null
+  route?: KanbanRoute | null
+}
+export interface KanbanRoute {
+  provider?: string | null
+  model?: string | null
+  reasoning?: string | null
+  base_url?: string | null
 }
 export interface KanbanRunResult {
   session_id: string
