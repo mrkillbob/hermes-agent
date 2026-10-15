@@ -144,3 +144,13 @@ def test_claim_reclaimed_before_admission_marker_is_refused(tmp_path, monkeypatc
     assert calls == []
     with closing(connect(board='owned')) as conn:
         assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='owner_admitted'", (task_id,)).fetchone()[0] == 0
+
+
+def test_retry_of_a_routed_attempt_matches_its_frozen_claim():
+    from gateway.session_kanban import retry_matches_frozen_claim
+    route = {'provider': 'ollama', 'model': 'm', 'reasoning': None, 'base_url': 'http://x'}
+    params = dict(board='b', task_id='t', run_id=1, claim_lock='c', route=route)
+    frozen = dict(params, workspace='/w')
+    assert retry_matches_frozen_claim(params, frozen)
+    assert not retry_matches_frozen_claim(params | {'route': dict(route, model='other')}, frozen)
+    assert not retry_matches_frozen_claim(params | {'cwd': '/tmp'}, frozen)

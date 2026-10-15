@@ -80,6 +80,12 @@ def build_kanban_policy(connection, params, config):
                    request_json=json.dumps(request, sort_keys=True), kanban_json=json.dumps(context)), private
 
 
+def retry_matches_frozen_claim(params, context):
+    """A resend of an admitted attempt may carry the same optional db/route and nothing else new."""
+    claim = {'board', 'task_id', 'run_id', 'claim_lock'}
+    return claim <= set(params) <= claim | {'db', 'route'} and all(params[k] == context.get(k) for k in params)
+
+
 async def run_task(connection, params):
     if not connection.native_owner or 'session:create' not in connection.actor.capabilities:
         raise RuntimeStoreError('permission_denied')
@@ -102,8 +108,7 @@ async def run_task(connection, params):
     if saved:
         policy = restore_policy(saved['policy'])
         context = json.loads(policy.kanban_json or '{}')
-        if (not connection.native_owner or set(params) not in ({'board', 'task_id', 'run_id', 'claim_lock'}, {'board', 'task_id', 'run_id', 'claim_lock', 'db'})
-                or any(params[k] != context.get(k) for k in params)):
+        if not connection.native_owner or not retry_matches_frozen_claim(params, context):
             raise RuntimeStoreError('permission_denied')
         from gateway.session_local_recovery import restore_local_session
         ref = restore_local_session(authority, sid)
