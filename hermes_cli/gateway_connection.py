@@ -134,12 +134,20 @@ class GatewayConnection:
     def start(self, timeout=90):
         deadline = time.monotonic() + timeout
         while True:
-            with self._start_lock:
+            if not self._start_lock.acquire(timeout=max(deadline - time.monotonic(), 0)):
+                raise GatewayClientError("Gateway connection timed out; no local fallback")
+            try:
                 if self.final:
                     if self._error is not None:
                         raise self._error
                     return
                 thread = self._thread
+                if thread is not None and self.closed:
+                    # A completed dial publishes its error before its loop thread exits. Do not
+                    # mistake that final teardown for a dial in progress, or reuse its stale error.
+                    thread.join(max(deadline - time.monotonic(), 0))
+                    if thread.is_alive():
+                        raise GatewayClientError("Gateway connection timed out; no local fallback")
                 if thread is None or not thread.is_alive():
                     from agent.memory_provider import spawn_context_thread
 
@@ -151,6 +159,8 @@ class GatewayConnection:
                         self.closed = False
                     thread = self._thread = spawn_context_thread(self._run, name="hermes-gateway-loop")
                     thread.start()
+            finally:
+                self._start_lock.release()
             # Every caller waits out a dial in progress, its own or another thread's.
             if not self._ready.wait(max(deadline - time.monotonic(), 0)):
                 raise GatewayClientError("Gateway connection timed out; no local fallback")

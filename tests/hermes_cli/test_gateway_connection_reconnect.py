@@ -122,12 +122,109 @@ def test_close_ends_the_viewer_for_good(gateway, conn):
     assert len(gateway.lives) == 1
 
 
-def test_a_failed_redial_is_retried_on_the_next_call(gateway, conn):
+@pytest.fixture
+def paused_loop_exit(conn, monkeypatch):
+    """Keep the real failed loop thread alive after it publishes its result."""
+    finished, release = threading.Event(), threading.Event()
+    run = conn._run
+
+    def pause_after_run():
+        run()
+        finished.set()
+        assert release.wait(30)
+
+    monkeypatch.setattr(conn, "_run", pause_after_run)
+    try:
+        yield finished, release
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("failure", ["dial", "resume"])
+def test_a_failed_redial_is_retried_on_the_next_call(gateway, conn, paused_loop_exit, monkeypatch, failure):
+    gateway.hang_up(conn)
+    if failure == "dial":
+        gateway.refusals = 1
+    else:
+        gateway.resume_errors.append(GatewayClientError("storage_unavailable"))
+    with pytest.raises(GatewayClientError, match="Gateway starting|storage_unavailable"):
+        conn.call("status")
+    finished, release = paused_loop_exit
+    assert finished.wait(5)
+    failed_thread = conn._thread
+    assert failed_thread.is_alive()
+    join = failed_thread.join
+
+    def finish_teardown(timeout=None):
+        release.set()
+        join(timeout)
+
+    monkeypatch.setattr(failed_thread, "join", finish_teardown)
+    life = 2 if failure == "dial" else 3
+    assert conn.call("status") == {"status": "ok", "life": life}
+    assert len(gateway.lives) == life and conn.epoch == 2
+    assert _resumes(gateway.lives[-1]) == [SID]
+    assert conn.state(SID).subscription_id == f"sub-{life}"
+
+
+def test_retry_waits_for_failed_thread_teardown_only_until_its_deadline(gateway, conn, paused_loop_exit):
     gateway.hang_up(conn)
     gateway.refusals = 1
     with pytest.raises(GatewayClientError, match="Gateway starting"):
         conn.call("status")
-    assert conn.call("status") == {"status": "ok", "life": 2}
+    finished, _release = paused_loop_exit
+    assert finished.wait(5)
+    with pytest.raises(GatewayClientError, match="connection timed out"):
+        conn.start(timeout=0)
+    assert len(gateway.lives) == 1 and conn._thread.is_alive()
+
+
+def test_short_deadline_expires_while_another_caller_waits_for_teardown(
+        gateway, conn, paused_loop_exit, monkeypatch):
+    gateway.hang_up(conn)
+    gateway.refusals = 1
+    with pytest.raises(GatewayClientError, match="Gateway starting"):
+        conn.call("status")
+    finished, release = paused_loop_exit
+    assert finished.wait(5)
+    joining, short_done = threading.Event(), threading.Event()
+    failed_thread = conn._thread
+    join = failed_thread.join
+
+    def observed_join(timeout=None):
+        joining.set()
+        join(timeout)
+
+    monkeypatch.setattr(failed_thread, "join", observed_join)
+    outcomes = {}
+
+    def start(name, timeout):
+        try:
+            conn.start(timeout=timeout)
+            outcomes[name] = "ready"
+        except GatewayClientError as exc:
+            outcomes[name] = str(exc)
+        finally:
+            if name == "short":
+                short_done.set()
+
+    long = threading.Thread(target=start, args=("long", 30), daemon=True)
+    short = threading.Thread(target=start, args=("short", 0), daemon=True)
+    long.start()
+    try:
+        assert joining.wait(5)
+        short.start()
+        assert short_done.wait(5), "short caller waited for the long caller's teardown deadline"
+        assert "connection timed out" in outcomes["short"]
+        assert failed_thread.is_alive() and len(gateway.lives) == 1
+    finally:
+        release.set()
+        long.join(5)
+        if short.ident is not None:
+            short.join(5)
+    assert not long.is_alive() and not short.is_alive()
+    assert outcomes["long"] == "ready"
+    assert len(gateway.lives) == 2 and conn.epoch == 2
 
 
 def test_a_first_connect_failure_is_still_final(gateway):
