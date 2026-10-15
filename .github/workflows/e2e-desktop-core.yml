@@ -18,6 +18,10 @@ on:
         description: Caller namespace for independent reusable E2E runs.
         type: string
         default: ci
+      commit:
+        description: Commit to test and build. Empty keeps the triggering commit.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -25,8 +29,9 @@ permissions:
 concurrency:
   # This reusable lane is called by both CI and the nightly E2E workflow.
   # Keep their runs independent when a scheduled run overlaps a main push.
-  group: e2e-desktop-core-${{ inputs.concurrency_scope }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: e2e-desktop-core-${{ inputs.concurrency_scope }}-${{ inputs.commit != '' && github.run_id || github.ref }}
+  # A stable run is on the default branch. It must not queue behind or cancel a push.
+  cancel-in-progress: ${{ inputs.commit == '' }}
 
 jobs:
   core:
@@ -38,6 +43,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
 
       - name: Install system dependencies for Electron
         run: |

@@ -377,6 +377,10 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 
 # "muse" = Meta Muse Spark: on defaults it answers in prose with 0 tool calls and the turn closes on
 # finish_reason=stop (#96550).
+# "nemotron" is deliberately absent from this list and EXECUTION_GUIDANCE_MODELS. We ran Nemotron 3.5 Super VL 5 times
+# with the tool-use enforcement, execution guidance and Google operational guidance blocks forced on and 5 times with
+# them off: pass rate moved by under 1 point on SWE-bench Verified, SWE-bench Pro and GDPval, and by +3.7 points on
+# Terminal-Bench 2.1, which was not significant per task (p = 0.14).
 TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek", "muse")
 
 # Models that receive OPENAI_MODEL_EXECUTION_GUIDANCE when agent.execution_guidance is "auto" (agentic-eval
@@ -1385,6 +1389,10 @@ def build_skills_system_prompt(
     ``skills_dir_override`` makes home resolution EXPLICIT: a build thread that never bound the HERMES_HOME
     ContextVar would otherwise leak the default profile's skills into a bot's prompt.
     """
+    from agent.safe_worker_policy import safe_worker_enabled
+
+    if safe_worker_enabled():
+        return ""
     _home_token = None
     if skills_dir_override is not None:
         skills_dir = Path(skills_dir_override)
@@ -1496,6 +1504,13 @@ def _render_skills_index(
             if name not in seen:
                 seen.add(name)
                 index_lines.append(f"    - {name}: {desc}" if desc else f"    - {name}")
+    from agent.oneshot_footprint import ONESHOT_SKILLS_LOAD_GUIDANCE, is_single_query_session
+    if is_single_query_session():
+        return (
+            ONESHOT_SKILLS_LOAD_GUIDANCE
+            + "\n<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>"
+            + hidden_note
+        )
     return (
         "## Skills\n"
         "Before replying, scan the skills below. If a skill matches or is even partially relevant to your "
@@ -1515,6 +1530,11 @@ def _render_skills_index(
         "Only proceed without loading a skill if genuinely none are relevant to the task."
         + hidden_note
     )
+
+
+def _oneshot_prompt_variant() -> bool:
+    from agent.oneshot_footprint import is_single_query_session
+    return is_single_query_session()
 
 
 def _build_skills_system_prompt_inner(
@@ -1539,7 +1559,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())), compact_all_categories,
-        tuple(plugin_rows),
+        _oneshot_prompt_variant(), tuple(plugin_rows),
     )
     snapshot = _load_skills_snapshot(skills_dir, manifest)
     app_gated = snapshot is not None and any(
@@ -1680,6 +1700,10 @@ def load_soul_md(context_length: Optional[int] = None, home_override: Path | Non
     ContextVar falls back to the launch home and reads the wrong profile's SOUL.md (#50233, same class as
     the skills-index leak fixed in #86313).
     """
+    from agent.safe_worker_policy import safe_worker_enabled
+
+    if safe_worker_enabled():
+        return None
     try:
         from hermes_cli.config import ensure_hermes_home
         ensure_hermes_home()
@@ -1866,6 +1890,10 @@ def build_context_files_prompt(
     AGENTS.md chain (git root → cwd) → CLAUDE.md (cwd) → .cursorrules + .cursor/rules/*.mdc (cwd). SOUL.md
     from HERMES_HOME is independent and always included unless *skip_soul* (already the identity slot).
     """
+    from agent.safe_worker_policy import safe_worker_enabled
+
+    if safe_worker_enabled():
+        return ""
     cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
     # A FALLBACK-picked cwd inside the Hermes install tree must not gain system-prompt authority (the desktop
     # default would load this repo's contributor AGENTS.md). An explicit cwd is honored verbatim.

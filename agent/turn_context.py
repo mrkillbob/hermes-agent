@@ -22,6 +22,7 @@ from agent.iteration_budget import IterationBudget
 from agent.memory_manager import build_memory_context_block
 from agent.memory_provider import is_trivial_prompt
 from agent.message_content import flatten_message_text
+from agent.plugin_live_notes import pop_plugin_notices
 from agent.skills_index_delta import stage_skills_index_note
 from agent.message_metadata import (
     PERSISTENCE_ONLY_MESSAGE_FIELDS, SKILLS_NOTE_CARRIER, append_message, stamp_message_timestamp,
@@ -857,15 +858,15 @@ def _merge_gateway_notes(
     agent: Any, messages: list[Any], current_turn_user_idx: int, plugin_user_context: str
 ) -> str:
     """Must-deliver per-turn notes ride the user-message injection channel (one-shot) so the
-    ephemeral system prompt stays byte-stable: the gateway's staged notes, then the
-    surface-switch correction. Multimodal (list) content can't take the string sidecar —
+    ephemeral system prompt stays byte-stable: the gateway's staged notes, plugin go-live
+    notices no tool result carried, then the surface-switch correction. Multimodal (list) content can't take the string sidecar —
     append a durable text part instead."""
     _surface_note = consume_surface_switch_note(agent)
     _surface_metadata = take_surface_switch_metadata(agent)
     _skills_note = consume_skills_index_note(agent)
     _turn_notes = "\n\n".join(
-        part for part in (consume_gateway_turn_context_notes(agent), _surface_note,
-                          _skills_note) if part
+        part for part in (consume_gateway_turn_context_notes(agent), pop_plugin_notices(agent),
+                          _surface_note, _skills_note) if part
     )
     if _surface_note and _surface_metadata and 0 <= current_turn_user_idx < len(messages):
         user_msg = messages[current_turn_user_idx]

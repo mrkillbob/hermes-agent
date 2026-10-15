@@ -3819,9 +3819,7 @@ class _StreamingCall(StreamingWaitMonitor):
             return True
 
         _partial_tool_in_flight = bool(self.result.get("partial_tool_names")) or self.provider_tool_in_flight["yes"]
-        _visible_text_was_sent = self.deltas_were_sent["yes"] or bool(
-            (getattr(self.agent, "_current_streamed_assistant_text", "") or "").strip()
-        )
+        _visible_text_was_sent = self._visible_text_delivered(e, _partial_tool_in_flight)
         if _partial_tool_in_flight:
             # A tool call has not executed yet, so a transient drop can safely retry even
             # when quiet-mode/test consumers suppress ordinary text callbacks.

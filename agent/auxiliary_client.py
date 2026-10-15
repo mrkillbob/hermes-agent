@@ -29,7 +29,7 @@ from agent.error_classifier import (
     is_reasoning_field_rejection as _classifies_reasoning_field_rejection,
     is_reasoning_required_rejection as _classifies_reasoning_required_rejection,
 )
-
+from agent.auxiliary_structured_output import _without_structured_output_format
 from agent.codex_headers import (
     CODEX_AUX_BASE_URL as _CODEX_AUX_BASE_URL,
     apply_required_codex_headers as _apply_required_codex_headers,
@@ -671,13 +671,12 @@ def _is_codex_spark(model: Optional[str], provider: Optional[str] = None) -> boo
 def _fixed_temperature_for_model(
     model: Optional[str], base_url: Optional[str] = None, provider: Optional[str] = None,
 ) -> "Optional[float] | object":
-    """``OMIT_TEMPERATURE`` (drop the key; Kimi/Moonshot), a fixed ``float``, or ``None``."""
+    """``OMIT_TEMPERATURE`` (drop the key; Kimi/Moonshot, Gemini 3.6+), a fixed ``float``, or ``None``."""
     if _temperature_route_key(provider, model, base_url) in _TEMPERATURE_REJECTED_ROUTES:
         return OMIT_TEMPERATURE
     bare = _bare_model(model)
-    if bare.startswith(("o3", "o4")) or (
-        bare.startswith("gpt-5") and not bare.startswith("gpt-5-chat")
-    ):
+    from agent.gemini_native_adapter import gemini_sampling_deprecated
+    if bare.startswith(("o3", "o4")) or (bare.startswith("gpt-5") and not bare.startswith("gpt-5-chat")) or gemini_sampling_deprecated(bare):
         return OMIT_TEMPERATURE
     if _is_kimi_model(model):
         logger.debug("Omitting temperature for Kimi model %r (server-managed)", model)
@@ -3534,22 +3533,6 @@ def _is_structured_output_rejection(exc: Exception) -> bool:
     return _is_unsupported_parameter_error(exc, "response_format") or _is_unsupported_parameter_error(exc, "output_config")
 
 
-def _without_structured_output_format(kwargs: dict) -> Optional[dict]:
-    """Copy *kwargs* without ``response_format`` (top-level and ``extra_body``); None when nothing was
-    removed, so call sites don't retry an unchanged request."""
-    retry_kwargs = dict(kwargs)
-    changed = retry_kwargs.pop("response_format", None) is not None
-    extra_body = retry_kwargs.get("extra_body")
-    if isinstance(extra_body, dict) and "response_format" in extra_body:
-        remaining = {k: v for k, v in extra_body.items() if k != "response_format"}
-        if remaining:
-            retry_kwargs["extra_body"] = remaining
-        else:
-            retry_kwargs.pop("extra_body", None)
-        changed = True
-    return retry_kwargs if changed else None
-
-
 def _is_model_not_found_error(exc: Exception) -> bool:
     """"Requested model doesn't exist" (404 / invalid model) — typically a long-lived process pinned a
     since-dropped model. Excludes billing keywords, which :func:`_is_payment_error` owns."""
@@ -3878,10 +3861,12 @@ def _retry_same_provider_sync(*, resolved_provider: str, resolved_api_mode: Opti
 
 
 async def _retry_same_provider_async(*, resolved_provider: str, resolved_api_mode: Optional[str], task: Optional[str], **prep) -> Any:
+    import asyncio
     retry_client, retry_kwargs = _prepare_same_provider_retry(
         task=task, resolved_provider=resolved_provider, resolved_api_mode=resolved_api_mode, async_mode=True, **prep,
     )
-    return _validate_llm_response(
+    return await asyncio.to_thread(
+        _validate_llm_response,
         await _relay_async_completion(retry_client, retry_kwargs, provider=resolved_provider, api_mode=resolved_api_mode),
         task,
     )
@@ -4277,8 +4262,10 @@ async def _call_fallback_candidate_async(
     )
 
     async def _send(client: Any, request_kwargs: dict[str, Any], dest: _FallbackDestination) -> Any:
+        import asyncio
         try:
-            return _validate_llm_response(
+            return await asyncio.to_thread(
+                _validate_llm_response,
                 await _relay_async_completion(client, request_kwargs, provider=dest.provider, api_mode=dest.api_mode),
                 task,
             )
@@ -4286,7 +4273,8 @@ async def _call_fallback_candidate_async(
             retry_kwargs = _without_structured_output_format(request_kwargs) if _is_structured_output_rejection(exc) else None
             if retry_kwargs is None:
                 raise
-            response = _validate_llm_response(
+            response = await asyncio.to_thread(
+                _validate_llm_response,
                 await _relay_async_completion(client, retry_kwargs, provider=dest.provider, api_mode=dest.api_mode),
                 task,
             )
@@ -6967,7 +6955,8 @@ def _validate_llm_response(
     """Validate the .choices[0].message shape (fail fast, not a downstream AttributeError).
 
     Also the single aux-usage accounting chokepoint: every successful non-streaming response
-    passes here exactly once; *provider*/*base_url* are optional hints.
+    passes here exactly once; *provider*/*base_url* are optional hints. Async callers
+    await this off-loop because accounting may commit through synchronous worker RPC.
 
     See #7264.
     Recording is best-effort and never affects validation. *provider*/*base_url* are optional accounting
@@ -8539,7 +8528,9 @@ async def _async_call_llm_impl(
             return await _acreate_with_progress(client, _kwargs, task, force_stream=_force_stream_async)
 
         async def _primary(**validate_kw: Any) -> Any:
-            return _validate_llm_response(
+            import asyncio
+            return await asyncio.to_thread(
+                _validate_llm_response,
                 await _relay_async_completion(
                     client, kwargs, provider=request_provider, api_mode=req.resolved_api_mode,
                     create=_acreate),
@@ -8557,7 +8548,8 @@ async def _async_call_llm_impl(
         async def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":
-                return _validate_llm_response(await _relay_async_completion(*args, **kw), task)
+                import asyncio
+                return await asyncio.to_thread(_validate_llm_response, await _relay_async_completion(*args, **kw), task)
             if kind == "retry":
                 return await _retry_same_provider_async(**kw)
             fb_client, fb_model, fb_label = args

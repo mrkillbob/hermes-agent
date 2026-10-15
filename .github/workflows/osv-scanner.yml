@@ -25,6 +25,10 @@ name: OSV-Scanner
 on:
   workflow_call:
     inputs:
+      commit:
+        description: Commit to test and build. Empty keeps the triggering commit.
+        type: string
+        default: ''
       upload-sarif:
         description: "Upload SARIF to Code Scanning (disabled for PR baseline mismatch)"
         type: boolean
@@ -50,6 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ inputs.commit }}
           persist-credentials: false
       - name: Run scanner
         uses: google/osv-scanner-action/osv-scanner-action@8dc09193bb540e09b23da07ad7e30bd33bf87018 # v2.3.8

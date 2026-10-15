@@ -1492,9 +1492,9 @@ class CLITuiMixin(CLITuiStyleMixin):
                 self._should_exit = True
                 if event.app.is_running:
                     event.app.exit()
-        elif (
-            self._should_handle_steer_command_inline(text, has_images=has_images)
-            or self._should_handle_background_command_inline(text, has_images=has_images)):
+        elif (self._should_handle_steer_command_inline(text, has_images=has_images)
+              or self._should_handle_background_command_inline(text, has_images=has_images)
+              or self._should_handle_stop_command_inline(text, has_images=has_images)):
             self.process_command(text)
         else:
             return False

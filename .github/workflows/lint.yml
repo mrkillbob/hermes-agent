@@ -16,6 +16,10 @@ name: Lint (ruff + ty)
 on:
   workflow_call:
     inputs:
+      commit:
+        description: Commit to test and build. Empty keeps the triggering commit.
+        type: string
+        default: ''
       event_name:
         description: The event name from the calling orchestrator (pull_request or push).
         type: string
@@ -29,8 +33,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: lint-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: lint-${{ (github.ref_type == 'tag' || inputs.commit != '') && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' && inputs.commit == '' }}
 
 jobs:
   lint-diff:
@@ -46,6 +50,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
+          ref: ${{ inputs.commit }}
           # Two commits keep the PR merge base (or HEAD~1 for pushes) available.
           # The exact PR base SHA comes from the event payload below; fetching
           # every branch and tag made this advisory job time out on checkout.
@@ -162,6 +167,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
 
       - uses: ./.github/actions/setup-pm
         with:
@@ -199,6 +206,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
+          ref: ${{ inputs.commit }}
           fetch-depth: 2 # the merge commit and its first parent (the base branch tip)
 
       - uses: ./.github/actions/setup-pm
@@ -233,6 +241,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
 
       - uses: ./.github/actions/setup-pm
         with:

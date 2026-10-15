@@ -34,6 +34,10 @@ on:
         type: string
         required: false
         default: all
+      commit:
+        description: Commit to test and build. Empty keeps the triggering commit.
+        type: string
+        default: ''
       desktop_updater:
         description: >-
           Run the Windows desktop-update hand-off integration tests
@@ -71,8 +75,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: tests-os-${{ inputs.platform_scope }}-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: tests-os-${{ inputs.platform_scope }}-${{ (github.ref_type == 'tag' || inputs.commit != '') && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' && inputs.commit == '' }}
 
 jobs:
   plan:
@@ -84,6 +88,8 @@ jobs:
       run_windows: ${{ steps.plan.outputs.run_windows }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
       - id: plan
         env:
           PLATFORM_SCOPE: ${{ inputs.platform_scope }}
@@ -108,6 +114,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
 
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
@@ -246,6 +254,7 @@ jobs:
     if: needs.plan.outputs.run_windows == 'true' && inputs.e2e_upgrade
     uses: ./.github/workflows/windows-install-update-e2e.yml
     with:
+      commit: ${{ inputs.commit }}
       strict_acceptance: ${{ inputs.strict_acceptance }}
 
   e2e-windows:
@@ -273,6 +282,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
 
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm

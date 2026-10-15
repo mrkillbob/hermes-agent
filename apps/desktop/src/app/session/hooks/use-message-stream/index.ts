@@ -49,6 +49,7 @@ import { useGatewayEventHandler } from './gateway-event'
 import { handleServerRequest as dispatchServerRequest } from './gateway-event/server-requests'
 import { extendInterruptedReply } from './interrupted-reply'
 import { isPersistedInterimCompletion } from './persisted-completion'
+import { bindReceiptUserRows } from './receipt-user-rows'
 import { currentResponseParts, mergeCurrentResponseText } from './response-parts'
 import { completionErrorText, delegateTaskPayloads, MAX_STREAM_FLUSH_GAP_MS, STREAM_DELTA_FLUSH_MS } from './utils'
 
@@ -872,8 +873,11 @@ export function useMessageStream({
           message => message.role === 'user' && !(hasCurrentResponse && message.id === `user-queued-${sessionId}`)
         )
 
+        // A redirect reserves its correction row below the live stream without
+        // sealing it, so a still-pending stream row above the last user message
+        // is this completion's own reply, not a stale earlier occurrence.
         const streamIndex = streamId
-          ? prev.findIndex((message, index) => index > lastUserIndex && message.id === streamId)
+          ? prev.findIndex((message, index) => message.id === streamId && (index > lastUserIndex || message.pending))
           : -1
 
         const persistedAssistantRowId = persistedTurn?.final_assistant_row_id
@@ -1055,7 +1059,7 @@ export function useMessageStream({
         // degraded websocket leaves its tool row spinning forever. The turn is
         // provably done here — nothing can still be running — so seal any
         // tool-call parts that never saw their completion event.
-        nextMessages = sealOpenToolParts(nextMessages)
+        nextMessages = bindReceiptUserRows(sealOpenToolParts(nextMessages), persistedTurn)
 
         const hasInlineError = nextMessages.some(
           (m, index) => index > lastUserIndex && m.role === 'assistant' && m.error && !m.hidden

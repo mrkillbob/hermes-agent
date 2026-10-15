@@ -138,6 +138,8 @@ def test_default_auto_recovery_keeps_existing_snapshot_selection(homes, monkeypa
     database(homes / "state-snapshots/20000101/state.db")
     import hermes_cli.backup_restore as restore
     monkeypatch.setattr(restore, "_foreign_db_holder_pids", lambda path: [])
+    # Snapshot selection is under test, not the epoch floor; synthetic garbage has no readable epoch.
+    monkeypatch.setattr(restore, "_restore_destination_epoch", lambda dst: 0)
     result = maint._verify_and_restore_one_state_db(homes, label="default")
     assert result["ok"] is True and "20000101" in result["restored"]
     with sqlite3.connect(state) as conn:

@@ -702,6 +702,9 @@ async def test_production_factory_new_failure_preserves_all_old_gateway_state(
         def async_session_store(self):
             return self._async_session_store
 
+        async def _hm_stop_owner_turn(self, _session_key):
+            return None
+
         def _session_key_for_source(self, _source):
             return session_key
 
@@ -831,6 +834,9 @@ async def test_new_bind_failure_preserves_cached_agent_and_generation(tmp_path):
         @property
         def async_session_store(self):
             return self._async_session_store
+
+        async def _hm_stop_owner_turn(self, _session_key):
+            return None
 
         def _session_key_for_source(self, _source):
             return session_key

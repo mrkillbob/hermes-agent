@@ -158,6 +158,7 @@ class GatewaySessionCommandsMixin:
         """Handle /new or /reset command."""
         source = event.source
         session_key = self._session_key_for_source(source)
+        await self._hm_stop_owner_turn(session_key)  # idle and confirmed resets too (N53)
         old_entry = self.session_store._entries.get(session_key)
         try:
             new_entry = await self.async_session_store.reset_session(
@@ -189,6 +190,8 @@ class GatewaySessionCommandsMixin:
         _reset_process_scoped_tool_state()
 
         _old_sid = old_entry.session_id if old_entry else None
+        from gateway.session_automation import move_route_wakes
+        await move_route_wakes(self, session_key, _old_sid)  # main #114456: a parked wake survives /new
         await self._fire_session_reset_hooks(source, session_key, _old_sid,
                                              new_entry.session_id if new_entry else None)
         # Scoped to the profile serving this source so a multiplexed /new banner reports the

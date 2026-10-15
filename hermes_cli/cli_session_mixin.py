@@ -11,7 +11,6 @@ import contextlib
 import os
 import shutil
 import sys
-import uuid
 
 from agent.i18n import t
 from hermes_constants import get_hermes_home
@@ -88,7 +87,9 @@ def _reset_model_to_config_default(cli, silent: bool) -> None:
             explicit_provider=_config_provider or "")
         if not r.success:
             return
-        if cli.agent:
+        # A gateway /new already opened the next session on the profile's default (``session.create``
+        # without a model); the stand-in still points at the ended session, which a switch would rewrite.
+        if cli.agent and not getattr(cli, "_gateway_session_open", False):
             cli.agent.switch_model(
                 new_model=r.new_model, new_provider=r.target_provider, api_key=r.api_key,
                 base_url=r.base_url, api_mode=r.api_mode,
@@ -288,13 +289,6 @@ class CLISessionMixin:
             ctx_label = None
 
         lines = [t("cli.session.status_title"), "", *status_lines(fields, "session_id", "path", "title", "model")]
-        try:
-            from hermes_cli.anon_auth import free_tier_route
-
-            if free_tier_route():
-                lines.append(t("gateway.status.free_tier"))
-        except Exception:
-            pass
         optional = ((t("cli.session.label_reasoning"), reasoning_label),
                     (t("cli.session.label_approvals"), approval_label),
                     (t("cli.session.label_context"), ctx_label))
@@ -496,20 +490,21 @@ class CLISessionMixin:
         from hermes_cli.cli_model_switch_mixin import _resolve_cli_reasoning
         old_session_id = self.session_id
         new_session_start = datetime.now()
-        new_session_id = f"{new_session_start.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        # The gateway's new session; getattr: tests drive new_session unbound (main's mint then).
+        fresh_session_id = getattr(self, "_new_session_id", new_session_id)(new_session_start)
         managed_new = getattr(self, "_conversation_worktree_manager", None) is not None
         new_reasoning_config = _parse_reasoning_config(
             CLI_CONFIG["agent"].get("reasoning_effort", ""))
         if managed_new:
             def persist_new():
                 self._session_db.create_session(
-                    session_id=new_session_id, cwd=os.getcwd(),
+                    session_id=fresh_session_id, cwd=os.getcwd(),
                     source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                     model=self.model,
                     model_config={"max_iterations": self.max_turns,
                                   "reasoning_config": new_reasoning_config})
 
-            if not self._prepare_conversation_root(new_session_id, before_commit=persist_new):
+            if not self._prepare_conversation_root(fresh_session_id, before_commit=persist_new):
                 return False
         _boundary_snapshot = None
         if self.agent:
@@ -518,7 +513,9 @@ class CLISessionMixin:
                 # rotation) so /new never blocks on the LLM-bound call.
                 _boundary_snapshot = self._launch_session_boundary_memory_flush(
                     list(self.conversation_history), session_id=old_session_id)
-            self._notify_session_boundary("on_session_finalize")
+            from hermes_cli.cli_shutdown import _gateway_owns_session_end
+            if not _gateway_owns_session_end(self.agent):  # the gateway finalizes at end_session below
+                self._notify_session_boundary("on_session_finalize")
 
         if self._session_db and old_session_id:
             # /new can arrive mid-turn before _flush_messages_to_session_db() ran — flush
@@ -538,7 +535,7 @@ class CLISessionMixin:
             self._discard_session_if_empty(old_session_id)
 
         self.session_start = new_session_start
-        self.session_id = new_session_id
+        self.session_id = fresh_session_id
         # getattr: tests drive new_session unbound against a SimpleNamespace stand-in.
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
         self.conversation_history = []
@@ -602,7 +599,9 @@ class CLISessionMixin:
                     _mm.on_session_switch(
                         self.session_id, parent_session_id=old_session_id or "",
                         reset=True, reason="new_session")
-            self._notify_session_boundary("on_session_reset")
+            from hermes_cli.cli_shutdown import _gateway_owns_session_end
+            if not _gateway_owns_session_end(self.agent):  # the gateway resets when end_session closes it
+                self._notify_session_boundary("on_session_reset")
 
         if not silent:
             if title:
