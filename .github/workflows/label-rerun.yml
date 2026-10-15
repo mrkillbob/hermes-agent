@@ -1,21 +1,87 @@
 name: Label rerun
 
-# A pull_request event uses candidate workflow code. This file only wakes the
-# default-branch Review CI resumption controller, which reads live maintainer
-# labels and exact-head run metadata before requesting any retry.
+# CI reads the maintainer labels (run-e2e, ci-reviewed) while it runs, and the
+# CI workflows do not trigger on `labeled`. When a maintainer adds one of them,
+# rerun this head's CI so the new label is observed: `run-e2e` reruns the whole
+# run (the detect jobs must be recomputed to un-skip the slow lanes), while
+# `ci-reviewed` reruns only the failed jobs. A run that is still in progress
+# cannot be rerun, so wait for it to finish first.
 on:
   pull_request:
     types: [labeled]
 
-permissions: {}
+permissions:
+  actions: write
+  contents: read
 
 jobs:
-  wake-up:
+  rerun-failed:
     if: >-
       github.repository == 'mrkillbob/hermes-agent' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       contains(fromJSON('["run-e2e", "ci-reviewed"]'), github.event.label.name)
+    # On the job, so only the two maintainer labels enter the group: an unrelated
+    # label event must not displace a pending rerun. One handler per PR at a
+    # time, queued rather than cancelled, so two labels added together cannot
+    # race on the same completed run and no request is dropped.
+    concurrency:
+      group: label-rerun-${{ github.event.pull_request.number }}
+      queue: max
+      cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 180
     steps:
-      - name: Wake trusted label reconciliation
-        run: echo 'Maintainer labels changed; the trusted controller will re-evaluate them.'
+      - name: Rerun CI for the labeled head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LABEL: ${{ github.event.label.name }}
+        run: |
+          set -euo pipefail
+          # Runs are matched by head SHA and then by pull request, so another PR
+          # sharing the commit is never rerun.
+          find_run() {
+            gh api "repos/$GH_REPO/actions/workflows/$1/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=30" \
+              | jq -c --argjson pr "$PR_NUMBER" \
+                '[.workflow_runs[] | select(any(.pull_requests[]; .number == $pr))][0] // empty'
+          }
+          # A rerun of a superseded head can cancel the newer head's CI through
+          # the shared concurrency group, so re-read the live head first. Done as
+          # a plain assignment, not inside an `if`, so a failed lookup fails the
+          # job instead of looking like a moved head.
+          live_head() {
+            live=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid) \
+              || { echo "::error::could not read the live head of PR $PR_NUMBER"; exit 1; }
+            [ -n "$live" ] || { echo "::error::empty live head for PR $PR_NUMBER"; exit 1; }
+          }
+          for workflow in ci.yaml docker.yml nix.yml; do
+            run=$(find_run "$workflow")
+            [ -n "$run" ] || { echo "$workflow: no run for $HEAD_SHA"; continue; }
+            id=$(jq -r .id <<<"$run")
+            if [ "$(jq -r .status <<<"$run")" != completed ]; then
+              echo "$workflow run $id is still running; waiting for it to finish"
+              gh run watch "$id" --interval 60 >/dev/null || true
+            fi
+            live_head
+            if [ "$live" != "$HEAD_SHA" ]; then
+              echo "PR head moved to $live; skipping"
+              break
+            fi
+            # Re-read after the wait: the run may have been rerun or replaced.
+            run=$(find_run "$workflow")
+            id=$(jq -r .id <<<"$run")
+            conclusion=$(jq -r .conclusion <<<"$run")
+            if [ "$(jq -r .status <<<"$run")" != completed ]; then
+              echo "$workflow run $id never finished; leaving it alone"
+            elif [ "$LABEL" = run-e2e ]; then
+              echo "$workflow run $id: rerunning everything for run-e2e"
+              gh run rerun "$id"
+            elif [ "$conclusion" = success ]; then
+              echo "$workflow run $id already passed"
+            else
+              echo "$workflow run $id ended $conclusion; rerunning failed jobs"
+              gh run rerun "$id" --failed
+            fi
+          done
