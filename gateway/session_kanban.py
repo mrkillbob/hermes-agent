@@ -163,6 +163,10 @@ def bind_worker_context(frame):
         'HERMES_KANBAN_CLAIM_LOCK': context['claim_lock'], 'HERMES_KANBAN_WORKSPACE': context['workspace'],
         'HERMES_KANBAN_WORKSPACES_ROOT': context['workspaces_root'], 'HERMES_PROFILE': context['profile'],
         'HERMES_SESSION_SOURCE': 'kanban'}
+    # The submitter's env (where bind_worker_environment set this) is not what the managed executor
+    # inherits; without it completion policies cannot find the control plane and stop enforcing.
+    from hermes_constants import get_default_hermes_root
+    env['HERMES_CONTROL_HOME'] = str(get_default_hermes_root())
     for key, value in (('HERMES_KANBAN_BRANCH', context['branch']), ('HERMES_TENANT', context['tenant'])):
         if value:
             env[key] = value
