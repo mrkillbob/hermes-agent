@@ -65,6 +65,8 @@ killer.unref()
 
 async function main() {
   const { runUpdateWindowChat } = await import('./update-window-chat.mjs')
+  const { predictSmokeHermesHome } = await import('./desktop-smoke.ts')
+  const { readBundledBundleEnv } = await import('../../../tests-js/scripts/desktop-smoke-process.ts')
   const { isolateUpdateWindowEnvironment, isolatedElectronArgs, updateWindowEnvironment } = await import('./smoke-env.mjs')
   const origin = nativeHandoff ? 'bundled' : 'source'
   const root = nativeHandoff ? path.join(path.dirname(exePath), 'resources', 'agent-payload') : path.join(process.env.HERMES_HOME, 'hermes-agent')
@@ -101,7 +103,7 @@ async function main() {
   await runUpdateWindowChat(app, page, {
     mockUrl: process.env.HERMES_E2E_MOCK_URL, outDir: proofDir,
     expectCommit: oldSha,
-    origin, root, executable: exePath, userData,
+    origin, root, executable: exePath, userData, hermesHome: origin === 'bundled' ? predictSmokeHermesHome(launchEnv, readBundledBundleEnv(root) ?? {}) : launchEnv.HERMES_HOME,
     prepare: async () => {
       await prepareWindowForInput(app, page)
       log('[zoom] app window prepared at 100%')

@@ -168,7 +168,7 @@ async function main() {
     mockUrl: values['mock-url'], outDir: values['chat-out'],
     expectCommit: values['old-sha'],
     root: values['repo-dir'], origin: 'source', executable: launch.executablePath,
-    userData: launchEnv.HERMES_DESKTOP_USER_DATA_DIR,
+    userData: launchEnv.HERMES_DESKTOP_USER_DATA_DIR, hermesHome: launchEnv.HERMES_HOME,
     prepare: async () => {
       phase('old-chat');
       await window.screenshot({ path: `${values.spec}.window.png` }).catch(() => {});

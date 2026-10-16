@@ -6,6 +6,7 @@ import path from 'node:path'
 import type { ElectronApplication, Page } from '@playwright/test'
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { predictSmokeHermesHome } from '../tests/install/e2e-assets/desktop-smoke.ts'
 import { runUpdateWindowChat, type UpdateWindowChatOptions } from '../tests/install/e2e-assets/update-window-chat.mjs'
 
 import type * as SelectionDiagnostics from './scripts/desktop-selection-diagnostics.ts'
@@ -89,7 +90,7 @@ function fixture() {
 
   const options: UpdateWindowChatOptions = {
     mockUrl: 'http://127.0.0.1:1234', outDir, expectCommit: 'a'.repeat(40),
-    origin: 'source', root: outDir, executable, userData: outDir, prepare,
+    origin: 'source', root: outDir, executable, userData: outDir, hermesHome: outDir, prepare,
   }
 
   chat.waitForChatReady.mockImplementation(async () => { calls.push('ready') })
@@ -213,9 +214,13 @@ test('diagnostic cleanup errors do not replace the preparation error', async () 
 })
 
 
-test('OLD update-window chat verifies a detached listener through the app-resolved home', async () => {
+test.each(['app-resolved', 'legacy launch', 'legacy baked-clear launch'] as const)('OLD update-window chat verifies a detached listener through the %s home', async source => {
   const f = fixture()
-  const home = path.join(f.options.root, 'profiles', 'old')
+
+  const home = source === 'legacy baked-clear launch'
+    ? predictSmokeHermesHome({ HERMES_HOME: path.join(f.options.root, 'cleared-home'), HERMES_DESKTOP_USER_DATA_DIR: path.join(f.options.root, 'baked-user-data') }, { HERMES_HOME: null })
+    : path.join(f.options.root, 'profiles', 'old')
+
   fs.mkdirSync(home, { recursive: true })
   const script = path.join(f.options.root, 'listener.mjs')
   fs.writeFileSync(script, 'import net from "node:net";const s=net.createServer();s.listen(0,"127.0.0.1",()=>console.log(s.address().port))')
@@ -230,13 +235,15 @@ test('OLD update-window chat verifies a detached listener through the app-resolv
     const actual = await vi.importActual<typeof DesktopSmokeProcess>('./scripts/desktop-smoke-process.ts')
     const started = actual.processStartTime(child.pid!)
     expect(started).not.toBeNull()
-    fs.writeFileSync(path.join(f.options.root, 'spawn-ledger.json'), JSON.stringify([
+    const ledgerRoot = source === 'legacy baked-clear launch' ? home : f.options.root
+    fs.writeFileSync(path.join(ledgerRoot, 'spawn-ledger.json'), JSON.stringify([
       { pid: child.pid, purpose: 'gateway', create_time: started, hermes_home: home, host: '', port: null },
     ]))
     vi.mocked(f.app.evaluate).mockResolvedValue({ pid: child.pid, executable: f.options.executable,
       resources: f.options.root, userData: f.options.userData })
     vi.mocked(f.page.evaluate).mockResolvedValue({ mode: 'local', baseUrl: `http://127.0.0.1:${port}` })
-    chat.readChatIdentity.mockResolvedValue({ hermesRoot: f.options.root, hermesHome: home })
+    f.options.hermesHome = home
+    chat.readChatIdentity.mockResolvedValue({ hermesRoot: f.options.root, ...(source === 'app-resolved' ? { hermesHome: home } : {}) })
     // UI and inference stay inert; native ownership and installed-tree origin are real.
     provenance.localBackendProcess.mockImplementation(actual.localBackendProcess)
     provenance.assertBackendOrigin.mockImplementation(actual.assertBackendOrigin)
