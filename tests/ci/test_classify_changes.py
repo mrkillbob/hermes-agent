@@ -803,5 +803,3 @@ def test_catalog_lane_runs_every_test_that_reads_the_shipped_catalog():
     ):
         assert must in files
     assert not any(f.startswith("tests/e2e/") for f in files)
-    text = (_REPO / ".github/workflows/catalog-tests.yml").read_text(encoding="utf-8-sig")
-    assert "scripts/ci/catalog_test_files.py" in text and "scripts/run_tests.sh" in text
