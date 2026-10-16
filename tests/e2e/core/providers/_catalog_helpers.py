@@ -214,6 +214,9 @@ def write_home(root: Path, model: dict[str, Any], extra_cfg: dict[str, Any] | No
            # auto_recovery_cycles: 0 — the documented post-exhaustion ladder (15/30/60/60/60 s) would
            # otherwise park a transport-failed turn for minutes; one bounded attempt is the contract here.
            "agent": {"api_max_retries": 1, "auto_recovery_cycles": 0}, "updates": {"check": False},
+           # Background metadata refresh is outside this inference-routing fixture.
+           # Its forced refresh bypasses the synthetic cache after 30 seconds.
+           "model_catalog": {"enabled": False},
            **(extra_cfg or {})}
     (home / ".hermes" / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     # Startup can consult the generic OpenRouter picker catalog even for another provider.
