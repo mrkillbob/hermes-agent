@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 import threading
@@ -61,7 +62,7 @@ class FleetRunner:
         profile_models: Mapping[str, str] | None = None,
         profile_providers: Mapping[str, str] | None = None,
         liveness_check: Callable[[], bool] | None = None,
-        executor: Callable[[list[str]], Any] | None = None,
+        executor: Callable[[list[str], str], Any] | None = None,
     ):
         self.node_id = node_id
         self.coordinator = coordinator
@@ -177,8 +178,9 @@ class FleetRunner:
             if provider:
                 argv.extend(["--provider", provider])
             argv.extend(["-m", models[0]])
-        argv.extend(["-q", body, "--format", "stream-json"])
-        result = self._executor(argv)
+        # Keep task data out of the command line, including Windows batch launchers.
+        argv.extend(["--query-file", "-", "--format", "stream-json"])
+        result = self._executor(argv, body)
         if result.returncode == 0:
             result.stdout, result.telemetry = _parse_stream_json_result(result.stdout or "")
         else:
@@ -186,5 +188,7 @@ class FleetRunner:
         return result
 
     @staticmethod
-    def _execute(argv: list[str]):
-        return subprocess.run(argv, check=False, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    def _execute(argv: list[str], input_text: str):
+        return subprocess.run(argv, input=input_text, check=False, capture_output=True, text=True,
+                              encoding='utf-8', errors='replace',
+                              env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
