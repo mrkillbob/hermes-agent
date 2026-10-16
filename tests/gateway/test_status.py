@@ -1729,17 +1729,19 @@ def test_strict_gateway_identity_raises_when_metadata_stat_is_denied(
         status.get_running_pid_identity_strict(pid_path)
 
 
-def test_strict_gateway_identity_raises_on_malformed_active_metadata(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("malformed_name", ["gateway.pid", "gateway.lock"])
+def test_strict_gateway_identity_identifies_malformed_active_metadata_file(
+    tmp_path, monkeypatch, malformed_name
 ):
     pid_path = tmp_path / "gateway.pid"
     lock_path = tmp_path / "gateway.lock"
-    pid_path.write_text("bad", encoding="utf-8")
-    lock_path.write_text("bad", encoding="utf-8")
+    valid = json.dumps({"pid": 123, "start_time": 10.0, "kind": "hermes-gateway"})
+    pid_path.write_text("bad" if malformed_name == "gateway.pid" else valid, encoding="utf-8")
+    lock_path.write_text("bad" if malformed_name == "gateway.lock" else valid, encoding="utf-8")
     monkeypatch.setattr(status, "_get_gateway_lock_path", lambda _path=None: lock_path)
     monkeypatch.setattr(status, "_is_gateway_runtime_lock_active_strict", lambda _path=None: True)
 
-    with pytest.raises(RuntimeError, match="malformed"):
+    with pytest.raises(RuntimeError, match=rf"unreadable or invalid record: {malformed_name}"):
         status.get_running_pid_identity_strict(pid_path)
 
 

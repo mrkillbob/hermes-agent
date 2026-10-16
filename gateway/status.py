@@ -2076,7 +2076,16 @@ def get_running_pid_identity_strict(pid_path: Path) -> Optional[tuple[int, float
     # the live process below is the same proof — raising here blocked every following update.
     records = (_read_pid_record(resolved_pid_path), lock_record) if pid_exists else (lock_record,)
     if not all(records):
-        raise RuntimeError("gateway PID or lock metadata is malformed")
+        record_paths = (
+            (resolved_pid_path, resolved_lock_path) if pid_exists else (resolved_lock_path,)
+        )
+        malformed_paths = ", ".join(
+            path.name for path, record in zip(record_paths, records) if record is None
+        )
+        raise RuntimeError(
+            "gateway PID or lock metadata is malformed "
+            f"(unreadable or invalid record: {malformed_paths})"
+        )
     pid = _pid_from_record(records[0])
     if pid is None or pid <= 0 or any(_pid_from_record(record) != pid for record in records[1:]):
         raise RuntimeError("gateway PID and lock identities disagree")
