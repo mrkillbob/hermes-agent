@@ -1,6 +1,7 @@
 """Graceful gateway exit releases its inference runtime after accepted work drains."""
 
 import asyncio
+import threading
 
 import pytest
 
@@ -35,3 +36,47 @@ async def test_gateway_drains_before_stopping_owned_runtime(monkeypatch, stop_fa
     assert owners[0]._shutdown_event.is_set()
     if not stop_fails:
         assert bootstrap.get_supervisor() is None
+
+
+@pytest.mark.asyncio
+async def test_blocked_native_stop_does_not_hold_the_event_loop_executor(monkeypatch):
+    from gateway.run_local_runtime import stop_owned_local_runtime
+    from hermes_cli.local_runtime import bootstrap
+
+    release = threading.Event()
+    entered = threading.Event()
+    exited = threading.Event()
+    workers = []
+
+    class BlockedRuntime:
+        def stop(self):
+            workers.append(threading.current_thread())
+            entered.set()
+            try:
+                release.wait(10)
+            finally:
+                exited.set()
+
+    monkeypatch.setattr(bootstrap, '_SUPERVISOR', BlockedRuntime())
+    try:
+        with pytest.raises(TimeoutError, match='remaining shutdown budget'):
+            await asyncio.wait_for(stop_owned_local_runtime(0), 5)
+        assert await asyncio.to_thread(entered.wait, 5)
+        assert workers[0].daemon
+        # A blocked native stop must not occupy the executor asyncio.run joins on exit.
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: 'available'), 5) == 'available'
+    finally:
+        release.set()
+        assert await asyncio.to_thread(exited.wait, 5)
+
+
+@pytest.mark.asyncio
+async def test_adopter_cleanup_does_not_inspect_or_stop_another_owner(monkeypatch):
+    from gateway.run_local_runtime import stop_owned_local_runtime
+    from hermes_cli.local_runtime import bootstrap
+
+    calls = []
+    monkeypatch.setattr(bootstrap, '_SUPERVISOR', None)
+    monkeypatch.setattr(bootstrap, 'shutdown_local_runtime', lambda: calls.append('shutdown'))
+    await stop_owned_local_runtime(0)
+    assert calls == []

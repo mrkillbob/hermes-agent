@@ -2234,8 +2234,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             # The gateway's exit funnel skips atexit. Release only our own router after its
             # consumers finish, before a replacement gateway can acquire the runtime lock.
             with _log_suppressed(logging.WARNING, "Managed local runtime shutdown failed: %s"):
-                from hermes_cli.local_runtime.bootstrap import shutdown_local_runtime
-                await asyncio.to_thread(shutdown_local_runtime)
+                from gateway.run_local_runtime import stop_owned_local_runtime
+                await stop_owned_local_runtime(effective_shutdown_watchdog_delay(self) - ctx.elapsed())
             await GatewayRunner._stop_release_runtime_state(self, ctx)
             GatewayRunner._stop_quiesce_and_close_session_dbs(self, timeout, ctx)
             await GatewayRunner._stop_persist_exit_state(self, ctx)
