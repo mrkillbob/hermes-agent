@@ -285,7 +285,8 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
     from gateway.session_local_editor import validate_editor
     validate_editor(source, params.get('editor'))
     launch_skills(params)
-    config = present_sections(json.loads(json.dumps(config)))
+    from gateway.session_policy_config import copy_config_for_policy
+    config = present_sections(copy_config_for_policy(config))
     if params.get('follow_profile_config') is True and 'model' in params:
         # The pick's provenance, recorded before the launch route folds in: it holds while the profile
         # still targets this, and a later profile edit supersedes it.
