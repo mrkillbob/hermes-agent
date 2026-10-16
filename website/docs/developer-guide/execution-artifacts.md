@@ -62,3 +62,26 @@ claim follows from those tests. A reviewed immutable build, explicit task/projec
 and command scope, resolved existing account/route, byte/request budgets, expiry,
 and separate activation approval are required before real sharing. This feature
 must not route around a denied task or expand execution permissions.
+
+## Durable accounting adapter (development only)
+
+`DurableArtifactAuthority` adds private POSIX SQLite accounting behind the same
+disabled constructor gate. It stores immutable host-approved metadata/digests,
+never captured result bytes or command arguments. A separately authenticated host
+issuer is still required; `record_approval` is not a public/worker endpoint. A
+missing live-admission verifier refuses before I/O. An approval ID alone confers
+no authority. Windows refuses until its private-directory ACL boundary is qualified.
+
+Invocation IDs and `(task, request)` are durably reserved before execution, so
+changing approval/invocation IDs cannot reexecute an uncertain request. Per-task
+release budgets survive admissions and process restarts. Consumption commits
+before sending; the shared cross-process file fence remains held through the
+single send and serializes explicit revocation. Synthetic tests use real spawned
+processes and temporary databases, not production approvals or provider calls.
+
+The host admission/policy mutator must share that dispatch/revocation fence; a
+boolean verifier alone cannot serialize independently changing host state. No
+production mutation bridge is provided. Storage assumes a trusted owning OS user
+and private stable directory; it is not tamper/rollback-resistant against that
+user replacing files or restoring old databases. Network filesystems, rollback
+recovery and Windows ACL qualification are not supported activation claims.
