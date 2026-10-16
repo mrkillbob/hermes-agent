@@ -376,6 +376,9 @@ _SPECS = [
     ], help="Archive one or more tasks"),
     _cmd("tail", [_TASK_ID, _arg("--interval", type=float, default=1.0)], help="Follow a task's event stream"),
     _cmd("dispatch", [
+        _arg("--task-id", action="append", dest="task_ids", metavar="ID",
+             help="Dispatch only this exact ready/review card; repeat for a finite set. "
+                  "Skips board-wide reclaim, watchdog and promotion."),
         _arg("--dry-run", action="store_true", help="Don't actually spawn processes; just print what would happen"),
         _arg("--max", type=int, help="Cap number of spawns this pass"),
         _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,

@@ -311,6 +311,35 @@ hermes kanban stats
 
 When the dispatcher picks up `t_abcd` and spawns the `researcher` profile, the very first thing that worker's model does is call `kanban_show()` to read its task. It doesn't run `hermes kanban show t_abcd`.
 
+### Dispatch a finite set of cards
+
+Use repeated `--task-id` flags for a one-pass exact selection on the current
+board (or select the board explicitly):
+
+```bash
+hermes kanban --board engineering dispatch --task-id t_abcd1234 --task-id t_efab5678
+```
+
+Only those exact IDs already in `ready` or `review` can be dispatched. Duplicates
+are ignored, and normal board priority order applies. Unknown IDs do not match
+other cards. Empty IDs, whitespace and wildcard patterns are rejected; omitting
+`--task-id` retains the normal board-wide tick.
+
+An exact-card pass skips watchdog, reclamation, orphan reconciliation and
+promotion entirely, including for the selected cards. It leaves running claims,
+blocked holds, triage and staged `todo` work to their existing maintenance owner.
+Routing and assignment run only after selection. Newly created cards and children
+are excluded unless their exact IDs are explicitly selected in a later pass.
+This selection restricts which cards the dispatcher may consider; it does not
+restrict the actions an admitted worker may perform.
+
+Normal ownership, dependency, profile, respawn, workspace, model, host capacity
+and memory-pressure controls still apply. Unselected running work still counts
+against capacity. `--max` remains the live board concurrency cap and does not
+grant capacity beyond those controls. The selector does not enable the gateway
+dispatcher or grant task execution or data-route authority. `--dry-run` suppresses
+worker spawning; it is not a promise of a read-only operation.
+
 ### Gateway-embedded dispatcher (default)
 
 The dispatcher runs inside the gateway process. Nothing to install, no

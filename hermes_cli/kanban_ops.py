@@ -126,6 +126,12 @@ def _cmd_tail(args: argparse.Namespace) -> int:
 
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_dispatch_tick import normalize_task_ids
+
+    try:
+        task_ids = normalize_task_ids(getattr(args, "task_ids", None))
+    except ValueError as exc:
+        return _err(f"kanban dispatch: {exc}", 2)
     # Honour kanban.default_assignee, kanban.max_in_progress,
     # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
     # semantics as the gateway dispatch path.
@@ -161,6 +167,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         res = kbd.dispatch_once(
             conn,
             dry_run=args.dry_run,
+            task_ids=task_ids,
             max_spawn=max_spawn,
             max_in_progress=max_in_progress,
             failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
