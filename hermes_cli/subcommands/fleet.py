@@ -60,6 +60,11 @@ def _task_dict(task) -> dict:
 
 def cmd_fleet(args: argparse.Namespace) -> int:
     action = getattr(args, "fleet_action", None)
+    if action == "child-env":
+        from hermes_cli.fleet_execution import profile_child_env
+
+        print(json.dumps({"version": 1, "env": profile_child_env(args.target_profile)}))
+        return 0
     if action == "reconcile":
         import asyncio
         from hermes_cli.fleet_reconcile import run_reconcile
@@ -178,6 +183,8 @@ def build_parser(subparsers) -> None:
         description="Coordinate opt-in Kanban work across live Hermes installations without sharing credentials or Git checkouts.",
     )
     fleet_sub = parser.add_subparsers(dest="fleet_action")
+    child_env = fleet_sub.add_parser("child-env", help=argparse.SUPPRESS)
+    child_env.add_argument("--target-profile", required=True)
     reconcile = fleet_sub.add_parser("reconcile", help="Read the exact accepted gateway admission without replaying it")
     reconcile.add_argument("--session-id", required=True)
     reconcile.add_argument("--admission-id", required=True)

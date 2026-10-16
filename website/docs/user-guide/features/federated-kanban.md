@@ -13,7 +13,11 @@ boundary.
 
 Windows does not become a fork. The Windows runner is a standalone compatibility
 process that invokes the stock upstream Hermes executable already installed on
-that computer.
+that computer. The standalone zipapp requires a Hermes version with the internal
+`fleet child-env` helper. It asks that runtime to construct the target profile
+environment through the same isolation and managed-value rules as local runners;
+the zipapp itself needs only the standard library. An older runtime or invalid
+helper response stops execution without falling back to the launch environment.
 
 ## Availability model
 

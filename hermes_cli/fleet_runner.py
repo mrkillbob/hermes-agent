@@ -87,7 +87,9 @@ class FleetRunner:
         liveness_check: Callable[[], bool] | None = None,
         executor: Callable[[list[str], str], Any] | None = None,
         state_dir: str | Path | None = None,
+        profile_env_executable: str | None = None,
     ):
+        self.profile_env_executable = profile_env_executable
         self.node_id = node_id
         self.coordinator = coordinator
         self.hermes_executable = hermes_executable
@@ -229,7 +231,7 @@ class FleetRunner:
         else:
             from hermes_cli.fleet_execution import profile_child_env
             try:
-                env = profile_child_env(profile)
+                env = profile_child_env(profile, hermes_executable=self.profile_env_executable)
             except (OSError, ValueError) as exc:
                 result = subprocess.CompletedProcess(argv, 127, "",
                     f"Fleet profile environment unavailable ({type(exc).__name__})")
@@ -268,7 +270,7 @@ class FleetRunner:
         from hermes_cli._subprocess_compat import bounded_probe_run
         from hermes_cli.fleet_execution import profile_child_env, stream_event
         try:
-            env = profile_child_env(profile)
+            env = profile_child_env(profile, hermes_executable=self.profile_env_executable)
         except (OSError, ValueError) as exc:
             original.stderr = (original.stderr or "") + f"\nRecovery profile unavailable ({type(exc).__name__}); do not retry"
             return original

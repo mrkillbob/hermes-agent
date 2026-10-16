@@ -86,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         profile_models=profile_models,
         profile_providers=profile_providers,
         state_dir=Path(args.liveness_file).parent / "executions",
+        profile_env_executable=args.hermes_executable,
         liveness_check=lambda: Path(args.liveness_file).is_file(),
     )
     try:

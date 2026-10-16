@@ -129,11 +129,37 @@ def execute_transport(argv, input_text, *, cancel=None, output_dir=None, env=Non
             handle.close()
 
 
-def profile_child_env(profile):
+def profile_child_env(profile, *, hermes_executable=None):
     """Use the same served-profile environment for execution and reconciliation."""
+    if hermes_executable is not None:
+        return _installed_profile_child_env(hermes_executable, profile)
     from hermes_cli.profiles import resolve_profile_env
     from tools.environments.local import restore_managed_env, served_profile_child_env
 
     env = served_profile_child_env(target_home=resolve_profile_env(profile), inherit_credentials=True)
     env['PYTHONIOENCODING'] = 'utf-8'
     return restore_managed_env(env)
+
+
+def _installed_profile_child_env(executable, profile):
+    """Ask the installed runtime to apply its complete profile/environment policy."""
+    from hermes_cli._subprocess_compat import bounded_probe_run
+
+    home = Path(os.environ.get('HERMES_HOME', ''))
+    launch_profile = home.name if home.parent.name == 'profiles' else 'default'
+    # Explicitly retain the launch profile: sticky active_profile and target -p
+    # would otherwise rebind the sanitizer before it strips launch residue.
+    result = bounded_probe_run([executable, '-p', launch_profile, 'fleet', 'child-env',
+                               '--target-profile', profile], timeout=30,
+                              env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
+    try:
+        payload = json.loads(result.stdout) if result is not None and result.returncode == 0 else None
+        env = payload.get('env') if isinstance(payload, dict) and payload.get('version') == 1 else None
+        if (not isinstance(env, dict) or not env.get('HERMES_HOME')
+                or any(not isinstance(k, str) or not k or '=' in k or '\0' in k
+                       or not isinstance(v, str) or '\0' in v for k, v in env.items())):
+            raise ValueError('invalid environment response')
+    except (ValueError, TypeError) as exc:
+        # Neither the response nor stderr may enter retained task diagnostics.
+        raise ValueError('Installed Hermes fleet child-env helper unavailable or invalid') from exc
+    return env
