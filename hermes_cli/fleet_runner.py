@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 import threading
@@ -11,6 +12,9 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from hermes_cli.fleet_protocol import RunnerCapability, TaskTelemetry
+
+# Complete or stop before the coordinator default 60-second claim lease expires.
+_EXECUTION_TIMEOUT_SECONDS = 45.0
 
 
 def _parse_stream_json_result(stdout: str) -> tuple[str, TaskTelemetry | None]:
@@ -61,7 +65,7 @@ class FleetRunner:
         profile_models: Mapping[str, str] | None = None,
         profile_providers: Mapping[str, str] | None = None,
         liveness_check: Callable[[], bool] | None = None,
-        executor: Callable[[list[str]], Any] | None = None,
+        executor: Callable[[list[str], str], Any] | None = None,
     ):
         self.node_id = node_id
         self.coordinator = coordinator
@@ -133,11 +137,11 @@ class FleetRunner:
                     now=now,
                 )
                 continue
-            self._delivered[claim.task_id] = claim.claim_id
             result = self._execute_task(task, claim.runner_profile)
             if result.returncode == 0:
                 text = (result.stdout or "").strip()
                 self._results[claim.task_id] = text
+                self._delivered[claim.task_id] = claim.claim_id
                 self.coordinator.complete_task(
                     claim.task_id,
                     claim.claim_id,
@@ -171,14 +175,15 @@ class FleetRunner:
         body = task.get("body") if isinstance(task, dict) else task.body
         requirement = task.get("requirement") if isinstance(task, dict) else task.requirement
         models = requirement.get("models", ()) if isinstance(requirement, dict) else requirement.models
-        argv = [self.hermes_executable, "-p", profile]
+        argv = [self.hermes_executable, "-p", profile, "chat"]
         if len(models) == 1:
             provider = self.profile_providers.get(profile)
             if provider:
                 argv.extend(["--provider", provider])
             argv.extend(["-m", models[0]])
-        argv.extend(["-q", body, "--format", "stream-json"])
-        result = self._executor(argv)
+        # Keep task data out of the command line, including Windows batch launchers.
+        argv.extend(["--query-file", "-", "--format", "stream-json"])
+        result = self._executor(argv, body)
         if result.returncode == 0:
             result.stdout, result.telemetry = _parse_stream_json_result(result.stdout or "")
         else:
@@ -186,5 +191,15 @@ class FleetRunner:
         return result
 
     @staticmethod
-    def _execute(argv: list[str]):
-        return subprocess.run(argv, check=False, capture_output=True, text=True, encoding='utf-8', errors='replace')
+    def _execute(argv: list[str], input_text: str):
+        from hermes_cli._subprocess_compat import bounded_probe_run
+
+        try:
+            result = bounded_probe_run(
+                argv, input=input_text, timeout=_EXECUTION_TIMEOUT_SECONDS,
+                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}, raise_on_spawn_failure=True)
+        except OSError as exc:
+            return subprocess.CompletedProcess(argv, 127, '', f'Fleet launcher did not start ({type(exc).__name__})')
+        if result is None:
+            return subprocess.CompletedProcess(argv, 124, '', 'Fleet execution stopped at its bounded deadline or pipe failure')
+        return result

@@ -124,6 +124,36 @@ def _hkcu_path() -> tuple[str, int] | None:
         return None
 
 
+def _runtime_metadata_diagnostic(path: Path) -> str:
+    """Return bounded parse health and schema shape without publishing runtime values."""
+    limit = 64 * 1024
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(limit + 1)
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        return f"unreadable error={type(exc).__name__}"
+    if len(data) > limit:
+        return f"oversized bytes>{limit}"
+    if not data.strip():
+        return "empty"
+    try:
+        raw = data.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        return f"invalid-utf8 bytes={len(data)}"
+    try:
+        record = json.loads(raw)
+    except json.JSONDecodeError:
+        return f"invalid-json bytes={len(data)}"
+    if not isinstance(record, dict):
+        return f"json={type(record).__name__}"
+    allowed_keys = {"pid", "start_time", "kind", "argv", "hermes_home"}
+    keys = sorted(key for key in record if isinstance(key, str) and key in allowed_keys)
+    unknown_count = sum(not isinstance(key, str) or key not in allowed_keys for key in record)
+    return f"json=dict keys={keys} unknown_keys={unknown_count}"
+
+
 def _restore_hkcu_path(saved: tuple[str, int] | None) -> None:
     import winreg
 
@@ -508,7 +538,11 @@ class Machine:
         if receipt.is_file():
             parts.append(self._tail(receipt, 4000))
         parts.append(f"gateway_state.json: {self.gateway_state()}")
-        parts.append(f"gateway.pid present: {(self.hermes_home / 'gateway.pid').exists()}")
+        # Report parse health and shape only: runtime records contain local paths and process
+        # identity values. A failed strict updater probe must identify which file was partial or
+        # unreadable without copying those values into a public CI artifact.
+        for name in ("gateway.pid", "gateway.lock"):
+            parts.append(f"{name} diagnostic: {_runtime_metadata_diagnostic(self.hermes_home / name)}")
         logs = self.hermes_home / "logs"
         for name in ("gateway.log", "gateway-stdio.log", "errors.log", "agent.log", "update.log",
                      "desktop-update-handoff.log"):

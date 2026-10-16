@@ -42,3 +42,19 @@ def test_runner_refuses_to_start_without_the_desktop_liveness_marker(tmp_path):
 
     with pytest.raises(ValueError, match="does not exist"):
         resolve_hermes_executable(tmp_path / "missing-hermes.exe")
+
+
+def test_bundle_executes_with_no_third_party_site_packages(tmp_path):
+    import json
+    import subprocess
+    import sys
+    bundle = build_runner_bundle(tmp_path / 'runner.pyz')
+    code = ("import sys,json; sys.path.insert(0,sys.argv[1]); "
+            "from hermes_cli.fleet_runner import FleetRunner; "
+            "r=FleetRunner._execute([sys.executable,'-c','import sys; print(sys.stdin.read())'],'Public fixture π'); "
+            "print(json.dumps({'rc':r.returncode,'text':r.stdout.strip()}))")
+    done = subprocess.run([sys.executable, '-I', '-S', '-c', code, str(bundle)],
+                          capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15, check=False,
+                          env={**__import__('os').environ, 'PYTHONIOENCODING':'utf-8'})
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == {'rc':0,'text':'Public fixture π'}

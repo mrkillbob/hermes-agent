@@ -20,18 +20,11 @@ $marker = Join-Path $fleetRoot "desktop-live"
 $tokenFile = Join-Path $HermesRoot ".env"
 $stdoutLog = Join-Path $fleetRoot "runner.supervisor.out.log"
 $stderrLog = Join-Path $fleetRoot "runner.supervisor.err.log"
-$desktopName = [IO.Path]::GetFileName($DesktopExecutable)
-$desktopCommandLine = '"' + $DesktopExecutable + '"'
+. (Join-Path $PSScriptRoot "fleet_desktop_runtime.ps1")
 $script:RunnerProcess = $null
 
 function Get-DesktopMainProcess {
-    Get-CimInstance Win32_Process |
-        Where-Object {
-            $_.Name -eq $desktopName -and
-            $_.ExecutablePath -eq $DesktopExecutable -and
-            $_.CommandLine -eq $desktopCommandLine
-        } |
-        Select-Object -First 1
+    Get-FleetDesktopMainProcess (Get-CimInstance Win32_Process) $DesktopExecutable
 }
 
 function Get-RunnerProcess {
@@ -143,16 +136,12 @@ function Start-Runner {
     $env:HERMES_FLEET_TOKEN = $tokenLines[0].Substring($prefix.Length)
     New-Item -ItemType File -Force -Path $marker | Out-Null
 
-    $profileNames = @("default") + $Profile
-    $profileRoot = Join-Path $HermesRoot "profiles"
-    if (Test-Path -LiteralPath $profileRoot) {
-        $profileNames += @(Get-ChildItem -LiteralPath $profileRoot -Directory | Select-Object -ExpandProperty Name)
-    }
-    $profileNames = @($profileNames | Select-Object -Unique)
+    # The supplied enrollment list is authoritative; other profiles may be unqualified.
+    $profileNames = @($Profile | Select-Object -Unique)
     $localModelIds = @(Get-LocalModelIds)
     $profileModelArgs = @()
     $profileProviderArgs = @()
-    $hermesExecutable = Join-Path $HermesRoot "bin\\hermes.exe"
+    $hermesExecutable = Resolve-FleetHermesExecutable $HermesRoot
     foreach ($profileName in $profileNames) {
         $modelInfo = @(Get-ProfileModelConfig $profileName)
         if ($modelInfo.Count -ge 2 -and $modelInfo[0] -and $modelInfo[1]) {
