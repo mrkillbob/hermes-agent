@@ -35,6 +35,9 @@ import { writeEnvFile, writeMockProviderConfig } from './mock-provider-config.ts
 export const MOCK_REPLY = 'Hello from the mock inference server! The full boot chain is working.'
 
 export interface MockServerOptions {
+  /** Rebind a journey endpoint after a driver phase; zero chooses an ephemeral port. */
+  port?: number
+
   /** Choose distinct replies from the latest input without replaying history. */
   replyForPrompt?: (prompt: string) => string
 
@@ -994,7 +997,7 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
 
     server.on('error', reject)
 
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(options.port ?? 0, '127.0.0.1', () => {
       const addr = server.address()
 
       if (addr === null || typeof addr === 'string') {

@@ -134,6 +134,12 @@ jobs:
           HERMES_VERIFY_GET_WINDOWS_NATIVE: '1'
           npm_config_foreground_scripts: 'true'
         run: node ../../node_modules/vitest/vitest.mjs run --project electron scripts/node-pre-gyp-compat.test.mjs scripts/prepared-native-deps.test.mjs scripts/stage-native-deps.test.mjs e2e/fix-electron-tracing.unit.test.ts --maxWorkers=2
+      - name: Qualify native gateway smoke ownership
+        working-directory: tests-js
+        run: >-
+          node ../node_modules/vitest/vitest.mjs run scripts/desktop-smoke.test.ts update-window-selection.test.ts
+          --testNamePattern '^(a detached native gateway |OLD update-window chat verifies |journey mock resumes |Windows journey mock retains )'
+          --no-cache --configLoader runner --maxWorkers=1
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
         # leaves an untracked or modified file in the checkout is reported here. Runs only when

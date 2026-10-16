@@ -222,9 +222,16 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
     return shutdown_signal_handler
 
 
+def _start_gateway_register_identity() -> None:
+    """Register the claimed owner from every entrypoint, including CLI/Desktop ensure."""
+    from hermes_cli.process_identity import attach_self_to_kill_on_close_job, register_self
+    register_self("gateway")
+    attach_self_to_kill_on_close_job()
+
+
 def _start_gateway_claim_pid_file(force: bool = False) -> bool:
     """Claim the runtime lock + PID file (O_EXCL winner is the authoritative gateway). False = lost."""
-    from gateway.run import (_claim_host_gateway_role, logger, os)
+    from gateway.run import (_best_effort, _claim_host_gateway_role, logger, os)
     import atexit
     from gateway.status import (
         acquire_gateway_runtime_lock, get_running_pid, release_gateway_runtime_lock,
@@ -248,6 +255,7 @@ def _start_gateway_claim_pid_file(force: bool = False) -> bool:
     from hermes_cli.gateway_multiplex_mode import publish_pending_multiplex_decision
     publish_pending_multiplex_decision()
     _claim_host_gateway_role(force=force)
+    _best_effort(_start_gateway_register_identity)
     return True
 
 
@@ -681,9 +689,6 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Config verdicts come before the duplicate-instance guard: `--replace` must not stop a healthy
     # gateway for a launch that cannot start.
     resolved_config = config if config is not None else load_gateway_config_for_runner()
-    # The first turn's prompt needs the host toolchain probe (five subprocess calls); start it now
-    # so it runs beside the boot imports instead of serially inside the pre-READY warm-up.
-    _start_gateway_early_environment_probe()
     profile_homes = (_multiplex_profile_homes(resolved_config)
                      if getattr(resolved_config, 'multiplex_profiles', False) else [])
     if profile_homes and not _launch_home_may_multiplex(resolved_config):
@@ -717,6 +722,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     if not _start_gateway_claim_pid_file(force=force):
         release_gateway_runtime_lock()
         return False
+
+    # The claim registers this process in its kill-on-close job. Start the probe only afterwards so
+    # its worker and any Python/pip descendants inherit gateway containment on Windows.
+    # It still runs beside the remaining boot work instead of serially inside pre-READY warm-up.
+    _start_gateway_early_environment_probe()
 
     _control_server = None
     runner = None

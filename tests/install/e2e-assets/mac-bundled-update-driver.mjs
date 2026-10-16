@@ -24,6 +24,8 @@ import { parseArgs } from 'node:util';
 import { _electron } from '@playwright/test';
 import { createRequire } from 'node:module';
 import { runUpdateWindowChat } from './update-window-chat.mjs';
+import { predictSmokeHermesHome } from './desktop-smoke.ts';
+import { readBundledBundleEnv } from '../../../tests-js/scripts/desktop-smoke-process.ts';
 import { updateWindowEnvironment } from './smoke-env.mjs';
 
 const require = createRequire(import.meta.url);
@@ -82,7 +84,7 @@ await runUpdateWindowChat(app, page, {
   expectCommit: values['old-sha'],
   origin: 'bundled', executable: appBin,
   root: path.resolve(path.dirname(appBin), '..', 'Resources', 'agent-payload'),
-  userData: launchEnv.HERMES_DESKTOP_USER_DATA_DIR,
+  userData: launchEnv.HERMES_DESKTOP_USER_DATA_DIR, hermesHome: predictSmokeHermesHome(launchEnv, readBundledBundleEnv(path.resolve(path.dirname(appBin), '..', 'Resources', 'agent-payload')) ?? {}),
   prepare: () => prepareWindowForInput(app, page),
 });
 await shot(page, '01-app-booted');

@@ -3,8 +3,19 @@
 function Start-DesktopJourneyMock([string]$Node, [string]$Assets, [string]$Work, [string]$HermesHome, [string]$Out) {
     New-Item -ItemType Directory -Path $Out -Force | Out-Null
     $urlFile = Join-Path $Work 'chat-mock-url'
-    Remove-Item -LiteralPath $urlFile -Force -ErrorAction SilentlyContinue
-    $mock = Start-Process -FilePath $Node -ArgumentList @(('"' + (Join-Path $Assets 'mock-provider.mjs') + '"'), ('"' + $urlFile + '"')) `
+    # Resumed Desktop sessions intentionally preserve their provider endpoint.
+    # Each driver phase owns its mock lifetime, but must rebind the same origin.
+    $listenPort = 0
+    if (Test-Path -LiteralPath $urlFile) {
+        $previousUrl = (Get-Content -LiteralPath $urlFile -Raw).Trim()
+        if ($previousUrl -notmatch '^http://127\.0\.0\.1:([0-9]{1,5})$') {
+            throw 'Invalid persisted journey mock URL'
+        }
+        $listenPort = [int]$Matches[1]
+        if ($listenPort -lt 1 -or $listenPort -gt 65535) { throw 'Invalid persisted journey mock port' }
+    }
+    if (Test-Path -LiteralPath $urlFile) { Remove-Item -LiteralPath $urlFile -Force -ErrorAction Stop }
+    $mock = Start-Process -FilePath $Node -ArgumentList @(('"' + (Join-Path $Assets 'mock-provider.mjs') + '"'), ('"' + $urlFile + '"'), $listenPort) `
         -PassThru -RedirectStandardOutput (Join-Path $Out 'chat-mock.log') -RedirectStandardError (Join-Path $Out 'chat-mock-error.log')
     try {
         $deadline = (Get-Date).AddSeconds(30)
