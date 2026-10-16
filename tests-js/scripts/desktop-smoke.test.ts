@@ -343,7 +343,7 @@ test('a registered gateway proves only its own source installation when process 
   const other = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-other-origin-'))
 
   try {
-    const installId = createHash('sha256').update(fs.realpathSync(root).toLowerCase(), 'utf8').digest('hex').slice(0, 12)
+    const installId = createHash('sha256').update(fs.realpathSync.native(root).toLowerCase(), 'utf8').digest('hex').slice(0, 12)
 
     const backend = { pid: process.pid, parentPid: 1, executable: path.join(os.tmpdir(), 'python.exe'),
       command: 'python.exe -m hermes_cli.main gateway run --quiet', ownership: 'host-ledger' as const,

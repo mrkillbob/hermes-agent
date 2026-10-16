@@ -60,7 +60,7 @@ export async function runUpdateWindowChat(app, page, options) {
     if (connection.mode !== 'local' || !['127.0.0.1', 'localhost', '[::1]'].includes(base.hostname)) {
       throw new Error('OLD update-window chat did not use the local installed backend');
     }
-    const backend = localBackendProcess(Number(base.port), running.pid);
+    const backend = localBackendProcess(Number(base.port), running.pid, identity.hermesHome);
     assertUpdateWindowBackendOrigin(backend, identity, options.root, options.origin);
     const provenanceCommit = readInstallationCommit(options.root, options.origin);
     if (provenanceCommit !== options.expectCommit) throw new Error('Installed OLD commit differs from the expected commit');

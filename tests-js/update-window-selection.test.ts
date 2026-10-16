@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,6 +10,7 @@ import { runUpdateWindowChat, type UpdateWindowChatOptions } from '../tests/inst
 
 import type * as SelectionDiagnostics from './scripts/desktop-selection-diagnostics.ts'
 import { beginSelectionCapture, type installSelectionObserver } from './scripts/desktop-selection-diagnostics.ts'
+import type * as DesktopSmokeProcess from './scripts/desktop-smoke-process.ts'
 
 const chat = vi.hoisted(() => ({
   readChatIdentity: vi.fn(), runDesktopChatSmoke: vi.fn(), waitForChatReady: vi.fn(),
@@ -209,3 +211,44 @@ test('diagnostic cleanup errors do not replace the preparation error', async () 
     f.restored()
   } finally { f.cleanup() }
 })
+
+
+test('OLD update-window chat verifies a detached listener through the app-resolved home', async () => {
+  const f = fixture()
+  const home = path.join(f.options.root, 'profiles', 'old')
+  fs.mkdirSync(home, { recursive: true })
+  const script = path.join(f.options.root, 'listener.mjs')
+  fs.writeFileSync(script, 'import net from "node:net";const s=net.createServer();s.listen(0,"127.0.0.1",()=>console.log(s.address().port))')
+  const child = spawn(process.execPath, [script], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+
+  try {
+    const port = await new Promise<number>((resolve, reject) => {
+      child.once('error', reject)
+      child.stdout.once('data', (data: Buffer) => resolve(Number(data.toString().trim())))
+    })
+
+    const actual = await vi.importActual<typeof DesktopSmokeProcess>('./scripts/desktop-smoke-process.ts')
+    const started = actual.processStartTime(child.pid!)
+    expect(started).not.toBeNull()
+    fs.writeFileSync(path.join(f.options.root, 'spawn-ledger.json'), JSON.stringify([
+      { pid: child.pid, purpose: 'gateway', create_time: started, hermes_home: home, host: '', port: null },
+    ]))
+    vi.mocked(f.app.evaluate).mockResolvedValue({ pid: child.pid, executable: f.options.executable,
+      resources: f.options.root, userData: f.options.userData })
+    vi.mocked(f.page.evaluate).mockResolvedValue({ mode: 'local', baseUrl: `http://127.0.0.1:${port}` })
+    chat.readChatIdentity.mockResolvedValue({ hermesRoot: f.options.root, hermesHome: home })
+    // UI and inference stay inert; native ownership and installed-tree origin are real.
+    provenance.localBackendProcess.mockImplementation(actual.localBackendProcess)
+    provenance.assertBackendOrigin.mockImplementation(actual.assertBackendOrigin)
+
+    await runUpdateWindowChat(f.app, f.page, f.options)
+    const receipt = JSON.parse(fs.readFileSync(path.join(f.options.outDir, 'desktop-chat-old.json'), 'utf8'))
+    expect(receipt).toMatchObject({ status: 'passed', launchKind: 'pre-update-window', backend: { pid: child.pid } })
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>(resolve => { child.once('exit', () => resolve()); child.kill() })
+    }
+
+    f.cleanup()
+  }
+}, process.platform === 'win32' ? 120_000 : 30_000)

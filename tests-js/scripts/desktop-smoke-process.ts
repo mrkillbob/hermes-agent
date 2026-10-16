@@ -181,6 +181,13 @@ export function processStartTime(pid: number): number | null {
   }
 }
 
+/** Match Python Path.resolve, including Windows DOS short-name expansion. */
+function canonicalInstallationPath(value: string): string {
+  const resolved = fs.realpathSync.native(value)
+
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
 const nativeGatewayRecord = z.object({
   pid: z.number().int().positive(),
   create_time: z.number().positive(),
@@ -205,7 +212,7 @@ function nativeGatewayCandidates(contents: string, ledgerRoot: string, port: num
     const root = resolveDesktopHermesHome({ home: os.homedir(), env: { HERMES_HOME: record.hermes_home } })
 
     try {
-      if (fs.realpathSync(root) !== fs.realpathSync(ledgerRoot)) {
+      if (canonicalInstallationPath(root) !== canonicalInstallationPath(ledgerRoot)) {
         return []
       }
     } catch {
@@ -343,7 +350,7 @@ function gatewayVouchesForBackend(backend: BackendProcess, root: string): boolea
   return backend.ownership === 'host-ledger'
     && backend.cwd === undefined && backend.pythonPath === undefined && backend.virtualEnv === undefined
     && backend.registeredGatewayInstallId === createHash('sha256')
-      .update(fs.realpathSync(root).toLowerCase(), 'utf8').digest('hex').slice(0, 12)
+      .update(canonicalInstallationPath(root).toLowerCase(), 'utf8').digest('hex').slice(0, 12)
 }
 
 export function assertBackendOrigin(backend: BackendProcess, root: string, origin: 'source' | 'bundled',
@@ -361,7 +368,7 @@ export function assertBackendOrigin(backend: BackendProcess, root: string, origi
   const encoded = /base64\.b64decode\('([A-Za-z0-9+/=]+)'\)/.exec(backend.command)?.[1]
   const command = encoded ? Buffer.from(encoded, 'base64').toString('utf8') : backend.command
   // Source venvs may resolve to system Python; their entry script still lives in the installation.
-  const spellings = [root, fs.realpathSync(root)].flatMap((value: string): string[] => [value, JSON.stringify(value).slice(1, -1)])
+  const spellings = [root, fs.realpathSync(root), fs.realpathSync.native(root)].flatMap((value: string): string[] => [value, JSON.stringify(value).slice(1, -1)])
 
   const namesInstallRoot = spellings.some((value: string): boolean => {
     const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -375,7 +382,7 @@ export function assertBackendOrigin(backend: BackendProcess, root: string, origi
     }
 
     // An unreadable path is no evidence, not a crash: a process cwd can be gone.
-    try { return fs.realpathSync(value) === fs.realpathSync(root) } catch { return false }
+    try { return canonicalInstallationPath(value) === canonicalInstallationPath(root) } catch { return false }
   }
 
   // A Python -m entry has no source path in argv. Its live import root is
