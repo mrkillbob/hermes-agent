@@ -86,3 +86,14 @@ def test_failed_attempt_is_not_replayed_as_a_successful_duplicate():
     assert not coordinator.completed
     assert len(coordinator.failed) == 2
     assert len(executions) == 2
+
+
+def test_missing_launcher_reports_failed_claim(tmp_path):
+    from tests.hermes_cli.test_fleet_runner import _Coordinator
+    coordinator = _Coordinator()
+    runner = FleetRunner('windows', coordinator, str(tmp_path / 'missing-hermes.exe'),
+                         ['coding-expert'], ['LunaBot'], capabilities=[coordinator.capability])
+    assert runner.run_once(now=100)
+    assert not coordinator.completed
+    assert coordinator.failed[0][:2] == ('global-task-1', 'claim-1')
+    assert 'FileNotFoundError' in coordinator.failed[0][2]['error']

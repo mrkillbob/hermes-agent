@@ -194,9 +194,12 @@ class FleetRunner:
     def _execute(argv: list[str], input_text: str):
         from hermes_cli._subprocess_compat import bounded_probe_run
 
-        result = bounded_probe_run(
-            argv, input=input_text, timeout=_EXECUTION_TIMEOUT_SECONDS,
-            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}, raise_on_spawn_failure=True)
+        try:
+            result = bounded_probe_run(
+                argv, input=input_text, timeout=_EXECUTION_TIMEOUT_SECONDS,
+                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}, raise_on_spawn_failure=True)
+        except OSError as exc:
+            return subprocess.CompletedProcess(argv, 127, '', f'Fleet launcher did not start ({type(exc).__name__})')
         if result is None:
             return subprocess.CompletedProcess(argv, 124, '', 'Fleet execution stopped at its bounded deadline or pipe failure')
         return result
