@@ -204,11 +204,59 @@ def _launchd_gateway_argv(argv: list[str], home: Path) -> list[str]:
     # and absence of trailing shell operations, not just the decoded argv.
     if argv != launchd_program_arguments(command, stdout, stderr):
         _unverified()
+    if command[1:3] == ["-I", "-c"]:
+        return _runtime_launchd_gateway_argv(command, stderr)
     if (command[1:4] not in (["-m", "hermes_cli.stderr_timestamp", "--error-log"],
                             ["--run-module", "hermes_cli.stderr_timestamp", "--error-log"])
             or command[4:6] != [str(stderr), "--"]):
         _unverified()
     return command
+
+
+def _runtime_command_identity(argv: list[str]) -> tuple[Path, str, list[str]]:
+    """Verify one complete non-PM launcher as emitted by ``runtime_command``."""
+    import ast
+    from hermes_cli._launchers import runtime_command
+
+    if (len(argv) < 5 or not Path(argv[0]).is_absolute()
+            or not re.fullmatch(r"python(?:w|\d+(?:\.\d+)*)?(?:\.exe)?", Path(argv[0]).name.lower())
+            or argv[1:3] != ["-I", "-c"]):
+        _unverified()
+    root_match = re.search(r"; sys\.path\.insert\(0, (.+?)\); sys\._hermes_pin_default_home", argv[3])
+    module_match = re.search(r"; runpy\.run_module\((.+?), run_name='__main__', alter_sys=True\)$", argv[3])
+    if not root_match or not module_match:
+        _unverified()
+    try:
+        root = Path(ast.literal_eval(root_match[1]))
+        module = ast.literal_eval(module_match[1])
+    except (SyntaxError, ValueError):
+        _unverified()
+    if not root.is_absolute() or module not in {"hermes_cli.main", "hermes_cli.stderr_timestamp"}:
+        _unverified()
+    if runtime_command(root, argv[4:], module=module, python=argv[0]) != argv:
+        _unverified()
+    return root, module, argv[4:]
+
+
+def _runtime_launchd_gateway_argv(command: list[str], stderr: Path) -> list[str]:
+    """Bind the timestamp shim and its child to the same canonical runtime install."""
+    root, module, outer_args = _runtime_command_identity(command)
+    if (module != "hermes_cli.stderr_timestamp" or len(outer_args) < 8
+            or outer_args[:2] != ["--error-log", str(stderr)] or outer_args[2] != "--"):
+        _unverified()
+    child = outer_args[3:]
+    child_root, child_module, gateway_args = _runtime_command_identity(child)
+    if child_root != root or child[0] != command[0] or child_module != "hermes_cli.main":
+        _unverified()
+    bound_args = gateway_args
+    if bound_args[:1] in (["--profile"], ["-p"]):
+        if len(bound_args) < 3:
+            _unverified()
+        bound_args = bound_args[2:]
+    if (bound_args[:2] != ["gateway", "run"]
+            or any(arg not in {"--quiet", "--external-supervisor"} for arg in bound_args[2:])):
+        _unverified()
+    return [command[0], "-m", "hermes_cli.main", *gateway_args]
 
 
 def verify_launchd_loaded(output: str, home: Path, *, uid: int, username: str) -> None:

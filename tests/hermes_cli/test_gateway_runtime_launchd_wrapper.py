@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 
-def installed_definition(tmp_path, monkeypatch, profile=False):
+def installed_definition(tmp_path, monkeypatch, profile=False, *, runtime=False):
     import plistlib
     from hermes_cli import gateway as gw, _launchers
     from hermes_cli.gateway_launchd import generate_launchd_plist
@@ -19,7 +19,8 @@ def installed_definition(tmp_path, monkeypatch, profile=False):
     # Exercise the real current generator's PM branch; no launcher is executed.
     root = tmp_path / "source space's $literal"
     monkeypatch.setattr(gw, 'PROJECT_ROOT', root)
-    monkeypatch.setattr(_launchers, 'resolve_store_python', lambda root: tmp_path / 'python3')
+    selected_python = None if runtime else tmp_path / 'python3'
+    monkeypatch.setattr(_launchers, 'resolve_store_python', lambda root: selected_python)
     monkeypatch.setattr(gw, '_profile_arg', lambda: '--profile worker' if profile else '')
     return home, plistlib.loads(generate_launchd_plist().encode())
 
@@ -43,6 +44,40 @@ def test_current_installer_wrapper_is_verified(tmp_path, monkeypatch, profile, l
         verify_launchd_loaded(loaded_definition(definition), home, uid=123, username='owner')
     else:
         verify_launchd_plist(definition, definition['Label'], home)
+
+
+@pytest.mark.parametrize('profile', [False, True])
+@pytest.mark.parametrize('loaded', [False, True])
+def test_runtime_installer_wrapper_is_verified(tmp_path, monkeypatch, profile, loaded):
+    from hermes_cli.gateway_runtime_service_identity import verify_launchd_loaded, verify_launchd_plist
+    home, definition = installed_definition(tmp_path, monkeypatch, profile, runtime=True)
+    if loaded:
+        verify_launchd_loaded(loaded_definition(definition), home, uid=123, username='owner')
+    else:
+        verify_launchd_plist(definition, definition['Label'], home)
+
+
+@pytest.mark.parametrize('loaded', [False, True])
+def test_modified_runtime_bootstrap_is_refused(tmp_path, monkeypatch, loaded):
+    from hermes_cli.gateway_launchd import (
+        _timestamped_stderr_gateway_command,
+        launchd_program_arguments,
+    )
+    from hermes_cli.gateway_runtime_service_identity import verify_launchd_loaded, verify_launchd_plist
+    home, definition = installed_definition(tmp_path, monkeypatch, runtime=True)
+    command = _timestamped_stderr_gateway_command(home / 'logs/gateway.error.log', external_supervisor=True)
+    # The outer timestamp shim is argv[0:4], then its three arguments, then
+    # the child runtime command; mutate the child's Python bootstrap itself.
+    child_argv_index = 4 + 3
+    child_bootstrap_index = child_argv_index + 3
+    command[child_bootstrap_index] += "; import sys; sys.exit(0)"
+    definition['ProgramArguments'] = launchd_program_arguments(
+        command, home / 'logs/gateway.log', home / 'logs/gateway.error.log')
+    with pytest.raises(ValueError, match='service_identity_unverified'):
+        if loaded:
+            verify_launchd_loaded(loaded_definition(definition), home, uid=123, username='owner')
+        else:
+            verify_launchd_plist(definition, definition['Label'], home)
 
 
 @pytest.mark.parametrize('case,reason', [
