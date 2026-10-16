@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
+from hermes_cli.fleet_client import FleetTransportError, FleetTransientTransportError
 from hermes_cli.fleet_protocol import RunnerCapability, TaskTelemetry
 
 # Maintenance cadence is independent of the task duration.
@@ -134,7 +135,8 @@ class FleetRunner:
         if not self._is_live():
             return False
         for capability in self.capabilities:
-            self.coordinator.register_runner(capability, ttl=self._runner_ttl)
+            if not self.coordinator.register_runner(capability, ttl=self._runner_ttl):
+                raise FleetTransportError("coordinator refused runner registration")
         return True
 
     def run_once(self, *, now: float | None = None) -> bool:
@@ -196,10 +198,24 @@ class FleetRunner:
                 break
         return claimed
 
+    def _register_with_backoff(self) -> bool:
+        # Registration is an idempotent capability upsert. Claims and execution
+        # deliberately stay outside this retry boundary: their ACK may be lost.
+        for delay in (1.0, 2.0, None):
+            if self.stopped or not self._is_live():
+                return False
+            try:
+                return self.register()
+            except FleetTransientTransportError:
+                if delay is None:
+                    raise
+                if self._stop.wait(delay):
+                    return False
+        return False
+
     def run_forever(self, *, interval: float = 5.0) -> None:
         while not self.stopped:
-            if self._is_live():
-                self.register()
+            if self._is_live() and self._register_with_backoff():
                 self.run_once()
             self._stop.wait(interval)
 

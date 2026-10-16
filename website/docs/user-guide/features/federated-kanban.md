@@ -77,7 +77,13 @@ recover that state. A restart reads the original gateway admission without submi
 or cancelling it. Captures are removed after the coordinator acknowledges settlement;
 unknown outcomes retain their evidence and require inspection.
 
-The coordinator checks expired leases even when all runners are offline. Expiry
+Runner registration retries transient connection failures at most twice, waiting one
+and then two seconds. Authorization, certificate and protocol failures remain terminal.
+These retries cover registration only; claims and execution are never replayed by this loop.
+
+The coordinator checks expired leases in a single maintenance worker even when all runners are offline.
+A busy expiry transaction does not block HTTP acceptance. Shutdown waits for an in-flight
+sweep to finish committing and mirroring its result. Expiry
 releases runner load and holds the task as `uncertain`; it never makes possibly
 running work available for automatic retry. These leases and receipts do not provide
 consensus-grade exactly-once execution.

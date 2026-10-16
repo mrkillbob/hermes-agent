@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import urllib.error
 import urllib.request
@@ -21,6 +22,19 @@ from hermes_cli.urllib_security import open_credentialed_url
 
 class FleetTransportError(RuntimeError):
     """Raised for an unavailable or rejected coordinator request."""
+
+
+class FleetTransientTransportError(FleetTransportError):
+    """A transport outage; only explicitly idempotent callers may retry."""
+
+
+def _is_transient_transport_failure(error: BaseException) -> bool:
+    cause = error.reason if isinstance(error, urllib.error.URLError) else error
+    return isinstance(cause, (TimeoutError, ConnectionError)) or (
+        isinstance(cause, OSError) and cause.errno in {
+            errno.ETIMEDOUT, errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED,
+            errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EPIPE,
+        })
 
 
 class FleetClient:
@@ -46,8 +60,9 @@ class FleetClient:
                 decoded = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raise FleetTransportError(f"{exc.code}: coordinator rejected request") from exc
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise FleetTransportError(f"coordinator request failed: {exc}") from exc
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            error_type = FleetTransientTransportError if _is_transient_transport_failure(exc) else FleetTransportError
+            raise error_type(f"coordinator request failed: {exc}") from exc
         if not isinstance(decoded, dict):
             raise FleetTransportError("coordinator returned a non-object response")
         return decoded
