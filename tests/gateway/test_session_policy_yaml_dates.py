@@ -59,3 +59,40 @@ def test_frozen_policy_still_rejects_unsupported_config_values(tmp_path):
     with pytest.raises(TypeError, match='Object of type set is not JSON serializable'):
         build_policy({'source': 'cli', 'cwd': str(tmp_path), 'toolsets': []},
                      {'plugins': {'unsupported': {'value'}}}, profile_terminal=False)
+
+
+def test_yaml_dates_in_nested_mapping_keys_are_frozen_as_iso_strings(tmp_path):
+    import yaml
+    from gateway.session_policy import build_policy
+
+    config = yaml.safe_load(
+        'plugins:\n  entries:\n    example:\n      settings:\n'
+        '        schedule:\n          2026-08-25:\n'
+        '            2026-08-25T06:03:40.123456+05:30: enabled\n'
+    )
+    original_settings = config['plugins']['entries']['example']['settings']
+    policy = build_policy({'source': 'cli', 'cwd': str(tmp_path), 'toolsets': []}, config,
+                          profile_terminal=False)
+    frozen = json.loads(policy.config_json)
+
+    assert frozen['plugins']['entries']['example']['settings']['schedule'] == {
+        '2026-08-25': {'2026-08-25T06:03:40.123456+05:30': 'enabled'}
+    }
+    assert config['plugins']['entries']['example']['settings'] is original_settings
+    assert next(iter(original_settings['schedule'])) == date(2026, 8, 25)
+
+
+@pytest.mark.parametrize('date_first', [False, True])
+def test_yaml_date_mapping_key_collision_is_rejected(date_first):
+    from gateway.session_policy_config import copy_config_for_policy
+
+    date_key = date(2026, 8, 25)
+    entries = [(date_key, 'date value'), ('2026-08-25', 'string value')]
+    if not date_first:
+        entries.reverse()
+    config = {'settings': dict(entries)}
+
+    with pytest.raises(ValueError, match='collides with another configuration key'):
+        copy_config_for_policy(config)
+
+    assert len(config['settings']) == 2
