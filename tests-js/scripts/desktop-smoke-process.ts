@@ -148,7 +148,7 @@ function linuxListeningPid(port: number, candidates: NativeProcess[]): number[] 
 }
 
 /** Epoch seconds a live process started (psutil's `create_time` basis), or null when unreadable. */
-function processStartTime(pid: number): number | null {
+export function processStartTime(pid: number): number | null {
   try {
     if (process.platform === 'linux') {
       // psutil: boot time + field 22 (starttime, clock ticks), read after the `(comm)` field.
@@ -179,6 +179,42 @@ function processStartTime(pid: number): number | null {
   }
 }
 
+const nativeGatewayRecord = z.object({
+  pid: z.number().int().positive(),
+  create_time: z.number().positive(),
+  purpose: z.literal('gateway'),
+  hermes_home: z.string().min(1),
+  host: z.enum(['', '0.0.0.0', '127.0.0.1', '::', '::1', 'localhost']).optional(),
+  port: z.number().int().min(1).max(65535).nullish(),
+  isolated: z.literal(false).optional(),
+})
+
+/** gateway.run registers before binding, unlike the legacy serve discovery contract. */
+function nativeGatewayCandidates(contents: string, ledgerRoot: string, port: number): { pid: number; createTime: number }[] {
+  return z.array(z.unknown()).parse(JSON.parse(contents)).flatMap((entry) => {
+    const parsed = nativeGatewayRecord.safeParse(entry)
+
+    if (!parsed.success || (parsed.data.port != null && parsed.data.port !== port)) {
+      return []
+    }
+
+    const record = parsed.data
+    const root = resolveDesktopHermesHome({ home: os.homedir(), env: { HERMES_HOME: record.hermes_home } })
+
+    try {
+      if (fs.realpathSync(root) !== fs.realpathSync(ledgerRoot)) {
+        return []
+      }
+    } catch {
+      return []
+    }
+
+    // No PID-only fallback for a gateway record without a bound port. The caller
+    // must match this incarnation and independently prove it owns the app's port.
+    return [{ pid: record.pid, createTime: record.create_time }]
+  })
+}
+
 /** Identify the actual listener, not a healthy helper or a command recorded before spawn. */
 export function localBackendProcess(port: number, electronPid: number, hermesHome?: string): BackendProcess {
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
@@ -200,11 +236,14 @@ export function localBackendProcess(port: number, electronPid: number, hermesHom
     const ledgerRoot = resolveDesktopHermesHome({ home: os.homedir(), env: { HERMES_HOME: hermesHome } })
 
     try {
-      registered = parseSpawnLedger(fs.readFileSync(path.join(ledgerRoot, SPAWN_LEDGER_FILENAME), 'utf8'))
-        .filter(record => record.port === port && processes.some(candidate => candidate.pid === record.pid))
+      const contents = fs.readFileSync(path.join(ledgerRoot, SPAWN_LEDGER_FILENAME), 'utf8')
+      const legacy = parseSpawnLedger(contents).filter(record => record.port === port)
+      const gateways = nativeGatewayCandidates(contents, ledgerRoot, port)
+      registered = [...legacy, ...gateways]
+        .filter(record => processes.some(candidate => candidate.pid === record.pid))
         // A record names a (pid, create_time) incarnation; a reused PID is a different
-        // process. Same 2 s tolerance as the product's `_same_incarnation`; a record
-        // without a create_time (no psutil) carries only its PID, as in the product.
+        // process. Same 2 s tolerance as the product's `_same_incarnation`; a
+        // legacy record without create_time (no psutil) carries only its PID, as in the product.
         .filter((record) => {
           if (record.createTime === null) {
             return true

@@ -11,7 +11,7 @@ import { sourceRuntimeSettleCommand } from '../../tests/install/e2e-assets/sourc
 import { assertUpdateWindowBackendOrigin, assertUpdateWindowProcess } from '../../tests/install/e2e-assets/update-window-chat.mjs'
 
 import { assertChatCommit, newCompletedPair, readMockPrompts, type TranscriptMessage } from './desktop-chat-smoke.ts'
-import { assertBackendOrigin, localBackendProcess, readBundledBundleEnv, readInstallationCommit } from './desktop-smoke-process.ts'
+import { assertBackendOrigin, localBackendProcess, processStartTime, readBundledBundleEnv, readInstallationCommit } from './desktop-smoke-process.ts'
 import { writeEnvFile, writeMockProviderConfig } from './mock-provider-config.ts'
 import { MOCK_REPLY, startMockServer } from './mock-server.ts'
 
@@ -217,6 +217,72 @@ test.runIf(process.platform === 'linux' || process.platform === 'darwin')('a hos
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+// Each Windows observation starts separate PowerShell processes for CIM and TCP ownership.
+test('a detached native gateway needs its machine ledger incarnation and exact live listener', async (): Promise<void> => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-native-gateway-'))
+  const home = path.join(root, 'profiles', 'work')
+  fs.mkdirSync(home, { recursive: true })
+  const script = 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>console.log(s.address().port))'
+  const child = spawn(process.execPath, ['-e', script], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const other = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'] })
+
+  try {
+    const [port, otherPort] = await Promise.all([child, other].map(listener => new Promise<number>((resolve, reject): void => {
+      listener.once('error', reject)
+      listener.once('exit', code => reject(new Error(`Listener exited before readiness: ${code}`)))
+      listener.stdout.once('data', (data: Buffer): void => resolve(Number(data.toString().trim())))
+    })))
+
+    const started = processStartTime(child.pid!)
+    const otherStarted = processStartTime(other.pid!)
+
+    if (started === null || otherStarted === null) {
+      throw new Error('Native listener creation time is unreadable')
+    }
+
+    // gateway.run registers before binding: the record has no host/port detail.
+    const record = { pid: child.pid, purpose: 'gateway', create_time: started, host: '', port: null,
+      hermes_home: home, isolated: false }
+
+    const ledger = path.join(root, 'spawn-ledger.json')
+    // A sibling process stands in for Desktop: the detached listener is not its child.
+    fs.writeFileSync(path.join(home, 'spawn-ledger.json'), JSON.stringify([record]))
+    expect(() => localBackendProcess(port, other.pid!, home)).toThrow('found 0')
+    fs.rmSync(path.join(home, 'spawn-ledger.json'))
+
+    for (const invalid of [{ ...record, create_time: null }, { ...record, create_time: started - 3600 },
+      { ...record, pid: other.pid, create_time: otherStarted }, { ...record, port: port + 1 }, { ...record, isolated: true },
+      { ...record, hermes_home: os.tmpdir() }, { ...record, purpose: 'update' },
+      { ...record, host: '192.0.2.1' }, { ...record, hermes_home: path.join(root, 'missing') }]) {
+      fs.writeFileSync(ledger, JSON.stringify([invalid]))
+      expect(() => localBackendProcess(port, other.pid!, home)).toThrow('found 0')
+    }
+
+    fs.writeFileSync(ledger, JSON.stringify([record]))
+    const backend = localBackendProcess(port, other.pid!, home)
+    expect(backend.pid).toBe(child.pid)
+    expect(backend.ownership).toBe('host-ledger')
+    expect(() => localBackendProcess(otherPort, other.pid!, home)).toThrow('found 0')
+    fs.writeFileSync(ledger, JSON.stringify([{ ...record, hermes_home: path.join(root, 'missing') }, record]))
+    expect(localBackendProcess(port, other.pid!, home).pid).toBe(child.pid)
+    // A gateway candidate cannot vouch for its installed tree through app identity.
+    expect(() => assertBackendOrigin(backend, root, 'source', { appReportedRoot: root })).toThrow('source tree')
+    expect(() => assertBackendOrigin(backend, root, 'bundled')).toThrow('agent-payload')
+  } finally {
+    await Promise.all([child, other].map(listener => new Promise<void>((resolve): void => {
+      if (listener.exitCode !== null || listener.signalCode !== null) {
+        resolve()
+
+        return
+      }
+
+      listener.once('exit', (): void => resolve())
+      listener.kill()
+    })))
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}, process.platform === 'win32' ? 120_000 : 30_000)
 
 test('a backend bound to the tree by environment needs no root in argv', (): void => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-env-origin-'))
