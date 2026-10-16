@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -26,6 +27,7 @@ export interface NativeProcess {
 /** The identified listener, with how it was tied to this app (ancestry or this home's ledger). */
 export interface BackendProcess extends NativeProcess {
   ownership: 'child' | 'host-ledger'
+  registeredGatewayInstallId?: string
 }
 
 /** What the caller already knows about the app that owns this listener. */
@@ -183,6 +185,7 @@ const nativeGatewayRecord = z.object({
   pid: z.number().int().positive(),
   create_time: z.number().positive(),
   purpose: z.literal('gateway'),
+  install: z.string().regex(/^[0-9a-f]{12}$/).optional(),
   hermes_home: z.string().min(1),
   host: z.enum(['', '0.0.0.0', '127.0.0.1', '::', '::1', 'localhost']).optional(),
   port: z.number().int().min(1).max(65535).nullish(),
@@ -190,7 +193,7 @@ const nativeGatewayRecord = z.object({
 })
 
 /** gateway.run registers before binding, unlike the legacy serve discovery contract. */
-function nativeGatewayCandidates(contents: string, ledgerRoot: string, port: number): { pid: number; createTime: number }[] {
+function nativeGatewayCandidates(contents: string, ledgerRoot: string, port: number): { pid: number; createTime: number; gatewayInstallId?: string }[] {
   return z.array(z.unknown()).parse(JSON.parse(contents)).flatMap((entry) => {
     const parsed = nativeGatewayRecord.safeParse(entry)
 
@@ -211,7 +214,7 @@ function nativeGatewayCandidates(contents: string, ledgerRoot: string, port: num
 
     // No PID-only fallback for a gateway record without a bound port. The caller
     // must match this incarnation and independently prove it owns the app's port.
-    return [{ pid: record.pid, createTime: record.create_time }]
+    return [{ pid: record.pid, createTime: record.create_time, gatewayInstallId: record.install }]
   })
 }
 
@@ -227,7 +230,9 @@ export function localBackendProcess(port: number, electronPid: number, hermesHom
   // new window legitimately attaches to that host backend instead of spawning
   // its own child. Registration is only a candidate: the OS listener and the
   // caller's existing installed-tree checks must independently agree.
-  let registered: number[] = []
+  let ledgerObservation: object = {}
+  const observedStarts: Record<number, number | null> = {}
+  let registered: { pid: number; createTime: number | null; gatewayInstallId?: string }[] = []
 
   if (hermesHome) {
     // The product writes one machine-root ledger for every profile, and the app
@@ -236,7 +241,13 @@ export function localBackendProcess(port: number, electronPid: number, hermesHom
     const ledgerRoot = resolveDesktopHermesHome({ home: os.homedir(), env: { HERMES_HOME: hermesHome } })
 
     try {
+      ledgerObservation = { root: ledgerRoot, readable: false }
       const contents = fs.readFileSync(path.join(ledgerRoot, SPAWN_LEDGER_FILENAME), 'utf8')
+      // Failure diagnostics contain only structured process identity, never argv or environment.
+      ledgerObservation = { root: ledgerRoot, records: z.array(z.unknown()).parse(JSON.parse(contents)).slice(-20).map((entry) => {
+        const parsed = nativeGatewayRecord.safeParse(entry)
+        return parsed.success ? parsed.data : { rejectedSchema: true }
+      }) }
       const legacy = parseSpawnLedger(contents).filter(record => record.port === port)
       const gateways = nativeGatewayCandidates(contents, ledgerRoot, port)
       registered = [...legacy, ...gateways]
@@ -250,14 +261,14 @@ export function localBackendProcess(port: number, electronPid: number, hermesHom
           }
 
           const started = processStartTime(record.pid)
+          observedStarts[record.pid] = started
 
           return started !== null && Math.abs(started - record.createTime) < 2
         })
-        .map(record => record.pid)
     } catch { /* Missing/unreadable ledger provides no attachment evidence. */ }
   }
 
-  const candidates = processes.filter(candidate => children.includes(candidate) || registered.includes(candidate.pid))
+  const candidates = processes.filter(candidate => children.includes(candidate) || registered.some(record => record.pid === candidate.pid))
   let pids: number[]
 
   if (process.platform === 'win32') {
@@ -273,10 +284,20 @@ export function localBackendProcess(port: number, electronPid: number, hermesHom
   const matches = candidates.filter((child: NativeProcess): boolean => pids.includes(child.pid))
 
   if (matches.length !== 1) {
-    throw new Error(`Expected one Desktop-owned or registered host backend listener on port ${port}; found ${matches.length}`)
+    const observation = { electronPid, observedStarts, candidates: candidates.map(candidate => candidate.pid),
+      listeners: process.platform === 'linux' ? linuxListeningPid(port, processes) : pids, ledger: ledgerObservation }
+    throw new Error(`Expected one Desktop-owned or registered host backend listener on port ${port}; found ${matches.length}`
+      + `; observation=${JSON.stringify(observation)}`)
   }
 
   const backend: BackendProcess = { ...matches[0], ownership: children.includes(matches[0]) ? 'child' : 'host-ledger' }
+
+  // Preserve only the selected listener's self-stamped installation, never another
+  // PID's record or conflicting registrations for the same live incarnation.
+  const installIds = new Set(registered.filter(record => record.pid === backend.pid).map(record => record.gatewayInstallId))
+  if (backend.ownership === 'host-ledger' && installIds.size === 1) {
+    backend.registeredGatewayInstallId = [...installIds][0]
+  }
 
   if (process.platform === 'linux') {
     backend.executable = fs.readlinkSync(`/proc/${backend.pid}/exe`)
@@ -312,6 +333,14 @@ function appVouchesForBackend(backend: BackendProcess, evidence: OriginEvidence,
 
   return processEvidenceUnreadable && backend.ownership === 'child'
     && evidence.appReportedRoot !== undefined && sameTree(evidence.appReportedRoot)
+}
+
+/** Same producer contract as process_identity.install_id; only a live gateway record may vouch. */
+function gatewayVouchesForBackend(backend: BackendProcess, root: string): boolean {
+  return backend.ownership === 'host-ledger'
+    && backend.cwd === undefined && backend.pythonPath === undefined && backend.virtualEnv === undefined
+    && backend.registeredGatewayInstallId === createHash('sha256')
+      .update(fs.realpathSync(root).toLowerCase(), 'utf8').digest('hex').slice(0, 12)
 }
 
 export function assertBackendOrigin(backend: BackendProcess, root: string, origin: 'source' | 'bundled',
@@ -381,8 +410,9 @@ export function assertBackendOrigin(backend: BackendProcess, root: string, origi
           && sameTree(path.dirname(backend.virtualEnv)))
 
     const appOwnsBackend = appVouchesForBackend(backend, evidence, sameTree)
+    const registeredGatewayOwnsSource = gatewayVouchesForBackend(backend, root)
 
-    if (!sameTree(backend.cwd) && !namesInstallRoot && !usesInstallEnvironment && !appOwnsBackend) {
+    if (!sameTree(backend.cwd) && !namesInstallRoot && !usesInstallEnvironment && !appOwnsBackend && !registeredGatewayOwnsSource) {
       throw new Error('Source backend listener imports a different source tree'
         + ` (cwd=${backend.cwd ?? '(unreadable)'}, HERMES_PYTHON_SRC_ROOT=(unset),`
         + ` executable=${backend.executable}, expected=${root},`

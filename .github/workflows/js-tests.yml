@@ -138,7 +138,7 @@ jobs:
         working-directory: tests-js
         run: >-
           node ../node_modules/vitest/vitest.mjs run scripts/desktop-smoke.test.ts
-          --testNamePattern '^a detached native gateway needs its machine ledger incarnation and exact live listener$'
+          --testNamePattern '^a detached native gateway '
           --no-cache --configLoader runner --maxWorkers=1
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that

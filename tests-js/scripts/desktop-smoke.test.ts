@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -283,6 +284,80 @@ test('a detached native gateway needs its machine ledger incarnation and exact l
     fs.rmSync(root, { recursive: true, force: true })
   }
 }, process.platform === 'win32' ? 120_000 : 30_000)
+
+test('a detached native gateway proves its source installation', async (): Promise<void> => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-python-gateway-'))
+  const home = path.join(root, 'profiles', 'work')
+  const source = path.join(root, 'source with spaces')
+  fs.mkdirSync(home, { recursive: true })
+  fs.mkdirSync(path.join(source, 'hermes_cli'), { recursive: true })
+  fs.writeFileSync(path.join(source, 'hermes_cli', '__init__.py'), '')
+  // A real module launch exposes only the shared interpreter and -m to CIM.
+  // Its self-computed install ID follows register_self's producer contract.
+  fs.writeFileSync(path.join(source, 'hermes_cli', 'main.py'), [
+    'import hashlib, json', 'from pathlib import Path',
+    'from http.server import HTTPServer, BaseHTTPRequestHandler',
+    'root = str(Path(__file__).resolve().parent.parent).lower()',
+    'server = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)',
+    'print(json.dumps({"port": server.server_port, "install": hashlib.sha256(root.encode("utf-8")).hexdigest()[:12]}), flush=True)',
+    'server.serve_forever()',
+  ].join('\n'))
+  const python = process.env.HERMES_PYTHON || (process.platform === 'win32' ? 'python.exe' : 'python3')
+  const child = spawn(python, ['-m', 'hermes_cli.main'], { cwd: source, detached: true,
+    env: { ...process.env, PYTHONPATH: source }, stdio: ['ignore', 'pipe', 'pipe'] })
+
+  try {
+    const identity = await new Promise<{ port: number; install: string }>((resolve, reject): void => {
+      child.once('error', reject)
+      child.once('exit', code => reject(new Error(`Python listener exited before readiness: ${code}`)))
+      child.stdout.once('data', (data: Buffer): void => resolve(JSON.parse(data.toString())))
+    })
+    const started = processStartTime(child.pid!)
+    expect(started).not.toBeNull()
+    const record = { pid: child.pid, purpose: 'gateway', create_time: started, host: '', port: null,
+      hermes_home: home, install: identity.install }
+    fs.writeFileSync(path.join(root, 'spawn-ledger.json'), JSON.stringify([record]))
+    const backend = localBackendProcess(identity.port, child.pid!, home)
+    expect(backend.ownership).toBe('host-ledger')
+    expect(backend.registeredGatewayInstallId).toBe(identity.install)
+    expect(() => assertBackendOrigin(backend, source, 'source')).not.toThrow()
+    expect(() => assertBackendOrigin(backend, root, 'source', { appReportedRoot: root })).toThrow('source tree')
+    expect(() => assertBackendOrigin(backend, source, 'bundled')).toThrow('agent-payload')
+    fs.writeFileSync(path.join(root, 'spawn-ledger.json'), JSON.stringify([record, { ...record, install: '0123456789ab' }]))
+    expect(localBackendProcess(identity.port, child.pid!, home).registeredGatewayInstallId).toBeUndefined()
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve): void => { child.once('exit', () => resolve()); child.kill() })
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}, process.platform === 'win32' ? 120_000 : 30_000)
+
+test('a registered gateway proves only its own source installation when process evidence is unreadable', (): void => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-ledger-origin-'))
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-other-origin-'))
+
+  try {
+    const installId = createHash('sha256').update(fs.realpathSync(root).toLowerCase(), 'utf8').digest('hex').slice(0, 12)
+    const backend = { pid: process.pid, parentPid: 1, executable: path.join(os.tmpdir(), 'python.exe'),
+      command: 'python.exe -m hermes_cli.main gateway run --quiet', ownership: 'host-ledger' as const,
+      registeredGatewayInstallId: installId }
+
+    expect(() => assertBackendOrigin(backend, root, 'source')).not.toThrow()
+    for (const id of [undefined, 'bad', '0123456789ab']) {
+      expect(() => assertBackendOrigin({ ...backend, registeredGatewayInstallId: id }, root, 'source', { appReportedRoot: root })).toThrow('source tree')
+    }
+    expect(() => assertBackendOrigin(backend, other, 'source', { appReportedRoot: other })).toThrow('source tree')
+    for (const evidence of [{ sourceRoot: other }, { cwd: other }, { pythonPath: other }, { virtualEnv: path.join(other, 'venv') }]) {
+      expect(() => assertBackendOrigin({ ...backend, ...evidence }, root, 'source')).toThrow('source tree')
+    }
+    expect(() => assertBackendOrigin(backend, root, 'bundled')).toThrow('agent-payload')
+    expect(() => assertBackendOrigin({ ...backend, ownership: 'child' }, root, 'source')).toThrow('source tree')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+    fs.rmSync(other, { recursive: true, force: true })
+  }
+})
 
 test('a backend bound to the tree by environment needs no root in argv', (): void => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-env-origin-'))
