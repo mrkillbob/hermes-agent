@@ -572,23 +572,39 @@ def _portable_git_candidates() -> list:
     from hermes_constants import get_default_hermes_root, get_hermes_home
     candidates = []
     with suppress(Exception):
-        candidates += [root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe" for root in (get_default_hermes_root(), Path(get_hermes_home()))]
+        roots = (get_default_hermes_root() / "git", Path(get_hermes_home()) / "git")
+        candidates += [root / "mingw64" / "libexec" / "git-core" / "git.exe" for root in roots]
+        candidates += [
+            root / arch / directory / "git.exe"
+            for root in roots
+            for arch in ("clangarm64", "mingw64", "mingw32")
+            for directory in ("bin", "libexec/git-core")
+        ]
     return candidates
 
 
 def _locate_real_git() -> Optional[Path]:
-    """Find a real Git-for-Windows ``git-core/git.exe`` (standard locations + managed PortableGit) that runs
-    without the trampoline guard. None when nothing suits — callers keep the broken command and let the
-    fetch-failure ZIP fallback handle it. A failed probe (None) disqualifies a candidate like a guard hit.
+    """Find a real Git-for-Windows binary without the trampoline guard.
 
-    The trampoline symptom is PATH-level: ``bin\\git.exe`` / ``cmd\\git.exe`` (both ~46KB shims) fail to
-    re-exec git-core, while the real binary at ``mingw64\\libexec\\git-core\\git.exe`` (≈4.4MB) works when
-    invoked directly (#87876).
+    Search standard and Hermes-managed installs, plus the install containing PATH git:
+    PM's versioned PortableGit lives outside the legacy ``<root>/git`` directory.
+    Git distributions expose the real binary in ``<arch>/bin`` and/or ``git-core``;
+    never fall back to the ``cmd``/``bin`` launchers that caused the guard (#87876).
+    A failed probe disqualifies a candidate; None lets the caller use the ZIP fallback.
     """
+    from hermes_platform.resolver import locate_command
+
+    roots = [Path(base) / "Git" for base in (r"C:\Program Files", r"C:\Program Files (x86)")]
+    command = locate_command("git").command
+    if command:
+        git_dir = Path(command[0]).parent
+        if git_dir.name.lower() in {"cmd", "bin"}:
+            roots.append(git_dir.parent)
     candidates = [
-        Path(base) / "Git" / arch / "libexec" / "git-core" / "git.exe"
-        for base in (r"C:\Program Files", r"C:\Program Files (x86)")
+        root / arch / directory / "git.exe"
+        for root in roots
         for arch in ("clangarm64", "mingw64", "mingw32")
+        for directory in ("libexec/git-core", "bin")
     ] + _portable_git_candidates()
     return next((c for c in candidates if c.exists() and _probe_fork_bomb([str(c)]) is False), None)
 

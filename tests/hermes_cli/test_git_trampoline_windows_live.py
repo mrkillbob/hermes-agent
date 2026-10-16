@@ -7,9 +7,9 @@ helpers against the runner's genuine Git-for-Windows install plus a real
 broken-trampoline stand-in (a .bat that reproduces the launcher's
 "BUG (fork bomb)" guard output and refuses to run).
 
-windows-latest ships full Git for Windows at ``C:\\Program Files\\Git`` with
-the real ``mingw64\\libexec\\git-core\\git.exe`` — exactly the layout the
-locator targets — so the swap path is exercised end to end.
+The runner provides Git for Windows, and PM may prepend a versioned PortableGit
+install to PATH. Discovery must find a working real binary in either install;
+its location must not be tied to one runner image's git-core layout.
 """
 
 from __future__ import annotations
@@ -54,13 +54,11 @@ class TestGitTrampolineLive:
         bat = _make_broken_trampoline(tmp_path)
         assert update_cmd._git_is_trampoline([str(bat)]) is True
 
-    def test_locate_real_git_finds_runner_git_core(self):
+    def test_locate_real_git_finds_working_runner_binary(self):
         from hermes_cli import update_cmd
 
         real = update_cmd._locate_real_git()
-        # windows-latest ships Git for Windows under Program Files with the
-        # canonical git-core layout the locator searches first.
-        assert real is not None, "expected git-core git.exe on windows-latest"
+        assert real is not None, "expected a working real Git-for-Windows binary"
         assert real.exists()
         assert real.name == "git.exe"
         probe = subprocess.run(
@@ -86,7 +84,20 @@ class TestGitTrampolineLive:
             healed[:1] + ["--version"], capture_output=True, text=True, timeout=30,
             check=False,
         )
-        assert result.returncode == 0
+        assert result.returncode == 0, result.stderr
+        assert "git version" in result.stdout.lower()
+        repo = tmp_path / "repo"
+        initialized = subprocess.run(
+            healed + ["init", str(repo)], capture_output=True, text=True, timeout=30,
+            check=False,
+        )
+        assert initialized.returncode == 0, initialized.stderr
+        status = subprocess.run(
+            healed + ["-C", str(repo), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert status.returncode == 0, status.stderr
+        assert status.stdout == ""
         assert "switching to real git" in capsys.readouterr().out
 
     def test_healthy_git_command_untouched_live(self):
