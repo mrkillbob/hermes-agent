@@ -69,15 +69,69 @@ def test_transient_registration_failures_back_off_before_any_claim(monkeypatch, 
     assert waits == [1.0, 2.0]
 
 
-def test_registration_retry_budget_is_finite(monkeypatch):
+def test_registration_retry_budget_is_finite_per_poll_cycle(monkeypatch):
     failure = _failure(monkeypatch, TimeoutError('inert timeout'))
-    coordinator = Coordinator([failure] * 4)
+    coordinator = Coordinator([failure] * 3 + [True])
     runner, waits = _runner(coordinator, monkeypatch)
-    with pytest.raises(FleetTransportError):
+    runner.run_forever()
+    assert coordinator.registrations == 4
+    assert coordinator.claims == 1
+    assert waits == [1.0, 2.0, 5.0]
+
+
+def test_idle_heartbeat_outage_skips_claim_and_revalidates_next_poll(monkeypatch):
+    failure = _failure(monkeypatch, TimeoutError('inert heartbeat outage'))
+    coordinator = Coordinator([True, True])
+    runner, waits = _runner(coordinator, monkeypatch)
+    heartbeats = []
+
+    def heartbeat(*_args, **_kwargs):
+        heartbeats.append(coordinator.registrations)
+        if len(heartbeats) == 1:
+            raise failure
+        return True
+
+    coordinator.heartbeat_runner = heartbeat
+    runner.run_forever()
+    assert heartbeats == [1, 2]
+    assert coordinator.registrations == 2 and coordinator.claims == 1
+    assert waits == [5.0]
+
+
+@pytest.mark.parametrize('outcome', ['denied', 'certificate', 'refused', 'stopped', 'owner-gone'])
+def test_heartbeat_must_authorize_and_preserve_owner_before_claim(monkeypatch, outcome):
+    coordinator = Coordinator([True])
+    live = [True]
+    runner, waits = _runner(coordinator, monkeypatch, live=lambda: live[0])
+    original = runner._is_live
+
+    def is_live():
+        result = original()
+        if not result:
+            runner.stop()
+        return result
+
+    monkeypatch.setattr(runner, '_is_live', is_live)
+
+    def heartbeat(*_args, **_kwargs):
+        if outcome == 'denied':
+            raise _failure(monkeypatch, urllib.error.HTTPError('http://inert.invalid', 401, 'denied', {}, None))
+        if outcome == 'certificate':
+            raise _failure(monkeypatch, urllib.error.URLError(ssl.SSLCertVerificationError('untrusted')))
+        if outcome == 'stopped':
+            runner.stop()
+        if outcome == 'owner-gone':
+            live[0] = False
+        return outcome != 'refused'
+
+    coordinator.heartbeat_runner = heartbeat
+    if outcome in {'denied', 'certificate', 'refused'}:
+        with pytest.raises(FleetTransportError):
+            runner.run_forever()
+    else:
         runner.run_forever()
-    assert coordinator.registrations == 3
-    assert coordinator.claims == 0
-    assert waits == [1.0, 2.0]
+    assert coordinator.registrations == 1 and coordinator.claims == 0
+    assert waits == []
 
 
 @pytest.mark.parametrize('cause', [urllib.error.HTTPError('http://inert.invalid', 401, 'denied', {}, None),

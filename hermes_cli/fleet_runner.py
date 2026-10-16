@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import hashlib
 import os
 from pathlib import Path
@@ -146,7 +147,17 @@ class FleetRunner:
             return False
         claimed = False
         for capability in self.capabilities:
-            self.coordinator.heartbeat_runner(capability, now=now, ttl=self._runner_ttl)
+            try:
+                alive = self.coordinator.heartbeat_runner(capability, now=now, ttl=self._runner_ttl)
+            except FleetTransientTransportError:
+                # No claim has been requested for this capability. Revalidate on
+                # the next poll; never replay run_once or an ambiguous claim.
+                logging.getLogger(__name__).warning('Fleet heartbeat unavailable; deferring poll')
+                return claimed
+            if not alive:
+                raise FleetTransportError('coordinator refused runner heartbeat')
+            if self.stopped or not self._is_live():
+                return claimed
             claim = self.coordinator.claim_task(capability, now=now)
             if claim is None:
                 continue
@@ -215,7 +226,12 @@ class FleetRunner:
 
     def run_forever(self, *, interval: float = 5.0) -> None:
         while not self.stopped:
-            if self._is_live() and self._register_with_backoff():
+            try:
+                registered = self._is_live() and self._register_with_backoff()
+            except FleetTransientTransportError:
+                logging.getLogger(__name__).warning('Fleet registration unavailable; deferring poll')
+                registered = False
+            if registered:
                 self.run_once()
             self._stop.wait(interval)
 
