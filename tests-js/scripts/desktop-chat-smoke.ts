@@ -263,7 +263,13 @@ export async function clickComposer(composer: Locator, trial: boolean, timeoutMs
   }
 }
 
-export async function waitForChatReady(page: Page, timeoutMs = 120_000): Promise<Locator> {
+// An updated app can first ensure (75 s), time out its manual-owner restart
+// client (120 s), then re-ensure (75 s). Keep 30 s for renderer readiness beyond
+// that supported bounded path in each readiness stage; ordinary hit-tested
+// clicks remain mandatory. This is a per-stage allowance, not a total deadline.
+const DESKTOP_READY_TIMEOUT_MS = 300_000
+
+export async function waitForChatReady(page: Page, timeoutMs = DESKTOP_READY_TIMEOUT_MS): Promise<Locator> {
   // The visible editor is a contentEditable div. assistant-ui also renders an
   // aria-hidden, sr-only <textarea> that carries the composer binding: it is
   // "editable" but clipped out of the viewport, so a bare `textarea` selector
