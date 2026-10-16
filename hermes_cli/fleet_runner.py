@@ -171,7 +171,7 @@ class FleetRunner:
         body = task.get("body") if isinstance(task, dict) else task.body
         requirement = task.get("requirement") if isinstance(task, dict) else task.requirement
         models = requirement.get("models", ()) if isinstance(requirement, dict) else requirement.models
-        argv = [self.hermes_executable, "-p", profile]
+        argv = [self.hermes_executable, "-p", profile, "chat"]
         if len(models) == 1:
             provider = self.profile_providers.get(profile)
             if provider:
