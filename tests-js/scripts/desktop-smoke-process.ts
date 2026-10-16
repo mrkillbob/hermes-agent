@@ -246,6 +246,7 @@ export function localBackendProcess(port: number, electronPid: number, hermesHom
       // Failure diagnostics contain only structured process identity, never argv or environment.
       ledgerObservation = { root: ledgerRoot, records: z.array(z.unknown()).parse(JSON.parse(contents)).slice(-20).map((entry) => {
         const parsed = nativeGatewayRecord.safeParse(entry)
+
         return parsed.success ? parsed.data : { rejectedSchema: true }
       }) }
       const legacy = parseSpawnLedger(contents).filter(record => record.port === port)
@@ -286,6 +287,7 @@ export function localBackendProcess(port: number, electronPid: number, hermesHom
   if (matches.length !== 1) {
     const observation = { electronPid, observedStarts, candidates: candidates.map(candidate => candidate.pid),
       listeners: process.platform === 'linux' ? linuxListeningPid(port, processes) : pids, ledger: ledgerObservation }
+
     throw new Error(`Expected one Desktop-owned or registered host backend listener on port ${port}; found ${matches.length}`
       + `; observation=${JSON.stringify(observation)}`)
   }
@@ -295,6 +297,7 @@ export function localBackendProcess(port: number, electronPid: number, hermesHom
   // Preserve only the selected listener's self-stamped installation, never another
   // PID's record or conflicting registrations for the same live incarnation.
   const installIds = new Set(registered.filter(record => record.pid === backend.pid).map(record => record.gatewayInstallId))
+
   if (backend.ownership === 'host-ledger' && installIds.size === 1) {
     backend.registeredGatewayInstallId = [...installIds][0]
   }

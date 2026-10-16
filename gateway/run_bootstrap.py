@@ -222,9 +222,16 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
     return shutdown_signal_handler
 
 
+def _start_gateway_register_identity() -> None:
+    """Register the claimed owner from every entrypoint, including CLI/Desktop ensure."""
+    from hermes_cli.process_identity import attach_self_to_kill_on_close_job, register_self
+    register_self("gateway")
+    attach_self_to_kill_on_close_job()
+
+
 def _start_gateway_claim_pid_file(force: bool = False) -> bool:
     """Claim the runtime lock + PID file (O_EXCL winner is the authoritative gateway). False = lost."""
-    from gateway.run import (_claim_host_gateway_role, logger, os)
+    from gateway.run import (_best_effort, _claim_host_gateway_role, logger, os)
     import atexit
     from gateway.status import (
         acquire_gateway_runtime_lock, get_running_pid, release_gateway_runtime_lock,
@@ -248,6 +255,7 @@ def _start_gateway_claim_pid_file(force: bool = False) -> bool:
     from hermes_cli.gateway_multiplex_mode import publish_pending_multiplex_decision
     publish_pending_multiplex_decision()
     _claim_host_gateway_role(force=force)
+    _best_effort(_start_gateway_register_identity)
     return True
 
 

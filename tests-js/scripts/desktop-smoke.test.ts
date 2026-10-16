@@ -303,6 +303,7 @@ test('a detached native gateway proves its source installation', async (): Promi
     'server.serve_forever()',
   ].join('\n'))
   const python = process.env.HERMES_PYTHON || (process.platform === 'win32' ? 'python.exe' : 'python3')
+
   const child = spawn(python, ['-m', 'hermes_cli.main'], { cwd: source, detached: true,
     env: { ...process.env, PYTHONPATH: source }, stdio: ['ignore', 'pipe', 'pipe'] })
 
@@ -312,10 +313,13 @@ test('a detached native gateway proves its source installation', async (): Promi
       child.once('exit', code => reject(new Error(`Python listener exited before readiness: ${code}`)))
       child.stdout.once('data', (data: Buffer): void => resolve(JSON.parse(data.toString())))
     })
+
     const started = processStartTime(child.pid!)
     expect(started).not.toBeNull()
+
     const record = { pid: child.pid, purpose: 'gateway', create_time: started, host: '', port: null,
       hermes_home: home, install: identity.install }
+
     fs.writeFileSync(path.join(root, 'spawn-ledger.json'), JSON.stringify([record]))
     const backend = localBackendProcess(identity.port, child.pid!, home)
     expect(backend.ownership).toBe('host-ledger')
@@ -329,6 +333,7 @@ test('a detached native gateway proves its source installation', async (): Promi
     if (child.exitCode === null && child.signalCode === null) {
       await new Promise<void>((resolve): void => { child.once('exit', () => resolve()); child.kill() })
     }
+
     fs.rmSync(root, { recursive: true, force: true })
   }
 }, process.platform === 'win32' ? 120_000 : 30_000)
@@ -339,18 +344,23 @@ test('a registered gateway proves only its own source installation when process 
 
   try {
     const installId = createHash('sha256').update(fs.realpathSync(root).toLowerCase(), 'utf8').digest('hex').slice(0, 12)
+
     const backend = { pid: process.pid, parentPid: 1, executable: path.join(os.tmpdir(), 'python.exe'),
       command: 'python.exe -m hermes_cli.main gateway run --quiet', ownership: 'host-ledger' as const,
       registeredGatewayInstallId: installId }
 
     expect(() => assertBackendOrigin(backend, root, 'source')).not.toThrow()
+
     for (const id of [undefined, 'bad', '0123456789ab']) {
       expect(() => assertBackendOrigin({ ...backend, registeredGatewayInstallId: id }, root, 'source', { appReportedRoot: root })).toThrow('source tree')
     }
+
     expect(() => assertBackendOrigin(backend, other, 'source', { appReportedRoot: other })).toThrow('source tree')
+
     for (const evidence of [{ sourceRoot: other }, { cwd: other }, { pythonPath: other }, { virtualEnv: path.join(other, 'venv') }]) {
       expect(() => assertBackendOrigin({ ...backend, ...evidence }, root, 'source')).toThrow('source tree')
     }
+
     expect(() => assertBackendOrigin(backend, root, 'bundled')).toThrow('agent-payload')
     expect(() => assertBackendOrigin({ ...backend, ownership: 'child' }, root, 'source')).toThrow('source tree')
   } finally {
