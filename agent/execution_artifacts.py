@@ -7,11 +7,13 @@ Raw terminal strings never acquire file-source grants or bypass the firewall.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 import math
 from threading import RLock
+from contextvars import ContextVar
 import time
 import uuid
 
@@ -19,6 +21,14 @@ from agent.execution_artifact_contracts import (
     Approval, ApprovalAuthority, ArtifactDenied, ArtifactSink, Capture,
     ConfinedExecutor, Invocation, Recipient, TaskIdentity, invocation_digest,
 )
+_SENDING = ContextVar("artifact_sink_active", default=False)
+
+
+def _deny_sink_reentry():
+    if _SENDING.get():
+        raise ArtifactDenied("artifact_sink_reentry")
+
+
 from agent.llm_egress_firewall import validate_sanitized_text
 from agent.redact import redact_sensitive_text
 from agent.source_provenance import SourceProvenanceRegistry
@@ -122,12 +132,18 @@ class ExecutionArtifactRegistry(SourceProvenanceRegistry):
         self._invocations: set[tuple] = set()
         self._closed_turns: set[str] = set()
         self._closed_requests: set[str] = set()
+        self._known_scopes: set[tuple[TaskIdentity, str]] = set()
 
     def produce(self, identity: TaskIdentity, invocation: Invocation,
                 recipient: Recipient, *, request_id: str) -> ArtifactReference:
         """Execute a newly approved operation once; never ingest saved denied text."""
+        _deny_sink_reentry()
         if not self._enabled or self._authority is None or self._executor is None:
             raise ArtifactDenied("execution_artifacts_disabled")
+        with self._artifact_lock:
+            if identity.turn in self._closed_turns or request_id in self._closed_requests:
+                raise ArtifactDenied("invocation_reused_or_closed")
+            self._known_scopes.add((identity, request_id))
         approval = self._authority.approve(identity, invocation, recipient, request_id)
         _validate_approval(approval, identity, invocation, recipient, request_id, self._clock())
         if not self._authority.current(approval):
@@ -146,9 +162,10 @@ class ExecutionArtifactRegistry(SourceProvenanceRegistry):
         payload = _presentation(capture, approval.result_kind)
         raw_digest = sha256(json.dumps([sha256(capture.stdout).hexdigest(),
                                        sha256(capture.stderr).hexdigest()]).encode()).hexdigest()
+        still_current = self._authority.current(approval)
         with self._artifact_lock:
             if (identity.turn in self._closed_turns or request_id in self._closed_requests
-                    or not self._authority.current(approval)):
+                    or not still_current):
                 raise ArtifactDenied("approval_revoked")
             handle = uuid.uuid4().hex
             self._artifacts[handle] = _Artifact(approval, capture.invocation_id, raw_digest,
@@ -162,48 +179,86 @@ class ExecutionArtifactRegistry(SourceProvenanceRegistry):
         Both registry construction and sink implementation are host-only seams.
         This method does not enable ordinary LLM terminal-result authorization.
         """
+        _deny_sink_reentry()
         with self._artifact_lock:
             artifact = self._artifacts.get(reference.handle)
             if (artifact is None or not request_id or identity.turn in self._closed_turns
                     or request_id in self._closed_requests):
                 raise ArtifactDenied("artifact_unknown")
-            approval = artifact.approval
-            if (identity != approval.identity or invocation_digest(invocation) != approval.invocation_digest
-                    or sink.recipient != approval.recipient or request_id != approval.request_id):
-                raise ArtifactDenied("release_binding_mismatch")
-            if (self._authority is None or not self._authority.current(approval)
-                    or self._clock() >= approval.expires_at):
-                raise ArtifactDenied("approval_revoked_or_expired")
-            if sha256(artifact.payload).hexdigest() != artifact.presentation_digest:
-                raise ArtifactDenied("presentation_changed")
-            validate_sanitized_text(artifact.payload.decode("utf-8"), max_bytes=32_768)
+        approval = artifact.approval
+        if (identity != approval.identity or invocation_digest(invocation) != approval.invocation_digest
+                or sink.recipient != approval.recipient or request_id != approval.request_id):
+            raise ArtifactDenied("release_binding_mismatch")
+        if self._authority is None or self._clock() >= approval.expires_at:
+            raise ArtifactDenied("approval_revoked_or_expired")
+        if sha256(artifact.payload).hexdigest() != artifact.presentation_digest:
+            raise ArtifactDenied("presentation_changed")
+        validate_sanitized_text(artifact.payload.decode("utf-8"), max_bytes=32_768)
+        with self._artifact_lock:
             task_key = (identity.node, identity.profile, identity.task)
-            # Same task budgets cannot be reset by refreshing approval IDs/generations.
             count, size = self._budgets.get(task_key, (0, 0))
-            request_key = (*task_key, request_id)
-            if request_key in self._spent_requests:
-                raise ArtifactDenied("request_already_consumed")
             if count + 1 > approval.request_budget or size + len(artifact.payload) > approval.export_budget:
                 raise ArtifactDenied("task_budget_exceeded")
-            with self._authority.dispatch_scope(approval, len(artifact.payload)):
+        # F is acquired with no registry lock held. It spans only short local
+        # accounting and the synchronous, terminal transport contract.
+        with self._authority.dispatch_scope(approval, len(artifact.payload)):
+            with self._artifact_lock:
+                if (self._artifacts.get(reference.handle) is not artifact
+                        or identity.turn in self._closed_turns or request_id in self._closed_requests):
+                    raise ArtifactDenied("artifact_closed")
+                task_key = (identity.node, identity.profile, identity.task)
+                count, size = self._budgets.get(task_key, (0, 0))
+                request_key = (*task_key, request_id)
+                if request_key in self._spent_requests:
+                    raise ArtifactDenied("request_already_consumed")
+                if count + 1 > approval.request_budget or size + len(artifact.payload) > approval.export_budget:
+                    raise ArtifactDenied("task_budget_exceeded")
                 self._spent_requests.add(request_key)
                 self._budgets[task_key] = (count + 1, size + len(artifact.payload))
-                # A grant releases once, even if the sink raises after accepting bytes.
                 del self._artifacts[reference.handle]
+            sending_token = _SENDING.set(True)
+            try:
                 sink.send(request_id, artifact.payload)
+            finally:
+                _SENDING.reset(sending_token)
+
+    def _close_scopes(self, *, request_id=None, turn_id=None):
+        # Local disposal is fail-closed even if a fence cannot be acquired. It
+        # does not acknowledge owner revocation or settle an already-started send.
+        with self._artifact_lock:
+            closing_scopes = {(i, r) for i, r in self._known_scopes
+                              if r == request_id or i.turn == turn_id}
+            identities = sorted({i for i, r in closing_scopes},
+                                key=lambda i: (i.node, i.profile, i.task))
+            if request_id is not None:
+                self._closed_requests.add(request_id)
+                super().clear_request(request_id)
+            if turn_id is not None:
+                self._closed_turns.add(turn_id)
+                super().clear_turn(turn_id)
+            self._artifacts = {key: value for key, value in self._artifacts.items()
+                               if value.approval.request_id not in self._closed_requests
+                               and value.approval.identity.turn not in self._closed_turns}
+        seen = set()
+        with ExitStack() as stack:
+            for identity in identities:
+                key = (identity.node, identity.profile, identity.task)
+                if key in seen:
+                    continue
+                seen.add(key)
+                scope = getattr(self._authority, "cleanup_scope", None)
+                stack.enter_context(scope(identity) if scope else nullcontext())
+            # Success waits for every in-flight F. Keep scope identities on failure
+            # so a later explicit cleanup can still wait for the same senders.
+            with self._artifact_lock:
+                self._known_scopes.difference_update(closing_scopes)
 
     def clear_request(self, request_id: str) -> None:
         """Close the artifact request, including capture currently in flight."""
-        super().clear_request(request_id)
-        with self._artifact_lock:
-            self._closed_requests.add(request_id)
-            self._artifacts = {key: value for key, value in self._artifacts.items()
-                               if value.approval.request_id != request_id}
+        _deny_sink_reentry()
+        self._close_scopes(request_id=request_id)
 
     def clear_turn(self, turn_id: str) -> None:
         """Discard authority and bytes; retain consumed budgets until registry dies."""
-        super().clear_turn(turn_id)
-        with self._artifact_lock:
-            self._closed_turns.add(turn_id)
-            self._artifacts = {key: value for key, value in self._artifacts.items()
-                               if value.approval.identity.turn != turn_id}
+        _deny_sink_reentry()
+        self._close_scopes(turn_id=turn_id)

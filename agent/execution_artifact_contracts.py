@@ -61,6 +61,7 @@ class Approval:
     result_kind: str
     export_budget: int = 1_048_576
     request_budget: int = 10
+    execution_plan_digest: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,8 @@ class ArtifactSink(ABC):
     def send(self, request_id: str, payload: bytes) -> None:
         """Send once without redirects/fallback/retry; error is uncertain delivery.
 
+        Return or raise only after no further writes are possible. An async
+        future timeout is not settlement; unqualified transports must refuse.
         Place bytes exclusively as untrusted tool DATA, never instructions. Verify
         authenticated recipient and exact final wire bytes at the transport fence;
         provider adapters must run the existing full request/firewall checks too.
