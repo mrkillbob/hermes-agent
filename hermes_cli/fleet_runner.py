@@ -13,6 +13,9 @@ from typing import Any
 
 from hermes_cli.fleet_protocol import RunnerCapability, TaskTelemetry
 
+# Complete or stop before the coordinator default 60-second claim lease expires.
+_EXECUTION_TIMEOUT_SECONDS = 45.0
+
 
 def _parse_stream_json_result(stdout: str) -> tuple[str, TaskTelemetry | None]:
     """Extract the authoritative one-shot result without scraping human output."""
@@ -134,11 +137,11 @@ class FleetRunner:
                     now=now,
                 )
                 continue
-            self._delivered[claim.task_id] = claim.claim_id
             result = self._execute_task(task, claim.runner_profile)
             if result.returncode == 0:
                 text = (result.stdout or "").strip()
                 self._results[claim.task_id] = text
+                self._delivered[claim.task_id] = claim.claim_id
                 self.coordinator.complete_task(
                     claim.task_id,
                     claim.claim_id,
@@ -189,6 +192,11 @@ class FleetRunner:
 
     @staticmethod
     def _execute(argv: list[str], input_text: str):
-        return subprocess.run(argv, input=input_text, check=False, capture_output=True, text=True,
-                              encoding='utf-8', errors='replace',
-                              env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
+        from hermes_cli._subprocess_compat import bounded_probe_run
+
+        result = bounded_probe_run(
+            argv, input=input_text, timeout=_EXECUTION_TIMEOUT_SECONDS,
+            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}, raise_on_spawn_failure=True)
+        if result is None:
+            return subprocess.CompletedProcess(argv, 124, '', 'Fleet execution stopped at its bounded deadline or pipe failure')
+        return result

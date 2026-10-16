@@ -12,6 +12,9 @@ _BUNDLE_MODULES = (
     "fleet_client.py",
     "fleet_runner.py",
     "urllib_security.py",
+    "_subprocess_compat.py",
+    "local_runtime/__init__.py",
+    "local_runtime/processes.py",
 )
 
 
