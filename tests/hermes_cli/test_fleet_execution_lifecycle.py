@@ -1,6 +1,7 @@
 """Fleet execution remains leased until an authoritative outcome is acknowledged."""
 import json
 import threading
+import pytest
 from types import SimpleNamespace
 
 from hermes_cli.fleet_protocol import FleetTask, RunnerCapability, TaskRequirement
@@ -145,3 +146,36 @@ def test_damaged_claim_receipt_holds_matching_execution_without_replay(tmp_path)
     assert runner.stopped
     assert store.list_tasks()[0].status == 'uncertain'
     assert 'Damaged local claim receipt' in store.list_tasks()[0].error
+
+
+@pytest.mark.parametrize('restarted', [False, True])
+@pytest.mark.parametrize('terminal_error', ['', 'Conversation worktree unavailable'])
+def test_failed_reconciled_delivery_preserves_terminal_diagnostic_and_identity(
+        tmp_path, monkeypatch, restarted, terminal_error):
+    store, cap = _setup(tmp_path)
+    identity = {'type': 'system', 'subtype': 'admission', 'session_id': 'session-proof',
+                'admission_id': 'admission-proof'}
+    terminal = {'type': 'result', 'exit_code': 1, 'settled': True, 'outcome': 'failed',
+                'session_id': 'session-proof', 'admission_id': 'admission-proof',
+                'text': 'The admitted turn failed.', 'error': terminal_error}
+    state_dir = tmp_path / 'receipts'
+    if restarted:
+        import hashlib
+        claim = store.claim_task(cap)
+        directory = state_dir / hashlib.sha256(claim.claim_id.encode()).hexdigest()
+        directory.mkdir(parents=True)
+        (directory / 'claim.json').write_text(json.dumps({'task_id': 'task', 'claim_id': claim.claim_id,
+                                                        'node_id': 'mac', 'profile': 'worker'}))
+        (directory / 'stdout-fixture').write_text(json.dumps(identity) + '\n')
+
+    monkeypatch.setattr(FleetRunner, '_reconcile', lambda *args, **kwargs: SimpleNamespace(
+        returncode=1, stdout=json.dumps(terminal), stderr='session_id: session-proof\n'))
+    runner = FleetRunner('mac', store, 'hermes', ['worker'], [], capabilities=[cap], state_dir=state_dir,
+                         executor=lambda *_: SimpleNamespace(returncode=1, stdout=json.dumps(identity), stderr=''))
+    runner.run_once()
+    record = store.list_tasks()[0]
+    assert record.status == 'failed'
+    assert record.error.startswith(terminal_error or 'The admitted turn failed.')
+    assert 'The admitted turn failed.' in record.error
+    assert 'session-proof' in record.error
+    assert 'admission-proof' in record.error

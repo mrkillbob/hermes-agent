@@ -46,6 +46,24 @@ def _parse_stream_json_result(stdout: str) -> tuple[str, TaskTelemetry | None]:
     return str(terminal.get("text") or ""), telemetry
 
 
+def _failure_diagnostic(result) -> str:
+    """Keep authoritative failure details ahead of the CLI's stderr session footer."""
+    from hermes_cli.fleet_execution import stream_event
+
+    stdout = result.stdout or ""
+    terminal = stream_event(stdout, "result") or {}
+    identity = stream_event(stdout, "system", "admission") or {}
+    details = [str(terminal.get(key) or "").strip() for key in ("error", "text")]
+    for key in ("session_id", "admission_id"):
+        value = terminal.get(key) or identity.get(key)
+        if value:
+            details.append(f"{key}: {value}")
+    details.append((result.stderr or "").strip())
+    if not terminal:
+        details.append(stdout.strip())
+    return "\n".join(dict.fromkeys(detail for detail in details if detail)) or "Hermes exited with a failure"
+
+
 class FleetRunner:
     """Claim coordinator work only while the owning local Hermes is live.
 
@@ -159,7 +177,7 @@ class FleetRunner:
                 payload = {"task_id": claim.task_id, "claim_id": claim.claim_id,
                            "status": "completed" if result.returncode == 0 else "failed",
                            "result": (result.stdout or "").strip(),
-                           "error": (result.stderr or result.stdout or "Hermes exited with a failure").strip(),
+                           "error": _failure_diagnostic(result),
                            "telemetry": getattr(result, "telemetry", None)}
                 self._save_delivery(payload)
                 if not self._send_delivery(payload, now=guard.now()):
@@ -350,7 +368,7 @@ class FleetRunner:
                 text, telemetry = _parse_stream_json_result(result.stdout or "")
                 payload = {"task_id": record.task_id, "claim_id": record.claim_id,
                            "status": "completed" if result.returncode == 0 else "failed",
-                           "result": text, "error": result.stderr or text, "telemetry": telemetry}
+                           "result": text, "error": _failure_diagnostic(result), "telemetry": telemetry}
                 self._save_delivery(payload)
                 if not self._send_delivery(payload):
                     self.stop()
