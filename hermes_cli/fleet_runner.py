@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from pathlib import Path
 import os
 import platform
 import subprocess
@@ -13,8 +15,8 @@ from typing import Any
 
 from hermes_cli.fleet_protocol import RunnerCapability, TaskTelemetry
 
-# Complete or stop before the coordinator default 60-second claim lease expires.
-_EXECUTION_TIMEOUT_SECONDS = 45.0
+# Maintenance cadence is independent of the task duration.
+_LEASE_REFRESH_SECONDS = 10.0
 
 
 def _parse_stream_json_result(stdout: str) -> tuple[str, TaskTelemetry | None]:
@@ -66,6 +68,7 @@ class FleetRunner:
         profile_providers: Mapping[str, str] | None = None,
         liveness_check: Callable[[], bool] | None = None,
         executor: Callable[[list[str], str], Any] | None = None,
+        state_dir: str | Path | None = None,
     ):
         self.node_id = node_id
         self.coordinator = coordinator
@@ -79,7 +82,8 @@ class FleetRunner:
         # A large fleet must not expire its early profiles before the sweep finishes.
         self._runner_ttl = max(30.0, 3.0 * len(self.capabilities))
         self._liveness_check = liveness_check or (lambda: True)
-        self._executor = executor or self._execute
+        self._executor = executor
+        self.state_dir = Path(state_dir) if state_dir is not None else None
         self._stop = threading.Event()
         self._delivered: dict[str, str] = {}
         self._results: dict[str, str] = {}
@@ -116,6 +120,8 @@ class FleetRunner:
     def run_once(self, *, now: float | None = None) -> bool:
         if self.stopped or not self._is_live():
             return False
+        if not self._deliver_pending() or not self._recover_executions():
+            return False
         claimed = False
         for capability in self.capabilities:
             self.coordinator.heartbeat_runner(capability, now=now, ttl=self._runner_ttl)
@@ -137,21 +143,33 @@ class FleetRunner:
                     now=now,
                 )
                 continue
-            result = self._execute_task(task, claim.runner_profile)
-            if result.returncode == 0:
-                text = (result.stdout or "").strip()
-                self._results[claim.task_id] = text
-                self._delivered[claim.task_id] = claim.claim_id
-                self.coordinator.complete_task(
-                    claim.task_id,
-                    claim.claim_id,
-                    result=text,
-                    telemetry=getattr(result, "telemetry", None),
-                    now=now,
-                )
-            else:
-                error = (result.stderr or result.stdout or "Hermes exited with a failure").strip()
-                self.coordinator.fail_task(claim.task_id, claim.claim_id, error=error, now=now)
+            from hermes_cli.fleet_execution import ClaimGuard
+            with ClaimGuard(self, claim, now, _LEASE_REFRESH_SECONDS) as guard:
+                if guard.cancel.is_set():
+                    # No work has been launched; the exact claim may already be gone.
+                    self.stop()
+                    break
+                result = self._execute_task(task, claim.runner_profile, guard=guard, claim=claim)
+                if getattr(result, "outcome_unknown", False):
+                    self.coordinator.mark_uncertain(
+                        claim.task_id, claim.claim_id, result=result.stdout or "",
+                        error=result.stderr or "Gateway outcome unknown; reconcile before retry", now=guard.now())
+                    self.stop()
+                    break
+                payload = {"task_id": claim.task_id, "claim_id": claim.claim_id,
+                           "status": "completed" if result.returncode == 0 else "failed",
+                           "result": (result.stdout or "").strip(),
+                           "error": (result.stderr or result.stdout or "Hermes exited with a failure").strip(),
+                           "telemetry": getattr(result, "telemetry", None)}
+                self._save_delivery(payload)
+                if not self._send_delivery(payload, now=guard.now()):
+                    self.stop()
+                    break
+                if result.returncode == 0:
+                    self._results[claim.task_id] = payload["result"]
+                    self._delivered[claim.task_id] = claim.claim_id
+            if self.stopped:
+                break
         return claimed
 
     def run_forever(self, *, interval: float = 5.0) -> None:
@@ -171,7 +189,7 @@ class FleetRunner:
                 return task
         return None
 
-    def _execute_task(self, task: Any, profile: str):
+    def _execute_task(self, task: Any, profile: str, *, guard=None, claim=None):
         body = task.get("body") if isinstance(task, dict) else task.body
         requirement = task.get("requirement") if isinstance(task, dict) else task.requirement
         models = requirement.get("models", ()) if isinstance(requirement, dict) else requirement.models
@@ -183,23 +201,163 @@ class FleetRunner:
             argv.extend(["-m", models[0]])
         # Keep task data out of the command line, including Windows batch launchers.
         argv.extend(["--query-file", "-", "--format", "stream-json"])
-        result = self._executor(argv, body)
-        if result.returncode == 0:
+        output_dir = None
+        if self.state_dir is not None and claim is not None:
+            output_dir = self.state_dir / hashlib.sha256(claim.claim_id.encode()).hexdigest()
+            output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._write_receipt(output_dir / "claim.json", {
+                "task_id": claim.task_id, "claim_id": claim.claim_id, "profile": profile,
+                "node_id": self.node_id})
+        if self._executor is not None:
+            result = self._executor(argv, body)
+        else:
+            result = self._execute(argv, body, cancel=guard.cancel if guard else None, output_dir=output_dir)
+        from hermes_cli.fleet_execution import stream_event
+        terminal = stream_event(result.stdout or "", "result")
+        # CLI failures and detach receipts can leave real gateway work alive. Only an
+        # exact terminal admission receipt can turn that into a safe failure/retry.
+        if not getattr(result, "not_started", False) and (
+                terminal is None or result.returncode != 0 or terminal.get("exit_code", 0) != 0):
+            identity = stream_event(result.stdout or "", "system", "admission")
+            if identity is not None:
+                result = self._reconcile(profile, identity, cancel=bool(guard and guard.cancel.is_set()), original=result, guard=guard)
+                terminal = stream_event(result.stdout or "", "result")
+            result.outcome_unknown = terminal is None or terminal.get("settled") is not True
+        else:
+            result.outcome_unknown = False
+        if not result.outcome_unknown and result.returncode == 0:
             result.stdout, result.telemetry = _parse_stream_json_result(result.stdout or "")
         else:
             result.telemetry = None
         return result
 
-    @staticmethod
-    def _execute(argv: list[str], input_text: str):
+    def _reconcile(self, profile, identity, *, cancel, original, guard=None):
         from hermes_cli._subprocess_compat import bounded_probe_run
+        from hermes_cli.fleet_execution import stream_event
+        while True:
+            argv = [self.hermes_executable, "-p", profile, "fleet", "reconcile",
+                    "--session-id", identity["session_id"], "--admission-id", identity["admission_id"]]
+            stopping = cancel or bool(guard and guard.cancel.is_set())
+            if stopping:
+                argv.append("--cancel")
+            result = bounded_probe_run(argv, timeout=30, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            terminal = stream_event(result.stdout or "", "result") if result is not None else None
+            if terminal is not None and terminal.get("settled") is True:
+                return result
+            if (terminal is None or terminal.get("admission_status") not in {"queued", "started"}
+                    or terminal.get("needs_input") or stopping or guard is None):
+                original.stderr = (original.stderr or "") + ("\nGateway outcome unknown; exact session/admission: "
+                    + identity["session_id"] + "/" + identity["admission_id"] + "; do not retry")
+                return original
+            # The CLI transport ended, but the authoritative turn is still alive.
+            # Continue reading that admission while its original claim is renewed.
+            guard.cancel.wait(2)
 
-        try:
-            result = bounded_probe_run(
-                argv, input=input_text, timeout=_EXECUTION_TIMEOUT_SECONDS,
-                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}, raise_on_spawn_failure=True)
-        except OSError as exc:
-            return subprocess.CompletedProcess(argv, 127, '', f'Fleet launcher did not start ({type(exc).__name__})')
-        if result is None:
-            return subprocess.CompletedProcess(argv, 124, '', 'Fleet execution stopped at its bounded deadline or pipe failure')
-        return result
+    def _delivery_path(self, payload):
+        return self.state_dir / (hashlib.sha256(payload["claim_id"].encode()).hexdigest() + ".delivery.json")
+
+    def _save_delivery(self, payload):
+        if self.state_dir is None:
+            return
+        self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        data = {**payload, "telemetry": payload["telemetry"].to_dict() if payload["telemetry"] else None}
+        path = self._delivery_path(payload)
+        self._write_receipt(path, data)
+
+    @staticmethod
+    def _write_receipt(path, data):
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            temporary.chmod(0o600)
+            json.dump(data, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+
+    def _send_delivery(self, payload, *, now=None):
+        if payload["status"] == "completed":
+            telemetry = payload.get("telemetry")
+            if isinstance(telemetry, dict):
+                telemetry = TaskTelemetry.from_dict(telemetry)
+            ok = self.coordinator.complete_task(payload["task_id"], payload["claim_id"],
+                result=payload["result"], telemetry=telemetry, now=now)
+        else:
+            ok = self.coordinator.fail_task(payload["task_id"], payload["claim_id"], error=payload["error"], now=now)
+        if ok and self.state_dir is not None:
+            self._delivery_path(payload).unlink(missing_ok=True)
+            (self.state_dir / hashlib.sha256(payload["claim_id"].encode()).hexdigest() / "claim.json").unlink(missing_ok=True)
+        return ok
+
+    def _deliver_pending(self):
+        if self.state_dir is None or not self.state_dir.exists():
+            return True
+        for path in self.state_dir.glob("*.delivery.json"):
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not self._send_delivery(payload):
+                self.stop()
+                return False
+        return True
+
+    def _recover_executions(self):
+        """A retained claim is reconciled, never submitted again after a runner crash."""
+        if self.state_dir is None or not self.state_dir.exists():
+            return True
+        journals = list(self.state_dir.glob("*/claim.json"))
+        if not journals:
+            return True
+        records = {row.task_id: row for row in self.coordinator.list_tasks()}
+        from hermes_cli.fleet_execution import ClaimGuard, stream_event
+        for path in journals:
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8-sig"))
+                if not isinstance(saved, dict) or not all(isinstance(saved.get(key), str)
+                        for key in ("task_id", "claim_id", "profile", "node_id")):
+                    raise ValueError("Invalid claim receipt")
+            except (ValueError, OSError):
+                # Match a damaged journal back to the coordinator's exact original
+                # claim; never infer that missing local data authorizes a replay.
+                record = next((row for row in records.values() if row.claim_id and row.node_id == self.node_id
+                    and hashlib.sha256(row.claim_id.encode()).hexdigest() == path.parent.name), None)
+                if record is not None:
+                    self.coordinator.mark_uncertain(record.task_id, record.claim_id,
+                        error="Damaged local claim receipt; inspect retained capture before retry")
+                self.stop()
+                return False
+            record = records.get(saved["task_id"])
+            if (record is None or record.claim_id != saved["claim_id"] or record.node_id != self.node_id
+                    or record.runner_profile != saved["profile"]):
+                self.stop()
+                return False
+            if record.status in {"completed", "failed", "cancelled"}:
+                path.unlink()
+                continue
+            captures = sorted(path.parent.glob("stdout-*"))
+            stdout = "\n".join(capture.read_text(encoding="utf-8-sig", errors="replace") for capture in captures)
+            identity = stream_event(stdout, "system", "admission")
+            if identity is None:
+                self.coordinator.mark_uncertain(record.task_id, record.claim_id, result=stdout,
+                    error="Runner restarted without an admission receipt; inspect retained capture before retry")
+                self.stop()
+                return False
+            with ClaimGuard(self, record, None, _LEASE_REFRESH_SECONDS) as guard:
+                original = subprocess.CompletedProcess([], 75, stdout, "Runner restarted during gateway execution")
+                result = self._reconcile(saved["profile"], identity, cancel=guard.cancel.is_set(), original=original, guard=guard)
+                terminal = stream_event(result.stdout or "", "result")
+                if terminal is None or terminal.get("settled") is not True:
+                    self.coordinator.mark_uncertain(record.task_id, record.claim_id, result=stdout, error=result.stderr)
+                    self.stop()
+                    return False
+                text, telemetry = _parse_stream_json_result(result.stdout or "")
+                payload = {"task_id": record.task_id, "claim_id": record.claim_id,
+                           "status": "completed" if result.returncode == 0 else "failed",
+                           "result": text, "error": result.stderr or text, "telemetry": telemetry}
+                self._save_delivery(payload)
+                if not self._send_delivery(payload):
+                    self.stop()
+                    return False
+        return True
+
+    @staticmethod
+    def _execute(argv: list[str], input_text: str, *, cancel=None, output_dir=None):
+        from hermes_cli.fleet_execution import execute_transport
+        return execute_transport(argv, input_text, cancel=cancel, output_dir=output_dir)

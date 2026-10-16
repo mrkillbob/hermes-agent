@@ -85,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         capabilities=capabilities,
         profile_models=profile_models,
         profile_providers=profile_providers,
+        state_dir=Path(args.liveness_file).parent / "executions",
         liveness_check=lambda: Path(args.liveness_file).is_file(),
     )
     try:

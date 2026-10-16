@@ -256,6 +256,14 @@ class _FleetHandler(BaseHTTPRequestHandler):
                     self.fleet.notify_task_update(task_id, "failed", error=body.get("error"))
                 self._respond(HTTPStatus.OK, {"ok": ok})
                 return
+            if action == "uncertain":
+                ok = self.fleet.store.mark_uncertain(
+                    task_id, body["claim_id"], error=str(body.get("error", "")),
+                    result=str(body.get("result", "")), now=body.get("now"))
+                if ok:
+                    self.fleet.notify_task_update(task_id, "uncertain", error=body.get("error"))
+                self._respond(HTTPStatus.OK, {"ok": ok})
+                return
             if action == "retry":
                 ok = self.fleet.store.retry_task(task_id, now=body.get("now"))
                 if ok:

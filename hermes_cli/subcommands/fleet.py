@@ -60,6 +60,11 @@ def _task_dict(task) -> dict:
 
 def cmd_fleet(args: argparse.Namespace) -> int:
     action = getattr(args, "fleet_action", None)
+    if action == "reconcile":
+        import asyncio
+        from hermes_cli.fleet_reconcile import run_reconcile
+
+        return asyncio.run(run_reconcile(args.session_id, args.admission_id, cancel=args.cancel))
     if action == "init":
         from hermes_cli.config import load_config, save_config
 
@@ -169,6 +174,10 @@ def build_parser(subparsers) -> None:
         description="Coordinate opt-in Kanban work across live Hermes installations without sharing credentials or Git checkouts.",
     )
     fleet_sub = parser.add_subparsers(dest="fleet_action")
+    reconcile = fleet_sub.add_parser("reconcile", help="Read the exact accepted gateway admission without replaying it")
+    reconcile.add_argument("--session-id", required=True)
+    reconcile.add_argument("--admission-id", required=True)
+    reconcile.add_argument("--cancel", action="store_true", help="Cancel only this admission, then reconcile")
     init = fleet_sub.add_parser("init", help="Configure the coordinator URL and opt in or out")
     init.add_argument("--url", required=True)
     init.add_argument("--enable", action="store_true", help="Enable federated Kanban admission")

@@ -100,3 +100,20 @@ def test_runner_status_keeps_expired_rows_visible_for_desktop(tmp_path):
         expired = _store.list_runners(now=now + 2.0)
         assert expired[0]["online"] is False
         assert expired[0]["profile"] == "coding-expert"
+
+
+def test_uncertain_execution_is_not_retryable_and_same_claim_can_reconcile(tmp_path):
+    with _server(tmp_path) as (_store, _coordinator, client):
+        cap = _runner('mac')
+        client.register_runner(cap)
+        client.submit_task(_task())
+        claim = client.claim_task(cap)
+        assert claim is not None
+        assert client.mark_uncertain('task-1', claim.claim_id, error='transport unknown', result='partial')
+        assert not client.retry_task('task-1')
+        assert client.claim_task(cap) is None
+        record = client.list_tasks()[0]
+        assert (record.status, record.result) == ('uncertain', 'partial')
+        assert not client.complete_task('task-1', 'wrong', result='bad')
+        assert client.complete_task('task-1', claim.claim_id, result='authoritative')
+        assert client.list_tasks()[0].result == 'authoritative'

@@ -46,46 +46,47 @@ def test_default_executor_transmits_unicode_query_over_stdin():
     assert json.loads(result.stdout) == text
 
 
-def test_default_executor_bounds_a_stalled_child(monkeypatch):
+def test_default_executor_stops_on_lease_loss_and_retains_output(tmp_path):
     import sys
-    import time
-    from hermes_cli import fleet_runner
-
-    monkeypatch.setattr(fleet_runner, '_EXECUTION_TIMEOUT_SECONDS', 0.1)
-    started = time.monotonic()
-    result = FleetRunner._execute([sys.executable, '-c', 'import time; time.sleep(30)'], 'Public fixture')
+    import threading
+    from tests.waiting import wait_until
+    cancel = threading.Event()
+    results = []
+    worker = threading.Thread(target=lambda: results.append(FleetRunner._execute([sys.executable, '-c',
+        'import sys,threading; print("partial",flush=True); print("diagnostic",file=sys.stderr,flush=True); threading.Event().wait(30)'],
+        'Public fixture', cancel=cancel, output_dir=tmp_path)))
+    worker.start()
+    try:
+        assert wait_until(lambda: any('partial' in path.read_text(encoding='utf-8-sig')
+                          for path in tmp_path.glob('stdout-*')), timeout=10)
+    finally:
+        cancel.set()
+        worker.join(10)
+    assert not worker.is_alive()
+    result = results[0]
     assert result.returncode != 0
-    assert time.monotonic() - started < 5
+    assert 'partial' in result.stdout
+    assert 'diagnostic' in result.stderr
+    assert result.transport_interrupted
 
 
-def test_timed_out_execution_reports_failure_without_completion():
-    from tests.hermes_cli.test_fleet_runner import _Coordinator
-    coordinator = _Coordinator()
-    runner = FleetRunner('windows', coordinator, 'hermes', ['coding-expert'], ['LunaBot'],
-                         capabilities=[coordinator.capability],
-                         executor=lambda argv, text: SimpleNamespace(
-                             returncode=124, stdout='', stderr='bounded execution failed'))
-    assert runner.run_once(now=100)
-    assert not coordinator.completed
-    assert coordinator.failed[0][:2] == ('global-task-1', 'claim-1')
-
-
-def test_failed_attempt_is_not_replayed_as_a_successful_duplicate():
+def test_transport_failure_without_receipt_is_held_not_retried():
     from tests.hermes_cli.test_fleet_runner import _Coordinator
     coordinator = _Coordinator()
     executions = []
 
     def fail(argv, text):
         executions.append(argv)
-        return SimpleNamespace(returncode=124, stdout='', stderr='bounded execution failed')
+        return SimpleNamespace(returncode=124, stdout='', stderr='transport failed')
 
     runner = FleetRunner('windows', coordinator, 'hermes', ['coding-expert'], ['LunaBot'],
                          capabilities=[coordinator.capability], executor=fail)
     assert runner.run_once(now=100)
-    assert runner.run_once(now=101)
+    assert not runner.run_once(now=101)
     assert not coordinator.completed
-    assert len(coordinator.failed) == 2
-    assert len(executions) == 2
+    assert not coordinator.failed
+    assert len(coordinator.uncertain) == 1
+    assert len(executions) == 1
 
 
 def test_missing_launcher_reports_failed_claim(tmp_path):

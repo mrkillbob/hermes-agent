@@ -376,6 +376,10 @@ class FleetStore:
             task_id, claim_id, status="failed", result=None, error=error, telemetry=None, now=now
         )
 
+    def mark_uncertain(self, task_id: str, claim_id: str, *, error: str, result: str = "", now: float | None = None) -> bool:
+        """Hold ambiguous gateway work without making it eligible for redelivery."""
+        return self._finish(task_id, claim_id, status="uncertain", result=result, error=error, telemetry=None, now=now)
+
     def retry_task(self, task_id: str, *, now: float | None = None) -> bool:
         now = _now() if now is None else now
         with self._connection() as connection:
@@ -427,13 +431,13 @@ class FleetStore:
                 return False
             if row["status"] == status and row["claim_id"] == claim_id:
                 return True
-            if row["status"] != "running" or row["claim_id"] != claim_id:
+            if row["status"] not in {"running", "uncertain"} or row["claim_id"] != claim_id:
                 return False
             connection.execute(
                 """
                 UPDATE fleet_tasks SET status=?, result=?, error=?, output_tokens=?, duration_ms=?,
                     output_tps=?, lease_expires_at=NULL, updated_at=?
-                WHERE task_id=? AND claim_id=? AND status='running'
+                WHERE task_id=? AND claim_id=? AND status IN ('running', 'uncertain')
                 """,
                 (
                     status,
@@ -463,13 +467,11 @@ class FleetStore:
                         row["runner_profile"],
                     ),
                 )
-            connection.execute(
-                """
-                UPDATE fleet_runners SET active_load=MAX(active_load-1, 0)
-                WHERE node_id=? AND profile=?
-                """,
-                (row["node_id"], row["runner_profile"]),
-            )
+            if row["status"] == "running":
+                connection.execute(
+                    "UPDATE fleet_runners SET active_load=MAX(active_load-1, 0) WHERE node_id=? AND profile=?",
+                    (row["node_id"], row["runner_profile"]),
+                )
             self._event(connection, task_id, f"task_{status}", now)
             return True
 
@@ -484,7 +486,7 @@ class FleetStore:
                 connection.execute(
                     """
                     UPDATE fleet_tasks
-                    SET status='pending', claim_id=NULL, node_id=NULL, runner_profile=NULL,
+                    SET status='uncertain', error='Claim expired; reconcile gateway outcome before retry',
                         lease_expires_at=NULL, updated_at=?
                     WHERE task_id=? AND status='running' AND claim_id=?
                     """,
@@ -497,7 +499,7 @@ class FleetStore:
                     """,
                     (row["node_id"], row["runner_profile"]),
                 )
-                self._event(connection, row["task_id"], "claim_reclaimed", now)
+                self._event(connection, row["task_id"], "claim_uncertain", now)
             return len(rows)
 
     def list_tasks(self) -> list[TaskRecord]:

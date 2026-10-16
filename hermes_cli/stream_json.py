@@ -55,6 +55,12 @@ class StreamJsonEmitter:
         run still reports which session holds the accepted work."""
         self._session_id = session_id or self._session_id
 
+    def emit_admission(self, session_id: str, admission_id: str) -> None:
+        """Publish the durable handoff before waiting for gateway execution."""
+        self.bind_session(session_id)
+        self._emit({"type": "system", "subtype": "admission", "session_id": session_id,
+                    "admission_id": admission_id})
+
     def on_text_delta(self, text: str | None) -> None:
         # Only None/"" (the turn-end sentinel) is dropped: whitespace deltas are part of the text, and
         # a consumer concatenating ``text`` events must reproduce the answer byte for byte.
@@ -96,6 +102,9 @@ class StreamJsonEmitter:
                    "duration_ms": int((time.time() - self._start) * 1000)}
         if data.get("error"):
             payload["error"] = str(data["error"])
+        for key in ("admission_id", "admission_status", "settled", "outcome", "needs_input"):
+            if key in data:
+                payload[key] = data[key]
         self._emit(payload)
         print(f"\nsession_id: {session_id or self._session_id}", file=sys.stderr)  # same stderr contract as -Q
         return exit_code

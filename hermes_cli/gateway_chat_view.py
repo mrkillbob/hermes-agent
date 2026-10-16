@@ -231,10 +231,13 @@ class GatewayChatView:
 
     async def submit(self, text):
         self.mutations.retire(self.session_id)
-        return await self.client.rpc("prompt.submit", session_id=self.session_id,
+        receipt = await self.client.rpc("prompt.submit", session_id=self.session_id,
                                      input_id=uuid.uuid4().hex, text=text,
                                      **({"finite": True} if self.finite else {}),
                                      **({"unattended": True} if self.finite and self.unattended else {}))
+        if self.emitter is not None:
+            self.emitter.emit_admission(self.session_id, receipt["admission_id"])
+        return receipt
 
     async def command(self, text):
         command, _, rest = text.partition(" ")

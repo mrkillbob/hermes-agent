@@ -150,6 +150,10 @@ class FleetClient:
             ).get("ok")
         )
 
+    def mark_uncertain(self, task_id: str, claim_id: str, *, error: str, result: str = "", now: float | None = None) -> bool:
+        return bool(self._request("POST", f"/v1/fleet/tasks/{task_id}/uncertain",
+                                 {"claim_id": claim_id, "error": error, "result": result, "now": now}).get("ok"))
+
     def retry_task(self, task_id: str, *, now: float | None = None) -> bool:
         return bool(self._request("POST", f"/v1/fleet/tasks/{task_id}/retry", {"now": now}).get("ok"))
 
