@@ -2213,16 +2213,24 @@ def dispatch_once(
     max_in_progress_by_profile: Optional[dict] = None,
     local_model_cap: Optional[int] = None,
     reconcile_orphans: bool = True,
+    task_ids: Optional[list[str] | tuple[str, ...]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under host admission and board writer locks.
 
     The host lock makes the cross-board running-task snapshot and claim decision
     one critical section; the board lock remains the per-database single-writer
-    guard. A contended dispatcher returns an empty ``DispatchResult`` with
+    guard. ``task_ids`` restricts dispatch to exact already-ready/review cards
+    and skips board-wide reclaim, watchdog and promotion. Explicit empty or
+    malformed selections raise ValueError before any locks or mutations.
+    A contended dispatcher returns an empty ``DispatchResult`` with
     ``skipped_locked=True`` and writes nothing.
     """
+    from hermes_cli.kanban_dispatch_tick import dispatch_tick, normalize_task_ids
+
+    selected_task_ids = normalize_task_ids(task_ids)
+
     def _locked_tick() -> DispatchResult:
-        return _dispatch_once_locked(
+        return dispatch_tick(
             conn,
             spawn_fn=spawn_fn,
             ttl_seconds=ttl_seconds,
@@ -2239,6 +2247,7 @@ def dispatch_once(
             max_in_progress_by_profile=max_in_progress_by_profile,
             local_model_cap=local_model_cap,
             reconcile_orphans=reconcile_orphans,
+            task_ids=selected_task_ids,
         )
 
     try:
@@ -2586,197 +2595,6 @@ def _tick_spawn_budget(
             spawn_budget = 1
     return True, spawn_budget
 
-
-def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
-    """Unclaimed rows of one lane in dispatch order."""
-    return conn.execute(
-        "SELECT id, assignee, created_by, title, body, provider_override, model_override FROM tasks "
-        f"WHERE status = '{status}' AND claim_lock IS NULL "
-        "AND COALESCE(created_by, '') != 'fleet' "
-        "ORDER BY priority DESC, created_at ASC"
-    ).fetchall()
-
-
-def _any_spawnable_review(
-    conn: sqlite3.Connection,
-    review_rows: list[sqlite3.Row],
-    *,
-    per_profile_cap: Optional[int] = None,
-    per_profile_running: Optional[dict[str, int]] = None,
-) -> bool:
-    """Mirror review dispatch gates before reserving ready-lane capacity.
-
-    Unavailable profile metadata retains the historic fail-open behavior. A
-    review row that :func:`_dispatch_lane_task` would refuse this tick — its
-    assignee already at the per-profile cap, or respawn-guarded — cannot
-    consume the reservation, so it must not withhold capacity from an
-    otherwise ready task (one such row would pin ``ready_budget`` to 0).
-    """
-    if not review_rows:
-        return False
-    profile_exists = _profile_exists_fn()
-    running = per_profile_running or {}
-    for row in review_rows:
-        assignee = row["assignee"]
-        if not assignee:
-            continue
-        if profile_exists is not None and not profile_exists(assignee):
-            continue
-        if per_profile_cap is not None and running.get(assignee, 0) >= per_profile_cap:
-            continue
-        if check_respawn_guard(conn, row["id"], lane="review") is None:
-            return True
-    return False
-
-
-def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
-    """``kanban.default_assignee`` when it names a real profile this home may
-    claim (``kanban.dispatch_profiles`` gated, same predicate as the spawn
-    gate). Otherwise ``None`` so an unassigned shared-board card is never
-    written to. When the profiles module isn't importable trust the
-    operator's config: the downstream check still buckets a missing profile
-    as nonspawnable."""
-    name = (default_assignee or "").strip() or None
-    if name:
-        profile_exists = _profile_exists_fn()
-        if profile_exists is not None and not profile_exists(name):
-            return None
-    return name
-
-
-# The dispatch lock has been released here. Fire the tick observer strictly OUTSIDE the single-writer
-# critical section (#56066 sweeper finding / #64231 disposition): a slow subscriber must never extend the
-# lock hold and stall a sibling dispatcher's tick.
-def _dispatch_once_locked(
-    conn: sqlite3.Connection,
-    *,
-    spawn_fn=None,
-    ttl_seconds: Optional[int] = None,
-    dry_run: bool = False,
-    max_spawn: Optional[int] = None,
-    max_in_progress: Optional[int] = None,
-    failure_limit: int = DEFAULT_FAILURE_LIMIT,
-    stale_timeout_seconds: int = 0,
-    board: Optional[str] = None,
-    default_assignee: Optional[str] = None,
-    max_in_progress_per_profile: Optional[int] = None,
-    max_in_progress_per_model: Optional[int] = None,
-    max_in_progress_by_model: Optional[dict] = None,
-    max_in_progress_by_profile: Optional[dict] = None,
-    local_model_cap: Optional[int] = None,
-    reconcile_orphans: bool = True,
-) -> DispatchResult:
-    """One dispatcher tick: reclaim stale/crashed running tasks, promote
-    todo -> ready, then atomically claim each spawnable ready/review row and
-    call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
-    the PID so later ticks catch crashes before the TTL. Cap semantics:
-    :func:`_tick_spawn_budget`."""
-    result = DispatchResult()
-    _run_reclaim_phase(
-        conn, result, stale_timeout_seconds=stale_timeout_seconds,
-        failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
-    )
-    may_spawn, spawn_budget = _tick_spawn_budget(
-        conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
-    )
-    if not may_spawn:
-        return result
-    other_running_rows = running_task_rows_other_boards(board)
-
-    ready_rows = _lane_rows(conn, "ready")
-    # Review rows are enumerated up front so the budget split can see whether
-    # review work exists at all.
-    review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []
-    # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
-    # skipped_unassigned — "busy, retry later" differs from "needs routing".
-    # Resolved BEFORE the review reservation so the reservation can see which
-    # review rows the lane loop would refuse this tick.
-    per_profile_cap = max_in_progress_per_profile if (
-        # Per-profile concurrency cap (#21582): when set, track how many workers each assignee already has
-        # in flight, and refuse to spawn when this would push that assignee past the cap. Prevents fan-out
-        # workloads from melting a single profile's local model / API quota / browser pool while leaving
-        # other profiles idle.
-        isinstance(max_in_progress_per_profile, int)
-        and max_in_progress_per_profile > 0
-    ) else None
-    per_profile_running: dict[str, int] = {}
-    if per_profile_cap is not None:
-        for prow in conn.execute(
-            "SELECT assignee, COUNT(*) AS n FROM tasks "
-            "WHERE status = 'running' AND assignee IS NOT NULL "
-            "GROUP BY assignee"
-        ):
-            per_profile_running[prow["assignee"]] = int(prow["n"])
-        for other_row in other_running_rows:
-            assignee = other_row.get("assignee")
-            if assignee:
-                per_profile_running[assignee] = per_profile_running.get(assignee, 0) + 1
-    from hermes_cli.kanban_worker_capacity import WorkerCapacity
-
-    capacity = WorkerCapacity(
-        conn, model_cap=max_in_progress_per_model,
-        model_caps=max_in_progress_by_model, profile_caps=max_in_progress_by_profile,
-        other_running_rows=other_running_rows, local_model_cap=local_model_cap,
-    )
-    # Review-lane reservation: the ready loop runs first and would otherwise
-    # consume the ENTIRE shared budget, starving reviews under a sustained ready
-    # backlog. When spawnable review work exists and there is any budget, hold
-    # one slot back.
-    ready_budget = spawn_budget
-    if spawn_budget is not None and spawn_budget > 0 and _any_spawnable_review(
-        conn, review_rows,
-        per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
-    ):
-        ready_budget = max(spawn_budget - 1, 0)
-    lane_kwargs: dict[str, Any] = dict(
-        dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
-        failure_limit=failure_limit, spawn_fn=spawn_fn,
-        per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
-        capacity=capacity,
-        other_running_rows=other_running_rows,
-    )
-    default_assignee = _resolve_default_assignee(default_assignee)
-    spawned = 0
-    for row in ready_rows:
-        if ready_budget is not None and spawned >= ready_budget:
-            break
-        from hermes_cli.kanban_worker_routing import (
-            recover_generated_assignee,
-            route_orchestrator_task,
-        )
-        row_assignee = recover_generated_assignee(conn, row, default_assignee, dry_run=dry_run, result=result)
-        if row_assignee in {"task-orchestrator", "task-intake-router", "intake-router"}:
-            row_assignee = route_orchestrator_task(
-                conn, row, dry_run=dry_run, result=result, board=board,
-            )
-            if not row_assignee:
-                continue
-        if not row_assignee:
-            # Honour kanban.default_assignee so an unassigned task doesn't
-            # park in 'ready' forever.
-            if not default_assignee or not _apply_default_assignee(
-                conn, row["id"], default_assignee, dry_run=dry_run,
-            ):
-                result.skipped_unassigned.append(row["id"])
-                continue
-            row_assignee = default_assignee
-            result.auto_assigned_default.append(row["id"])
-        if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
-            spawned += 1
-
-    # A review agent (sdlc-review) approves (→ done) or requests changes
-    # (→ ready/todo). Review spawns share max_spawn with ready tasks. The loop
-    # checks the FULL shared ``spawn_budget`` — the reservation above caps the
-    # ready lane, it grants no extra capacity here.
-    for row in review_rows:
-        if spawn_budget is not None and spawned >= spawn_budget:
-            break
-        if not row["assignee"]:
-            result.skipped_unassigned.append(row["id"])
-            continue
-        if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
-            spawned += 1
-    return result
 
 
 def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:
