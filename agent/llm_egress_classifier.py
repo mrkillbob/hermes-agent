@@ -23,6 +23,7 @@ from agent.llm_egress_firewall import (
     UntrustedProvenanceSegment,
     ValidatedToolSyntaxSegment,
     content_free_violation_locations,
+    _generated_context_text_for_base64_scan,
     redact_remote_unsafe_text,
     source_grant_digest,
     static_literal_sha256,
@@ -1926,9 +1927,16 @@ def _typed_payload_violation_locations(
             text = getattr(item, "text", None)
             if not isinstance(text, str):
                 return
-            reasons = tuple(
-                sorted({reason for _, found in content_free_violation_locations(text) for reason in found})
-            )
+            reasons = {
+                reason for _, found in content_free_violation_locations(text) for reason in found
+            }
+            if isinstance(item, GeneratedContextSegment) and "base64_payload" in reasons:
+                # Match final authorization's bounded metadata mask; raw diagnostics
+                # otherwise blame generated identifiers that the firewall allows.
+                scanned = _generated_context_text_for_base64_scan(text)
+                if not any("base64_payload" in found for _, found in content_free_violation_locations(scanned)):
+                    reasons.remove("base64_payload")
+            reasons = tuple(sorted(reasons))
             if reasons:
                 locations.append((path, type(item).__name__, len(text.encode("utf-8")), reasons))
             return
