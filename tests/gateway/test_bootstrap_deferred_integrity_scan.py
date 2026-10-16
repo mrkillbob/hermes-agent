@@ -128,3 +128,21 @@ async def test_clean_previous_exit_launches_no_scan(_startup):
 
     assert events == ["runner_started", "ready", ("runtime_waited", False)]
     assert not scan_entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_early_environment_probe_starts_after_gateway_process_containment(_startup, monkeypatch):
+    from gateway.config import GatewayConfig
+    events, _, _ = _startup
+
+    def claim_gateway(*, force=False):
+        events.append("gateway_contained")
+        return True
+
+    monkeypatch.setattr(run_bootstrap, "_start_gateway_claim_pid_file", claim_gateway)
+    monkeypatch.setattr(run_bootstrap, "_start_gateway_early_environment_probe",
+                        lambda: events.append("environment_probe_started"))
+
+    assert await run_bootstrap.start_gateway(config=GatewayConfig(), replace=False, verbosity=None) is True
+
+    assert events.index("gateway_contained") < events.index("environment_probe_started")
