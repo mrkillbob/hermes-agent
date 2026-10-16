@@ -9,7 +9,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from hermes_cli.fleet_protocol import FleetTask, RunnerCapability, RunnerTelemetry, TaskRequirement, TaskTelemetry
 
@@ -475,7 +475,8 @@ class FleetStore:
             self._event(connection, task_id, f"task_{status}", now)
             return True
 
-    def reclaim_expired(self, *, now: float | None = None) -> int:
+    def reclaim_expired(self, *, now: float | None = None,
+                        on_reclaimed: Callable[[str, str], None] | None = None) -> int:
         now = _now() if now is None else now
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -500,7 +501,10 @@ class FleetStore:
                     (row["node_id"], row["runner_profile"]),
                 )
                 self._event(connection, row["task_id"], "claim_uncertain", now)
-            return len(rows)
+        if on_reclaimed is not None:
+            for row in rows:
+                on_reclaimed(row["task_id"], "Claim expired; reconcile gateway outcome before retry")
+        return len(rows)
 
     def list_tasks(self) -> list[TaskRecord]:
         with self._connection() as connection:

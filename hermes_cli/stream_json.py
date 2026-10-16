@@ -39,6 +39,7 @@ class StreamJsonEmitter:
 
     def __init__(self, model: str = "", session_id: str = ""):
         self._session_id = session_id
+        self._admission_attempted = False
         self._start = time.time()
         self._tool_started: dict[str, float] = {}
         self._emit({"type": "system", "subtype": "init", "model": model, "session_id": session_id})
@@ -46,6 +47,7 @@ class StreamJsonEmitter:
     def attach(self, agent) -> StreamJsonEmitter:
         """Route the agent's streaming/tool callbacks into this emitter (``init`` was already written at
         construction, before credentials/agent init, so a failed start still yields init + result)."""
+        self.begin_admission()
         agent.stream_delta_callback = self.on_text_delta
         agent.tool_progress_callback = self.on_tool_progress
         return self
@@ -55,8 +57,13 @@ class StreamJsonEmitter:
         run still reports which session holds the accepted work."""
         self._session_id = session_id or self._session_id
 
+    def begin_admission(self) -> None:
+        """Fence a lost submit acknowledgment from a proven pre-admission rejection."""
+        self._admission_attempted = True
+
     def emit_admission(self, session_id: str, admission_id: str) -> None:
         """Publish the durable handoff before waiting for gateway execution."""
+        self.begin_admission()
         self.bind_session(session_id)
         self._emit({"type": "system", "subtype": "admission", "session_id": session_id,
                     "admission_id": admission_id})
@@ -96,6 +103,7 @@ class StreamJsonEmitter:
         exit_code = exit_code or (1 if data.get("failed") else 0)
         payload = {"type": "result", "session_id": session_id or self._session_id, "exit_code": exit_code,
                    "text": data.get("final_response") or "",
+                   "admission_attempted": self._admission_attempted,
                    "tokens": {"input": data.get("input_tokens") or 0, "output": data.get("output_tokens") or 0,
                               "total": data.get("total_tokens") or 0, "cache_read": data.get("cache_read_tokens") or 0,
                               "cache_write": data.get("cache_write_tokens") or 0},

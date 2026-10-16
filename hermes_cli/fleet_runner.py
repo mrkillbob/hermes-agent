@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import hashlib
-from pathlib import Path
 import os
+from pathlib import Path
 import platform
 import subprocess
 import threading
@@ -147,11 +147,15 @@ class FleetRunner:
             if claim is None:
                 continue
             claimed = True
+            self._journal_claim(claim, stage="claimed")
             task = self._find_task(claim.task_id)
             if task is None:
-                self.coordinator.fail_task(
-                    claim.task_id, claim.claim_id, error="coordinator returned an unknown task", now=now
-                )
+                payload = {"task_id": claim.task_id, "claim_id": claim.claim_id, "status": "failed",
+                           "result": "", "error": "coordinator returned an unknown task", "telemetry": None}
+                self._save_delivery(payload)
+                if not self._send_delivery(payload, now=now):
+                    self.stop()
+                    break
                 continue
             if claim.task_id in self._delivered:
                 self.coordinator.complete_task(
@@ -219,17 +223,20 @@ class FleetRunner:
             argv.extend(["-m", models[0]])
         # Keep task data out of the command line, including Windows batch launchers.
         argv.extend(["--query-file", "-", "--format", "stream-json"])
-        output_dir = None
-        if self.state_dir is not None and claim is not None:
-            output_dir = self.state_dir / hashlib.sha256(claim.claim_id.encode()).hexdigest()
-            output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            self._write_receipt(output_dir / "claim.json", {
-                "task_id": claim.task_id, "claim_id": claim.claim_id, "profile": profile,
-                "node_id": self.node_id})
+        output_dir = self._journal_claim(claim, stage="executing") if claim is not None else None
         if self._executor is not None:
             result = self._executor(argv, body)
         else:
-            result = self._execute(argv, body, cancel=guard.cancel if guard else None, output_dir=output_dir)
+            from hermes_cli.fleet_execution import profile_child_env
+            try:
+                env = profile_child_env(profile)
+            except (OSError, ValueError) as exc:
+                result = subprocess.CompletedProcess(argv, 127, "",
+                    f"Fleet profile environment unavailable ({type(exc).__name__})")
+                result.not_started = True
+            else:
+                result = self._execute(argv, body, cancel=guard.cancel if guard else None,
+                                       output_dir=output_dir, env=env)
         from hermes_cli.fleet_execution import stream_event
         terminal = stream_event(result.stdout or "", "result")
         # CLI failures and detach receipts can leave real gateway work alive. Only an
@@ -237,6 +244,14 @@ class FleetRunner:
         if not getattr(result, "not_started", False) and (
                 terminal is None or result.returncode != 0 or terminal.get("exit_code", 0) != 0):
             identity = stream_event(result.stdout or "", "system", "admission")
+            if (identity is None and terminal is not None and not terminal.get("admission_id")
+                    and terminal.get("admission_attempted") is False
+                    and "settled" not in terminal and terminal.get("exit_code", 0) != 0
+                    and not getattr(result, "transport_interrupted", False)):
+                # A terminal CLI rejection before admission owns no gateway work.
+                result.outcome_unknown = False
+                result.telemetry = None
+                return result
             if identity is not None:
                 result = self._reconcile(profile, identity, cancel=bool(guard and guard.cancel.is_set()), original=result, guard=guard)
                 terminal = stream_event(result.stdout or "", "result")
@@ -251,14 +266,19 @@ class FleetRunner:
 
     def _reconcile(self, profile, identity, *, cancel, original, guard=None):
         from hermes_cli._subprocess_compat import bounded_probe_run
-        from hermes_cli.fleet_execution import stream_event
+        from hermes_cli.fleet_execution import profile_child_env, stream_event
+        try:
+            env = profile_child_env(profile)
+        except (OSError, ValueError) as exc:
+            original.stderr = (original.stderr or "") + f"\nRecovery profile unavailable ({type(exc).__name__}); do not retry"
+            return original
         while True:
             argv = [self.hermes_executable, "-p", profile, "fleet", "reconcile",
                     "--session-id", identity["session_id"], "--admission-id", identity["admission_id"]]
             stopping = cancel or bool(guard and guard.cancel.is_set())
             if stopping:
                 argv.append("--cancel")
-            result = bounded_probe_run(argv, timeout=30, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            result = bounded_probe_run(argv, timeout=30, env=env)
             terminal = stream_event(result.stdout or "", "result") if result is not None else None
             if terminal is not None and terminal.get("settled") is True:
                 return result
@@ -270,6 +290,25 @@ class FleetRunner:
             # The CLI transport ended, but the authoritative turn is still alive.
             # Continue reading that admission while its original claim is renewed.
             guard.cancel.wait(2)
+
+    def _journal_claim(self, claim, *, stage):
+        if self.state_dir is None:
+            return None
+        directory = self.state_dir / hashlib.sha256(claim.claim_id.encode()).hexdigest()
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._write_receipt(directory / "claim.json", {
+            "task_id": claim.task_id, "claim_id": claim.claim_id, "profile": claim.runner_profile,
+            "node_id": self.node_id, "stage": stage})
+        return directory
+
+    def _remove_capture(self, claim_id):
+        """Remove only this acknowledged claim's owned files; retain other evidence."""
+        directory = self.state_dir / hashlib.sha256(claim_id.encode()).hexdigest()
+        for pattern in ("stdout-*", "stderr-*", "input-*", "claim.json"):
+            for path in directory.glob(pattern):
+                path.unlink()
+        if directory.exists() and not any(directory.iterdir()):
+            directory.rmdir()
 
     def _delivery_path(self, payload):
         return self.state_dir / (hashlib.sha256(payload["claim_id"].encode()).hexdigest() + ".delivery.json")
@@ -302,8 +341,8 @@ class FleetRunner:
         else:
             ok = self.coordinator.fail_task(payload["task_id"], payload["claim_id"], error=payload["error"], now=now)
         if ok and self.state_dir is not None:
+            self._remove_capture(payload["claim_id"])
             self._delivery_path(payload).unlink(missing_ok=True)
-            (self.state_dir / hashlib.sha256(payload["claim_id"].encode()).hexdigest() / "claim.json").unlink(missing_ok=True)
         return ok
 
     def _deliver_pending(self):
@@ -324,7 +363,7 @@ class FleetRunner:
         if not journals:
             return True
         records = {row.task_id: row for row in self.coordinator.list_tasks()}
-        from hermes_cli.fleet_execution import ClaimGuard, stream_event
+        from hermes_cli.fleet_execution import stream_event
         for path in journals:
             try:
                 saved = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -347,7 +386,15 @@ class FleetRunner:
                 self.stop()
                 return False
             if record.status in {"completed", "failed", "cancelled"}:
-                path.unlink()
+                self._remove_capture(record.claim_id)
+                continue
+            if saved.get("stage") == "claimed":
+                payload = {"task_id": record.task_id, "claim_id": record.claim_id, "status": "failed",
+                           "result": "", "error": "Runner restarted before launching task", "telemetry": None}
+                self._save_delivery(payload)
+                if not self._send_delivery(payload):
+                    self.stop()
+                    return False
                 continue
             captures = sorted(path.parent.glob("stdout-*"))
             stdout = "\n".join(capture.read_text(encoding="utf-8-sig", errors="replace") for capture in captures)
@@ -357,25 +404,26 @@ class FleetRunner:
                     error="Runner restarted without an admission receipt; inspect retained capture before retry")
                 self.stop()
                 return False
-            with ClaimGuard(self, record, None, _LEASE_REFRESH_SECONDS) as guard:
-                original = subprocess.CompletedProcess([], 75, stdout, "Runner restarted during gateway execution")
-                result = self._reconcile(saved["profile"], identity, cancel=guard.cancel.is_set(), original=original, guard=guard)
-                terminal = stream_event(result.stdout or "", "result")
-                if terminal is None or terminal.get("settled") is not True:
-                    self.coordinator.mark_uncertain(record.task_id, record.claim_id, result=stdout, error=result.stderr)
-                    self.stop()
-                    return False
-                text, telemetry = _parse_stream_json_result(result.stdout or "")
-                payload = {"task_id": record.task_id, "claim_id": record.claim_id,
-                           "status": "completed" if result.returncode == 0 else "failed",
-                           "result": text, "error": _failure_diagnostic(result), "telemetry": telemetry}
-                self._save_delivery(payload)
-                if not self._send_delivery(payload):
-                    self.stop()
-                    return False
+            # Recovery observes the original admission once. An expired/uncertain
+            # coordinator lease is not authority to interrupt accepted gateway work.
+            original = subprocess.CompletedProcess([], 75, stdout, "Runner restarted during gateway execution")
+            result = self._reconcile(saved["profile"], identity, cancel=False, original=original)
+            terminal = stream_event(result.stdout or "", "result")
+            if terminal is None or terminal.get("settled") is not True:
+                self.coordinator.mark_uncertain(record.task_id, record.claim_id, result=stdout, error=result.stderr)
+                self.stop()
+                return False
+            text, telemetry = _parse_stream_json_result(result.stdout or "")
+            payload = {"task_id": record.task_id, "claim_id": record.claim_id,
+                       "status": "completed" if result.returncode == 0 else "failed",
+                       "result": text, "error": _failure_diagnostic(result), "telemetry": telemetry}
+            self._save_delivery(payload)
+            if not self._send_delivery(payload):
+                self.stop()
+                return False
         return True
 
     @staticmethod
-    def _execute(argv: list[str], input_text: str, *, cancel=None, output_dir=None):
+    def _execute(argv: list[str], input_text: str, *, cancel=None, output_dir=None, env=None):
         from hermes_cli.fleet_execution import execute_transport
-        return execute_transport(argv, input_text, cancel=cancel, output_dir=output_dir)
+        return execute_transport(argv, input_text, cancel=cancel, output_dir=output_dir, env=env)

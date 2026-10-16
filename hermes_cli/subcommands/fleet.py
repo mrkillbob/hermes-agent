@@ -146,6 +146,9 @@ def cmd_fleet(args: argparse.Namespace) -> int:
             )
             for profile in args.profile
         ]
+        import hashlib
+        from hermes_constants import get_hermes_home
+
         runner = FleetRunner(
             args.node_id,
             client,
@@ -153,6 +156,7 @@ def cmd_fleet(args: argparse.Namespace) -> int:
             args.profile,
             args.project,
             capabilities=capabilities,
+            state_dir=get_hermes_home() / "fleet" / "runners" / hashlib.sha256(args.node_id.encode()).hexdigest(),
             liveness_check=lambda: Path(args.liveness_file).is_file(),
         )
         if args.once:

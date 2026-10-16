@@ -182,11 +182,15 @@ Every event carries `timestamp` (Unix epoch milliseconds).
 | `text` | `text` — a streamed assistant text delta |
 | `tool_use` | `name`; `input` when the tool arguments are available |
 | `tool_result` | `name`, `output` (capped at 5000 chars), `duration_ms`, `is_error` |
-| `result` | `session_id`, `exit_code`, `text`, `tokens` (`input`, `output`, `total`, `cache_read`, `cache_write`), `duration_ms`; `error` when the turn failed |
+| `result` | `session_id`, `exit_code`, `text`, `tokens` (`input`, `output`, `total`, `cache_read`, `cache_write`), `duration_ms`, `admission_attempted`; `error` when the turn failed |
 
 Once a conversation starts, its terminal record is always `result` — including
 `exit_code: 130` when it is interrupted with Ctrl-C. Treat that record as the
 completion signal; the process exit code matches its `exit_code`.
+
+For a failed gateway invocation, `admission_attempted: false` proves submission never
+began. A true or absent marker without an admission receipt leaves acceptance unknown
+(for example, a lost submission acknowledgment); do not automatically retry it.
 
 After an accepted run loses its viewer, inspect its exact receipt without submitting
 the work again:

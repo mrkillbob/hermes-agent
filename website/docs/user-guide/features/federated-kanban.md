@@ -67,6 +67,13 @@ hermes fleet runner \
 Use `hermes fleet status` to inspect reachability, task leases, and whether the
 secret is configured. Status output never prints the bearer key.
 
-The current coordinator uses leases and idempotency, so a network partition is
-at-least-once and reclaimable rather than pretending to provide consensus-grade
-exactly-once execution.
+The CLI runner retains claims and transport captures under the active Hermes home's
+`fleet/runners/<node hash>/` directory. Restart it with the same home and node ID to
+recover that state. A restart reads the original gateway admission without submitting
+or cancelling it. Captures are removed after the coordinator acknowledges settlement;
+unknown outcomes retain their evidence and require inspection.
+
+The coordinator checks expired leases even when all runners are offline. Expiry
+releases runner load and holds the task as `uncertain`; it never makes possibly
+running work available for automatic retry. These leases and receipts do not provide
+consensus-grade exactly-once execution.

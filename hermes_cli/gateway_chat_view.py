@@ -231,6 +231,8 @@ class GatewayChatView:
 
     async def submit(self, text):
         self.mutations.retire(self.session_id)
+        if self.emitter is not None:
+            self.emitter.begin_admission()
         receipt = await self.client.rpc("prompt.submit", session_id=self.session_id,
                                      input_id=uuid.uuid4().hex, text=text,
                                      **({"finite": True} if self.finite else {}),

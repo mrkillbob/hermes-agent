@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import sqlite3
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +33,17 @@ def _claim_dict(claim) -> dict:
     }
 
 
+class _FleetHTTPServer(ThreadingHTTPServer):
+    def service_actions(self):
+        """Reclaim even when every worker is down and no requests arrive."""
+        try:
+            self.fleet_server.store.reclaim_expired(on_reclaimed=lambda task_id, error:
+                self.fleet_server.notify_task_update(task_id, "uncertain", error=error))
+        except sqlite3.Error:
+            # A transient busy database must not kill the coordinator's serve loop.
+            logging.getLogger(__name__).exception("fleet lease sweep failed; retrying next tick")
+
+
 class FleetServer:
     def __init__(
         self,
@@ -47,7 +59,7 @@ class FleetServer:
         self.store = store
         self.token = token
         self.on_task_update = on_task_update
-        self._http = ThreadingHTTPServer((host, port), _FleetHandler)
+        self._http = _FleetHTTPServer((host, port), _FleetHandler)
         self._http.daemon_threads = True
         self._http.fleet_server = self  # type: ignore[attr-defined]
         self._thread: threading.Thread | None = None

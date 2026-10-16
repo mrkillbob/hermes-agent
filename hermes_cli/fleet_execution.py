@@ -73,7 +73,7 @@ class ClaimGuard:
         self.thread.join()
 
 
-def execute_transport(argv, input_text, *, cancel=None, output_dir=None):
+def execute_transport(argv, input_text, *, cancel=None, output_dir=None, env=None):
     """Wait for process settlement, never a fixed task duration. Files avoid pipe-EOF hangs.
 
     The owner may outlive this CLI. A killed transport must be reconciled separately.
@@ -96,7 +96,7 @@ def execute_transport(argv, input_text, *, cancel=None, output_dir=None):
         source.seek(0)
         try:
             proc, job = spawn_server(argv, stdin=source, stdout=stdout, stderr=stderr,
-                                    env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+                                    env={**(os.environ if env is None else env), 'PYTHONIOENCODING': 'utf-8'},
                                     **({'creationflags': windows_hide_flags()} if os.name == 'nt' else {'process_group': 0}))
         except OSError as exc:
             result = subprocess.CompletedProcess(argv, 127, '', f'Fleet launcher did not start ({type(exc).__name__})')
@@ -127,3 +127,13 @@ def execute_transport(argv, input_text, *, cancel=None, output_dir=None):
         _close_job(job)
         for handle in files:
             handle.close()
+
+
+def profile_child_env(profile):
+    """Use the same served-profile environment for execution and reconciliation."""
+    from hermes_cli.profiles import resolve_profile_env
+    from tools.environments.local import restore_managed_env, served_profile_child_env
+
+    env = served_profile_child_env(target_home=resolve_profile_env(profile), inherit_credentials=True)
+    env['PYTHONIOENCODING'] = 'utf-8'
+    return restore_managed_env(env)
