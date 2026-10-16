@@ -138,7 +138,7 @@ jobs:
         working-directory: tests-js
         run: >-
           node ../node_modules/vitest/vitest.mjs run scripts/desktop-smoke.test.ts update-window-selection.test.ts
-          --testNamePattern '^(a detached native gateway |OLD update-window chat verifies )'
+          --testNamePattern '^(a detached native gateway |OLD update-window chat verifies |journey mock resumes |Windows journey mock retains )'
           --no-cache --configLoader runner --maxWorkers=1
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that

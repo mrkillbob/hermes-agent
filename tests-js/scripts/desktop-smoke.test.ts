@@ -64,6 +64,91 @@ test('one server owns inference and a fresh, per-server prompt witness', async (
   await expect(readMockPrompts(first.url)).rejects.toThrow()
 })
 
+test('journey mock resumes a persisted endpoint across phase restarts', async (): Promise<void> => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'journey-mock-'))
+  const urlFile = path.join(root, 'mock-url')
+  const wrapper = path.resolve(import.meta.dirname, '../../tests/install/e2e-assets/mock-provider.mjs')
+  let child: ReturnType<typeof spawn> | undefined
+
+  const stop = async (): Promise<void> => {
+    if (!child || child.exitCode !== null) { return }
+    const exited = new Promise<void>(resolve => child!.once('exit', (): void => resolve()))
+    child.kill()
+    await exited
+  }
+
+  const start = async (port = 0): Promise<string> => {
+    fs.rmSync(urlFile, { force: true })
+    child = spawn(process.execPath, [wrapper, urlFile, String(port)], { stdio: 'ignore' })
+    await expect.poll((): boolean => fs.existsSync(urlFile), { timeout: 15_000 }).toBe(true)
+
+    return fs.readFileSync(urlFile, 'utf8')
+  }
+
+  try {
+    const original = await start()
+    const port = Number(new URL(original).port)
+    await stop()
+    const resumed = await start(port)
+    expect(resumed).toBe(original)
+    expect(await readMockPrompts(original)).toEqual([])
+    const nonce = 'fresh NEW request through persisted OLD endpoint'
+
+    const reply = await fetch(`${original}/v1/chat/completions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: nonce }] }),
+    })
+
+    expect(reply.ok).toBe(true)
+    expect(await readMockPrompts(original)).toEqual([nonce])
+    await expect(startMockServer({ port })).rejects.toThrow('EADDRINUSE')
+  } finally {
+    await stop()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}, 40_000)
+
+test.runIf(process.platform === 'win32')('Windows journey mock retains its endpoint across driver invocations', (): void => {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'journey-mock-windows-'))
+  const assets = path.resolve(import.meta.dirname, '../../tests/install/e2e-assets')
+  const home = path.join(work, 'home')
+
+  const script = `
+    $ErrorActionPreference = 'Stop'
+    . (Join-Path $env:TEST_ASSETS 'desktop-smoke-windows.ps1')
+    $mock = Start-DesktopJourneyMock $env:TEST_NODE $env:TEST_ASSETS $env:TEST_WORK $env:TEST_HOME $env:TEST_WORK
+    try {
+      $before = Invoke-RestMethod -Uri "$env:HERMES_E2E_MOCK_URL/__e2e__/prompts"
+      if (@($before.receivedPrompts).Count -ne 0) { throw 'New phase must have a fresh witness' }
+      $body = @{ messages = @(@{role='user'; content=$env:TEST_NONCE}) } | ConvertTo-Json -Depth 5
+      Invoke-RestMethod -Uri "$env:HERMES_E2E_MOCK_URL/v1/chat/completions" -Method Post -ContentType 'application/json' -Body $body | Out-Null
+      $after = Invoke-RestMethod -Uri "$env:HERMES_E2E_MOCK_URL/__e2e__/prompts"
+      if (@($after.receivedPrompts).Count -ne 1 -or $after.receivedPrompts[0] -ne $env:TEST_NONCE) { throw 'Fresh phase prompt was not received' }
+      Write-Output "JOURNEY_URL=$env:HERMES_E2E_MOCK_URL"
+    } finally {
+      Stop-Process -Id $mock.Id
+      $mock.WaitForExit()
+    }
+  `
+
+  const phase = (nonce: string): string => {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
+      encoding: 'utf8', timeout: 45_000,
+      env: { ...process.env, TEST_ASSETS: assets, TEST_NODE: process.execPath, TEST_WORK: work, TEST_HOME: home, TEST_NONCE: nonce },
+    })
+
+    expect(result.status, result.stdout + result.stderr).toBe(0)
+    const url = /^JOURNEY_URL=(http:\/\/127\.0\.0\.1:[0-9]+)$/m.exec(result.stdout)?.[1]
+    expect(url).toBeDefined()
+
+    return url!
+  }
+
+  try { expect(phase('OLD checkpoint')).toBe(phase('NEW resumed checkpoint')) } finally {
+    fs.rmSync(work, { recursive: true, force: true })
+  }
+}, 100_000)
+
 test('provider reconfiguration preserves feed, plugins, history and explicit fixture options', (): void => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-config-'))
 
