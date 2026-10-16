@@ -53,11 +53,14 @@ def test_is_connected_needs_both_credentials(monkeypatch):
 
 
 def test_qqbot_platform_hint_comes_from_the_builtin_table():
+    import types
+
     from agent.prompt_builder import PLATFORM_HINTS
-    from agent.system_prompt import _default_platform_hint
+    from agent.system_prompt import platform_hint
 
     assert "MEDIA:" in PLATFORM_HINTS["qqbot"]
-    assert _default_platform_hint("qqbot") == PLATFORM_HINTS["qqbot"]
+    agent = types.SimpleNamespace(platform="qqbot", _platform_hint_overrides={})
+    assert platform_hint(agent) == PLATFORM_HINTS["qqbot"]
 
 
 def test_qqbot_is_a_builtin_deliver_target():

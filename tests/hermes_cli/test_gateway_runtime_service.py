@@ -144,7 +144,7 @@ def _launchd_gateway_command(tmp_path, monkeypatch, *, store, profile=""):
     monkeypatch.setattr(gw, "get_python_path", lambda: sys.executable)
     monkeypatch.setattr(gw, "_profile_arg", lambda *a, **k: profile)
     monkeypatch.setattr(_launchers, "resolve_store_python", lambda *a, **k: Path(sys.executable) if store else None)
-    return _timestamped_stderr_gateway_command(tmp_path / "logs" / "gateway.error.log", external_supervisor=True)
+    return _timestamped_stderr_gateway_command(tmp_path / ".hermes" / "logs" / "gateway.error.log", external_supervisor=True)
 
 
 @pytest.mark.platforms("linux", "macos")  # launchd ProgramArguments are POSIX shell-quoted
@@ -175,7 +175,7 @@ def test_launchd_verifies_the_osascript_wrapped_command_the_installer_writes(cas
         from hermes_cli.gateway_launchd import _timestamped_stderr_gateway_command
         root = gw.PROJECT_ROOT
         monkeypatch.setattr(gw, "PROJECT_ROOT", tmp_path / "other-checkout")
-        command = _timestamped_stderr_gateway_command(tmp_path / "logs" / "gateway.error.log", external_supervisor=True)
+        command = _timestamped_stderr_gateway_command(tmp_path / ".hermes" / "logs" / "gateway.error.log", external_supervisor=True)
         monkeypatch.setattr(gw, "PROJECT_ROOT", root)
     if case in {"own_wrapper_foreign_inner", "osascript_foreign_bare"}:
         # The installer's own gateway command for ANOTHER checkout: inside OUR stderr wrapper, or bare
@@ -185,12 +185,12 @@ def test_launchd_verifies_the_osascript_wrapped_command_the_installer_writes(cas
                                        python=sys.executable)
         assert Path(foreign[0]).name == "hermes"
         command = foreign if case == "osascript_foreign_bare" else installation_command(
-            gw.PROJECT_ROOT, ["--error-log", str(tmp_path / "logs" / "gateway.error.log"), "--", *foreign],
+            gw.PROJECT_ROOT, ["--error-log", str(tmp_path / ".hermes" / "logs" / "gateway.error.log"), "--", *foreign],
             module="hermes_cli.stderr_timestamp", python=sys.executable)
     if case == "osascript_legacy_module":
         # The legacy ``python -m`` form from any interpreter: accepted unwrapped, never written inside osascript.
         command = [sys.executable, "-m", "hermes_cli.stderr_timestamp", "--error-log",
-                   str(tmp_path / "logs" / "gateway.error.log"), "--",
+                   str(tmp_path / ".hermes" / "logs" / "gateway.error.log"), "--",
                    sys.executable, "-m", "hermes_cli.main", "gateway", "run", "--external-supervisor"]
     if case == "osascript_non_gateway":
         command = ["/bin/sh", "-c", "id"]
@@ -202,7 +202,7 @@ def test_launchd_verifies_the_osascript_wrapped_command_the_installer_writes(cas
         command = [sys.executable, "-I", "-c", "print('injected')", *command[3:]]
     if case == "other_run_module":
         command[2] = "other_module"
-    argv = launchd_program_arguments(command, tmp_path / "logs" / "gateway.log", tmp_path / "logs" / "gateway.error.log")
+    argv = launchd_program_arguments(command, tmp_path / ".hermes" / "logs" / "gateway.log", tmp_path / ".hermes" / "logs" / "gateway.error.log")
     shell_edits = {"chained_shell": (" >> ", "; id >> "), "substituted_shell": (" gateway run", " $(id) gateway run")}
     if case in shell_edits:
         edited = argv[4].replace(*shell_edits[case], 1)

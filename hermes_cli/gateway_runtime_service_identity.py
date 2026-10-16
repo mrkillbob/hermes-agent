@@ -213,11 +213,11 @@ def verify_systemd(props: dict[str, str], manager_env: str, home: Path, *, syste
 
 
 def _verify_launchd_argv(argv: list[str], home: Path) -> None:
-    command, wrapped = _launchd_command(argv)
+    command, wrapped = _launchd_command(argv, home)
     verify_gateway_argv(command, home, wrapped=wrapped)
 
 
-def _launchd_command(argv: list[str]) -> tuple[list[str], bool]:
+def _launchd_command(argv: list[str], home: Path) -> tuple[list[str], bool]:
     """``(command, wrapped)``: the command the launchd job runs, and whether it came out of the Local
     Network wrapper (gateway_launchd.launchd_program_arguments, #71206). The wrapper is accepted only when
     the installer regenerates it byte for byte from the inner command and the two log paths it carries,
@@ -236,6 +236,13 @@ def _launchd_command(argv: list[str]) -> tuple[list[str], bool]:
         _unverified()
     command = tokens[1:-4]
     if launchd_program_arguments(command, Path(tokens[-3]), Path(tokens[-1])) != argv:
+        _unverified()
+    # The job's own logs only: a regenerated wrapper that redirects (or timestamps) into a foreign file is not ours.
+    stdout, stderr = home / "logs/gateway.log", home / "logs/gateway.error.log"
+    if tokens[-3] != str(stdout) or tokens[-1] != str(stderr):
+        _unverified()
+    shim = _launch_module(command, legacy=False)
+    if shim is not None and shim[0] == "hermes_cli.stderr_timestamp" and shim[1][:2] != ["--error-log", str(stderr)]:
         _unverified()
     return command, True
 
