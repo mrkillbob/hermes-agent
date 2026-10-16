@@ -10,6 +10,8 @@ from hermes_cli import update_cmd_git
 @pytest.mark.parametrize("source", ["path", "managed"])
 @pytest.mark.parametrize("relative", [
     "mingw64/bin/git.exe",
+    "ucrt64/bin/git.exe",
+    "ucrt64/libexec/git-core/git.exe",
     "clangarm64/libexec/git-core/git.exe",
     "mingw32/bin/git.exe",
 ])

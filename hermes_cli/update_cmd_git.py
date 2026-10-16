@@ -577,7 +577,7 @@ def _portable_git_candidates() -> list:
         candidates += [
             root / arch / directory / "git.exe"
             for root in roots
-            for arch in ("clangarm64", "mingw64", "mingw32")
+            for arch in ("clangarm64", "ucrt64", "mingw64", "mingw32")
             for directory in ("bin", "libexec/git-core")
         ]
     return candidates
@@ -603,7 +603,7 @@ def _locate_real_git() -> Optional[Path]:
     candidates = [
         root / arch / directory / "git.exe"
         for root in roots
-        for arch in ("clangarm64", "mingw64", "mingw32")
+        for arch in ("clangarm64", "ucrt64", "mingw64", "mingw32")
         for directory in ("libexec/git-core", "bin")
     ] + _portable_git_candidates()
     return next((c for c in candidates if c.exists() and _probe_fork_bomb([str(c)]) is False), None)
