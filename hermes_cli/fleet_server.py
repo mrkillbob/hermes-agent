@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hmac
 import json
 import logging
@@ -33,17 +34,6 @@ def _claim_dict(claim) -> dict:
     }
 
 
-class _FleetHTTPServer(ThreadingHTTPServer):
-    def service_actions(self):
-        """Reclaim even when every worker is down and no requests arrive."""
-        try:
-            self.fleet_server.store.reclaim_expired(on_reclaimed=lambda task_id, error:
-                self.fleet_server.notify_task_update(task_id, "uncertain", error=error))
-        except sqlite3.Error:
-            # A transient busy database must not kill the coordinator's serve loop.
-            logging.getLogger(__name__).exception("fleet lease sweep failed; retrying next tick")
-
-
 class FleetServer:
     def __init__(
         self,
@@ -59,10 +49,12 @@ class FleetServer:
         self.store = store
         self.token = token
         self.on_task_update = on_task_update
-        self._http = _FleetHTTPServer((host, port), _FleetHandler)
+        self._http = ThreadingHTTPServer((host, port), _FleetHandler)
         self._http.daemon_threads = True
         self._http.fleet_server = self  # type: ignore[attr-defined]
         self._thread: threading.Thread | None = None
+        self._maintenance_thread: threading.Thread | None = None
+        self._maintenance_stop = threading.Event()
 
     def notify_task_update(self, task_id: str, status: str, **fields) -> None:
         if self.on_task_update is None:
@@ -84,15 +76,36 @@ class FleetServer:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._thread = threading.Thread(target=self._http.serve_forever, name="hermes-fleet", daemon=True)
+        self._maintenance_stop.clear()
+        self._thread = threading.Thread(target=contextvars.copy_context().run,
+                                        args=(self._http.serve_forever,), name="hermes-fleet", daemon=True)
+        self._maintenance_thread = threading.Thread(
+            target=contextvars.copy_context().run, args=(self._maintain_leases,),
+            name="hermes-fleet-maintenance", daemon=True)
         self._thread.start()
+        self._maintenance_thread.start()
+
+    def _maintain_leases(self) -> None:
+        # A SQLite busy wait must not hold the HTTP accept loop. One worker keeps
+        # sweeps single-flight, including while every runner is unavailable.
+        while not self._maintenance_stop.wait(0.5):
+            try:
+                self.store.reclaim_expired(on_reclaimed=lambda task_id, error:
+                    self.notify_task_update(task_id, "uncertain", error=error))
+            except sqlite3.Error:
+                logging.getLogger(__name__).exception("fleet lease sweep failed; retrying next tick")
 
     def close(self) -> None:
         if self._thread is None:
             return
+        self._maintenance_stop.set()
         self._http.shutdown()
         self._http.server_close()
         self._thread.join(timeout=2.0)
+        # Let an accepted sweep commit and mirror before close returns. The
+        # store retains its existing bounded SQLite busy timeout.
+        self._maintenance_thread.join()
+        self._maintenance_thread = None
         self._thread = None
 
 
