@@ -12,8 +12,10 @@ OS_TESTS = (
     {"name": "macOS-only tests (2/2)", "runner": "macos-latest", "marker": "macos", "slice": "2/2"},
     {"name": "Windows-only tests", "runner": "windows-latest-32-core",
      "fork_runner": "windows-2025", "marker": "windows"},
-    {"name": "Windows-only tests (arm64)", "runner": "windows-latest-32-arm-core",
-     "fork_runner": "windows-11-arm", "marker": "windows", "timeout": 60},
+    {"name": "Windows-only tests (arm64, 1/2)", "runner": "windows-latest-32-arm-core",
+     "fork_runner": "windows-11-arm", "marker": "windows", "timeout": 60, "slice": "1/2"},
+    {"name": "Windows-only tests (arm64, 2/2)", "runner": "windows-latest-32-arm-core",
+     "fork_runner": "windows-11-arm", "marker": "windows", "timeout": 60, "slice": "2/2"},
 )
 
 
