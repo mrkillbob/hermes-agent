@@ -16,7 +16,7 @@ import time
 from typing import Iterator
 import uuid
 
-from agent.conversation_worktree_policy import ConversationWorktreePolicy
+from agent.conversation_worktree_policy import ConversationWorktreePolicy, repository_identity
 from hermes_cli.worktree_environment import bootstrap_worktree_environments
 from hermes_cli._subprocess_compat import (
     IS_WINDOWS,
@@ -712,7 +712,7 @@ class ConversationWorktreeManager:
                             "cleanup",
                         )
                         if unlocked.returncode != 0:
-                            message = self._sanitize_remove_failure(unlocked.stderr)
+                            message = self._sanitize_diagnostic(unlocked.stderr)
                             logger.warning(
                                 "conversation_worktree.remove_failed phase=unlock message=%s",
                                 message,
@@ -737,7 +737,7 @@ class ConversationWorktreeManager:
                                     "conversation_worktree.relock_after_remove_failure_failed",
                                     exc_info=True,
                                 )
-                            message = self._sanitize_remove_failure(removed.stderr)
+                            message = self._sanitize_diagnostic(removed.stderr)
                             logger.warning(
                                 "conversation_worktree.remove_failed phase=remove message=%s",
                                 message,
@@ -997,11 +997,17 @@ class ConversationWorktreeManager:
             yield "unknown"
 
     @staticmethod
-    def _sanitize_remove_failure(stderr: str) -> str:
+    def _sanitize_diagnostic(stderr: str) -> str:
         text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(stderr or ""))
         text = re.sub(
-            r"(?i)\b(token|password|secret|authorization)\s*=\s*\S+",
-            r"\1=<redacted>",
+            r"(?i)(?P<scheme>(?:https?|ssh|git)://)[^\s/@]+@",
+            r"\g<scheme><redacted>@",
+            text,
+        )
+        text = re.sub(
+            r"(?i)(?P<key>(?:[A-Za-z0-9-]+[_-])*(?:token|password|secret|authorization|api[_-]?key))"
+            r"\s*[:=]\s*(?:Bearer\s+)?\S+",
+            r"\g<key>=<redacted>",
             text,
         )
         text = " ".join(text.split()) or "git worktree remove failed"
@@ -1012,7 +1018,9 @@ class ConversationWorktreeManager:
         if base is None:
             raise ConversationWorktreeError("governed creation base is not configured", phase="policy")
         args = ["remote", "get-url", base.remote]
-        if self._git_stdout(source, args, "creation_base") != base.expected_remote_url:
+        actual_remote = repository_identity(self._git_stdout(source, args, "creation_base"))
+        expected_remote = repository_identity(base.expected_remote_url)
+        if actual_remote != expected_remote:
             raise ConversationWorktreeError("creation remote identity mismatch", phase="creation_base")
         # Each acquisition owns its ref: concurrent fetches cannot replace the
         # commit between acquisition and resolution. Never consume FETCH_HEAD
@@ -1026,7 +1034,9 @@ class ConversationWorktreeManager:
                  f"refs/heads/{base.branch}:{ref}"],
                 "creation_base",
             )
-            if self._git_stdout(source, args, "creation_base") != base.expected_remote_url:
+            actual_remote = repository_identity(self._git_stdout(source, args, "creation_base"))
+            expected_remote = repository_identity(base.expected_remote_url)
+            if actual_remote != expected_remote:
                 raise ConversationWorktreeError(
                     "creation remote identity changed", phase="creation_base"
                 )
@@ -1654,7 +1664,7 @@ class ConversationWorktreeManager:
                 "bootstrap command could not start", phase="bootstrap"
             ) from exc
         try:
-            _stdout, _stderr = process.communicate(timeout=self._policy.bootstrap_timeout)
+            _stdout, stderr = process.communicate(timeout=self._policy.bootstrap_timeout)
         except subprocess.TimeoutExpired as exc:
             # A bootstrap can spawn compilers/package managers and descendants.
             # Killing only its direct shell leaves those descendants running in
@@ -1680,8 +1690,10 @@ class ConversationWorktreeManager:
                 "bootstrap process communication failed", phase="bootstrap"
             ) from exc
         if process.returncode != 0:
+            diagnostic = self._sanitize_diagnostic(stderr) if stderr.strip() else ""
+            detail = f": {diagnostic}" if diagnostic else ""
             raise ConversationWorktreeError(
-                f"bootstrap command exited with status {process.returncode}",
+                f"bootstrap command exited with status {process.returncode}{detail}",
                 phase="bootstrap",
             )
 
@@ -1689,7 +1701,7 @@ class ConversationWorktreeManager:
         result = self._run_git(cwd, args, self._timeout_for_phase(phase), phase)
         if result.returncode != 0:
             raise ConversationWorktreeError(
-                f"git {args[0]} failed: {self._sanitize_remove_failure(result.stderr)}", phase=phase
+                f"git {args[0]} failed: {self._sanitize_diagnostic(result.stderr)}", phase=phase
             )
         return result.stdout.strip()
 
