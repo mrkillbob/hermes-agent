@@ -1011,7 +1011,14 @@ class ConversationWorktreeManager:
             text,
         )
         text = " ".join(text.split()) or "git worktree remove failed"
-        return text[:_LEASE_MESSAGE_LIMIT]
+        if len(text) <= _LEASE_MESSAGE_LIMIT:
+            return text
+        from tools.tool_output_truncate import head_tail_split
+
+        # Git progress can fill the head before the actual checkout error is emitted.
+        marker = " ... [truncated] ... "
+        head, tail = head_tail_split(_LEASE_MESSAGE_LIMIT - len(marker))
+        return text[:head] + marker + text[-tail:]
 
     def _resolve_governed_creation_base(self, source: Path) -> str:
         base = self._policy.creation_base
