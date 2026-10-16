@@ -30,7 +30,9 @@ from gateway.restart import (
 from gateway.run_common import _UNSET
 from gateway.run_runtime import managed_turn_count, stop_managed_turns
 from gateway.run_shutdown_session_end import GatewaySessionEndMixin
-from gateway.shutdown_watchdog import arm_shutdown_watchdog, resolve_shutdown_watchdog_delay
+from gateway.shutdown_watchdog import (
+    arm_shutdown_watchdog, effective_shutdown_watchdog_delay, resolve_shutdown_watchdog_delay,
+)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
@@ -161,13 +163,6 @@ def _delivery_target_key(platform_value: str, chat_id, thread_id, *, profile: Op
             and looks_like_telegram_private_chat_id(chat_id)):
         platform_value = f"{profile}:{platform_value}"
     return _notice_target_key(platform_value, chat_id, thread_id)
-
-
-def _effective_watchdog_leash(runner: object) -> float:
-    """Thread-watchdog leash for the stop in progress: effective drain + grace, clamped under
-    launchd's live ``ExitTimeOut`` minus the dump margin. Lives here (not in gateway.restart)
-    because restart.py cannot import shutdown_watchdog without a cycle."""
-    return effective_stop_watchdog_delay(runner, resolve_shutdown_watchdog_delay(effective_stop_drain_timeout(runner)))
 
 
 class GatewayShutdownMixin(GatewaySessionEndMixin):
@@ -2198,7 +2193,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             "restart_drain_timeout": self._restart_drain_timeout,
             "effective_drain_timeout": effective_stop_drain_timeout(self),
             "launchd_exit_timeout_s": getattr(self, "_launchd_exit_timeout_s", None),
-            "watchdog_delay_s": _effective_watchdog_leash(self),
+            "watchdog_delay_s": effective_shutdown_watchdog_delay(self),
             "phase_elapsed_s": ctx.elapsed() if ctx.started_at is not None else None,
         }
 
@@ -2218,7 +2213,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         )
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             arm_shutdown_watchdog(
-                _effective_watchdog_leash(self), done_event=_watchdog_done,
+                effective_shutdown_watchdog_delay(self), done_event=_watchdog_done,
                 snapshot_fn=lambda: GatewayRunner._shutdown_watchdog_snapshot(self, ctx), exit_code=1,
             )
         try:
@@ -2234,8 +2229,13 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             if ctx.timed_out:
                 await GatewayRunner._stop_interrupt_remaining_work(self, ctx)
             from gateway.run_runtime import settle_gateway_runtime  # within what the leash has left
-            await settle_gateway_runtime(self, budget=_effective_watchdog_leash(self) - ctx.elapsed())
+            await settle_gateway_runtime(self, budget=effective_shutdown_watchdog_delay(self) - ctx.elapsed())
             await GatewayRunner._stop_finalize_agents_and_adapters(self, ctx)
+            # The gateway's exit funnel skips atexit. Release only our own router after its
+            # consumers finish, before a replacement gateway can acquire the runtime lock.
+            with _log_suppressed(logging.WARNING, "Managed local runtime shutdown failed: %s"):
+                from hermes_cli.local_runtime.bootstrap import shutdown_local_runtime
+                await asyncio.to_thread(shutdown_local_runtime)
             await GatewayRunner._stop_release_runtime_state(self, ctx)
             GatewayRunner._stop_quiesce_and_close_session_dbs(self, timeout, ctx)
             await GatewayRunner._stop_persist_exit_state(self, ctx)
