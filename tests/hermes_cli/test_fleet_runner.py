@@ -37,6 +37,7 @@ class _Coordinator:
         self.registered = []
         self.completed = []
         self.failed = []
+        self.uncertain = []
 
     def register_runner(self, capability, **_kwargs):
         self.registered.append(capability)
@@ -47,6 +48,13 @@ class _Coordinator:
 
     def claim_task(self, _capability, **_kwargs):
         return self.claims.pop(0) if self.claims else None
+
+    def renew_claim(self, task_id, claim_id, **_kwargs):
+        return TaskClaim(task_id, claim_id, "windows", "coding-expert", 300.0, 1)
+
+    def mark_uncertain(self, task_id, claim_id, **kwargs):
+        self.uncertain.append((task_id, claim_id, kwargs))
+        return True
 
     def list_tasks(self):
         return [
@@ -112,7 +120,7 @@ def test_runner_uses_windows_executable_as_an_argument_vector_and_reports_comple
     assert coordinator.completed[0][2]["telemetry"].output_tps == 60.0
 
 
-def test_runner_omits_telemetry_when_stream_has_no_terminal_result():
+def test_runner_holds_uncertain_when_stream_has_no_terminal_result():
     coordinator = _Coordinator()
 
     runner = FleetRunner(
@@ -127,8 +135,8 @@ def test_runner_omits_telemetry_when_stream_has_no_terminal_result():
     )
 
     assert runner.run_once(now=100.0) is True
-    assert coordinator.completed[0][2]["telemetry"] is None
-    assert coordinator.completed[0][2]["result"] == "partial output"
+    assert coordinator.completed == []
+    assert coordinator.uncertain[0][2]["result"] == "partial output"
 
 
 def test_runner_does_not_register_or_claim_when_desktop_is_not_live():
@@ -159,7 +167,7 @@ def test_duplicate_delivery_is_idempotent_and_stop_is_graceful():
         projects=["LunaBot"],
         capabilities=[coordinator.capability],
         liveness_check=lambda: True,
-        executor=lambda argv, _input: executions.append(argv) or SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        executor=lambda argv, _input: executions.append(argv) or SimpleNamespace(returncode=0, stdout='{"type":"result","text":"ok","exit_code":0}', stderr=""),
     )
 
     assert runner.run_once(now=100.0) is True

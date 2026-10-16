@@ -130,7 +130,7 @@ def test_existing_fleet_schema_receives_telemetry_columns(tmp_path):
     assert {"output_tokens", "duration_ms", "output_tps"} <= task_columns
 
 
-def test_expired_claim_is_reclaimed_with_a_new_attempt(tmp_path):
+def test_expired_claim_is_held_without_a_new_attempt(tmp_path):
     store = FleetStore(tmp_path / "fleet.db")
     store.register_runner(_runner(), now=100.0, ttl=30.0)
     store.register_runner(_runner("windows"), now=100.0, ttl=30.0)
@@ -141,9 +141,9 @@ def test_expired_claim_is_reclaimed_with_a_new_attempt(tmp_path):
     assert store.reclaim_expired(now=107.0) == 1
     second = store.claim_task(_runner("windows"), now=108.0, lease_seconds=5.0)
 
-    assert second is not None
-    assert second.claim_id != first.claim_id
-    assert second.attempt == 2
+    assert second is None
+    assert store.list_tasks()[0].status == "uncertain"
+    assert store.retry_task("task-1", now=109) is False
 
 
 def test_competing_claims_cannot_both_commit_the_same_task(tmp_path):

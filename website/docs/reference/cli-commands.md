@@ -178,14 +178,48 @@ Every event carries `timestamp` (Unix epoch milliseconds).
 | Event `type` | Fields |
 |---|---|
 | `system` | `subtype: "init"`, `model`, `session_id` |
+| `system` | `subtype: "admission"`, `session_id`, `admission_id` — the gateway accepted this exact input |
 | `text` | `text` — a streamed assistant text delta |
 | `tool_use` | `name`; `input` when the tool arguments are available |
 | `tool_result` | `name`, `output` (capped at 5000 chars), `duration_ms`, `is_error` |
-| `result` | `session_id`, `exit_code`, `text`, `tokens` (`input`, `output`, `total`, `cache_read`, `cache_write`), `duration_ms`; `error` when the turn failed |
+| `result` | `session_id`, `exit_code`, `text`, `tokens` (`input`, `output`, `total`, `cache_read`, `cache_write`), `duration_ms`, `admission_attempted`; `error` when the turn failed |
 
 Once a conversation starts, its terminal record is always `result` — including
 `exit_code: 130` when it is interrupted with Ctrl-C. Treat that record as the
 completion signal; the process exit code matches its `exit_code`.
+
+For a failed gateway invocation, `admission_attempted: false` proves submission never
+began. A true or absent marker without an admission receipt leaves acceptance unknown
+(for example, a lost submission acknowledgment); do not automatically retry it.
+
+After an accepted run loses its viewer, inspect its exact receipt without submitting
+the work again:
+
+```bash
+hermes -p PROFILE fleet reconcile --session-id SESSION --admission-id ADMISSION
+```
+
+This command attaches only to an already ready gateway and emits JSONL `system/init`
+and `result`. Its result includes `admission_id`, `admission_status` (`queued`,
+`started`, `terminal`, or `unknown`), `settled`, `outcome`, and `needs_input`, alongside
+the usual result fields. Exit `75` with `settled: false` means the gateway could not
+prove terminal execution; retain the admission and reconcile later. A terminal
+receipt returns its committed result and completion/failure/interruption exit code.
+For a started admission, `needs_input: true` identifies a pending approval or
+clarification for its exact execution generation so the runner can report the hold.
+Add `--cancel` to cancel that queued admission or interrupt its exact current
+execution generation, then wait briefly for control settlement. This never resends
+the prompt or imposes a deadline on task execution.
+
+Fleet execution renews the original coordinator claim and runner heartbeat while the
+accepted gateway turn runs; there is no fixed total task deadline. The runner keeps
+claim metadata and stdout/stderr beside its liveness marker. After a restart it
+reconciles the captured session/admission rather than submitting the task again.
+A completed result is saved until the coordinator acknowledges it; lost acknowledgments
+replay only the result delivery. Expired leases or unconfirmed gateway outcomes enter
+`uncertain`, retain their original claim, and cannot be retried or claimed by another
+worker until that exact execution is reconciled. Input requests retain the session for
+an operator to resolve; no approval is supplied automatically.
 
 #### Exit codes for one-shot runs
 

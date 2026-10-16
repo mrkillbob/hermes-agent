@@ -60,6 +60,16 @@ def _task_dict(task) -> dict:
 
 def cmd_fleet(args: argparse.Namespace) -> int:
     action = getattr(args, "fleet_action", None)
+    if action == "child-env":
+        from hermes_cli.fleet_execution import profile_child_env
+
+        print(json.dumps({"version": 1, "env": profile_child_env(args.target_profile)}))
+        return 0
+    if action == "reconcile":
+        import asyncio
+        from hermes_cli.fleet_reconcile import run_reconcile
+
+        return asyncio.run(run_reconcile(args.session_id, args.admission_id, cancel=args.cancel))
     if action == "init":
         from hermes_cli.config import load_config, save_config
 
@@ -141,6 +151,9 @@ def cmd_fleet(args: argparse.Namespace) -> int:
             )
             for profile in args.profile
         ]
+        import hashlib
+        from hermes_constants import get_hermes_home
+
         runner = FleetRunner(
             args.node_id,
             client,
@@ -148,6 +161,7 @@ def cmd_fleet(args: argparse.Namespace) -> int:
             args.profile,
             args.project,
             capabilities=capabilities,
+            state_dir=get_hermes_home() / "fleet" / "runners" / hashlib.sha256(args.node_id.encode()).hexdigest(),
             liveness_check=lambda: Path(args.liveness_file).is_file(),
         )
         if args.once:
@@ -169,6 +183,12 @@ def build_parser(subparsers) -> None:
         description="Coordinate opt-in Kanban work across live Hermes installations without sharing credentials or Git checkouts.",
     )
     fleet_sub = parser.add_subparsers(dest="fleet_action")
+    child_env = fleet_sub.add_parser("child-env", help=argparse.SUPPRESS)
+    child_env.add_argument("--target-profile", required=True)
+    reconcile = fleet_sub.add_parser("reconcile", help="Read the exact accepted gateway admission without replaying it")
+    reconcile.add_argument("--session-id", required=True)
+    reconcile.add_argument("--admission-id", required=True)
+    reconcile.add_argument("--cancel", action="store_true", help="Cancel only this admission, then reconcile")
     init = fleet_sub.add_parser("init", help="Configure the coordinator URL and opt in or out")
     init.add_argument("--url", required=True)
     init.add_argument("--enable", action="store_true", help="Enable federated Kanban admission")

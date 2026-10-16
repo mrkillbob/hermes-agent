@@ -379,15 +379,20 @@ test('a detached native gateway proves its source installation', async (): Promi
   fs.writeFileSync(path.join(source, 'hermes_cli', '__init__.py'), '')
   // A real module launch exposes only the shared interpreter and -m to CIM.
   // Its self-computed install ID follows register_self's producer contract.
+  // This is a listener-ownership fixture, so startup must not depend on DNS.
   fs.writeFileSync(path.join(source, 'hermes_cli', 'main.py'), [
-    'import hashlib, json', 'from pathlib import Path',
-    'from http.server import HTTPServer, BaseHTTPRequestHandler',
+    'import hashlib, json, socket', 'from pathlib import Path',
+    'def no_hostname_lookup(*args): raise RuntimeError("source proof must not resolve hostnames")',
+    'socket.getfqdn = no_hostname_lookup',
+    'from socketserver import TCPServer, BaseRequestHandler',
     'root = str(Path(__file__).resolve().parent.parent).lower()',
-    'server = HTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)',
-    'print(json.dumps({"port": server.server_port, "install": hashlib.sha256(root.encode("utf-8")).hexdigest()[:12]}), flush=True)',
+    'server = TCPServer(("127.0.0.1", 0), BaseRequestHandler)',
+    'print(json.dumps({"port": server.server_address[1], "install": hashlib.sha256(root.encode("utf-8")).hexdigest()[:12]}), flush=True)',
     'server.serve_forever()',
   ].join('\n'))
   const python = process.env.HERMES_PYTHON || (process.platform === 'win32' ? 'python.exe' : 'python3')
+
+  console.info('[native source proof] starting listener')
 
   const child = spawn(python, ['-m', 'hermes_cli.main'], { cwd: source, detached: true,
     env: { ...process.env, PYTHONPATH: source }, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -399,14 +404,17 @@ test('a detached native gateway proves its source installation', async (): Promi
       child.stdout.once('data', (data: Buffer): void => resolve(JSON.parse(data.toString())))
     })
 
+    console.info('[native source proof] listener ready')
     const started = processStartTime(child.pid!)
     expect(started).not.toBeNull()
+    console.info('[native source proof] process start observed')
 
     const record = { pid: child.pid, purpose: 'gateway', create_time: started, host: '', port: null,
       hermes_home: home, install: identity.install }
 
     fs.writeFileSync(path.join(root, 'spawn-ledger.json'), JSON.stringify([record]))
     const backend = localBackendProcess(identity.port, child.pid!, home)
+    console.info('[native source proof] listener ownership observed')
     expect(backend.ownership).toBe('host-ledger')
     expect(backend.registeredGatewayInstallId).toBe(identity.install)
     expect(() => assertBackendOrigin(backend, source, 'source')).not.toThrow()
@@ -415,9 +423,13 @@ test('a detached native gateway proves its source installation', async (): Promi
     fs.writeFileSync(path.join(root, 'spawn-ledger.json'), JSON.stringify([record, { ...record, install: '0123456789ab' }]))
     expect(localBackendProcess(identity.port, child.pid!, home).registeredGatewayInstallId).toBeUndefined()
   } finally {
+    console.info('[native source proof] stopping listener')
+
     if (child.exitCode === null && child.signalCode === null) {
       await new Promise<void>((resolve): void => { child.once('exit', () => resolve()); child.kill() })
     }
+
+    console.info('[native source proof] listener stopped')
 
     fs.rmSync(root, { recursive: true, force: true })
   }

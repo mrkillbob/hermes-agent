@@ -36,7 +36,7 @@ def mirror_fleet_task(
             )
         if status == "pending" and task.status in {"blocked", "scheduled"}:
             return kb.unblock_task(connection, task_id)
-        if status in {"failed", "cancelled"} and task.status in {"ready", "running"}:
+        if status in {"failed", "cancelled", "uncertain"} and task.status in {"ready", "running"}:
             return kb.block_task(
                 connection,
                 task_id,
