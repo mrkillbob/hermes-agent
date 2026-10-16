@@ -7,6 +7,7 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 
 | Patch | Files | Guard test |
 |---|---|---|
+| Frozen session policies preserve YAML dates/timestamps as ISO strings, so unrelated plugin dates cannot block cron admission | `gateway/session_policy.py`, `gateway/session_policy_config.py` | `tests/gateway/test_session_policy_yaml_dates.py` |
 | Skill env passthrough is keyed per conversation session, not process-wide (sibling chats cannot inherit a skill's secret names) | `tools/env_passthrough.py` | `tests/tools/test_env_passthrough_fork_isolation.py` |
 | Media proxy enforces its 25 MB cap while streaming | `hermes_cli/web_routers/files.py` | `tests/hermes_cli/test_media_proxy_streaming_limit.py` |
 | Transcription split lists only `partNNN.m4a` segments and turns segmenter failures into an error envelope | `tools/transcription_chunking.py` | `tests/tools/test_transcription_chunking_fork_names.py` |
