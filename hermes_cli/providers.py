@@ -23,6 +23,8 @@ class HermesOverlay:
     extra_env_vars: tuple[str, ...] = ()  # env vars models.dev doesn't list
     base_url_override: str = ""           # override if models.dev URL is wrong/missing
     base_url_env_var: str = ""            # env var for user-custom base URL
+    api_key_env_vars_override: tuple[str, ...] = ()  # preserve an ordered credential compatibility contract
+    catalog_only: bool = False           # apply only when models.dev has an entry
 
 
 HERMES_OVERLAYS: dict[str, HermesOverlay] = {
@@ -53,6 +55,10 @@ HERMES_OVERLAYS: dict[str, HermesOverlay] = {
                                    base_url_override="https://api.minimax.io/anthropic"),
     "minimax-cn": HermesOverlay(transport="anthropic_messages", base_url_env_var="MINIMAX_CN_BASE_URL"),
     "deepseek": HermesOverlay(base_url_env_var="DEEPSEEK_BASE_URL"),
+    # Hermes shipped the long name before models.dev added CommandCode with CMD_API_KEY.
+    # Keep saved credentials first, while accepting the provider's current key name.
+    "commandcode": HermesOverlay(api_key_env_vars_override=("COMMANDCODE_API_KEY", "CMD_API_KEY"),
+                                  base_url_env_var="COMMANDCODE_BASE_URL", catalog_only=True),
     "alibaba": HermesOverlay(base_url_env_var="DASHSCOPE_BASE_URL"),
     "alibaba-coding-plan": HermesOverlay(base_url_env_var="ALIBABA_CODING_PLAN_BASE_URL"),
     "vercel": HermesOverlay(is_aggregator=True),
@@ -199,14 +205,15 @@ def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderD
     overlay = HERMES_OVERLAYS.get(canonical)
     if mdev_info is not None:
         ov = overlay or HermesOverlay()
-        env_vars = list(mdev_info.env)
+        env_vars = list(ov.api_key_env_vars_override or mdev_info.env)
         for ev in ov.extra_env_vars:
             if ev not in env_vars:
                 env_vars.append(ev)
         return _overlay_pdef(canonical, ov, mdev_info.name, tuple(env_vars), ov.base_url_override or mdev_info.api,
                              mdev_info.doc, "models.dev")
-    if overlay is not None:
-        return _overlay_pdef(canonical, overlay, _LABEL_OVERRIDES.get(canonical, canonical), overlay.extra_env_vars,
+    if overlay is not None and not overlay.catalog_only:
+        return _overlay_pdef(canonical, overlay, _LABEL_OVERRIDES.get(canonical, canonical),
+                             overlay.api_key_env_vars_override or overlay.extra_env_vars,
                              overlay.base_url_override, "", "hermes")
     # Plugin-registered profiles (plugins/model-providers/<name>/) absent from models.dev and
     # HERMES_OVERLAYS would otherwise be "Unknown provider" in /model, --provider and model-switch
