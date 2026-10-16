@@ -11,7 +11,11 @@ import pytest
 
 from agent.conversation_worktree import ConversationWorktreeManager
 from agent.secret_scope import is_multiplex_active, set_multiplex_active
-from agent.conversation_worktree_policy import ConversationCreationBasePolicy, ConversationWorktreePolicy
+from agent.conversation_worktree_policy import (
+    ConversationCreationBasePolicy,
+    ConversationWorktreePolicy,
+    resolve_conversation_worktree_policy,
+)
 from hermes_state import SessionDB
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from scripts import conversation_worktree_base_guard as guard
@@ -99,6 +103,41 @@ def advance(repository: Path) -> str:
 def arguments(mode, remote, destination):
     return ["--mode", mode, "--remote", "origin", "--branch", "stable",
             "--expected-remote", str(remote), "--worktree-root", str(destination)]
+
+
+@pytest.mark.platforms("posix")
+def test_guarded_creation_uses_fresh_project_base_without_touching_source_wip(workspace, tmp_path):
+    repository, source, remote, destination = workspace
+    source_head = git(source, "rev-parse", "HEAD")
+    git(source, "remote", "set-url", "origin", remote.as_uri())
+    wip = source / "operator-wip.txt"
+    wip.write_text("keep existing work\n", encoding="utf-8")
+    stable_head = advance(repository)
+    policy = resolve_conversation_worktree_policy({
+        "conversation_worktree": {
+            "enabled": True,
+            "source_worktree": str(source),
+            "worktree_root": str(destination),
+            "bootstrap": True,
+            "bootstrap_command": [
+                sys.executable, guard.__file__, *arguments("hermes-agent", remote, destination),
+            ],
+            "create_timeout": 10,
+            "bootstrap_timeout": 10,
+        },
+    })
+    home = tmp_path / "profile-home"
+    with SessionDB(home / "state.db") as db, profile_home(home):
+        binding = ConversationWorktreeManager(policy, db).bind_new_root_session(
+            "fresh-stable", conversation_kind="interactive",
+        )
+
+    assert binding.base_commit == stable_head
+    assert git(binding.path, "rev-parse", "HEAD") == stable_head
+    assert git(source, "rev-parse", "HEAD") == source_head
+    assert wip.read_text(encoding="utf-8") == "keep existing work\n"
+    assert git(source, "status", "--porcelain", "--untracked-files=all") == "?? operator-wip.txt"
+    assert not (binding.path / "operator-wip.txt").exists()
 
 
 @pytest.mark.platforms("posix")

@@ -218,6 +218,33 @@ def test_bootstrap_failure_is_retained_and_never_ready(repo, db, tmp_path):
     assert Path(record.worktree_path).exists()
 
 
+def test_bootstrap_failure_preserves_bounded_redacted_stderr(repo, db, tmp_path):
+    diagnostic = (
+        "guard blocked token=topsecret HERMES_FLEET_TOKEN=also-secret "
+        "credential URL https://user:embedded-secret@example.com/repo "
+        + ("detail " * 100)
+    )
+    command = (
+        sys.executable,
+        "-c",
+        "import sys; sys.stderr.write(" + repr(diagnostic) + "); raise SystemExit(7)",
+    )
+    worktree_manager = manager(
+        repo, db, tmp_path, bootstrap=True, bootstrap_command=command,
+    )
+
+    with pytest.raises(ConversationWorktreeError) as error:
+        worktree_manager.bind_new_root_session("stderr-root", conversation_kind="interactive")
+
+    assert "bootstrap command exited with status 7" in str(error.value)
+    assert "guard blocked token=<redacted>" in str(error.value)
+    assert "topsecret" not in str(error.value)
+    assert "also-secret" not in str(error.value)
+    assert "embedded-secret" not in str(error.value)
+    assert "user:embedded-secret" not in str(error.value)
+    assert len(str(error.value)) < 400
+
+
 def test_repeated_root_reuses_same_validated_ready_binding(repo, db, tmp_path):
     worktree_manager = manager(repo, db, tmp_path)
     first = worktree_manager.bind_new_root_session("root", conversation_kind="interactive")

@@ -2,6 +2,7 @@ import pytest
 
 from agent.conversation_worktree_policy import (
     ConversationWorktreePolicyError,
+    repository_identity,
     resolve_conversation_worktree_policy,
 )
 
@@ -240,6 +241,57 @@ def test_explicit_creation_base_policy_is_typed_and_opt_in(tmp_path):
     assert result.creation_base.expected_remote_url == "https://example.invalid/owner/repo.git"
     del config["conversation_worktree"]["creation_base"]
     assert resolve_conversation_worktree_policy(config).creation_base is None
+
+
+def test_guarded_bootstrap_derives_fresh_creation_base_policy(tmp_path):
+    policy = resolve_conversation_worktree_policy({
+        "conversation_worktree": {
+            "enabled": True,
+            "source_worktree": str(tmp_path / "source"),
+            "worktree_root": str(tmp_path / "children"),
+            "bootstrap": True,
+            "bootstrap_command": [
+                "/Users/example/.local/bin/hermes-conversation-base-guard",
+                "--mode", "lunabot",
+                "--remote", "origin",
+                "--branch", "stable",
+                "--expected-remote", "github.com/mrkillbob/luna-bot",
+                "--worktree-root", str(tmp_path / "children"),
+            ],
+        }
+    })
+
+    assert policy.creation_base.remote == "origin"
+    assert policy.creation_base.branch == "stable"
+    assert policy.creation_base.expected_remote_url == "github.com/mrkillbob/luna-bot"
+
+
+def test_repository_identity_normalizes_supported_remote_spellings(tmp_path):
+    assert repository_identity(
+        "https://github.com/NousResearch/hermes-agent.git"
+    ) == repository_identity("github.com/nousresearch/hermes-agent")
+    assert repository_identity(
+        "git@github.com:NousResearch/hermes-agent.git"
+    ) == repository_identity("https://github.com/nousresearch/hermes-agent")
+    assert repository_identity("https://github.com:8443/nousresearch/hermes-agent") != repository_identity(
+        "https://github.com/nousresearch/hermes-agent"
+    )
+    assert repository_identity("https://github.com:443/nousresearch/hermes-agent") == repository_identity(
+        "https://github.com/nousresearch/hermes-agent"
+    )
+    assert repository_identity("https://git.example/Team/Repo") != repository_identity(
+        "https://git.example/team/repo"
+    )
+    assert repository_identity("ssh://git@github.com/NousResearch/Hermes-Agent.git") == repository_identity(
+        "https://github.com/nousresearch/hermes-agent"
+    )
+    assert repository_identity("git@host.example:Team/Repo.git") != repository_identity(
+        "git@host.example:team/repo.git"
+    )
+    assert repository_identity((tmp_path / "repo.git").as_uri()) == repository_identity(
+        str(tmp_path / "repo.git")
+    )
+    assert repository_identity("/CaseSensitive/Repo") != repository_identity("/casesensitive/repo")
 
 
 @pytest.mark.parametrize("value", [
