@@ -225,8 +225,9 @@ class FleetRunner:
             argv.extend(["-m", models[0]])
         # Keep task data out of the command line, including Windows batch launchers.
         argv.extend(["--query-file", "-", "--format", "stream-json"])
-        output_dir = self._journal_claim(claim, stage="executing") if claim is not None else None
         if self._executor is not None:
+            if claim is not None:
+                self._journal_claim(claim, stage="executing")
             result = self._executor(argv, body)
         else:
             from hermes_cli.fleet_execution import profile_child_env
@@ -237,6 +238,12 @@ class FleetRunner:
                     f"Fleet profile environment unavailable ({type(exc).__name__})")
                 result.not_started = True
             else:
+                if guard is not None and guard.cancel.is_set():
+                    result = subprocess.CompletedProcess(argv, 75, "", "Lease lost before task launch")
+                    result.not_started = True
+                    result.outcome_unknown = False
+                    return result
+                output_dir = self._journal_claim(claim, stage="executing") if claim is not None else None
                 result = self._execute(argv, body, cancel=guard.cancel if guard else None,
                                        output_dir=output_dir, env=env)
         from hermes_cli.fleet_execution import stream_event

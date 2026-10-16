@@ -248,3 +248,40 @@ def test_missing_recovery_profile_holds_claim_without_launch(tmp_path, monkeypat
     assert not runner.run_once()
     assert store.list_tasks()[0].status == 'uncertain'
     assert directory.is_dir()
+
+
+def test_environment_setup_crash_keeps_claim_proven_unlaunched(tmp_path, monkeypatch):
+    store, cap = _setup(tmp_path)
+    runner = _runner(store, cap, tmp_path)
+
+    def crash_before_launch(*_a, **_k):
+        raise SystemExit('environment setup interrupted')
+
+    monkeypatch.setattr('hermes_cli.fleet_execution.profile_child_env', crash_before_launch)
+    with pytest.raises(SystemExit, match='environment setup interrupted'):
+        runner.run_once()
+    journal = next((tmp_path / 'receipts').glob('*/claim.json'))
+    assert json.loads(journal.read_text())['stage'] == 'claimed'
+    restarted = _runner(store, cap, tmp_path, executor=lambda *_: pytest.fail('Must never replay'))
+    restarted.run_once()
+    assert store.list_tasks()[0].status == 'failed'
+
+
+def test_lease_loss_during_environment_setup_does_not_launch(tmp_path, monkeypatch):
+    import threading
+    store, cap = _setup(tmp_path)
+    claim = store.claim_task(cap)
+    runner = _runner(store, cap, tmp_path)
+    runner._journal_claim(claim, stage='claimed')
+    guard = SimpleNamespace(cancel=threading.Event())
+
+    def lose_lease(*_a, **_k):
+        guard.cancel.set()
+        return {}
+
+    monkeypatch.setattr('hermes_cli.fleet_execution.profile_child_env', lose_lease)
+    monkeypatch.setattr(FleetRunner, '_execute', staticmethod(lambda *_a, **_k: pytest.fail('Lost lease must not launch')))
+    result = runner._execute_task(runner._find_task(claim.task_id), 'worker', guard=guard, claim=claim)
+    assert result.not_started
+    journal = next((tmp_path / 'receipts').glob('*/claim.json'))
+    assert json.loads(journal.read_text())['stage'] == 'claimed'
