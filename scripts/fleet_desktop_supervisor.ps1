@@ -18,10 +18,10 @@ $fleetRoot = Join-Path $HermesRoot "fleet"
 $bundle = Join-Path $fleetRoot "hermes-fleet-runner.pyz"
 $marker = Join-Path $fleetRoot "desktop-live"
 $tokenFile = Join-Path $HermesRoot ".env"
-$stdoutLog = Join-Path $fleetRoot "runner.supervisor.out.log"
-$stderrLog = Join-Path $fleetRoot "runner.supervisor.err.log"
+$diagnosticsRoot = Join-Path $fleetRoot "runner-diagnostics"
 . (Join-Path $PSScriptRoot "fleet_desktop_runtime.ps1")
 $script:RunnerProcess = $null
+$script:RunnerDiagnostic = $null
 
 function Get-DesktopMainProcess {
     Get-FleetDesktopMainProcess (Get-CimInstance Win32_Process) $DesktopExecutable
@@ -31,7 +31,14 @@ function Get-RunnerProcess {
     if ($null -eq $script:RunnerProcess) {
         return $null
     }
-    Get-Process -Id $script:RunnerProcess.Id -ErrorAction SilentlyContinue
+    $script:RunnerProcess.Refresh()
+    if ($script:RunnerProcess.HasExited) {
+        Complete-FleetRunnerDiagnostics $script:RunnerDiagnostic $diagnosticsRoot
+        $script:RunnerProcess = $null
+        $script:RunnerDiagnostic = $null
+        return $null
+    }
+    return $script:RunnerProcess
 }
 
 function Remove-LivenessMarker {
@@ -43,9 +50,10 @@ function Remove-LivenessMarker {
 function Stop-Runner {
     $runner = Get-RunnerProcess
     if ($null -ne $runner) {
-        Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+        Stop-FleetRunnerWithDiagnostics $script:RunnerDiagnostic $diagnosticsRoot
     }
     $script:RunnerProcess = $null
+    $script:RunnerDiagnostic = $null
     Remove-LivenessMarker
 }
 
@@ -174,13 +182,9 @@ function Start-Runner {
     }
     $arguments += "--liveness-file $(Quote-Argument $marker)"
     $arguments += "--interval 2"
-    $script:RunnerProcess = Start-Process -FilePath $PythonExecutable `
-        -ArgumentList ($arguments -join " ") `
-        -WorkingDirectory $HermesRoot `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $stdoutLog `
-        -RedirectStandardError $stderrLog `
-        -PassThru
+    $script:RunnerDiagnostic = Start-FleetRunnerWithDiagnostics $PythonExecutable `
+        ($arguments -join " ") $HermesRoot $diagnosticsRoot
+    $script:RunnerProcess = $script:RunnerDiagnostic.Process
 }
 
 try {

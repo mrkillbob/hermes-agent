@@ -77,9 +77,22 @@ recover that state. A restart reads the original gateway admission without submi
 or cancelling it. Captures are removed after the coordinator acknowledges settlement;
 unknown outcomes retain their evidence and require inspection.
 
-Runner registration retries transient connection failures at most twice, waiting one
-and then two seconds. Authorization, certificate and protocol failures remain terminal.
-These retries cover registration only; claims and execution are never replayed by this loop.
+Each polling cycle retries transient registration failures at most twice, waiting one
+and then two seconds. Exhaustion defers work until the next poll instead of exiting the
+worker. A transient idle heartbeat failure also skips claiming until the next registered
+poll. Authorization, certificate, protocol and explicit heartbeat refusals remain terminal.
+Owner liveness and cancellation are checked again before claiming; active execution's
+lease-maintenance failures still cancel execution. Claims and execution are never replayed
+by this recovery loop.
+
+The Windows Desktop supervisor stores each worker's complete stdout/stderr and a PID,
+start/end-time and exit-code receipt in `fleet/runner-diagnostics/run-<unique id>/`.
+It retains the latest eight completed runs, evicting whole older runs rather than
+truncating their output. Active runs and records whose process identity cannot be checked
+are protected. After a supervisor disappears, a dead worker's receipt records an
+unobserved exit rather than inventing an exit code. This bounds completed history by
+run count, not byte size; live output is never truncated. Receipts contain no command
+arguments or credentials. The earlier fixed supervisor log files are left intact.
 
 The coordinator checks expired leases in a single maintenance worker even when all runners are offline.
 A busy expiry transaction does not block HTTP acceptance. Shutdown waits for an in-flight
