@@ -62,11 +62,12 @@ def runner_for(coordinator, **kwargs):
 
 def test_claim_transport_failure_escapes_without_work_or_journal(tmp_path, caplog):
     coordinator = Coordinator(FleetTransientTransportError("private transport detail"))
-    runner = runner_for(coordinator, state_dir=tmp_path)
+    state = tmp_path / "runner-state"
+    runner = runner_for(coordinator, state_dir=state)
     with caplog.at_level(logging.WARNING), pytest.raises(FleetTransientTransportError):
         runner.run_once(now=100)
     assert coordinator.calls == ["heartbeat", "claim"]
-    assert list(tmp_path.iterdir()) == []
+    assert not state.exists() or list(state.iterdir()) == []
     assert not runner.stopped
     assert "claim outcome unknown" in caplog.text
     assert "private transport detail" not in caplog.text
