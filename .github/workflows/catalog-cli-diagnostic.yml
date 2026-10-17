@@ -25,13 +25,13 @@ jobs:
           toolchain: all
           extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "messaging"]'
           test-environment: 'true'
-      - name: Run one bounded catalog CLI case
-        run: scripts/run_tests.sh tests/e2e/core/providers/test_catalog_cli_exit.py -- -v --tb=short
+      - name: Observe the existing main fanout with unchanged turn deadlines
+        run: scripts/run_tests.sh tests/e2e/core/providers/test_catalog_cli_exit.py -- -v --tb=short -s -k load24
         env:
           PYTHON_CPU_COUNT: '1'
           HERMES_TEST_WORKERS: '1'
           HERMES_TEST_FILE_RETRIES: '0'
-          HERMES_TEST_FILE_TIMEOUT: '180'
+          HERMES_TEST_FILE_TIMEOUT: '480'
           OPENROUTER_API_KEY: ''
           OPENAI_API_KEY: ''
           NOUS_API_KEY: ''
