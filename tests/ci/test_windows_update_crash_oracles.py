@@ -4,6 +4,7 @@ update was what the cell claims."""
 
 import importlib
 import inspect
+import json
 import os
 import shlex
 import subprocess
@@ -280,17 +281,23 @@ def test_workflow_requires_the_crash_journey_manifest(tmp_path, monkeypatch):
 def test_mid_git_hold_verdict_needs_looks_as_well_as_seconds(tmp_path, monkeypatch):
     clock = [0.0]
     monkeypatch.setattr(crash, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    monkeypatch.setattr(crash, "_git_op", lambda proc, ops: None)  # the op is not visible yet
     monkeypatch.setattr(crash, "descendants", lambda proc: [])
     machine = SimpleNamespace(root=tmp_path, install_dir=tmp_path / "install", logs=tmp_path, evidence=lambda: "")
     hold = crash._GitHold(machine)
     hold.flags.mkdir(parents=True)
-    (hold.flags / "held").write_text("1", encoding="utf-8")
+    updater = SimpleNamespace(pid=7)
+    held = SimpleNamespace(is_running=lambda: True, create_time=lambda: 1.0,
+                           cmdline=lambda: ["python", str(hold.flags / "hold.py"), hold.token],
+                           parents=lambda: [updater])  # the writing git is not visible yet
+    monkeypatch.setattr(crash.psutil, "Process", lambda pid: held)
+    ready = {"pid": 8, "created": 1.0, "state": "holding", "token": hold.token,
+             "path": str((machine.install_dir / hold.path).resolve()), "deadline": 1200.0}
+    (hold.flags / "held").write_text(json.dumps(ready), encoding="utf-8")
     for _ in range(crash.HOLD_SETTLE_LOOKS - 1):  # each look takes 10 s on this runner
-        assert hold.point(None, machine, "t") is None
+        assert hold.point(updater, machine, "t") is None
         clock[0] += 10.0
     with pytest.raises(AssertionError, match="the hold filter ran but no merge/reset/checkout"):
-        hold.point(None, machine, "t")
+        hold.point(updater, machine, "t")
 
 
 class _SharedMachine:

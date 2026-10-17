@@ -40,6 +40,7 @@ REFUSAL = "Another Hermes update is already running"
 _DRIVER = r'''
 import json, os, signal, subprocess, sys, time
 from pathlib import Path
+from tests.waiting import wait_until
 
 root, checkout, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 envs = json.loads((root / "envs.json").read_text(encoding="utf-8"))
@@ -64,6 +65,26 @@ def alive(pid):
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     except OSError:
+        return False
+
+
+def stopped(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "T"
+    except OSError:
+        return False
+
+
+def hold_completion(child):
+    # Keep the real completion child (and any inherited lock fd) alive throughout the
+    # contender's lock attempt. Sampling before a whole update does not establish that.
+    if child is None:
+        return False
+    try:
+        os.kill(child, signal.SIGSTOP)
+        wait_until(lambda: stopped(child), timeout=2, what="completion child stopped")
+        return True
+    except (ProcessLookupError, AssertionError):
         return False
 
 
@@ -108,13 +129,17 @@ elif mode == "kill-mid-completion":
         child = completion_child(envs["home-a"]["HERMES_HOME"])
         time.sleep(0.05)
     result["child_seen"] = child is not None
+    result["child_stopped_before"] = hold_completion(child)
     os.kill(first.pid, signal.SIGKILL)
     first.wait()
     result["child_alive_before"] = child is not None and alive(child)
-    result["rc"], result["out"] = update("home-b")
-    result["child_alive_after"] = child is not None and alive(child)
-    if child is not None and alive(child):
-        os.kill(child, signal.SIGKILL)
+    try:
+        result["rc"], result["out"] = update("home-b")
+        result["child_alive_after"] = child is not None and alive(child)
+        result["child_stopped_after"] = child is not None and stopped(child)
+    finally:
+        if child is not None and alive(child):
+            os.kill(child, signal.SIGKILL)
 elif mode == "orphan-reader":
     first = subprocess.Popen(ARGV, env=envs["home-a"], cwd=checkout, stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -124,17 +149,21 @@ elif mode == "orphan-reader":
         child = completion_child(envs["home-a"]["HERMES_HOME"])
         time.sleep(0.05)
     result["child_seen"] = child is not None
+    result["child_stopped_before"] = hold_completion(child)
     os.kill(first.pid, signal.SIGKILL)
     first.wait()
     # The killed owner's marker is gone (any reader compare-and-deletes a dead claim).
     (Path(envs["home-a"]["HERMES_HOME"]) / ".hermes-update-in-progress").unlink(missing_ok=True)
-    reader = subprocess.run([sys.executable, "-c", READER, checkout], env=envs["home-b"], cwd=checkout,
-                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
-    result["reader_out"] = reader.stdout[-2000:] + reader.stderr[-2000:]
-    result["reader"] = json.loads(reader.stdout.strip().splitlines()[-1]) if reader.returncode == 0 else None
-    result["child_alive_after"] = child is not None and alive(child)
-    if child is not None and alive(child):
-        os.kill(child, signal.SIGKILL)
+    try:
+        reader = subprocess.run([sys.executable, "-c", READER, checkout], env=envs["home-b"], cwd=checkout,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        result["reader_out"] = reader.stdout[-2000:] + reader.stderr[-2000:]
+        result["reader"] = json.loads(reader.stdout.strip().splitlines()[-1]) if reader.returncode == 0 else None
+        result["child_alive_after"] = child is not None and alive(child)
+        result["child_stopped_after"] = child is not None and stopped(child)
+    finally:
+        if child is not None and alive(child):
+            os.kill(child, signal.SIGKILL)
 result["out"] = result.get("out", "")[-4000:]
 print(json.dumps(result))
 '''
@@ -246,6 +275,7 @@ def test_killed_owner_keeps_the_checkout_locked_while_its_tree_runs(rig):
     fd, so a new update (any home) is refused until the child exits; never starts mid-mutation."""
     r = rig.driver("kill-mid-completion", timeout=600)
     assert r["child_seen"] and r["child_alive_before"], f"no completion child outlived the owner: {r}"
+    assert r["child_stopped_before"] and r["child_stopped_after"], f"completion did not stay held: {r}"
     assert r["rc"] == 2 and REFUSAL in r["out"], (
         f"a new update started while the killed update's completion child ran (rc={r['rc']}, "
         f"child alive after: {r['child_alive_after']}):\n{r['out']}")
@@ -256,5 +286,6 @@ def test_orphaned_update_tree_reads_as_in_progress(rig):
     holds the checkout lock, so every "is an update running" reader must still say yes."""
     r = rig.driver("orphan-reader", timeout=600)
     assert r["child_seen"] and r["child_alive_after"], f"premise: no completion child outlived the owner: {r}"
+    assert r["child_stopped_before"] and r["child_stopped_after"], f"completion did not stay held: {r}"
     assert r["reader"] is not None, f"reader process failed:\n{r['reader_out']}"
     assert r["reader"]["skew_reader"] is True, f"the server's update probe missed the live update tree: {r}"

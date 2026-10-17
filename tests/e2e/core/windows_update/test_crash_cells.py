@@ -33,9 +33,10 @@ before the next cell starts, noted in the evidence: ``_run_cells``):
   ``hermes_constants.py``: the torn tree, stale ``index.lock`` and missing startup module
   a mid-merge kill leaves;
 * ``mid_git_bootstrap``: the same hold on ``hermes_bootstrap.py``, the first changed path in
-  index order and the module every launcher imports to reach the repair: the kill leaves it
-  unlinked, so the next launch must repair from the recovery code the update published outside
-  the tree before git wrote;
+  index order and the module every launcher imports to reach the repair. After verifying the
+  live filter belongs to this update's writing git, the harness removes that exact path before
+  killing the tree. This explicitly injects the missing-module crash state, independent of
+  Git's ordering of smudge conversion and unlinking the old file;
 * ``tree_moved``: killed right after the checkout moved to the target, before the
   update finished (dependency sync, launcher refresh, completion stamp);
 * ``desktop_handoff``: the Desktop hand-off script's whole tree killed while its
@@ -67,6 +68,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import psutil
@@ -131,24 +133,32 @@ HOLD_FILTER = "hermes-e2e-hold"
 # The last changed path in index order (".hermes-e2e-*" < "hermes_cli/main.py" <
 # "hermes_constants.py"): when git reaches it, the other two are already written at the target.
 HELD_PATH = "hermes_constants.py"
-# The smudge filter. Git runs it while it checks out HELD_PATH, inside unpack_trees with
-# .git/index.lock held and the old file already unlinked. One shot: the first run marks
-# `held` and waits (the kill lands here); any later checkout passes the bytes through.
+# One-shot smudge filter: publish an atomic, incarnation-bound readiness record while
+# blocked. Marker existence alone cannot establish that its process is still holding git.
 HOLD_SCRIPT = """\
-import os, shutil, sys, time
+import json, os, shutil, sys, time
 from pathlib import Path
+import psutil
 
-flags, budget = Path(sys.argv[1]), float(sys.argv[2])
+flags, budget, token, held_path = Path(sys.argv[1]), float(sys.argv[2]), sys.argv[3], sys.argv[4]
 try:
-    fd = os.open(flags / "held", os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    fd = os.open(flags / "claimed", os.O_CREAT | os.O_EXCL | os.O_WRONLY)
 except FileExistsError:
     pass
 else:
-    os.write(fd, str(os.getpid()).encode())
     os.close(fd)
     deadline = time.monotonic() + budget
+    record = {"pid": os.getpid(), "created": psutil.Process().create_time(),
+              "token": token, "path": str(Path(held_path).resolve()), "deadline": deadline}
+    def publish(state):
+        record["state"] = state
+        temporary = flags / "ready.tmp"
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(temporary, flags / "held")
+    publish("holding")
     while time.monotonic() < deadline and not (flags / "release").exists():
         time.sleep(0.05)
+    publish("released")
 shutil.copyfileobj(sys.stdin.buffer, sys.stdout.buffer)
 """
 
@@ -160,9 +170,13 @@ class _GitHold:
     the installer's Git); the command is the driver's own interpreter by absolute path.
     """
 
-    def __init__(self, machine, path: str = HELD_PATH) -> None:
+    def __init__(self, machine, path: str = HELD_PATH, *, inject_missing: bool = False) -> None:
+        if inject_missing and path != "hermes_bootstrap.py":
+            raise ValueError("missing-module injection is restricted to hermes_bootstrap.py")
         self.machine = machine
         self.path = path
+        self.inject_missing = inject_missing
+        self.token = uuid.uuid4().hex
         self.flags = machine.root / "git-hold"
         self.attributes = machine.install_dir / ".git" / "info" / "attributes"
         self._saved_attributes: str | None = None
@@ -179,7 +193,8 @@ class _GitHold:
         script = self.flags / "hold.py"
         script.write_text(HOLD_SCRIPT, encoding="utf-8")
         command = " ".join(shlex.quote(p) for p in (
-            Path(sys.executable).as_posix(), script.as_posix(), self.flags.as_posix(), str(int(UPDATE_TIMEOUT))))
+            Path(sys.executable).as_posix(), script.as_posix(), self.flags.as_posix(), str(int(UPDATE_TIMEOUT)),
+            self.token, (self.machine.install_dir / self.path).resolve().as_posix()))
         harness_git("-C", str(self.machine.install_dir), "config", f"filter.{HOLD_FILTER}.smudge", command)
         if self.attributes.is_file():
             self._saved_attributes = self.attributes.read_text(encoding="utf-8-sig")
@@ -197,10 +212,38 @@ class _GitHold:
             harness_git("-C", str(self.machine.install_dir), "config", "--remove-section", f"filter.{HOLD_FILTER}")
 
     def point(self, proc, machine, target) -> str | None:
-        """Git is inside the checkout: the filter holds it, a local write op is alive, index.lock is held."""
+        """Require this live filter below this updater's writing git and its index lock."""
         if not self.held:
             return None
-        seen = _git_op(proc, LOCAL_GIT_OPS)
+        ready = json.loads((self.flags / "held").read_text(encoding="utf-8"))
+        armed = (machine.install_dir / self.path).resolve()
+        if (ready.get("token") != self.token or ready.get("state") != "holding"
+                or Path(ready.get("path", "")).resolve() != armed
+                or ready.get("deadline", 0) - time.monotonic() <= 60):
+            raise AssertionError(fail_with(machine, "mid_git: stale, released or mismatched filter readiness"))
+        try:
+            held = psutil.Process(ready["pid"])
+            if not held.is_running() or held.create_time() != ready["created"]:
+                raise AssertionError(fail_with(machine, "mid_git: filter process incarnation changed"))
+            argv = held.cmdline()
+            script = os.path.normcase(os.path.abspath(self.flags / "hold.py"))
+            if self.token not in argv or not any(os.path.normcase(os.path.abspath(arg)) == script for arg in argv):
+                raise AssertionError(fail_with(machine, "mid_git: filter command identity changed"))
+            parents = held.parents()
+            if not any(parent.pid == proc.pid for parent in parents):
+                raise AssertionError(fail_with(machine, "mid_git: filter is outside this updater's tree"))
+            seen = None
+            for parent in parents:
+                if parent.pid == proc.pid:
+                    break
+                if "git" not in parent.name().lower() or Path(parent.cwd()).resolve() != machine.install_dir.resolve():
+                    continue
+                op = next((arg.lower() for arg in parent.cmdline()[1:] if arg.lower() in LOCAL_GIT_OPS), None)
+                if op:
+                    seen = op, parent.pid
+                    break
+        except psutil.Error as error:
+            raise AssertionError(fail_with(machine, "mid_git: held filter identity became unreadable")) from error
         lock = machine.install_dir / ".git" / "index.lock"
         if seen is None or not lock.is_file():
             # Held by a git this cell does not model (or a lock-free write): name it, never
@@ -224,7 +267,17 @@ class _GitHold:
                              f"and {self._held_looks} looks "
                              f"(index.lock={lock.is_file()}, git children: {gits or 'none'})"))
             return None
-        return f"git {seen[0]} (pid {seen[1]}) held writing {self.path}, .git/index.lock held"
+        existed = armed.exists()
+        if self.inject_missing:
+            armed.unlink(missing_ok=True)
+            if armed.exists():
+                raise AssertionError(fail_with(machine, "mid_git: bootstrap injection did not remove the armed path"))
+        receipt = {"filter": ready, "git_pid": seen[1], "updater_pid": proc.pid,
+                   "path_existed_before_injection": existed, "missing_injected": self.inject_missing,
+                   "path_absent_at_kill_point": not armed.exists()}
+        (machine.logs / f"git-hold-{Path(self.path).name}.json").write_text(json.dumps(receipt), encoding="utf-8")
+        return (f"git {seen[0]} (pid {seen[1]}), live filter {held.pid}, .git/index.lock held; "
+                f"{self.path} missing injected={self.inject_missing}")
 
 
 HOLD_SETTLE_SECONDS = 30.0
@@ -354,12 +407,14 @@ def _crash(machine, srv, label: str, start, point, hold: _GitHold | None = None,
         try:
             proc = start()
             seen = _kill_when(machine, proc, label, point, target)
+            # Capture the crash premise before releasing any surviving filter or asking git
+            # to inspect the checkout. Those later operations are not the kill-time state.
+            index_lock_after_kill = leftover.is_file()
+            held_missing_after_kill = hold is not None and not (machine.install_dir / hold.path).exists()
         finally:
             if hold is not None:
                 hold.disarm()
-        index_lock_after_kill = leftover.is_file()
         tree_after_kill = _tree(machine, label)
-        held_missing_after_kill = hold is not None and not (machine.install_dir / hold.path).exists()
         turn = one_shot_turn(machine, srv, f"{label}-next-launch")
         tree_after_launch = _tree(machine, label)
         marker_after_launch = (machine.hermes_home / MARKER).is_file()
@@ -721,7 +776,7 @@ def journey(tmp_path_factory):
                 "install", j["install"].returncode == 0, "install.ps1 failed", j["install"]))
             if j.ok("installed"):
                 hold = _GitHold(machine)
-                boot_hold = _GitHold(machine, "hermes_bootstrap.py")
+                boot_hold = _GitHold(machine, "hermes_bootstrap.py", inject_missing=True)
                 _run_cells(machine, j, (
                     ("mid_fetch", lambda: _crash(machine, srv, "mid-fetch",
                                                  _cli_update(machine, "mid-fetch-update"), _git_fetching)),
