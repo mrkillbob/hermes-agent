@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+import re
 import sqlite3
 
 from hermes_cli import kanban_db as kb
@@ -45,10 +46,21 @@ def _correlation(delivery):
     return {key: getattr(delivery, key) for key in ('task_id', 'run_id', 'key', 'payload_sha256')}
 
 
+
+_LOCAL_PATH = re.compile(r'(?<![\w/])(?:/(?!/)|~[/\\]|[A-Za-z]:[/\\]|\\\\|file:|\.\.?[/\\])', re.IGNORECASE)
+_WEB_URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+
+def _guard_assignment(delivery):
+    for text in (delivery.title, delivery.body):
+        if (security.redact_outbound(text) != text or _LOCAL_PATH.search(_WEB_URL.sub('', text))
+                or any(value in text for value in (delivery.database, delivery.workspace, delivery.claim))):
+            raise ValueError('Explicitly prepare assignment without local paths, authority or credentials')
+
+
 def _message(delivery):
     # Local authority/path fields stay local, even though Delivery contains them.
-    if any(security.redact_outbound(text) != text for text in (delivery.title, delivery.body)):
-        raise ValueError('Explicitly redact the assignment before external delivery')
+    _guard_assignment(delivery)
     assignment = {'schema': 'hermes.a2a.assignment.v1', 'expected_result_schema': _SCHEMA, 'correlation': _correlation(delivery),
                   'assignment': {'title': delivery.title, 'body': delivery.body}}
     message = protocol.text_message(protocol.ROLE_USER, json.dumps(assignment, sort_keys=True))

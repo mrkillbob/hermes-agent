@@ -29,7 +29,7 @@ def context(tmp_path, monkeypatch):
         yield conn, tmp_path
 
 
-def prepared(context, peer=None, body="Synthetic arithmetic"):
+def prepared(context, peer=None, body="Synthetic arithmetic", title="fixture: A2A task"):
     conn, root = context
     adapter, client = api()
     peer = peer or FakePeer()
@@ -38,7 +38,7 @@ def prepared(context, peer=None, body="Synthetic arithmetic"):
     ex = adapter.A2AExecutor(db, plan, client(plan.url, version=plan.version, opener=peer.open))
     stub = SimpleNamespace(submit=lambda d: None, lookup=lambda d: None)
     lanes = ExternalLanes({'external-a2a': Lane(plan.executor_id, stub)})
-    tid = kb.create_task(conn, title='fixture: A2A task', body=body, assignee='external-a2a')
+    tid = kb.create_task(conn, title=title, body=body, assignee='external-a2a')
     task = kb.claim_task(conn, tid)
     delivery = lanes.deliver(conn, task, str(root / tid))
     return delivery, ex, peer, ExternalLanes({'external-a2a': Lane(plan.executor_id, ex)})
@@ -305,3 +305,25 @@ def test_preexisting_conflicting_send_intent_fails_closed(context):
     with pytest.raises(ValueError):
         ex.submit(d)
     assert not peer.calls
+
+
+
+@pytest.mark.parametrize('local_path', ['/private/synthetic/work/a.py', 'C:\\Synthetic\\work\\a.py',
+                                       '\\\\fixture\\share\\work', '~/synthetic/a',
+                                       'file:///private/synthetic/a', '../synthetic/a', './synthetic/a',
+                                       'FILE:/private/synthetic/a', 'path:/private/synthetic/a'])
+@pytest.mark.parametrize('field', ['title', 'body'])
+def test_local_path_text_is_refused_before_transport(context, local_path, field):
+    d, ex, peer, _ = prepared(context, **{field: 'Inspect ' + local_path})
+    with pytest.raises(ValueError):
+        ex.submit(d)
+    assert not peer.calls
+    assert local_path not in json.dumps(peer.calls)
+    assert ex.journal.read(d, 'external_a2a_send_intent') is None
+
+
+@pytest.mark.parametrize('url', ['https://example.invalid/reference', 'https://example.invalid/~/reference'])
+def test_ordinary_web_url_is_preserved_in_approved_assignment(context, url):
+    d, ex, peer, _ = prepared(context, body='Read ' + url)
+    assert ex.submit(d).kind == 'ack'
+    assert url in json.dumps(peer.calls)
