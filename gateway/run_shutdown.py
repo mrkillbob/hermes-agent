@@ -28,7 +28,7 @@ from gateway.restart import (
     effective_stop_drain_timeout, effective_stop_watchdog_delay, resolve_cron_drain_budget
 )
 from gateway.run_common import _UNSET
-from gateway.run_runtime import STOP_TAIL_RESERVE_SECONDS, managed_turn_count, stop_managed_turns
+from gateway.run_runtime import managed_turn_count, stop_managed_turns
 from gateway.run_shutdown_session_end import GatewaySessionEndMixin
 from gateway.shutdown_watchdog import (
     arm_shutdown_watchdog, effective_shutdown_watchdog_delay, resolve_shutdown_watchdog_delay,
@@ -2187,7 +2187,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
     async def _stop_impl(self) -> None:
         """Run every ``_stop_*`` phase under the thread-based shutdown watchdog."""
         from gateway.run import GatewayRunner
-        from gateway.run_local_runtime import begin_local_runtime_shutdown
+        from gateway.run_local_runtime import begin_local_runtime_shutdown, finalize_local_runtime
         begin_local_runtime_shutdown(self)
         # Thread-based watchdog (asyncio timeouts cannot recover a frozen loop): dumps stacks and
         # os._exit past drain+grace so the service manager revives us. Skipped under pytest.
@@ -2220,11 +2220,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             from gateway.run_runtime import settle_gateway_runtime  # within what the leash has left
             await settle_gateway_runtime(self, budget=effective_shutdown_watchdog_delay(self) - ctx.elapsed())
             await GatewayRunner._stop_finalize_agents_and_adapters(self, ctx)
-            # Hard exit skips atexit: release our router before dropping the runtime lock.
-            with _log_suppressed(logging.WARNING, "Managed local runtime shutdown failed: %s"):
-                from gateway.run_local_runtime import stop_owned_local_runtime
-                await stop_owned_local_runtime(
-                    effective_shutdown_watchdog_delay(self) - ctx.elapsed() - STOP_TAIL_RESERVE_SECONDS)
+            await finalize_local_runtime(self, ctx)
             await GatewayRunner._stop_release_runtime_state(self, ctx)
             GatewayRunner._stop_quiesce_and_close_session_dbs(self, timeout, ctx)
             await GatewayRunner._stop_persist_exit_state(self, ctx)

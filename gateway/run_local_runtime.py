@@ -20,6 +20,18 @@ def begin_local_runtime_shutdown(runner) -> None:
         owner.close()
 
 
+async def finalize_local_runtime(runner, ctx) -> None:
+    """Hard exit skips atexit: release inference before dropping the gateway lock."""
+    from gateway.run_runtime import STOP_TAIL_RESERVE_SECONDS
+    from gateway.shutdown_watchdog import effective_shutdown_watchdog_delay
+
+    try:
+        await stop_owned_local_runtime(
+            effective_shutdown_watchdog_delay(runner) - ctx.elapsed() - STOP_TAIL_RESERVE_SECONDS)
+    except Exception:
+        logger.warning('Managed local runtime shutdown failed', exc_info=True)
+
+
 async def stop_owned_local_runtime(timeout: float) -> None:
     """Attempt owned cleanup within the stop's remaining leash; never join a stuck worker."""
     from agent.memory_provider import spawn_context_thread
