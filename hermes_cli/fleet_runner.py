@@ -92,6 +92,7 @@ class FleetRunner:
         executor: Callable[[list[str], str], Any] | None = None,
         state_dir: str | Path | None = None,
         profile_env_executable: str | None = None,
+        claim_recovery: bool = False,
     ):
         self.profile_env_executable = profile_env_executable
         self.node_id = node_id
@@ -108,6 +109,11 @@ class FleetRunner:
         self._liveness_check = liveness_check or (lambda: True)
         self._executor = executor
         self.state_dir = Path(state_dir) if state_dir is not None else None
+        if claim_recovery and self.state_dir is None:
+            raise ValueError("claim recovery requires a durable state directory")
+        self.claim_recovery = claim_recovery
+        self._claim_journal = None
+        self._recovery_poll_lock = threading.Lock()
         self._stop = threading.Event()
         self._delivered: dict[str, str] = {}
         self._results: dict[str, str] = {}
@@ -143,8 +149,26 @@ class FleetRunner:
                 raise FleetTransportError("coordinator refused runner registration")
         return True
 
+    def close(self) -> None:
+        """Release local ownership only after polling/execution has stopped."""
+        if not self._recovery_poll_lock.acquire(blocking=False):
+            raise RuntimeError("cannot release runner state during a poll")
+        try:
+            if self._claim_journal is not None:
+                self._claim_journal.close()
+                self._claim_journal = None
+        finally:
+            self._recovery_poll_lock.release()
+
     def run_once(self, *, now: float | None = None) -> bool:
         if self.stopped or not self._is_live():
+            return False
+        if self.claim_recovery:
+            from hermes_cli.fleet_runner_recovery import run_once
+            return run_once(self, now=now)
+        if self.state_dir is not None and any((self.state_dir / name).exists()
+                for name in ("claim-owner.sqlite", "claim-intents.sqlite")):
+            logging.getLogger(__name__).warning("Fleet recovery state exists; legacy polling held")
             return False
         if not self._deliver_pending() or not self._recover_executions():
             return False
@@ -282,6 +306,11 @@ class FleetRunner:
         if self._executor is not None:
             if claim is not None:
                 self._journal_claim(claim, stage="executing")
+            if self.claim_recovery:
+                from hermes_cli.fleet_runner_recovery import prelaunch_refusal
+                refused = prelaunch_refusal(self, guard)
+                if refused is not None:
+                    return refused
             result = self._executor(argv, body)
         else:
             from hermes_cli.fleet_execution import profile_child_env
@@ -298,6 +327,11 @@ class FleetRunner:
                     result.outcome_unknown = False
                     return result
                 output_dir = self._journal_claim(claim, stage="executing") if claim is not None else None
+                if self.claim_recovery:
+                    from hermes_cli.fleet_runner_recovery import prelaunch_refusal
+                    refused = prelaunch_refusal(self, guard)
+                    if refused is not None:
+                        return refused
                 result = self._execute(argv, body, cancel=guard.cancel if guard else None,
                                        output_dir=output_dir, env=env)
         from hermes_cli.fleet_execution import stream_event
@@ -354,10 +388,19 @@ class FleetRunner:
             # Continue reading that admission while its original claim is renewed.
             guard.cancel.wait(2)
 
-    def _journal_claim(self, claim, *, stage):
+    def _capture_root(self):
         if self.state_dir is None:
             return None
-        directory = self.state_dir / hashlib.sha256(claim.claim_id.encode()).hexdigest()
+        return self.state_dir / "atomic-claim-captures" if self.claim_recovery else self.state_dir
+
+    def _journal_claim(self, claim, *, stage):
+        if self.claim_recovery and stage == "executing":
+            if self._claim_journal is None:
+                raise ValueError("execution without durable request ownership")
+            self._claim_journal.mark_executing(claim)
+        if self.state_dir is None:
+            return None
+        directory = self._capture_root() / hashlib.sha256(claim.claim_id.encode()).hexdigest()
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._write_receipt(directory / "claim.json", {
             "task_id": claim.task_id, "claim_id": claim.claim_id, "profile": claim.runner_profile,
@@ -366,7 +409,7 @@ class FleetRunner:
 
     def _remove_capture(self, claim_id):
         """Remove only this acknowledged claim's owned files; retain other evidence."""
-        directory = self.state_dir / hashlib.sha256(claim_id.encode()).hexdigest()
+        directory = self._capture_root() / hashlib.sha256(claim_id.encode()).hexdigest()
         for pattern in ("stdout-*", "stderr-*", "input-*", "claim.json"):
             for path in directory.glob(pattern):
                 path.unlink()
@@ -374,12 +417,12 @@ class FleetRunner:
             directory.rmdir()
 
     def _delivery_path(self, payload):
-        return self.state_dir / (hashlib.sha256(payload["claim_id"].encode()).hexdigest() + ".delivery.json")
+        return self._capture_root() / (hashlib.sha256(payload["claim_id"].encode()).hexdigest() + ".delivery.json")
 
     def _save_delivery(self, payload):
         if self.state_dir is None:
             return
-        self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._capture_root().mkdir(parents=True, exist_ok=True, mode=0o700)
         data = {**payload, "telemetry": payload["telemetry"].to_dict() if payload["telemetry"] else None}
         path = self._delivery_path(payload)
         self._write_receipt(path, data)
@@ -394,7 +437,7 @@ class FleetRunner:
             os.fsync(handle.fileno())
         temporary.replace(path)
 
-    def _send_delivery(self, payload, *, now=None):
+    def _send_delivery(self, payload, *, now=None, retain_proof=False):
         if payload["status"] == "completed":
             telemetry = payload.get("telemetry")
             if isinstance(telemetry, dict):
@@ -403,7 +446,7 @@ class FleetRunner:
                 result=payload["result"], telemetry=telemetry, now=now)
         else:
             ok = self.coordinator.fail_task(payload["task_id"], payload["claim_id"], error=payload["error"], now=now)
-        if ok and self.state_dir is not None:
+        if ok and self.state_dir is not None and not retain_proof:
             self._remove_capture(payload["claim_id"])
             self._delivery_path(payload).unlink(missing_ok=True)
         return ok
@@ -411,7 +454,7 @@ class FleetRunner:
     def _deliver_pending(self):
         if self.state_dir is None or not self.state_dir.exists():
             return True
-        for path in self.state_dir.glob("*.delivery.json"):
+        for path in self._capture_root().glob("*.delivery.json"):
             payload = json.loads(path.read_text(encoding="utf-8-sig"))
             if not self._send_delivery(payload):
                 self.stop()
@@ -422,7 +465,7 @@ class FleetRunner:
         """A retained claim is reconciled, never submitted again after a runner crash."""
         if self.state_dir is None or not self.state_dir.exists():
             return True
-        journals = list(self.state_dir.glob("*/claim.json"))
+        journals = list(self._capture_root().glob("*/claim.json"))
         if not journals:
             return True
         records = {row.task_id: row for row in self.coordinator.list_tasks()}
