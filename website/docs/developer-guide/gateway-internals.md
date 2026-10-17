@@ -17,6 +17,11 @@ expansion or frozen worker configuration. Automatic startup preserves `local_run
 no setting, provider assignment, engine installation or model download is implied. Named
 gateways, one-shot/cron workers and compatibility standalone HTTP lifespans only adopt the
 existing identity-verified endpoint. A main gateway must be running for managed cold start.
+An explicit root Local Models setup may retain an already-ready idle-exit gateway in the
+background through the existing authenticated HTTP boundary. It keeps the same process and
+accepted work, binds cleanup before publishing ownership, and disarms idle exit. Registration
+uses captured launch context and neither boots inference nor changes enabled settings.
+Named, standalone, draining and stopping gateways cannot acquire this capability.
 
 Bootstrap serializes transitions inside the process and across processes. Unavailable or
 contended boot locks refuse mutation. A living or uncertain foreign owner is never replaced,
@@ -26,6 +31,10 @@ tree under the existing process-birth and Windows containment guards. Implicit r
 HTTP requests from another process. Downloads and engine installs stay staged until an explicit
 default-profile owner stop/start. Activation checks the live model
 listing and refuses an unserved model without changing the existing assignment.
+
+Explicit Stop invalidates setup generations captured at acceptance, including downloading,
+paused and queued activation jobs. Those jobs cannot re-enable inference or assign a default
+after Stop; a fresh explicit setup can be accepted afterward.
 
 Gateway shutdown closes boot admission before draining consumers. Cancellation covers a queued
 worker, a boot-lock wait and health startup; cleanup also waits for an unpublished boot within
