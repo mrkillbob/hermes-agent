@@ -177,3 +177,38 @@ for index in range(20):
                 child.wait(timeout=5)
     assert json.loads(path.read_text(encoding='utf-8')) == {
         prefix + str(index): 98304 for prefix in ('a', 'b') for index in range(20)}
+
+
+def test_failed_atomic_publication_preserves_existing_grants(tmp_path, monkeypatch):
+    import errno
+    import os
+    from hermes_cli.local_runtime import growth
+
+    path = tmp_path / 'windows.json'
+    monkeypatch.setattr(growth, 'window_overrides_path', lambda: path)
+    growth.save_window_override('existing', 98304)
+    original = path.read_bytes()
+
+    def unavailable(*args, **kwargs):
+        raise OSError(errno.EXDEV, 'atomic rename unavailable')
+
+    monkeypatch.setattr(os, 'replace', unavailable)
+    with pytest.raises(OSError):
+        growth.save_window_override('new', 98304)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.platforms('windows')
+def test_held_grant_file_is_never_rewritten_in_place(tmp_path, monkeypatch):
+    from hermes_cli.local_runtime import growth
+
+    path = tmp_path / 'windows.json'
+    monkeypatch.setattr(growth, 'window_overrides_path', lambda: path)
+    growth.save_window_override('existing', 98304)
+    original = path.read_bytes()
+    with path.open('rb'):
+        with pytest.raises(PermissionError):
+            growth.save_window_override('new', 98304)
+        assert path.read_bytes() == original
+    growth.save_window_override('new', 98304)
+    assert growth.load_window_overrides() == {'existing': 98304, 'new': 98304}

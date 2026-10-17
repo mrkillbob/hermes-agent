@@ -9,7 +9,9 @@ from __future__ import annotations
 from contextlib import contextmanager, suppress
 import json
 import logging
+import os
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 _GRANT_WRITER_LOCK = threading.Lock()
@@ -39,11 +41,28 @@ def load_window_overrides(*, strict: bool = False) -> dict:
 
 
 def _write_overrides(overrides: dict) -> None:
-    from utils import atomic_write_text
+    from utils import mkstemp_beside
 
-    path = window_overrides_path()
+    path = window_overrides_path().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, json.dumps(overrides, indent=1), mode=0o600)
+    fd, temporary = mkstemp_beside(path, prefix=".window-grants_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(overrides, stream, indent=1)
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(5):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
+        # No copy/in-place fallback: readers must see an entire old or new grant map.
+    finally:
+        with suppress(OSError):
+            os.unlink(temporary)
 
 
 @contextmanager
