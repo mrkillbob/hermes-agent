@@ -136,6 +136,7 @@ def test_corrupt_pending_grants_are_not_overwritten(tmp_path, monkeypatch):
 @pytest.mark.platforms("any")
 def test_concurrent_process_grants_preserve_every_model(tmp_path):
     import json
+    import os
     import subprocess
     import sys
     import time
@@ -159,17 +160,26 @@ for index in range(20):
     children = [subprocess.Popen([sys.executable, '-c', program, str(path), prefix],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) for prefix in ('a', 'b')]
     try:
+        reads = 0
         deadline = time.monotonic() + 20
         while any(child.poll() is None for child in children):
             assert time.monotonic() < deadline, 'pending-grant writers timed out'
             try:
                 assert isinstance(json.loads(path.read_text(encoding='utf-8')), dict)
+                reads += 1
             except FileNotFoundError:
                 pass  # first atomic publication has not happened yet
+            except PermissionError as exc:
+                # Windows can refuse a reader while rename is pending. This is not
+                # a partial JSON read. Bound contention by the same deadline; still
+                # require successful concurrent reads, every writer and the final map.
+                if os.name != 'nt' or getattr(exc, 'winerror', None) not in (5, 32, 33):
+                    raise
             time.sleep(.001)
         for child in children:
             stdout, stderr = child.communicate(timeout=20)
             assert child.returncode == 0, (stdout, stderr)
+        assert reads > 0, 'no complete pending-grant map observed during concurrent writes'
     finally:
         for child in children:
             if child.poll() is None:
