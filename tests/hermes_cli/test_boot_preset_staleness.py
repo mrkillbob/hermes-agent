@@ -3,8 +3,7 @@
 The managed server autoloads any GGUF in its models dir; a model missing
 from the preset INI loads with llama-server defaults (f16 KV at max
 context, no placement) — on Windows/WDDM that silently demotes VRAM and
-decodes at a crawl. Boot must therefore refuse to adopt a running server
-whose presets predate the staged set."""
+decodes at a crawl. A live owner must refresh its own policy; consumers must not replace it with a parallel router."""
 
 from __future__ import annotations
 
@@ -66,63 +65,32 @@ def test_no_models_is_never_stale(hermes_home):
     assert _presets_stale() is False
 
 
-def test_boot_replaces_incumbent_with_stale_presets(hermes_home, monkeypatch):
-    """ensure_local_runtime must not adopt a running server whose presets
-    miss a staged model — it stops it and boots fresh (boot itself is
-    stubbed; the contract under test is the adopt/replace decision)."""
-    import hermes_cli.local_runtime.bootstrap as boot
+def test_stale_presets_are_deferred_to_the_live_owner(hermes_home, monkeypatch):
+    from hermes_cli.local_runtime import bootstrap as boot, recovery
+    from hermes_cli.local_runtime.ownership import RuntimeOwner
 
     _stage(hermes_home, "model-a")
     _stage(hermes_home, "model-b")
     _write_presets(hermes_home, "model-a")
-
-    stopped = {}
-    monkeypatch.setattr(
-        "hermes_cli.local_runtime.endpoint._state_endpoint",
-        lambda: {"base_url": "http://127.0.0.1:18434/v1", "api_key": "k"})
-    monkeypatch.setattr(boot, "_stop_state_server", lambda: stopped.setdefault("stopped", True))
-
-    sentinel = object()
-
-    def fake_boot(*a, **k):
-        raise _BootReached()
-
-    class _BootReached(Exception):
-        pass
-
-    # Fail fast once boot proper begins — reaching it IS the assertion.
-    monkeypatch.setattr(
-        "hermes_cli.local_runtime.binaries.installed_engine", fake_boot)
-
-    result = boot.ensure_local_runtime({"local_runtime": {"enabled": True}})
-    assert stopped.get("stopped"), "stale incumbent was not stopped"
-    # Boot proceeded past adoption (our fake raised inside the try block,
-    # which ensure_local_runtime swallows into a None return).
-    assert result is None or result is sentinel
-
-
-def test_refresh_bounces_an_adopted_server(hermes_home, monkeypatch):
-    """refresh_local_runtime with no in-process supervisor but a running
-    state-file server (the post-restart shape) must stop that server and
-    boot fresh — NOT silently no-op. Regression: the no-op meant every
-    download/delete after a backend restart left the router serving a
-    stale model catalog, and picking the new model failed with
-    'not found in this provider's model listing'."""
-    import hermes_cli.local_runtime.bootstrap as boot
-
-    stopped = {}
+    path = hermes_home / "runtimes/llamacpp/presets.ini"
+    before = path.read_bytes()
     monkeypatch.setattr(boot, "_SUPERVISOR", None)
-    monkeypatch.setattr(
-        "hermes_cli.local_runtime.endpoint._state_endpoint",
-        lambda: {"base_url": "http://127.0.0.1:18434/v1", "api_key": "k"})
-    monkeypatch.setattr(boot, "_stop_state_server", lambda: stopped.setdefault("stopped", True))
-    booted = {}
-    monkeypatch.setattr(boot, "ensure_local_runtime",
-                        lambda cfg, force=False: booted.setdefault("force", force) or object())
+    monkeypatch.setattr(recovery, "read_state", lambda: {"owner_pid": -1, "create_time": 1})
+    monkeypatch.setattr(recovery, "_owner_is_dead", lambda state: False)
+    monkeypatch.setattr(recovery, "stop_recorded_orphan", lambda: pytest.fail("stopped a live owner"))
+    monkeypatch.setattr("hermes_cli.local_runtime.binaries.installed_engine",
+                        lambda *args: pytest.fail("started a parallel replacement"))
+    assert boot.ensure_local_runtime({"local_runtime": {"enabled": True}},
+                                     owner=RuntimeOwner(hermes_home)) is None
+    assert path.read_bytes() == before
 
-    assert boot.refresh_local_runtime() is True
-    assert stopped.get("stopped"), "adopted server was not stopped"
-    assert booted.get("force") is True, "fresh boot did not follow the stop"
+
+def test_refresh_defers_to_another_process_owner(hermes_home, monkeypatch):
+    from hermes_cli.local_runtime import bootstrap as boot
+
+    monkeypatch.setattr(boot, "_SUPERVISOR", None)
+    monkeypatch.setattr(boot, "ensure_local_runtime", lambda *args, **kwargs: pytest.fail("acquired ownership"))
+    assert boot.refresh_local_runtime() is False
 
 
 def test_refresh_no_server_anywhere_is_a_noop(hermes_home, monkeypatch):

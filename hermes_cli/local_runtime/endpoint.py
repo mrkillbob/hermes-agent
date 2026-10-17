@@ -10,7 +10,6 @@ from __future__ import annotations
 from contextlib import suppress
 import json
 import logging
-import threading
 import time
 import urllib.request
 
@@ -116,9 +115,6 @@ def resolve_llamacpp_endpoint(config: dict | None = None,
     return None
 
 
-_KICK_LOCK = threading.Lock()
-
-
 def _load_config_if_none(config: dict | None) -> dict | None:
     if config is not None:
         return config
@@ -128,25 +124,12 @@ def _load_config_if_none(config: dict | None) -> dict | None:
 
 
 def _kick_managed_boot(config: dict | None) -> None:
-    """Actively start the managed server when resolution finds it missing — the wait loop assumes
-    some OTHER thread is bringing it up, which is true only at backend start."""
-    if not _KICK_LOCK.acquire(blocking=False):
-        return  # a kick is already in flight
+    """Only this process's registered durable owner can repair its missing router."""
+    from hermes_cli.local_runtime.ownership import current_owner
 
-    def _boot() -> None:
-        try:
-            from hermes_cli.local_runtime.bootstrap import ensure_local_runtime
-
-            ensure_local_runtime(_load_config_if_none(config))
-        except Exception:
-            logger.warning("on-demand managed-server boot failed", exc_info=True)
-        finally:
-            _KICK_LOCK.release()
-
-    from agent.memory_provider import spawn_context_thread
-
-    # The caller's profile scope: ``config=None`` resolves (and the boot prices) under it.
-    spawn_context_thread(_boot, name="lr-on-demand-boot").start()
+    owner = current_owner()
+    if owner is not None:
+        owner.request_boot()
 
 
 def _boot_in_flight(config: dict | None) -> bool:

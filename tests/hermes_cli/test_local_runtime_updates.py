@@ -10,6 +10,13 @@ from pm.lock import Facts, Lockfile
 from pm.store import tree_digest
 
 
+def _runtime_owner():
+    from hermes_cli.local_runtime.ownership import RuntimeOwner
+    from hermes_constants import get_hermes_home
+
+    return RuntimeOwner(get_hermes_home())
+
+
 @pytest.fixture
 def runtime_env(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -73,14 +80,14 @@ def test_boot_uses_previous_pm_engine_without_installing(runtime_env, monkeypatc
     monkeypatch.setattr(pm, "ensure", forbidden)
     spawned = []
 
-    def start(self):
+    def start(self, **kwargs):
         spawned.append(self.binary)
 
     monkeypatch.setattr(supervisor.LlamaServerSupervisor, "start", start)
     config = {"local_runtime": {"enabled": True, "backend": "cpu", "tag": "b99999"}}
-    assert bootstrap.ensure_local_runtime(config, force=True) is not None
+    assert bootstrap.ensure_local_runtime(config, force=True, owner=_runtime_owner()) is not None
     assert spawned == [binary]
     monkeypatch.setattr(bootstrap, "_SUPERVISOR", None)
     binary.unlink()
-    assert bootstrap.ensure_local_runtime(config, force=True) is None
+    assert bootstrap.ensure_local_runtime(config, force=True, owner=_runtime_owner()) is None
     assert spawned == [binary]

@@ -13,6 +13,10 @@ from fastapi.testclient import TestClient
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     from hermes_cli import web_server
+    from hermes_cli.local_runtime import ownership
+    from hermes_constants import get_hermes_home
+
+    monkeypatch.setattr(ownership, "_OWNER", ownership.RuntimeOwner(get_hermes_home()))
 
     test_client = TestClient(web_server.app)
     token = getattr(web_server, "_SESSION_TOKEN", "")
@@ -50,7 +54,7 @@ def test_start_enables_and_boots(client, monkeypatch):
     class _FakeSup:
         base_url = "http://127.0.0.1:18434/v1"
 
-    def _ensure(config, force=False):
+    def _ensure(config, force=False, *, owner=None):
         booted["called"] = True
         assert force is True
         return _FakeSup()
@@ -135,3 +139,33 @@ def test_stop_forwards_recovery_and_preserves_conflict(client, tmp_path, monkeyp
     assert response.status_code == (409 if refuse else 200), response.text
     assert called == [True]
     assert disabled == ([] if refuse else [False])
+
+
+def test_foreign_profile_cannot_reenable_or_stop_owner_runtime(client, monkeypatch):
+    from hermes_cli.web_routers import local_models
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+
+    writes = []
+    monkeypatch.setattr(local_models, '_set_runtime_enabled', lambda value: writes.append(value))
+    monkeypatch.setattr(local_models.bootstrap, 'get_supervisor', lambda: object())
+    token = set_hermes_home_override(get_hermes_home() / 'profiles' / 'named')
+    try:
+        for action in ('start', 'stop'):
+            response = client.post('/api/local-models/server', json={'action': action})
+            assert response.status_code == 409
+    finally:
+        reset_hermes_home_override(token)
+    assert writes == []
+
+
+def test_standalone_start_refuses_before_enabling_or_spawning(client, monkeypatch):
+    from hermes_cli.local_runtime import ownership
+    from hermes_cli.web_routers import local_models
+
+    calls = []
+    monkeypatch.setattr(ownership, '_OWNER', None)
+    monkeypatch.setattr(local_models, '_set_runtime_enabled', lambda value: calls.append('wrote-config'))
+    monkeypatch.setattr(local_models.bootstrap, 'ensure_local_runtime', lambda *args, **kwargs: calls.append('booted'))
+    response = client.post('/api/local-models/server', json={'action': 'start'})
+    assert response.status_code == 409
+    assert calls == []

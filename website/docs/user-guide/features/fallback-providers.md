@@ -108,6 +108,17 @@ OpenAI-compatible base URL continues to use the compatible client instead.
 | Custom endpoint | `custom` | `base_url` + `key_env` (see below) |
 | Mixture of Agents preset | `moa` (`model` = preset name) | A configured MoA preset whose aggregator has credentials — the fallback runs the whole preset (references + aggregator), not the aggregator alone |
 
+### Managed Local Fallback
+
+Managed llama.cpp runs under the main gateway started from the default profile
+(`hermes gateway run`). Its existing `local_runtime.enabled` setting controls automatic
+startup; startup uses installed engines and staged models without downloading or loading a
+model. One-shot commands, cron workers, named-profile gateways, gateways started with
+`--idle-exit`, and standalone HTTP backends use an existing server and do not start their own.
+Stopping a consumer leaves the shared server running. Profile settings and deliberate cloud
+primaries are preserved; a profile with automatic startup disabled can still use an existing
+endpoint. If no server is available, the local fallback is skipped as before.
+
 ### Custom Endpoint Fallback
 
 For a custom OpenAI-compatible endpoint, add `base_url` and optionally `key_env`:

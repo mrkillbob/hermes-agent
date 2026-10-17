@@ -2187,6 +2187,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
     async def _stop_impl(self) -> None:
         """Run every ``_stop_*`` phase under the thread-based shutdown watchdog."""
         from gateway.run import GatewayRunner
+        from gateway.run_local_runtime import begin_local_runtime_shutdown
+        begin_local_runtime_shutdown(self)
         # Thread-based watchdog (asyncio timeouts cannot recover a frozen loop): dumps stacks and
         # os._exit past drain+grace so the service manager revives us. Skipped under pytest.
         # Arm a plain OS thread at the start of stop(); if teardown never finishes within drain+grace it

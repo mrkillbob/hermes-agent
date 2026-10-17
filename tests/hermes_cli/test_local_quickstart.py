@@ -22,6 +22,10 @@ from hermes_cli.local_runtime.binaries import Engine
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     from hermes_cli import web_server
+    from hermes_cli.local_runtime import ownership
+    from hermes_constants import get_hermes_home
+
+    monkeypatch.setattr(ownership, "_OWNER", ownership.RuntimeOwner(get_hermes_home()))
 
     test_client = TestClient(web_server.app)
     test_client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
@@ -73,7 +77,7 @@ def test_quickstart_without_recommendation_requires_explicit_choice(client, monk
         def models(self):
             return [chosen["model_id"]]
 
-    def start_server(config, force=False):
+    def start_server(config, force=False, *, owner=None):
         calls.append(("server", config["local_runtime"]["enabled"], force))
         return Server()
 
@@ -179,10 +183,14 @@ def test_quickstart_runs_all_three_legs(client, capable_hardware, monkeypatch, t
     # Leg 3: activation — stub the server start and the model assignment.
     monkeypatch.setattr(
         "hermes_cli.local_runtime.bootstrap.ensure_local_runtime",
-        lambda config, force=False: calls.append("server") or None)
+        lambda config, force=False, **kwargs: calls.append("server") or None)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models._state_endpoint",
         lambda: {"base_url": "http://127.0.0.1:1/v1", "api_key": "k"})
+    from hermes_cli.local_runtime import bootstrap
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models._router_request",
+        lambda *args, **kwargs: {"data": [{"id": mid} for mid in bootstrap.staged_model_ids()]})
     monkeypatch.setattr(
         "hermes_cli.web_server_config._apply_model_assignment_sync",
         lambda *a, **k: calls.append("assign"))
@@ -244,10 +252,14 @@ def test_quickstart_skips_satisfied_legs(client, capable_hardware, monkeypatch):
         lambda *a, **k: calls.append("download"))
     monkeypatch.setattr(
         "hermes_cli.local_runtime.bootstrap.ensure_local_runtime",
-        lambda config, force=False: None)
+        lambda config, force=False, **kwargs: None)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models._state_endpoint",
         lambda: {"base_url": "http://127.0.0.1:1/v1", "api_key": "k"})
+    from hermes_cli.local_runtime import bootstrap
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models._router_request",
+        lambda *args, **kwargs: {"data": [{"id": mid} for mid in bootstrap.staged_model_ids()]})
     monkeypatch.setattr(
         "hermes_cli.web_server_config._apply_model_assignment_sync",
         lambda *a, **k: calls.append("assign"))

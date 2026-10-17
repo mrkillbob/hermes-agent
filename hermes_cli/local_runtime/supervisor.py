@@ -212,14 +212,19 @@ class LlamaServerSupervisor:
         # readiness probe racing the boot doesn't throw the app back to onboarding.
         self._write_state()
 
-    def start(self, timeout_s: int = 120) -> None:
+    def start(self, timeout_s: int = 120, *, cancel_event=None) -> None:
         with self._lifecycle_lock:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("llama-server startup cancelled")
             self._stopping = False
             self._stop_event.clear()
             self._spawn()
-        self._wait_health(timeout_s)
-        self._watchdog = threading.Thread(target=self._watch, daemon=True, name="llamacpp-supervisor")
-        self._watchdog.start()
+        self._wait_health(timeout_s, cancel_event=cancel_event)
+        with self._lifecycle_lock:
+            if self._stopping or (cancel_event is not None and cancel_event.is_set()):
+                raise RuntimeError("llama-server startup cancelled")
+            self._watchdog = threading.Thread(target=self._watch, daemon=True, name="llamacpp-supervisor")
+            self._watchdog.start()
 
     def _write_state(self) -> None:
         import os
@@ -240,10 +245,10 @@ class LlamaServerSupervisor:
         mkdir_under_hermes_home(path.parent)
         atomic_json_write(path, self._state, mode=0o600)
 
-    def _wait_health(self, timeout_s: int) -> None:
+    def _wait_health(self, timeout_s: int, *, cancel_event=None) -> None:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            if self._stop_event.is_set():
+            if self._stop_event.is_set() or (cancel_event is not None and cancel_event.is_set()):
                 raise RuntimeError("llama-server startup cancelled")
             if self.proc and self.proc.poll() is not None:
                 raise RuntimeError(f"llama-server exited rc={self.proc.returncode} during startup "

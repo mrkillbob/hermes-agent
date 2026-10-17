@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 
 def test_activate_rescans_through_state_endpoint_when_supervisor_is_none(
     tmp_path, monkeypatch
@@ -24,6 +26,8 @@ def test_activate_rescans_through_state_endpoint_when_supervisor_is_none(
 
     def fake_refresh():
         calls["refresh"] += 1
+        calls["known"] = [{"id": "Qwen3-4B-Q4_K_M"}]
+        return True
 
     def fake_router_request(endpoint, path, *, timeout, payload=None):
         assert path == "/models"
@@ -88,3 +92,28 @@ def test_activate_skips_rescan_when_owned_server_already_lists_the_model(
         )
 
     assert calls["refresh"] == 0, "no bounce when the listing already knows the model"
+
+
+@pytest.mark.asyncio
+async def test_deferred_refresh_does_not_assign_an_unserved_model(monkeypatch):
+    from hermes_cli.web_routers import local_models as lm
+    from hermes_constants import get_hermes_home
+
+    home = get_hermes_home()
+    home.mkdir(parents=True, exist_ok=True)
+    config = home / 'config.yaml'
+    before = 'model:\n  provider: cloud-fixture\n  default: existing-choice\n'
+    config.write_text(before)
+    writes = []
+    monkeypatch.setattr(lm.bootstrap, 'staged_model_ids', lambda: ['fixture'])
+    monkeypatch.setattr(lm.bootstrap, 'ensure_local_runtime', lambda *args, **kwargs: None)
+    monkeypatch.setattr(lm, '_state_endpoint', lambda: {'base_url': 'http://127.0.0.1:1/v1', 'api_key': 'fixture'})
+    monkeypatch.setattr(lm, '_router_request', lambda *args, **kwargs: {'data': [{'id': 'other'}]})
+    monkeypatch.setattr(lm.bootstrap, 'refresh_local_runtime', lambda: False)
+    monkeypatch.setattr(lm, '_set_runtime_enabled', lambda value: writes.append(('enabled', value)))
+    monkeypatch.setattr(lm, '_assign_default', lambda *args: writes.append(('assigned',)))
+    monkeypatch.setattr(lm, '_spawn_job', lambda job, name, run, **kwargs: run())
+    with pytest.raises(RuntimeError, match='busy or owned by another gateway'):
+        await lm.local_models_activate(lm.ModelActivateBody(model_id='fixture'))
+    assert writes == []
+    assert config.read_text() == before

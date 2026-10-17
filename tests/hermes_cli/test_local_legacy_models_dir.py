@@ -48,7 +48,10 @@ def test_boot_and_status_both_adopt_legacy_models(tmp_path, monkeypatch):
     work = _profile(tmp_path, "work")
 
     (work / "models" / "booted.gguf").touch()
-    bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}})
+    from hermes_cli.local_runtime.ownership import RuntimeOwner
+    from hermes_constants import get_hermes_home
+
+    bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}}, owner=RuntimeOwner(get_hermes_home()))
     assert (bootstrap.models_dir() / "booted.gguf").exists()
 
     (work / "models").mkdir()  # the boot's adoption emptied and removed it

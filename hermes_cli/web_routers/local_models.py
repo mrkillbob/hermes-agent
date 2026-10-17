@@ -357,8 +357,13 @@ def _entry_or_404(model_id: str):
 
 def _start_local_server(config: dict, fail_detail: str):
     """Force-start the local server; raise ``fail_detail`` when neither we nor another process ended up serving."""
-    sup = bootstrap.ensure_local_runtime(config, force=True)
+    from hermes_cli.local_runtime.ownership import current_owner
+
+    owner = current_owner(for_scope=True)
+    sup = bootstrap.ensure_local_runtime(config, force=True, owner=owner)
     if sup is None and _state_endpoint() is None:
+        if owner is None:
+            raise RuntimeError("Start a long-lived root Hermes gateway to own the local server")
         raise RuntimeError(fail_detail)
     return sup
 
@@ -369,25 +374,25 @@ def _ensure_server(job: dict[str, Any], config: dict, model_id: str, *, fail_det
     _step(job, "starting-server", "Starting the local server")
     sup = _start_local_server(config, fail_detail)
 
-    def rescan_if_unknown(known: dict[str, Any]) -> None:
-        if model_id not in known:
-            job["detail"] = "Refreshing the local server"
-            bootstrap.refresh_local_runtime()
-
-    if sup is not None:
-        _quiet(lambda: rescan_if_unknown(sup.models()), None, debug=skip_msg)
+    if model_id in _server_model_ids(sup):
         return
-    # A server owned by another process: ensure_local_runtime returned None, so the supervisor
-    # path above never ran — but the same spawn-only listing gap applies. Probe the live
-    # listing through the persisted endpoint and bounce when it lacks the model.
+    job["detail"] = "Refreshing the local server"
+    if not bootstrap.refresh_local_runtime():
+        logger.info("%s: refresh deferred", skip_msg)
+        raise RuntimeError("The local server is busy or owned by another gateway. "
+                           "Finish its active requests and retry from its owning gateway.")
+    if model_id not in _server_model_ids(bootstrap.get_supervisor()):
+        raise RuntimeError("The local server has not registered this model; retry its refresh")
+
+
+def _server_model_ids(sup) -> set[str]:
+    if sup is not None:
+        return set(sup.models())
     endpoint = _state_endpoint()
-    if endpoint is not None:
-
-        def _known_models() -> dict[str, Any]:
-            data = (_router_request(endpoint, "/models", timeout=10) or {}).get("data", [])
-            return {m.get("id"): m for m in data}
-
-        _quiet(lambda: rescan_if_unknown(_known_models()), None, debug=skip_msg)
+    if endpoint is None:
+        raise RuntimeError("The local server stopped before its model listing was available")
+    data = (_router_request(endpoint, "/models", timeout=10) or {}).get("data", [])
+    return {m["id"] for m in data if m.get("id")}
 
 
 def _assign_default(job: dict[str, Any], model_id: str) -> None:
@@ -842,6 +847,7 @@ def _terminate_state_pid() -> None:
 
 def _stop_server() -> None:
     if bootstrap.get_supervisor() is not None:
+        _runtime_control_owner()
         bootstrap.shutdown_local_runtime()
     else:
         _terminate_state_pid()
@@ -849,7 +855,18 @@ def _stop_server() -> None:
 
 
 def _start_server() -> None:
+    _runtime_control_owner()
     _start_local_server(_set_runtime_enabled(True), _SERVER_START_FAILED)
+
+
+def _runtime_control_owner():
+    from hermes_cli.local_runtime.ownership import current_owner
+
+    owner = current_owner(for_scope=True)
+    if owner is None:
+        raise HTTPException(status_code=409, detail=(
+            "Start the main Hermes gateway from the default profile to control the local server"))
+    return owner
 
 
 _SERVER_ACTIONS = {"stop": _stop_server, "start": _start_server}

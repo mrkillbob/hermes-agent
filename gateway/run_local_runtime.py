@@ -5,13 +5,28 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def start_owned_local_runtime(runner, *, idle_exit: bool) -> None:
+    """An idle-exit/consumer gateway cannot carry other processes' inference lifetime."""
+    if idle_exit:
+        return
+    from hermes_cli.local_runtime.ownership import start_gateway_owner
+
+    runner._local_runtime_owner = start_gateway_owner()
+
+
+def begin_local_runtime_shutdown(runner) -> None:
+    owner = getattr(runner, '_local_runtime_owner', None)
+    if owner is not None:
+        owner.close()
+
+
 async def stop_owned_local_runtime(timeout: float) -> None:
     """Attempt owned cleanup within the stop's remaining leash; never join a stuck worker."""
     from agent.memory_provider import spawn_context_thread
     from gateway.run import _await_thread_exit
-    from hermes_cli.local_runtime.bootstrap import get_supervisor, shutdown_local_runtime
+    from hermes_cli.local_runtime.bootstrap import has_owned_runtime, shutdown_local_runtime
 
-    if get_supervisor() is None:
+    if not has_owned_runtime():
         return
     errors = []
 

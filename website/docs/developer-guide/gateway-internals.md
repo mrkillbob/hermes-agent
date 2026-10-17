@@ -8,6 +8,31 @@ description: "How the messaging gateway boots, authorizes users, routes sessions
 
 The messaging gateway is the long-running process that connects Hermes to 20+ external messaging platforms through a unified architecture.
 
+## Managed local inference ownership
+
+After the root gateway wins its runtime lock and starts its runner, a non-idle-exit launch
+registers one process-local `RuntimeOwner`. Background boot reads that owner's home and
+captured context, so a routed profile cannot supply its backend, residency limit, environment
+expansion or frozen worker configuration. Automatic startup preserves `local_runtime.enabled`;
+no setting, provider assignment, engine installation or model download is implied. Named
+gateways, one-shot/cron workers and compatibility standalone HTTP lifespans only adopt the
+existing identity-verified endpoint. A main gateway must be running for managed cold start.
+
+Bootstrap serializes transitions inside the process and across processes. Unavailable or
+contended boot locks refuse mutation. A living or uncertain foreign owner is never replaced,
+including stale-preset and dead-child cases where its watchdog could restart the child.
+Identity-verified orphan recovery retains the existing process-birth and Windows containment
+guards. Refresh is performed only by the current owner after checking all loaded models for
+busy work; deferred or unsuccessful refresh cannot silently assign an unserved model.
+
+Gateway shutdown closes boot admission before draining consumers. Cancellation covers a queued
+worker, a boot-lock wait and health startup; cleanup also waits for an unpublished boot within
+the existing shutdown budget and tail reserve. Owned cleanup runs on a context-preserving daemon
+thread, never an executor worker that could strand `asyncio.run` on exit. A consumer with no
+supervisor or pending boot releases nothing. Windows kill-on-close jobs and the owner's idle
+unload/refit loop remain in place. These source guarantees do not establish model accuracy,
+native inference readiness or permission to enable a profile or update an installed runtime.
+
 ## Canonical group metadata and profile discovery
 
 The authenticated canonical WebSocket exposes `groups.capabilities`, `groups.list`,
