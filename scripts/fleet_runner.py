@@ -26,6 +26,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--tool", action="append", default=["terminal", "git"])
     parser.add_argument("--liveness-file", required=True, help="Marker maintained while local Hermes/Desktop is alive")
     parser.add_argument("--interval", type=float, default=5.0)
+    parser.add_argument("--claim-recovery", action="store_true",
+                        help="Require atomic nonce recovery and an explicit qualified coordinator cutover")
     return parser
 
 
@@ -88,11 +90,14 @@ def main(argv: list[str] | None = None) -> int:
         state_dir=Path(args.liveness_file).parent / "executions",
         profile_env_executable=args.hermes_executable,
         liveness_check=lambda: Path(args.liveness_file).is_file(),
+        claim_recovery=args.claim_recovery,
     )
     try:
         runner.run_forever(interval=args.interval)
     except KeyboardInterrupt:
         runner.stop()
+    finally:
+        runner.close()
     return 0
 
 
