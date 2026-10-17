@@ -127,6 +127,16 @@ def installed_engine(backend: str = "auto", *, allow_outdated: bool = True) -> E
     return engine
 
 
+def engine_for_binary(binary: Path) -> Engine | None:
+    """Read-only matching of a live executable to registered PM engine facts."""
+    resolved = binary.resolve()
+    for backend in BACKEND_PACKAGES:
+        engine = _installed((backend,), allow_outdated=True)
+        if engine is not None and engine.binary.resolve() == resolved:
+            return engine
+    return None
+
+
 # Before PM owned binaries, Hermes installed each engine to runtimes/llamacpp/b<tag>/<backend>/
 # and wrote a manifest.json with the archive digests and the llama-server --version it saw.
 _SHA256 = re.compile(r"[0-9a-f]{64}")

@@ -124,6 +124,23 @@ def managed_model_idle(base_url: str, model_id: str) -> bool:
         return False
 
 
+def managed_engine(base_url: str):
+    """Resolve the verified router's registered PM engine without adoption or installation."""
+    from pathlib import Path
+    import psutil
+    from hermes_cli.local_runtime import binaries, recovery
+
+    try:
+        state = recovery.read_state()
+        if base_url.rstrip("/") != str(state.get("base_url", "")).rstrip("/"):
+            return None
+        process = (recovery.recorded_process(state) if recovery.is_modern(state)
+                   else recovery.legacy_recorded_process(state))
+        return None if process is None else binaries.engine_for_binary(Path(process.exe()))
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, psutil.Error):
+        return None
+
+
 def resolve_llamacpp_endpoint(config: dict | None = None,
                               wait_for_boot_s: float = 8.0) -> dict | None:
     """Managed-first, detection-second endpoint for llamacpp aliases.
@@ -143,8 +160,7 @@ def resolve_llamacpp_endpoint(config: dict | None = None,
     if hit and not hit.auth_required:
         return {"base_url": hit.base_url, "api_key": ""}
 
-    if wait_for_boot_s > 0 and _boot_in_flight(config):
-        _kick_managed_boot(config)
+    if wait_for_boot_s > 0 and _boot_in_flight(config) and _kick_managed_boot(config):
         deadline = time.monotonic() + wait_for_boot_s
         while time.monotonic() < deadline:
             time.sleep(0.25)
@@ -162,13 +178,14 @@ def _load_config_if_none(config: dict | None) -> dict | None:
     return load_config()
 
 
-def _kick_managed_boot(config: dict | None) -> None:
+def _kick_managed_boot(config: dict | None) -> bool:
     """Only this process's registered durable owner can repair its missing router."""
     from hermes_cli.local_runtime.ownership import current_owner
 
     owner = current_owner()
     if owner is not None:
-        owner.request_boot()
+        return owner.request_boot()
+    return False
 
 
 def _boot_in_flight(config: dict | None) -> bool:

@@ -28,8 +28,10 @@ def client(tmp_path, monkeypatch):
 def test_stop_disables_and_tears_down(client, monkeypatch):
     stopped = {"called": False}
 
-    def _shutdown():
+    def _shutdown(*, on_stopped=None):
         stopped["called"] = True
+        if on_stopped is not None:
+            on_stopped(True)
 
     class _FakeSup:
         pass

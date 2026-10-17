@@ -434,13 +434,16 @@ def test_failed_idle_plan_application_retries_at_stable_budget(hermes_home, monk
     assert bootstrap.refit_idle_presets(router) is False
 
 
-@pytest.mark.parametrize('idle', [True, False, None])
-def test_adopting_consumer_saves_only_confirmed_idle_growth(hermes_home, monkeypatch, capacity_probe, idle):
+@pytest.mark.parametrize('idle,known_engine', [(True, True), (False, True), (None, True), (True, False)])
+def test_adopting_consumer_saves_only_confirmed_idle_growth(hermes_home, monkeypatch, capacity_probe,
+                                                         idle, known_engine):
     """A worker records a pending grant without owning or restarting the router."""
-    from hermes_cli.local_runtime import bootstrap, endpoint, estimator, growth, presets
+    from hermes_cli.local_runtime import binaries, bootstrap, endpoint, estimator, growth, presets
     from hermes_cli.local_runtime import gguf as gguf_mod
 
     _mdir, gguf = _stage_27b(hermes_home, monkeypatch)
+    monkeypatch.setattr(endpoint, 'managed_engine', lambda url:
+                        binaries.Engine('cuda', 'fixture', gguf) if known_engine else None)
     monkeypatch.setattr(bootstrap, 'get_supervisor', lambda: None)
     monkeypatch.setattr(growth, 'is_managed_endpoint', lambda url: True)
     monkeypatch.setattr(endpoint, 'managed_model_idle', lambda *args: idle, raising=False)
@@ -451,4 +454,36 @@ def test_adopting_consumer_saves_only_confirmed_idle_growth(hermes_home, monkeyp
     monkeypatch.setattr(bootstrap, 'refresh_local_runtime', lambda: pytest.fail('consumer must not restart'))
     assert growth.maybe_grow_window(MODEL_ID, base_url='http://127.0.0.1:1/v1',
                                     session_tokens=140 * 1024, current_window=144 * 1024) is None
-    assert growth.load_window_overrides() == ({MODEL_ID: 216 * 1024} if idle is True else {})
+    assert growth.load_window_overrides() == ({MODEL_ID: 216 * 1024}
+                                            if idle is True and known_engine else {})
+
+
+def test_adopted_growth_prices_verified_serving_engine(hermes_home, monkeypatch, capacity_probe):
+    from hermes_cli import config
+    from hermes_cli.local_runtime import binaries, bootstrap, endpoint, estimator, growth, presets
+    from hermes_cli.local_runtime import gguf as gguf_mod
+
+    _mdir, gguf = _stage_27b(hermes_home, monkeypatch)
+    served = binaries.Engine('vulkan', 'fixture', gguf.parent / 'owner-engine')
+    consumer = binaries.Engine('cpu', 'fixture', gguf.parent / 'consumer-engine')
+    monkeypatch.setattr(bootstrap, 'get_supervisor', lambda: None)
+    monkeypatch.setattr(bootstrap, 'serving_engine', lambda: None)
+    monkeypatch.setattr(growth, 'is_managed_endpoint', lambda url: True)
+    monkeypatch.setattr(endpoint, 'managed_engine', lambda url: served, raising=False)
+    monkeypatch.setattr(endpoint, 'managed_model_idle', lambda *args: True)
+    monkeypatch.setattr(config, 'load_config_readonly', lambda: {'local_runtime': {'backend': 'cpu'}})
+    monkeypatch.setattr(binaries, 'installed_engine', lambda backend: consumer)
+    monkeypatch.setattr(gguf_mod, 'read_gguf_header', presets.read_gguf_header)
+    monkeypatch.setattr(estimator, 'profile_from_gguf', presets.profile_from_gguf)
+    own = presets.resident_footprint(gguf, CARD_CAPACITY, 144 * 1024)
+    _card(monkeypatch, 2.0 + own / GIB)
+    original_probe = hardware.probe_budget
+
+    def probe(**kwargs):
+        assert hardware._configured_engine() == served
+        return original_probe(**kwargs)
+
+    monkeypatch.setattr(hardware, 'probe_budget', probe)
+    assert growth.maybe_grow_window(MODEL_ID, base_url='http://127.0.0.1:1/v1',
+                                    session_tokens=140 * 1024, current_window=144 * 1024) is None
+    assert growth.load_window_overrides() == {MODEL_ID: 216 * 1024}

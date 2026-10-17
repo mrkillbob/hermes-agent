@@ -20,11 +20,15 @@ class RuntimeOwner:
         self._boot_lock = threading.Lock()
         self._context = copy_context()
 
-    def ensure(self, *, force: bool = False):
-        # A routed caller's secret scope must not expand the owner's ${VAR} settings.
-        return self._context.copy().run(self._ensure, force=force)
+    def ensure(self, *, force: bool = False, boot_generation: int | None = None):
+        from hermes_cli.local_runtime.bootstrap import current_boot_generation
 
-    def _ensure(self, *, force: bool):
+        if boot_generation is None:
+            boot_generation = current_boot_generation()
+        # A routed caller's secret scope must not expand the owner's ${VAR} settings.
+        return self._context.copy().run(self._ensure, force=force, boot_generation=boot_generation)
+
+    def _ensure(self, *, force: bool, boot_generation: int):
         from hermes_cli.config import load_config_readonly
         from hermes_cli.local_runtime.bootstrap import ensure_local_runtime
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
@@ -34,19 +38,24 @@ class RuntimeOwner:
         # Only runtime settings are read here; no profile secrets or model assignments are copied.
         token = set_hermes_home_override(self.home)
         try:
-            return ensure_local_runtime(load_config_readonly(), force=force, owner=self)
+            return ensure_local_runtime(load_config_readonly(), force=force, owner=self,
+                                        boot_generation=boot_generation)
         finally:
             reset_hermes_home_override(token)
 
-    def request_boot(self) -> None:
+    def request_boot(self) -> bool:
         from agent.memory_provider import spawn_context_thread
+        from hermes_cli.local_runtime.bootstrap import current_boot_generation
 
-        if self.stopping.is_set() or not self._boot_lock.acquire(blocking=False):
-            return
+        if self.stopping.is_set():
+            return False
+        if not self._boot_lock.acquire(blocking=False):
+            return True  # This owner already has a queued or active boot request.
+        generation = current_boot_generation()
 
         def boot() -> None:
             try:
-                self.ensure()
+                self.ensure(boot_generation=generation)
             except Exception:
                 logger.exception("Managed local runtime owner boot failed")
             finally:
@@ -54,6 +63,7 @@ class RuntimeOwner:
 
         try:
             spawn_context_thread(boot, name="gateway-local-runtime-boot").start()
+            return True
         except Exception:
             self._boot_lock.release()
             raise

@@ -28,6 +28,7 @@ _TRANSITION_LOCK = threading.RLock()
 _STATE_LOCK = threading.Lock()
 _BOOT_CANCEL = None
 _BOOT_OWNER = None
+_BOOT_GENERATION = 0
 _STOPPING = 0
 _SERVING_OWNER = None
 
@@ -435,13 +436,16 @@ def _cross_process_boot_lock(timeout_s: float = 130.0, *, cancel_event=None):
         os.close(fd)
 
 
-def ensure_local_runtime(config: dict, force: bool = False, *, owner=None) -> object | None:
+def ensure_local_runtime(config: dict, force: bool = False, *, owner=None,
+                         boot_generation: int | None = None) -> object | None:
     """Only a durable owner may boot; consumers resolve/adopt through endpoint.py instead.
 
     ``force`` is an explicit server action, not permission for a consumer to become owner.
     Failures keep the configured provider's existing unavailable/fallback behavior.
     """
     global _BOOT_CANCEL, _BOOT_OWNER, _EXIT_CLEANUP_DELEGATED
+    if boot_generation is None:
+        boot_generation = current_boot_generation()
     section = (config or {}).get("local_runtime") or {}
     if owner is None or owner.stopping.is_set():
         return None
@@ -449,7 +453,7 @@ def ensure_local_runtime(config: dict, force: bool = False, *, owner=None) -> ob
         return None
     with _TRANSITION_LOCK:
         with _STATE_LOCK:
-            if _STOPPING or owner.stopping.is_set():
+            if _STOPPING or owner.stopping.is_set() or boot_generation != _BOOT_GENERATION:
                 return None
             _EXIT_CLEANUP_DELEGATED = False
             cancel = threading.Event()
@@ -529,21 +533,26 @@ def _boot_owned_runtime(section: dict, owner, cancel, *, force: bool):
             return None
 
 
-def shutdown_local_runtime() -> None:
+def shutdown_local_runtime(*, on_stopped=None) -> None:
     """Cancel a pending boot before waiting for its transition, then stop only our supervisor."""
-    global _SUPERVISOR, _SERVING_ENGINE, _SERVING_OWNER, _STOPPING
+    global _SUPERVISOR, _SERVING_ENGINE, _SERVING_OWNER, _STOPPING, _BOOT_GENERATION
     with _STATE_LOCK:
+        _BOOT_GENERATION += 1
         _STOPPING += 1
     cancel_pending_boot()
     try:
         with _TRANSITION_LOCK:
+            stopped_supervisor = _SUPERVISOR is not None
             if _SUPERVISOR is not None:
                 _SUPERVISOR.stop()
                 _SUPERVISOR = None
             _SERVING_ENGINE = None
             _SERVING_OWNER = None
+            if on_stopped is not None:
+                on_stopped(stopped_supervisor)
     finally:
         with _STATE_LOCK:
+            _BOOT_GENERATION += 1
             _STOPPING -= 1
 
 
@@ -552,6 +561,22 @@ def cancel_pending_boot(owner=None) -> None:
         cancel = _BOOT_CANCEL if owner is None or _BOOT_OWNER is owner else None
     if cancel is not None:
         cancel.set()
+
+
+def current_boot_generation() -> int:
+    """Stop invalidates queued owner callbacks as well as already admitted boots."""
+    with _STATE_LOCK:
+        return _BOOT_GENERATION
+
+
+@contextmanager
+def runtime_control_scope(generation: int):
+    """Keep explicit configuration and boot admission ordered with a concurrent Stop."""
+    with _TRANSITION_LOCK:
+        with _STATE_LOCK:
+            if _STOPPING or generation != _BOOT_GENERATION:
+                raise RuntimeError("Local runtime control changed; retry after the current action completes")
+        yield
 
 
 def has_owned_runtime() -> bool:

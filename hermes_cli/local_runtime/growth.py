@@ -124,13 +124,20 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
     from hermes_cli.local_runtime.context_policy import growth_decision
     from hermes_cli.local_runtime.estimator import as_loaded, profile_from_gguf
     from hermes_cli.local_runtime.gguf import model_id_from_stem, read_gguf_header
-    from hermes_cli.local_runtime.hardware import probe_budget
+    from hermes_cli.local_runtime.hardware import engine_scope, probe_budget
     from hermes_cli.local_runtime.presets import (
         preset_for_model, read_preset_decisions, resident_footprint)
 
     sup = get_supervisor()
     if not is_managed_endpoint(base_url):
         return None
+    engine = None
+    if sup is None:
+        from hermes_cli.local_runtime.endpoint import managed_engine
+
+        engine = managed_engine(base_url)
+        if engine is None:
+            return None  # Never price an adopted server using the consumer's backend.
 
     gguf = next((p for p in staged_models() if model_id_from_stem(p.stem) == model_id), None)
     if gguf is None:
@@ -152,29 +159,25 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
     except Exception:
         server_idle = False
 
-    budget = probe_budget(planning=True)
-    decision = growth_decision(
-        # Capacity budget, not live-free: growth executes via a server bounce, so the grown
-        # instance loads onto a freed card. Live-free is distorted by the very model being grown
-        # — it reads its own residency as unavailable and vetoes rungs that fit.
-        as_loaded(profile, budget), budget,
-        current_window=current_window,
-        session_tokens=session_tokens,
-        measured_decode_tok_s=measured_decode_tok_s,
-        server_idle=server_idle,
-        # The caller IS the occupancy signal: this runs from the agent's compression gate, which
-        # fired on its own threshold. Two separately-derived edges must not deadlock into
-        # compress-before-grow.
-        occupancy_confirmed=True,
-    )
-    if decision.action != "grow" or not decision.next_window:
-        logger.debug("growth %s: %s (%s)", model_id, decision.action, decision.reason)
-        return None
+    with engine_scope(engine):
+        budget = probe_budget(planning=True)
+        decision = growth_decision(
+            # Capacity budget: a pending grant applies after the current model exits.
+            as_loaded(profile, budget), budget,
+            current_window=current_window,
+            session_tokens=session_tokens,
+            measured_decode_tok_s=measured_decode_tok_s,
+            server_idle=server_idle,
+            # The caller's compression gate already confirmed its own occupancy.
+            occupancy_confirmed=True,
+        )
+        if decision.action != "grow" or not decision.next_window:
+            logger.debug("growth %s: %s (%s)", model_id, decision.action, decision.reason)
+            return None
 
-    # The grown instance loads after this one exits, so the model's own memory counts as free.
-    # Other loaded models still count as held, which errs toward a smaller window.
-    live = _launch_budget(budget, own_bytes=resident_footprint(gguf, budget, current_window) or 0)
-    plan = preset_for_model(gguf, budget, set(), requested_window=decision.next_window, live=live)
+        # The growing model's residency becomes available at its eventual reload.
+        live = _launch_budget(budget, own_bytes=resident_footprint(gguf, budget, current_window) or 0)
+        plan = preset_for_model(gguf, budget, set(), requested_window=decision.next_window, live=live)
     if plan is None or plan.refusal or plan.window < decision.next_window:
         logger.debug("growth %s: the next rung does not fit beside other programs' GPU memory",
                      model_id)

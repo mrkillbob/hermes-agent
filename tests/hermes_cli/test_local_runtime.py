@@ -430,6 +430,10 @@ def test_llamacpp_endpoint_waits_for_boot_in_flight(tmp_path, monkeypatch):
 
     # Boot is in flight: runtime enabled + binary installed.
     monkeypatch.setattr(ep, "_boot_in_flight", lambda config: True)
+    from hermes_cli.local_runtime import ownership
+    owner = _runtime_owner()
+    monkeypatch.setattr(ownership, '_OWNER', owner)
+    monkeypatch.setattr(owner, 'request_boot', lambda: True)  # Existing owner startup below.
     monkeypatch.setattr(
         "hermes_cli.local_runtime.recovery.legacy_recorded_process", lambda state: object())
     # Nothing detected externally.
@@ -476,8 +480,9 @@ def test_resolution_kicks_boot_when_no_thread_is_booting(tmp_path, monkeypatch):
     from hermes_cli.local_runtime import ownership
     monkeypatch.setattr(ownership, '_OWNER', _runtime_owner())
 
-    def _fake_ensure(config, force=False, *, owner=None):
+    def _fake_ensure(config, force=False, *, owner=None, boot_generation=None):
         assert owner is ownership.current_owner()
+        assert boot_generation is not None
         _time.sleep(0.3)  # a real spawn takes a moment
         state_path().parent.mkdir(parents=True, exist_ok=True)
         state_path().write_text(json.dumps({

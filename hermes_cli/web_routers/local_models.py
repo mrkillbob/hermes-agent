@@ -818,10 +818,11 @@ def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None)
             _run_download_plan(job, download_plan, entry.display_name)
         _step(job, "starting-server", "Starting the local server")
         with _config_profile_scope(profile):
-            _ensure_server(job, _set_runtime_enabled(True), variant.model_id,
-                           fail_detail="The local server could not start — open Local Models for details",
-                           skip_msg="quickstart rescan check skipped")
-            _assign_default(job, variant.model_id)
+            with bootstrap.runtime_control_scope(bootstrap.current_boot_generation()):
+                _ensure_server(job, _set_runtime_enabled(True), variant.model_id,
+                               fail_detail="The local server could not start — open Local Models for details",
+                               skip_msg="quickstart rescan check skipped")
+                _assign_default(job, variant.model_id)
         _finish(job, f"{entry.display_name} is ready — new chats use it")
 
     _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s",
@@ -841,17 +842,21 @@ def _terminate_state_pid() -> None:
 
 
 def _stop_server() -> None:
-    if bootstrap.get_supervisor() is not None:
-        _runtime_control_owner()
-        bootstrap.shutdown_local_runtime()
-    else:
-        _terminate_state_pid()
-    _set_runtime_enabled(False)
+    _runtime_control_owner()
+    # Always fence queued owner callbacks, including ones that captured enabled=true
+    # before a supervisor or pending-boot token was published.
+    def persist_stop(stopped_supervisor):
+        if not stopped_supervisor:
+            _terminate_state_pid()
+        _set_runtime_enabled(False)
+
+    bootstrap.shutdown_local_runtime(on_stopped=persist_stop)
 
 
 def _start_server() -> None:
     _runtime_control_owner()
-    _start_local_server(_set_runtime_enabled(True), _SERVER_START_FAILED)
+    with bootstrap.runtime_control_scope(bootstrap.current_boot_generation()):
+        _start_local_server(_set_runtime_enabled(True), _SERVER_START_FAILED)
 
 
 def _runtime_control_owner():
@@ -917,12 +922,13 @@ async def local_models_activate(body: ModelActivateBody, profile: Optional[str] 
         # config.yaml write — scope it to the profile the request names, inside the job
         # thread (the contextvar override must be set where the write happens).
         with _config_profile_scope(profile):
-            _ensure_server(job, config_mod.load_config(), body.model_id,
-                           fail_detail=_SERVER_START_FAILED, skip_msg="activate rescan check skipped")
-            _step(job, "setting-default", "Making it your default")
-            _set_runtime_enabled(True)
-            _assign_default(job, body.model_id)
-            _finish(job, f"{body.model_id} is the default for new chats")
+            with bootstrap.runtime_control_scope(bootstrap.current_boot_generation()):
+                _ensure_server(job, config_mod.load_config(), body.model_id,
+                               fail_detail=_SERVER_START_FAILED, skip_msg="activate rescan check skipped")
+                _step(job, "setting-default", "Making it your default")
+                _set_runtime_enabled(True)
+                _assign_default(job, body.model_id)
+                _finish(job, f"{body.model_id} is the default for new chats")
 
     _spawn_job(job, "lr-model-activate", _run, fail_msg="model activate failed: %s")
     return {"job_id": job["job_id"]}
