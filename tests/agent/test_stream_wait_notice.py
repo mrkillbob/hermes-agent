@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent import chat_completion_helpers as h
+from agent import chat_completion_local
 
 
 @pytest.mark.parametrize("local_loading,heartbeat_race", [(False, False), (True, False), (False, True)])
@@ -24,7 +25,7 @@ def test_resumed_chunks_clear_wait_without_erasing_local_load(monkeypatch, local
     call.stream_attempt_state = {"current": 0, "cancelled": set()}
     call._stream_stale_timeout = 180.0
     loading = "Loading local model weights"
-    monkeypatch.setattr(h, "_managed_local_load_notice",
+    monkeypatch.setattr(chat_completion_local, "_managed_local_load_notice",
                         lambda *args: loading if now[0] >= 1060.6 else None)
     monkeypatch.setattr(h.time, "time", lambda: now[0])
 

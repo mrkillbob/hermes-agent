@@ -139,8 +139,8 @@ def _shadowed_by_builtin(requested_norm: str) -> bool:
 def _match_new_style_provider(
     requested_norm: str, providers: dict[str, Any], *, metadata_only: bool = False,
     resolve_credentials: bool = True,
-) -> Optional[dict[str, Any]]:
-    """Scan ``providers:`` (new-style, keyed) for ``requested_norm``."""
+) -> Optional[tuple[dict[str, Any], Any]]:
+    """Scan ``providers:`` (new-style, keyed) for ``requested_norm``; ``(entry, config key)``."""
     from hermes_cli.config import is_provider_enabled
     rp = _rp()
     for ep_name, entry in providers.items():
@@ -153,7 +153,7 @@ def _match_new_style_provider(
         if not base_url:
             continue
         if metadata_only:
-            return {"name": entry.get("name", ep_name), "base_url": base_url.strip()}
+            return {"name": entry.get("name", ep_name), "base_url": base_url.strip()}, ep_name
         # Resolve credentials only after identity and endpoint validation. Merely scanning an
         # unrelated entry must not read its profile-scoped secret.
         key_env = _clean(entry.get("key_env") or entry.get("api_key_env"))
@@ -170,12 +170,14 @@ def _match_new_style_provider(
             entry, result, provider_key=_clean(ep_name), key_env=key_env,
             api_mode=rp._parse_api_mode(entry.get("api_mode") or entry.get("transport")),
         )
-        return result
+        return result, ep_name
     return None
 
 
-def _match_legacy_custom_provider(requested_norm: str, custom_providers, *, metadata_only: bool = False) -> Optional[dict[str, Any]]:
-    """Scan the legacy ``custom_providers:`` list for ``requested_norm``."""
+def _match_legacy_custom_provider(
+    requested_norm: str, custom_providers, *, metadata_only: bool = False,
+) -> Optional[tuple[dict[str, Any], dict]]:
+    """Scan the legacy ``custom_providers:`` list for ``requested_norm``; ``(result, matched entry)``."""
     for entry in custom_providers:
         name, base_url = (entry.get("name"), entry.get("base_url")) if isinstance(entry, dict) else (None, None)
         if not isinstance(name, str) or not isinstance(base_url, str):
@@ -184,14 +186,14 @@ def _match_legacy_custom_provider(requested_norm: str, custom_providers, *, meta
         if requested_norm not in custom_provider_aliases(name, provider_key):
             continue
         if metadata_only:
-            return {"name": name.strip(), "base_url": base_url.strip()}
+            return {"name": name.strip(), "base_url": base_url.strip()}, entry
         result = {"name": name.strip(), "base_url": base_url.strip(), "api_key": _clean(entry.get("api_key", ""))}
         model_name = _clean(entry.get("model", ""))
         if model_name:
             result["model"] = model_name
         _lift_common_custom_fields(entry, result, provider_key=provider_key, key_env=_clean(entry.get("key_env", "")),
                                    api_mode=_rp()._parse_api_mode(entry.get("api_mode")))
-        return result
+        return result, entry
     return None
 
 
@@ -202,6 +204,37 @@ def _get_named_custom_provider(
     """Resolve a named endpoint. ``metadata_only`` reads the config read-only and returns identity and
     endpoint only. Creation-time config copying supplies its own config snapshot and skips credential
     reads; ordinary runtime callers keep their existing scoped resolution."""
+    found = _select_named_custom_provider(
+        requested_provider, metadata_only=metadata_only, config=config, resolve_credentials=resolve_credentials)
+    return found[0] if found else None
+
+
+def named_custom_provider_config_path(requested_provider: str, config: dict[str, Any]) -> Optional[tuple]:
+    """The config path (``("providers", key)`` / ``("custom_providers", index)``) of the ONE entry
+    the runtime routes *requested_provider* through, else None. Reads no credential."""
+    found = _select_named_custom_provider(requested_provider, config=config, resolve_credentials=False)
+    return found[1] if found else None
+
+
+def custom_provider_config_path_for_url(base_url: Any, config: dict[str, Any]) -> Optional[tuple]:
+    """The config path of the entry a bare ``custom`` route at *base_url* takes its key from: the
+    first compatible ``custom_providers`` / ``providers`` entry with that URL (trailing slash
+    ignored), the same owner the credential pool seeds from. Reads no credential."""
+    url = str(base_url or "").strip().rstrip("/")
+    if not url or isinstance(config.get("custom_providers"), dict):
+        return None
+    for entry in _rp().get_compatible_custom_providers(config) or ():
+        if isinstance(entry, dict) and str(entry.get("base_url") or "").strip().rstrip("/") == url:
+            return _compatible_entry_path(config, entry)
+    return None
+
+
+def _select_named_custom_provider(
+    requested_provider: str, *, metadata_only: bool = False, config: Optional[dict[str, Any]],
+    resolve_credentials: bool,
+) -> Optional[tuple[dict[str, Any], Optional[tuple]]]:
+    """``(resolved entry, its config path)`` for the first usable match: ``providers:`` first,
+    then the legacy list view."""
     requested_norm = _normalize_custom_provider_name(requested_provider or "")
     if not requested_norm or requested_norm == "auto" or _shadowed_by_builtin(requested_norm):
         return None
@@ -219,14 +252,29 @@ def _get_named_custom_provider(
         if isinstance(providers, dict) else None
     )
     if found:
-        return found
+        return found[0], ("providers", found[1])
     if isinstance(config.get("custom_providers"), dict):
         logger.warning("custom_providers in config.yaml is a dict, not a list. "
                        "Each entry must be prefixed with '-' in YAML. "
                        "Run 'hermes doctor' for details.")
         return None
     custom_providers = rp.get_compatible_custom_providers(config)
-    return _match_legacy_custom_provider(requested_norm, custom_providers, metadata_only=metadata_only) if custom_providers else None
+    found = (_match_legacy_custom_provider(requested_norm, custom_providers, metadata_only=metadata_only)
+             if custom_providers else None)
+    return (found[0], _compatible_entry_path(config, found[1])) if found else None
+
+
+def _compatible_entry_path(config: dict[str, Any], entry: dict[str, Any]) -> Optional[tuple]:
+    """Where a ``get_compatible_custom_providers`` entry lives in *config*. The view keeps the first
+    of identical legacy entries, so the first raw entry normalizing to it is its source."""
+    from hermes_cli.config_providers import _normalize_custom_provider_entry
+    providers = config.get("providers")
+    key = entry.get("provider_key")
+    if key and isinstance(providers, dict):
+        return next((("providers", k) for k in providers if str(k).strip() == key), None)
+    legacy = config.get("custom_providers")
+    return next((("custom_providers", i) for i, raw in enumerate(legacy if isinstance(legacy, list) else ())
+                 if _normalize_custom_provider_entry(raw) == entry), None)
 
 
 def has_named_custom_provider(requested_provider: str) -> bool:

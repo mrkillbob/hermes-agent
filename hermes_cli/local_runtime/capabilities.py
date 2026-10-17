@@ -42,12 +42,12 @@ def _props_modalities(model_id: str, *, endpoint: tuple[str, str] | None = None)
     the model isn't loaded, or the build doesn't report modalities. Recovery callers may
     pin an already verified local endpoint instead of borrowing the managed root."""
     with suppress(Exception):
-        from hermes_cli.local_runtime.endpoint import managed_get_json, managed_root
+        from hermes_cli.local_runtime.endpoint import child_query, managed_get_json, managed_root
 
         ep = endpoint if endpoint is not None else managed_root()
         if ep is None:
             return None
-        modalities = managed_get_json(*ep, f"/props?model={model_id}", timeout_s=3).get("modalities")
+        modalities = managed_get_json(*ep, f"/props?{child_query(model_id)}", timeout_s=3).get("modalities")
         if isinstance(modalities, dict) and "vision" in modalities:
             return bool(modalities["vision"])
     return None

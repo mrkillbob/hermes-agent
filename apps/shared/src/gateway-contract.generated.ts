@@ -1081,7 +1081,7 @@ export interface ConnectionTargetEnvField {
   default: string
   prompt?: string | null
 }
-export type CatalogTier = 'official' | 'community'
+export type CatalogTier = 'official' | 'verified' | 'community'
 /** The catalog's security scan of the pinned commit; read-only on the card. */
 export interface CatalogScan {
   status: CatalogScanStatus
@@ -4642,6 +4642,7 @@ export interface CanonicalSessionInfo {
   api_mode?: string | null
   tool_count?: number | null
   credential_hint?: string | null
+  config_warning?: string | null
   [key: string]: unknown
 }
 export interface SessionStatsParams {
@@ -4936,6 +4937,7 @@ export interface CanonicalCreateParams {
   cwd_explicit?: boolean | null
   run_budget?: number | null
   verbose?: boolean
+  client_env?: Record<string, string> | null
 }
 export interface CanonicalSnapshot {
   session_id: string
@@ -5013,6 +5015,7 @@ export interface CanonicalSnapshotInfo {
   api_mode?: string | null
   tool_count?: number | null
   credential_hint?: string | null
+  config_warning?: string | null
 }
 export interface CanonicalResumeParams {
   profile?: string | null
@@ -5242,12 +5245,14 @@ export interface CanonicalBotDeliverParams {
   author?: Record<string, unknown> | null
   notification_category?: string | null
 }
+/** A delivery's receipt. It names its admission, unless ``refused``: the FIFO refused the delivery before anything was committed (``gateway/session_bot.py``), a terminal ``failed`` receipt with no admission that the relay settles as the sender's answer. */
 export interface CanonicalBotDeliverResult {
   status: string
   delivery_id: string
   profile_home: string
   session_id: string
-  admission_id: string
+  admission_id?: string | null
+  refused?: true | null
   message: string
   reply?: string | null
   retry_admission_id?: string | null
@@ -5711,7 +5716,7 @@ export interface TodoUpdatedPayload {
   todos: unknown[]
   revision: number
 }
-/** ``agent/credits_tracker.py::AgentNotice`` via notice_callback, and ``server._await_agent_ready``'s slow-build notice. ``level``: info | warn | error | success; ``kind``: sticky | ttl | agent. */
+/** ``agent/credits_tracker.py::AgentNotice`` via notice_callback, and ``server._await_agent_ready``'s slow-build notice. ``level``: info | warn | error | success; ``kind``: sticky | ttl | agent. ``detail``: the full text behind a short ``text`` (the low-disk auto-prune question): Desktop shows it in the toast's expandable body, the Ink TUI prints it into the transcript. */
 export interface NotificationShowPayload {
   text: string
   level: string
@@ -5719,6 +5724,7 @@ export interface NotificationShowPayload {
   ttl_ms?: number | null
   key?: string | null
   id?: string | null
+  detail?: string | null
 }
 export interface NotificationClearPayload {
   key: string

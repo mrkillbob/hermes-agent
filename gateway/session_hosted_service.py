@@ -254,6 +254,11 @@ async def ensure_hosted_service(runner):
 
 
 async def _ensure_hosted_service(runner, authority):
+    # The watcher visits every authority each second. Prepared services need no
+    # scope/config work: re-entering owner_scope reads credentials on the loop.
+    service = getattr(authority, 'hosted_room_service', None)
+    if service is not None and getattr(service, '_transport_installed', False):
+        return
     with owner_scope(authority):
         service = getattr(authority, 'hosted_room_service', None)
         if service is None:

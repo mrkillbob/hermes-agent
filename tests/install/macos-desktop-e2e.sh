@@ -260,6 +260,12 @@ phase_install() {
   ok "hermes --version works: $(head -c 120 "$LOG_DIR/version-old.log" | tr -d '\n')"
   find_installed_app >/dev/null || fail "no installed Hermes.app after the dmg bootstrap"
   ok "installed app: $(find_installed_app)"
+  # The OLD chat is persisted with the endpoint it ran on, and the updated app resumes that chat on
+  # its saved route. One mock serves both checkpoints (phase_update reuses it, or restarts it on the
+  # same port): a checkpoint-private mock is gone by then and the resumed turn never reaches a server.
+  # shellcheck source=../install/e2e-assets/mock-provider.sh
+  source "$ASSETS/mock-provider.sh"
+  PATH="$(dirname "$HERMES_E2E_NODE"):$PATH" mock_start "$WORK_ROOT"
   desktop_checkpoint old "$OLD_SHA" desktop-installer@latest
 }
 

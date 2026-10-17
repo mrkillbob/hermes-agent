@@ -404,7 +404,9 @@ class Machine:
             ],
             # Stream existing Node/npm diagnostics before an outer timeout kills
             # the process tree; contained child output otherwise disappears.
-            "install", timeout=INSTALL_TIMEOUT, cwd=cwd, env_extra={"HERMES_VERBOSE": "1"})
+            # serve.git carries this checkout's release tags; install main, not the latest release.
+            "install", timeout=INSTALL_TIMEOUT, cwd=cwd,
+            env_extra={"HERMES_VERBOSE": "1", "HERMES_INSTALL_CHANNEL": "main"})
         if run.returncode == 0 and self.hermes_exe.is_file():
             # advance() lands NEXT on main and publishes no release: follow main, not the stable
             # default an official-origin checkout gets (channel resolution has its own suites).

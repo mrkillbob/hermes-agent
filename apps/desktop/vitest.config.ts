@@ -48,7 +48,10 @@ const electronNative: TestProjectConfiguration = {
       'scripts/perf/lunar-city-runner.test.mjs',
       'scripts/perf/lunar-city.test.mjs'
     ],
-    testTimeout: 30_000
+    testTimeout: 30_000,
+    // Only these contracts need the Hermes test interpreter; resolving it may
+    // sync the Python environment, which UI-only runs must not wait for.
+    globalSetup: ['./vitest.hermes-python.ts']
   }
 }
 
