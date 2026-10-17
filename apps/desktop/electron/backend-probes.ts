@@ -84,32 +84,59 @@ async function execProbe(
       // spawn's timeout only sends SIGTERM. A cooperative handler can leave
       // this exact owned probe alive forever, preventing both close and retry.
       // Give normal termination a grace period, then reap only this child.
-      const reapTimer = setTimeout(() => {
+      const reap = () => {
         if (child.exitCode === null && child.signalCode === null) {
           child.kill('SIGKILL')
         }
-      }, options.timeout + 1_000)
+      }
+
+      let reapTimer = setTimeout(reap, options.timeout + 1_000)
+
+      const onAbort = () => {
+        clearTimeout(reapTimer)
+        reapTimer = setTimeout(reap, 1_000)
+
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGTERM')
+        }
+      }
+
+      const cleanup = () => {
+        clearTimeout(reapTimer)
+        signal?.removeEventListener('abort', onAbort)
+      }
 
       child.once('error', error => {
-        clearTimeout(reapTimer)
+        cleanup()
         reject(error)
       })
-      child.once('close', (code, signal) => {
-        clearTimeout(reapTimer)
+      child.once('close', (code, closeSignal) => {
+        cleanup()
+
+        if (signal?.aborted) {
+          reject(signal.reason)
+
+          return
+        }
 
         // A timed-out probe may handle SIGTERM and exit zero; it is still a timeout.
         if (code === 0 && !child.killed) {
           resolve()
         } else {
           reject(
-            Object.assign(new Error(`Runtime probe failed: ${command} (${signal || code})`), {
+            Object.assign(new Error(`Runtime probe failed: ${command} (${closeSignal || code})`), {
               code,
-              signal,
+              signal: closeSignal,
               killed: child.killed
             })
           )
         }
       })
+      signal?.addEventListener('abort', onAbort, { once: true })
+
+      if (signal?.aborted) {
+        onAbort()
+      }
     })
   }
 
