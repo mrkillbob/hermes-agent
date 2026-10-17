@@ -5170,11 +5170,8 @@ def main():
     except Exception:
         logger.debug("boot bootstrap failed", exc_info=True)
 
-    import argparse
-    parser = argparse.ArgumentParser(description="Hermes Gateway - Multi-platform messaging")
-    parser.add_argument("--config", "-c", help="Path to gateway config file")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    args = parser.parse_args()
+    from gateway.run_cli import parse_gateway_args
+    args = parse_gateway_args()
 
     config = None
     if args.config:
@@ -5198,7 +5195,7 @@ def main():
         # planned-restart, and service-restart paths, all of which complete teardown first. Routing those
         # codes through the same os._exit backstop means EVERY exit path is wedge-proof, not just the
         # boolean-return ones.
-        success = asyncio.run(start_gateway(config))
+        success = asyncio.run(start_gateway(config, idle_exit=args.idle_exit))
         exit_code = 0 if success else 1
     except SystemExit as e:
         # e.code may be None (→ 0), an int, or a str (→ 1, like CPython).

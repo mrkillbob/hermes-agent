@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from starlette.concurrency import run_in_threadpool
@@ -790,6 +790,7 @@ def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None)
     missing), make it the default. Each leg uses the same code as the individual setup routes.
     Preflight rejects (no automatic recommendation or no servable choice) fail the POST
     synchronously so the button can explain itself; everything slow runs in the job with phase/byte progress."""
+    generation = bootstrap.current_boot_generation()
     # Quickstart promises activation, not just staging. Reject consumers before any slow leg.
     with _config_profile_scope(profile):
         _runtime_control_owner()
@@ -818,7 +819,7 @@ def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None)
             _run_download_plan(job, download_plan, entry.display_name)
         _step(job, "starting-server", "Starting the local server")
         with _config_profile_scope(profile):
-            with bootstrap.runtime_control_scope(bootstrap.current_boot_generation()):
+            with bootstrap.runtime_control_scope(generation):
                 _ensure_server(job, _set_runtime_enabled(True), variant.model_id,
                                fail_detail="The local server could not start — open Local Models for details",
                                skip_msg="quickstart rescan check skipped")
@@ -829,6 +830,19 @@ def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None)
                on_exit=_QUICKSTART_LOCK.release, resumable=True)
     return {"job_id": job["job_id"], "model_id": entry.id, "display_name": entry.display_name,
             "needs_runtime": need_runtime, "needs_download": need_download, "download_bytes": download_bytes}
+
+
+@router.post("/api/local-models/control")
+async def local_models_control(request: Request, profile: Optional[str] = None):
+    """Explicitly retain an already-ready root gateway for setup; never replace its work."""
+    from gateway.run_local_runtime import retain_gateway_for_local_models
+
+    runner = getattr(request.app.state, 'gateway_runner', None)
+    with _config_profile_scope(profile):
+        if runner is None or not retain_gateway_for_local_models(runner):
+            raise HTTPException(status_code=409, detail=(
+                "This gateway cannot provide durable local-model control; start the main Hermes gateway"))
+    return {"control_available": True}
 
 
 # ── server lifecycle: turn the engine on/off ─────────────────
@@ -912,6 +926,7 @@ async def local_models_activate(body: ModelActivateBody, profile: Optional[str] 
     """Make a downloaded model the default for new chats: a config write via the same machinery as
     /api/model/set plus making sure the server is up. NO model loading (residency v2: models load on first
     inference; an empty router costs nothing). Kept as a job for UI continuity."""
+    generation = bootstrap.current_boot_generation()
     # Split variants stage under their first part — resolve like the other routes.
     if body.model_id not in bootstrap.staged_model_ids():
         raise HTTPException(status_code=404, detail=f"{body.model_id} is not downloaded")
@@ -922,7 +937,7 @@ async def local_models_activate(body: ModelActivateBody, profile: Optional[str] 
         # config.yaml write — scope it to the profile the request names, inside the job
         # thread (the contextvar override must be set where the write happens).
         with _config_profile_scope(profile):
-            with bootstrap.runtime_control_scope(bootstrap.current_boot_generation()):
+            with bootstrap.runtime_control_scope(generation):
                 _ensure_server(job, config_mod.load_config(), body.model_id,
                                fail_detail=_SERVER_START_FAILED, skip_msg="activate rescan check skipped")
                 _step(job, "setting-default", "Making it your default")

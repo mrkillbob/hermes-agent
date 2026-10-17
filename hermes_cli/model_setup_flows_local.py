@@ -68,7 +68,14 @@ def _connect_local_models():
         observed = ensure_gateway_runtime(home, idle_exit=False)
     if observed.state != 'ready' or observed.endpoint is None:
         raise LocalModelClientError(f'Gateway is {observed.state}; no model setup submitted.')
-    return LocalModelClient(home, observed.endpoint)
+    client = LocalModelClient(home, observed.endpoint)
+    if (home == get_default_hermes_root(home=home).resolve()
+            and not client.get('status').get('control_available', False)):
+        if not prompt_yes_no('  Keep this gateway running in the background for local model setup?', False):
+            return None
+        if not client.post('control', {}).get('control_available', False):
+            raise LocalModelClientError('Gateway did not accept durable setup; no model job submitted.')
+    return client
 
 
 def _follow_job(lm, client, job_id: str) -> str:

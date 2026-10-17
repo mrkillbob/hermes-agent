@@ -75,7 +75,7 @@ class RuntimeOwner:
         cancel_pending_boot(self)
 
 
-def start_gateway_owner() -> RuntimeOwner | None:
+def start_gateway_owner(*, request_boot: bool = True, on_registered=None) -> RuntimeOwner | None:
     """Called only after the durable gateway wins its lock; named gateways remain consumers."""
     global _OWNER
     from hermes_constants import get_default_hermes_root, get_hermes_home
@@ -84,13 +84,19 @@ def start_gateway_owner() -> RuntimeOwner | None:
     home = get_hermes_home()
     if worker_config_snapshot() is not None or home.resolve() != get_default_hermes_root(home=home).resolve():
         return None
-    if _OWNER is None or _OWNER.stopping.is_set():
-        _OWNER = RuntimeOwner(home)
-    elif _OWNER.home.resolve() != home.resolve():
+    candidate = _OWNER
+    if candidate is None or candidate.stopping.is_set():
+        candidate = RuntimeOwner(home)
+    elif candidate.home.resolve() != home.resolve():
         logger.warning("This process already carries another root gateway's local runtime")
         return None
-    _OWNER.request_boot()
-    return _OWNER
+    # Bind lifecycle cleanup before exposing this capability to concurrent consumers.
+    if on_registered is not None:
+        on_registered(candidate)
+    _OWNER = candidate
+    if request_boot:
+        candidate.request_boot()
+    return candidate
 
 
 def current_owner(*, for_scope: bool = False) -> RuntimeOwner | None:

@@ -163,3 +163,42 @@ def test_stop_serializes_start_snapshot_and_allows_fresh_start(client, inert_run
     restarted = client.post('/api/local-models/server', json={'action': 'start'})
     assert restarted.status_code == 200, restarted.text
     assert calls == ['constructed', 'started'] and enabled['value'] is True
+
+
+def test_stop_invalidates_queued_activation_before_any_config_write(client, monkeypatch):
+    from hermes_cli.web_routers import local_models as lm
+
+    monkeypatch.setattr(lm.bootstrap, 'staged_model_ids', lambda: {'fixture'})
+    accepted = []
+    monkeypatch.setattr(lm, '_spawn_job', lambda job, name, body, **k: accepted.append(body))
+    monkeypatch.setattr(lm, '_ensure_server', lambda *a, **k: pytest.fail('stale activation booted'))
+    monkeypatch.setattr(lm, '_assign_default', lambda *a: pytest.fail('stale activation assigned'))
+    monkeypatch.setattr(lm, '_terminate_state_pid', lambda: None)
+    wrote = []
+    monkeypatch.setattr(lm, '_set_runtime_enabled', lambda value: wrote.append(value))
+    response = client.post('/api/local-models/activate', json={'model_id': 'fixture'})
+    assert response.status_code == 200, response.text
+    lm._stop_server()
+    with pytest.raises(RuntimeError, match='control changed'):
+        accepted[0]()
+    assert wrote == [False]
+
+
+def test_explicit_named_control_request_cannot_retain_root(client, monkeypatch):
+    from types import SimpleNamespace
+    from gateway.run_local_runtime import start_owned_local_runtime
+    from hermes_cli import web_server
+    from hermes_cli.local_runtime import ownership
+    from hermes_constants import get_hermes_home
+
+    home = get_hermes_home()
+    named = home / 'profiles' / 'named'
+    named.mkdir(parents=True)
+    (named / 'config.yaml').write_text('{}')
+    runner = SimpleNamespace(_running=True, _draining=False, session_runtime_descriptor={'state': 'ready'})
+    monkeypatch.setattr(ownership, '_OWNER', None)
+    start_owned_local_runtime(runner, idle_exit=True)
+    monkeypatch.setattr(web_server.app.state, 'gateway_runner', runner, raising=False)
+    response = client.post('/api/local-models/control?profile=named', json={})
+    assert response.status_code == 409, response.text
+    assert ownership._OWNER is None and not getattr(runner, '_idle_exit_promoted', False)

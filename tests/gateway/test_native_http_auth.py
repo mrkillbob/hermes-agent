@@ -18,7 +18,7 @@ from tests.gateway.test_normal_runtime_boot import control
 
 
 @contextmanager
-def daemon(tmp_path):
+def daemon(tmp_path, *, idle_exit=False):
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700, exist_ok=True)
     user.mkdir(exist_ok=True)
@@ -42,7 +42,8 @@ def daemon(tmp_path):
                PYTHONPATH=str(root), PYTHONUNBUFFERED='1',
                HERMES_DASHBOARD_SESSION_TOKEN='normal-http-owner')
     with (tmp_path / 'gateway.log').open('w+') as log:
-        process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
+        command = [sys.executable, '-m', 'gateway.run', *(['--idle-exit'] if idle_exit else [])]
+        process = subprocess.Popen(command, cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 40

@@ -387,3 +387,42 @@ def test_ownerless_quickstart_refuses_before_planning_or_download(client, monkey
     assert response.status_code == 409
     assert 'default profile' in response.json()['detail']
     assert set(lm._JOBS) == before_jobs
+
+
+@pytest.mark.parametrize('paused', [False, True])
+def test_stop_invalidates_quickstart_accepted_before_download(client, quickstart_ready, monkeypatch, tmp_path, paused):
+    from types import SimpleNamespace
+    from hermes_cli.web_routers import local_models as lm
+
+    entry = SimpleNamespace(id='fixture', display_name='Fixture')
+    variant = SimpleNamespace(model_id='fixture-model')
+    monkeypatch.setattr(lm, '_quickstart_target', lambda *a: (entry, variant))
+    monkeypatch.setattr(lm.hardware, 'probe_budget', lambda **k: None)
+    monkeypatch.setattr(lm, '_runtime_target', lambda: ('b1', 'cpu'))
+    monkeypatch.setattr(lm, '_download_plan', lambda *a: [(None, tmp_path / 'model.gguf', 1)])
+    accepted = []
+    monkeypatch.setattr(lm, '_spawn_job', lambda job, name, body, **k: accepted.append((job, body, k['on_exit'])))
+    wrote, booted, assigned = [], [], []
+    monkeypatch.setattr(lm, '_set_runtime_enabled', lambda value: wrote.append(value))
+    monkeypatch.setattr(lm, '_ensure_server', lambda *a, **k: booted.append(True))
+    monkeypatch.setattr(lm, '_assign_default', lambda *a: assigned.append(True))
+    monkeypatch.setattr(lm, '_terminate_state_pid', lambda: None)
+    def download(*a):
+        if paused:
+            raise lm.DownloadPaused()
+        lm._stop_server()
+    monkeypatch.setattr(lm, '_run_download_plan', download)
+    response = client.post('/api/local-models/quickstart', json={'model_id': 'fixture'})
+    assert response.status_code == 200, response.text
+    _job, run, release = accepted[0]
+    try:
+        if paused:
+            with pytest.raises(lm.DownloadPaused):
+                run()
+            lm._stop_server()
+            monkeypatch.setattr(lm, '_run_download_plan', lambda *a: None)
+        with pytest.raises(RuntimeError, match='control changed'):
+            run()
+        assert wrote == [False] and booted == [] and assigned == []
+    finally:
+        release()

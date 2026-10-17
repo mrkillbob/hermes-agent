@@ -89,3 +89,25 @@ async def test_queued_work_clients_adapters_and_cron_each_keep_it_up(tmp_path, m
         assert "idle probe failed" in run_idle_exit.busy_reason(runner, window=0.2)
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_retained_gateway_ignores_pending_idle_probe(tmp_path, monkeypatch):
+    runner, _home, db, stops = _runner(tmp_path, monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def probe(*args, **kwargs):
+        entered.set()
+        await release.wait()
+    monkeypatch.setattr(run_idle_exit.asyncio, 'to_thread', probe)
+    task = asyncio.create_task(run_idle_exit.unmanaged_idle_exit_watcher(runner))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        runner._idle_exit_promoted = True
+        release.set()
+        await asyncio.wait_for(task, 5)
+        assert stops == [] and runner.session_runtime_descriptor['state'] == 'ready'
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        db.close()

@@ -98,3 +98,37 @@ def test_absent_root_gateway_requires_explicit_background_choice(monkeypatch, tm
         reset_hermes_home_override(token)
     assert questions and questions[0][1] is False
     assert 'background' in questions[0][0]
+
+
+@pytest.mark.parametrize('accepted', [False, True])
+def test_ready_ownerless_root_requires_explicit_durable_choice(monkeypatch, tmp_path, accepted):
+    from types import SimpleNamespace
+    from hermes_cli import model_setup_flows_local as flow, gateway_runtime, local_model_client, setup
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    home = tmp_path / 'root'
+    home.mkdir()
+    token = set_hermes_home_override(home)
+    observed = gateway_runtime.GatewayDiscovery('ready', endpoint=SimpleNamespace())
+    monkeypatch.setattr(gateway_runtime, 'discover_gateway_endpoint', lambda h: observed)
+    monkeypatch.setattr(gateway_runtime, 'ensure_gateway_runtime', lambda *a, **k: pytest.fail('ready gateway replaced'))
+    calls = []
+    class Client:
+        def __init__(self, *a):
+            pass
+        def get(self, path):
+            assert path == 'status'
+            return {'control_available': False}
+        def post(self, path, body):
+            calls.append((path, body))
+            return {'control_available': True}
+    monkeypatch.setattr(local_model_client, 'LocalModelClient', Client)
+    questions = []
+    monkeypatch.setattr(setup, 'prompt_yes_no', lambda question, default: questions.append((question, default)) or accepted)
+    try:
+        result = flow._connect_local_models()
+    finally:
+        reset_hermes_home_override(token)
+    assert questions and questions[0][1] is False
+    assert (result is not None) == accepted
+    assert calls == ([('control', {})] if accepted else [])

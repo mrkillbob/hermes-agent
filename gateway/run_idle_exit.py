@@ -193,7 +193,8 @@ async def unmanaged_idle_exit_watcher(runner) -> None:
                 "admissions (gateway.unmanaged_idle_exit_seconds)", window)
     interval = min(30.0, max(0.5, window / 4))
     idle_since = None
-    while runner._running and not runner._draining:
+    while (runner._running and not runner._draining
+           and not getattr(runner, "_idle_exit_promoted", False)):
         await asyncio.sleep(interval)
         window = idle_exit_seconds(runner)
         if window <= 0:
@@ -202,6 +203,8 @@ async def unmanaged_idle_exit_watcher(runner) -> None:
         # The store/cron/kanban reads touch disk; keep them off the loop, then re-check the
         # loop-only facts (clients, tickets, draining) synchronously right before acting.
         reason = await asyncio.to_thread(busy_reason, runner, window=window)
+        if getattr(runner, "_idle_exit_promoted", False):
+            return
         if reason is not None:
             idle_since = None
             continue
