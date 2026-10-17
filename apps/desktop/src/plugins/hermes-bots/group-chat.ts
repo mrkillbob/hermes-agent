@@ -1712,9 +1712,8 @@ function groupChatEntryId(): string {
 
 let lastGroupChatEntryAt = 0
 
-function groupChatEntryAt(): number {
-  const now = Date.now()
-  const at = now > lastGroupChatEntryAt ? now : lastGroupChatEntryAt + 1
+function groupChatEntryAt(after = 0): number {
+  const at = Math.max(Date.now(), lastGroupChatEntryAt + 1, after + 1)
   lastGroupChatEntryAt = at
 
   return at
@@ -1742,9 +1741,17 @@ export function appendGroupChatEntry(
   thread?: null | string,
   images?: Attachment[]
 ): GroupMessage {
+  const priorLog = ($groupChats.get()[group] || {}).log || []
+  const lastEntry = priorLog[priorLog.length - 1]
+
   const entry: GroupMessage = {
     id: groupChatEntryId(),
-    at: groupChatEntryAt(),
+    // Strictly after the tail: the gateway mirror merge re-sorts the log by
+    // `at` (id breaks ties), and watermarks are log INDICES. Two rows in one
+    // millisecond (or a clock step back) would come back shuffled — a user
+    // follow-up landing under a member's watermark is lost, or a reply moved
+    // past it is fed back as news and re-drives the member.
+    at: groupChatEntryAt(Number(lastEntry?.at || 0)),
     from,
     // Stored bodies share the prompt's per-line cap (see trimGroupChatLog);
     // cutting here too keeps the duplicate-echo guard comparing like with like.
@@ -1762,9 +1769,6 @@ export function appendGroupChatEntry(
   // loop both committing the same member reply) lands back-to-back and
   // byte-identical. Drop the echo instead of flooding the room. User
   // entries and non-adjacent repeats are never touched.
-  const priorLog = ($groupChats.get()[group] || {}).log || []
-  const lastEntry = priorLog[priorLog.length - 1]
-
   if (isDuplicateGroupAppend(lastEntry, from, entry.text, entry.thread)) {
     return lastEntry
   }

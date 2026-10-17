@@ -538,6 +538,10 @@ def _spawn_hermes_action(
             proc = subprocess.Popen(
                 cmd, **popen_kwargs, creationflags=windows_detach_flags_without_breakaway(),
             )
+    except OSError as exc:
+        # Without this the action log would hold only the started-header for a spawn that never happened.
+        log_file.write(f"{name}: spawn failed: {exc}\n".encode())
+        raise
     finally:
         log_file.close()  # child owns its dup'd fd; failures must close ours too
     _ACTION_RESULTS.pop(name, None)

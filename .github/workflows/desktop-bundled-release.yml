@@ -117,6 +117,10 @@ on:
         description: 'Stable only: build no Microsoft Store bundle and submit none (the claim has no windows-store lane).'
         type: boolean
         default: false
+      windows-smokes-with-bundle:
+        description: 'Stable only: smoke the staged per-arch MSIX packages in the win32-bundle call, beside assembly, instead of after each per-arch build.'
+        type: boolean
+        default: false
     outputs:
       darwin-arm64-receipt-url:
         value: ${{ jobs.stage-receipt-darwin-arm64.outputs.receipt-url }}
@@ -1374,10 +1378,13 @@ jobs:
       public-root: ${{ needs.validate.outputs.public-root }}
       disposable-run: ${{ needs.validate.outputs.disposable-run }}
 
+  # Stable passes windows-smokes-with-bundle: its per-arch calls only build, and
+  # the win32-bundle call smokes both staged MSIX beside assembly, so the bundle
+  # does not wait for a smoke after the slower arch's build.
   smoke-win32-x64:
     name: Smoke Windows x64 MSIX
     needs: [validate, build-win32-x64]
-    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.validate.result == 'success' && needs.validate.outputs.sha != '' && needs.build-win32-x64.result == 'success' && needs.validate.outputs.win32-x64 == 'true' && (inputs.release-phase == '' || inputs.release-phase == 'candidate') && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '') && inputs.skip-tests != true && inputs.skip-signed != true) }}
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.validate.result == 'success' && needs.validate.outputs.sha != '' && ((inputs.windows-smokes-with-bundle != true && needs.build-win32-x64.result == 'success' && needs.validate.outputs.win32-x64 == 'true') || (inputs.windows-smokes-with-bundle == true && needs.validate.outputs.win32-bundle == 'true' && (needs.validate.outputs.win32-x64 != 'true' || needs.build-win32-x64.result == 'success'))) && (inputs.release-phase == '' || inputs.release-phase == 'candidate') && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '') && inputs.skip-tests != true && inputs.skip-signed != true) }}
     permissions:
       contents: read
     uses: ./.github/workflows/desktop-bundle-smoke.yml
@@ -1400,7 +1407,7 @@ jobs:
   smoke-win32-arm64:
     name: Smoke Windows arm64 MSIX
     needs: [validate, build-win32-arm64]
-    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.validate.result == 'success' && needs.validate.outputs.sha != '' && needs.build-win32-arm64.result == 'success' && needs.validate.outputs.win32-arm64 == 'true' && (inputs.release-phase == '' || inputs.release-phase == 'candidate') && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '') && inputs.skip-tests != true && inputs.skip-signed != true) }}
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.validate.result == 'success' && needs.validate.outputs.sha != '' && ((inputs.windows-smokes-with-bundle != true && needs.build-win32-arm64.result == 'success' && needs.validate.outputs.win32-arm64 == 'true') || (inputs.windows-smokes-with-bundle == true && needs.validate.outputs.win32-bundle == 'true' && (needs.validate.outputs.win32-arm64 != 'true' || needs.build-win32-arm64.result == 'success'))) && (inputs.release-phase == '' || inputs.release-phase == 'candidate') && (inputs.upload_release == true || inputs.release-phase == 'candidate' || inputs.build_commit != '' || inputs.channel != '') && inputs.skip-tests != true && inputs.skip-signed != true) }}
     permissions:
       contents: read
     uses: ./.github/workflows/desktop-bundle-smoke.yml
@@ -2441,6 +2448,7 @@ jobs:
           RELEASE_PHASE: ${{ inputs.release-phase }}
           SKIP_TESTS: ${{ inputs.skip-tests }}
           SKIP_SIGNED: ${{ inputs.skip-signed }}
+          WINDOWS_SMOKES_WITH_BUNDLE: ${{ inputs.windows-smokes-with-bundle }}
         run: |
           python - <<'PY'
           import json, os
@@ -2451,7 +2459,8 @@ jobs:
           selected = {group: outputs.get(group) == 'true' for group in JOB_GROUPS}
           require_success(needs, phase_jobs(selected, os.environ['RELEASE_PHASE'],
                                             skip_tests=os.environ['SKIP_TESTS'] == 'true',
-                                            skip_signed=os.environ['SKIP_SIGNED'] == 'true'))
+                                            skip_signed=os.environ['SKIP_SIGNED'] == 'true',
+                                            windows_smokes_with_bundle=os.environ.get('WINDOWS_SMOKES_WITH_BUNDLE') == 'true'))
           PY
 
   publish-canary:

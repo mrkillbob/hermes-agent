@@ -1335,7 +1335,12 @@ def _apply_context_engine_selection(
         # The selection can be raw clones of the transcript; a protected route must not see a sent note.
         projected = project_skills_notes(
             agent, selected if all(a is b for a, b in zip(stripped, selected)) else stripped, sidecar_rows)
-        return keep_newest_skills_note(agent, projected)
+        # A selection built from the transcript carries the ``[screenshot]`` placeholders the request
+        # copy had just been replayed out of; re-attach the retained images on what is actually sent.
+        from agent.image_replay import replay_for_agent
+        kept = keep_newest_skills_note(agent, projected)
+        replay_for_agent(agent, kept)
+        return kept
     logger.warning(
         "Context engine select_context returned an invalid value "
         "(not a non-empty list of dicts); ignoring (session=%s)", session_label,

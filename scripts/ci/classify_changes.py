@@ -41,6 +41,12 @@ Lanes:
   lives under ``apps/``, so without this lane a Rust change matched ``frontend``
   and only the TypeScript matrix ran.
 * ``mcp_catalog`` — bundled MCP catalog / installer review.
+* ``catalog``     — the plugin-catalog tests (catalog-tests.yml). A diff made
+  only of catalog entry data (``plugin-catalog/*.yaml``, ``contributors/emails/``)
+  runs this lane INSTEAD of the Python suite: those files are data that a known
+  set of tests reads, so a one-entry PR need not run 23k tests on three OSes.
+  ``plugin-catalog/README.md`` is not entry data (a docs page mirrors it), and
+  any other file in the diff brings the full Python suite back.
 * ``remote_backends`` — the SSH and Docker terminal backends against a real
   sshd container and the runner's Docker daemon (remote-backends.yml). Every
   other test of those backends is mocked, so a change to the backends, the
@@ -142,6 +148,10 @@ _CI_REVIEW_FILES = {
     ".prettierrc",
 }
 _CI_REVIEW_PATHS = (".github/workflows/", ".github/actions/")
+
+# Catalog entry data: read by the catalog tests and the Plugin Catalog CI
+# admission gate, executed by nothing. Same set that gate allows in an entry PR.
+_CATALOG_DATA = ("plugin-catalog/", "contributors/emails/")
 
 # Supply-chain scan: files that can execute code at install/import time.
 _SCAN_EXTS = (".py", ".pth")
@@ -575,6 +585,10 @@ def _py_irrelevant(p: str) -> bool:
     )
 
 
+def _is_catalog_data(p: str) -> bool:
+    return p.startswith(_CATALOG_DATA) and p not in _PY_RELEVANT_CONTRACT_FILES
+
+
 def _py_test_only(p: str) -> bool:
     """Is ``p`` inside the test suite (never shipped / imported by the product)?
 
@@ -645,8 +659,10 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
     lane on.
     """
     files = [f.strip() for f in files if f.strip()]
-    python = any(not _py_irrelevant(f) for f in files)
-    python_prod = any(not _py_irrelevant(f) and not _py_test_only(f) for f in files)
+    catalog = any(_is_catalog_data(f) for f in files)
+    code = [f for f in files if not _is_catalog_data(f)]
+    python = any(not _py_irrelevant(f) for f in code)
+    python_prod = any(not _py_irrelevant(f) and not _py_test_only(f) for f in code)
     frontend = any(
         f.startswith(_FRONTEND) or f in _ROOT_NPM or f in _FRONTEND_FILES
         or f.startswith("tests-js/")
@@ -675,6 +691,7 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         "mcp_catalog": any(_is_mcp_catalog(f) for f in files),
         "ci_review": any(_is_ci_review(f) for f in files),
         "remote_backends": any(f.startswith(_REMOTE_BACKEND_PATHS) for f in files),
+        "catalog": catalog,
         **{lane: run_e2e or on for lane, on in _slow_lanes(files).items()},
     }
     consumers = [c for f in files for c in _SHARED_FIXTURE_CONSUMERS.get(f, ())]
@@ -701,6 +718,7 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         # when the diff touches their own paths (workflow files included) or
         # the run-e2e label is set, so a workflow-only PR skips ~2.5h of
         # Windows/Linux E2E runner time. An empty diff still runs everything.
+        ret["catalog"] = True
         ret.update(dict.fromkeys(_slow_lanes([]) if not files else ("docker", "nix"), True))
 
         # explicitly skip mcp catalog here. it's not needed unless those files are modified.

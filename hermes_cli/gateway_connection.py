@@ -142,7 +142,7 @@ class GatewayConnection:
                         raise self._error
                     return
                 thread = self._thread
-                if thread is not None and self.closed:
+                if thread is not None and self.closed and thread is not threading.current_thread():
                     # A completed dial publishes its error before its loop thread exits. Do not
                     # mistake that final teardown for a dial in progress, or reuse its stale error.
                     thread.join(max(deadline - time.monotonic(), 0))
