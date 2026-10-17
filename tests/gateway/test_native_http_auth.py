@@ -34,7 +34,10 @@ def daemon(tmp_path):
         'auxiliary': {'title_generation': {'enabled': False}},
     }))
     root = Path(__file__).resolve().parents[2]
-    env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
+    # Windows needs SystemRoot to initialize Winsock in the child interpreter.
+    # Keep this whitelist narrow: the gateway must not inherit provider credentials.
+    env = {k: os.environ[k] for k in ('PATH', 'SYSTEMROOT', 'LANG', 'TZ', 'TIRITH_ENABLED')
+           if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home),
                PYTHONPATH=str(root), PYTHONUNBUFFERED='1',
                HERMES_DASHBOARD_SESSION_TOKEN='normal-http-owner')
