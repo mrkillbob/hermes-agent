@@ -104,7 +104,8 @@ async function assertStagedBranch(page, expectedSha, log) {
   }
 }
 
-async function waitForUpdate(page, { log, shot }) {
+async function waitForUpdate(page, { log, shot, expectedTargetSha }) {
+  if (expectedTargetSha) await assertStagedBranch(page, expectedTargetSha, log)
   const update = page.getByRole('button', { name: /update now/i }).first()
   const details = page.getByRole('button', { name: /^see what['’]s new$/i }).first()
   const deadline = Date.now() + 180_000

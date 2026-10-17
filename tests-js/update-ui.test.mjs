@@ -14,7 +14,7 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-function fixture({ details = true, available = true, statusOverride } = {}) {
+function fixture({ details = true, available = true, statusOverride, bridgeStatuses } = {}) {
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(0)
   const { window } = new JSDOM('<body></body>', { runScripts: 'outside-only' })
@@ -28,18 +28,22 @@ function fixture({ details = true, available = true, statusOverride } = {}) {
     document.body.append(button)
     return button
   }
+  let status = statusOverride || { supported: true, behind: available ? 1 : 0 }
+  const pendingStatuses = [...(bridgeStatuses || [])]
   const revealUpdate = () => addButton('Update now')
   const check = addButton('Check now', () => {
     check.disabled = true
-    if (!available) return
+    if (!available || (bridgeStatuses && status.error)) return
     if (details) {
       const more = addButton("See what's new", () => { more.remove(); revealUpdate() })
     } else {
       revealUpdate()
     }
   })
-  const status = statusOverride || { supported: true, behind: available ? 1 : 0 }
-  window.hermesDesktop = { updates: { check: async () => status } }
+  window.hermesDesktop = { updates: { check: async () => {
+    status = pendingStatuses.shift() || status
+    return status
+  } } }
   const page = {
     getByRole(role, { name }) {
       expect(role).toBe('button')
@@ -67,6 +71,38 @@ test.each([true, false])('reveals the actual update button without applying (det
   expect(await update.isVisible()).toBe(true)
   expect(f.clicks).toEqual(details ? ['Check now', "See what's new"] : ['Check now'])
   expect(f.shot).toHaveBeenCalledWith(f.page, '04-update-available')
+})
+
+test('preflights staged main and recovers a cached ref race before requiring the update button', async () => {
+  const sha = 'a'.repeat(40)
+  const race = { supported: true, error: 'fetch-failed', message: "error: cannot lock ref 'refs/remotes/origin/main'" }
+  const ready = { supported: true, branch: 'main', currentSha: 'b'.repeat(40), targetSha: sha, behind: 1 }
+  const f = fixture({ statusOverride: race, bridgeStatuses: [race, ready] })
+  const update = await updateUi.waitForUpdate(f.page, { ...f, expectedTargetSha: sha })
+  expect(await update.isVisible()).toBe(true)
+  expect(f.log.mock.calls.filter(([line]) => line.startsWith('[source-branch-check]'))).toHaveLength(2)
+  expect(f.clicks).toEqual(['Check now', "See what's new"])
+})
+
+test.each([
+  { supported: true, branch: 'main', currentSha: 'b'.repeat(40), targetSha: 'c'.repeat(40), behind: 1 },
+  { supported: true, error: 'fetch-failed', message: 'fatal: Authentication failed' },
+])('refuses a staged update after an unrelated or failed bridge check: %j', async statusOverride => {
+  const f = fixture({ statusOverride })
+  await expect(updateUi.waitForUpdate(f.page, { ...f, expectedTargetSha: 'a'.repeat(40) }))
+    .rejects.toThrow(/refusing to click/)
+  expect(f.clicks).toEqual([])
+  expect(f.log.mock.calls.filter(([line]) => line.startsWith('[source-branch-check]'))).toHaveLength(1)
+})
+
+test('a valid staged target still requires a visible Update now button', async () => {
+  const sha = 'a'.repeat(40)
+  const f = fixture({ available: false, statusOverride: {
+    supported: true, branch: 'main', currentSha: 'b'.repeat(40), targetSha: sha, behind: 1,
+  } })
+  await expect(updateUi.waitForUpdate(f.page, { ...f, expectedTargetSha: sha }))
+    .rejects.toThrow(/"Update now" never appeared/)
+  expect(f.shot).toHaveBeenCalledWith(f.page, 'ERROR-no-update-now')
 })
 
 test('checks the live Desktop bridge against the staged target before opening About', async () => {
