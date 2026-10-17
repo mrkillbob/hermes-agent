@@ -565,11 +565,12 @@ def preflight_db_writability(db_path: Path, *, db_label: str = "state.db") -> No
         if in_scope and os.access(p, os.R_OK | os.W_OK):
             logger.info("%s preflight: repaired read-only %s (chmod u+rw%s)", db_label, p, x)
             continue
-        if p in sidecars:
+        if not is_dir:
             try:
                 p.stat()
             except FileNotFoundError:
-                # SQLite can checkpoint and remove sidecars after enumeration.
+                # SQLite can checkpoint and remove sidecars after enumeration, and a concurrent opener can
+                # quarantine the database file itself: a path that vanished is not a permission problem.
                 continue
             except OSError:
                 pass  # Other metadata errors still refuse access below.

@@ -38,6 +38,18 @@ from hermes_state import SessionDB
 # ---------------------------------------------------------------------------
 # AST invariant: the auto-reset block re-syncs the topic binding
 # ---------------------------------------------------------------------------
+_RESET_CALLS = {"reset_session", "reset_and_rehome_messages"}
+
+
+def _reset_call_name(node) -> str | None:
+    """The reset call's name when *node* is ``store.reset_session(...)`` or ``reset_and_rehome_messages(...)``."""
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+    return name if name in _RESET_CALLS else None
+
+
 def _find_compression_exhausted_reset_block() -> ast.If:
     """Return the ``if agent_result.get('compression_exhausted') ...`` block."""
     tree = ast.parse(inspect.getsource(gateway_run_turn_persistence))
@@ -54,16 +66,11 @@ def _find_compression_exhausted_reset_block() -> ast.If:
         if "compression_exhausted" in consts:
             # Only the branch that actually performs the reset, not the
             # earlier classifier that merely reads the flag into a bool.
-            calls = {
-                sub.func.attr
-                for sub in ast.walk(node)
-                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
-            }
-            if "reset_session" in calls:
+            if any(_reset_call_name(sub) for sub in ast.walk(node)):
                 return node
     raise AssertionError(
         "Could not locate the compression-exhausted auto-reset block "
-        "(if agent_result.get('compression_exhausted') ... reset_session) "
+        "(if agent_result.get('compression_exhausted') ... reset_session / reset_and_rehome_messages) "
         "in gateway/run_turn_persistence.py — the structure changed or the AST walker is stale."
     )
 
@@ -82,11 +89,7 @@ class TestAutoResetBlockReSyncsBinding:
                 # assignment value is Await(Call(...)), not a bare Call.
                 if isinstance(val, ast.Await):
                     val = val.value
-                if (
-                    isinstance(val, ast.Call)
-                    and isinstance(val.func, ast.Attribute)
-                    and val.func.attr == "reset_session"
-                ):
+                if _reset_call_name(val):
                     captured = True
         assert captured, (
             "gateway/run.py auto-reset block calls reset_session() but discards "

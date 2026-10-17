@@ -261,7 +261,7 @@ _CODEX_ENCRYPTED_REASONING_REPLAY = re.compile(r"^gAAAA[A-Za-z0-9_=-]{20,}$")
 _ANTHROPIC_THINKING_SIGNATURE_REPLAY = re.compile(r"^[A-Za-z0-9+/]{20,8192}={0,2}$")
 _BOUNDED_DURATION = re.compile(r"^(?:0|[1-9][0-9]{0,6})(?:ms|s|m|h)$")
 _BOUNDED_CLI_WORD = re.compile(r"^--[a-z]+(?:-[a-z]+)*$")
-_SAFE_DIAGNOSTIC_STATUS_WORDS = frozenset({
+_SAFE_CONTEXT_WORDS = frozenset({
     "PASS",
     "WARN",
     "SUMMARY",
@@ -278,10 +278,10 @@ _SAFE_DIAGNOSTIC_STATUS_WORDS = frozenset({
     # as canonical Base64 by coincidence.
     "APPROVE",
     "TEXT",
-    # These words occur as ordinary labels in generated/tool context and are
-    # too short and low-entropy to carry a useful encoded payload.
-    "TOOL",
-    "WINS",
+    # Fixed ordinary labels and prose atoms. Only these exact spellings are
+    # exempt; arbitrary uppercase words and hyphenated blobs remain scanned.
+    "TOOL", "WINS", "IDLE",
+    "Cross-department",  # Ordinary Kanban prose, not arbitrary hyphenated blobs.
 })
 _LINTER_DIAGNOSTIC_CODE = re.compile(r"^[A-Z][0-9]{3,4}$")
 _PYTHON_DUNDER_IDENTIFIER = re.compile(r"^__[a-z][a-z0-9_]{0,62}__$")
@@ -935,8 +935,8 @@ def _canonical_base64_candidate(candidate: str) -> bool:
         return False
     if candidate in _PROTOCOL_GRAMMAR_ATOMS:
         return False
-    if candidate in _SAFE_DIAGNOSTIC_STATUS_WORDS:
-        # Exact status labels are not an encoding channel; treating them as
+    if candidate in _SAFE_CONTEXT_WORDS:
+        # Exact context words are not an encoding channel; treating them as
         # Base64 strands workers while replaying ordinary CLI output.
         return False
     if _LINTER_DIAGNOSTIC_CODE.fullmatch(candidate):

@@ -2779,7 +2779,7 @@ export interface CatalogEntry {
   repo: string;
   sha: string;
   sha_short: string;
-  tier: "official" | "community";
+  tier: "official" | "verified" | "community";
   maintainer: string;
   requires_hermes: string;
   platforms: string[];
