@@ -46,7 +46,7 @@ describe('installed runtime gate', () => {
     await expect(resolveHermesBackend()).resolves.toBe('bootstrap-needed')
     expect(probe).not.toHaveBeenCalled()
     // main.ts ensureRuntime: the re-resolve after a successful bootstrap.
-    await expect(runtime.afterInstall(resolveHermesBackend)).resolves.toBe(active)
+    await expect(runtime.afterInstall(resolveHermesBackend, {})).resolves.toBe(active)
     // Later resolves (pool backends, TUI resume) keep the new runtime too.
     await expect(resolveHermesBackend()).resolves.toBe(active)
     expect(probe).toHaveBeenCalledTimes(2)
