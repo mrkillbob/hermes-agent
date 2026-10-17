@@ -213,6 +213,9 @@ class _FleetHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return
+        from hermes_cli.fleet_claim_recovery_http import get
+        if get(self):
+            return
         path = urlsplit(self.path).path.rstrip("/")
         if path == "/v1/fleet/health":
             self._respond(HTTPStatus.OK, {"ok": True})
@@ -243,6 +246,9 @@ class _FleetHandler(BaseHTTPRequestHandler):
             self._respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
     def _dispatch_post(self, path: str) -> None:
+        from hermes_cli.fleet_claim_recovery_http import post
+        if post(self, path):
+            return
         if path == "/v1/fleet/runners/register":
             body = self._json_body()
             capability = RunnerCapability.from_dict(self._protocol_body(body, "runner_capability"))

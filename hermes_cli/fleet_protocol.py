@@ -332,3 +332,125 @@ def decode_message(payload: bytes, *, expected_kind: str | None = None) -> dict[
         raise ProtocolError("fleet message body must be an object")
     message["body"] = body
     return message
+
+
+CLAIM_RECOVERY_VERSION = "hermes.fleet.claim-recovery.v1"
+# GET reconciliation must fit the stdlib server request-line limit even after
+# worst-case URL quoting (three bytes per canonical JSON byte).
+MAX_CLAIM_REQUEST_BYTES = 16_384
+_HEX_ID = re.compile(r"^[0-9a-f]{64}$")
+
+
+def recovery_id(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not _HEX_ID.fullmatch(value):
+        raise ProtocolError(f"invalid {field}")
+    return value
+
+
+@dataclass(frozen=True)
+class ClaimRequest:
+    version: str
+    store_id: str
+    cutover_id: str
+    installation_id: str
+    nonce: str
+    capability: RunnerCapability
+    now: float | None = None
+    lease_seconds: float = 60.0
+
+    def __post_init__(self):
+        if self.version != CLAIM_RECOVERY_VERSION:
+            raise ProtocolError("unsupported claim recovery version")
+        for field in ("store_id", "cutover_id", "installation_id", "nonce"):
+            recovery_id(getattr(self, field), field)
+        if not isinstance(self.capability, RunnerCapability):
+            raise ProtocolError("invalid request capability")
+        if self.now is not None:
+            _optional_finite_nonnegative_float(self.now, "now")
+        lease = _optional_finite_nonnegative_float(self.lease_seconds, "lease_seconds")
+        if lease is None or not 0 < lease <= 86400:
+            raise ProtocolError("invalid lease_seconds")
+        if len(json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode()) > MAX_CLAIM_REQUEST_BYTES:
+            raise ProtocolError("claim request too large for exact GET reconciliation")
+
+    def to_dict(self):
+        return {"version": self.version, "store_id": self.store_id,
+                "cutover_id": self.cutover_id, "installation_id": self.installation_id,
+                "nonce": self.nonce, "capability": self.capability.to_dict(),
+                "now": self.now, "lease_seconds": self.lease_seconds}
+
+    @property
+    def fingerprint(self):
+        import hashlib
+        return hashlib.sha256(json.dumps(self.to_dict(), sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+    @classmethod
+    def from_dict(cls, value):
+        fields = {"version", "store_id", "cutover_id", "installation_id", "nonce",
+                  "capability", "now", "lease_seconds"}
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ProtocolError("incomplete claim request")
+        return cls(**{**value, "capability": RunnerCapability.from_dict(value["capability"])})
+
+
+@dataclass(frozen=True)
+class ClaimOutcome:
+    request: ClaimRequest
+    kind: str
+    claim: dict[str, Any] | None = None
+
+    def __post_init__(self):
+        if self.kind not in {"absent", "claimed", "empty", "sealed_empty"}:
+            raise ProtocolError("invalid claim outcome")
+        if self.kind != "claimed":
+            if self.claim is not None:
+                raise ProtocolError("non-claim outcome contains claim")
+            return
+        fields = {"task_id", "claim_id", "node_id", "runner_profile", "lease_expires_at", "attempt"}
+        if not isinstance(self.claim, dict) or set(self.claim) != fields:
+            raise ProtocolError("incomplete recovered claim")
+        for field in ("task_id", "claim_id", "node_id", "runner_profile"):
+            _required_text(self.claim[field], field)
+        if (self.claim["node_id"] != self.request.capability.node_id
+                or self.claim["runner_profile"] != self.request.capability.profile):
+            raise ProtocolError("recovered claim owner mismatch")
+        if _nonnegative_int(self.claim["attempt"], "attempt") < 1:
+            raise ProtocolError("invalid recovered attempt")
+        if _optional_finite_nonnegative_float(self.claim["lease_expires_at"], "lease") is None:
+            raise ProtocolError("missing recovered lease")
+
+    def to_dict(self):
+        return {"version": CLAIM_RECOVERY_VERSION, "request": self.request.to_dict(),
+                "fingerprint": self.request.fingerprint, "kind": self.kind, "claim": self.claim}
+
+    @classmethod
+    def from_dict(cls, value, *, request):
+        if (not isinstance(value, dict)
+                or set(value) != {"version", "request", "fingerprint", "kind", "claim"}
+                or value["version"] != CLAIM_RECOVERY_VERSION):
+            raise ProtocolError("incomplete claim outcome")
+        binding = ClaimRequest.from_dict(value["request"])
+        if binding != request or value["fingerprint"] != request.fingerprint:
+            raise ProtocolError("claim request binding mismatch")
+        return cls(request, value["kind"], value["claim"])
+
+
+def validate_recovery_capabilities(value):
+    if (not isinstance(value, dict)
+            or set(value) != {"version", "store_id", "cutover", "resolve_or_seal"}
+            or value["version"] != CLAIM_RECOVERY_VERSION
+            or value["resolve_or_seal"] is not True):
+        raise ProtocolError("unsupported claim recovery capability")
+    recovery_id(value["store_id"], "store_id")
+    receipt = value["cutover"]
+    if receipt is not None:
+        if (not isinstance(receipt, dict)
+                or set(receipt) != {"version", "store_id", "cutover_id", "scope", "legacy_claims"}
+                or receipt["version"] != CLAIM_RECOVERY_VERSION
+                or receipt["store_id"] != value["store_id"]
+                or receipt["scope"] != "store-wide"
+                or receipt["legacy_claims"] != "permanently_closed"):
+            raise ProtocolError("invalid legacy cutover receipt")
+        recovery_id(receipt["cutover_id"], "cutover_id")
+    return value
