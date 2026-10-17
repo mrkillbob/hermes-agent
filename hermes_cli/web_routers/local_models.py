@@ -829,13 +829,8 @@ def _repriced_quickstart(job: dict[str, Any], body: QuickstartBody, variant):
 @router.post("/api/local-models/quickstart")
 async def local_models_quickstart(body: QuickstartBody, request: Request, profile: Optional[str] = None):
     """Explicit setup retains an eligible root gateway before accepting any slow work."""
-    from hermes_cli.local_runtime.ownership import current_owner
-
     generation = bootstrap.current_boot_generation()
-    with _config_profile_scope(profile):
-        if current_owner(for_scope=True) is None:
-            await local_models_control(request, profile)
-        _runtime_control_owner()
+    _prepare_runtime_control(request, profile, required=True)
     try:
         return await run_in_threadpool(_accept_quickstart, body, profile, generation)
     except RuntimeError as exc:
@@ -883,16 +878,26 @@ def _accept_quickstart(body: QuickstartBody, profile: Optional[str], generation:
             "needs_runtime": need_runtime, "needs_download": need_download, "download_bytes": download_bytes}
 
 
+def _prepare_runtime_control(request: Request, profile: Optional[str], *, required: bool) -> bool:
+    """Loop-only preflight for explicit model mutations; consumers may still adopt on Activate."""
+    from gateway.run_local_runtime import retain_gateway_for_local_models
+    from hermes_cli.local_runtime.ownership import current_owner
+
+    with _config_profile_scope(profile):
+        if current_owner(for_scope=True) is not None:
+            return True
+        runner = getattr(request.app.state, 'gateway_runner', None)
+        if runner is not None and retain_gateway_for_local_models(runner):
+            return True
+        if required:
+            _runtime_control_owner()
+    return False
+
+
 @router.post("/api/local-models/control")
 async def local_models_control(request: Request, profile: Optional[str] = None):
     """Explicitly retain an already-ready root gateway for setup; never replace its work."""
-    from gateway.run_local_runtime import retain_gateway_for_local_models
-
-    runner = getattr(request.app.state, 'gateway_runner', None)
-    with _config_profile_scope(profile):
-        if runner is None or not retain_gateway_for_local_models(runner):
-            raise HTTPException(status_code=409, detail=(
-                "This gateway cannot provide durable local-model control; start the main Hermes gateway from the default profile"))
+    _prepare_runtime_control(request, profile, required=True)
     return {"control_available": True}
 
 
@@ -938,15 +943,29 @@ def _runtime_control_owner():
 _SERVER_ACTIONS = {"stop": _stop_server, "start": _start_server}
 
 
+def _dispatch_server_action(action: str, profile: Optional[str], generation: int) -> None:
+    with _config_profile_scope(profile):
+        if action == 'start':
+            with bootstrap.runtime_control_scope(generation):
+                _SERVER_ACTIONS[action]()
+        else:
+            _SERVER_ACTIONS[action]()
+
+
 @router.post("/api/local-models/server")
-async def local_models_server(body: ServerActionBody):
-    """Turn the local engine off (stop the server, free ALL GPU memory, disable auto-start) or back on. Unlike
-    per-model eject the off switch IS durable: the user said off, so boots stay off until they say on."""
+async def local_models_server(body: ServerActionBody, request: Request, profile: Optional[str] = None):
+    """Start may retain its root gateway; Stop requires an existing owner and cancels setup."""
     action = (body.action or "").strip().lower()
     if action not in _SERVER_ACTIONS:
         raise HTTPException(status_code=400, detail="action must be 'stop' or 'start'")
+    generation = bootstrap.current_boot_generation()
+    if action == 'start':
+        _prepare_runtime_control(request, profile, required=True)
+    else:
+        with _config_profile_scope(profile):
+            _runtime_control_owner()
     try:
-        await asyncio.to_thread(_SERVER_ACTIONS[action])
+        await asyncio.to_thread(_dispatch_server_action, action, profile, generation)
     except HTTPException:
         raise
     except Exception as exc:
@@ -974,11 +993,18 @@ def local_models_eject(body: ModelEjectBody):
 
 
 @router.post("/api/local-models/activate")
-async def local_models_activate(body: ModelActivateBody, profile: Optional[str] = None):
-    """Make a downloaded model the default for new chats: a config write via the same machinery as
-    /api/model/set plus making sure the server is up. NO model loading (residency v2: models load on first
-    inference; an empty router costs nothing). Kept as a job for UI continuity."""
+async def local_models_activate(body: ModelActivateBody, request: Request, profile: Optional[str] = None):
+    """Capture intent on admission; runtime lock waits must not block HTTP Stop dispatch."""
     generation = bootstrap.current_boot_generation()
+    _prepare_runtime_control(request, profile, required=False)
+    try:
+        return await run_in_threadpool(_accept_activation, body, profile, generation)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _accept_activation(body: ModelActivateBody, profile: Optional[str], generation: int):
+    """Register the worker under the transition fence on a worker thread."""
     # Split variants stage under their first part — resolve like the other routes.
     if body.model_id not in bootstrap.staged_model_ids():
         raise HTTPException(status_code=404, detail=f"{body.model_id} is not downloaded")

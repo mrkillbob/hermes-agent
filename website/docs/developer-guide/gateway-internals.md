@@ -24,6 +24,9 @@ uses captured launch context and neither boots inference nor changes enabled set
 Named, standalone, draining and stopping gateways cannot acquire this capability.
 The explicit quickstart HTTP operation performs eligible retention before dispatching its
 synchronous planning worker, so Desktop and terminal use the same ownership contract.
+Explicit root Start and Activate can retain the same eligible gateway too. Stop does not
+acquire this capability from a consumer. Registration and activation lock waits run on
+worker threads, leaving the gateway loop able to dispatch Stop during a boot.
 
 Bootstrap serializes transitions inside the process and across processes. Unavailable or
 contended boot locks refuse mutation. A living or uncertain foreign owner is never replaced,

@@ -50,6 +50,7 @@ def test_stop_terminalizes_paused_setup_and_releases_single_flight(client, setup
     lm._QUICKSTART_LOCK.release()
 
 
+@pytest.mark.platforms("any")
 def test_stop_requests_active_transfer_cancel_but_waits_for_writer_cleanup(client, setup_plan, monkeypatch):
     lm = setup_plan
     entered, quiescing, release = threading.Event(), threading.Event(), threading.Event()
@@ -153,3 +154,69 @@ def test_start_failure_and_late_cancellation_release_once(setup_plan, monkeypatc
     assert job['status'] == 'error' and job['error'] == 'thread start failed'
     late[0]()
     assert released == [True] and job['job_id'] not in lm._RUNNING
+
+
+@pytest.mark.asyncio
+async def test_activation_registration_does_not_block_stop_dispatch(client, setup_plan, monkeypatch):
+    import asyncio
+    from starlette.requests import Request
+
+    lm = setup_plan
+    monkeypatch.setattr(lm.bootstrap, 'staged_model_ids', lambda: {'fixture'})
+    monkeypatch.setattr(lm, '_spawn_job', lambda *a, **k: None)
+    held, loop_serviced = threading.Event(), threading.Event()
+    starved = []
+    def owner_boot():
+        with lm.bootstrap._TRANSITION_LOCK:
+            held.set()
+            starved.append(not loop_serviced.wait(2))
+    boot = threading.Thread(target=owner_boot)
+    boot.start()
+    assert held.wait(5)
+    async def dispatch_other_request():
+        loop_serviced.set()
+    try:
+        activation = asyncio.create_task(lm.local_models_activate(
+            lm.ModelActivateBody(model_id='fixture'), Request({'type': 'http', 'app': client.app})))
+        heartbeat = asyncio.create_task(dispatch_other_request())
+        await asyncio.wait_for(asyncio.gather(activation, heartbeat), 5)
+    finally:
+        loop_serviced.set()
+        boot.join(5)
+    assert not boot.is_alive() and starved == [False], 'Activate prevented the loop dispatching Stop'
+
+
+@pytest.mark.parametrize('action', ['start', 'activate'])
+def test_explicit_root_controls_also_retain_ready_idle_gateway(client, setup_plan, monkeypatch, action):
+    from gateway.run_local_runtime import start_owned_local_runtime
+    from hermes_cli import web_server
+    from hermes_cli.local_runtime import ownership
+
+    lm = setup_plan
+    monkeypatch.setattr(ownership, '_OWNER', None)
+    runner = SimpleNamespace(_running=True, _draining=False, session_runtime_descriptor={'state': 'ready'})
+    start_owned_local_runtime(runner, idle_exit=True)
+    monkeypatch.setattr(web_server.app.state, 'gateway_runner', runner, raising=False)
+    monkeypatch.setattr(lm.bootstrap, 'staged_model_ids', lambda: {'fixture'})
+    monkeypatch.setattr(lm, '_spawn_job', lambda *a, **k: None)
+    monkeypatch.setattr(lm, '_start_local_server', lambda *a: None)
+    if action == 'start':
+        response = client.post('/api/local-models/server', json={'action': action})
+    else:
+        response = client.post('/api/local-models/activate', json={'model_id': 'fixture'})
+    assert response.status_code == 200, response.text
+    assert runner._idle_exit_promoted and runner._local_runtime_owner is ownership.current_owner()
+
+
+def test_stop_does_not_retain_a_consumer_gateway(client, setup_plan, monkeypatch):
+    from gateway.run_local_runtime import start_owned_local_runtime
+    from hermes_cli import web_server
+    from hermes_cli.local_runtime import ownership
+
+    monkeypatch.setattr(ownership, '_OWNER', None)
+    runner = SimpleNamespace(_running=True, _draining=False, session_runtime_descriptor={'state': 'ready'})
+    start_owned_local_runtime(runner, idle_exit=True)
+    monkeypatch.setattr(web_server.app.state, 'gateway_runner', runner, raising=False)
+    response = client.post('/api/local-models/server', json={'action': 'stop'})
+    assert response.status_code == 409, response.text
+    assert not runner._idle_exit_promoted and ownership.current_owner() is None

@@ -121,7 +121,8 @@ asks before starting or awaiting one that stays in the background. If the root g
 ready but set to exit when idle, setup asks whether to keep that same gateway running after clients
 disconnect. This choice preserves accepted work and does not enable inference or change settings.
 Desktop's explicit setup action also keeps an eligible root gateway running without replacing
-it or interrupting accepted conversations. Named profiles may
+it or interrupting accepted conversations. Explicit Start and model activation can do the same
+from the default profile; Stop requires an already-established main gateway. Named profiles may
 activate models served by the shared router; install new models from the default profile.
 Newly downloaded models and engine updates take effect after you explicitly
 stop/start the local server from the default-profile gateway. Staging changes does not restart a

@@ -91,6 +91,8 @@ def test_activate_skips_rescan_when_owned_server_already_lists_the_model(
 
 @pytest.mark.asyncio
 async def test_deferred_refresh_does_not_assign_an_unserved_model(monkeypatch):
+    from fastapi import FastAPI, HTTPException
+    from starlette.requests import Request
     from hermes_cli.web_routers import local_models as lm
     from hermes_constants import get_hermes_home
 
@@ -108,7 +110,9 @@ async def test_deferred_refresh_does_not_assign_an_unserved_model(monkeypatch):
     monkeypatch.setattr(lm, '_set_runtime_enabled', lambda value: writes.append(('enabled', value)))
     monkeypatch.setattr(lm, '_assign_default', lambda *args: writes.append(('assigned',)))
     monkeypatch.setattr(lm, '_spawn_job', lambda job, name, run, **kwargs: run())
-    with pytest.raises(RuntimeError, match='Stop/start the local server'):
-        await lm.local_models_activate(lm.ModelActivateBody(model_id='fixture'))
+    with pytest.raises(HTTPException, match='Stop/start the local server') as error:
+        await lm.local_models_activate(lm.ModelActivateBody(model_id='fixture'),
+                                       Request({'type': 'http', 'app': FastAPI()}))
+    assert error.value.status_code == 409
     assert writes == []
     assert config.read_text() == before
