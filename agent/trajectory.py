@@ -1,5 +1,6 @@
 """Trajectory saving + scratchpad helpers (``_convert_to_trajectory_format`` stays an AIAgent method — batch_runner.py calls it)."""
 
+import errno
 import json
 import gzip
 import io
@@ -25,12 +26,21 @@ def has_incomplete_scratchpad(content: str) -> bool:
 
 
 def _lock_append_handle(f, acquire: bool) -> None:
-    """Exclusive whole-file lock on an append handle: ``flock`` on POSIX, a 1-byte
-    ``msvcrt.locking`` range at offset 0 on Windows (append position is restored by the OS)."""
+    """Blocking exclusive lock: ``flock`` on POSIX, byte zero on Windows.
+
+    The CRT's blocking lock gives up after ten attempts. Keep waiting on that
+    specific contention verdict, like flock, instead of dropping a queued append.
+    """
     if os.name == "nt":
         import msvcrt
         f.seek(0)
-        msvcrt.locking(f.fileno(), msvcrt.LK_LOCK if acquire else msvcrt.LK_UNLCK, 1)
+        while True:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK if acquire else msvcrt.LK_UNLCK, 1)
+                break
+            except OSError as error:
+                if not acquire or error.errno != errno.EDEADLK:
+                    raise
     else:
         import fcntl
         fcntl.flock(f.fileno(), fcntl.LOCK_EX if acquire else fcntl.LOCK_UN)
