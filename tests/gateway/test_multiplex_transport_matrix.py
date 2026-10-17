@@ -177,6 +177,8 @@ def test_inferred_primary_transport_does_not_hide_a_secondary_local_session_poli
     secondary_adapter.policies[source.chat_id] = picked_policy
 
     identity = resolve_identity(source, runner=runner)
-    assert identity.transport_inferred and identity.transport_profile == "default"
+    # A LOCAL source names its own session authority's adapter, so its transport is the secondary's,
+    # never an inference from the primary adapter.
+    assert not identity.transport_inferred and identity.transport_profile == "team_b"
     assert policy_for_source(runner, source) is picked_policy
     assert runner._delivery_adapter_for(source) is secondary_adapter

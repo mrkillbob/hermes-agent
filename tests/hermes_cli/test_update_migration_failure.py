@@ -25,13 +25,14 @@ def test_failed_migration_writes_partial_receipt_and_keeps_pending_marker(tmp_pa
         from hermes_cli import gateway_migrate_guards
 
         plan = SimpleNamespace(already_multiplexed=False, profiles=[object(), object()],
-                               manifest=None, standalone_secondaries=[object()], blocked=False)
+                               manifest=None, standalone_secondaries=[object()], blocked=False, default_home=tmp_path)
         monkeypatch.setattr(gateway_migrate, '_host_supports_migration', lambda: None)
         monkeypatch.setattr(gateway_migrate, '_default_home', lambda: tmp_path)
         monkeypatch.setattr(gateway_migrate, 'build_migration_plan', lambda: plan)
         monkeypatch.setattr(gateway_migrate, 'format_plan', lambda *a, **kw: [])
         monkeypatch.setattr(gateway_migrate_guards, 'auto_migration_opted_out', lambda home: False)
         monkeypatch.setattr(gateway_migrate_guards, 'auto_migration_blockers', lambda plan: [])
+        monkeypatch.setattr(gateway_migrate_guards, 'masked_default_unit', lambda home: None)
         failed_apply = Mock(return_value=False)
         monkeypatch.setattr(gateway_migrate, 'apply_migration', failed_apply)
     monkeypatch.setattr(update_cmd_fleet_verify, '_named_gateways_still_owed', lambda: False)
