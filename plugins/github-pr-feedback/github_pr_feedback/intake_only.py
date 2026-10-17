@@ -11,7 +11,7 @@ import stat
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -296,6 +296,7 @@ def _deliver(card, ledger, kanban):
         return False
     if previous:
         raise IntakeError("pending or uncertain delivery absent; automatic recreation forbidden")
+    kanban.prepare_create(card)  # known local launch failures must not become uncertain
     ledger.set(card, "pending")  # durable and anchored BEFORE the remote create
     try:
         task_id = kanban.create(card)
@@ -315,9 +316,8 @@ def _deliver(card, ledger, kanban):
 
 
 def _same_pr_snapshot(first, second):
-    # The list converter alone supplies updated_at. Every shared security and
-    # admission field remains strict, including head/base identity and labels.
-    return replace(first, updated_at=None) == replace(second, updated_at=None)
+    # Both real converters retain the update marker along with admission identity.
+    return first == second
 
 
 def _collect_intake_cards(policy, github):

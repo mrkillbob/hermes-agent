@@ -620,3 +620,14 @@ plugins enable github-pr-feedback` command before dispatch. The worker still
 uses its own model configuration; its completion hook reads the task's trusted
 control-home ledger. Real-discovery tests cover both the missing-hook failure
 and the enabled policy, rather than manually registering a test callback.
+
+Intake-only `scan-intake` also requires the documented `HERMES_EXECUTABLE`
+absolute executable path for its bounded triage-create command. It performs no
+PATH search or launcher fallback. The adapter validates the configured path at
+construction and again immediately before recording a new pending receipt; a
+known missing, non-executable, or changed launcher holds without a new receipt.
+This passive check cannot guarantee a later launch or acknowledgment succeeds.
+Existing pending/uncertain receipts remain held and are never automatically replayed.
+PR list/detail update timestamps must agree at each race check, alongside the
+other admission fields; this is an additional race marker, not proof that no
+feedback can change after the final read.

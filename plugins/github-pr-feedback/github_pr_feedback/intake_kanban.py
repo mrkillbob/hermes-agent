@@ -1,8 +1,9 @@
-"""Only safe host intake-lookup and bounded triage create; no broad client."""
+"""Passive scoped history and configured bounded triage create; no broad client."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -44,15 +45,30 @@ class IntakeKanban:
     def __init__(self, runner=_run, *, expected_root=None, context=None):
         if expected_root is None or not Path(expected_root).expanduser().is_absolute():
             raise IntakeError("explicit registered intake control root required")
-        executable = Path.home() / ".local/bin/hermes"
-        if not executable.is_absolute():
-            raise IntakeError("absolute owner-home Hermes command required")
         if context is None:
             raise IntakeError("registered passive Kanban context required")
         self._context = context
-        self._hermes = str(executable)
+        self._hermes = self._configured_executable()
         self._expected_root = Path(expected_root).expanduser().resolve()
         self._run = runner
+
+    @staticmethod
+    def _configured_executable():
+        configured = os.environ.get("HERMES_EXECUTABLE", "").strip()
+        executable = Path(configured)
+        try:
+            valid = executable.is_absolute() and executable.is_file() and os.access(executable, os.X_OK)
+        except OSError:
+            valid = False
+        if not valid:
+            raise IntakeError("HERMES_EXECUTABLE must name an executable absolute path")
+        return str(executable)
+
+    def prepare_create(self, card):
+        """Reject known local launch failures before a durable pending receipt."""
+        require_context(self._context, self._expected_root, card.board)
+        if self._configured_executable() != self._hermes:
+            raise IntakeError("HERMES_EXECUTABLE changed during intake; held")
 
     def lookup(self, board, key):
         if board not in set(SCOPES.values()) or not re.fullmatch(
@@ -114,7 +130,7 @@ class IntakeKanban:
         return intake_history.legacy_matches(rows, identity, deadline=deadline)
 
     def create(self, card):
-        require_context(self._context, self._expected_root, card.board)
+        self.prepare_create(card)
         if card.board not in set(SCOPES.values()) or not Path(card.workspace_path).is_dir():
             raise IntakeError("existing intake scope/workspace unavailable")
         try:

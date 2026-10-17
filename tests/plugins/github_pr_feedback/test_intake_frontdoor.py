@@ -130,7 +130,7 @@ def test_policy_preserves_scope_trust_and_refuses_override(tmp_path, monkeypatch
         load_intake_policy(ctx, "mrkillbob/luna-bot")
 
 
-def test_narrow_adapter_only_lookup_and_triage_create(tmp_path):
+def test_narrow_adapter_only_lookup_and_triage_create(tmp_path, configured_hermes_executable):
     github = GitHub()
     card = render_card(policy(tmp_path), github.pr, github.items[0])
     calls = []
@@ -142,7 +142,7 @@ def test_narrow_adapter_only_lookup_and_triage_create(tmp_path):
     kb = IntakeKanban(runner, expected_root=get_default_hermes_root(), context=actual_context())
     assert kb.lookup(card.board, card.idempotency_key) == []
     assert kb.create(card) == "task-1"
-    assert calls[0][0] == str(Path.home() / ".local/bin/hermes")
+    assert calls[0][0] == str(configured_hermes_executable)
     assert len(calls) == 1
     create = calls[0]
     assert "--triage" in create and create[create.index("--assignee") + 1] == "task-intake-router"

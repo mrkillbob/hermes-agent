@@ -70,6 +70,9 @@ class Kanban:
     def legacy_feedback_lookup(self, board, identity):
         return []
 
+    def prepare_create(self, card):
+        pass
+
     def create(self, card):
         self.creates += 1
         value = {

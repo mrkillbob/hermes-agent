@@ -24,6 +24,7 @@ class Transport:
             "base": {"repo": {"full_name": REPO}, "ref": "stable", "sha": "b" * 40},
             "head": {"repo": {"full_name": REPO}, "ref": "feature", "sha": "a" * 40},
             "user": {"login": "mrkillbob"}, "labels": [],
+            "updated_at": "2026-10-17T10:00:00Z",
         }
 
     def run(self, argv):
@@ -45,6 +46,7 @@ class Transport:
                     "base_branch": lambda: row["base"].update(ref="other"),
                     "base_sha": lambda: row["base"].update(sha="c" * 40),
                     "is_draft": lambda: row.update(draft=True),
+                    "updated_at": lambda: row.update(updated_at="2026-10-17T10:01:00Z"),
                 }
                 mutations[self.changed_field]()
             return json.dumps(row)
@@ -64,10 +66,23 @@ def test_real_list_detail_and_feedback_converters_allow_same_pr(tmp_path):
 @pytest.mark.parametrize("read", [1, 2, 3])
 @pytest.mark.parametrize("field", [
     "number", "state", "base_repository", "head_repository", "author_login",
-    "head_ref_name", "head_sha", "labels", "base_branch", "base_sha", "is_draft",
+    "head_ref_name", "head_sha", "labels", "base_branch", "base_sha", "is_draft", "updated_at",
 ])
 def test_shared_pr_identity_change_at_any_reread_holds_delivery(tmp_path, field, read):
     kanban = Kanban()
     result = run(tmp_path, GitHubClient(Transport(field, read)), kanban)
     assert result["status"] == ("held" if read == 3 else "partial")
+    assert result["created"] == 0 and kanban.creates == 0
+
+
+@pytest.mark.parametrize("marker", [None, "malformed", "missing"])
+def test_real_detail_missing_or_invalid_marker_cannot_match_list(tmp_path, marker):
+    transport = Transport()
+    if marker == "missing":
+        transport.detail.pop("updated_at")
+    else:
+        transport.detail["updated_at"] = marker
+    kanban = Kanban()
+    result = run(tmp_path, GitHubClient(transport), kanban)
+    assert result["status"] == "partial"
     assert result["created"] == 0 and kanban.creates == 0
