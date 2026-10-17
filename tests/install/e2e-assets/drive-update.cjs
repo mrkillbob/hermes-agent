@@ -119,7 +119,7 @@ async function main() {
   }
 
   await openAbout(page, { log, shot, prepare: () => prepareWindowForInput(app, page) })
-  const updateNow = await waitForUpdate(page, { log, shot })
+  const updateNow = await waitForUpdate(page, { log, shot, expectedTargetSha: targetSha })
 
   let appClosed = false
   app.on('close', () => {
