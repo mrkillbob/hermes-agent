@@ -478,7 +478,7 @@ def test_cli_wires_literal_resolve_superseded_feedback_identity(
         argv.append("--allow-merged")
     args = parser.parse_args(argv)
 
-    assert cli.handle_cli_with_context(object(), args) == 0
+    assert cli.handle_cli_with_context(SimpleNamespace(get_config=lambda key, default=None: {"enabled": True}.get(key, default)), args) == 0
     assert seen[0][:3] == ("acme/widgets", 17, HEAD)
     assert seen[0][3] == {
         "comment_id": "42",

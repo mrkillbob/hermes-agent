@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 import subprocess
 import threading
+from types import SimpleNamespace
+
+import pytest
 
 from github_pr_feedback.controller import FeedbackReceipt, PreparedWorktree
 from github_pr_feedback.github_client import (
@@ -1017,7 +1020,7 @@ def test_scoped_repair_dispatch_does_not_read_or_dispatch_other_prs(tmp_path, mo
     cli.setup_cli(None, parser)
     args = parser.parse_args(["dispatch-repair", "--repository", "acme/widgets",
                               "--pr-number", "17", "--head-sha", SHA])
-    assert cli.handle_cli_with_context(None, args) == 0
+    assert cli.handle_cli_with_context(SimpleNamespace(get_config=lambda key, default=None: {"enabled": True}.get(key, default)), args) == 0
     assert json.loads(capsys.readouterr().out)["created"] == 1
     assert len(kanban.tasks) == 1
 
@@ -1055,3 +1058,16 @@ def test_repair_scan_rejects_draft_from_listing_and_canonical_reread(tmp_path):
         assert result.skipped["draft_pr"] == 1
     assert kanban.tasks == []
     ledger.close()
+
+
+def test_scoped_repair_dispatch_rejects_missing_context(monkeypatch, capsys):
+    import argparse
+    import json
+    from github_pr_feedback import cli
+
+    monkeypatch.setattr(cli, "_load_policy_from_context", lambda *_: pytest.fail("policy reached"))
+    args = argparse.Namespace(github_pr_feedback_action="dispatch-repair")
+    assert cli.handle_cli_with_context(None, args) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "rejected", "reason": "broad_capability_unavailable"
+    }

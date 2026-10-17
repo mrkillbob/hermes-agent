@@ -490,6 +490,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                     "via `hermes kanban boards switch <slug>` or the "
                                     "HERMES_KANBAN_BOARD env var). Use `hermes kanban boards "
                                     "list` to see all boards.")
-    _add_commands(kanban_parser.add_subparsers(dest="kanban_action"), _SPECS)
+    actions = kanban_parser.add_subparsers(dest="kanban_action")
+    _add_commands(actions, _SPECS)
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser

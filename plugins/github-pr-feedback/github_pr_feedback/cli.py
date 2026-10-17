@@ -841,7 +841,17 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _broad_capability_available(ctx: Any) -> bool:
+    getter = getattr(ctx, "get_config", lambda key, default=None: default)
+    absent = object()
+    intake = getter("intake_only", default=absent)
+    return getter("enabled", default=False) is True and intake is absent
+
+
 def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
+    if not _broad_capability_available(ctx):
+        print(json.dumps({"status": "rejected", "reason": "broad_capability_unavailable"}))
+        return 1
     action = getattr(args, "github_pr_feedback_action", None)
     if action == "publish-issue":
         from .cli_issue_publication import handle_publish_issue
@@ -850,10 +860,9 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
         return _scan(ctx, args)
     if action == "historical-merged-scan":
         return _historical_merged_scan(ctx, args)
-    if action == "status":
-        return _status()
-    if action == "doctor":
-        return _doctor(ctx)
+    diagnostics = {"status": _status, "doctor": partial(_doctor, ctx)}
+    if action in diagnostics:
+        return diagnostics[action]()
     if action == "label-scan":
         return _label_scan(ctx, args)
     if action == "inspect-pr":
@@ -1141,35 +1150,8 @@ def cli_bindings(ctx: Any) -> tuple[Any, Any]:
 
 
 def _github_client(policy: PluginPolicy) -> GitHubClient:
-    """Return the sole authenticated client for governed Hermes GitHub activity."""
-
-    # Lightweight injected test doubles intentionally do not implement the
-    # production factory. Production always uses the real class below.
-    factory = getattr(GitHubClient, "for_automation_identity", None)
-    if not callable(factory):
-        return GitHubClient()
-    if not isinstance(policy, PluginPolicy):
-        raise GitHubClientError("invalid GitHub automation policy", code="invalid_policy")
-    settings = policy.github_identity
-    if settings is None:
-        raise GitHubClientError(
-            "Hermes GitHub automation identity is not configured",
-            code="automation_identity_not_configured",
-        )
-    actions_settings = policy.github_actions_permissions_identity
-    return factory(
-        expected_login=settings.expected_login,
-        token_env=settings.token_env,
-        actions_permissions_expected_login=(
-            actions_settings.expected_login if actions_settings is not None else None
-        ),
-        actions_permissions_gh_config_dir=(
-            actions_settings.gh_config_dir if actions_settings is not None else None
-        ),
-        actions_permissions_repositories=(
-            actions_settings.repositories if actions_settings is not None else frozenset()
-        ),
-    )
+    from .automation_client import automation_client
+    return automation_client(policy, client_type=GitHubClient)
 
 
 def _submit_review(ctx: Any, args: argparse.Namespace) -> int:
@@ -3125,6 +3107,10 @@ def _doctor(
 
 
 def _load_policy_from_context(ctx: Any) -> PluginPolicy:
+    absent = object()
+    intake = ctx.get_config("intake_only", default=absent)
+    if intake is not absent:
+        return load_policy({"enabled": False})
     enabled = ctx.get_config("enabled", default=False)
     if enabled is not True:
         return load_policy({"enabled": False})

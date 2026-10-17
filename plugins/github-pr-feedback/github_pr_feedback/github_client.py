@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import quote
 
 from .github_identity import GitHubAutomationIdentity, GitHubIdentityError
+from .github_client_timestamps import _timestamp
 
 try:
     import fcntl
@@ -2213,6 +2214,7 @@ def _pull_request(
             base_branch=base["ref"],
             base_sha=base_sha,
             is_draft=is_draft,
+            updated_at=_timestamp(row["updated_at"]) if row.get("updated_at") is not None else None,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise GitHubClientError(
@@ -2297,18 +2299,6 @@ def _is_billing_lockout_message(message: object) -> bool:
         return False
     lowered = message.casefold()
     return any(phrase in lowered for phrase in _BILLING_LOCKOUT_PHRASES)
-
-
-def _timestamp(value: object) -> datetime:
-    if not isinstance(value, str) or not value:
-        raise ValueError("timestamp is required")
-    try:
-        timestamp = datetime.fromisoformat(value)
-    except ValueError as error:
-        raise ValueError("timestamp is invalid") from error
-    if timestamp.tzinfo is None:
-        raise ValueError("timestamp requires a timezone")
-    return timestamp
 
 
 def _validated_repository(value: object) -> str:

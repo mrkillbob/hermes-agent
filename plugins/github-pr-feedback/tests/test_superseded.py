@@ -417,7 +417,7 @@ def test_cli_wires_explicit_exact_head_close_superseded(
         ]
     )
 
-    assert cli.handle_cli_with_context(object(), args) == 0
+    assert cli.handle_cli_with_context(SimpleNamespace(get_config=lambda key, default=None: {"enabled": True}.get(key, default)), args) == 0
     assert seen == [("acme/widgets", 17, SHA, tmp_path)]
     assert json.loads(capsys.readouterr().out) == {
         "status": "closed_superseded",
