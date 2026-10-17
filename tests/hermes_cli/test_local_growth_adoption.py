@@ -135,6 +135,7 @@ def test_corrupt_pending_grants_are_not_overwritten(tmp_path, monkeypatch):
 
 @pytest.mark.platforms("any")
 def test_concurrent_process_grants_preserve_every_model(tmp_path):
+    import errno
     import json
     import os
     import subprocess
@@ -173,7 +174,10 @@ for index in range(20):
                 # Windows can refuse a reader while rename is pending. This is not
                 # a partial JSON read. Bound contention by the same deadline; still
                 # require successful concurrent reads, every writer and the final map.
-                if os.name != 'nt' or getattr(exc, 'winerror', None) not in (5, 32, 33):
+                # io.open uses CRT errno and can omit winerror on native Windows.
+                winerror = getattr(exc, 'winerror', None)
+                if os.name != 'nt' or not (winerror in (5, 32, 33) or
+                                          (winerror is None and exc.errno == errno.EACCES)):
                     raise
             time.sleep(.001)
         for child in children:
