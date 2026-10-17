@@ -237,7 +237,7 @@ remote submitted Task produces `ack`, and working produces `started`. Duplicate
 submit, a crash or a lost reply never causes another send. Returned server task
 and context IDs are saved separately from Hermes task/run/key/payload identity.
 Raw claim locks, database paths and local workspace paths are not sent. Assignments
-with embedded local authority values, absolute/home/drive/UNC/file-URI paths or
+with embedded local authority values, rooted slash/backslash, home, drive, UNC or file-URI paths or
 relative path escapes, or that would change under the existing outbound secret
 redactor, are refused for explicit preparation; the adapter never silently changes the assignment.
 

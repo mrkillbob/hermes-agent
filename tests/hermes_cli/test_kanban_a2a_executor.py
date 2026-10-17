@@ -311,7 +311,8 @@ def test_preexisting_conflicting_send_intent_fails_closed(context):
 @pytest.mark.parametrize('local_path', ['/private/synthetic/work/a.py', 'C:\\Synthetic\\work\\a.py',
                                        '\\\\fixture\\share\\work', '~/synthetic/a',
                                        'file:///private/synthetic/a', '../synthetic/a', './synthetic/a',
-                                       'FILE:/private/synthetic/a', 'path:/private/synthetic/a'])
+                                       'FILE:/private/synthetic/a', 'path:/private/synthetic/a',
+                                       '//server/share/work', '\\Windows\\Synthetic'])
 @pytest.mark.parametrize('field', ['title', 'body'])
 def test_local_path_text_is_refused_before_transport(context, local_path, field):
     d, ex, peer, _ = prepared(context, **{field: 'Inspect ' + local_path})

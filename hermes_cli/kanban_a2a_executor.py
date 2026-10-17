@@ -47,7 +47,7 @@ def _correlation(delivery):
 
 
 
-_LOCAL_PATH = re.compile(r'(?<![\w/])(?:/(?!/)|~[/\\]|[A-Za-z]:[/\\]|\\\\|file:|\.\.?[/\\])', re.IGNORECASE)
+_LOCAL_PATH = re.compile(r'(?<![\w/\\])(?:[/\\]|~[/\\]|[A-Za-z]:[/\\]|file:|\.\.?[/\\])', re.IGNORECASE)
 _WEB_URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 
