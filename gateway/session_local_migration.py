@@ -84,6 +84,10 @@ def legacy_launch_params(row):
         # an endpoint left without a provider is a custom route, never one to pair with the
         # profile's provider.
         route.setdefault('provider', 'custom')
+    if route.get('provider') == 'custom' and 'base_url' not in route:
+        # Initial old local rows saved this placeholder before a turn supplied a billing URL.
+        # Without any saved endpoint it names no route; let the profile supply its route and key.
+        route.pop('provider')
     if row['source'] == 'acp' and 'cwd' not in params and Path(str(saved.get('cwd') or '')).is_absolute():
         params['cwd'] = saved['cwd']
     params.update({key: route[key] for key in ('provider', 'base_url') if key in route})

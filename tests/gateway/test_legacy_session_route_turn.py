@@ -58,7 +58,7 @@ def _write_profile(home, profile_url, extra=''):
         'agent:\n  api_max_retries: 1\n  reasoning_effort: low\nplatform_toolsets:\n  tui: []\n' + extra)
 
 
-@pytest.mark.parametrize('shape', ['tui-custom', 'tui-named', 'tui-provider-only', 'cli-billing'])
+@pytest.mark.parametrize('shape', ['tui-custom', 'tui-named', 'tui-provider-only', 'cli-billing', 'tui-custom-billing'])
 def test_adopted_legacy_session_turn_goes_to_its_route_with_its_own_key(monkeypatch, shape):
     from run_agent import AIAgent
     with FakeLLMServer([Text('profile')]) as profile, FakeLLMServer([Text('legacy ok')]) as legacy:
@@ -73,6 +73,9 @@ def test_adopted_legacy_session_turn_goes_to_its_route_with_its_own_key(monkeypa
             policy, (model, runtime) = _adopt_and_resolve(home, {'provider': 'openrouter'})
         elif shape == 'cli-billing':
             policy, (model, runtime) = _adopt_and_resolve(home, {}, source='cli', billing={
+                'billing_provider': 'custom', 'billing_base_url': legacy.base_url})
+        elif shape == 'tui-custom-billing':
+            policy, (model, runtime) = _adopt_and_resolve(home, {'provider': 'custom'}, billing={
                 'billing_provider': 'custom', 'billing_base_url': legacy.base_url})
         else:
             policy, (model, runtime) = _adopt_and_resolve(home, {
@@ -135,6 +138,25 @@ def _run_turn(policy, model, runtime):
                     reasoning_config=policy.reasoning_config, quiet_mode=True, skip_context_files=True,
                     skip_memory=True, enabled_toolsets=['memory'])
     return agent.run_conversation('hello again')
+
+
+@pytest.mark.parametrize('source', ['tui', 'desktop'])
+def test_bare_custom_legacy_session_without_saved_endpoint_uses_profile_route(monkeypatch, source):
+    """An initial old local row could save only model/provider before usage supplied a billing URL.
+    Its bare custom placeholder must inherit the profile route and its key while keeping the model.
+    """
+    with FakeLLMServer([Text('legacy ok')], api_key='sk-profile-only') as profile:
+        home = Path(os.environ['HERMES_HOME'])
+        monkeypatch.setattr('gateway.run._hermes_home', home)
+        _write_profile(home, profile.base_url)
+        policy, (model, runtime) = _adopt_and_resolve(home, {'provider': 'custom'}, source=source)
+
+        result = _run_turn(policy, model, runtime)
+
+        assert result['final_response'] == 'legacy ok'
+        assert runtime['base_url'] == profile.base_url
+        assert [r['model'] for r in profile.main_requests()] == ['legacy-model']
+        assert {r['auth'] for r in profile.requests} == {'Bearer sk-profile-only'}
 
 
 @pytest.mark.parametrize('owner', ['recovered', 'gone'])
