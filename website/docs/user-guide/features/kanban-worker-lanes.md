@@ -223,6 +223,53 @@ Live no-tools CLI qualification, authenticated executor authority, crash-survivi
 host enforcement and native application result return remain separate work. This
 prototype adds no native Codex/Dot callback, SDK conversation binding or A2A endpoint.
 
+## Explicit A2A receipt transport
+
+`hermes_cli.kanban_a2a_executor.A2AExecutor` is a caller-registered library adapter.
+It reuses the bundled A2A JSON-RPC client transport and durable Kanban events;
+there is no new broker or automatic lane registration. Its owner supplies an
+immutable `PeerPlan` and trusted client for one exact URL, tenant, protocol version
+and authority reference. Construction does not contact a peer or read credentials.
+
+`submit()` commits one send intent with a stable message ID before one
+`SendMessage`. Local `accepted` means only that the send intent exists; a bound
+remote submitted Task produces `ack`, and working produces `started`. Duplicate
+submit, a crash or a lost reply never causes another send. Returned server task
+and context IDs are saved separately from Hermes task/run/key/payload identity.
+Raw claim locks, database paths and local workspace paths are not sent. Assignments
+that would change under the existing outbound secret redactor are refused for
+explicit preparation; the adapter never silently changes the assignment.
+
+`lookup()` reads local receipts only. An owner explicitly calls `refresh_once()`
+for one remote `GetTask`, then invokes normal lane reconciliation. Terminal result
+application still validates the current Hermes claim and persists the artifact
+before existing complete/block APIs. Saved results reconcile without a new model
+request or an available peer. Remote task-not-found after peer memory loss remains
+uncertain; the bundled server's in-memory TaskStore and separate conversation log
+cannot reconstruct the missing task receipt.
+
+A qualified result is a single bounded JSON text artifact with schema
+`hermes.a2a.receipt.v1`, exact `correlation` (task_id, run_id, key, payload_sha256),
+kind `completed` or `error`, nonblank summary and text-array findings/questions.
+The A2A terminal state must match. General peer prose or a normal Hermes answer
+does not establish this application contract. Same-user hashes are consistency
+checks; trusted client/peer authority is an explicit caller responsibility.
+
+`status()` exposes a typed saved observation. Input-required retains bounded,
+bound questions without finalizing the external receipt. Auth-required, canceled,
+rejected and unknown states also hold with their exact peer state; there is no
+automatic login, continuation, cancellation or retry. The frozen receipt vocabulary
+does not yet represent these lifecycles. Missing remote IDs, malformed results and
+binding conflicts remain fenced.
+
+The raw client caps request/response JSON at 48 KiB to leave journal-envelope room,
+rejects duplicate members/nonfinite numbers and endpoint-changing redirects, and
+uses at most two seconds per request (one for refresh). These cooperative budgets
+cannot bound stalled process scheduling, DNS or kernel I/O. Existing public A2A
+tools retain their legacy transport behavior. Tests use in-process fake responses;
+no listener, real peer, Herdr/CLI executor or model is qualified. Streaming, push,
+server task persistence and native Dot/Codex result return remain separate work.
+
 ## Failure modes the dispatcher handles
 
 These PID-based rules describe profile workers. External delivery intents use the
