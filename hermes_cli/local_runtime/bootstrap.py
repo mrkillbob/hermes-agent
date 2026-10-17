@@ -188,24 +188,14 @@ def _incumbent_allows_boot() -> bool:
 
 
 def refresh_local_runtime() -> bool:
-    """Restart the managed server so it rescans the models directory. The router's model list is
-    SPAWN-ONLY: a GGUF added after start is invisible to GET /models and 400s on completion, so
-    anything that changes the staged set while the server runs must bounce it."""
-    try:
-        with _TRANSITION_LOCK:
-            owner = _SERVING_OWNER
-            if _SUPERVISOR is None or owner is None or owner.stopping.is_set():
-                logger.info("Local runtime refresh deferred to its owning gateway")
-                return False
-            # Check every loaded model, including work submitted by another process.
-            if not _SUPERVISOR.is_idle():
-                logger.info("Local runtime refresh deferred while shared inference is busy")
-                return False
-            shutdown_local_runtime()
-            return owner.ensure(force=True) is not None
-    except Exception as exc:
-        logger.warning("local runtime refresh failed: %s", exc)
-        return False
+    """Stage changes for the next explicit owner restart without interrupting shared requests.
+
+    The router has direct HTTP adopters and no admission fence: even a confirmed idle snapshot
+    cannot exclude a new request before termination. Download, install and growth callers must
+    defer; the existing explicit owner stop/start controls remain the disruptive action.
+    """
+    logger.info("Local runtime refresh deferred; explicitly stop/start the server from its owning gateway")
+    return False
 
 
 def _admitted_models_max(mdir: Path, configured: int) -> int:

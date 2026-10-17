@@ -22,8 +22,10 @@ Bootstrap serializes transitions inside the process and across processes. Unavai
 contended boot locks refuse mutation. A living or uncertain foreign owner is never replaced,
 including stale-preset and dead-child cases where its watchdog could restart the child.
 Identity-verified orphan recovery retains the existing process-birth and Windows containment
-guards. Refresh is performed only by the current owner after checking all loaded models for
-busy work; deferred or unsuccessful refresh cannot silently assign an unserved model.
+guards. Implicit refresh never stops the shared router: an idle snapshot cannot fence off new
+HTTP requests from another process. Downloads and engine installs stay staged until an explicit
+default-profile owner stop/start. Activation checks the live model
+listing and refuses an unserved model without changing the existing assignment.
 
 Gateway shutdown closes boot admission before draining consumers. Cancellation covers a queued
 worker, a boot-lock wait and health startup; cleanup also waits for an unpublished boot within
@@ -32,6 +34,10 @@ thread, never an executor worker that could strand `asyncio.run` on exit. A cons
 supervisor or pending boot releases nothing. Windows kill-on-close jobs and the owner's idle
 unload/refit loop remain in place. These source guarantees do not establish model accuracy,
 native inference readiness or permission to enable a profile or update an installed runtime.
+Saved context-growth requests remain available to future eligible idle preset planning or an
+explicit restart; compression proceeds until a larger window is materialized. The existing
+idle refit's documented status-check-to-reload race is unchanged: this repair prevents implicit
+server termination and consumer-exit cleanup, not every possible inference interruption.
 
 ## Canonical group metadata and profile discovery
 

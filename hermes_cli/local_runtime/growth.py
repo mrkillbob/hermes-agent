@@ -66,9 +66,8 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
     """One growth evaluation + execution. Returns the NEW window when the ladder granted a bigger
     one, else None (hold / compress / not ours).
 
-    The caller sits at a request boundary by construction (the pre-API compression gate), so
-    re-prefill growth is safe at any call: the next request rebuilds server state in the larger
-    window — nothing rewinds.
+    The caller's request boundary does not fence other processes' requests. A saved grant may
+    remain pending until an eligible idle replan or explicit owner restart; compression proceeds meanwhile.
     """
     from hermes_cli.local_runtime.bootstrap import (
         _launch_budget, get_supervisor, refresh_local_runtime, staged_models)
@@ -129,9 +128,9 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
     logger.info("context growth %s: %s", model_id, decision.reason)
     save_window_override(model_id, decision.next_window)
     if not refresh_local_runtime():
-        # The override still lands at the next boot; report no growth NOW so the caller
+        # The override remains available to future preset planning; report no growth NOW so the caller
         # compresses instead of overflowing a stale window.
-        logger.warning("growth %s: server refresh failed; compression proceeds", model_id)
+        logger.info("growth %s: saved for an eligible idle replan or explicit restart; compression proceeds", model_id)
         return None
     materialized = read_preset_decisions().get(model_id)
     if materialized is None or materialized.window < decision.next_window:

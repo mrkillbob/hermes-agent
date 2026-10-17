@@ -115,6 +115,12 @@ Managed llama.cpp runs under the main gateway started from the default profile
 startup; startup uses installed engines and staged models without downloading or loading a
 model. One-shot commands, cron workers, named-profile gateways, gateways started with
 `--idle-exit`, and standalone HTTP backends use an existing server and do not start their own.
+Newly downloaded models and engine updates take effect after you explicitly
+stop/start the local server from the default-profile gateway. Staging changes does not restart a
+server that other conversations may be using; activation preserves your current model until the
+running server lists the new one.
+Context-growth requests can take effect during a future eligible idle replan or an explicit restart;
+requests continue using compression until a larger window is available.
 Stopping a consumer leaves the shared server running. Profile settings and deliberate cloud
 primaries are preserved; a profile with automatic startup disabled can still use an existing
 endpoint. If no server is available, the local fallback is skipped as before.

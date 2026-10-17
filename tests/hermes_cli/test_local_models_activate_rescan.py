@@ -1,9 +1,4 @@
-"""The activate flow's rescan must fire even when another process owns the local server (#115237).
-
-ensure_local_runtime returns None when the router is supervised elsewhere, so the supervisor
-path's rescan_if_unknown never ran — exactly the desktop situation after a download job already
-bounced the router once (presets fresh, listing still spawn-only and missing the new model).
-"""
+"""Activation requires a live model listing; staging cannot bounce a shared router."""
 
 from __future__ import annotations
 
@@ -12,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 
-def test_activate_rescans_through_state_endpoint_when_supervisor_is_none(
+def test_activate_requires_explicit_restart_when_shared_listing_lacks_model(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
@@ -49,17 +44,17 @@ def test_activate_rescans_through_state_endpoint_when_supervisor_is_none(
             lambda *a, **k: {"ok": True},
         ),
     ):
-        lm._ensure_server(
-            job,
-            {"local_runtime": {"enabled": True}},
-            "Qwen3-4B-Q4_K_M",
-            fail_detail="server failed",
-            skip_msg="skipped",
-        )
+        with pytest.raises(RuntimeError, match='Stop/start the local server'):
+            lm._ensure_server(
+                job,
+                {"local_runtime": {"enabled": True}},
+                "Qwen3-4B-Q4_K_M",
+                fail_detail="server failed",
+                skip_msg="skipped",
+            )
 
-    assert calls["refresh"] == 1, (
-        "the router must be bounced when its listing lacks the model"
-    )
+    assert calls["refresh"] == 0
+    assert calls['known'] == [{'id': 'some-other-model'}]
 
 
 def test_activate_skips_rescan_when_owned_server_already_lists_the_model(
@@ -113,7 +108,7 @@ async def test_deferred_refresh_does_not_assign_an_unserved_model(monkeypatch):
     monkeypatch.setattr(lm, '_set_runtime_enabled', lambda value: writes.append(('enabled', value)))
     monkeypatch.setattr(lm, '_assign_default', lambda *args: writes.append(('assigned',)))
     monkeypatch.setattr(lm, '_spawn_job', lambda job, name, run, **kwargs: run())
-    with pytest.raises(RuntimeError, match='busy or owned by another gateway'):
+    with pytest.raises(RuntimeError, match='Stop/start the local server'):
         await lm.local_models_activate(lm.ModelActivateBody(model_id='fixture'))
     assert writes == []
     assert config.read_text() == before

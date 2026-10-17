@@ -234,8 +234,8 @@ def _spawn_job(job: dict[str, Any], name: str, body: Callable[[], None], *, fail
         try:
             body()
             if download_label is not None:
-                _finish(job, f"{download_label} ready")
-                _refresh_runtime("post-download runtime refresh skipped")
+                hint = _refresh_runtime("post-download runtime refresh skipped")
+                _finish(job, f"{download_label} downloaded. {hint}")
         except DownloadPaused:
             status = "paused"
         except Exception as exc:
@@ -286,10 +286,10 @@ def _spawn_job(job: dict[str, Any], name: str, body: Callable[[], None], *, fail
 
 
 # ── runtime / router plumbing ────────────────────────────────
-def _refresh_runtime(skip_msg: str) -> None:
-    """Bounce a running router so it rescans the models dir (it only scans at spawn).
-    Never raises — the file operation already succeeded."""
+def _refresh_runtime(skip_msg: str) -> str:
+    """Report staged changes without interrupting shared inference."""
     _quiet(bootstrap.refresh_local_runtime, None, debug=skip_msg)
+    return "Start or restart the local server from the default-profile gateway to use the staged files."
 
 
 def _router_request(endpoint: dict[str, Any], path: str, *, timeout: float, payload: dict | None = None) -> Any:
@@ -369,20 +369,15 @@ def _start_local_server(config: dict, fail_detail: str):
 
 
 def _ensure_server(job: dict[str, Any], config: dict, model_id: str, *, fail_detail: str, skip_msg: str) -> None:
-    """Start the local server if needed and self-heal a stale router: the model list is spawn-only, so a
-    server started before ``model_id`` finished downloading can't serve it — bounce it when it doesn't know it."""
+    """Activate only a model the live router serves; staged additions need an explicit restart."""
     _step(job, "starting-server", "Starting the local server")
     sup = _start_local_server(config, fail_detail)
 
     if model_id in _server_model_ids(sup):
         return
-    job["detail"] = "Refreshing the local server"
-    if not bootstrap.refresh_local_runtime():
-        logger.info("%s: refresh deferred", skip_msg)
-        raise RuntimeError("The local server is busy or owned by another gateway. "
-                           "Finish its active requests and retry from its owning gateway.")
-    if model_id not in _server_model_ids(bootstrap.get_supervisor()):
-        raise RuntimeError("The local server has not registered this model; retry its refresh")
+    logger.info("%s: model registration awaits an explicit owner restart", skip_msg)
+    raise RuntimeError("The model is staged but the running server has not registered it. "
+                       "Stop/start the local server from its default-profile gateway, then retry activation.")
 
 
 def _server_model_ids(sup) -> set[str]:
@@ -671,13 +666,9 @@ def local_models_runtime_install(body: RuntimeInstallBody, profile: Optional[str
 
     def run():
         with _config_profile_scope(profile):
-            previous = binaries.installed_engine(backend)
             engine = _install_engine_job(job, backend)
-            running = bootstrap.get_supervisor()
-            if running is not None and previous != engine:
-                _step(job, "restarting", "Switching the running server to the pinned build")
-                bootstrap.refresh_local_runtime()
-        _finish(job, f"llama.cpp {tag} ready ({backend})")
+        _finish(job, f"llama.cpp {engine.tag} installed ({backend}). "
+                     "Start or restart the local server from its default-profile gateway to use this build.")
 
     _spawn_job(job, "lr-runtime-install", run, fail_msg="runtime install failed: %s", resumable=True)
     return {"job_id": job["job_id"], "backend": backend, "tag": tag}
@@ -709,8 +700,8 @@ def local_models_download(body: ModelDownloadBody):
     job = _job("model-download", f"{entry.display_name} ({variant.quant})", model_id=entry.id)
     def _run():
         _run_download_plan(job, plan, entry.display_name)
-        _finish(job, f"{entry.display_name} ready")
-        _refresh_runtime("post-download runtime refresh skipped")
+        hint = _refresh_runtime("post-download runtime refresh skipped")
+        _finish(job, f"{entry.display_name} downloaded. {hint}")
 
     _spawn_job(job, "lr-model-download", _run, fail_msg="model download failed: %s", resumable=True)
     return {"job_id": job["job_id"], "model_id": variant.model_id}
@@ -740,8 +731,7 @@ async def local_models_download_resume(body: JobIdBody):
 
 @router.delete("/api/local-models/models/{model_id}")
 async def local_models_delete(model_id: str):
-    """Remove every split part plus private assets, then bounce the router off the request thread (deleting
-    the active file mid-serve is exactly the stale state the refresh exists for)."""
+    """Remove staged files; leave running requests alone until the owner explicitly restarts."""
     files = _variant_files_on_disk(model_id)
     if not files:
         raise HTTPException(status_code=404, detail="model not found")
@@ -749,9 +739,8 @@ async def local_models_delete(model_id: str):
         path.unlink(missing_ok=True)
     # Growth state dies with the model: a re-download starts back at its zero-spill window, not a stale grown one.
     _quiet(lambda: growth.clear_window_override(model_id), None, debug="window-override clear skipped")
-    spawn_context_thread(_refresh_runtime, args=("post-delete runtime refresh skipped",),
-                         name="lr-post-delete").start()
-    return {"ok": True}
+    hint = _refresh_runtime("post-delete runtime refresh skipped")
+    return {"ok": True, "detail": hint}
 
 
 # ── quickstart: one click from nothing to a working default ──
@@ -998,7 +987,7 @@ async def local_models_download_browsed(body: BrowsedDownloadBody):
 @router.post("/api/local-models/sideload")
 async def local_models_sideload(body: SideloadBody):
     """Register a GGUF already on this machine: link it into the managed models dir (copy only when linking is
-    impossible) and bounce the router. The original stays put; delete-from-Hermes removes only our link."""
+    impossible). The original stays put; delete-from-Hermes removes only our link."""
     src = Path(body.path)
     if not src.is_file() or src.suffix.lower() != ".gguf":
         raise HTTPException(status_code=422, detail="Pick a .gguf model file")
@@ -1013,5 +1002,5 @@ async def local_models_sideload(body: SideloadBody):
             os.symlink(src, dest)   # cross-volume fallback
         except OSError:
             await run_in_threadpool(shutil.copyfile, src, dest)
-    _refresh_runtime("post-sideload runtime refresh skipped")
-    return {"ok": True, "model_id": dest.stem}
+    hint = _refresh_runtime("post-sideload runtime refresh skipped")
+    return {"ok": True, "model_id": dest.stem, "detail": hint}
