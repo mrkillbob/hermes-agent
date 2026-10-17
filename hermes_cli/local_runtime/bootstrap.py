@@ -451,7 +451,7 @@ def ensure_local_runtime(config: dict, force: bool = False, *, owner=None,
         return None
     if not force and not section.get("enabled"):
         return None
-    with _TRANSITION_LOCK:
+    with owner.observing_boot(), _TRANSITION_LOCK:
         with _STATE_LOCK:
             if _STOPPING or owner.stopping.is_set() or boot_generation != _BOOT_GENERATION:
                 return None

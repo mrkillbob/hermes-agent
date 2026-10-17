@@ -160,13 +160,18 @@ def resolve_llamacpp_endpoint(config: dict | None = None,
     if hit and not hit.auth_required:
         return {"base_url": hit.base_url, "api_key": ""}
 
-    if wait_for_boot_s > 0 and _boot_in_flight(config) and _kick_managed_boot(config):
+    from hermes_cli.local_runtime.boot_status import owner_boot_pending
+
+    requested = wait_for_boot_s > 0 and _boot_in_flight(config) and _kick_managed_boot(config)
+    if wait_for_boot_s > 0 and (requested or owner_boot_pending()):
         deadline = time.monotonic() + wait_for_boot_s
         while time.monotonic() < deadline:
             time.sleep(0.25)
             managed = _state_endpoint()
             if managed:
                 return managed
+            if not requested and not owner_boot_pending():
+                break
     return None
 
 

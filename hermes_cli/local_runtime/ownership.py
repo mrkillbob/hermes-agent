@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import contextmanager
 from contextvars import copy_context
 from pathlib import Path
 
@@ -15,7 +16,10 @@ class RuntimeOwner:
     """A process-local capability, closed before its gateway starts draining."""
 
     def __init__(self, home: Path):
+        from hermes_cli.local_runtime.boot_status import BootStatus
+
         self.home = home
+        self._boot_status = BootStatus(home)
         self.stopping = threading.Event()
         self._boot_lock = threading.Lock()
         self._context = copy_context()
@@ -26,7 +30,17 @@ class RuntimeOwner:
         if boot_generation is None:
             boot_generation = current_boot_generation()
         # A routed caller's secret scope must not expand the owner's ${VAR} settings.
-        return self._context.copy().run(self._ensure, force=force, boot_generation=boot_generation)
+        with self.observing_boot():
+            return self._context.copy().run(self._ensure, force=force, boot_generation=boot_generation)
+
+    @contextmanager
+    def observing_boot(self):
+        """Publish only observation while an already-authorized request is queued or active."""
+        self._boot_status.begin()
+        try:
+            yield
+        finally:
+            self._boot_status.end()
 
     def _ensure(self, *, force: bool, boot_generation: int):
         from hermes_cli.config import load_config_readonly
@@ -52,6 +66,7 @@ class RuntimeOwner:
         if not self._boot_lock.acquire(blocking=False):
             return True  # This owner already has a queued or active boot request.
         generation = current_boot_generation()
+        self._boot_status.begin()  # Visible to workers before the boot thread is scheduled.
 
         def boot() -> None:
             try:
@@ -59,12 +74,14 @@ class RuntimeOwner:
             except Exception:
                 logger.exception("Managed local runtime owner boot failed")
             finally:
+                self._boot_status.end()
                 self._boot_lock.release()
 
         try:
             spawn_context_thread(boot, name="gateway-local-runtime-boot").start()
             return True
         except Exception:
+            self._boot_status.end()
             self._boot_lock.release()
             raise
 
@@ -72,6 +89,7 @@ class RuntimeOwner:
         from hermes_cli.local_runtime.bootstrap import cancel_pending_boot
 
         self.stopping.set()
+        self._boot_status.close()
         cancel_pending_boot(self)
 
 

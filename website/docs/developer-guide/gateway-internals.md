@@ -829,3 +829,5 @@ Plugins that load after the adapters connected (install/enable from the CLI, Des
 - [ACP Internals](./acp-internals.md)
 - [Agent Loop Internals](./agent-loop.md)
 - [Messaging Gateway (User Guide)](../user-guide/messaging/index.md)
+
+Managed consumers can wait for an already queued or active root-owner boot before server state exists. The owner publishes a machine-root boot observation before scheduling its boot thread and removes it when requests settle or the owner closes. Readers verify the live process incarnation, executable and root. This observation grants no boot, reload, configuration or cleanup authority; missing or stale evidence keeps unavailable/fallback behavior prompt.
