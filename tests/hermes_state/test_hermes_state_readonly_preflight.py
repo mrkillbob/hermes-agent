@@ -228,3 +228,24 @@ def test_checkpoint_removing_sidecar_is_not_readonly(
         assert reopened.execute("SELECT x FROM t").fetchall() == committed
     finally:
         reopened.close()
+
+
+@pytest.mark.parametrize("inside_home", [True, False])
+def test_database_quarantined_by_another_opener_is_not_readonly(hermes_home, tmp_path, monkeypatch, inside_home):
+    """A concurrent opener can move a zeroed state.db aside after preflight enumerated it and before its
+    access check; the vanished file is a lost race, not a permission problem."""
+    db = (hermes_home if inside_home else tmp_path) / "quarantined.db"
+    db.write_bytes(b"\0" * 4096)
+    real_access = os.access
+    quarantined = False
+
+    def quarantine_on_access(path, mode):
+        nonlocal quarantined
+        if Path(path) == db and not quarantined:
+            db.rename(db.with_name(db.name + ".corrupt"))
+            quarantined = True
+        return real_access(path, mode)
+
+    monkeypatch.setattr("hermes_state_repair.os.access", quarantine_on_access)
+    preflight_db_writability(db)
+    assert quarantined
