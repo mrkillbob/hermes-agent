@@ -1,16 +1,19 @@
 """In-session context growth for the managed llama.cpp runtime.
 
-Scope guard: only a server THIS process supervises grows. Detected external servers and
-other-process supervisors keep their own policies.
+Consumers may record deferred grants for the identity-verified managed router.
+Only its durable owner applies presets; detected external servers keep their own policies.
 """
 
 from __future__ import annotations
 
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 import json
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
+_GRANT_WRITER_LOCK = threading.Lock()
+_GRANT_LOCK_HOLDER = threading.local()
 
 
 def window_overrides_path():
@@ -19,34 +22,62 @@ def window_overrides_path():
     return runtimes_root() / "window_overrides.json"
 
 
-def load_window_overrides() -> dict:
-    """model_id -> granted window (int). Empty on any read problem."""
+def load_window_overrides(*, strict: bool = False) -> dict:
+    """model_id -> granted window. Readers tolerate damage; writers must preserve it."""
     try:
         with open(window_overrides_path(), encoding="utf-8-sig") as fh:
             data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("Invalid pending window grants")
         return {str(k): int(v) for k, v in data.items()}
+    except FileNotFoundError:
+        return {}
     except Exception:
+        if strict:
+            raise
         return {}
 
 
 def _write_overrides(overrides: dict) -> None:
+    from utils import atomic_write_text
+
     path = window_overrides_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(overrides, indent=1), encoding="utf-8")
+    atomic_write_text(path, json.dumps(overrides, indent=1), mode=0o600)
 
 
-def save_window_override(model_id: str, window: int) -> None:
-    overrides = load_window_overrides()
-    overrides[model_id] = int(window)
-    _write_overrides(overrides)
+@contextmanager
+def _overrides_lock():
+    from hermes_cli import auth
+
+    if auth.fcntl is None and auth.msvcrt is None:
+        raise OSError("No native pending-grant lock is available")
+    if not _GRANT_WRITER_LOCK.acquire(timeout=2):
+        raise TimeoutError("Pending-grant writer is busy")
+    try:
+        with auth._file_lock(window_overrides_path().with_suffix(".lock"),
+                             _GRANT_LOCK_HOLDER, 2, "Pending-grant writer is busy"):
+            yield
+    finally:
+        _GRANT_WRITER_LOCK.release()
+
+
+def save_window_override(model_id: str, window: int, *, only_grow: bool = False) -> None:
+    """Serialize pending grants; stale growth requests cannot shrink a newer request."""
+    with _overrides_lock():
+        overrides = load_window_overrides(strict=True)
+        overrides[model_id] = (max(int(window), overrides.get(model_id, 0))
+                               if only_grow else int(window))
+        _write_overrides(overrides)
 
 
 def clear_window_override(model_id: str) -> None:
     """Drop a model's growth state (delete/re-download paths)."""
-    overrides = load_window_overrides()
-    if model_id in overrides:
-        del overrides[model_id]
-        _write_overrides(overrides)
+    with _overrides_lock():
+        overrides = load_window_overrides(strict=True)
+        if model_id in overrides:
+            del overrides[model_id]
+            _write_overrides(overrides)
 
 
 def is_managed_endpoint(base_url: str) -> bool:
@@ -79,7 +110,7 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
         preset_for_model, read_preset_decisions, resident_footprint)
 
     sup = get_supervisor()
-    if sup is None or not is_managed_endpoint(base_url):
+    if not is_managed_endpoint(base_url):
         return None
 
     gguf = next((p for p in staged_models() if model_id_from_stem(p.stem) == model_id), None)
@@ -93,7 +124,12 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
         return None
 
     try:
-        server_idle = sup.is_idle(model_id)
+        if sup is not None:
+            server_idle = sup.is_idle(model_id)
+        else:
+            from hermes_cli.local_runtime.endpoint import managed_model_idle
+
+            server_idle = managed_model_idle(base_url, model_id)
     except Exception:
         server_idle = False
 
@@ -126,7 +162,11 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
         return None
 
     logger.info("context growth %s: %s", model_id, decision.reason)
-    save_window_override(model_id, decision.next_window)
+    save_window_override(model_id, decision.next_window, only_grow=True)
+    if sup is None:
+        # An adopting worker can request a future preset, never reload another process's router.
+        logger.info("growth %s: consumer saved a deferred grant; compression proceeds", model_id)
+        return None
     if not refresh_local_runtime():
         # The override remains available to future preset planning; report no growth NOW so the caller
         # compresses instead of overflowing a stale window.

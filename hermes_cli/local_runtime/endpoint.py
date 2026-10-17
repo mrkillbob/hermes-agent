@@ -85,6 +85,44 @@ def managed_get_json(base: str, api_key: str, route: str, timeout_s: float) -> o
         return json.loads(r.read())
 
 
+def managed_get_text(base: str, api_key: str, route: str, timeout_s: float) -> str:
+    """Bounded telemetry read; never forward local credentials through proxies or redirects."""
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    req = urllib.request.Request(f"{base}{route}",
+                                 headers={"Authorization": f"Bearer {api_key}"})
+    with opener.open(req, timeout=timeout_s) as response:
+        body = response.read((1 << 20) + 1)
+    if len(body) > 1 << 20:
+        raise ValueError("Managed telemetry response exceeds limit")
+    return body.decode("utf-8")
+
+
+def managed_model_idle(base_url: str, model_id: str) -> bool:
+    """Consumers may observe an identity-verified child, without autoload or boot authority."""
+    try:
+        state = _state_endpoint()
+        if state is None or base_url.rstrip("/") != state["base_url"].rstrip("/"):
+            return False
+        base = state["base_url"].removesuffix("/").removesuffix("/v1")
+        key = state.get("api_key", "")
+        query = child_query(model_id)
+        slots = json.loads(managed_get_text(base, key, f"/slots?{query}", 2))
+        if not isinstance(slots, list) or not slots or any(
+                not isinstance(slot, dict) or slot.get("is_processing") is not False
+                for slot in slots):
+            return False
+        metrics = managed_get_text(base, key, f"/metrics?{query}", 2)
+        processing = [float(line.split()[-1]) for line in metrics.splitlines()
+                      if line.startswith("llamacpp:requests_processing")]
+        return bool(processing) and all(value == 0 for value in processing)
+    except Exception:
+        return False
+
+
 def resolve_llamacpp_endpoint(config: dict | None = None,
                               wait_for_boot_s: float = 8.0) -> dict | None:
     """Managed-first, detection-second endpoint for llamacpp aliases.
