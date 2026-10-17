@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 import json
 import os
 from pathlib import Path
@@ -216,17 +216,16 @@ async def connect_gateway(endpoint=None):
         endpoint = result.endpoint
         ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
         url, protocols = gateway_ws_target(endpoint, ticket)
-    try:
+    async with AsyncExitStack() as stack:
         # The gateway is a loopback (or explicitly named) peer, never something to route through the
         # user's HTTP(S) proxy; websockets>=14 reads HTTP_PROXY/HTTPS_PROXY by default and a proxy that
         # cannot reach 127.0.0.1 turns every launch into a 10 s open timeout.
-        async with connect(url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024,
-                           proxy=None) as ws:
-            if protocols and ws.subprotocol != GATEWAY_WS_PROTOCOL:
-                raise GatewayClientError("Gateway protocol mismatch; update/restart required")
-            async with GatewayClient(ws) as client:
-                yield client
-    except GatewayClientError:
-        raise
-    except (OSError, TimeoutError) as exc:
-        raise GatewayClientError("Gateway connection failed; no local fallback") from exc
+        try:
+            ws = await stack.enter_async_context(connect(
+                url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024, proxy=None))
+        except (OSError, TimeoutError) as exc:
+            raise GatewayClientError("Gateway connection failed; no local fallback") from exc
+        if protocols and ws.subprotocol != GATEWAY_WS_PROTOCOL:
+            raise GatewayClientError("Gateway protocol mismatch; update/restart required")
+        async with GatewayClient(ws) as client:
+            yield client
