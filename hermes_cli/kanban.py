@@ -248,6 +248,11 @@ def kanban_command(args: argparse.Namespace) -> int:
     if action == "boards":
         return _dispatch_boards(args)
 
+    # Intake reconciliation must not initialize, repair or recompute the board.
+    if action == "intake-lookup":
+        from hermes_cli.kanban_intake_lookup import intake_lookup_command
+        return intake_lookup_command(args)
+
     # `--board <slug>` pins HERMES_KANBAN_BOARD for the duration of this call so it inherits the
     # exact resolution the dispatcher uses for workers.
     board_override = getattr(args, "board", None)

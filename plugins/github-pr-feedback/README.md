@@ -1,5 +1,9 @@
 # github-pr-feedback
 
+The separate, disabled-by-default [intake-only capability](INTAKE_ONLY.md) registers
+`scan-intake` with broad maintenance disabled. Its source candidate requires the
+reviewed passive Kanban lookup capability and separate release qualification.
+
 `github-pr-feedback` is a disabled-by-default standalone Hermes plugin. It
 reads canonical GitHub pull-request feedback, applies a strict local policy,
 and creates exact-head Kanban tasks for admitted feedback. An independent,

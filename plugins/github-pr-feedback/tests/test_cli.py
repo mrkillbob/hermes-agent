@@ -846,13 +846,11 @@ def test_scan_reads_disabled_policy_through_the_plugin_config_context(
 
     exit_code = command["handler_fn"](parser.parse_args(["scan"]))
 
-    assert exit_code == 0
+    assert exit_code == 1
     assert json.loads(capsys.readouterr().out) == {
-        "created": 0,
-        "skipped": {},
-        "status": "ok",
+        "status": "rejected", "reason": "broad_capability_unavailable"
     }
-    assert context.config_reads == ["enabled"]
+    assert context.config_reads == ["intake_only", "intake_only", "enabled"]
 
 
 def test_scan_lock_rejects_a_concurrent_scan_for_the_same_control_home(
@@ -1032,7 +1030,7 @@ def test_retry_deployment_defers_when_scan_lock_is_held(
 
 
 def test_cli_exposes_status_doctor_and_an_exact_immutable_retry_identity() -> None:
-    context = RecordingContext()
+    context = RecordingContext({"enabled": True})
     _plugin_module().register(context)
     parser = argparse.ArgumentParser()
     context.calls[0]["setup_fn"](parser)
@@ -1121,7 +1119,7 @@ def test_status_reports_durable_receipt_counts(
     assert failed_lease is not None
     ledger.fail(failed, "Kanban unavailable", failed_lease)
     ledger.close()
-    context = RecordingContext()
+    context = RecordingContext({"enabled": True})
     _plugin_module().register(context)
     parser = argparse.ArgumentParser()
     context.calls[0]["setup_fn"](parser)
@@ -1146,9 +1144,11 @@ def test_doctor_reports_a_disabled_plugin_without_scanning(
 
     exit_code = context.calls[0]["handler_fn"](parser.parse_args(["doctor"]))
 
-    assert exit_code == 0
-    assert json.loads(capsys.readouterr().out) == {"status": "disabled"}
-    assert context.config_reads == ["enabled"]
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "rejected", "reason": "broad_capability_unavailable"
+    }
+    assert context.config_reads == ["intake_only", "intake_only", "enabled"]
 
 
 def test_namespaced_context_loads_assignee_rules_for_runtime_routing(
@@ -2408,7 +2408,7 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
     assert exit_code == 1
     assert json.loads(capsys.readouterr().out) == {"status": "invalid_configuration"}
     assert context.config_reads == [
-        "enabled",
+        "intake_only", "intake_only", "enabled", "intake_only", "enabled",
         "repositories",
         "reviewer_logins",
         "reviewer_associations",

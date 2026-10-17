@@ -490,6 +490,13 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                     "via `hermes kanban boards switch <slug>` or the "
                                     "HERMES_KANBAN_BOARD env var). Use `hermes kanban boards "
                                     "list` to see all boards.")
-    _add_commands(kanban_parser.add_subparsers(dest="kanban_action"), _SPECS)
+    actions = kanban_parser.add_subparsers(dest="kanban_action")
+    _add_commands(actions, _SPECS)
+    lookup = actions.add_parser("intake-lookup", help="Passively reconcile an intake key or legacy feedback identity")
+    keys = lookup.add_mutually_exclusive_group(required=True)
+    keys.add_argument("--idempotency-key", help="Exact github-pr-intake:v1 SHA256 key")
+    keys.add_argument("--legacy-receipt-key", help="Exact github-pr-feedback SHA256 receipt base")
+    keys.add_argument("--legacy-feedback-identity", help="Canonical JSON feedback identity across all legacy heads")
+    lookup.add_argument("--json", action="store_true", help="Emit full raw matching task rows (required)")
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
