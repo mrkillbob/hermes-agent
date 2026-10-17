@@ -1,0 +1,37 @@
+name: Focused catalog CLI diagnostic
+
+on:
+  push:
+    branches: [codex/fix-catalog-cli-exit]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-cli-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  catalog-cli-exit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - name: Set up the existing locked test environment
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "messaging"]'
+          test-environment: 'true'
+      - name: Run one bounded catalog CLI case
+        run: scripts/run_tests.sh tests/e2e/core/providers/test_catalog_cli_exit.py -- -v --tb=short
+        env:
+          PYTHON_CPU_COUNT: '1'
+          HERMES_TEST_WORKERS: '1'
+          HERMES_TEST_FILE_RETRIES: '0'
+          HERMES_TEST_FILE_TIMEOUT: '180'
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
