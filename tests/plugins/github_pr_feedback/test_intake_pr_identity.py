@@ -9,9 +9,10 @@ from .test_intake_only import Kanban, REPO, run
 
 
 class Transport:
-    def __init__(self, changed_field=None, changed_read=None):
+    def __init__(self, changed_field=None, changed_read=None, label_reads=None):
         self.changed_field, self.changed_read = changed_field, changed_read
         self.detail_reads = 0
+        self.label_reads = label_reads or {}
         self.listing = {
             "number": 7, "state": "OPEN", "isDraft": False,
             "headRepository": {"nameWithOwner": REPO}, "author": {"login": "mrkillbob"},
@@ -33,6 +34,8 @@ class Transport:
         if argv == ["gh", "api", f"repos/{REPO}/pulls/7"]:
             self.detail_reads += 1
             row = copy.deepcopy(self.detail)
+            if self.detail_reads in self.label_reads:
+                row["labels"] = [{"name": label} for label in self.label_reads[self.detail_reads]]
             if self.detail_reads == self.changed_read:
                 mutations = {
                     "number": lambda: row.update(number=8),
@@ -85,4 +88,36 @@ def test_real_detail_missing_or_invalid_marker_cannot_match_list(tmp_path, marke
     kanban = Kanban()
     result = run(tmp_path, GitHubClient(transport), kanban)
     assert result["status"] == "partial"
+    assert result["created"] == 0 and kanban.creates == 0
+
+
+@pytest.mark.parametrize("read", [1, 2, 3])
+@pytest.mark.parametrize("labels", [("bug", "priority"), ("bug", "bug", "priority")])
+def test_real_label_permutation_at_any_reread_allows_delivery(tmp_path, labels, read):
+    transport = Transport(label_reads={read: tuple(reversed(labels))})
+    transport.listing["labels"] = [{"name": label} for label in labels]
+    transport.detail["labels"] = copy.deepcopy(transport.listing["labels"])
+    kanban = Kanban()
+    result = run(tmp_path, GitHubClient(transport), kanban)
+    assert result["status"] == "ok" and result["created"] == 1
+    assert kanban.creates == 1 and transport.detail_reads == 3
+
+
+@pytest.mark.parametrize("read", [1, 2, 3])
+@pytest.mark.parametrize("changed_labels", [
+    ("bug", "priority", "added"),
+    ("bug",),
+    ("bug", "renamed"),
+    ("Bug", "priority"),
+    ("bug", "bug", "priority"),
+])
+def test_real_label_content_change_at_any_reread_holds_delivery(
+    tmp_path, changed_labels, read
+):
+    transport = Transport(label_reads={read: changed_labels})
+    transport.listing["labels"] = [{"name": "bug"}, {"name": "priority"}]
+    transport.detail["labels"] = copy.deepcopy(transport.listing["labels"])
+    kanban = Kanban()
+    result = run(tmp_path, GitHubClient(transport), kanban)
+    assert result["status"] == ("held" if read == 3 else "partial")
     assert result["created"] == 0 and kanban.creates == 0

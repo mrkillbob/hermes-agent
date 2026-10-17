@@ -11,7 +11,7 @@ import stat
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -316,8 +316,8 @@ def _deliver(card, ledger, kanban):
 
 
 def _same_pr_snapshot(first, second):
-    # Both real converters retain the update marker along with admission identity.
-    return first == second
+    # Transport label order is incidental; spellings, counts and all other fields remain strict.
+    return replace(first, labels=tuple(sorted(first.labels))) == replace(second, labels=tuple(sorted(second.labels)))
 
 
 def _collect_intake_cards(policy, github):
