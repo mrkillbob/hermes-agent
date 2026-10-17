@@ -1,0 +1,34 @@
+name: Focused Windows trajectory contention diagnostic
+
+on:
+  push:
+    branches: [codex/probe-windows-trajectory-contention]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trajectory-contention-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-contention:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - name: Set up existing locked test environment
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '["messaging"]'
+          test-environment: 'true'
+          prune-python-cache: true
+      - name: Observe real CRT contention and record publication
+        shell: bash
+        run: bash scripts/run_tests.sh tests/agent/test_trajectory_windows_contention.py -- -v --tb=short -s
+        env:
+          PYTHON_CPU_COUNT: '1'
+          HERMES_TEST_WORKERS: '1'
+          HERMES_TEST_FILE_RETRIES: '0'
+          HERMES_TEST_FILE_TIMEOUT: '180'
