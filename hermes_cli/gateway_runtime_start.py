@@ -78,8 +78,20 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
                 # A Windows refusal is not necessarily a job-policy denial. Keep
                 # its native code without recording argv, environment or private
                 # paths from the exception; no weaker detach fallback is safe.
-                output.write((json.dumps({"event": "gateway_spawn_failed", "errno": exc.errno,
-                                          "winerror": getattr(exc, "winerror", None)}) + "\n").encode("utf-8"))
+                report: dict[str, object] = {"event": "gateway_spawn_failed", "errno": exc.errno,
+                                             "winerror": getattr(exc, "winerror", None)}
+                try:
+                    from hermes_platform.host.windows_job import current_process_job_limits
+                    job = current_process_job_limits()
+                except Exception:  # health: allow BLE001 -- Diagnostics must preserve the original spawn refusal and disclose no exception text.
+                    job = {"scope": "immediate_job", "probe_unavailable": True}
+                if job is not None:
+                    report["windows_job"] = job
+                try:
+                    output.write((json.dumps(report) + "\n").encode("utf-8"))
+                except OSError:
+                    # A full or failed sidecar must not replace the actual spawn refusal.
+                    pass
                 raise
     except OSError as exc:
         reason = "windows_breakaway_unavailable" if sys.platform == "win32" else "spawn_failed"
