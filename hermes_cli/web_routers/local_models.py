@@ -22,6 +22,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -42,6 +43,7 @@ from hermes_cli.local_runtime.endpoint import _state_endpoint, child_query
 from hermes_cli.local_runtime.gguf import split_parts
 
 logger = logging.getLogger(__name__)
+_SETUP_ADMISSION_SECONDS = 15.0  # Less than the terminal client's 30-second POST budget.
 
 router = APIRouter()
 
@@ -830,15 +832,17 @@ def _repriced_quickstart(job: dict[str, Any], body: QuickstartBody, variant):
 async def local_models_quickstart(body: QuickstartBody, request: Request, profile: Optional[str] = None):
     """Explicit setup retains an eligible root gateway before accepting any slow work."""
     generation = bootstrap.current_boot_generation()
+    deadline = monotonic() + _SETUP_ADMISSION_SECONDS
     _prepare_runtime_control(request, profile, required=True)
     try:
-        return await run_in_threadpool(_accept_quickstart, body, profile, generation)
+        return await run_in_threadpool(_accept_quickstart, body, profile, generation, deadline)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-def _accept_quickstart(body: QuickstartBody, profile: Optional[str], generation: int):
+def _accept_quickstart(body: QuickstartBody, profile: Optional[str], generation: int, deadline: float):
     """Synchronous hardware/planning and generation-fenced job registration."""
+    _check_setup_admission(deadline)
     entry, variant = _quickstart_target(body, hardware.probe_budget(planning=True))
     _tag, backend = _runtime_target()
     need_runtime = binaries.installed_engine(backend) is None
@@ -868,7 +872,8 @@ def _accept_quickstart(body: QuickstartBody, profile: Optional[str], generation:
                 _assign_default(job, variant.model_id)
         _finish(job, f"{entry.display_name} is ready — new chats use it")
 
-    with bootstrap.runtime_control_scope(generation):
+    with bootstrap.runtime_control_scope(generation, blocking=False):
+        _check_setup_admission(deadline)
         if not _QUICKSTART_LOCK.acquire(blocking=False):
             raise HTTPException(status_code=409, detail="Setup is already running")
         job = _job("quickstart", entry.display_name, model_id=entry.id)
@@ -876,6 +881,11 @@ def _accept_quickstart(body: QuickstartBody, profile: Optional[str], generation:
                    on_exit=_QUICKSTART_LOCK.release, resumable=True, generation=generation)
     return {"job_id": job["job_id"], "model_id": entry.id, "display_name": entry.display_name,
             "needs_runtime": need_runtime, "needs_download": need_download, "download_bytes": download_bytes}
+
+
+def _check_setup_admission(deadline: float) -> None:
+    if monotonic() >= deadline:
+        raise RuntimeError("Setup request expired before admission; retry when the gateway is ready")
 
 
 def _prepare_runtime_control(request: Request, profile: Optional[str], *, required: bool) -> bool:
@@ -996,15 +1006,17 @@ def local_models_eject(body: ModelEjectBody):
 async def local_models_activate(body: ModelActivateBody, request: Request, profile: Optional[str] = None):
     """Capture intent on admission; runtime lock waits must not block HTTP Stop dispatch."""
     generation = bootstrap.current_boot_generation()
+    deadline = monotonic() + _SETUP_ADMISSION_SECONDS
     _prepare_runtime_control(request, profile, required=False)
     try:
-        return await run_in_threadpool(_accept_activation, body, profile, generation)
+        return await run_in_threadpool(_accept_activation, body, profile, generation, deadline)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-def _accept_activation(body: ModelActivateBody, profile: Optional[str], generation: int):
+def _accept_activation(body: ModelActivateBody, profile: Optional[str], generation: int, deadline: float):
     """Register the worker under the transition fence on a worker thread."""
+    _check_setup_admission(deadline)
     # Split variants stage under their first part — resolve like the other routes.
     if body.model_id not in bootstrap.staged_model_ids():
         raise HTTPException(status_code=404, detail=f"{body.model_id} is not downloaded")
@@ -1022,7 +1034,8 @@ def _accept_activation(body: ModelActivateBody, profile: Optional[str], generati
                 _assign_default(job, body.model_id)
                 _finish(job, f"{body.model_id} is the default for new chats")
 
-    with bootstrap.runtime_control_scope(generation):
+    with bootstrap.runtime_control_scope(generation, blocking=False):
+        _check_setup_admission(deadline)
         job = _job("model-activate", body.model_id, model_id=body.model_id)
         _spawn_job(job, "lr-model-activate", _run, fail_msg="model activate failed: %s", generation=generation)
     return {"job_id": job["job_id"]}

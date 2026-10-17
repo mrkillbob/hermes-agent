@@ -831,3 +831,5 @@ Plugins that load after the adapters connected (install/enable from the CLI, Des
 - [Messaging Gateway (User Guide)](../user-guide/messaging/index.md)
 
 Managed consumers can wait for an already queued or active root-owner boot before server state exists. The owner publishes a machine-root boot observation before scheduling its boot thread and removes it when requests settle or the owner closes. Readers verify the live process incarnation, executable and root. This observation grants no boot, reload, configuration or cleanup authority; missing or stale evidence keeps unavailable/fallback behavior prompt.
+
+Quickstart and Activate reject a busy boot transition instead of waiting to register an unobserved job. Their admission deadline is captured before threadpool dispatch and rechecked before job creation, so a delayed planning/admission worker cannot register setup beyond the request budget. Already accepted jobs retain their normal polling, Stop cancellation and generation fences.

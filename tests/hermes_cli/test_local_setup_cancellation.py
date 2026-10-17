@@ -179,7 +179,11 @@ async def test_activation_registration_does_not_block_stop_dispatch(client, setu
         activation = asyncio.create_task(lm.local_models_activate(
             lm.ModelActivateBody(model_id='fixture'), Request({'type': 'http', 'app': client.app})))
         heartbeat = asyncio.create_task(dispatch_other_request())
-        await asyncio.wait_for(asyncio.gather(activation, heartbeat), 5)
+        results = await asyncio.wait_for(asyncio.gather(activation, heartbeat, return_exceptions=True), 5)
+        if isinstance(results[0], lm.HTTPException):
+            assert results[0].status_code == 409 and 'busy' in results[0].detail
+        else:
+            assert isinstance(results[0], dict) and 'job_id' in results[0]
     finally:
         loop_serviced.set()
         boot.join(5)
@@ -220,3 +224,69 @@ def test_stop_does_not_retain_a_consumer_gateway(client, setup_plan, monkeypatch
     response = client.post('/api/local-models/server', json={'action': 'stop'})
     assert response.status_code == 409, response.text
     assert not runner._idle_exit_promoted and ownership.current_owner() is None
+
+
+@pytest.mark.parametrize('action', ['quickstart', 'activate'])
+def test_busy_boot_rejects_setup_before_response_and_cannot_register_later(client, setup_plan, monkeypatch, action):
+    lm = setup_plan
+    monkeypatch.setattr(lm.bootstrap, 'staged_model_ids', lambda: {'fixture'})
+    accepted = []
+    monkeypatch.setattr(lm, '_spawn_job', lambda job, *a, **k: accepted.append(job))
+    held, release, responded = threading.Event(), threading.Event(), threading.Event()
+    replies = []
+    def booting():
+        with lm.bootstrap._TRANSITION_LOCK:
+            held.set()
+            assert release.wait(10)
+    def request():
+        body = {} if action == 'quickstart' else {'model_id': 'fixture'}
+        replies.append(client.post('/api/local-models/' + action, json=body))
+        responded.set()
+    boot = threading.Thread(target=booting)
+    caller = threading.Thread(target=request)
+    boot.start()
+    assert held.wait(5)
+    caller.start()
+    try:
+        assert responded.wait(2), 'admission waited behind a boot until the caller could time out'
+        assert replies[0].status_code == 409, replies[0].text
+        assert lm._JOBS == {} and accepted == [] and not lm._QUICKSTART_LOCK.locked()
+    finally:
+        release.set()
+        boot.join(5)
+        caller.join(5)
+    assert not boot.is_alive() and not caller.is_alive()
+    assert lm._JOBS == {} and accepted == [], 'rejected setup registered after boot completed'
+    request()
+    assert replies[-1].status_code == 200, replies[-1].text
+    assert len(accepted) == 1
+    if lm._QUICKSTART_LOCK.locked():
+        lm._QUICKSTART_LOCK.release()
+
+
+@pytest.mark.parametrize('action', ['quickstart', 'activate'])
+@pytest.mark.parametrize('delay', ['threadpool', 'planning'])
+def test_delayed_setup_cannot_register_after_client_timeout(client, setup_plan, monkeypatch, action, delay):
+    lm = setup_plan
+    monkeypatch.setattr(lm.bootstrap, 'staged_model_ids', lambda: {'fixture'})
+    accepted = []
+    monkeypatch.setattr(lm, '_spawn_job', lambda job, *a, **k: accepted.append(job))
+    clock = {'now': 0.0}
+    monkeypatch.setattr(lm, 'monotonic', lambda: clock['now'])
+    if delay == 'threadpool':
+        async def delayed_admission(function, *args):
+            clock['now'] = 31.0  # The original client's 30-second request budget has elapsed.
+            return function(*args)
+        monkeypatch.setattr(lm, 'run_in_threadpool', delayed_admission)
+    else:
+        target, name = ((lm, '_quickstart_target') if action == 'quickstart'
+                        else (lm.bootstrap, 'staged_model_ids'))
+        original = getattr(target, name)
+        def delayed_planning(*args):
+            clock['now'] = 31.0
+            return original(*args)
+        monkeypatch.setattr(target, name, delayed_planning)
+    body = {} if action == 'quickstart' else {'model_id': 'fixture'}
+    response = client.post('/api/local-models/' + action, json=body)
+    assert response.status_code == 409, response.text
+    assert accepted == [] and lm._JOBS == {} and not lm._QUICKSTART_LOCK.locked()

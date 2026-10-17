@@ -570,13 +570,17 @@ def current_boot_generation() -> int:
 
 
 @contextmanager
-def runtime_control_scope(generation: int):
-    """Keep explicit configuration and boot admission ordered with a concurrent Stop."""
-    with _TRANSITION_LOCK:
+def runtime_control_scope(generation: int, *, blocking: bool = True):
+    """Order mutations with Stop; HTTP job admission rejects an occupied transition."""
+    if not _TRANSITION_LOCK.acquire(blocking=blocking):
+        raise RuntimeError("Local runtime control is busy; retry after the current action completes")
+    try:
         with _STATE_LOCK:
             if _STOPPING or generation != _BOOT_GENERATION:
                 raise RuntimeError("Local runtime control changed; retry after the current action completes")
         yield
+    finally:
+        _TRANSITION_LOCK.release()
 
 
 def has_owned_runtime() -> bool:
