@@ -133,6 +133,7 @@ def test_corrupt_pending_grants_are_not_overwritten(tmp_path, monkeypatch):
     assert path.read_text(encoding='utf-8') == '{incomplete'
 
 
+@pytest.mark.platforms("any")
 def test_concurrent_process_grants_preserve_every_model(tmp_path):
     import json
     import subprocess
