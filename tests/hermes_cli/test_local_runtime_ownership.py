@@ -104,6 +104,22 @@ def test_unreadable_incumbent_record_refuses_replacement(inert_runtime, owner):
     assert calls == []
 
 
+@pytest.mark.parametrize('modern', [False, True])
+def test_recorded_live_router_is_never_reclaimed_at_startup(inert_runtime, owner, monkeypatch, modern):
+    import os
+    from hermes_cli.local_runtime import recovery
+
+    bootstrap, calls = inert_runtime
+    state = {'pid': os.getpid()}
+    if modern:
+        state.update(owner_pid=1, create_time=1)
+    monkeypatch.setattr(recovery, 'read_state', lambda: state)
+    monkeypatch.setattr(recovery, '_owner_is_dead', lambda state: True)
+    monkeypatch.setattr(recovery, 'stop_recorded_orphan', lambda: calls.append('reclaimed') or True)
+    assert bootstrap.ensure_local_runtime({'local_runtime': {'enabled': True}}, owner=owner) is None
+    assert calls == []
+
+
 @pytest.mark.asyncio
 async def test_shutdown_cancels_boot_before_supervisor_publication(inert_runtime, owner, monkeypatch):
     import asyncio

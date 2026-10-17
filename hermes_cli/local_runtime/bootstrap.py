@@ -164,7 +164,7 @@ def _incumbent_allows_boot() -> bool:
     """Never replace a live/uncertain owner, even when its router or presets need repair."""
     import psutil
     from hermes_cli.local_runtime.recovery import (
-        _owner_is_dead, _same_birth, is_modern, read_state, stop_recorded_orphan,
+        _owner_is_dead, _same_birth, _valid_pid, is_modern, read_state,
     )
     from hermes_cli.local_runtime.supervisor import state_path
 
@@ -181,8 +181,11 @@ def _incumbent_allows_boot() -> bool:
             else:
                 logger.info("Another live Hermes process owns the local runtime; adopting its endpoint")
             return False
-    if not stop_recorded_orphan():
-        logger.warning("Local runtime ownership is live or uncertain; refusing a parallel replacement")
+    # Owner death is not an admission fence: adopters may still be using an orphan. Only the
+    # explicit stop action may recover its tree. Even an unverified/reused live PID must not
+    # cause startup to kill a process or overwrite the uncertain machine record.
+    if not _valid_pid(state.get('pid')) or psutil.pid_exists(state['pid']):
+        logger.info("Recorded local router is live or uncertain; leaving recovery to explicit stop")
         return False
     return True
 

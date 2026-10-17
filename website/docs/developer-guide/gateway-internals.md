@@ -21,8 +21,8 @@ existing identity-verified endpoint. A main gateway must be running for managed 
 Bootstrap serializes transitions inside the process and across processes. Unavailable or
 contended boot locks refuse mutation. A living or uncertain foreign owner is never replaced,
 including stale-preset and dead-child cases where its watchdog could restart the child.
-Identity-verified orphan recovery retains the existing process-birth and Windows containment
-guards. Implicit refresh never stops the shared router: an idle snapshot cannot fence off new
+Even a verified live orphan remains available for adoption; only explicit stop may reclaim its
+tree under the existing process-birth and Windows containment guards. Implicit refresh never stops the shared router: an idle snapshot cannot fence off new
 HTTP requests from another process. Downloads and engine installs stay staged until an explicit
 default-profile owner stop/start. Activation checks the live model
 listing and refuses an unserved model without changing the existing assignment.

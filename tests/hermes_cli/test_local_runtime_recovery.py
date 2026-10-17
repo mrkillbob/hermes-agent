@@ -433,12 +433,10 @@ def test_clock_step_keeps_the_recorded_router(tmp_path, monkeypatch):
 
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("owner", ["exited", "alive"])
-def test_replacement_stops_only_an_orphaned_router(tmp_path, monkeypatch, owner):
-    """Stale-preset replacement and the rescan bounce stop the recorded router only when its owner
-    is gone; a live owner's router keeps running (its watchdog would respawn it anyway). POSIX: a
-    Windows router dies with its owner's job object, so no orphan exists to stop."""
+def test_startup_preserves_router_and_only_explicit_stop_recovers_an_orphan(tmp_path, monkeypatch, owner):
+    """An exited owner does not prove its adopters are idle; startup must preserve the router."""
     from gateway.status import get_process_start_time
-    from hermes_cli.local_runtime import bootstrap, endpoint, supervisor
+    from hermes_cli.local_runtime import bootstrap, endpoint, recovery, supervisor
 
     monkeypatch.setattr(supervisor, "runtimes_root", lambda: tmp_path)
     holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -455,7 +453,9 @@ def test_replacement_stops_only_an_orphaned_router(tmp_path, monkeypatch, owner)
             holder.kill()
             holder.wait(timeout=5)
 
-        assert bootstrap._incumbent_allows_boot() is (owner == "exited")
+        assert bootstrap._incumbent_allows_boot() is False
+        assert router.poll() is None
+        assert recovery.stop_recorded_orphan() is (owner == "exited")
 
         if owner == "exited":
             router.wait(timeout=10)
