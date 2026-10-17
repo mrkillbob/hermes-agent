@@ -8,6 +8,7 @@ its state file appears.
 from __future__ import annotations
 
 from contextlib import suppress
+import http.client
 import json
 import logging
 import time
@@ -119,7 +120,7 @@ def managed_model_idle(base_url: str, model_id: str) -> bool:
         processing = [float(line.split()[-1]) for line in metrics.splitlines()
                       if line.startswith("llamacpp:requests_processing")]
         return bool(processing) and all(value == 0 for value in processing)
-    except Exception:
+    except (OSError, ValueError, TypeError, KeyError, http.client.HTTPException):
         return False
 
 

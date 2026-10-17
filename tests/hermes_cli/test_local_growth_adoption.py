@@ -6,6 +6,7 @@ import pytest
 @pytest.mark.parametrize('case,expected', [
     ('idle', True), ('slot-busy', False), ('metric-busy', False),
     ('unknown-slots', False), ('unknown-metric', False), ('transport-error', False),
+    ('truncated-response', False),
     ('foreign', False), ('no-state', False),
 ])
 def test_adopted_idle_probe_fails_closed(monkeypatch, case, expected):
@@ -22,6 +23,9 @@ def test_adopted_idle_probe_fails_closed(monkeypatch, case, expected):
         assert timeout_s == 2 and 'autoload=false' in route and 'model=model%20a' in route
         if case == 'transport-error':
             raise OSError('closed')
+        if case == 'truncated-response':
+            from http.client import IncompleteRead
+            raise IncompleteRead(b'partial', 20)
         if route.startswith('/slots?'):
             return ('{}' if case == 'unknown-slots' else
                     '[{"is_processing":true}]' if case == 'slot-busy' else
