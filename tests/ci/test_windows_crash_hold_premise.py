@@ -7,9 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = pytest.mark.platforms("windows")
-
-
 def _fixture(tmp_path, monkeypatch):
     from tests.e2e.core.windows_update import test_crash_cells as cells
 
