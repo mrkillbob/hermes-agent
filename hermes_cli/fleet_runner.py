@@ -19,6 +19,8 @@ from hermes_cli.fleet_protocol import RunnerCapability, TaskTelemetry
 
 # Maintenance cadence is independent of the task duration.
 _LEASE_REFRESH_SECONDS = 10.0
+_IDLE_LOG_SECONDS = 300.0
+_monotonic = time.monotonic
 
 
 def _parse_stream_json_result(stdout: str) -> tuple[str, TaskTelemetry | None]:
@@ -109,6 +111,7 @@ class FleetRunner:
         self._stop = threading.Event()
         self._delivered: dict[str, str] = {}
         self._results: dict[str, str] = {}
+        self._idle_logged_at: float | None = None
 
     def _default_capabilities(self, models: Iterable[str], tools: Iterable[str]):
         current_platform = "windows" if platform.system().lower() == "windows" else platform.system().lower()
@@ -158,7 +161,15 @@ class FleetRunner:
                 raise FleetTransportError('coordinator refused runner heartbeat')
             if self.stopped or not self._is_live():
                 return claimed
-            claim = self.coordinator.claim_task(capability, now=now)
+            try:
+                claim = self.coordinator.claim_task(capability, now=now)
+            except FleetTransientTransportError:
+                # No claim ACK has been journaled and no work has been launched.
+                # If the coordinator committed the claim before the ACK was lost, its
+                # lease expires into "uncertain" exactly as when a runner dies; the
+                # claim is never retried or assumed here.
+                logging.getLogger(__name__).warning('Fleet claim unavailable; deferring poll')
+                return claimed
             if claim is None:
                 continue
             claimed = True
@@ -235,8 +246,19 @@ class FleetRunner:
                 self.run_once()
             self._stop.wait(interval)
 
+    def _note_desktop_not_live(self) -> None:
+        """Explain a silent non-heartbeating runner without logging every poll."""
+        now = _monotonic()
+        if self._idle_logged_at is not None and now - self._idle_logged_at < _IDLE_LOG_SECONDS:
+            return
+        self._idle_logged_at = now
+        logging.getLogger(__name__).warning('Fleet desktop liveness is false; not registering or polling')
+
     def _is_live(self) -> bool:
-        return bool(self._liveness_check())
+        live = bool(self._liveness_check())
+        if not live:
+            self._note_desktop_not_live()
+        return live
 
     def _find_task(self, task_id: str):
         for task in self.coordinator.list_tasks():

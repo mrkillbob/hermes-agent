@@ -8,6 +8,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -21,6 +22,20 @@ from hermes_cli.fleet_protocol import (
     decode_message,
 )
 from hermes_cli.fleet_store import FleetStore
+
+
+_SLOW_REQUEST_SECONDS = 2.0
+_monotonic = time.monotonic
+_ROUTE_CLASSES = frozenset({
+    "health", "tasks", "runners", "register", "heartbeat", "claim",
+    "renew", "complete", "fail", "uncertain", "retry", "cancel",
+})
+
+
+def _route_class(path: str) -> str:
+    """Name the endpoint without exposing task, node or profile identifiers."""
+    last = path.rstrip("/").rsplit("/", 1)[-1]
+    return last if last in _ROUTE_CLASSES else "other"
 
 
 def _claim_dict(claim) -> dict:
@@ -55,6 +70,12 @@ class FleetServer:
         self._thread: threading.Thread | None = None
         self._maintenance_thread: threading.Thread | None = None
         self._maintenance_stop = threading.Event()
+        self._write_failure_lock = threading.Lock()
+        self.response_write_failures = 0
+
+    def record_response_write_failure(self) -> None:
+        with self._write_failure_lock:
+            self.response_write_failures += 1
 
     def notify_task_update(self, task_id: str, status: str, **fields) -> None:
         if self.on_task_update is None:
@@ -125,12 +146,35 @@ class _FleetHandler(BaseHTTPRequestHandler):
         return hmac.compare_digest(header, expected)
 
     def _respond(self, status: int, body: dict) -> None:
+        self._last_status = int(status)
         payload = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The client gave up. Any store mutation already committed; answering
+            # again (a 500) on the dead socket would only repeat the failure.
+            self.close_connection = True
+            self._write_failed = True
+            self.fleet.record_response_write_failure()
+
+    def _timed(self, handler) -> None:
+        """Log slow requests and disconnects without payload or peer data."""
+        started = _monotonic()
+        self._last_status = None
+        self._write_failed = False
+        try:
+            handler()
+        finally:
+            elapsed = _monotonic() - started
+            if elapsed >= _SLOW_REQUEST_SECONDS or self._write_failed:
+                logging.getLogger(__name__).warning(
+                    "fleet request: %s %s status=%s %.3fs write_failed=%s active_threads=%d response_write_failures=%d",
+                    self.command, _route_class(urlsplit(self.path).path), self._last_status,
+                    elapsed, self._write_failed, threading.active_count(), self.fleet.response_write_failures)
 
     def _read_body(self) -> bytes:
         try:
@@ -160,6 +204,12 @@ class _FleetHandler(BaseHTTPRequestHandler):
         return decoded
 
     def do_GET(self) -> None:
+        self._timed(self._handle_get)
+
+    def do_POST(self) -> None:
+        self._timed(self._handle_post)
+
+    def _handle_get(self) -> None:
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return
@@ -181,7 +231,7 @@ class _FleetHandler(BaseHTTPRequestHandler):
             return
         self._respond(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
-    def do_POST(self) -> None:
+    def _handle_post(self) -> None:
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return
