@@ -75,6 +75,7 @@ class FleetStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=10000")
         connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA synchronous=FULL")
         try:
             yield connection
         except BaseException:
@@ -149,6 +150,9 @@ class FleetStore:
                 "fleet_tasks",
                 {"output_tokens": "INTEGER", "duration_ms": "INTEGER", "output_tps": "REAL"},
             )
+            self._ensure_columns(connection, "fleet_tasks", {"claim_request_nonce": "TEXT"})
+            from hermes_cli.fleet_claim_recovery import initialize
+            initialize(connection)
 
     @staticmethod
     def _ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
@@ -264,70 +268,97 @@ class FleetStore:
             assert row is not None
             return self._record(row)
 
-    def claim_task(
-        self,
-        capability: RunnerCapability,
-        *,
-        now: float | None = None,
-        lease_seconds: float = 60.0,
-    ) -> TaskClaim | None:
-        now = _now() if now is None else now
+    def claim_recovery_capabilities(self):
+        from hermes_cli.fleet_claim_recovery import capabilities
+        return capabilities(self)
+
+    def establish_claim_cutover(self, expected_store_id):
+        """Explicit store-wide irreversible legacy fence; never run by a runner."""
+        from hermes_cli.fleet_claim_recovery import establish_cutover
+        return establish_cutover(self, expected_store_id)
+
+    def claim_request(self, request):
+        from hermes_cli.fleet_claim_recovery import outcome
+        return outcome(self, request, operation="claim")
+
+    def lookup_claim_request(self, request):
+        from hermes_cli.fleet_claim_recovery import outcome
+        return outcome(self, request, operation="lookup")
+
+    def resolve_claim_request(self, request):
+        from hermes_cli.fleet_claim_recovery import outcome
+        return outcome(self, request, operation="resolve")
+
+    def claim_task(self, capability, *, now=None, lease_seconds=60.0):
+        from hermes_cli.fleet_claim_recovery import meta
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            runner = connection.execute(
-                "SELECT * FROM fleet_runners WHERE node_id=? AND profile=? AND expires_at>?",
-                (capability.node_id, capability.profile, now),
-            ).fetchone()
-            if runner is None:
-                return None
-            rows = connection.execute(
-                "SELECT * FROM fleet_tasks WHERE status='pending' ORDER BY created_at, task_id"
-            ).fetchall()
-            selected = next(
-                (
-                    row
-                    for row in rows
-                    if _capability_matches(
-                        TaskRequirement.from_dict(json.loads(row["requirement_json"])), capability
-                    )
-                ),
-                None,
-            )
-            if selected is None:
-                return None
-            claim_id = uuid.uuid4().hex
-            expires = now + lease_seconds
-            updated = connection.execute(
-                """
-                UPDATE fleet_tasks
-                SET status='running', claim_id=?, node_id=?, runner_profile=?,
-                    lease_expires_at=?, attempt=attempt+1, updated_at=?
-                WHERE task_id=? AND status='pending'
-                """,
-                (
-                    claim_id,
-                    capability.node_id,
-                    capability.profile,
-                    expires,
-                    now,
-                    selected["task_id"],
-                ),
-            )
-            if updated.rowcount != 1:
-                return None
+            if meta(connection)["cutover_id"] is not None:
+                raise ValueError("legacy claims permanently closed")
+            return self._claim_in_transaction(connection, capability, now=now, lease_seconds=lease_seconds)
+
+    def _claim_in_transaction(self, connection, capability, *, now=None, lease_seconds=60.0, request_nonce=None):
+        now = _now() if now is None else now
+        runner = connection.execute(
+            "SELECT * FROM fleet_runners WHERE node_id=? AND profile=? AND expires_at>?",
+            (capability.node_id, capability.profile, now),
+        ).fetchone()
+        if runner is None:
+            return None
+        rows = connection.execute(
+            "SELECT * FROM fleet_tasks WHERE status='pending' ORDER BY created_at, task_id"
+        ).fetchall()
+        selected = next(
+            (
+                row
+                for row in rows
+                if _capability_matches(
+                    TaskRequirement.from_dict(json.loads(row["requirement_json"])), capability
+                )
+            ),
+            None,
+        )
+        if selected is None:
+            return None
+        claim_id = uuid.uuid4().hex
+        expires = now + lease_seconds
+        if request_nonce is not None:
             connection.execute(
-                "UPDATE fleet_runners SET active_load=active_load+1 WHERE node_id=? AND profile=?",
-                (capability.node_id, capability.profile),
+                "UPDATE fleet_claim_requests SET task_id=?,claim_id=?,node_id=?,profile=?,attempt=? WHERE nonce=? AND outcome_json IS NULL",
+                (selected["task_id"], claim_id, capability.node_id, capability.profile, selected["attempt"] + 1, request_nonce),
             )
-            self._event(connection, selected["task_id"], "task_claimed", now)
-            return TaskClaim(
-                task_id=selected["task_id"],
-                claim_id=claim_id,
-                node_id=capability.node_id,
-                runner_profile=capability.profile,
-                lease_expires_at=expires,
-                attempt=selected["attempt"] + 1,
-            )
+        updated = connection.execute(
+            """
+            UPDATE fleet_tasks
+            SET status='running', claim_id=?, node_id=?, runner_profile=?,
+                lease_expires_at=?, attempt=attempt+1, updated_at=?, claim_request_nonce=?
+            WHERE task_id=? AND status='pending'
+            """,
+            (
+                claim_id,
+                capability.node_id,
+                capability.profile,
+                expires,
+                now,
+                request_nonce,
+                selected["task_id"],
+            ),
+        )
+        if updated.rowcount != 1:
+            return None
+        connection.execute(
+            "UPDATE fleet_runners SET active_load=active_load+1 WHERE node_id=? AND profile=?",
+            (capability.node_id, capability.profile),
+        )
+        self._event(connection, selected["task_id"], "task_claimed", now)
+        return TaskClaim(
+            task_id=selected["task_id"],
+            claim_id=claim_id,
+            node_id=capability.node_id,
+            runner_profile=capability.profile,
+            lease_expires_at=expires,
+            attempt=selected["attempt"] + 1,
+        )
 
     def renew_claim(
         self, task_id: str, claim_id: str, *, now: float | None = None, lease_seconds: float = 60.0
