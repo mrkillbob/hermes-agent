@@ -84,7 +84,11 @@ def _apply(executor, delivery, artifact):
 
 
 def _uncertain(executor, delivery, reason):
-    executor.record(delivery, 'external_receiver_uncertain', {'reason': reason}, exclusive=True)
+    try:
+        executor.record(delivery, 'external_receiver_uncertain', {'reason': reason}, exclusive=True)
+    except (sqlite3.Error, TimeoutError):
+        # The already committed external intent is still the durable recovery fence.
+        pass
     return ReceiverOutcome('uncertain', delivery.key)
 
 
@@ -190,8 +194,11 @@ def _execute(executor, delivery, plan, seconds):
         birth = _birth(process.pid)
         reason, counts, settled = 'receiver_interrupted', {'stdout': 0, 'stderr': 0}, False
         try:
-            executor.record(delivery, 'external_process_started', {'launch_id': launch, 'pid': process.pid, 'birth': birth})
-            _apply(executor, delivery, Artifact(delivery, 'started', 'Inert process started; model acceptance unproven'))
+            deadline = started + seconds
+            executor.record(delivery, 'external_process_started', {'launch_id': launch, 'pid': process.pid, 'birth': birth},
+                            seconds=deadline - time.monotonic())
+            executor.observe(Artifact(delivery, 'started', 'Inert process started; model acceptance unproven'),
+                             seconds=deadline - time.monotonic())
             reason, counts = _drain(process, outputs, started + seconds, limits.stream_bytes)
         finally:
             if process.poll() is None:
@@ -305,5 +312,8 @@ def receive_once(database: Path, task_id: str, run_id: int, key: str,
         seconds = min(seconds, row[0] + row[1] - time.time())
     if seconds <= 0:
         return _apply(executor, delivery, Artifact(delivery, 'error', 'Task deadline elapsed before inert launch'))
-    record = _execute(executor, delivery, plan, seconds)
+    try:
+        record = _execute(executor, delivery, plan, seconds)
+    except (sqlite3.Error, TimeoutError, OSError):
+        return _uncertain(executor, delivery, 'receiver_io_or_deadline')
     return _finish(executor, delivery, plan, record)

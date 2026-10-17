@@ -153,11 +153,14 @@ class CoordinatorExecutor:
                 raise ValueError('Foreign delivery key')
             return delivery
 
-    def record(self, delivery, kind, payload, *, exclusive=False) -> bool:
+    def record(self, delivery, kind, payload, *, exclusive=False, seconds=None) -> bool:
         value = {'binding': digest(asdict(delivery)), **payload}
         if len(json.dumps(value).encode()) > 65536:
             raise ValueError('Coordinator event exceeds envelope limit')
-        with bounded_connection(self.database, self.limits.submit_seconds, writable=True) as conn:
+        budget = self.limits.submit_seconds if seconds is None else min(seconds, self.limits.submit_seconds)
+        if budget <= 0:
+            raise TimeoutError('No remaining execution budget')
+        with bounded_connection(self.database, budget, writable=True) as conn:
             validate_binding(conn, delivery, self.database, self.coordinator_id)
             old = event(conn, delivery, kind)
             if old is not None:
@@ -167,6 +170,23 @@ class CoordinatorExecutor:
             validate_binding(conn, delivery, self.database, self.coordinator_id, owned=True)
             kb._append_event(conn, delivery.task_id, kind, value, run_id=delivery.run_id)
             return True
+
+    def observe(self, artifact: Artifact, seconds: float):
+        """Record only a nonterminal observation without lifecycle-writer retries."""
+        if artifact.kind not in {'accepted', 'ack', 'started'}:
+            raise ValueError('Observation must not terminate work')
+        budget = min(seconds, self.limits.submit_seconds)
+        if budget <= 0:
+            raise TimeoutError('No remaining execution budget')
+        with bounded_connection(self.database, budget, writable=True) as conn:
+            delivery = artifact.delivery
+            validate_binding(conn, delivery, self.database, self.coordinator_id, owned=True)
+            kind = 'external_' + artifact.kind
+            old = event(conn, delivery, kind)
+            if old is not None and artifact_from_envelope(old) != artifact:
+                raise ValueError('Conflicting nonterminal observation')
+            if old is None:
+                kb._append_event(conn, delivery.task_id, kind, envelope(artifact), run_id=delivery.run_id)
 
     def read(self, delivery, kind):
         with bounded_connection(self.database, self.limits.lookup_seconds) as conn:

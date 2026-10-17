@@ -309,3 +309,18 @@ def test_late_receiver_claim_remains_idempotent_after_winner_completed(context):
     assert executor.record(delivery, 'external_receiver_claim', {'receiver_instance': 'late'}, exclusive=True) is False
     assert kinds(conn, tid).count('external_launch_intent') == 1
     assert kb.get_task(conn, tid).status == 'done'
+
+
+@pytest.mark.platforms('posix')
+def test_running_child_observation_uses_concrete_bounded_journal(context, monkeypatch):
+    conn, _root = context
+    tid, delivery, _executor, _lanes, plan = offered(context)
+    original = ExternalLanes.receive
+    def lifecycle_receiver(self, connection, artifact):
+        if artifact.kind == 'started':
+            raise TimeoutError('Lifecycle retrying writer is unavailable during child execution')
+        return original(self, connection, artifact)
+    monkeypatch.setattr(ExternalLanes, 'receive', lifecycle_receiver)
+    assert receive(context, delivery, plan).state == 'completed'
+    assert kinds(conn, tid).count('external_started') == 1
+    assert kb.get_task(conn, tid).status == 'done'
