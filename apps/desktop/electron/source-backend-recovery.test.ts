@@ -7,6 +7,7 @@ import { afterEach, test, vi } from 'vitest'
 
 import { createBackendConnectionState } from './backend-connection-state'
 import { execProbe } from './backend-probes'
+import { createInstalledRuntimeGate } from './backend-resolution'
 import { createFirstRunSetupGate } from './first-run-setup-gate'
 import { runPrimaryBackendStartup } from './primary-backend-startup'
 import { resolveSourceInstallationBackend } from './source-backend'
@@ -187,3 +188,53 @@ test('late successful recovery cannot advance a superseded startup', async () =>
   assert.equal(run.waitForDecision.mock.calls.length, 0)
   assert.equal(run.ensureLocalRuntime.mock.calls.length, 0)
 })
+
+for (const cancellation of ['connection reset', 'shutdown']) {
+  test(`post-install re-resolution fences recovery after ${cancellation}`, async () => {
+    vi.useFakeTimers()
+    const root = installation()
+    const controller = new AbortController()
+    const state = createBackendConnectionState<unknown, unknown>()
+    const attempt = state.startAttempt()
+    const gate = createInstalledRuntimeGate({ HERMES_DESKTOP_IGNORE_EXISTING: '1' }, () => {})
+
+    const control = {
+      signal: controller.signal,
+      assertCurrentAttempt: () => state.assertCurrentAttempt(attempt)
+    }
+
+    vi.mocked(execProbe).mockRejectedValueOnce(new Error('failed')).mockResolvedValueOnce(undefined)
+
+    const pending = gate.afterInstall(
+      probeControl =>
+        gate.resolve(root, () =>
+          resolveSourceInstallationBackend(root, [], {
+            isWindows: false,
+            hermesHome: root,
+            ...probeControl
+          })
+        ),
+      control
+    )
+
+    // Observe settlement immediately: the old path resolves instead of rejecting.
+    const settled = pending.then(
+      value => ({ value, error: null }),
+      error => ({ value: null, error })
+    )
+
+    await vi.advanceTimersByTimeAsync(1)
+
+    if (cancellation === 'connection reset') {
+      state.invalidate()
+    } else {
+      controller.abort(new Error('shutdown'))
+    }
+
+    await vi.runAllTimersAsync()
+    const result = await settled
+    assert.ok(result.error, 'a superseded post-install resolution must reject')
+    assert.equal(result.value, null)
+    assert.equal(vi.mocked(execProbe).mock.calls.length, 1)
+  })
+}

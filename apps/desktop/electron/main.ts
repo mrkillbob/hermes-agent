@@ -5343,7 +5343,7 @@ async function ensureRuntime(
 
     // Resolve the newly published launcher after the installer completes.
     return ensureRuntime(
-      await installedRuntimeGate.afterInstall(() => resolveHermesBackend(backend.args)),
+      await installedRuntimeGate.afterInstall(control => resolveHermesBackend(backend.args, control), { signal: localBackendLifecycle.signal, assertCurrentAttempt: assertStillOwned }),
       assertStillOwned
     )
   }
