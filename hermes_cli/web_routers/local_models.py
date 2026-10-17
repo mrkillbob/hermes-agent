@@ -424,14 +424,31 @@ def _ensure_server(job: dict[str, Any], config: dict, model_id: str, *, fail_det
                        "Stop/start the local server from its default-profile gateway, then retry activation.")
 
 
-def _server_model_ids(sup) -> set[str]:
+def _server_model_ids(sup, *, timeout_s: int | None = None) -> set[str]:
     if sup is not None:
-        return set(sup.models())
+        return set(sup.models() if timeout_s is None else sup.models(timeout_s=timeout_s))
     endpoint = _state_endpoint()
     if endpoint is None:
         raise RuntimeError("The local server stopped before its model listing was available")
-    data = (_router_request(endpoint, "/models", timeout=10) or {}).get("data", [])
+    data = (_router_request(endpoint, "/models", timeout=10 if timeout_s is None else timeout_s) or {}).get("data", [])
     return {m["id"] for m in data if m.get("id")}
+
+
+def _preflight_quickstart_server(model_id: str) -> None:
+    """Do not download weights a live shared router cannot register without an explicit stop."""
+    from hermes_cli.local_runtime.boot_status import owner_boot_pending
+
+    if owner_boot_pending():
+        raise HTTPException(status_code=409, detail="The local server is starting; retry setup when it is ready")
+    sup = bootstrap.get_supervisor()
+    if sup is None and _state_endpoint() is None:
+        return  # A cold setup can start a new router after staging its model.
+    with _http_error(409, "Cannot verify the running local server before setup: "):
+        registered = _server_model_ids(sup, timeout_s=5)
+    if model_id not in registered:
+        raise HTTPException(status_code=409, detail=(
+            "The running local server has not registered this model. "
+            "Stop the local server in Local Models from its default-profile gateway, then retry setup."))
 
 
 def _assign_default(job: dict[str, Any], model_id: str) -> None:
@@ -851,12 +868,14 @@ def _accept_quickstart(body: QuickstartBody, profile: Optional[str], generation:
     if not need_download:
         download_plan = []
     download_bytes = sum(p[2] for p in download_plan)
+    _preflight_quickstart_server(variant.model_id)
     def _run():
         nonlocal entry, variant, download_plan
         if need_runtime and binaries.installed_engine(backend) is None:
             _install_engine_job(job, backend)
             entry, variant, download_plan = _repriced_quickstart(job, body, variant)
         if download_plan:
+            _preflight_quickstart_server(variant.model_id)
             # Each phase has its own complete download plan. Resume within a
             # phase retains counters until PM reports the durable bytes.
             if job["phase"] != "downloading":

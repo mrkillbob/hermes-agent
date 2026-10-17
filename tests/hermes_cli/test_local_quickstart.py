@@ -186,7 +186,8 @@ def test_quickstart_runs_all_three_legs(client, capable_hardware, monkeypatch, t
         lambda config, force=False, **kwargs: calls.append("server") or None)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models._state_endpoint",
-        lambda: {"base_url": "http://127.0.0.1:1/v1", "api_key": "k"})
+        lambda: ({"base_url": "http://127.0.0.1:1/v1", "api_key": "k"}
+                 if "server" in calls else None))
     from hermes_cli.local_runtime import bootstrap
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models._router_request",
