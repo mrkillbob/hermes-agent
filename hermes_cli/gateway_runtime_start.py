@@ -1,6 +1,7 @@
 """One detached-process primitive; callers must first prove owner/service absence."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -69,9 +70,17 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
     try:
         with (logs / "gateway-stdio.log").open("ab", buffering=0) as output:
             remaining(deadline)
-            return subprocess.Popen(command, cwd=root, env=env, close_fds=True,
-                                    stdin=subprocess.DEVNULL, stdout=output, stderr=output,
-                                    **windows_detach_popen_kwargs())
+            try:
+                return subprocess.Popen(command, cwd=root, env=env, close_fds=True,
+                                        stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                        **windows_detach_popen_kwargs())
+            except OSError as exc:
+                # A Windows refusal is not necessarily a job-policy denial. Keep
+                # its native code without recording argv, environment or private
+                # paths from the exception; no weaker detach fallback is safe.
+                output.write((json.dumps({"event": "gateway_spawn_failed", "errno": exc.errno,
+                                          "winerror": getattr(exc, "winerror", None)}) + "\n").encode("utf-8"))
+                raise
     except OSError as exc:
         reason = "windows_breakaway_unavailable" if sys.platform == "win32" else "spawn_failed"
         raise RuntimeStartError(reason) from exc
