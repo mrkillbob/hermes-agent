@@ -11,7 +11,7 @@ import stat
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -314,6 +314,12 @@ def _deliver(card, ledger, kanban):
     return True
 
 
+def _same_pr_snapshot(first, second):
+    # The list converter alone supplies updated_at. Every shared security and
+    # admission field remains strict, including head/base identity and labels.
+    return replace(first, updated_at=None) == replace(second, updated_at=None)
+
+
 def _collect_intake_cards(policy, github):
     target = policy.admission.targets[policy.repository]
     pulls = github.list_open_pull_requests(policy.repository, target.owner_login)
@@ -326,14 +332,14 @@ def _collect_intake_cards(policy, github):
         if not policy.admission.admit_pull_request(pull).admitted:
             continue
         current = github.get_pull_request(policy.repository, pull.number)
-        if current != pull:
+        if not _same_pr_snapshot(current, pull):
             raise IntakeError("PR changed during retrieval")
         items = github.list_actionable_feedback(
             policy.repository, pull.number, expected_head_sha=current.head_sha
         )
         if (
             not isinstance(items, (tuple, list))
-            or github.get_pull_request(policy.repository, pull.number) != current
+            or not _same_pr_snapshot(github.get_pull_request(policy.repository, pull.number), current)
         ):
             raise IntakeError("feedback retrieval incomplete or head changed")
         for feedback in items:
@@ -397,7 +403,7 @@ def scan_intake(policy, github, kanban, ledger_path, *, now, legacy_path=None):
         if cards:
             with ReceiptLedger(ledger_path).locked() as ledger:
                 for card, pull, receipt in cards.values():
-                    if github.get_pull_request(policy.repository, pull.number) != pull:
+                    if not _same_pr_snapshot(github.get_pull_request(policy.repository, pull.number), pull):
                         raise IntakeError("PR head changed before intake delivery")
                     from .intake_legacy import LegacyReceipts
 

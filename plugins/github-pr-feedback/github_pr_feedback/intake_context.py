@@ -33,37 +33,31 @@ def _canonical(path):
     return value.resolve()
 
 
-def registered_control_root(ctx):
-    from hermes_constants import get_default_hermes_root
-
-    manager = getattr(ctx, "_manager", None)
-    homes = [getattr(manager, key, None) for key in ("home_path", "scope_key")]
-    homes = [value for value in homes if value is not None]
-    if not homes:
-        raise IntakeError("registered intake control plane unavailable")
-    roots = {_canonical(get_default_hermes_root(home=_canonical(value))) for value in homes}
-    if len(roots) != 1:
-        raise IntakeError("registered intake control roots differ")
-    root = roots.pop()
-    require_context(root)
-    return root
-
-
-def require_context(expected_root):
-    # Presence is intentional: empty/'false' markers do not grant authority.
+def read_snapshot(ctx, board, *, expected_root=None, **selectors):
+    # Keep this local check as well as the native parent check: RPC threads do
+    # not carry a child's native fencing ContextVars. Host mode refuses this API.
     if PROTECTED_CONTEXT.intersection(os.environ):
         raise IntakeError("worker/delegation identity or Kanban path pin present")
-    from hermes_cli import kanban_db as kb
-    from hermes_constants import get_default_hermes_root
+    try:
+        snapshot = ctx.kanban_readonly_snapshot(board, **selectors)
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        raise IntakeError("passive Kanban context unavailable") from None
+    if (not isinstance(snapshot, dict) or set(snapshot) != {"control_root", "board", "tasks"}
+            or snapshot["board"] != board):
+        raise IntakeError("exact passive Kanban context required")
+    root = _canonical(snapshot["control_root"])
+    if expected_root is not None and root != _canonical(expected_root):
+        raise IntakeError("registered Kanban root differs")
+    selected = any(value is not None for value in selectors.values())
+    if (selected and not isinstance(snapshot["tasks"], list)) or (not selected and snapshot["tasks"] is not None):
+        raise IntakeError("complete selected task snapshot required")
+    return snapshot
 
-    root = _canonical(expected_root)
-    if _canonical(get_default_hermes_root()) != root or _canonical(kb.kanban_home()) != root:
-        raise IntakeError("intake Kanban/control root mismatch")
-    if (
-        "HERMES_CONTROL_HOME" in os.environ
-        and _canonical(os.environ["HERMES_CONTROL_HOME"]) != root
-    ):
-        raise IntakeError("inherited intake control root differs")
-    if kb._explicit_board_intent_pinned():
-        raise IntakeError("native Kanban context is fenced")
-    return root
+
+def registered_control_root(ctx, board="default"):
+    return _canonical(read_snapshot(ctx, board)["control_root"])
+
+
+def require_context(ctx, expected_root, board):
+    read_snapshot(ctx, board, expected_root=expected_root)
+    return _canonical(expected_root)

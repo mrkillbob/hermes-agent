@@ -83,17 +83,17 @@ def handle_cli(ctx, args):
         print(json.dumps({"status": "rejected", "created": 0}))
         return 1
     try:
-        control_root = registered_control_root(ctx)
+        control_root = registered_control_root(ctx, SCOPES[args.repository])
         policy = load_intake_policy(ctx, args.repository)
         now = datetime.now(UTC)
         policy.check(now)  # time/capability gates before credential/client access
-        require_context(control_root)
+        require_context(ctx, control_root, SCOPES[args.repository])
         github = automation_client(policy.admission, allow_actions=False)
         ledger = control_root / "github-pr-feedback" / "intake-only" / "receipts.sqlite3"
         result = scan_intake(
             policy,
             github,
-            IntakeKanban(expected_root=control_root),
+            IntakeKanban(expected_root=control_root, context=ctx),
             ledger,
             now=now,
             legacy_path=control_root / "github-pr-feedback" / "ledger.sqlite3",

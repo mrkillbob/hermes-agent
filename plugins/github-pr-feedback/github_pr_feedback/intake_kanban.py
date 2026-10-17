@@ -8,7 +8,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .intake_context import require_context
+from .intake_context import read_snapshot, require_context
+from . import intake_history
 from .intake_only import ASSIGNEE, KEY_PREFIX, SCOPES, IntakeError
 
 MAX_BYTES = 1_048_576
@@ -40,34 +41,26 @@ def _run(argv):
 
 
 class IntakeKanban:
-    def __init__(self, runner=_run, *, expected_root=None):
+    def __init__(self, runner=_run, *, expected_root=None, context=None):
         if expected_root is None or not Path(expected_root).expanduser().is_absolute():
             raise IntakeError("explicit registered intake control root required")
         executable = Path.home() / ".local/bin/hermes"
         if not executable.is_absolute():
             raise IntakeError("absolute owner-home Hermes command required")
+        if context is None:
+            raise IntakeError("registered passive Kanban context required")
+        self._context = context
         self._hermes = str(executable)
         self._expected_root = Path(expected_root).expanduser().resolve()
         self._run = runner
 
     def lookup(self, board, key):
-        require_context(self._expected_root)
         if board not in set(SCOPES.values()) or not re.fullmatch(
             re.escape(KEY_PREFIX) + r"[0-9a-f]{64}", key
         ):
             raise IntakeError("intake lookup outside approved scope")
-        rows = self._run(
-            [
-                self._hermes,
-                "kanban",
-                "--board",
-                board,
-                "intake-lookup",
-                "--idempotency-key",
-                key,
-                "--json",
-            ]
-        )
+        rows = read_snapshot(self._context, board, expected_root=self._expected_root,
+                             idempotency_key=key)["tasks"]
         if not isinstance(rows, list) or len(rows) > 1:
             raise IntakeError("exact complete Kanban lookup unavailable")
         for row in rows:
@@ -99,7 +92,6 @@ class IntakeKanban:
         return rows
 
     def legacy_feedback_lookup(self, board, identity):
-        require_context(self._expected_root)
         if (
             board not in set(SCOPES.values())
             or not isinstance(identity, dict)
@@ -116,28 +108,13 @@ class IntakeKanban:
         payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
         if len(payload.encode("utf-8")) > 1024:
             raise IntakeError("legacy identity exceeds host request bound")
-        rows = self._run(
-            [
-                self._hermes,
-                "kanban",
-                "--board",
-                board,
-                "intake-lookup",
-                "--legacy-feedback-identity",
-                payload,
-                "--json",
-            ]
-        )
-        if (
-            not isinstance(rows, list)
-            or len(rows) > 10000
-            or any(not isinstance(row, dict) for row in rows)
-        ):
-            raise IntakeError("complete legacy card provenance unavailable")
-        return rows
+        deadline = intake_history._monotonic() + intake_history._LEGACY_INDEX_SECONDS
+        rows = read_snapshot(self._context, board, expected_root=self._expected_root,
+                             idempotency_prefix="github-pr-feedback:")["tasks"]
+        return intake_history.legacy_matches(rows, identity, deadline=deadline)
 
     def create(self, card):
-        require_context(self._expected_root)
+        require_context(self._context, self._expected_root, card.board)
         if card.board not in set(SCOPES.values()) or not Path(card.workspace_path).is_dir():
             raise IntakeError("existing intake scope/workspace unavailable")
         try:

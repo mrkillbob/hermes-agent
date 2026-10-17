@@ -11,6 +11,7 @@ from github_pr_feedback.intake_kanban import IntakeKanban
 from github_pr_feedback.intake_only import IntakeError, render_card
 from hermes_constants import get_default_hermes_root
 from .test_intake_only import GitHub, policy
+from .support import actual_context
 
 
 class Context:
@@ -138,12 +139,12 @@ def test_narrow_adapter_only_lookup_and_triage_create(tmp_path):
         calls.append(argv)
         return {"id": "task-1"} if "create" in argv else []
 
-    kb = IntakeKanban(runner, expected_root=get_default_hermes_root())
+    kb = IntakeKanban(runner, expected_root=get_default_hermes_root(), context=actual_context())
     assert kb.lookup(card.board, card.idempotency_key) == []
     assert kb.create(card) == "task-1"
     assert calls[0][0] == str(Path.home() / ".local/bin/hermes")
-    assert calls[0][4] == "intake-lookup"
-    create = calls[1]
+    assert len(calls) == 1
+    create = calls[0]
     assert "--triage" in create and create[create.index("--assignee") + 1] == "task-intake-router"
     assert create[create.index("--workspace") + 1] == "dir:" + str(tmp_path.resolve())
     assert not {
@@ -159,10 +160,12 @@ def test_narrow_adapter_only_lookup_and_triage_create(tmp_path):
 
 @pytest.mark.parametrize("result", [None, {}, "partial", [{"id": "missing-fields"}]])
 def test_partial_or_malformed_lookup_never_appears_complete(result):
+    root = get_default_hermes_root()
+    ctx = SimpleNamespace(kanban_readonly_snapshot=lambda board, **_: {
+        "control_root": str(root), "board": board, "tasks": result})
     with pytest.raises(IntakeError):
-        IntakeKanban(lambda _: result, expected_root=get_default_hermes_root()).lookup(
-            "default", "github-pr-intake:v1:" + "a" * 64
-        )
+        IntakeKanban(lambda _: pytest.fail("CLI lookup reached"), expected_root=root, context=ctx).lookup(
+            "default", "github-pr-intake:v1:" + "a" * 64)
 
 
 def test_intake_never_reads_or_passes_actions_identity(tmp_path, monkeypatch):
@@ -219,29 +222,19 @@ def test_host_explicit_deny_wins_over_enabled_list():
 
 
 def test_complete_legacy_identity_lookup_is_exact_and_head_independent():
-    import json
-
     calls = []
-    identity = {
-        "repository": "mrkillbob/luna-bot",
-        "pr_number": 7,
-        "feedback_kind": "review_comment",
-        "feedback_id": "101",
-    }
-    kb = IntakeKanban(
-        lambda argv: calls.append(argv) or [], expected_root=get_default_hermes_root()
-    )
-    assert kb.legacy_feedback_lookup("tradingbot-burndown", identity) == []
-    argv = calls[0]
-    assert argv[:5] == [
-        str(Path.home() / ".local/bin/hermes"),
-        "kanban",
-        "--board",
-        "tradingbot-burndown",
-        "intake-lookup",
-    ]
-    assert argv[-1] == "--json"
-    assert json.loads(argv[argv.index("--legacy-feedback-identity") + 1]) == identity
+    ctx = actual_context()
+    original = ctx.kanban_readonly_snapshot
+    def snapshot(board, **selectors):
+        calls.append((board, selectors))
+        return original(board, **selectors)
+    ctx.kanban_readonly_snapshot = snapshot
+    identity = {"repository": "mrkillbob/luna-bot", "pr_number": 7,
+                "feedback_kind": "review_comment", "feedback_id": "101"}
+    adapter = IntakeKanban(lambda _: pytest.fail("CLI history reached"),
+                           expected_root=get_default_hermes_root(), context=ctx)
+    assert adapter.legacy_feedback_lookup("tradingbot-burndown", identity) == []
+    assert calls == [("tradingbot-burndown", {"idempotency_prefix": "github-pr-feedback:"})]
     assert "head_sha" not in identity
 
 
@@ -265,7 +258,7 @@ def test_legacy_identity_lookup_rejects_scope_or_malformed_identity(field, value
     identity[field] = value
     with pytest.raises(IntakeError):
         IntakeKanban(
-            lambda _: pytest.fail("transport reached"), expected_root=get_default_hermes_root()
+            lambda _: pytest.fail("transport reached"), expected_root=get_default_hermes_root(), context=actual_context()
         ).legacy_feedback_lookup("tradingbot-burndown", identity)
 
 

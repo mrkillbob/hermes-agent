@@ -10,6 +10,7 @@ from github_pr_feedback.intake_context import PROTECTED_CONTEXT, registered_cont
 from github_pr_feedback.intake_kanban import IntakeKanban
 from github_pr_feedback.intake_only import IntakeError, render_card
 from .test_intake_only import GitHub, policy
+from .support import actual_context
 
 
 @pytest.fixture
@@ -23,15 +24,6 @@ def root(tmp_path, monkeypatch):
     for name in PROTECTED_CONTEXT:
         monkeypatch.delenv(name, raising=False)
     return home
-
-
-def actual_context(root):
-    from hermes_cli.plugins import PluginContext, PluginManager
-    from hermes_cli.plugins_manifest import PluginManifest
-
-    return PluginContext(
-        PluginManifest(name="github-pr-feedback", source="user"), PluginManager(scope_key=str(root))
-    )
 
 
 @pytest.mark.parametrize("marker", sorted(PROTECTED_CONTEXT))
@@ -132,7 +124,7 @@ def test_every_adapter_operation_rechecks_context(root, tmp_path, monkeypatch, o
     from hermes_cli import kanban_db as kb
 
     calls = []
-    adapter = IntakeKanban(lambda argv: calls.append(argv) or [], expected_root=root)
+    adapter = IntakeKanban(lambda argv: calls.append(argv) or [], expected_root=root, context=actual_context(root))
     card = render_card(policy(tmp_path), GitHub().pr, GitHub().items[0])
     other = tmp_path / "other"
     other.mkdir()
@@ -198,3 +190,27 @@ def test_context_is_rechecked_after_policy_loading_before_credentials(root, tmp_
         )
         == 1
     )
+
+
+@pytest.mark.parametrize("marker", sorted(PROTECTED_CONTEXT))
+@pytest.mark.parametrize("value", ["", "false"])
+def test_local_presence_guard_refuses_before_any_parent_api_call(tmp_path, monkeypatch, marker, value):
+    ctx = SimpleNamespace(kanban_readonly_snapshot=lambda *_a, **_k: pytest.fail("parent API reached"))
+    monkeypatch.setenv(marker, value)
+    with pytest.raises(IntakeError):
+        registered_control_root(ctx)
+    assert os.environ[marker] == value
+
+
+def test_host_isolation_refuses_intake_before_credentials(tmp_path, monkeypatch):
+    from hermes_cli.plugin_host_child import RemotePluginContext
+    from hermes_cli.plugins import PluginContext
+    from github_pr_feedback import intake_cli
+
+    runtime = SimpleNamespace(ctx_call=lambda *_a, **_k: pytest.fail("native authority crossed RPC"))
+    proxy = RemotePluginContext(runtime, "github-pr-feedback", {
+        "ctx_methods": [name for name in dir(PluginContext) if not name.startswith("_")],
+    })
+    monkeypatch.setattr(intake_cli, "automation_client", lambda *_a, **_k: pytest.fail("credentials reached"))
+    args = SimpleNamespace(github_pr_feedback_action="scan-intake", repository="mrkillbob/luna-bot")
+    assert handle_cli(proxy, args) == 1

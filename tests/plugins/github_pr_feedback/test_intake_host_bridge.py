@@ -1,21 +1,19 @@
 """Source-bound temporary SQLite bridge; no CLI process or live state access."""
 
-import argparse
 import hashlib
-import io
 import json
 import sqlite3
-from contextlib import closing, redirect_stderr, redirect_stdout
+from contextlib import closing
 from dataclasses import replace
 
 from github_pr_feedback.intake_kanban import IntakeKanban
 from github_pr_feedback.intake_only import IntakeError, scan_intake
 from .test_intake_legacy import legacy_database
 from .test_intake_only import NOW, GitHub, policy
+from .support import actual_context
 
 
 def test_adapter_engine_and_passive_host_qualified_history_contract(tmp_path, monkeypatch):
-    from hermes_cli import kanban as command
     from hermes_cli import kanban_db as kb
 
     home = tmp_path / "hermes"
@@ -69,19 +67,11 @@ def test_adapter_engine_and_passive_host_qualified_history_contract(tmp_path, mo
                     )
                 )
             return {"id": task_id}
-        parser = argparse.ArgumentParser()
-        command.build_parser(parser.add_subparsers(dest="command"))
-        output, errors = io.StringIO(), io.StringIO()
-        with redirect_stdout(output), redirect_stderr(errors):
-            rc = command.kanban_command(parser.parse_args(argv[1:]))
-        if rc:
-            assert output.getvalue() == ""
-            raise IntakeError("qualified passive host rejected historical provenance")
-        return json.loads(output.getvalue())
+        raise AssertionError("Only triage create may use a CLI transport")
 
     legacy = legacy_database(tmp_path / "legacy.sqlite3")
     github = GitHub()
-    adapter = IntakeKanban(runner, expected_root=home)
+    adapter = IntakeKanban(runner, expected_root=home, context=actual_context(home))
 
     def scan():
         return scan_intake(
@@ -140,7 +130,6 @@ import pytest
 def test_active_pins_never_redirect_intake_into_a_different_database(
     tmp_path, monkeypatch, context
 ):
-    from hermes_cli import kanban as command
     from hermes_cli import kanban_db as kb
 
     home, other = tmp_path / "hermes", tmp_path / "other"
@@ -187,20 +176,13 @@ def test_active_pins_never_redirect_intake_into_a_different_database(
                     idempotency_key=argv[argv.index("--idempotency-key") + 1],
                 )
             return {"id": task_id}
-        parser = argparse.ArgumentParser()
-        command.build_parser(parser.add_subparsers(dest="command"))
-        out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
-            rc = command.kanban_command(parser.parse_args(argv[1:]))
-        if rc:
-            raise IntakeError("passive lookup unavailable")
-        return json.loads(out.getvalue())
+        raise AssertionError("Only triage create may use a CLI transport")
 
     legacy = legacy_database(tmp_path / "legacy.sqlite3")
     result = scan_intake(
         policy(tmp_path),
         GitHub(),
-        IntakeKanban(runner, expected_root=home),
+        IntakeKanban(runner, expected_root=home, context=actual_context(home)),
         tmp_path / "private" / "receipts.sqlite3",
         now=NOW,
         legacy_path=legacy,
