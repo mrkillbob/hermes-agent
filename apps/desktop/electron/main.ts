@@ -5006,7 +5006,7 @@ function writeDefaultProjectDir(dir) {
 
 const installedRuntimeGate = createInstalledRuntimeGate(process.env, rememberLog)
 
-async function resolveHermesBackend(backendArgs: string[], probeControl: SourceProbeControl = {}): Promise<ResolvedHermesBackend> {
+async function resolveHermesBackend(backendArgs: string[], probeControl: SourceProbeControl = { signal: localBackendLifecycle.signal }): Promise<ResolvedHermesBackend> {
   const payload = bundledPayload(process.resourcesPath)
 
   if (payload) {
@@ -11762,7 +11762,7 @@ async function dialPoolBackend(profile, entry, opts: { forceLocal?: boolean; poo
 
   const connection = await ensureLocalGateway(async () => {
     const backend = await ensureRuntime(
-      await resolveHermesBackend(['--profile', profile, 'gateway', 'ensure', '--json']),
+      await resolveHermesBackend(['--profile', profile, 'gateway', 'ensure', '--json'], { signal: localBackendLifecycle.signal, assertCurrentAttempt: () => assertPoolEntryStillOwned(poolKey, entry) }),
       () => assertPoolEntryStillOwned(poolKey, entry)
     )
 
