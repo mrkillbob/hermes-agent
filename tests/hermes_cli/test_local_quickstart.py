@@ -362,3 +362,28 @@ def test_quickstart_prices_after_installing_the_engine(client, monkeypatch):
     assert job["status"] == "done", job["error"]
     assert installed == ["vulkan"]
     assert (job["model_id"], downloaded, assigned) == (fit.id, [fit.display_name], [fit.variants[0].model_id])
+
+
+@pytest.mark.parametrize('scope', ['absent', 'named', 'stopping'])
+def test_ownerless_quickstart_refuses_before_planning_or_download(client, monkeypatch, scope):
+    from hermes_cli.local_runtime import ownership
+    from hermes_cli.web_routers import local_models as lm
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+
+    token = None
+    if scope == 'absent':
+        monkeypatch.setattr(ownership, '_OWNER', None)
+    elif scope == 'named':
+        token = set_hermes_home_override(get_hermes_home() / 'profiles' / 'named')
+    else:
+        ownership._OWNER.stopping.set()
+    before_jobs = set(lm._JOBS)
+    monkeypatch.setattr(lm, '_quickstart_target', lambda *a: pytest.fail('unauthorized setup reached planning'))
+    try:
+        response = client.post('/api/local-models/quickstart', json={})
+    finally:
+        if token is not None:
+            reset_hermes_home_override(token)
+    assert response.status_code == 409
+    assert 'default profile' in response.json()['detail']
+    assert set(lm._JOBS) == before_jobs

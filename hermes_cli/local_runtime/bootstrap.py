@@ -307,6 +307,7 @@ def refit_idle_presets(sup) -> bool:
     changes.
     """
     from hermes_cli.local_runtime.hardware import probe_budget
+    from hermes_cli.local_runtime.growth import load_window_overrides
     from hermes_cli.local_runtime.presets import plan_presets, render_presets
 
     path = sup.preset_path
@@ -316,8 +317,10 @@ def refit_idle_presets(sup) -> bool:
     live = _launch_budget(capacity)
     if live is None:
         return False
+    overrides = load_window_overrides()
     last = sup._refit_usable
-    if last is not None and abs(live.usable_vram_bytes - last) < _REFIT_STEP_BYTES:
+    if (last is not None and not sup._refit_pending_reload and overrides == sup._refit_overrides
+            and abs(live.usable_vram_bytes - last) < _REFIT_STEP_BYTES):
         return False
     text = render_presets(plan_presets(models_dir(), capacity, live=live, residents=sup.models_max))
     # Held across the write and the reload so a restart can't spawn between them; everything
@@ -325,13 +328,22 @@ def refit_idle_presets(sup) -> bool:
     with sup._lifecycle_lock:
         if sup.proc is None or sup.proc.poll() is not None or _any_holds_memory(sup):
             return False
-        sup._refit_usable = live.usable_vram_bytes
-        if text == path.read_text(encoding="utf-8-sig"):
-            return False
-        from utils import atomic_write_text
+        changed = text != path.read_text(encoding="utf-8-sig")
+        needs_reload = changed or sup._refit_pending_reload
+        if needs_reload:
+            from utils import atomic_write_text
 
-        atomic_write_text(path, text, tmp_prefix=f".{path.name}_", mode=0o600)
-        sup.reload_presets()
+            # File equality after a failed reload is not proof the router applied its contents.
+            sup._refit_pending_reload = True
+            if changed:
+                atomic_write_text(path, text, tmp_prefix=f".{path.name}_", mode=0o600)
+            sup.reload_presets()
+            sup._refit_pending_reload = False
+        sup._refit_usable = live.usable_vram_bytes
+        # Cache only applied plans, using the pre-plan snapshot so concurrent grants retry.
+        sup._refit_overrides = overrides
+        if not needs_reload:
+            return False
     logger.info("launch windows re-planned for %.1f GiB of free GPU memory",
                 live.usable_vram_bytes / (1 << 30))
     return True

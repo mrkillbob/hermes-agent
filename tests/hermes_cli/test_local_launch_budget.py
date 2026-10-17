@@ -228,6 +228,8 @@ class _Router:
         self.models_max = 1
         self.proc = SimpleNamespace(poll=lambda: None)
         self._refit_usable = None
+        self._refit_overrides = None
+        self._refit_pending_reload = False
         import threading
 
         self._lifecycle_lock = threading.RLock()
@@ -347,3 +349,86 @@ def test_residency_cap_prices_capacity(hermes_home, monkeypatch, capacity_probe)
     mdir, _gguf = _stage_27b(hermes_home, monkeypatch)
     bootstrap._admitted_models_max(mdir, 4)
     assert capacity_probe == [{"planning": True}]
+
+
+def _override_router(hermes_home, monkeypatch):
+    from hermes_cli.local_runtime import growth, presets
+
+    _card(monkeypatch, 2.0)
+    path = hermes_home / 'presets.ini'
+    path.write_text('window=0\n', encoding='utf-8')
+    # Physics is covered above; here a saved grant becomes a distinct valid plan.
+    monkeypatch.setattr(presets, 'plan_presets', lambda *a, **k: growth.load_window_overrides())
+    monkeypatch.setattr(presets, 'render_presets', lambda plan: f"window={plan[MODEL_ID]}\n")
+    return _Router(path, {MODEL_ID: 'unloaded'})
+
+
+def test_window_override_changes_replan_stable_idle_router(hermes_home, monkeypatch, capacity_probe):
+    from hermes_cli.local_runtime import bootstrap, growth
+
+    router = _override_router(hermes_home, monkeypatch)
+    growth.save_window_override(MODEL_ID, 96 * 1024)
+    assert bootstrap.refit_idle_presets(router) is True
+    assert router.preset_path.read_text() == f'window={96 * 1024}\n'
+    growth.save_window_override(MODEL_ID, 144 * 1024)
+    router.statuses[MODEL_ID] = 'loaded'
+    assert bootstrap.refit_idle_presets(router) is False
+    router.statuses[MODEL_ID] = 'unloaded'
+    assert bootstrap.refit_idle_presets(router) is True
+    assert router.preset_path.read_text() == f'window={144 * 1024}\n'
+    assert router.reloads == 2
+    assert bootstrap.refit_idle_presets(router) is False
+
+
+def test_override_change_during_idle_plan_is_not_cached_as_applied(hermes_home, monkeypatch, capacity_probe):
+    from hermes_cli.local_runtime import bootstrap, growth, presets
+
+    router = _override_router(hermes_home, monkeypatch)
+    growth.save_window_override(MODEL_ID, 96 * 1024)
+    plan = presets.plan_presets
+    first = True
+
+    def plan_then_new_grant(*args, **kwargs):
+        nonlocal first
+        result = plan(*args, **kwargs)
+        if first:
+            first = False
+            growth.save_window_override(MODEL_ID, 144 * 1024)
+        return result
+
+    monkeypatch.setattr(presets, 'plan_presets', plan_then_new_grant)
+    assert bootstrap.refit_idle_presets(router) is True
+    assert router.preset_path.read_text() == f'window={96 * 1024}\n'
+    assert bootstrap.refit_idle_presets(router) is True
+    assert router.preset_path.read_text() == f'window={144 * 1024}\n'
+
+
+@pytest.mark.parametrize('failure', ['write', 'reload'])
+def test_failed_idle_plan_application_retries_at_stable_budget(hermes_home, monkeypatch, capacity_probe, failure):
+    import utils
+    from hermes_cli.local_runtime import bootstrap, growth
+
+    router = _override_router(hermes_home, monkeypatch)
+    growth.save_window_override(MODEL_ID, 96 * 1024)
+    assert bootstrap.refit_idle_presets(router) is True
+    growth.save_window_override(MODEL_ID, 144 * 1024)
+    attempts = []
+    original = utils.atomic_write_text if failure == 'write' else router.reload_presets
+
+    def fail_once(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise OSError('transient preset application failure')
+        return original(*args, **kwargs)
+
+    if failure == 'write':
+        monkeypatch.setattr(utils, 'atomic_write_text', fail_once)
+    else:
+        monkeypatch.setattr(router, 'reload_presets', fail_once)
+    with pytest.raises(OSError, match='transient preset'):
+        bootstrap.refit_idle_presets(router)
+    assert bootstrap.refit_idle_presets(router) is True
+    assert router.preset_path.read_text() == f'window={144 * 1024}\n'
+    assert router.reloads == 2
+    assert len(attempts) == 2
+    assert bootstrap.refit_idle_presets(router) is False

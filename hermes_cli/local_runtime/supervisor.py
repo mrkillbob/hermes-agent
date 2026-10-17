@@ -146,6 +146,8 @@ class LlamaServerSupervisor:
         self._idle_since: dict[str, float] = {}
         # Launch budget the preset file was last planned against (bootstrap.refit_idle_presets).
         self._refit_usable: int | None = None
+        self._refit_overrides: dict[str, int] | None = None
+        self._refit_pending_reload = False
 
     # ── endpoints ────────────────────────────────────────────
 

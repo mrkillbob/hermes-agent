@@ -790,6 +790,9 @@ def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None)
     missing), make it the default. Each leg uses the same code as the individual setup routes.
     Preflight rejects (no automatic recommendation or no servable choice) fail the POST
     synchronously so the button can explain itself; everything slow runs in the job with phase/byte progress."""
+    # Quickstart promises activation, not just staging. Reject consumers before any slow leg.
+    with _config_profile_scope(profile):
+        _runtime_control_owner()
     entry, variant = _quickstart_target(body, hardware.probe_budget(planning=True))
     _tag, backend = _runtime_target()
     need_runtime = binaries.installed_engine(backend) is None
