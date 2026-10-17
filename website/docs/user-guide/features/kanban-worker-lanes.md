@@ -239,7 +239,12 @@ and context IDs are saved separately from Hermes task/run/key/payload identity.
 Raw claim locks, database paths and local workspace paths are not sent. Assignments
 with embedded local authority values, rooted slash/backslash, home, drive, UNC or file-URI paths or
 relative path escapes, or that would change under the existing outbound secret
-redactor, are refused for explicit preparation; the adapter never silently changes the assignment.
+redactor, are refused for explicit preparation; the adapter never silently changes the assignment. The lexical rule requires a
+following path component after the rooted/home/drive/file-URI/relative-escape
+prefix; whitespace and quoting delimiters end a component. Standalone separators
+(`input / output`, `/`, `//`) and project-relative names (`src/module.py`) are
+allowed. Ordinary HTTP(S) URL spans are exempt from this lexical classification;
+exact local authority/path values and credential refusal still apply to all text.
 
 `lookup()` reads local receipts only. An owner explicitly calls `refresh_once()`
 for one remote `GetTask`, then invokes normal lane reconciliation. Terminal result

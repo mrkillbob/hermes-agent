@@ -323,8 +323,16 @@ def test_local_path_text_is_refused_before_transport(context, local_path, field)
     assert ex.journal.read(d, 'external_a2a_send_intent') is None
 
 
-@pytest.mark.parametrize('url', ['https://example.invalid/reference', 'https://example.invalid/~/reference'])
-def test_ordinary_web_url_is_preserved_in_approved_assignment(context, url):
-    d, ex, peer, _ = prepared(context, body='Read ' + url)
+@pytest.mark.parametrize('text', [
+    'input / output', 'request / response and input / output', 'Use input/output terminology',
+    'Discuss / as a separator', 'A lone slash: /', "Quoted '/' is a separator",
+    'The symbol \\ separates words', 'A // comment', 'Project-relative src/module.py',
+    'Discuss ./ and ../ syntax', 'file: a label',
+    'Read https://example.invalid/reference', 'Read https://example.invalid/~/reference',
+    'Read HTTPS://example.invalid/reference',
+])
+def test_prose_separators_project_names_and_web_urls_are_preserved(context, text):
+    d, ex, peer, _ = prepared(context, body=text)
     assert ex.submit(d).kind == 'ack'
-    assert url in json.dumps(peer.calls)
+    assignment = json.loads(peer.calls[0]['params']['message']['parts'][0]['text'])
+    assert assignment['assignment']['body'] == text

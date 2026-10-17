@@ -47,7 +47,12 @@ def _correlation(delivery):
 
 
 
-_LOCAL_PATH = re.compile(r'(?<![\w/\\])(?:[/\\]|~[/\\]|[A-Za-z]:[/\\]|file:|\.\.?[/\\])', re.IGNORECASE)
+# Literal rooted references require a component; standalone punctuation is prose.
+# Whitespace/quoting delimiters end a component; project-relative names are allowed.
+_COMPONENT_START = r"[^\s/\\'\"<>(){}\[\],;]"
+_LOCAL_PATH = re.compile(
+    r'(?<![\w/\\])(?:[/\\]+|~[/\\]+|[A-Za-z]:[/\\]+|\.\.?[/\\]+)' + _COMPONENT_START
+    + r'|(?<!\w)file:[/\\]*' + _COMPONENT_START, re.IGNORECASE)
 _WEB_URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 
