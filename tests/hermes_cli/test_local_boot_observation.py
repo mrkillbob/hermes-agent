@@ -119,7 +119,7 @@ def test_stale_or_foreign_boot_record_is_not_evidence(damage):
 
 
 @pytest.mark.platforms('any')
-def test_native_consumer_observes_owner_boot_in_another_process():
+def test_native_consumer_observes_owner_boot_in_another_process(tmp_path):
     import os
     from pathlib import Path
     import subprocess
@@ -130,12 +130,15 @@ def test_native_consumer_observes_owner_boot_in_another_process():
     status = boot_status.BootStatus(get_hermes_home())
     env = {key: value for key, value in os.environ.items()
            if key in {'PATH', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR'}}
-    env['HERMES_HOME'] = str(get_hermes_home())
-    script = ('from hermes_cli.local_runtime.boot_status import owner_boot_pending; '
+    env.update(HOME=str(tmp_path), USERPROFILE=str(tmp_path), HERMES_HOME=str(get_hermes_home()))
+    script = ('import sys; from pathlib import Path; '
+              'assert Path.home() == Path(sys.argv[1]), "child user home must be isolated"; '
+              'from hermes_cli.local_runtime.boot_status import owner_boot_pending; '
               'from hermes_cli.local_runtime.ownership import current_owner; '
               'assert current_owner() is None; print(owner_boot_pending())')
     def observe():
-        result = subprocess.run([sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[2],
+        result = subprocess.run([sys.executable, '-c', script, str(tmp_path)],
+                                cwd=Path(__file__).resolve().parents[2],
                                 env=env, capture_output=True, text=True, timeout=15, check=False)
         assert result.returncode == 0, result.stderr
         return result.stdout.strip()
