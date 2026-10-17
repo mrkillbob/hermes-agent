@@ -26,7 +26,7 @@ To be a kanban worker lane, an integration must provide three things:
 
 ### 1. An assignee string
 
-The dispatcher matches `task.assignee` against either a Hermes profile name (the default lane shape) or a registered non-spawnable identifier (the plugin lane shape — see [Adding an external CLI worker lane](#adding-an-external-cli-worker-lane) below). Tasks whose assignee doesn't resolve are left on `ready` with a `skipped_nonspawnable` event so a board operator can fix them; they are not silently dropped or executed by an arbitrary fallback.
+The dispatcher matches `task.assignee` against either a Hermes profile name (the default lane shape) or an explicitly registered `external-` assignee (the source integration boundary — see [Adding an external CLI worker lane](#adding-an-external-cli-worker-lane) below). Tasks whose assignee doesn't resolve are left on `ready` with a `skipped_nonspawnable` event so a board operator can fix them; they are not silently dropped or executed by an arbitrary fallback.
 
 ### 2. A spawn mechanism
 
@@ -44,7 +44,7 @@ For Hermes profile lanes, the dispatcher's `_default_spawn` runs `hermes -p <ass
 | `HERMES_PROFILE` | the worker's own profile name (for `kanban_comment` author attribution) |
 | `HERMES_TENANT` | tenant namespace, if the task has one |
 
-For non-Hermes lanes (registered via a plugin), the plugin supplies its own `spawn_fn` callable that gets `task`, `workspace`, and `board` and returns an optional pid for crash detection.
+For non-Hermes lanes, a trusted in-process owner can explicitly supply `ExternalLanes` through `dispatch_once(spawn_fn=...)`. A plain custom `spawn_fn` does not bypass profile validation. No plugin discovery or installed CLI runner is registered automatically.
 
 ### Descendant process scope
 
@@ -118,15 +118,68 @@ A specialisation of the profile lane: an orchestrator is a Hermes profile whose 
 
 ## Adding an external CLI worker lane
 
-Wiring a non-Hermes CLI tool (Codex CLI, Claude Code CLI, OpenCode CLI, a local coding-model runner, etc.) as a kanban worker lane is *not yet a paved path*. The dispatcher's spawn function is pluggable (`spawn_fn` is a parameter on `dispatch_once`), and a plugin could register its own `spawn_fn` for a non-Hermes assignee, but the surrounding integration work — wrapping the CLI's exit code into `kanban_complete` / `kanban_block` calls, mapping the CLI's workspace/sandbox conventions onto the dispatcher's `HERMES_KANBAN_WORKSPACE` env, handling auth and per-CLI policy — is still per-integration design work.
+The owner-side Python boundary is `hermes_cli.kanban_external`. It is source-only:
+no CLI executor, service, callback, polling loop, credentials or built-in lane
+registration is supplied. A trusted owner explicitly constructs
+`ExternalLanes({"external-example": Lane("executor-identity", executor)})` and
+passes it to `dispatch_once(spawn_fn=lanes)`. The executor implements bounded
+`submit(Delivery) -> Artifact | None` and read-only
+`lookup(Delivery) -> Artifact | None`. Actual profile names retain profile dispatch,
+including the existing profile allowlist. Unknown external assignees fail closed.
+External review-lane dispatch is unsupported and held; use the existing profile
+review path. Host capacity, dependency, claim and workspace checks still apply.
 
-If you're considering adding a CLI lane, open an issue describing the specific CLI and the workflow you're trying to enable. The contract above is the constraints any such lane must satisfy; the implementation shape (one plugin per CLI vs a generic CLI-runner plugin parameterised by config) is open.
+`Delivery` is immutable and binds database path, task, run, claim, lane, executor,
+random idempotency key, payload digest, task title/body and resolved workspace.
+Only those fields cross this boundary; no process environment, profile credentials,
+callback recipient or arbitrary task metadata is inherited. A 64 KiB limit bounds
+both deliveries and artifacts. `Artifact` accepts only `accepted`, `ack`, `started`,
+`completed`, `question`, `blocked` or `error`, plus a summary and immutable findings
+and questions. `artifact_from_envelope` validates the closed JSON-compatible
+`{"artifact": ..., "sha256": ...}` shape. Digests provide correlation and integrity,
+not peer authentication or task authority. An eventual transport must authenticate
+its peer and enforce the owner's approved execution scope separately.
 
-The historical issue for this is [#19931](https://github.com/NousResearch/hermes-agent/issues/19931) and the closed-not-merged Codex-specific PR [#19924](https://github.com/NousResearch/hermes-agent/pull/19924) — those describe the original architecture proposal but didn't land a runner.
+The delivery intent commits to the existing `task_events` journal **before** submit.
+The task stays `running` after transport acceptance, ACK or start; a broker ACK
+never means the work completed. A completed artifact calls the existing
+`complete_task(expected_run_id=...)`, retaining completion and repository policies.
+Question, blocked and error artifacts call `block_task` with a sticky `needs_input`
+block and preserve their distinct typed evidence. Findings and questions remain
+in the event artifact; no returned text executes commands or grants permissions.
+
+Duplicate submit requests reuse the committed delivery and never call submit again.
+A lost ACK, exception, dispatcher restart or crash between intent and submit is
+uncertain. Automatic TTL/stale/orphan recovery holds such a run instead of guessing
+from a missing local PID. An unresolved prior delivery also prevents redispatch,
+even after an operator reclaim. The owner can explicitly call
+`lanes.reconcile(conn, delivery)`: it applies a saved terminal artifact first,
+otherwise asks **the same registered executor's read-only lookup** for a receipt.
+Lookup must never start/resume work. No automatic resend, retry deadline, unsafe
+"not found means retry" rule or override API is provided. Unresolved/superseded
+runs require owner investigation; timeout alone cannot release the hold.
+
+Terminal artifacts commit before lifecycle mutation, allowing reconciliation after
+an interruption between the two. Identical terminal receipts are idempotent;
+conflicting evidence and foreign/stale task, run, claim, executor, board or payload
+bindings reject. Existing `hermes kanban tail` / `runs` surfaces retain the audit
+trail in `task_events` and `task_runs`; no new queue or ledger is created.
+
+Local CLI interfaces may be candidates for a future executor using existing approved
+accounts: Codex `exec --json --output-schema` and Claude Code
+`--print --output-format json --json-schema`. A process exit or parseable output is
+not an authenticated ACK, an idempotent lookup guarantee, containment proof or a
+native application callback. No private account tokens are read or extracted by
+this boundary. A2A can be mapped to Delivery/Artifact only when existing authenticated
+endpoints and task lookup capabilities are separately established. This patch
+creates no A2A endpoint and no native Codex/Dot callback. The historical uncertain
+App MCP callback must not be replayed; unattended result return remains unqualified.
 
 ## Failure modes the dispatcher handles
 
-So lane authors don't have to reimplement these:
+These PID-based rules describe profile workers. External delivery intents use the
+conservative reconciliation hold above; their TTL or runtime expiry does not prove
+that remote effects stopped.
 
 - **Stale claim TTL** — a worker that claims and then never heartbeats / completes / blocks gets reclaimed after `DEFAULT_CLAIM_TTL_SECONDS` (15 min default) — but only if the worker process has actually died. A live worker (slow model spending 20+ min in one tool-free LLM call) gets the claim *extended* instead of killed; only a dead PID is reclaimed.
 - **Crashed worker** — a worker whose host-local PID has vanished is detected by `detect_crashed_workers` and reaped; the task increments `consecutive_failures` and may auto-block when the breaker trips.
