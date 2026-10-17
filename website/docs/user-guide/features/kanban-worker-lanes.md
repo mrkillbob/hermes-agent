@@ -205,6 +205,9 @@ alone is insufficient; a remaining group retains uncertainty. It never signals a
 shared server or a historical session. No OS containment or escaped-descendant
 protection is claimed. Receiver death or a stalled OS can leave an uncertain
 attempt; these bounds require the receiver to remain alive and scheduled.
+Synchronous process creation itself cannot be bounded by the subsequent execution
+deadline. If process identity cannot be verified, the receiver closes its pipes
+and records uncertainty without signaling the group; a child may remain alive.
 
 Exit receipts bind launch/PID/birth, input bytes and bounded output hashes.
 Result validation uses those same retained bytes, exact task/run/key/payload and

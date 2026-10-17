@@ -324,3 +324,45 @@ def test_running_child_observation_uses_concrete_bounded_journal(context, monkey
     assert receive(context, delivery, plan).state == 'completed'
     assert kinds(conn, tid).count('external_started') == 1
     assert kb.get_task(conn, tid).status == 'done'
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize("denied_on", [1, 2])
+def test_process_identity_failure_preserves_uncertainty_without_signaling(context, monkeypatch, denied_on):
+    conn, _root = context
+    ex, runner = api()
+    limits = ex.CoordinatorLimits(execution_seconds=2, terminate_grace_seconds=.2, kill_grace_seconds=1)
+    tid, delivery, _executor, _lanes, plan = offered(context, 'ignore_term', limits)
+    processes = []
+    original = runner.subprocess.Popen
+    def launch(*args, **kwargs):
+        child = original(*args, **kwargs)
+        processes.append(child)
+        return child
+    original_birth = runner._birth
+    calls, signals = [], []
+    def denied(pid):
+        calls.append(pid)
+        if len(calls) >= denied_on:
+            raise runner.psutil.AccessDenied(pid)
+        return original_birth(pid)
+    def forbidden_signal(pid, sig):
+        signals.append(sig)
+        raise AssertionError("Identity was not verified")
+    monkeypatch.setattr(runner.subprocess, 'Popen', launch)
+    monkeypatch.setattr(runner, '_birth', denied)
+    monkeypatch.setattr(runner.os, 'killpg', forbidden_signal)
+    try:
+        assert receive(context, delivery, plan, limits).state == 'uncertain'
+        assert len(processes) == 1
+        assert processes[0].stdout.closed and processes[0].stderr.closed
+        assert signals == []
+        assert 'external_receiver_uncertain' in kinds(conn, tid)
+        assert kb.get_task(conn, tid).status == 'running'
+        assert receive(context, delivery, plan, limits).state == 'uncertain'
+        assert len(processes) == 1
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)

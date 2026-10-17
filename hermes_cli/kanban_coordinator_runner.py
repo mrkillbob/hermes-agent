@@ -121,7 +121,10 @@ def _birth(pid):
 
 def _signal_owned(process, birth, sig):
     # Never signal a group after losing the live leader's identity.
-    if process.poll() is not None or birth is None or _birth(process.pid) != birth:
+    try:
+        if process.poll() is not None or birth is None or _birth(process.pid) != birth:
+            return False
+    except psutil.Error:
         return False
     try:
         os.killpg(process.pid, sig)  # windows-footgun: ok -- only the validated POSIX fixture receiver reaches this
@@ -191,9 +194,10 @@ def _execute(executor, delivery, plan, seconds):
         process = subprocess.Popen([sys.executable, '-I', str(FIXTURE_PROGRAM), plan.behavior],
             stdin=prompt, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=root,
             env={'HOME': str(root), 'PATH': str(Path(sys.executable).parent), 'LANG': 'C.UTF-8'}, start_new_session=True)
-        birth = _birth(process.pid)
+        birth = None
         reason, counts, settled = 'receiver_interrupted', {'stdout': 0, 'stderr': 0}, False
         try:
+            birth = _birth(process.pid)
             deadline = started + seconds
             executor.record(delivery, 'external_process_started', {'launch_id': launch, 'pid': process.pid, 'birth': birth},
                             seconds=deadline - time.monotonic())
@@ -201,15 +205,17 @@ def _execute(executor, delivery, plan, seconds):
                              seconds=deadline - time.monotonic())
             reason, counts = _drain(process, outputs, started + seconds, limits.stream_bytes)
         finally:
-            if process.poll() is None:
-                settled = _abort(process, birth, limits)
-            else:
-                settled = not _group_exists(process.pid)
-            process.stdout.close()
-            process.stderr.close()
-            for stream in outputs.values():
-                stream.flush()
-                os.fsync(stream.fileno())
+            try:
+                if process.poll() is None:
+                    settled = _abort(process, birth, limits)
+                else:
+                    settled = not _group_exists(process.pid)
+            finally:
+                process.stdout.close()
+                process.stderr.close()
+                for stream in outputs.values():
+                    stream.flush()
+                    os.fsync(stream.fileno())
         record = {'launch_id': launch, 'pid': process.pid, 'birth': birth, 'exit_code': process.returncode,
                   'settled': settled, 'reason': reason, 'input_sha256': plan.input_sha256,
                   **{name + '_bytes': count for name, count in counts.items()}}
@@ -314,6 +320,6 @@ def receive_once(database: Path, task_id: str, run_id: int, key: str,
         return _apply(executor, delivery, Artifact(delivery, 'error', 'Task deadline elapsed before inert launch'))
     try:
         record = _execute(executor, delivery, plan, seconds)
-    except (sqlite3.Error, TimeoutError, OSError):
+    except (sqlite3.Error, TimeoutError, OSError, psutil.Error):
         return _uncertain(executor, delivery, 'receiver_io_or_deadline')
     return _finish(executor, delivery, plan, record)
