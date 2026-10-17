@@ -274,7 +274,7 @@ def test_publication_requires_verified_failure_and_never_republishes(
         monkeypatch.setattr(
             cli, "_github_client", lambda _: pytest.fail("dry-run accessed credentials")
         )
-        assert cli.handle_cli_with_context(object(), args) == 0
+        assert cli.handle_cli_with_context(SimpleNamespace(get_config=lambda key, default=None: {"enabled": True}.get(key, default)), args) == 0
         assert json.loads(capsys.readouterr().out)["github_accessed"] is False
     if case == "wrong_policy_identity":
         assert not factory_calls

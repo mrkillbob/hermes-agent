@@ -838,6 +838,34 @@ Config and state have different owners: settings are user-visible behavior in
 `config.yaml`, while state is plugin-owned runtime data under
 `<HERMES_HOME>/plugin-data/`. Neither API exposes another plugin's namespace.
 
+### Passive Kanban snapshots
+
+`ctx.kanban_readonly_snapshot(board, *, idempotency_key=None, idempotency_prefix=None)`
+is an additive in-process capability for unfenced control-plane plugins. It binds
+an explicit existing board to the registered owning home and refuses conflicting
+active/native roots, worker/delegation identity or path pins (including empty
+markers), and native machine/delegation fences. It never clears those markers.
+It is unavailable under `plugins.isolation: host`: native child context fences
+cannot be transferred safely through the existing RPC boundary.
+
+With no selector it returns context metadata only:
+`{"control_root": "/owning/root", "board": "example", "tasks": null}`. This is
+**not** evidence that no tasks exist. Supply either an exact `idempotency_key` or
+a literal `idempotency_prefix` to obtain a complete `tasks` list, including
+archived rows. The selectors are mutually exclusive, nonempty text of at most
+512 characters; prefixes have no wildcard semantics. Plugins own the meaning of
+their keys and any domain-specific parsing or reconciliation.
+
+Reads use one existing canonical SQLite file in `mode=ro`, with query-only and
+trusted-schema restrictions. No initialization, migration, readiness update,
+current-board change or fallback occurs. A snapshot either completes within
+10,000 rows, 8 MiB of encoded task rows, 1 MiB per row and one second, or raises
+`ValueError` without partial data. Returned values are JSON-safe dictionaries,
+strings and scalar values, never live database objects. Missing schema or
+unavailable/unsupported contexts fail closed. Normal SQLite coordination may
+create WAL/SHM sidecars; this promises passive task/schema data access, not zero
+filesystem effects or an immutable-file snapshot.
+
 ### Settings form in the Desktop
 
 Every key you declare in the manifest's `config_schema` renders as a row on the
