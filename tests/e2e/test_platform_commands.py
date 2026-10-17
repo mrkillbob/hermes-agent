@@ -143,7 +143,12 @@ class TestAuthorization:
         event = make_event(platform, "/help")
         adapter.send.reset_mock()
         await adapter.handle_message(event)
-        await asyncio.sleep(0.3)
+        # The reply is sent from a background task: wait for it rather than for a fixed
+        # interval a loaded CI runner can overrun.
+        for _ in range(100):
+            if adapter.send.called:
+                break
+            await asyncio.sleep(0.05)
 
         # The adapter.send is called directly by the authorization path
         # (not via _send_with_retry), so check it was called with a pairing message
