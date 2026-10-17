@@ -57,7 +57,14 @@ def daemon(tmp_path):
             yield home, descriptor
         finally:
             if process.poll() is None:
-                process.send_signal(signal.SIGINT)
+                if os.name == 'nt':
+                    # Popen cannot send SIGINT on Windows. Stop only this fixture's identity
+                    # through the same marker its gateway already watches for operator stops.
+                    from gateway.status import get_process_start_time
+                    from hermes_cli.gateway_runtime_replace import _write_planned_stop
+                    _write_planned_stop(home, process.pid, get_process_start_time(process.pid))
+                else:
+                    process.send_signal(signal.SIGINT)
                 try:
                     process.wait(timeout=20)
                 except subprocess.TimeoutExpired:
