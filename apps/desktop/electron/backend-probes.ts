@@ -68,11 +68,18 @@ async function execProbe(
     timeout: number
     shell?: boolean
     windowsHide?: boolean
+    signal?: AbortSignal
+    assertCurrentAttempt?: () => void
   }
 ): Promise<void> {
-  const run = () =>
-    new Promise<void>((resolve, reject) => {
-      const child = spawn(command, args, options)
+  const { signal, assertCurrentAttempt, ...spawnOptions } = options
+
+  const run = () => {
+    signal?.throwIfAborted()
+    assertCurrentAttempt?.()
+
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn(command, args, spawnOptions)
 
       // spawn's timeout only sends SIGTERM. A cooperative handler can leave
       // this exact owned probe alive forever, preventing both close and retry.
@@ -104,6 +111,7 @@ async function execProbe(
         }
       })
     })
+  }
 
   try {
     await run()

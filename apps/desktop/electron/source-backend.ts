@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 
 import { buildDesktopBackendEnv } from './backend-env'
-import { execProbe, PROBE_TIMEOUT_MS } from './backend-probes'
+import { probeInstalledSource } from './source-backend-probe'
 import { resolveInstallationLauncher } from './updater-process'
 
 export interface SourceBackend {
@@ -22,11 +22,16 @@ interface SourceOptions {
   env?: NodeJS.ProcessEnv
 }
 
+export interface SourceProbeControl {
+  signal?: AbortSignal
+  assertCurrentAttempt?: () => void
+}
+
 /** Keep the validated command. PM owns interpreter and generation selection. */
 export async function resolveSourceInstallationBackend(
   root: string,
   args: string[],
-  options: SourceOptions & { hermesHome?: string } = {}
+  options: SourceOptions & SourceProbeControl & { hermesHome?: string; log?: (message: string) => void } = {}
 ): Promise<SourceBackend | null> {
   if (!existsSync(path.join(root, 'hermes_cli', 'main.py'))) {
     return null
@@ -43,16 +48,16 @@ export async function resolveSourceInstallationBackend(
   const command: string = shell ? `"${launcher}"` : launcher
   const env: NodeJS.ProcessEnv = buildDesktopBackendEnv({ currentEnv: options.env ?? process.env })
 
-  try {
-    await execProbe(command, ['--version'], {
+  if (
+    !(await probeInstalledSource(command, {
       cwd: root,
       env: { ...process.env, ...options.env, ...env },
       shell,
-      stdio: 'ignore',
-      timeout: PROBE_TIMEOUT_MS,
-      windowsHide: true
-    })
-  } catch {
+      log: options.log,
+      signal: options.signal,
+      assertCurrentAttempt: options.assertCurrentAttempt
+    }))
+  ) {
     return null
   }
 

@@ -548,7 +548,7 @@ import {
 } from './session-windows'
 import { ensureLoginShellPath } from './shell-path'
 import { removeStaleSingletonLock } from './singleton-lock'
-import { createSourcePythonBackend, resolveSourceInstallationBackend, type SourceBackend } from './source-backend'
+import { createSourcePythonBackend, resolveSourceInstallationBackend, type SourceBackend, type SourceProbeControl } from './source-backend'
 import { resolveSourcePython } from './source-python'
 import { resolveSshBinary } from './ssh-binary'
 import { createBootstrapCoordinator, sshConfigFingerprint } from './ssh-bootstrap-coordinator'
@@ -5006,7 +5006,7 @@ function writeDefaultProjectDir(dir) {
 
 const installedRuntimeGate = createInstalledRuntimeGate(process.env, rememberLog)
 
-async function resolveHermesBackend(backendArgs: string[]): Promise<ResolvedHermesBackend> {
+async function resolveHermesBackend(backendArgs: string[], probeControl: SourceProbeControl = {}): Promise<ResolvedHermesBackend> {
   const payload = bundledPayload(process.resourcesPath)
 
   if (payload) {
@@ -5124,7 +5124,7 @@ async function resolveHermesBackend(backendArgs: string[]): Promise<ResolvedHerm
   //    bootstrap when the runtime itself is unusable.
   //    HERMES_DESKTOP_IGNORE_EXISTING=1 skips this rung (see backend-resolution).
   const activeBackend: SourceBackend | null = await installedRuntimeGate.resolve(ACTIVE_HERMES_ROOT, () =>
-    resolveSourceInstallationBackend(ACTIVE_HERMES_ROOT, backendArgs, { hermesHome: HERMES_HOME })
+    resolveSourceInstallationBackend(ACTIVE_HERMES_ROOT, backendArgs, { hermesHome: HERMES_HOME, log: rememberLog, ...probeControl })
   )
 
   const activeRuntime: ActiveRuntimeState = activeRuntimeState(activeBackend)
@@ -5151,7 +5151,7 @@ async function resolveHermesBackend(backendArgs: string[]): Promise<ResolvedHerm
 
     if (userInstall) {
       const userBackend: SourceBackend | null = await installedRuntimeGate.resolve(userInstall.root, () =>
-        resolveSourceInstallationBackend(userInstall.root, backendArgs, { hermesHome: HERMES_HOME })
+        resolveSourceInstallationBackend(userInstall.root, backendArgs, { hermesHome: HERMES_HOME, log: rememberLog, ...probeControl })
       )
 
       if (userBackend) {
@@ -12192,7 +12192,7 @@ async function startHermes(requestedProfile?: string) {
       prepareLocalBackend: async () => {
         await advanceBootProgress('backend.runtime', 'Resolving Hermes runtime', 28)
 
-        return resolveHermesBackend(backendArgs)
+        return resolveHermesBackend(backendArgs, { signal: localBackendLifecycle.signal, assertCurrentAttempt: () => backendConnectionState.assertCurrentAttempt(connectionAttempt) })
       },
       resolveRemote: () => {
         // Classify immediately before each throwing resolve. This callback runs
