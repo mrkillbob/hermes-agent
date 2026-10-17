@@ -175,6 +175,51 @@ endpoints and task lookup capabilities are separately established. This patch
 creates no A2A endpoint and no native Codex/Dot callback. The historical uncertain
 App MCP callback must not be replayed; unattended result return remains unqualified.
 
+## Explicit coordinator receipt prototype (fixture only)
+
+`kanban_coordinator_executor.CoordinatorExecutor` is a concrete local receipt
+adapter. Its `submit` records an offer in the existing Kanban event stream; it
+launches nothing. `lookup` uses a read-only/query-only SQLite connection and
+never starts, resumes or repairs work. Separate SQL deadlines cap application
+work at 2 seconds for submit and 1 second for lookup, with lock waits capped at
+200/100 ms, no retries, exact indexed queries and 64 KiB event envelopes.
+Stalled kernel/filesystem operations are outside hard real-time guarantees.
+
+An authorized owner must explicitly invoke
+`kanban_coordinator_runner.receive_once` for the exact database/task/run/key and
+an immutable `ExecutionPlan`. One receiver claim and one launch intent commit
+before the process starts. ACK means the coordinator inbox accepted the delivery;
+`started` means a process was created. Neither asserts model acceptance. There is
+no watcher, automatic registration, daemon, account access or CLI activation.
+
+This version accepts only the pinned POSIX fake program and synthetic fixture
+input. Live mode, arbitrary argv and changed program/input hashes reject before
+receiver admission. No Claude or Codex executable can be selected. Structured
+fake provider metadata is validation test data, not proof of real model use.
+
+The receiver drains bounded stdout/stderr under a monotonic execution deadline
+(at most 120 seconds and the remaining task budget), with 64 KiB per stream.
+It can terminate only its new process group while the live leader's birth identity
+still matches: 3 seconds for TERM, then at most 2 seconds for KILL. A leader exit
+alone is insufficient; a remaining group retains uncertainty. It never signals a
+shared server or a historical session. No OS containment or escaped-descendant
+protection is claimed. Receiver death or a stalled OS can leave an uncertain
+attempt; these bounds require the receiver to remain alive and scheduled.
+
+Exit receipts bind launch/PID/birth, input bytes and bounded output hashes.
+Result validation uses those same retained bytes, exact task/run/key/payload and
+strict synthetic CLI/provider metadata before calling the existing lifecycle API.
+A crash after exit or terminal persistence can reconcile from saved evidence
+without another launch. Changed evidence, ambiguous start or unsettled effects
+remain fenced. Evidence files are private same-user consistency records, not
+cryptographic peer authentication. Existing lifecycle APIs retain their own
+transaction/policy handling; their finalization latency is separate from the
+child execution deadline.
+
+Live no-tools CLI qualification, authenticated executor authority, crash-surviving
+host enforcement and native application result return remain separate work. This
+prototype adds no native Codex/Dot callback, SDK conversation binding or A2A endpoint.
+
 ## Failure modes the dispatcher handles
 
 These PID-based rules describe profile workers. External delivery intents use the
