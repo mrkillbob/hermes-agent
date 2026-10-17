@@ -159,6 +159,43 @@ def test_bare_custom_legacy_session_without_saved_endpoint_uses_profile_route(mo
         assert {r['auth'] for r in profile.requests} == {'Bearer sk-profile-only'}
 
 
+@pytest.mark.parametrize('api_mode', ['codex_responses', 'anthropic_messages'])
+def test_endpointless_custom_legacy_session_inherits_profile_wire_mode(monkeypatch, api_mode):
+    """A saved chat-completions mode belongs to the missing old endpoint, not the inherited route."""
+    import yaml
+    from tests.fakes.providers.openai_responses import FakeResponsesServer, Message, Turn
+    from tests.fakes.providers.anthropic_messages import AnthropicMessagesServer, Reply, Text as MessageText
+
+    profile = (FakeResponsesServer([Turn([Message('legacy ok')])], api_key='sk-profile-only')
+               if api_mode == 'codex_responses' else AnthropicMessagesServer([Reply([MessageText('legacy ok')])]))
+    with profile:
+        home = Path(os.environ['HERMES_HOME'])
+        monkeypatch.setattr('gateway.run._hermes_home', home)
+        _write_profile(home, profile.base_url)
+        config_path = home / 'config.yaml'
+        config = yaml.safe_load(config_path.read_text())
+        config['model']['api_mode'] = api_mode
+        if api_mode == 'codex_responses':
+            # A named custom provider explicitly opts a relay into Responses transport.
+            config['model']['provider'] = 'profile-box'
+            config['providers'] = {'profile-box': {'base_url': profile.base_url,
+                'api_key': 'sk-profile-only', 'transport': api_mode}}
+        config_path.write_text(yaml.safe_dump(config))
+        policy, (model, runtime) = _adopt_and_resolve(home, {'provider': 'custom'})
+
+        assert policy.config()['model']['api_mode'] == api_mode
+        assert runtime['api_mode'] == api_mode
+        result = _run_turn(policy, model, runtime)
+
+        assert result['final_response'] == 'legacy ok'
+        assert profile.requests
+        assert {r['body']['model'] for r in profile.requests} == {'legacy-model'}
+        assert all(r['path'].endswith('/responses' if api_mode == 'codex_responses' else '/messages')
+                   for r in profile.requests)
+        assert all(r['headers'].get('authorization') == 'Bearer sk-profile-only'
+                   or r['headers'].get('x-api-key') == 'sk-profile-only' for r in profile.requests)
+
+
 @pytest.mark.parametrize('owner', ['recovered', 'gone'])
 def test_named_provider_moved_never_sends_its_new_key_to_the_saved_endpoint(monkeypatch, owner):
     """The session saved ``custom:legacy-box`` at B; ``legacy-box`` now serves A with A's key. A's key
