@@ -820,6 +820,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         _early_verdict = await _start_gateway_run_runner(runner, _signal_initiated_shutdown)
         if _early_verdict is not None:
             return _early_verdict
+        from gateway.run_local_runtime import start_owned_local_runtime
+        start_owned_local_runtime(runner, idle_exit=idle_exit)
         if _unclean_exit is not None:
             _start_deferred_state_db_integrity_check(_unclean_exit)
 

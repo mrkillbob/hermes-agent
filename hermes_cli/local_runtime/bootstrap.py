@@ -1,8 +1,7 @@
 """Bootstrap for the managed runtime: config -> installed binaries -> running supervised server.
 
-One public call, ``ensure_local_runtime(config)``, safe at any session start: disabled or
-already-running -> no-op; enabled -> serve the installed build under a supervisor. Kept
-import-light: callers gate on config before importing so disabled sessions never pay the import.
+``ensure_local_runtime`` requires a durable gateway owner capability. Other callers only resolve
+an existing endpoint; their exit cannot tear down a router used by another process.
 """
 
 from __future__ import annotations
@@ -10,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager, suppress
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -23,19 +23,44 @@ _SUPERVISOR = None  # process-wide singleton; one router per Hermes process
 # every profile this process hosts, so another profile's ``local_runtime.backend`` must not resize it.
 _SERVING_ENGINE = None
 _EXIT_HOOKED = False
+_EXIT_CLEANUP_DELEGATED = False
+_TRANSITION_LOCK = threading.RLock()
+_STATE_LOCK = threading.Lock()
+_BOOT_CANCEL = None
+_BOOT_OWNER = None
+_BOOT_GENERATION = 0
+_STOPPING = 0
+_SERVING_OWNER = None
 
 
 def _stop_at_exit() -> None:
-    """The process that boots the server stops it on a clean exit, whatever surface it is (the
-    desktop backend also stops it in its shutdown handler; the second call is a no-op). Processes
-    that only adopted another's server never stop it. A hard kill still leaves an orphan, which the
-    next boot adopts or replaces."""
+    """Fallback cleanup when the gateway has not already delegated its bounded stop.
+
+    An unresponsive stop must not be re-entered synchronously during interpreter exit.
+    Hard kills can leave a recorded orphan for adoption or explicit owner recovery.
+    """
     global _EXIT_HOOKED
     if not _EXIT_HOOKED:
         import atexit
 
-        atexit.register(shutdown_local_runtime)
+        atexit.register(_shutdown_at_exit)
         _EXIT_HOOKED = True
+
+
+def set_exit_cleanup_delegated(delegated: bool) -> bool:
+    """Transfer exit cleanup to the gateway worker; return the previous setting for rollback."""
+    global _EXIT_CLEANUP_DELEGATED
+    with _STATE_LOCK:
+        previous = _EXIT_CLEANUP_DELEGATED
+        _EXIT_CLEANUP_DELEGATED = delegated
+        return previous
+
+
+def _shutdown_at_exit() -> None:
+    with _STATE_LOCK:
+        delegated = _EXIT_CLEANUP_DELEGATED
+    if not delegated:
+        shutdown_local_runtime()
 
 
 def _detect_gpu_vendor() -> str | None:
@@ -154,58 +179,45 @@ def _presets_stale() -> bool:
     return False
 
 
-def _stop_state_server() -> None:
-    """Stop the server the state file points at before this process boots a replacement, but only
-    an orphan (recorded owner gone): a live owner's watchdog would respawn its router, so that one
-    is left running and the replacement boots beside it, as it always has. The process comes from
-    the identity-guarded reader, never a bare PID — the endpoint dict callers hold has none."""
+def _incumbent_allows_boot() -> bool:
+    """Never replace a live/uncertain owner, even when its router or presets need repair."""
+    import psutil
     from hermes_cli.local_runtime.recovery import (
-        _owner_is_dead,
-        is_modern,
-        legacy_recorded_process,
-        read_state,
-        recorded_process,
+        _owner_is_dead, _same_birth, _valid_pid, is_modern, read_state,
     )
-    from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
+    from hermes_cli.local_runtime.supervisor import state_path
 
     state = read_state()
-    if is_modern(state):
-        if not _owner_is_dead(state):
-            logger.info("llama-server pid=%s belongs to a live Hermes process; leaving it", state.get("pid"))
-            return
-        proc = recorded_process(state)
-    else:
-        proc = legacy_recorded_process(state)
-    if proc is None:
-        return
-    try:
-        # Waits for the tree to exit, so the port and the GPU are free for the replacement.
-        LlamaServerSupervisor._terminate_tree(proc, verified_root=True)
-    except Exception as exc:
-        logger.warning("could not stop the incumbent llama-server (pid=%s): %s", proc.pid, exc)
+    if not state:
+        return not state_path().exists()  # an unreadable record is not evidence of absence
+    if is_modern(state) and not _owner_is_dead(state):
+        # A previous server of this exact process may have stopped cleanly. A different live
+        # owner can still respawn its child, so even a currently dead router is not replaceable.
+        ours = state.get("owner_pid") == os.getpid() and _same_birth(psutil.Process(), state, "owner_")
+        if not ours:
+            if _presets_stale():
+                logger.warning("Staged models need a refresh by the live owning gateway; deferring it")
+            else:
+                logger.info("Another live Hermes process owns the local runtime; adopting its endpoint")
+            return False
+    # Owner death is not an admission fence: adopters may still be using an orphan. Only the
+    # explicit stop action may recover its tree. Even an unverified/reused live PID must not
+    # cause startup to kill a process or overwrite the uncertain machine record.
+    if not _valid_pid(state.get('pid')) or psutil.pid_exists(state['pid']):
+        logger.info("Recorded local router is live or uncertain; leaving recovery to explicit stop")
+        return False
+    return True
 
 
 def refresh_local_runtime() -> bool:
-    """Restart the managed server so it rescans the models directory. The router's model list is
-    SPAWN-ONLY: a GGUF added after start is invisible to GET /models and 400s on completion, so
-    anything that changes the staged set while the server runs must bounce it."""
-    global _SUPERVISOR
-    try:
-        from hermes_cli.config import load_config
+    """Stage changes for the next explicit owner restart without interrupting shared requests.
 
-        if _SUPERVISOR is None:
-            from hermes_cli.local_runtime.endpoint import _state_endpoint
-
-            state = _state_endpoint()
-            if state is None:
-                return False
-            _stop_state_server()
-        else:
-            shutdown_local_runtime()
-        return ensure_local_runtime(load_config(), force=True) is not None
-    except Exception as exc:
-        logger.warning("local runtime refresh failed: %s", exc)
-        return False
+    The router has direct HTTP adopters and no admission fence: even a confirmed idle snapshot
+    cannot exclude a new request before termination. Download, install and growth callers must
+    defer; the existing explicit owner stop/start controls remain the disruptive action.
+    """
+    logger.info("Local runtime refresh deferred; explicitly stop/start the server from its owning gateway")
+    return False
 
 
 def _admitted_models_max(mdir: Path, configured: int) -> int:
@@ -296,6 +308,7 @@ def refit_idle_presets(sup) -> bool:
     changes.
     """
     from hermes_cli.local_runtime.hardware import probe_budget
+    from hermes_cli.local_runtime.growth import load_window_overrides
     from hermes_cli.local_runtime.presets import plan_presets, render_presets
 
     path = sup.preset_path
@@ -305,8 +318,10 @@ def refit_idle_presets(sup) -> bool:
     live = _launch_budget(capacity)
     if live is None:
         return False
+    overrides = load_window_overrides()
     last = sup._refit_usable
-    if last is not None and abs(live.usable_vram_bytes - last) < _REFIT_STEP_BYTES:
+    if (last is not None and not sup._refit_pending_reload and overrides == sup._refit_overrides
+            and abs(live.usable_vram_bytes - last) < _REFIT_STEP_BYTES):
         return False
     text = render_presets(plan_presets(models_dir(), capacity, live=live, residents=sup.models_max))
     # Held across the write and the reload so a restart can't spawn between them; everything
@@ -314,13 +329,22 @@ def refit_idle_presets(sup) -> bool:
     with sup._lifecycle_lock:
         if sup.proc is None or sup.proc.poll() is not None or _any_holds_memory(sup):
             return False
-        sup._refit_usable = live.usable_vram_bytes
-        if text == path.read_text(encoding="utf-8-sig"):
-            return False
-        from utils import atomic_write_text
+        changed = text != path.read_text(encoding="utf-8-sig")
+        needs_reload = changed or sup._refit_pending_reload
+        if needs_reload:
+            from utils import atomic_write_text
 
-        atomic_write_text(path, text, tmp_prefix=f".{path.name}_", mode=0o600)
-        sup.reload_presets()
+            # File equality after a failed reload is not proof the router applied its contents.
+            sup._refit_pending_reload = True
+            if changed:
+                atomic_write_text(path, text, tmp_prefix=f".{path.name}_", mode=0o600)
+            sup.reload_presets()
+            sup._refit_pending_reload = False
+        sup._refit_usable = live.usable_vram_bytes
+        # Cache only applied plans, using the pre-plan snapshot so concurrent grants retry.
+        sup._refit_overrides = overrides
+        if not needs_reload:
+            return False
     logger.info("launch windows re-planned for %.1f GiB of free GPU memory",
                 live.usable_vram_bytes / (1 << 30))
     return True
@@ -371,32 +395,40 @@ def _unlock_boot_fd(fd: int) -> None:
 
 
 @contextmanager
-def _cross_process_boot_lock(timeout_s: float = 130.0):
+def _cross_process_boot_lock(timeout_s: float = 130.0, *, cancel_event=None):
     """Serialize the state-check-then-spawn sequence across every Hermes process on this
     machine — the ``_SUPERVISOR`` singleton above only rules out a race within ONE process.
     Two profiles booting in the same second each see no ``server.json`` yet and each spawn a
     router on the stable port (#116682); an OS-held lock makes the second caller wait for the
     first to publish its state file, so it re-checks and adopts instead of spawning a duplicate.
-    Bounded, not indefinite: never hang session start dead if the lock is somehow stuck, and
-    never raise into session start: an unwritable runtimes dir (or a foreign-owned lock file)
-    proceeds unlocked with a warning, like the contention timeout."""
+    Failure grants no boot authority. Consumers can still adopt a verified endpoint, but an
+    unwritable lock or contention timeout must never create an unlocked second router."""
     path = runtimes_root() / "boot.lock"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     except OSError as exc:
-        logger.warning("boot lock unavailable (%s); proceeding without it", exc)
-        yield
+        logger.warning("boot lock unavailable (%s); refusing to boot", exc)
+        yield False
         return
     try:
         deadline = time.monotonic() + timeout_s
-        while not _try_lock_boot_fd(fd):
+        acquired = _try_lock_boot_fd(fd)
+        while not acquired:
+            if cancel_event is not None and cancel_event.is_set():
+                yield False
+                return
             if time.monotonic() >= deadline:
-                logger.warning("boot lock contended past %.0fs; proceeding without it", timeout_s)
-                break
-            time.sleep(0.2)
+                logger.warning("boot lock contended past %.0fs; refusing to boot", timeout_s)
+                yield False
+                return
+            if cancel_event is None:
+                time.sleep(0.2)
+            else:
+                cancel_event.wait(0.2)
+            acquired = _try_lock_boot_fd(fd)
         try:
-            yield
+            yield True
         finally:
             with suppress(OSError):
                 _unlock_boot_fd(fd)
@@ -404,47 +436,58 @@ def _cross_process_boot_lock(timeout_s: float = 130.0):
         os.close(fd)
 
 
-def ensure_local_runtime(config: dict, force: bool = False) -> object | None:
-    """Idempotent boot of the managed runtime. Returns the supervisor (or None when
-    disabled/unavailable). Never raises into a session start — failures log and return None; chat
-    falls back to configured providers."""
-    global _SUPERVISOR, _SERVING_ENGINE
+def ensure_local_runtime(config: dict, force: bool = False, *, owner=None,
+                         boot_generation: int | None = None) -> object | None:
+    """Only a durable owner may boot; consumers resolve/adopt through endpoint.py instead.
+
+    ``force`` is an explicit server action, not permission for a consumer to become owner.
+    Failures keep the configured provider's existing unavailable/fallback behavior.
+    """
+    global _BOOT_CANCEL, _BOOT_OWNER, _EXIT_CLEANUP_DELEGATED
+    if boot_generation is None:
+        boot_generation = current_boot_generation()
     section = (config or {}).get("local_runtime") or {}
+    if owner is None or owner.stopping.is_set():
+        return None
     if not force and not section.get("enabled"):
         return None
-    if _SUPERVISOR is not None:
-        return _SUPERVISOR
-
-    try:
-        adopt_legacy_models()
-    except OSError as exc:  # an unreadable profiles dir must not block serving what's staged
-        logger.warning("legacy model adoption failed: %s", exc)
-    # Residency: no staged models means nothing to serve — don't boot an empty server (delete
-    # your last model and boots stop). force boots as ever.
-    if not force and not staged_models():
-        logger.info("local runtime enabled but no models staged; not booting")
-        return None
-
-    # Another Hermes process may already be supervising — reuse via state, but ONLY while its
-    # launch policy still covers every staged model. A server whose preset file predates a
-    # download serves the new model with no policy at all (--models-autoload + stock fit). A stale
-    # incumbent gets stopped and replaced by a fresh boot with regenerated presets; sessions ride
-    # through like any other supervised restart (stable port + persisted key).
-    #
-    # The state check and the spawn below run under a cross-process lock: two backends racing
-    # to boot (#116682) must not both find no state file and both spawn a router on the stable
-    # port — the loser waits here, then re-checks state and adopts the winner's server instead.
-    from hermes_cli.local_runtime.endpoint import _state_endpoint
-
-    with _cross_process_boot_lock():
-        state = _state_endpoint()
-        if state is not None:
-            if not _presets_stale():
-                logger.info("managed llama-server already running (another process)")
+    with owner.observing_boot(), _TRANSITION_LOCK:
+        with _STATE_LOCK:
+            if _STOPPING or owner.stopping.is_set() or boot_generation != _BOOT_GENERATION:
                 return None
-            logger.info("running server's presets predate the staged models; "
-                        "replacing it so every model launches with a policy")
-            _stop_state_server()
+            _EXIT_CLEANUP_DELEGATED = False
+            cancel = threading.Event()
+            _BOOT_CANCEL = cancel
+            _BOOT_OWNER = owner
+        try:
+            if _SUPERVISOR is not None:
+                return _SUPERVISOR
+            return _boot_owned_runtime(section, owner, cancel, force=force)
+        except Exception as exc:
+            logger.warning("managed local runtime unavailable: %s", exc, exc_info=True)
+            return None
+        finally:
+            with _STATE_LOCK:
+                if _BOOT_CANCEL is cancel:
+                    _BOOT_CANCEL = None
+                    _BOOT_OWNER = None
+
+
+def _boot_owned_runtime(section: dict, owner, cancel, *, force: bool):
+    global _SUPERVISOR, _SERVING_ENGINE, _SERVING_OWNER
+
+    with _cross_process_boot_lock(cancel_event=cancel) as acquired:
+        if not acquired or cancel.is_set() or owner.stopping.is_set():
+            return None
+        if not _incumbent_allows_boot():
+            return None
+        try:
+            adopt_legacy_models()
+        except OSError as exc:  # an unreadable profiles dir must not block serving what's staged
+            logger.warning("legacy model adoption failed: %s", exc)
+        if not force and not staged_models():
+            logger.info("local runtime enabled but no models staged; not booting")
+            return None
 
         try:
             from hermes_cli.local_runtime.binaries import installed_engine
@@ -460,12 +503,18 @@ def ensure_local_runtime(config: dict, force: bool = False) -> object | None:
             mdir.mkdir(parents=True, exist_ok=True)
             models_max = _admitted_models_max(mdir, int(section.get("models_max", 4)))
             preset_path = _generate_presets(mdir, runtimes_root() / "presets.ini", models_max)
-
+            if cancel.is_set() or owner.stopping.is_set():
+                _SERVING_ENGINE = None
+                return None
             sup = LlamaServerSupervisor(engine.binary, mdir, preset_path=preset_path,
                                         models_max=models_max,
                                         port=int(section.get("port", 0)) or None)
             try:
-                sup.start()
+                sup.start(cancel_event=cancel)
+                if cancel.is_set() or owner.stopping.is_set():
+                    sup.stop()
+                    _SERVING_ENGINE = None
+                    return None
             except Exception:
                 # start() can fail after the router process exists (health timeout): leaving it
                 # running unsupervised strands its VRAM behind a port nothing will clean up.
@@ -473,22 +522,72 @@ def ensure_local_runtime(config: dict, force: bool = False) -> object | None:
                     sup.stop()
                 raise
             _SUPERVISOR = sup
+            _SERVING_OWNER = owner
             _stop_at_exit()
             logger.info("managed llama-server up at %s (backend=%s tag=%s)", sup.base_url, engine.backend, engine.tag)
             _start_idle_sweeper(sup)
             return sup
         except Exception as exc:
             _SERVING_ENGINE = None
-            logger.warning("managed local runtime unavailable: %s", exc)
+            logger.warning("managed local runtime unavailable: %s", exc, exc_info=True)
             return None
 
 
-def shutdown_local_runtime() -> None:
-    global _SUPERVISOR, _SERVING_ENGINE
-    if _SUPERVISOR is not None:
-        _SUPERVISOR.stop()
-        _SUPERVISOR = None
-    _SERVING_ENGINE = None
+def shutdown_local_runtime(*, on_stopped=None) -> None:
+    """Cancel a pending boot before waiting for its transition, then stop only our supervisor."""
+    global _SUPERVISOR, _SERVING_ENGINE, _SERVING_OWNER, _STOPPING, _BOOT_GENERATION
+    with _STATE_LOCK:
+        _BOOT_GENERATION += 1
+        _STOPPING += 1
+    cancel_pending_boot()
+    try:
+        with _TRANSITION_LOCK:
+            stopped_supervisor = _SUPERVISOR is not None
+            if _SUPERVISOR is not None:
+                _SUPERVISOR.stop()
+                _SUPERVISOR = None
+            _SERVING_ENGINE = None
+            _SERVING_OWNER = None
+            if on_stopped is not None:
+                on_stopped(stopped_supervisor)
+    finally:
+        with _STATE_LOCK:
+            _BOOT_GENERATION += 1
+            _STOPPING -= 1
+
+
+def cancel_pending_boot(owner=None) -> None:
+    with _STATE_LOCK:
+        cancel = _BOOT_CANCEL if owner is None or _BOOT_OWNER is owner else None
+    if cancel is not None:
+        cancel.set()
+
+
+def current_boot_generation() -> int:
+    """Stop invalidates queued owner callbacks as well as already admitted boots."""
+    with _STATE_LOCK:
+        return _BOOT_GENERATION
+
+
+@contextmanager
+def runtime_control_scope(generation: int, *, blocking: bool = True):
+    """Order mutations with Stop; HTTP job admission rejects an occupied transition."""
+    if not _TRANSITION_LOCK.acquire(blocking=blocking):
+        raise RuntimeError("Local runtime control is busy; retry after the current action completes")
+    try:
+        with _STATE_LOCK:
+            if _STOPPING or generation != _BOOT_GENERATION:
+                raise RuntimeError("Local runtime control changed; retry after the current action completes")
+        yield
+    finally:
+        _TRANSITION_LOCK.release()
+
+
+def has_owned_runtime() -> bool:
+    # Publication precedes clearing the pending bit under this lock: cleanup cannot observe
+    # an old "no supervisor" followed by a new "no pending boot" and miss the live server.
+    with _STATE_LOCK:
+        return _SUPERVISOR is not None or _BOOT_CANCEL is not None
 
 
 def get_supervisor():

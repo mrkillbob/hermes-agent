@@ -681,6 +681,10 @@ def test_quickstart_pause_stops_the_sequence(client, monkeypatch, dl_server,
     _pin_budget(monkeypatch)
     from tests.pm._range_server import RangeHandler
     from hermes_cli.web_routers import local_models as lm
+    from hermes_cli.local_runtime import ownership
+    from hermes_constants import get_hermes_home
+
+    monkeypatch.setattr(ownership, '_OWNER', ownership.RuntimeOwner(get_hermes_home()))
 
     _serve_plan(monkeypatch, dl_server, tmp_path / "partials",
                 {"QsPartA": _BIG_BODY, "QsPartB": _BIG_BODY})

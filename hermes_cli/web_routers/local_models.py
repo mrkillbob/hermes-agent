@@ -22,9 +22,10 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable, Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from starlette.concurrency import run_in_threadpool
@@ -42,6 +43,7 @@ from hermes_cli.local_runtime.endpoint import _state_endpoint, child_query
 from hermes_cli.local_runtime.gguf import split_parts
 
 logger = logging.getLogger(__name__)
+_SETUP_ADMISSION_SECONDS = 15.0  # Less than the terminal client's 30-second POST budget.
 
 router = APIRouter()
 
@@ -224,18 +226,35 @@ def _finish(job: dict[str, Any], detail: str) -> None:
 
 def _spawn_job(job: dict[str, Any], name: str, body: Callable[[], None], *, fail_msg: str | None = None,
                on_exit: Callable[[], None] | None = None, download_label: str | None = None,
-               resumable: bool = False) -> None:
-    """One worker per job. Pauses retain ownership; terminal outcomes release it."""
+               resumable: bool = False, generation: int | None = None) -> None:
+    """One writer per job; permanent cancellation releases only after quiescence."""
     guard = threading.Lock()
-    pause = threading.Event()
+    pause, cancelled = threading.Event(), threading.Event()
+    released = False
+
+    def settle_locked(status):
+        nonlocal released
+        if cancelled.is_set():
+            status = "error"
+            job["error"] = "Setup cancelled by Stop; start a fresh setup to continue"
+        callback = None
+        if status != "paused":
+            _RUNNING.pop(job["job_id"], None)
+            if not released:
+                released, callback = True, on_exit
+        job["status"] = status
+        guard.release()
+        return callback
 
     def _run():
         status = "done"
         try:
+            if cancelled.is_set():
+                raise DownloadPaused("setup cancelled")
             body()
             if download_label is not None:
-                _finish(job, f"{download_label} ready")
-                _refresh_runtime("post-download runtime refresh skipped")
+                hint = _refresh_runtime("post-download runtime refresh skipped")
+                _finish(job, f"{download_label} downloaded. {hint}")
         except DownloadPaused:
             status = "paused"
         except Exception as exc:
@@ -244,15 +263,23 @@ def _spawn_job(job: dict[str, Any], name: str, body: Callable[[], None], *, fail
             status = "error"
             job["error"] = str(exc)
         finally:
-            try:
-                if status != "paused" and on_exit is not None:
-                    on_exit()
-            finally:
-                with _JOBS_LOCK:
-                    if status != "paused":
-                        _RUNNING.pop(job["job_id"], None)
-                    job["status"] = status
-                    guard.release()
+            with _JOBS_LOCK:
+                callback = settle_locked(status)
+            if callback is not None:
+                callback()
+
+    def cancel():
+        with _JOBS_LOCK:
+            cancelled.set()
+            pause.set()
+            if not guard.acquire(blocking=False):
+                return  # The queued/active writer's finalizer owns its release.
+            if job["status"] != "paused":
+                guard.release()
+                return
+            callback = settle_locked("error")
+        if callback is not None:
+            callback()
 
     def start(*, initial: bool = False) -> bool:
         if not guard.acquire(blocking=False):
@@ -261,35 +288,52 @@ def _spawn_job(job: dict[str, Any], name: str, body: Callable[[], None], *, fail
             if not initial and job["status"] != "paused":
                 guard.release()
                 return False
-            pause.clear()
-            # A resume starts a fresh window: the gap parked in the queue
-            # would otherwise read as a rate of roughly zero bytes/sec.
-            running = _RUNNING.get(job["job_id"])
-            if running is not None:
-                running.pop("samples", None)
-            job["status"] = "running"
-            job["error"] = None
+            aborted = cancelled.is_set()
+            if aborted:
+                callback = settle_locked("error")
+            else:
+                callback = None
+                pause.clear()
+                running = _RUNNING.get(job["job_id"])
+                if running is not None:
+                    running.pop("samples", None)
+                job.update(status="running", error=None)
+        if aborted:
+            if callback is not None:
+                callback()
+            return False
         try:
             spawn_context_thread(_run, name=name).start()
-        except Exception:
-            _RUNNING.pop(job["job_id"], None)
-            if on_exit is not None:
-                on_exit()
-            job["status"] = "error"
-            guard.release()
+        except Exception as exc:
+            with _JOBS_LOCK:
+                job["error"] = str(exc)
+                callback = settle_locked("error")
+            if callback is not None:
+                callback()
             raise
         return True
 
-    if resumable:
-        _RUNNING[job["job_id"]] = {"resume": start, "pause": pause}
+    with _JOBS_LOCK:
+        if resumable or generation is not None:
+            _RUNNING[job["job_id"]] = {"cancel": cancel, "generation": generation}
+        if resumable:
+            _RUNNING[job["job_id"]].update(resume=start, pause=pause)
     start(initial=True)
 
 
-# ── runtime / router plumbing ────────────────────────────────
-def _refresh_runtime(skip_msg: str) -> None:
-    """Bounce a running router so it rescans the models dir (it only scans at spawn).
-    Never raises — the file operation already succeeded."""
+def _cancel_setup_jobs() -> None:
+    with _JOBS_LOCK:
+        callbacks = [running["cancel"] for job_id, running in _RUNNING.items()
+                     if _JOBS.get(job_id, {}).get("kind") in {"quickstart", "model-activate"}
+                     and "cancel" in running]
+    for cancel in callbacks:
+        cancel()
+
+
+def _refresh_runtime(skip_msg: str) -> str:
+    """Report staged changes without interrupting shared inference."""
     _quiet(bootstrap.refresh_local_runtime, None, debug=skip_msg)
+    return "Start or restart the local server from the default-profile gateway to use the staged files."
 
 
 def _router_request(endpoint: dict[str, Any], path: str, *, timeout: float, payload: dict | None = None) -> Any:
@@ -357,37 +401,54 @@ def _entry_or_404(model_id: str):
 
 def _start_local_server(config: dict, fail_detail: str):
     """Force-start the local server; raise ``fail_detail`` when neither we nor another process ended up serving."""
-    sup = bootstrap.ensure_local_runtime(config, force=True)
+    from hermes_cli.local_runtime.ownership import current_owner
+
+    owner = current_owner(for_scope=True)
+    sup = bootstrap.ensure_local_runtime(config, force=True, owner=owner)
     if sup is None and _state_endpoint() is None:
+        if owner is None:
+            raise RuntimeError("Start a long-lived root Hermes gateway to own the local server")
         raise RuntimeError(fail_detail)
     return sup
 
 
 def _ensure_server(job: dict[str, Any], config: dict, model_id: str, *, fail_detail: str, skip_msg: str) -> None:
-    """Start the local server if needed and self-heal a stale router: the model list is spawn-only, so a
-    server started before ``model_id`` finished downloading can't serve it — bounce it when it doesn't know it."""
+    """Activate only a model the live router serves; staged additions need an explicit restart."""
     _step(job, "starting-server", "Starting the local server")
     sup = _start_local_server(config, fail_detail)
 
-    def rescan_if_unknown(known: dict[str, Any]) -> None:
-        if model_id not in known:
-            job["detail"] = "Refreshing the local server"
-            bootstrap.refresh_local_runtime()
-
-    if sup is not None:
-        _quiet(lambda: rescan_if_unknown(sup.models()), None, debug=skip_msg)
+    if model_id in _server_model_ids(sup):
         return
-    # A server owned by another process: ensure_local_runtime returned None, so the supervisor
-    # path above never ran — but the same spawn-only listing gap applies. Probe the live
-    # listing through the persisted endpoint and bounce when it lacks the model.
+    logger.info("%s: model registration awaits an explicit owner restart", skip_msg)
+    raise RuntimeError("The model is staged but the running server has not registered it. "
+                       "Stop/start the local server from its default-profile gateway, then retry activation.")
+
+
+def _server_model_ids(sup, *, timeout_s: int | None = None) -> set[str]:
+    if sup is not None:
+        return set(sup.models() if timeout_s is None else sup.models(timeout_s=timeout_s))
     endpoint = _state_endpoint()
-    if endpoint is not None:
+    if endpoint is None:
+        raise RuntimeError("The local server stopped before its model listing was available")
+    data = (_router_request(endpoint, "/models", timeout=10 if timeout_s is None else timeout_s) or {}).get("data", [])
+    return {m["id"] for m in data if m.get("id")}
 
-        def _known_models() -> dict[str, Any]:
-            data = (_router_request(endpoint, "/models", timeout=10) or {}).get("data", [])
-            return {m.get("id"): m for m in data}
 
-        _quiet(lambda: rescan_if_unknown(_known_models()), None, debug=skip_msg)
+def _preflight_quickstart_server(model_id: str) -> None:
+    """Do not download weights a live shared router cannot register without an explicit stop."""
+    from hermes_cli.local_runtime.boot_status import owner_boot_pending
+
+    if owner_boot_pending():
+        raise HTTPException(status_code=409, detail="The local server is starting; retry setup when it is ready")
+    sup = bootstrap.get_supervisor()
+    if sup is None and _state_endpoint() is None:
+        return  # A cold setup can start a new router after staging its model.
+    with _http_error(409, "Cannot verify the running local server before setup: "):
+        registered = _server_model_ids(sup, timeout_s=5)
+    if model_id not in registered:
+        raise HTTPException(status_code=409, detail=(
+            "The running local server has not registered this model. "
+            "Stop the local server in Local Models from its default-profile gateway, then retry setup."))
 
 
 def _assign_default(job: dict[str, Any], model_id: str) -> None:
@@ -493,6 +554,8 @@ def _active_llamacpp_model_id() -> str | None:
 def local_models_status():
     """Cheap, immediate: config state + installed runtime + staged models + supervisor state (GPU facts live
     in /hardware). Sync def on purpose: blocking urlopen/scans run in the threadpool."""
+    from hermes_cli.local_runtime.ownership import current_owner
+
     section = _runtime_section()
     engine = binaries.installed_engine(section.get("backend", "auto"))
     runtime_backend = engine.backend if engine is not None else None
@@ -511,6 +574,7 @@ def local_models_status():
         lambda: _loaded_models(running), ({}, {}), warn="loaded-models read failed: %r")
     return {
         "enabled": bool(section.get("enabled")), "tag": tag, "configured_tag": configured_tag,
+        "control_available": current_owner(for_scope=True) is not None,
         "update_available": bool(section.get("enabled") and engine is not None and current is None),
         "runtime_installed": runtime_backend is not None, "runtime_backend": runtime_backend,
         "server_running": running is not None, "server_base_url": (running or {}).get("base_url"),
@@ -666,13 +730,9 @@ def local_models_runtime_install(body: RuntimeInstallBody, profile: Optional[str
 
     def run():
         with _config_profile_scope(profile):
-            previous = binaries.installed_engine(backend)
             engine = _install_engine_job(job, backend)
-            running = bootstrap.get_supervisor()
-            if running is not None and previous != engine:
-                _step(job, "restarting", "Switching the running server to the pinned build")
-                bootstrap.refresh_local_runtime()
-        _finish(job, f"llama.cpp {tag} ready ({backend})")
+        _finish(job, f"llama.cpp {engine.tag} installed ({backend}). "
+                     "Start or restart the local server from its default-profile gateway to use this build.")
 
     _spawn_job(job, "lr-runtime-install", run, fail_msg="runtime install failed: %s", resumable=True)
     return {"job_id": job["job_id"], "backend": backend, "tag": tag}
@@ -704,8 +764,8 @@ def local_models_download(body: ModelDownloadBody):
     job = _job("model-download", f"{entry.display_name} ({variant.quant})", model_id=entry.id)
     def _run():
         _run_download_plan(job, plan, entry.display_name)
-        _finish(job, f"{entry.display_name} ready")
-        _refresh_runtime("post-download runtime refresh skipped")
+        hint = _refresh_runtime("post-download runtime refresh skipped")
+        _finish(job, f"{entry.display_name} downloaded. {hint}")
 
     _spawn_job(job, "lr-model-download", _run, fail_msg="model download failed: %s", resumable=True)
     return {"job_id": job["job_id"], "model_id": variant.model_id}
@@ -735,8 +795,7 @@ async def local_models_download_resume(body: JobIdBody):
 
 @router.delete("/api/local-models/models/{model_id}")
 async def local_models_delete(model_id: str):
-    """Remove every split part plus private assets, then bounce the router off the request thread (deleting
-    the active file mid-serve is exactly the stale state the refresh exists for)."""
+    """Remove staged files; leave running requests alone until the owner explicitly restarts."""
     files = _variant_files_on_disk(model_id)
     if not files:
         raise HTTPException(status_code=404, detail="model not found")
@@ -744,9 +803,8 @@ async def local_models_delete(model_id: str):
         path.unlink(missing_ok=True)
     # Growth state dies with the model: a re-download starts back at its zero-spill window, not a stale grown one.
     _quiet(lambda: growth.clear_window_override(model_id), None, debug="window-override clear skipped")
-    spawn_context_thread(_refresh_runtime, args=("post-delete runtime refresh skipped",),
-                         name="lr-post-delete").start()
-    return {"ok": True}
+    hint = _refresh_runtime("post-delete runtime refresh skipped")
+    return {"ok": True, "detail": hint}
 
 
 # ── quickstart: one click from nothing to a working default ──
@@ -788,11 +846,20 @@ def _repriced_quickstart(job: dict[str, Any], body: QuickstartBody, variant):
 
 
 @router.post("/api/local-models/quickstart")
-def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None):
-    """One job: install the runtime (if missing), download this machine's build of the recommended model (if
-    missing), make it the default. Each leg uses the same code as the individual setup routes.
-    Preflight rejects (no automatic recommendation or no servable choice) fail the POST
-    synchronously so the button can explain itself; everything slow runs in the job with phase/byte progress."""
+async def local_models_quickstart(body: QuickstartBody, request: Request, profile: Optional[str] = None):
+    """Explicit setup retains an eligible root gateway before accepting any slow work."""
+    generation = bootstrap.current_boot_generation()
+    deadline = monotonic() + _SETUP_ADMISSION_SECONDS
+    _prepare_runtime_control(request, profile, required=True)
+    try:
+        return await run_in_threadpool(_accept_quickstart, body, profile, generation, deadline)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _accept_quickstart(body: QuickstartBody, profile: Optional[str], generation: int, deadline: float):
+    """Synchronous hardware/planning and generation-fenced job registration."""
+    _check_setup_admission(deadline)
     entry, variant = _quickstart_target(body, hardware.probe_budget(planning=True))
     _tag, backend = _runtime_target()
     need_runtime = binaries.installed_engine(backend) is None
@@ -801,15 +868,14 @@ def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None)
     if not need_download:
         download_plan = []
     download_bytes = sum(p[2] for p in download_plan)
-    if not _QUICKSTART_LOCK.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Setup is already running")
-    job = _job("quickstart", entry.display_name, model_id=entry.id)
+    _preflight_quickstart_server(variant.model_id)
     def _run():
         nonlocal entry, variant, download_plan
         if need_runtime and binaries.installed_engine(backend) is None:
             _install_engine_job(job, backend)
             entry, variant, download_plan = _repriced_quickstart(job, body, variant)
         if download_plan:
+            _preflight_quickstart_server(variant.model_id)
             # Each phase has its own complete download plan. Resume within a
             # phase retains counters until PM reports the durable bytes.
             if job["phase"] != "downloading":
@@ -818,16 +884,50 @@ def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None)
             _run_download_plan(job, download_plan, entry.display_name)
         _step(job, "starting-server", "Starting the local server")
         with _config_profile_scope(profile):
-            _ensure_server(job, _set_runtime_enabled(True), variant.model_id,
-                           fail_detail="The local server could not start — open Local Models for details",
-                           skip_msg="quickstart rescan check skipped")
-            _assign_default(job, variant.model_id)
+            with bootstrap.runtime_control_scope(generation):
+                _ensure_server(job, _set_runtime_enabled(True), variant.model_id,
+                               fail_detail="The local server could not start — open Local Models for details",
+                               skip_msg="quickstart rescan check skipped")
+                _assign_default(job, variant.model_id)
         _finish(job, f"{entry.display_name} is ready — new chats use it")
 
-    _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s",
-               on_exit=_QUICKSTART_LOCK.release, resumable=True)
+    with bootstrap.runtime_control_scope(generation, blocking=False):
+        _check_setup_admission(deadline)
+        if not _QUICKSTART_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Setup is already running")
+        job = _job("quickstart", entry.display_name, model_id=entry.id)
+        _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s",
+                   on_exit=_QUICKSTART_LOCK.release, resumable=True, generation=generation)
     return {"job_id": job["job_id"], "model_id": entry.id, "display_name": entry.display_name,
             "needs_runtime": need_runtime, "needs_download": need_download, "download_bytes": download_bytes}
+
+
+def _check_setup_admission(deadline: float) -> None:
+    if monotonic() >= deadline:
+        raise RuntimeError("Setup request expired before admission; retry when the gateway is ready")
+
+
+def _prepare_runtime_control(request: Request, profile: Optional[str], *, required: bool) -> bool:
+    """Loop-only preflight for explicit model mutations; consumers may still adopt on Activate."""
+    from gateway.run_local_runtime import retain_gateway_for_local_models
+    from hermes_cli.local_runtime.ownership import current_owner
+
+    with _config_profile_scope(profile):
+        if current_owner(for_scope=True) is not None:
+            return True
+        runner = getattr(request.app.state, 'gateway_runner', None)
+        if runner is not None and retain_gateway_for_local_models(runner):
+            return True
+        if required:
+            _runtime_control_owner()
+    return False
+
+
+@router.post("/api/local-models/control")
+async def local_models_control(request: Request, profile: Optional[str] = None):
+    """Explicitly retain an already-ready root gateway for setup; never replace its work."""
+    _prepare_runtime_control(request, profile, required=True)
+    return {"control_available": True}
 
 
 # ── server lifecycle: turn the engine on/off ─────────────────
@@ -841,29 +941,60 @@ def _terminate_state_pid() -> None:
 
 
 def _stop_server() -> None:
-    if bootstrap.get_supervisor() is not None:
-        bootstrap.shutdown_local_runtime()
-    else:
-        _terminate_state_pid()
-    _set_runtime_enabled(False)
+    _runtime_control_owner()
+    # Always fence queued owner callbacks, including ones that captured enabled=true
+    # before a supervisor or pending-boot token was published.
+    def persist_stop(stopped_supervisor):
+        _cancel_setup_jobs()
+        if not stopped_supervisor:
+            _terminate_state_pid()
+        _set_runtime_enabled(False)
+
+    bootstrap.shutdown_local_runtime(on_stopped=persist_stop)
 
 
 def _start_server() -> None:
-    _start_local_server(_set_runtime_enabled(True), _SERVER_START_FAILED)
+    _runtime_control_owner()
+    with bootstrap.runtime_control_scope(bootstrap.current_boot_generation()):
+        _start_local_server(_set_runtime_enabled(True), _SERVER_START_FAILED)
+
+
+def _runtime_control_owner():
+    from hermes_cli.local_runtime.ownership import current_owner
+
+    owner = current_owner(for_scope=True)
+    if owner is None:
+        raise HTTPException(status_code=409, detail=(
+            "Start the main Hermes gateway from the default profile to control the local server"))
+    return owner
 
 
 _SERVER_ACTIONS = {"stop": _stop_server, "start": _start_server}
 
 
+def _dispatch_server_action(action: str, profile: Optional[str], generation: int) -> None:
+    with _config_profile_scope(profile):
+        if action == 'start':
+            with bootstrap.runtime_control_scope(generation):
+                _SERVER_ACTIONS[action]()
+        else:
+            _SERVER_ACTIONS[action]()
+
+
 @router.post("/api/local-models/server")
-async def local_models_server(body: ServerActionBody):
-    """Turn the local engine off (stop the server, free ALL GPU memory, disable auto-start) or back on. Unlike
-    per-model eject the off switch IS durable: the user said off, so boots stay off until they say on."""
+async def local_models_server(body: ServerActionBody, request: Request, profile: Optional[str] = None):
+    """Start may retain its root gateway; Stop requires an existing owner and cancels setup."""
     action = (body.action or "").strip().lower()
     if action not in _SERVER_ACTIONS:
         raise HTTPException(status_code=400, detail="action must be 'stop' or 'start'")
+    generation = bootstrap.current_boot_generation()
+    if action == 'start':
+        _prepare_runtime_control(request, profile, required=True)
+    else:
+        with _config_profile_scope(profile):
+            _runtime_control_owner()
     try:
-        await asyncio.to_thread(_SERVER_ACTIONS[action])
+        await asyncio.to_thread(_dispatch_server_action, action, profile, generation)
     except HTTPException:
         raise
     except Exception as exc:
@@ -891,28 +1022,41 @@ def local_models_eject(body: ModelEjectBody):
 
 
 @router.post("/api/local-models/activate")
-async def local_models_activate(body: ModelActivateBody, profile: Optional[str] = None):
-    """Make a downloaded model the default for new chats: a config write via the same machinery as
-    /api/model/set plus making sure the server is up. NO model loading (residency v2: models load on first
-    inference; an empty router costs nothing). Kept as a job for UI continuity."""
+async def local_models_activate(body: ModelActivateBody, request: Request, profile: Optional[str] = None):
+    """Capture intent on admission; runtime lock waits must not block HTTP Stop dispatch."""
+    generation = bootstrap.current_boot_generation()
+    deadline = monotonic() + _SETUP_ADMISSION_SECONDS
+    _prepare_runtime_control(request, profile, required=False)
+    try:
+        return await run_in_threadpool(_accept_activation, body, profile, generation, deadline)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _accept_activation(body: ModelActivateBody, profile: Optional[str], generation: int, deadline: float):
+    """Register the worker under the transition fence on a worker thread."""
+    _check_setup_admission(deadline)
     # Split variants stage under their first part — resolve like the other routes.
     if body.model_id not in bootstrap.staged_model_ids():
         raise HTTPException(status_code=404, detail=f"{body.model_id} is not downloaded")
-    job = _job("model-activate", body.model_id, model_id=body.model_id)
 
     def _run():
         # The llama runtime is one host-wide process, but "my default model" is a
         # config.yaml write — scope it to the profile the request names, inside the job
         # thread (the contextvar override must be set where the write happens).
         with _config_profile_scope(profile):
-            _ensure_server(job, config_mod.load_config(), body.model_id,
-                           fail_detail=_SERVER_START_FAILED, skip_msg="activate rescan check skipped")
-            _step(job, "setting-default", "Making it your default")
-            _set_runtime_enabled(True)
-            _assign_default(job, body.model_id)
-            _finish(job, f"{body.model_id} is the default for new chats")
+            with bootstrap.runtime_control_scope(generation):
+                _ensure_server(job, config_mod.load_config(), body.model_id,
+                               fail_detail=_SERVER_START_FAILED, skip_msg="activate rescan check skipped")
+                _step(job, "setting-default", "Making it your default")
+                _set_runtime_enabled(True)
+                _assign_default(job, body.model_id)
+                _finish(job, f"{body.model_id} is the default for new chats")
 
-    _spawn_job(job, "lr-model-activate", _run, fail_msg="model activate failed: %s")
+    with bootstrap.runtime_control_scope(generation, blocking=False):
+        _check_setup_admission(deadline)
+        job = _job("model-activate", body.model_id, model_id=body.model_id)
+        _spawn_job(job, "lr-model-activate", _run, fail_msg="model activate failed: %s", generation=generation)
     return {"job_id": job["job_id"]}
 
 
@@ -981,7 +1125,7 @@ async def local_models_download_browsed(body: BrowsedDownloadBody):
 @router.post("/api/local-models/sideload")
 async def local_models_sideload(body: SideloadBody):
     """Register a GGUF already on this machine: link it into the managed models dir (copy only when linking is
-    impossible) and bounce the router. The original stays put; delete-from-Hermes removes only our link."""
+    impossible). The original stays put; delete-from-Hermes removes only our link."""
     src = Path(body.path)
     if not src.is_file() or src.suffix.lower() != ".gguf":
         raise HTTPException(status_code=422, detail="Pick a .gguf model file")
@@ -996,5 +1140,5 @@ async def local_models_sideload(body: SideloadBody):
             os.symlink(src, dest)   # cross-volume fallback
         except OSError:
             await run_in_threadpool(shutil.copyfile, src, dest)
-    _refresh_runtime("post-sideload runtime refresh skipped")
-    return {"ok": True, "model_id": dest.stem}
+    hint = _refresh_runtime("post-sideload runtime refresh skipped")
+    return {"ok": True, "model_id": dest.stem, "detail": hint}

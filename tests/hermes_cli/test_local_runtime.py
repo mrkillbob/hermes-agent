@@ -21,6 +21,13 @@ from hermes_cli.local_runtime.binaries import select_backend
 from hermes_cli.local_runtime.detect import DetectedServer, probe_port
 
 
+def _runtime_owner():
+    from hermes_cli.local_runtime.ownership import RuntimeOwner
+    from hermes_constants import get_hermes_home
+
+    return RuntimeOwner(get_hermes_home())
+
+
 def _write_current_process_state(path: Path, *, base_url: str, api_key: str) -> None:
     """Publish a modern state record for the process hosting the test stub."""
     import psutil
@@ -423,6 +430,10 @@ def test_llamacpp_endpoint_waits_for_boot_in_flight(tmp_path, monkeypatch):
 
     # Boot is in flight: runtime enabled + binary installed.
     monkeypatch.setattr(ep, "_boot_in_flight", lambda config: True)
+    from hermes_cli.local_runtime import ownership
+    owner = _runtime_owner()
+    monkeypatch.setattr(ownership, '_OWNER', owner)
+    monkeypatch.setattr(owner, 'request_boot', lambda: True)  # Existing owner startup below.
     monkeypatch.setattr(
         "hermes_cli.local_runtime.recovery.legacy_recorded_process", lambda state: object())
     # Nothing detected externally.
@@ -466,7 +477,12 @@ def test_resolution_kicks_boot_when_no_thread_is_booting(tmp_path, monkeypatch):
         "hermes_cli.local_runtime.recovery.legacy_recorded_process", lambda state: object())
     monkeypatch.setattr("hermes_cli.local_runtime.detect.DEFAULT_PROBE_PORTS", ())
 
-    def _fake_ensure(config, force=False):
+    from hermes_cli.local_runtime import ownership
+    monkeypatch.setattr(ownership, '_OWNER', _runtime_owner())
+
+    def _fake_ensure(config, force=False, *, owner=None, boot_generation=None):
+        assert owner is ownership.current_owner()
+        assert boot_generation is not None
         _time.sleep(0.3)  # a real spawn takes a moment
         state_path().parent.mkdir(parents=True, exist_ok=True)
         state_path().write_text(json.dumps({
@@ -638,7 +654,7 @@ def test_bootstrap_skips_boot_with_no_staged_models(tmp_path, monkeypatch):
         raise AssertionError("must not reach install/spawn")
 
     monkeypatch.setattr("hermes_cli.local_runtime.binaries.installed_engine", _boom)
-    result = bs.ensure_local_runtime({"local_runtime": {"enabled": True}})
+    result = bs.ensure_local_runtime({"local_runtime": {"enabled": True}}, owner=_runtime_owner())
     assert result is None
     assert called["spawn"] is False
 
@@ -851,9 +867,9 @@ def test_bootstrap_disabled_is_noop(tmp_path, monkeypatch):
     from hermes_cli.local_runtime import bootstrap
 
     monkeypatch.setattr(bootstrap, "_SUPERVISOR", None)
-    assert bootstrap.ensure_local_runtime({"local_runtime": {"enabled": False}}) is None
-    assert bootstrap.ensure_local_runtime({}) is None
-    assert bootstrap.ensure_local_runtime(None) is None
+    assert bootstrap.ensure_local_runtime({"local_runtime": {"enabled": False}}, owner=_runtime_owner()) is None
+    assert bootstrap.ensure_local_runtime({}, owner=_runtime_owner()) is None
+    assert bootstrap.ensure_local_runtime(None, owner=_runtime_owner()) is None
 
 
 def test_bootstrap_reuses_running_server(tmp_path, monkeypatch, stub_server):
@@ -874,7 +890,7 @@ def test_bootstrap_reuses_running_server(tmp_path, monkeypatch, stub_server):
     monkeypatch.setattr(
         "hermes_cli.local_runtime.binaries.installed_engine",
         lambda *a, **k: called.append(1))
-    assert bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}}) is None
+    assert bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}}, owner=_runtime_owner()) is None
     assert called == []
 
 
@@ -895,7 +911,7 @@ def test_bootstrap_failure_never_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         "hermes_cli.local_runtime.binaries.installed_engine", boom)
-    result = bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}})
+    result = bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}}, owner=_runtime_owner())
     assert result is None  # no exception escaped
 
 
@@ -934,7 +950,7 @@ def test_ensure_local_runtime_serializes_racing_callers(tmp_path, monkeypatch):
         def base_url(self):
             return f"http://127.0.0.1:{self.port}/v1"
 
-        def start(self, timeout_s=120):
+        def start(self, timeout_s=120, **kwargs):
             spawns.append(1)
             _time.sleep(0.3)  # widen the window the other caller races into
             # A bare legacy ``{pid}`` record is no longer adoptable (a live PID is not evidence);
@@ -949,7 +965,7 @@ def test_ensure_local_runtime_serializes_racing_callers(tmp_path, monkeypatch):
 
     def _boot():
         barrier.wait()
-        results.append(bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}}))
+        results.append(bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}}, owner=_runtime_owner()))
 
     threads = [threading.Thread(target=_boot) for _ in range(2)]
     for t in threads:
@@ -979,7 +995,7 @@ def test_ensure_local_runtime_proceeds_when_boot_lock_is_unwritable(tmp_path, mo
     monkeypatch.setattr("hermes_cli.local_runtime.binaries.installed_engine", lambda backend: None)
 
     with caplog.at_level(logging.WARNING, logger=bootstrap.logger.name):
-        result = bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}})
+        result = bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}}, owner=_runtime_owner())
 
     assert result is None  # no exception escaped
     assert any("boot lock unavailable" in rec.getMessage() for rec in caplog.records)
@@ -1012,7 +1028,7 @@ def test_boot_prices_the_engine_it_serves(tmp_path, monkeypatch):
         def __init__(self, *a, **k):
             pass
 
-        def start(self):
+        def start(self, **kwargs):
             raise RuntimeError("health timeout")
 
         def stop(self):
@@ -1020,6 +1036,6 @@ def test_boot_prices_the_engine_it_serves(tmp_path, monkeypatch):
 
     monkeypatch.setattr("hermes_cli.local_runtime.supervisor.LlamaServerSupervisor", _NoStart)
 
-    assert bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True, "backend": "vulkan"}}) is None
+    assert bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True, "backend": "vulkan"}}, owner=_runtime_owner()) is None
     assert priced == [vulkan]
     assert bootstrap.serving_engine() is None  # a failed boot serves nothing

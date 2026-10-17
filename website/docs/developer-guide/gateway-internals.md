@@ -8,6 +8,53 @@ description: "How the messaging gateway boots, authorizes users, routes sessions
 
 The messaging gateway is the long-running process that connects Hermes to 20+ external messaging platforms through a unified architecture.
 
+## Managed local inference ownership
+
+After the root gateway wins its runtime lock and starts its runner, a non-idle-exit launch
+registers one process-local `RuntimeOwner`. Background boot reads that owner's home and
+captured context, so a routed profile cannot supply its backend, residency limit, environment
+expansion or frozen worker configuration. Automatic startup preserves `local_runtime.enabled`;
+no setting, provider assignment, engine installation or model download is implied. Named
+gateways, one-shot/cron workers and compatibility standalone HTTP lifespans only adopt the
+existing identity-verified endpoint. A main gateway must be running for managed cold start.
+An explicit root Local Models setup may retain an already-ready idle-exit gateway in the
+background through the existing authenticated HTTP boundary. It keeps the same process and
+accepted work, binds cleanup before publishing ownership, and disarms idle exit. Registration
+uses captured launch context and neither boots inference nor changes enabled settings.
+Named, standalone, draining and stopping gateways cannot acquire this capability.
+The explicit quickstart HTTP operation performs eligible retention before dispatching its
+synchronous planning worker, so Desktop and terminal use the same ownership contract.
+Explicit root Start and Activate can retain the same eligible gateway too. Stop does not
+acquire this capability from a consumer. Registration and activation lock waits run on
+worker threads, leaving the gateway loop able to dispatch Stop during a boot.
+
+Bootstrap serializes transitions inside the process and across processes. Unavailable or
+contended boot locks refuse mutation. A living or uncertain foreign owner is never replaced,
+including stale-preset and dead-child cases where its watchdog could restart the child.
+Even a verified live orphan remains available for adoption; only explicit stop may reclaim its
+tree under the existing process-birth and Windows containment guards. Implicit refresh never stops the shared router: an idle snapshot cannot fence off new
+HTTP requests from another process. Downloads and engine installs stay staged until an explicit
+default-profile owner stop/start. Activation checks the live model
+listing and refuses an unserved model without changing the existing assignment.
+
+Explicit Stop invalidates setup generations captured at acceptance, including downloading,
+paused and queued activation jobs. Those jobs cannot re-enable inference or assign a default
+after Stop. Stop also requests cooperative download cancellation: paused setup jobs become
+terminal immediately; active writers retain single-flight ownership until cleanup finishes.
+Cancelled jobs cannot resume, but their partial bytes remain available to a fresh setup.
+
+Gateway shutdown closes boot admission before draining consumers. Cancellation covers a queued
+worker, a boot-lock wait and health startup; cleanup also waits for an unpublished boot within
+the existing shutdown budget and tail reserve. Owned cleanup runs on a context-preserving daemon
+thread, never an executor worker that could strand `asyncio.run` on exit. A consumer with no
+supervisor or pending boot releases nothing. Windows kill-on-close jobs and the owner's idle
+unload/refit loop remain in place. These source guarantees do not establish model accuracy,
+native inference readiness or permission to enable a profile or update an installed runtime.
+Saved context-growth requests remain available to future eligible idle preset planning or an
+explicit restart; compression proceeds until a larger window is materialized. The existing
+idle refit's documented status-check-to-reload race is unchanged: this repair prevents implicit
+server termination and consumer-exit cleanup, not every possible inference interruption.
+
 ## Canonical group metadata and profile discovery
 
 The authenticated canonical WebSocket exposes `groups.capabilities`, `groups.list`,
@@ -782,3 +829,9 @@ Plugins that load after the adapters connected (install/enable from the CLI, Des
 - [ACP Internals](./acp-internals.md)
 - [Agent Loop Internals](./agent-loop.md)
 - [Messaging Gateway (User Guide)](../user-guide/messaging/index.md)
+
+Managed consumers can wait for an already queued or active root-owner boot before server state exists. The owner publishes a machine-root boot observation before scheduling its boot thread and removes it when requests settle or the owner closes. Readers verify the live process incarnation, executable and root. This observation grants no boot, reload, configuration or cleanup authority; missing or stale evidence keeps unavailable/fallback behavior prompt.
+
+Quickstart and Activate reject a busy boot transition instead of waiting to register an unobserved job. Their admission deadline is captured before threadpool dispatch and rechecked before job creation, so a delayed planning/admission worker cannot register setup beyond the request budget. Already accepted jobs retain their normal polling, Stop cancellation and generation fences.
+
+Quickstart reads the running router's model listing before accepting setup and again before transferring model weights after engine repricing. An unregistered selection, active boot or unavailable listing refuses setup without reloading or stopping the shared server. With no running server, normal staging and owner boot remain available. Final activation still verifies the live listing if server state changes after preflight.

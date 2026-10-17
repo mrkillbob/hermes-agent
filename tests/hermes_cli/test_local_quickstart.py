@@ -22,6 +22,10 @@ from hermes_cli.local_runtime.binaries import Engine
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     from hermes_cli import web_server
+    from hermes_cli.local_runtime import ownership
+    from hermes_constants import get_hermes_home
+
+    monkeypatch.setattr(ownership, "_OWNER", ownership.RuntimeOwner(get_hermes_home()))
 
     test_client = TestClient(web_server.app)
     test_client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
@@ -73,7 +77,7 @@ def test_quickstart_without_recommendation_requires_explicit_choice(client, monk
         def models(self):
             return [chosen["model_id"]]
 
-    def start_server(config, force=False):
+    def start_server(config, force=False, *, owner=None):
         calls.append(("server", config["local_runtime"]["enabled"], force))
         return Server()
 
@@ -179,10 +183,15 @@ def test_quickstart_runs_all_three_legs(client, capable_hardware, monkeypatch, t
     # Leg 3: activation — stub the server start and the model assignment.
     monkeypatch.setattr(
         "hermes_cli.local_runtime.bootstrap.ensure_local_runtime",
-        lambda config, force=False: calls.append("server") or None)
+        lambda config, force=False, **kwargs: calls.append("server") or None)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models._state_endpoint",
-        lambda: {"base_url": "http://127.0.0.1:1/v1", "api_key": "k"})
+        lambda: ({"base_url": "http://127.0.0.1:1/v1", "api_key": "k"}
+                 if "server" in calls else None))
+    from hermes_cli.local_runtime import bootstrap
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models._router_request",
+        lambda *args, **kwargs: {"data": [{"id": mid} for mid in bootstrap.staged_model_ids()]})
     monkeypatch.setattr(
         "hermes_cli.web_server_config._apply_model_assignment_sync",
         lambda *a, **k: calls.append("assign"))
@@ -244,10 +253,14 @@ def test_quickstart_skips_satisfied_legs(client, capable_hardware, monkeypatch):
         lambda *a, **k: calls.append("download"))
     monkeypatch.setattr(
         "hermes_cli.local_runtime.bootstrap.ensure_local_runtime",
-        lambda config, force=False: None)
+        lambda config, force=False, **kwargs: None)
     monkeypatch.setattr(
         "hermes_cli.web_routers.local_models._state_endpoint",
         lambda: {"base_url": "http://127.0.0.1:1/v1", "api_key": "k"})
+    from hermes_cli.local_runtime import bootstrap
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.local_models._router_request",
+        lambda *args, **kwargs: {"data": [{"id": mid} for mid in bootstrap.staged_model_ids()]})
     monkeypatch.setattr(
         "hermes_cli.web_server_config._apply_model_assignment_sync",
         lambda *a, **k: calls.append("assign"))
@@ -350,3 +363,67 @@ def test_quickstart_prices_after_installing_the_engine(client, monkeypatch):
     assert job["status"] == "done", job["error"]
     assert installed == ["vulkan"]
     assert (job["model_id"], downloaded, assigned) == (fit.id, [fit.display_name], [fit.variants[0].model_id])
+
+
+@pytest.mark.parametrize('scope', ['absent', 'named', 'stopping'])
+def test_ownerless_quickstart_refuses_before_planning_or_download(client, monkeypatch, scope):
+    from hermes_cli.local_runtime import ownership
+    from hermes_cli.web_routers import local_models as lm
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+
+    token = None
+    if scope == 'absent':
+        monkeypatch.setattr(ownership, '_OWNER', None)
+    elif scope == 'named':
+        token = set_hermes_home_override(get_hermes_home() / 'profiles' / 'named')
+    else:
+        ownership._OWNER.stopping.set()
+    before_jobs = set(lm._JOBS)
+    monkeypatch.setattr(lm, '_quickstart_target', lambda *a: pytest.fail('unauthorized setup reached planning'))
+    try:
+        response = client.post('/api/local-models/quickstart', json={})
+    finally:
+        if token is not None:
+            reset_hermes_home_override(token)
+    assert response.status_code == 409
+    assert 'default profile' in response.json()['detail']
+    assert set(lm._JOBS) == before_jobs
+
+
+@pytest.mark.parametrize('paused', [False, True])
+def test_stop_invalidates_quickstart_accepted_before_download(client, quickstart_ready, monkeypatch, tmp_path, paused):
+    from types import SimpleNamespace
+    from hermes_cli.web_routers import local_models as lm
+
+    entry = SimpleNamespace(id='fixture', display_name='Fixture')
+    variant = SimpleNamespace(model_id='fixture-model')
+    monkeypatch.setattr(lm, '_quickstart_target', lambda *a: (entry, variant))
+    monkeypatch.setattr(lm.hardware, 'probe_budget', lambda **k: None)
+    monkeypatch.setattr(lm, '_runtime_target', lambda: ('b1', 'cpu'))
+    monkeypatch.setattr(lm, '_download_plan', lambda *a: [(None, tmp_path / 'model.gguf', 1)])
+    accepted = []
+    monkeypatch.setattr(lm, '_spawn_job', lambda job, name, body, **k: accepted.append((job, body, k['on_exit'])))
+    wrote, booted, assigned = [], [], []
+    monkeypatch.setattr(lm, '_set_runtime_enabled', lambda value: wrote.append(value))
+    monkeypatch.setattr(lm, '_ensure_server', lambda *a, **k: booted.append(True))
+    monkeypatch.setattr(lm, '_assign_default', lambda *a: assigned.append(True))
+    monkeypatch.setattr(lm, '_terminate_state_pid', lambda: None)
+    def download(*a):
+        if paused:
+            raise lm.DownloadPaused()
+        lm._stop_server()
+    monkeypatch.setattr(lm, '_run_download_plan', download)
+    response = client.post('/api/local-models/quickstart', json={'model_id': 'fixture'})
+    assert response.status_code == 200, response.text
+    _job, run, release = accepted[0]
+    try:
+        if paused:
+            with pytest.raises(lm.DownloadPaused):
+                run()
+            lm._stop_server()
+            monkeypatch.setattr(lm, '_run_download_plan', lambda *a: None)
+        with pytest.raises(RuntimeError, match='control changed'):
+            run()
+        assert wrote == [False] and booted == [] and assigned == []
+    finally:
+        release()

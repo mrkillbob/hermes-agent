@@ -8,9 +8,9 @@ its state file appears.
 from __future__ import annotations
 
 from contextlib import suppress
+import http.client
 import json
 import logging
-import threading
 import time
 import urllib.request
 
@@ -86,6 +86,61 @@ def managed_get_json(base: str, api_key: str, route: str, timeout_s: float) -> o
         return json.loads(r.read())
 
 
+def managed_get_text(base: str, api_key: str, route: str, timeout_s: float) -> str:
+    """Bounded telemetry read; never forward local credentials through proxies or redirects."""
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    req = urllib.request.Request(f"{base}{route}",
+                                 headers={"Authorization": f"Bearer {api_key}"})
+    with opener.open(req, timeout=timeout_s) as response:
+        body = response.read((1 << 20) + 1)
+    if len(body) > 1 << 20:
+        raise ValueError("Managed telemetry response exceeds limit")
+    return body.decode("utf-8")
+
+
+def managed_model_idle(base_url: str, model_id: str) -> bool:
+    """Consumers may observe an identity-verified child, without autoload or boot authority."""
+    try:
+        state = _state_endpoint()
+        if state is None or base_url.rstrip("/") != state["base_url"].rstrip("/"):
+            return False
+        base = state["base_url"].removesuffix("/").removesuffix("/v1")
+        key = state.get("api_key", "")
+        query = child_query(model_id)
+        slots = json.loads(managed_get_text(base, key, f"/slots?{query}", 2))
+        if not isinstance(slots, list) or not slots or any(
+                not isinstance(slot, dict) or slot.get("is_processing") is not False
+                for slot in slots):
+            return False
+        metrics = managed_get_text(base, key, f"/metrics?{query}", 2)
+        processing = [float(line.split()[-1]) for line in metrics.splitlines()
+                      if line.startswith("llamacpp:requests_processing")]
+        return bool(processing) and all(value == 0 for value in processing)
+    except (OSError, ValueError, TypeError, KeyError, http.client.HTTPException):
+        return False
+
+
+def managed_engine(base_url: str):
+    """Resolve the verified router's registered PM engine without adoption or installation."""
+    from pathlib import Path
+    import psutil
+    from hermes_cli.local_runtime import binaries, recovery
+
+    try:
+        state = recovery.read_state()
+        if base_url.rstrip("/") != str(state.get("base_url", "")).rstrip("/"):
+            return None
+        process = (recovery.recorded_process(state) if recovery.is_modern(state)
+                   else recovery.legacy_recorded_process(state))
+        return None if process is None else binaries.engine_for_binary(Path(process.exe()))
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, psutil.Error):
+        return None
+
+
 def resolve_llamacpp_endpoint(config: dict | None = None,
                               wait_for_boot_s: float = 8.0) -> dict | None:
     """Managed-first, detection-second endpoint for llamacpp aliases.
@@ -105,18 +160,19 @@ def resolve_llamacpp_endpoint(config: dict | None = None,
     if hit and not hit.auth_required:
         return {"base_url": hit.base_url, "api_key": ""}
 
-    if wait_for_boot_s > 0 and _boot_in_flight(config):
-        _kick_managed_boot(config)
+    from hermes_cli.local_runtime.boot_status import owner_boot_pending
+
+    requested = wait_for_boot_s > 0 and _boot_in_flight(config) and _kick_managed_boot(config)
+    if wait_for_boot_s > 0 and (requested or owner_boot_pending()):
         deadline = time.monotonic() + wait_for_boot_s
         while time.monotonic() < deadline:
             time.sleep(0.25)
             managed = _state_endpoint()
             if managed:
                 return managed
+            if not requested and not owner_boot_pending():
+                break
     return None
-
-
-_KICK_LOCK = threading.Lock()
 
 
 def _load_config_if_none(config: dict | None) -> dict | None:
@@ -127,26 +183,14 @@ def _load_config_if_none(config: dict | None) -> dict | None:
     return load_config()
 
 
-def _kick_managed_boot(config: dict | None) -> None:
-    """Actively start the managed server when resolution finds it missing — the wait loop assumes
-    some OTHER thread is bringing it up, which is true only at backend start."""
-    if not _KICK_LOCK.acquire(blocking=False):
-        return  # a kick is already in flight
+def _kick_managed_boot(config: dict | None) -> bool:
+    """Only this process's registered durable owner can repair its missing router."""
+    from hermes_cli.local_runtime.ownership import current_owner
 
-    def _boot() -> None:
-        try:
-            from hermes_cli.local_runtime.bootstrap import ensure_local_runtime
-
-            ensure_local_runtime(_load_config_if_none(config))
-        except Exception:
-            logger.warning("on-demand managed-server boot failed", exc_info=True)
-        finally:
-            _KICK_LOCK.release()
-
-    from agent.memory_provider import spawn_context_thread
-
-    # The caller's profile scope: ``config=None`` resolves (and the boot prices) under it.
-    spawn_context_thread(_boot, name="lr-on-demand-boot").start()
+    owner = current_owner()
+    if owner is not None:
+        return owner.request_boot()
+    return False
 
 
 def _boot_in_flight(config: dict | None) -> bool:

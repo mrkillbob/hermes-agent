@@ -108,6 +108,35 @@ OpenAI-compatible base URL continues to use the compatible client instead.
 | Custom endpoint | `custom` | `base_url` + `key_env` (see below) |
 | Mixture of Agents preset | `moa` (`model` = preset name) | A configured MoA preset whose aggregator has credentials — the fallback runs the whole preset (references + aggregator), not the aggregator alone |
 
+### Managed Local Fallback
+
+Managed llama.cpp runs under the main gateway started from the default profile
+(`hermes gateway run`). Its existing `local_runtime.enabled` setting controls automatic
+startup; startup uses installed engines and staged models without downloading or loading a
+model. One-shot commands, cron workers, named-profile gateways, gateways started with
+`--idle-exit`, and standalone HTTP backends use an existing server and do not start their own.
+`hermes model` → Local models submits setup and progress requests to that gateway using the
+selected profile's existing private tickets. If no ready default-profile gateway exists, setup
+asks before starting or awaiting one that stays in the background. If the root gateway is already
+ready but set to exit when idle, setup asks whether to keep that same gateway running after clients
+disconnect. This choice preserves accepted work and does not enable inference or change settings.
+Desktop's explicit setup action also keeps an eligible root gateway running without replacing
+it or interrupting accepted conversations. Explicit Start and model activation can do the same
+from the default profile; Stop requires an already-established main gateway. Named profiles may
+activate models served by the shared router; install new models from the default profile.
+Newly downloaded models and engine updates take effect after you explicitly
+stop/start the local server from the default-profile gateway. Staging changes does not restart a
+server that other conversations may be using; activation preserves your current model until the
+running server lists the new one.
+Context-growth requests can take effect during a future eligible idle replan or an explicit restart;
+requests continue using compression until a larger window is available.
+Stopping the local server also invalidates previously accepted setup jobs, including paused
+downloads and queued activation. It cancels the old setup; active transfers keep ownership
+until their cleanup finishes. Submit a fresh setup afterward to reuse the saved bytes.
+Stopping a consumer leaves the shared server running. Profile settings and deliberate cloud
+primaries are preserved; a profile with automatic startup disabled can still use an existing
+endpoint. If no server is available, the local fallback is skipped as before.
+
 ### Custom Endpoint Fallback
 
 For a custom OpenAI-compatible endpoint, add `base_url` and optionally `key_env`:

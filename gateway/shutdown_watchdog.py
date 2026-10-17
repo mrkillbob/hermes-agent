@@ -22,7 +22,9 @@ from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
+from gateway.restart import (
+    GATEWAY_SERVICE_RESTART_EXIT_CODE, effective_stop_drain_timeout, effective_stop_watchdog_delay,
+)
 from hermes_constants import get_hermes_home, get_process_hermes_home
 from utils import atomic_json_write
 
@@ -234,6 +236,11 @@ def resolve_shutdown_watchdog_delay(
     """Return the wall-clock leash for the shutdown watchdog thread."""
     grace = _coerce_float(grace_s, DEFAULT_SHUTDOWN_WATCHDOG_GRACE_S)
     return _coerce_float(drain_timeout, 0.0) + grace
+
+
+def effective_shutdown_watchdog_delay(runner: object) -> float:
+    """Clamp the stop's drain-plus-grace leash under the live service exit timeout."""
+    return effective_stop_watchdog_delay(runner, resolve_shutdown_watchdog_delay(effective_stop_drain_timeout(runner)))
 
 
 def _write_watchdog_dump(dump_path: Path, *, delay_s: float,

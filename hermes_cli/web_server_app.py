@@ -142,20 +142,8 @@ async def standalone_lifespan(app: "FastAPI"):
     # Live auto-archive timer, independent of list requests.
     auto_archive_task = asyncio.create_task(_auto_archive_ticker_loop())
 
-    # Managed local runtime (local_runtime.enabled): bring llama-server back so a
-    # restart doesn't strand a llamacpp main model. Off-thread and best-effort;
-    # failure falls back to cloud providers like a cold start. Server only —
-    # models load on first inference (an empty router holds no VRAM).
-    def _boot_local_runtime():
-        try:
-            from hermes_cli.config import load_config
-            from hermes_cli.local_runtime.bootstrap import ensure_local_runtime
-
-            ensure_local_runtime(load_config())
-        except Exception as exc:
-            logging.getLogger(__name__).warning("local runtime boot failed: %s", exc)
-
-    threading.Thread(target=_boot_local_runtime, daemon=True, name="local-runtime-boot").start()
+    # This compatibility backend is an inference consumer. The durable root gateway owns the
+    # shared router; closing a Desktop window must not kill another process's active requests.
 
     # Records who carries inference for setup.status / free_tier.status and broadcasts `setup.ready`
     # (no identity is created at boot). Off-thread; the desktop's first setup.status waits on the
@@ -190,15 +178,6 @@ async def standalone_lifespan(app: "FastAPI"):
         # including stale paths from sessions reaped earlier.
         _unlink_pty_markers(app)
 
-        # Stop the managed llama-server with its parent (an orphan pins VRAM).
-        try:
-            from hermes_cli.local_runtime.bootstrap import shutdown_local_runtime
-
-            shutdown_local_runtime()
-        except Exception:
-            # Shutdown boundary: a supervisor that fails to stop must not skip the
-            # managed-gateway teardown below; log it so the orphan is diagnosable.
-            logger.warning("managed local runtime shutdown failed", exc_info=True)
         if desktop_owned:
             _terminate_desktop_managed_gateway()
 

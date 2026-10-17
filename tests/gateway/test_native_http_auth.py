@@ -18,7 +18,7 @@ from tests.gateway.test_normal_runtime_boot import control
 
 
 @contextmanager
-def daemon(tmp_path):
+def daemon(tmp_path, *, idle_exit=False):
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700, exist_ok=True)
     user.mkdir(exist_ok=True)
@@ -34,12 +34,16 @@ def daemon(tmp_path):
         'auxiliary': {'title_generation': {'enabled': False}},
     }))
     root = Path(__file__).resolve().parents[2]
-    env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
+    # Windows needs SystemRoot to initialize Winsock in the child interpreter.
+    # Keep this whitelist narrow: the gateway must not inherit provider credentials.
+    env = {k: os.environ[k] for k in ('PATH', 'SYSTEMROOT', 'LANG', 'TZ', 'TIRITH_ENABLED')
+           if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home),
                PYTHONPATH=str(root), PYTHONUNBUFFERED='1',
                HERMES_DASHBOARD_SESSION_TOKEN='normal-http-owner')
     with (tmp_path / 'gateway.log').open('w+') as log:
-        process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
+        command = [sys.executable, '-m', 'gateway.run', *(['--idle-exit'] if idle_exit else [])]
+        process = subprocess.Popen(command, cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 40
@@ -57,7 +61,14 @@ def daemon(tmp_path):
             yield home, descriptor
         finally:
             if process.poll() is None:
-                process.send_signal(signal.SIGINT)
+                if os.name == 'nt':
+                    # Popen cannot send SIGINT on Windows. Stop only this fixture's identity
+                    # through the same marker its gateway already watches for operator stops.
+                    from gateway.status import get_process_start_time
+                    from hermes_cli.gateway_runtime_replace import _write_planned_stop
+                    _write_planned_stop(home, process.pid, get_process_start_time(process.pid))
+                else:
+                    process.send_signal(signal.SIGINT)
                 try:
                     process.wait(timeout=20)
                 except subprocess.TimeoutExpired:
