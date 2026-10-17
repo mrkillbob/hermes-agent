@@ -1,7 +1,7 @@
 """``hermes model`` → Local models: the desktop's Local Models setup, in the terminal.
 
-The flow drives the handlers behind the desktop's Local Models pane
-(``hermes_cli/web_routers/local_models.py``) in-process, so both surfaces run one code path:
+The flow drives the gateway routes behind the desktop's Local Models pane
+using existing profile-bound native HTTP tickets, so both surfaces run one code path:
 the catalog priced for this machine, quickstart (pinned engine via PM, model download, server
 start, default assignment) and activate for a model already on disk. Progress renders from the
 same job view the desktop polls; Ctrl+C pauses a download, and the next run resumes from the
@@ -10,7 +10,6 @@ bytes already on disk.
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 _POLL_S = 0.2
@@ -52,59 +51,82 @@ def _progress_line(lm, view: dict) -> str:
     return line
 
 
-def _follow_job(lm, job_id: str) -> str:
-    """Render a job until it settles; returns its terminal status. Ctrl+C pauses a pausable
-    phase (the downloader keeps finished bytes) and stops following anything else."""
+def _connect_local_models():
+    """Use the selected profile's gateway; only explicit root setup may start its owner."""
+    from hermes_cli.gateway_runtime import discover_gateway_endpoint, ensure_gateway_runtime
+    from hermes_cli.local_model_client import LocalModelClient, LocalModelClientError
+    from hermes_cli.setup import prompt_yes_no
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    home = get_hermes_home().resolve()
+    observed = discover_gateway_endpoint(home)
+    if observed.state != 'ready':
+        if home != get_default_hermes_root(home=home).resolve():
+            raise LocalModelClientError('Start the main Hermes gateway from the default profile first.')
+        if not prompt_yes_no('  Start or await the main Hermes gateway? It continues in the background.', False):
+            return None
+        observed = ensure_gateway_runtime(home, idle_exit=False)
+    if observed.state != 'ready' or observed.endpoint is None:
+        raise LocalModelClientError(f'Gateway is {observed.state}; no model setup submitted.')
+    return LocalModelClient(home, observed.endpoint)
+
+
+def _follow_job(lm, client, job_id: str) -> str:
+    """Follow an owner-side job; interrupting the viewer never stops the gateway."""
+    from hermes_cli.local_model_client import LocalModelClientError
+
     shown_phase, width = None, 0
     try:
         while True:
-            with lm._JOBS_LOCK:
-                view = lm._job_view(lm._JOBS[job_id])
-            if view["status"] != "running":
+            view = client.get(f'jobs/{job_id}')
+            if view['status'] != 'running':
                 break
-            if view["phase"] != shown_phase:
+            if view['phase'] != shown_phase:
                 if shown_phase is not None:
                     print()
-                shown_phase, width = view["phase"], 0
+                shown_phase, width = view['phase'], 0
             line = _progress_line(lm, view)
-            print(f"\r{line}{' ' * max(0, width - len(line))}", end="", flush=True)
+            print(f"\r{line}{' ' * max(0, width - len(line))}", end='', flush=True)
             width = len(line)
             time.sleep(_POLL_S)
     except KeyboardInterrupt:
         print()
-        running = lm._RUNNING.get(job_id, {})
-        with lm._JOBS_LOCK:
-            pausable = lm._job_view(lm._JOBS[job_id])["can_pause"]
-        if not pausable or running.get("pause") is None:
-            print("  Stopped following. Setup continues only while this process runs.")
-            return "interrupted"
-        running["pause"].set()
-        deadline = time.monotonic() + _PAUSE_WAIT_S
-        while time.monotonic() < deadline and lm._JOBS[job_id]["status"] == "running":
-            time.sleep(_POLL_S)
-        print("  Paused. Run `hermes model` → Local models again to resume; finished bytes are kept.")
-        return "paused"
+        try:
+            paused = client.post('download/pause', {'job_id': job_id}).get('paused')
+            if paused:
+                deadline = time.monotonic() + _PAUSE_WAIT_S
+                while time.monotonic() < deadline:
+                    view = client.get(f'jobs/{job_id}')
+                    if view['status'] != 'running':
+                        if view['status'] == 'paused':
+                            print('  Paused. Run `hermes model` → Local models again to resume; finished bytes are kept.')
+                            return 'paused'
+                        break
+                    time.sleep(_POLL_S)
+        except LocalModelClientError as exc:
+            print(f'  {exc}')
+        print('  Stopped following. Check Local Models in the gateway for the current job state.')
+        return 'interrupted'
+    except LocalModelClientError as exc:
+        print(f'\n  ✗ {exc}')
+        return 'unknown'
     if shown_phase is not None:
         print()
-    if view["status"] == "error":
+    if view['status'] == 'error':
         print(f"  ✗ {view.get('error') or 'Setup failed'}")
-    elif view["status"] == "done":
+    elif view['status'] == 'done':
         print(f"  ✓ {view.get('detail')}")
-    return view["status"]
+    return view['status']
 
 
-def _start(lm, start) -> str | None:
-    """Run a route handler that starts a job; its HTTP refusal becomes a printed line."""
-    from fastapi import HTTPException
+def _start(client, path, body) -> str | None:
+    from hermes_cli.local_model_client import LocalModelClientError
 
     try:
-        result = start()
-        if asyncio.iscoroutine(result):
-            result = asyncio.run(result)
-    except HTTPException as exc:
-        print(f"  ✗ {exc.detail}")
+        return client.post(path, body).get('job_id')
+    except LocalModelClientError as exc:
+        print(f'  ✗ {exc}')
         return None
-    return result.get("job_id")
 
 
 def _row_label(row: dict, active_id: str | None) -> str:
@@ -156,18 +178,37 @@ def _model_flow_local(config, current_model=""):
         print("No change.")
         return
 
+    from hermes_cli.local_model_client import LocalModelClientError
+
+    try:
+        client = _connect_local_models()
+        if client is None:
+            print('No change.')
+            return
+        gateway_status = client.get('status')
+    except LocalModelClientError as exc:
+        print(f'  ✗ {exc}')
+        return
+    can_control = gateway_status.get('control_available', False)
+    if not can_control and not gateway_status.get('server_running'):
+        print('  Start a long-lived main gateway from the default profile before setup; no downloads started.')
+        return
+
     if idx < len(choices):
         row = choices[idx]
         name, use_downloaded = row["display_name"], row.get("downloaded") and status["runtime_installed"]
         if not use_downloaded:
+            if not can_control:
+                print('  Install new models from the default-profile gateway; no downloads started.')
+                return
             need = [] if status["runtime_installed"] else [f"the llama.cpp engine ({status['configured_tag']})"]
             if not row.get("downloaded"):
                 need.append(f"{name} ({row['size_label']})")
             if need and not prompt_yes_no(f"  Download {' and '.join(need)}?", True):
                 print("No change.")
                 return
-            job_id = _start(lm, lambda: lm.local_models_quickstart(lm.QuickstartBody(model_id=row["id"])))
-            if job_id is None or _follow_job(lm, job_id) != "done":
+            job_id = _start(client, "quickstart", {"model_id": row["id"]})
+            if job_id is None or _follow_job(lm, client, job_id) != "done":
                 return
             print(f"Default model set to: {name} (via Local models · llama.cpp)")
             return
@@ -177,12 +218,15 @@ def _model_flow_local(config, current_model=""):
         name = model_id
 
     if not status["runtime_installed"]:
+        if not can_control:
+            print('  Install the engine from the default-profile gateway; no downloads started.')
+            return
         if not prompt_yes_no(f"  Download the llama.cpp engine ({status['configured_tag']})?", True):
             print("No change.")
             return
-        job_id = _start(lm, lambda: lm.local_models_runtime_install(lm.RuntimeInstallBody()))
-        if job_id is None or _follow_job(lm, job_id) != "done":
+        job_id = _start(client, "runtime/install", {})
+        if job_id is None or _follow_job(lm, client, job_id) != "done":
             return
-    job_id = _start(lm, lambda: lm.local_models_activate(lm.ModelActivateBody(model_id=model_id)))
-    if job_id is not None and _follow_job(lm, job_id) == "done":
+    job_id = _start(client, "activate", {"model_id": model_id})
+    if job_id is not None and _follow_job(lm, client, job_id) == "done":
         print(f"Default model set to: {name} (via Local models · llama.cpp)")

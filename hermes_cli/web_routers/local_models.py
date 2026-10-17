@@ -493,6 +493,8 @@ def _active_llamacpp_model_id() -> str | None:
 def local_models_status():
     """Cheap, immediate: config state + installed runtime + staged models + supervisor state (GPU facts live
     in /hardware). Sync def on purpose: blocking urlopen/scans run in the threadpool."""
+    from hermes_cli.local_runtime.ownership import current_owner
+
     section = _runtime_section()
     engine = binaries.installed_engine(section.get("backend", "auto"))
     runtime_backend = engine.backend if engine is not None else None
@@ -511,6 +513,7 @@ def local_models_status():
         lambda: _loaded_models(running), ({}, {}), warn="loaded-models read failed: %r")
     return {
         "enabled": bool(section.get("enabled")), "tag": tag, "configured_tag": configured_tag,
+        "control_available": current_owner(for_scope=True) is not None,
         "update_available": bool(section.get("enabled") and engine is not None and current is None),
         "runtime_installed": runtime_backend is not None, "runtime_backend": runtime_backend,
         "server_running": running is not None, "server_base_url": (running or {}).get("base_url"),

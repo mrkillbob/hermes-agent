@@ -89,3 +89,31 @@ async def test_adopter_cleanup_does_not_inspect_or_stop_another_owner(monkeypatc
     monkeypatch.setattr(bootstrap, 'shutdown_local_runtime', lambda: calls.append('shutdown'))
     await stop_owned_local_runtime(0)
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_failed_cleanup_thread_start_keeps_fallback_exit_hook(monkeypatch):
+    from agent import memory_provider
+    from gateway.run_local_runtime import stop_owned_local_runtime
+    from hermes_cli.local_runtime import bootstrap
+
+    class FailedThread:
+        def start(self):
+            raise RuntimeError('no test thread available')
+
+    monkeypatch.setattr(bootstrap, '_EXIT_CLEANUP_DELEGATED', False)
+    monkeypatch.setattr(bootstrap, '_SUPERVISOR', object())
+    monkeypatch.setattr(memory_provider, 'spawn_context_thread', lambda *a, **k: FailedThread())
+    with pytest.raises(RuntimeError, match='no test thread'):
+        await stop_owned_local_runtime(1)
+    assert bootstrap._EXIT_CLEANUP_DELEGATED is False
+
+
+def test_ordinary_exit_retains_fallback_cleanup(monkeypatch):
+    from hermes_cli.local_runtime import bootstrap
+
+    calls = []
+    monkeypatch.setattr(bootstrap, '_EXIT_CLEANUP_DELEGATED', False)
+    monkeypatch.setattr(bootstrap, 'shutdown_local_runtime', lambda: calls.append('stop'))
+    bootstrap._shutdown_at_exit()
+    assert calls == ['stop']

@@ -115,6 +115,11 @@ Managed llama.cpp runs under the main gateway started from the default profile
 startup; startup uses installed engines and staged models without downloading or loading a
 model. One-shot commands, cron workers, named-profile gateways, gateways started with
 `--idle-exit`, and standalone HTTP backends use an existing server and do not start their own.
+`hermes model` → Local models submits setup and progress requests to that gateway using the
+selected profile's existing private tickets. If no ready default-profile gateway exists, setup
+asks before starting or awaiting one that stays in the background. An existing idle-exit gateway
+cannot control inference: start a long-lived main gateway before downloading. Named profiles may
+activate models served by the shared router; install new models from the default profile.
 Newly downloaded models and engine updates take effect after you explicitly
 stop/start the local server from the default-profile gateway. Staging changes does not restart a
 server that other conversations may be using; activation preserves your current model until the

@@ -23,6 +23,7 @@ _SUPERVISOR = None  # process-wide singleton; one router per Hermes process
 # every profile this process hosts, so another profile's ``local_runtime.backend`` must not resize it.
 _SERVING_ENGINE = None
 _EXIT_HOOKED = False
+_EXIT_CLEANUP_DELEGATED = False
 _TRANSITION_LOCK = threading.RLock()
 _STATE_LOCK = threading.Lock()
 _BOOT_CANCEL = None
@@ -32,16 +33,33 @@ _SERVING_OWNER = None
 
 
 def _stop_at_exit() -> None:
-    """The process that boots the server stops it on a clean exit, whatever surface it is (the
-    desktop backend also stops it in its shutdown handler; the second call is a no-op). Processes
-    that only adopted another's server never stop it. A hard kill still leaves an orphan, which the
-    next boot adopts or replaces."""
+    """Fallback cleanup when the gateway has not already delegated its bounded stop.
+
+    An unresponsive stop must not be re-entered synchronously during interpreter exit.
+    Hard kills can leave a recorded orphan for adoption or explicit owner recovery.
+    """
     global _EXIT_HOOKED
     if not _EXIT_HOOKED:
         import atexit
 
-        atexit.register(shutdown_local_runtime)
+        atexit.register(_shutdown_at_exit)
         _EXIT_HOOKED = True
+
+
+def set_exit_cleanup_delegated(delegated: bool) -> bool:
+    """Transfer exit cleanup to the gateway worker; return the previous setting for rollback."""
+    global _EXIT_CLEANUP_DELEGATED
+    with _STATE_LOCK:
+        previous = _EXIT_CLEANUP_DELEGATED
+        _EXIT_CLEANUP_DELEGATED = delegated
+        return previous
+
+
+def _shutdown_at_exit() -> None:
+    with _STATE_LOCK:
+        delegated = _EXIT_CLEANUP_DELEGATED
+    if not delegated:
+        shutdown_local_runtime()
 
 
 def _detect_gpu_vendor() -> str | None:
@@ -411,7 +429,7 @@ def ensure_local_runtime(config: dict, force: bool = False, *, owner=None) -> ob
     ``force`` is an explicit server action, not permission for a consumer to become owner.
     Failures keep the configured provider's existing unavailable/fallback behavior.
     """
-    global _BOOT_CANCEL, _BOOT_OWNER
+    global _BOOT_CANCEL, _BOOT_OWNER, _EXIT_CLEANUP_DELEGATED
     section = (config or {}).get("local_runtime") or {}
     if owner is None or owner.stopping.is_set():
         return None
@@ -421,6 +439,7 @@ def ensure_local_runtime(config: dict, force: bool = False, *, owner=None) -> ob
         with _STATE_LOCK:
             if _STOPPING or owner.stopping.is_set():
                 return None
+            _EXIT_CLEANUP_DELEGATED = False
             cancel = threading.Event()
             _BOOT_CANCEL = cancel
             _BOOT_OWNER = owner

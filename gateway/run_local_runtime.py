@@ -36,7 +36,9 @@ async def stop_owned_local_runtime(timeout: float) -> None:
     """Attempt owned cleanup within the stop's remaining leash; never join a stuck worker."""
     from agent.memory_provider import spawn_context_thread
     from gateway.run import _await_thread_exit
-    from hermes_cli.local_runtime.bootstrap import has_owned_runtime, shutdown_local_runtime
+    from hermes_cli.local_runtime.bootstrap import (
+        has_owned_runtime, set_exit_cleanup_delegated, shutdown_local_runtime,
+    )
 
     if not has_owned_runtime():
         return
@@ -51,7 +53,12 @@ async def stop_owned_local_runtime(timeout: float) -> None:
 
     # A default-executor worker would be joined by asyncio.run even after a wait timeout.
     thread = spawn_context_thread(stop, name='gateway-local-runtime-stop')
-    thread.start()
+    previous = set_exit_cleanup_delegated(True)
+    try:
+        thread.start()
+    except BaseException:
+        set_exit_cleanup_delegated(previous)
+        raise
     if not await _await_thread_exit(thread, timeout):
         raise TimeoutError('managed local runtime stop exceeded remaining shutdown budget')
     if errors:
