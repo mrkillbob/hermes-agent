@@ -120,7 +120,8 @@ selected profile's existing private tickets. If no ready default-profile gateway
 asks before starting or awaiting one that stays in the background. If the root gateway is already
 ready but set to exit when idle, setup asks whether to keep that same gateway running after clients
 disconnect. This choice preserves accepted work and does not enable inference or change settings.
-Named profiles may
+Desktop's explicit setup action also keeps an eligible root gateway running without replacing
+it or interrupting accepted conversations. Named profiles may
 activate models served by the shared router; install new models from the default profile.
 Newly downloaded models and engine updates take effect after you explicitly
 stop/start the local server from the default-profile gateway. Staging changes does not restart a
@@ -129,7 +130,8 @@ running server lists the new one.
 Context-growth requests can take effect during a future eligible idle replan or an explicit restart;
 requests continue using compression until a larger window is available.
 Stopping the local server also invalidates previously accepted setup jobs, including paused
-downloads and queued activation; submit a fresh setup to activate after Stop.
+downloads and queued activation. It cancels the old setup; active transfers keep ownership
+until their cleanup finishes. Submit a fresh setup afterward to reuse the saved bytes.
 Stopping a consumer leaves the shared server running. Profile settings and deliberate cloud
 primaries are preserved; a profile with automatic startup disabled can still use an existing
 endpoint. If no server is available, the local fallback is skipped as before.

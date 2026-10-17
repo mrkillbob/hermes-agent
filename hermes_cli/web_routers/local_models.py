@@ -224,14 +224,31 @@ def _finish(job: dict[str, Any], detail: str) -> None:
 
 def _spawn_job(job: dict[str, Any], name: str, body: Callable[[], None], *, fail_msg: str | None = None,
                on_exit: Callable[[], None] | None = None, download_label: str | None = None,
-               resumable: bool = False) -> None:
-    """One worker per job. Pauses retain ownership; terminal outcomes release it."""
+               resumable: bool = False, generation: int | None = None) -> None:
+    """One writer per job; permanent cancellation releases only after quiescence."""
     guard = threading.Lock()
-    pause = threading.Event()
+    pause, cancelled = threading.Event(), threading.Event()
+    released = False
+
+    def settle_locked(status):
+        nonlocal released
+        if cancelled.is_set():
+            status = "error"
+            job["error"] = "Setup cancelled by Stop; start a fresh setup to continue"
+        callback = None
+        if status != "paused":
+            _RUNNING.pop(job["job_id"], None)
+            if not released:
+                released, callback = True, on_exit
+        job["status"] = status
+        guard.release()
+        return callback
 
     def _run():
         status = "done"
         try:
+            if cancelled.is_set():
+                raise DownloadPaused("setup cancelled")
             body()
             if download_label is not None:
                 hint = _refresh_runtime("post-download runtime refresh skipped")
@@ -244,15 +261,23 @@ def _spawn_job(job: dict[str, Any], name: str, body: Callable[[], None], *, fail
             status = "error"
             job["error"] = str(exc)
         finally:
-            try:
-                if status != "paused" and on_exit is not None:
-                    on_exit()
-            finally:
-                with _JOBS_LOCK:
-                    if status != "paused":
-                        _RUNNING.pop(job["job_id"], None)
-                    job["status"] = status
-                    guard.release()
+            with _JOBS_LOCK:
+                callback = settle_locked(status)
+            if callback is not None:
+                callback()
+
+    def cancel():
+        with _JOBS_LOCK:
+            cancelled.set()
+            pause.set()
+            if not guard.acquire(blocking=False):
+                return  # The queued/active writer's finalizer owns its release.
+            if job["status"] != "paused":
+                guard.release()
+                return
+            callback = settle_locked("error")
+        if callback is not None:
+            callback()
 
     def start(*, initial: bool = False) -> bool:
         if not guard.acquire(blocking=False):
@@ -261,31 +286,48 @@ def _spawn_job(job: dict[str, Any], name: str, body: Callable[[], None], *, fail
             if not initial and job["status"] != "paused":
                 guard.release()
                 return False
-            pause.clear()
-            # A resume starts a fresh window: the gap parked in the queue
-            # would otherwise read as a rate of roughly zero bytes/sec.
-            running = _RUNNING.get(job["job_id"])
-            if running is not None:
-                running.pop("samples", None)
-            job["status"] = "running"
-            job["error"] = None
+            aborted = cancelled.is_set()
+            if aborted:
+                callback = settle_locked("error")
+            else:
+                callback = None
+                pause.clear()
+                running = _RUNNING.get(job["job_id"])
+                if running is not None:
+                    running.pop("samples", None)
+                job.update(status="running", error=None)
+        if aborted:
+            if callback is not None:
+                callback()
+            return False
         try:
             spawn_context_thread(_run, name=name).start()
-        except Exception:
-            _RUNNING.pop(job["job_id"], None)
-            if on_exit is not None:
-                on_exit()
-            job["status"] = "error"
-            guard.release()
+        except Exception as exc:
+            with _JOBS_LOCK:
+                job["error"] = str(exc)
+                callback = settle_locked("error")
+            if callback is not None:
+                callback()
             raise
         return True
 
-    if resumable:
-        _RUNNING[job["job_id"]] = {"resume": start, "pause": pause}
+    with _JOBS_LOCK:
+        if resumable or generation is not None:
+            _RUNNING[job["job_id"]] = {"cancel": cancel, "generation": generation}
+        if resumable:
+            _RUNNING[job["job_id"]].update(resume=start, pause=pause)
     start(initial=True)
 
 
-# ── runtime / router plumbing ────────────────────────────────
+def _cancel_setup_jobs() -> None:
+    with _JOBS_LOCK:
+        callbacks = [running["cancel"] for job_id, running in _RUNNING.items()
+                     if _JOBS.get(job_id, {}).get("kind") in {"quickstart", "model-activate"}
+                     and "cancel" in running]
+    for cancel in callbacks:
+        cancel()
+
+
 def _refresh_runtime(skip_msg: str) -> str:
     """Report staged changes without interrupting shared inference."""
     _quiet(bootstrap.refresh_local_runtime, None, debug=skip_msg)
@@ -785,15 +827,23 @@ def _repriced_quickstart(job: dict[str, Any], body: QuickstartBody, variant):
 
 
 @router.post("/api/local-models/quickstart")
-def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None):
-    """One job: install the runtime (if missing), download this machine's build of the recommended model (if
-    missing), make it the default. Each leg uses the same code as the individual setup routes.
-    Preflight rejects (no automatic recommendation or no servable choice) fail the POST
-    synchronously so the button can explain itself; everything slow runs in the job with phase/byte progress."""
+async def local_models_quickstart(body: QuickstartBody, request: Request, profile: Optional[str] = None):
+    """Explicit setup retains an eligible root gateway before accepting any slow work."""
+    from hermes_cli.local_runtime.ownership import current_owner
+
     generation = bootstrap.current_boot_generation()
-    # Quickstart promises activation, not just staging. Reject consumers before any slow leg.
     with _config_profile_scope(profile):
+        if current_owner(for_scope=True) is None:
+            await local_models_control(request, profile)
         _runtime_control_owner()
+    try:
+        return await run_in_threadpool(_accept_quickstart, body, profile, generation)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _accept_quickstart(body: QuickstartBody, profile: Optional[str], generation: int):
+    """Synchronous hardware/planning and generation-fenced job registration."""
     entry, variant = _quickstart_target(body, hardware.probe_budget(planning=True))
     _tag, backend = _runtime_target()
     need_runtime = binaries.installed_engine(backend) is None
@@ -802,9 +852,6 @@ def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None)
     if not need_download:
         download_plan = []
     download_bytes = sum(p[2] for p in download_plan)
-    if not _QUICKSTART_LOCK.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Setup is already running")
-    job = _job("quickstart", entry.display_name, model_id=entry.id)
     def _run():
         nonlocal entry, variant, download_plan
         if need_runtime and binaries.installed_engine(backend) is None:
@@ -826,8 +873,12 @@ def local_models_quickstart(body: QuickstartBody, profile: Optional[str] = None)
                 _assign_default(job, variant.model_id)
         _finish(job, f"{entry.display_name} is ready — new chats use it")
 
-    _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s",
-               on_exit=_QUICKSTART_LOCK.release, resumable=True)
+    with bootstrap.runtime_control_scope(generation):
+        if not _QUICKSTART_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Setup is already running")
+        job = _job("quickstart", entry.display_name, model_id=entry.id)
+        _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s",
+                   on_exit=_QUICKSTART_LOCK.release, resumable=True, generation=generation)
     return {"job_id": job["job_id"], "model_id": entry.id, "display_name": entry.display_name,
             "needs_runtime": need_runtime, "needs_download": need_download, "download_bytes": download_bytes}
 
@@ -841,7 +892,7 @@ async def local_models_control(request: Request, profile: Optional[str] = None):
     with _config_profile_scope(profile):
         if runner is None or not retain_gateway_for_local_models(runner):
             raise HTTPException(status_code=409, detail=(
-                "This gateway cannot provide durable local-model control; start the main Hermes gateway"))
+                "This gateway cannot provide durable local-model control; start the main Hermes gateway from the default profile"))
     return {"control_available": True}
 
 
@@ -860,6 +911,7 @@ def _stop_server() -> None:
     # Always fence queued owner callbacks, including ones that captured enabled=true
     # before a supervisor or pending-boot token was published.
     def persist_stop(stopped_supervisor):
+        _cancel_setup_jobs()
         if not stopped_supervisor:
             _terminate_state_pid()
         _set_runtime_enabled(False)
@@ -930,7 +982,6 @@ async def local_models_activate(body: ModelActivateBody, profile: Optional[str] 
     # Split variants stage under their first part — resolve like the other routes.
     if body.model_id not in bootstrap.staged_model_ids():
         raise HTTPException(status_code=404, detail=f"{body.model_id} is not downloaded")
-    job = _job("model-activate", body.model_id, model_id=body.model_id)
 
     def _run():
         # The llama runtime is one host-wide process, but "my default model" is a
@@ -945,7 +996,9 @@ async def local_models_activate(body: ModelActivateBody, profile: Optional[str] 
                 _assign_default(job, body.model_id)
                 _finish(job, f"{body.model_id} is the default for new chats")
 
-    _spawn_job(job, "lr-model-activate", _run, fail_msg="model activate failed: %s")
+    with bootstrap.runtime_control_scope(generation):
+        job = _job("model-activate", body.model_id, model_id=body.model_id)
+        _spawn_job(job, "lr-model-activate", _run, fail_msg="model activate failed: %s", generation=generation)
     return {"job_id": job["job_id"]}
 
 

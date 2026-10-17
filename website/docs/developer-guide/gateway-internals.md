@@ -22,6 +22,8 @@ background through the existing authenticated HTTP boundary. It keeps the same p
 accepted work, binds cleanup before publishing ownership, and disarms idle exit. Registration
 uses captured launch context and neither boots inference nor changes enabled settings.
 Named, standalone, draining and stopping gateways cannot acquire this capability.
+The explicit quickstart HTTP operation performs eligible retention before dispatching its
+synchronous planning worker, so Desktop and terminal use the same ownership contract.
 
 Bootstrap serializes transitions inside the process and across processes. Unavailable or
 contended boot locks refuse mutation. A living or uncertain foreign owner is never replaced,
@@ -34,7 +36,9 @@ listing and refuses an unserved model without changing the existing assignment.
 
 Explicit Stop invalidates setup generations captured at acceptance, including downloading,
 paused and queued activation jobs. Those jobs cannot re-enable inference or assign a default
-after Stop; a fresh explicit setup can be accepted afterward.
+after Stop. Stop also requests cooperative download cancellation: paused setup jobs become
+terminal immediately; active writers retain single-flight ownership until cleanup finishes.
+Cancelled jobs cannot resume, but their partial bytes remain available to a fresh setup.
 
 Gateway shutdown closes boot admission before draining consumers. Cancellation covers a queued
 worker, a boot-lock wait and health startup; cleanup also waits for an unpublished boot within
