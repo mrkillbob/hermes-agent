@@ -164,12 +164,12 @@ class FleetRunner:
             try:
                 claim = self.coordinator.claim_task(capability, now=now)
             except FleetTransientTransportError:
-                # No claim ACK has been journaled and no work has been launched.
-                # If the coordinator committed the claim before the ACK was lost, its
-                # lease expires into "uncertain" exactly as when a runner dies; the
-                # claim is never retried or assumed here.
-                logging.getLogger(__name__).warning('Fleet claim unavailable; deferring poll')
-                return claimed
+                # The coordinator may have committed a claim before its ACK was
+                # lost. Another poll could claim a different pending task, so
+                # preserve the no-retry boundary until explicit reconciliation.
+                logging.getLogger(__name__).warning(
+                    'Fleet claim outcome unknown; stopping polling; reconciliation required')
+                raise
             if claim is None:
                 continue
             claimed = True

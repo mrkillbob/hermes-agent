@@ -60,34 +60,25 @@ def runner_for(coordinator, **kwargs):
     )
 
 
-def test_claim_transport_failure_defers_without_work_or_journal(tmp_path, caplog):
+def test_claim_transport_failure_escapes_without_work_or_journal(tmp_path, caplog):
     coordinator = Coordinator(FleetTransientTransportError("private transport detail"))
     runner = runner_for(coordinator, state_dir=tmp_path)
-    with caplog.at_level(logging.WARNING):
-        assert runner.run_once(now=100) is False
+    with caplog.at_level(logging.WARNING), pytest.raises(FleetTransientTransportError):
+        runner.run_once(now=100)
     assert coordinator.calls == ["heartbeat", "claim"]
     assert list(tmp_path.iterdir()) == []
     assert not runner.stopped
-    assert "claim unavailable" in caplog.text
+    assert "claim outcome unknown" in caplog.text
     assert "private transport detail" not in caplog.text
 
 
-def test_poll_loop_continues_after_claim_transport_failure():
-    coordinator = Coordinator(FleetTransientTransportError("unavailable"))
+def test_poll_loop_never_reclaims_after_ambiguous_claim(monkeypatch):
+    coordinator = Coordinator(FleetTransientTransportError("ambiguous ACK"))
     runner = runner_for(coordinator)
-
-    class TwoPolls:
-        polls = 0
-
-        def is_set(self):
-            return self.polls >= 2
-
-        def wait(self, _interval):
-            self.polls += 1
-
-    runner._stop = TwoPolls()
-    runner.run_forever(interval=0)
-    assert coordinator.calls == ["register", "heartbeat", "claim"] * 2
+    monkeypatch.setattr(runner._stop, "wait", lambda *_: pytest.fail("ambiguous claim must not repoll"))
+    with pytest.raises(FleetTransientTransportError):
+        runner.run_forever(interval=0)
+    assert coordinator.calls == ["register", "heartbeat", "claim"]
 
 
 def test_nontransient_claim_failure_still_escapes():
@@ -113,13 +104,38 @@ def test_lost_claim_ack_retains_exact_lease_until_uncertain(tmp_path):
             raise FleetTransientTransportError("lost ACK")
 
     coordinator = LostAck()
-    assert runner_for(coordinator).run_once(now=101) is False
+    with pytest.raises(FleetTransientTransportError):
+        runner_for(coordinator).run_once(now=101)
     record = store.list_tasks()[0]
     assert (record.status, record.claim_id, record.attempt) == ("running", coordinator.claim.claim_id, 1)
     assert store.claim_task(capability, now=102) is None
     store.reclaim_expired(now=coordinator.claim.lease_expires_at + 1)
     record = store.list_tasks()[0]
     assert (record.status, record.claim_id, record.attempt) == ("uncertain", coordinator.claim.claim_id, 1)
+
+
+def test_lost_ack_does_not_claim_other_pending_cards(tmp_path, monkeypatch):
+    store = FleetStore(tmp_path / "queue.db")
+    capability = RunnerCapability("node", "profile", platform="inert")
+    for index in range(3):
+        store.submit_task(FleetTask(f"task-{index}", "title", "body", TaskRequirement(),
+                                   f"inert-{index}"), now=100)
+    store.register_runner(capability, now=100)
+
+    class LostAck:
+        def register_runner(self, *_args, **_kwargs):
+            return True
+        def heartbeat_runner(self, *_args, **_kwargs):
+            return True
+        def claim_task(self, capability, **_kwargs):
+            store.claim_task(capability, now=101)
+            raise FleetTransientTransportError("lost ACK")
+
+    runner = runner_for(LostAck())
+    monkeypatch.setattr(runner._stop, "wait", lambda *_: pytest.fail("no subsequent poll allowed"))
+    with pytest.raises(FleetTransientTransportError):
+        runner.run_forever(interval=0)
+    assert sorted(row.status for row in store.list_tasks()) == ["pending", "pending", "running"]
 
 
 def test_postclaim_delivery_failure_keeps_receipt_and_escapes(tmp_path):
