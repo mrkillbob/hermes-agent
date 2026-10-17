@@ -132,6 +132,10 @@ def test_startup_preserves_trees_and_explicit_stop_checks_owner(tmp_path, monkey
             if case == "modern":
                 from fastapi import FastAPI
                 from fastapi.testclient import TestClient
+                from hermes_cli.local_runtime import ownership
+
+                # The HTTP control path requires the durable gateway's scoped capability.
+                monkeypatch.setattr(ownership, "_OWNER", _runtime_owner())
                 app = FastAPI()
                 app.include_router(local_models.router)
                 disabled = []
