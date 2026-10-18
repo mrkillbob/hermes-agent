@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import sysconfig
@@ -20,7 +21,11 @@ WORKER = r'''
 import json, pathlib, subprocess, sys, time
 root, home = map(pathlib.Path, sys.argv[1:3])
 (home/"worker-entered").write_text("entered")
-phase = "imports"
+phase = "diagnostic-setup"
+def set_phase(value):
+    global phase
+    phase = value
+    (home/"worker-phase").write_text(value)
 def worker_error(kind, error, traceback):
     frames = []
     while traceback is not None:
@@ -33,12 +38,16 @@ def worker_error(kind, error, traceback):
         report["missing_module"] = error.name
     (home/"worker-error.json").write_text(json.dumps(report))
 try:
+    import faulthandler
+    stack = (home/"worker-stack.txt").open("w")
+    faulthandler.dump_traceback_later(10, file=stack)
+    set_phase("imports")
     sys.path.insert(0, sys.argv[3])
     sys.path.insert(0, str(root))
     from hermes_cli import gateway_runtime_start as start
     from hermes_cli.gateway_runtime_service import RuntimeStartError
     from hermes_platform.host.windows_job import current_process_job_limits
-    phase = "ordinary-launch"
+    set_phase("ordinary-launch")
     real_popen = subprocess.Popen
     program = "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); p.write_text('ready'); release=pathlib.Path(sys.argv[2]);\nwhile not release.exists(): time.sleep(0.02)"
     ordinary = real_popen([sys.executable, '-I', '-c', program, str(home/'ordinary-ready'), str(home/'release')], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -48,7 +57,7 @@ try:
         return real_popen([argv[0], '-I', '-c', program, str(home/'daemon-ready'), str(home/'release')], **kwargs)
     start.subprocess.Popen = inert
     report = {'job': current_process_job_limits(), 'ordinary': ordinary.pid}
-    phase = "gateway-launch"
+    set_phase("gateway-launch")
     try:
         child = start.spawn_unmanaged_gateway(home, deadline=time.monotonic()+20)
         report['daemon'] = child.pid
@@ -57,6 +66,8 @@ try:
     report['attempts'] = len(calls)
     report['creation_flags'] = calls
     (home/'report.json').write_text(json.dumps(report))
+    faulthandler.cancel_dump_traceback_later()
+    stack.close()
     while not (home/'release').exists(): time.sleep(0.05)
 except BaseException as error:
     worker_error(type(error), error, error.__traceback__)
@@ -93,7 +104,7 @@ def test_update_step_allows_explicit_daemon_escape_but_cancels_ordinary_children
         "try {\n [HermesUpdateJob]::Resume($s)\n"
         f" $until=[DateTime]::UtcNow.AddSeconds(90); while (-not (Test-Path -LiteralPath {_ps_literal(str(cancel))})) {{ if ([DateTime]::UtcNow -gt $until) {{ throw 'probe controller deadline' }}; Start-Sleep -Milliseconds 20 }}\n"
         " if (-not [HermesUpdateJob]::TerminateAndWait($s.Job, 1, 5000)) { throw 'contained tree did not quiesce' }\n"
-        "} finally { try { $s.Process.Refresh(); if ($s.Process.HasExited) { Write-Output ('inert_worker_exit=' + $s.Process.ExitCode) } else { Write-Output 'inert_worker_running=true' } } finally { [void][HermesUpdateJob]::TerminateAndWait($s.Job, 1, 5000); [HermesUpdateJob]::Close($s.Job); if ($stdout.Wait(3000)) { [Console]::WriteLine($stdout.GetAwaiter().GetResult()) }; if ($stderr.Wait(3000)) { [Console]::Error.WriteLine($stderr.GetAwaiter().GetResult()) } } }\n"
+        "} finally { try { $s.Process.Refresh(); if ($s.Process.HasExited) { Write-Output ('inert_worker_exit_after_cancellation=' + $s.Process.ExitCode) } else { Write-Output 'inert_worker_running_after_cancellation=true' } } finally { [void][HermesUpdateJob]::TerminateAndWait($s.Job, 1, 5000); [HermesUpdateJob]::Close($s.Job); if ($stdout.Wait(3000)) { [Console]::WriteLine($stdout.GetAwaiter().GetResult()) }; if ($stderr.Wait(3000)) { [Console]::Error.WriteLine($stderr.GetAwaiter().GetResult()) } } }\n"
     )
     # Only OS launch essentials enter the inert tree; CI/provider credentials do not.
     env = {key: value for key, value in os.environ.items() if key.upper() in {
@@ -148,6 +159,18 @@ def test_update_step_allows_explicit_daemon_escape_but_cancels_ordinary_children
         except subprocess.TimeoutExpired:
             controller.kill()
             output, _ = controller.communicate(timeout=5)
+        phase = tmp_path / "worker-phase"
+        if phase.exists():
+            print("Inert last phase:", phase.read_text())
+        # Raw stacks stay in the disposable home. Export code locations only.
+        stack = tmp_path / "worker-stack.txt"
+        if stack.exists():
+            for line in stack.read_text().splitlines():
+                frame = re.fullmatch(r'  File "(.+)", line (\d+) in (.+)', line)
+                if frame:
+                    print("Inert blocked frame:", json.dumps({
+                        "file": Path(frame[1]).name, "line": int(frame[2]), "function": frame[3],
+                    }))
         print("Inert worker entered:", (tmp_path / "worker-entered").exists())
         if output:
             print("Inert controller/worker output:\n" + output)
