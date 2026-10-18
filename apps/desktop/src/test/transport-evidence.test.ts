@@ -150,6 +150,60 @@ it('ignores malformed, binary, oversized, unallowlisted and uncorrelated frames'
     oversizedFrames: 1, binaryFrames: 1, malformedFrames: 1 })
 })
 
+it.each([false, true])('records real replay-response contents without claiming renderer dispatch (snapshot required=%s)', required => {
+  const evidence = new TransportEvidence('transcript-integrity')
+  evidence.frame('socket', 'sent', 1, JSON.stringify({ id: 8, method: 'session.events.since',
+    params: { session_id: 'secret-session', profile: 'secret-profile', last_seen: 2 } }))
+  evidence.frame('socket', 'received', 1, JSON.stringify({ id: 8, result: {
+    events: [{ type: 'message.complete', session_id: 'secret-session', seq: 3, replay_epoch: 'secret-epoch',
+      authority_epoch: 7, execution_generation: 4, payload: { text: 'secret-answer' } },
+    { type: 'secret-event', payload: { token: 'secret-token' } }],
+    latest_seq: 3, last_sequence: 3, epoch: 'secret-epoch', replay_epoch: 'secret-epoch',
+    truncated: required, snapshot_required: required, count: 2
+  } }))
+  const { entries, ignoredReplayEntries } = evidence.snapshot()
+  expect(entries.map(entry => entry.kind)).toEqual(['request', 'result', 'event'])
+  expect(entries[1]).toMatchObject({ latestSequence: 3, lastSequence: 3, truncated: required,
+    snapshotRequired: required, replayReportedCount: 2 })
+  expect(entries[2]).toMatchObject({ type: 'message.complete', delivery: 'replay-response-content',
+    request: entries[0].request, seq: 3, authorityEpoch: 7, executionGeneration: 4 })
+  expect(entries[2].profile).toBeUndefined()
+  expect(ignoredReplayEntries).toBe(1)
+  expect(JSON.stringify(evidence.snapshot())).not.toContain('secret-')
+})
+
+it('bounds replay-array traversal and uses the same finite ring for replay contents', () => {
+  const evidence = new TransportEvidence('transcript-integrity')
+  evidence.frame('socket', 'sent', 1, JSON.stringify({ id: 1, method: 'session.events.since' }))
+  evidence.frame('socket', 'received', 1, JSON.stringify({ id: 1, result: {
+    events: Array.from({ length: 520 }, (_, seq) => ({ type: 'message.complete', seq })),
+    latest_seq: 519, last_sequence: 519, truncated: false, snapshot_required: false, count: 520
+  } }))
+  const snapshot = evidence.snapshot()
+  expect(snapshot.entries).toHaveLength(512)
+  expect(snapshot.discardedEntries).toBe(2)
+  expect(snapshot.discardedReplayEntries).toBe(8)
+  expect(snapshot.inspectedReplayEntries).toBe(512)
+  expect(snapshot.entries.at(-1)).toMatchObject({ seq: 511, delivery: 'replay-response-content' })
+})
+
+it('counts malformed replay arrays and nested entries, and rejects oversized replay frames before traversal', () => {
+  const evidence = new TransportEvidence('transcript-integrity')
+
+  const replay = (id: number, result: unknown) => {
+    evidence.frame('socket', 'sent', 1, JSON.stringify({ id, method: 'session.events.since' }))
+    evidence.frame('socket', 'received', 1, JSON.stringify({ id, result }))
+  }
+
+  replay(1, { events: [null, [], {}, 'secret-entry', { type: 'secret-type' }],
+    truncated: 'secret-flag', snapshot_required: 'secret-flag', latest_seq: 'secret-seq' })
+  replay(2, { events: { secret: 'secret-array' } })
+  replay(3, { events: [{ type: 'message.complete', payload: { text: 'secret-text'.repeat(14_000) } }] })
+  expect(evidence.snapshot()).toMatchObject({ ignoredReplayEntries: 5, malformedReplayArrays: 1,
+    oversizedFrames: 1, inspectedReplayEntries: 5 })
+  expect(JSON.stringify(evidence.snapshot())).not.toContain('secret-')
+})
+
 class FakeCdp {
   readonly listeners = new Map<string, Set<(event: never) => void>>()
   readonly send = vi.fn(async (_method: string) => ({}))

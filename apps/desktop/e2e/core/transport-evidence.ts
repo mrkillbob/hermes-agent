@@ -22,6 +22,7 @@ const EVENTS = new Set([
 
 export type EvidenceScope = 'transcript-integrity' | 'first-run-launch-1' | 'first-run-launch-2'
 type Direction = 'sent' | 'received'
+type Delivery = 'wire-event' | 'replay-response-content'
 type Fields = Record<string, unknown>
 interface EvidenceEntry {
   ms: number
@@ -39,6 +40,11 @@ interface EvidenceEntry {
   revision?: number
   running?: boolean
   errorCode?: number
+  delivery?: Delivery
+  latestSequence?: number
+  truncated?: boolean
+  snapshotRequired?: boolean
+  replayReportedCount?: number
 }
 interface PendingRequest {
   method: string
@@ -76,6 +82,10 @@ export class TransportEvidence {
   private binaryFrames = 0
   private malformedFrames = 0
   private uncorrelatedResponses = 0
+  private inspectedReplayEntries = 0
+  private discardedReplayEntries = 0
+  private ignoredReplayEntries = 0
+  private malformedReplayArrays = 0
   private elapsed = 0
   private readonly started: number
 
@@ -165,16 +175,15 @@ export class TransportEvidence {
     return false
   }
 
-  private recordEvent(socketId: string, frame: Fields): boolean {
-    const params = object(frame.params)
-
+  private appendLifecycle(socketId: string, params: Fields, delivery: Delivery, request?: number): boolean {
     if (
-      frame.method === 'event' &&
       typeof params.type === 'string' &&
       EVENTS.has(params.type)
     ) {
       this.append(socketId, {
         kind: 'event',
+        delivery,
+        request,
         type: params.type,
         ...this.owner(params),
         ...this.stamps({ ...object(params.payload), ...params })
@@ -184,6 +193,39 @@ export class TransportEvidence {
     }
 
     return false
+  }
+
+  private recordEvent(socketId: string, frame: Fields): boolean {
+    return frame.method === 'event' && this.appendLifecycle(socketId, object(frame.params), 'wire-event')
+  }
+
+  private replayOutcome(result: Fields): Partial<EvidenceEntry> {
+    return {
+      latestSequence: integer(result.latest_seq),
+      truncated: typeof result.truncated === 'boolean' ? result.truncated : undefined,
+      snapshotRequired: typeof result.snapshot_required === 'boolean' ? result.snapshot_required : undefined,
+      replayReportedCount: integer(result.count)
+    }
+  }
+
+  private recordReplay(socketId: string, result: Fields, request: number): void {
+    if (!Array.isArray(result.events)) {
+      this.malformedReplayArrays++
+
+      return
+    }
+
+    const inspected = Math.min(result.events.length, TransportEvidence.CAPACITY)
+    this.inspectedReplayEntries += inspected
+    this.discardedReplayEntries += result.events.length - inspected
+
+    // These are response contents. Epoch/truncation/sequence gates may prevent
+    // the client from dispatching them; this observer cannot decide delivery.
+    for (let index = 0; index < inspected; index++) {
+      if (!this.appendLifecycle(socketId, object(result.events[index]), 'replay-response-content', request)) {
+        this.ignoredReplayEntries++
+      }
+    }
   }
 
   private recordResponse(socketId: string, frame: Fields, key: string | undefined): boolean {
@@ -200,14 +242,18 @@ export class TransportEvidence {
       const result = object(frame.result)
       const owner = this.owner(result)
       const code = object(frame.error).code
+      const replay = request.method === 'session.events.since' && 'result' in frame
       this.append(socketId, {
         ...request,
         kind: 'error' in frame ? 'error' : 'result',
         session: owner.session ?? request.session,
         profile: owner.profile ?? request.profile,
         ...this.stamps(result),
+        ...(replay ? this.replayOutcome(result) : {}),
         errorCode: typeof code === 'number' && Number.isSafeInteger(code) ? code : undefined
       })
+
+      if (replay) { this.recordReplay(socketId, result, request.request) }
 
       return true
     }
@@ -256,6 +302,7 @@ export class TransportEvidence {
       scope: this.scope,
       capacity: TransportEvidence.CAPACITY,
       coverage: 'frames after listener registration, including already-open sockets; no handshake or earlier frames',
+      order: 'wire observation and response-content projection; not renderer dispatch order',
       discardedEntries: this.discardedEntries,
       discardedCorrelations: this.discardedCorrelations,
       discardedIdentities: this.discardedIdentities,
@@ -264,6 +311,10 @@ export class TransportEvidence {
       binaryFrames: this.binaryFrames,
       malformedFrames: this.malformedFrames,
       uncorrelatedResponses: this.uncorrelatedResponses,
+      inspectedReplayEntries: this.inspectedReplayEntries,
+      discardedReplayEntries: this.discardedReplayEntries,
+      ignoredReplayEntries: this.ignoredReplayEntries,
+      malformedReplayArrays: this.malformedReplayArrays,
       // Terminal/result boundaries share the same finite ring and may be evicted.
       entries: this.entries.map(entry => ({ ...entry }))
     }
