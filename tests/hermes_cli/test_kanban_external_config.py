@@ -340,3 +340,24 @@ def test_contended_tick_does_not_reserve_or_contact_peer(configured):
     assert kb.get_task(conn, tid).status == 'ready'
     assert not peer.calls
     assert not any(e.kind == 'external_intent' for e in kb.list_events(conn, tid))
+
+
+def test_one_deferred_lifecycle_error_does_not_abandon_other_prepared_sends(configured, monkeypatch):
+    conn, _, peer = configured
+    peer.states = ['COMPLETED']
+    first, second = task(conn), task(conn)
+    complete = kb.complete_task
+    def fail_first(connection, tid, **kwargs):
+        if tid == first:
+            raise RuntimeError('synthetic private lifecycle failure')
+        return complete(connection, tid, **kwargs)
+    monkeypatch.setattr(kb, 'complete_task', fail_first)
+    dispatch.dispatch_once(conn, task_ids=[first, second], max_in_progress=100)
+    assert len(peer.calls) == 2
+    assert kb.get_task(conn, first).status == 'running'
+    assert kb.get_task(conn, second).status == 'done'
+    assert 'synthetic private lifecycle failure' not in str(kb.list_events(conn, first))
+    monkeypatch.setattr(kb, 'complete_task', complete)
+    dispatch.dispatch_once(conn, task_ids=[first], max_in_progress=100)
+    assert kb.get_task(conn, first).status == 'done'
+    assert len(peer.calls) == 2

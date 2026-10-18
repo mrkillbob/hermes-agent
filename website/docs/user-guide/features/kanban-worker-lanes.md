@@ -324,7 +324,9 @@ Exact-card dispatch restricts refresh to those same cards. A persisted poll mark
 rotates work across eligible runs and throttles repeated dashboard nudges; no new
 worker, timer or queue is started. Delivery intents and poll reservations are persisted under the existing dispatcher
 locks. Both SendMessage and GetTask run after releasing those locks; active runs
-reserve capacity before sending. The client uses one-second cooperative refresh
+reserve capacity before sending. Ordinary per-task processing failures record a
+sanitized hold and do not abandon other prepared tasks in the same tick. A caller
+crash still retains uncertainty without replay. The client uses one-second cooperative refresh
 budgets. A stalled OS can still delay the calling tick, while unrelated boards
 can acquire admission locks. Missing remote IDs, changed authority/claims, malformed or
 conflicting evidence remain held without resubmission. Input-required responses create a visible sticky `needs_input` block whose reason

@@ -147,14 +147,20 @@ class ConfiguredLanes(ExternalLanes):
         sends, self._sends = self._sends, []
         refreshes, self._refreshes = self._refreshes, []
         for delivery, lane in sends:
-            super()._submit(conn, delivery, lane)
-            self._attention(conn, delivery, lane.executor.status(delivery))
+            self._finish_one(conn, delivery.task_id, delivery.run_id, delivery, lane)
         for task_id, run_id, delivery in refreshes:
-            try:
+            self._finish_one(conn, task_id, run_id, delivery)
+
+    def _finish_one(self, conn, task_id, run_id, delivery, lane=None):
+        try:
+            if lane is None:
                 self._refresh_one(conn, delivery)
-            except (ValueError, TypeError, KeyError, AttributeError, OSError) as error:
-                _mark(conn, task_id, run_id, 'external_a2a_refresh_hold',
-                      {'error_class': type(error).__name__})
+            else:
+                super()._submit(conn, delivery, lane)
+                self._attention(conn, delivery, lane.executor.status(delivery))
+        except Exception as error:  # health: allow BLE001 -- isolate per-task callback failures without exposing untrusted exception text or abandoning other prepared sends
+            _mark(conn, task_id, run_id, 'external_a2a_processing_hold',
+                  {'error_class': type(error).__name__})
 
     def _attention(self, conn, delivery, status):
         from plugins.platforms.a2a.protocol import STATE_INPUT_REQUIRED
