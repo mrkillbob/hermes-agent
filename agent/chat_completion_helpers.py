@@ -454,9 +454,8 @@ def _validated_openrouter_provider_sort(raw_sort: Any) -> Optional[str]:
 def _provider_preferences_for_agent(agent) -> dict[str, Any]:
     """Build the validated provider-routing object shared by request paths.
 
-    ``provider_routing.models.<id>`` overlays the flat constructor values for the CURRENT
-    ``agent.model`` (so ``/model`` switches, fallbacks, and delegated children on another
-    model each get their own pins without any surface re-plumbing the kwargs)."""
+    ``provider_routing.models.<id>`` overlays constructor values for the current model;
+    ``allow_fallbacks`` accepts booleans only in that per-model entry."""
     flat = {"only": agent.providers_allowed, "ignore": agent.providers_ignored, "order": agent.providers_order,
         "sort": agent.provider_sort, "require_parameters": agent.provider_require_parameters,
         "data_collection": agent.provider_data_collection}
@@ -469,7 +468,8 @@ def _provider_preferences_for_agent(agent) -> dict[str, Any]:
     merged = {**flat, **{k: v for k, v in per_model.items() if k in flat}}
     merged["sort"] = _validated_openrouter_provider_sort(merged["sort"])
     merged["require_parameters"] = True if merged["require_parameters"] else None
-    return {key: value for key, value in merged.items() if value}
+    return {**{key: value for key, value in merged.items() if value},
+        **{k: v for k, v in per_model.items() if k == "allow_fallbacks" and isinstance(v, bool)}}
 
 
 def _prompt_cache_scope_for_agent(agent) -> str | None:
