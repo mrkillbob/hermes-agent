@@ -647,6 +647,30 @@ export class CanonicalDesktopProtocol {
     }
   }
 
+  // Called only when an attach snapshot identifies the implicit launch route's
+  // named owner. Carry its matching terminal fence, never another profile's
+  // caches or a fence older than the named owner's established authority.
+  bindImplicitLaunchProfile(sessionId: string, profile: string, snapshot: ExecutionStampedEvent): void {
+    if (canonicalProfile(profile) === 'default') { return }
+    const implicit = this.executionAuthorities.get(canonicalSessionKey(sessionId, 'default'))
+
+    if (!implicit?.terminal || implicit.epoch !== String(snapshot.authority_epoch)
+        || implicit.generation !== snapshot.execution_generation) { return }
+
+    const owner = canonicalSessionKey(sessionId, profile)
+    const named = this.executionAuthorities.get(owner)
+
+    // Epochs are opaque: an existing different epoch cannot be replaced by an
+    // alias ACK. Keep both owners' retired epochs when their fences can unite.
+    if (named && (named.epoch !== implicit.epoch || named.generation > implicit.generation
+        || named.retiredEpochs.has(implicit.epoch))) { return }
+
+    this.executionAuthorities.set(owner, {
+      ...implicit,
+      retiredEpochs: new Set([...implicit.retiredEpochs, ...(named?.retiredEpochs ?? [])])
+    })
+  }
+
   private snapshotResult(value: any, route: unknown): any {
     const sid = value.session_id
     const profile = canonicalProfile(route)
