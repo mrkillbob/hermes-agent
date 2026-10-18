@@ -44,17 +44,20 @@ def _drive(primary: Row, fallback: Row, root: Path) -> dict:
     canary = f"CANARY-FB-{primary.name}"
     (project / "canary.txt").write_text(canary + "\n", encoding="utf-8")
     keys = decoy_keys(CATALOG)
+    diagnostics = {}
     args = {"path": str(project / "canary.txt")}
     with CatalogFake(fail_status=500, routes=primary.routes()) as dead, \
             CatalogFake(tool_args=args, final_text=FINAL, routes=fallback.routes()) as alive:
         home = write_home(root, {"provider": primary.name, "base_url": dead.origin + primary.base_path}, {
             "fallback_providers": [{"provider": fallback.name, "model": "catalog-model-a",
                                     "base_url": alive.origin + fallback.base_path}]})
-        proc = run_hermes(home, project, {**keys, **dead.proxy_env()}, "-z", "Read canary.txt and report.")
+        proc = run_hermes(home, project, {**keys, **dead.proxy_env()}, "-z", "Read canary.txt and report.",
+                          diagnostics=diagnostics)
         dead_reqs, alive_reqs = dead.inference(), alive.inference()
         egress = dead.egress_hosts()
     pk, fk = keys[primary.key_env or ""], keys[fallback.key_env or ""]
     return {
+        "lifecycle": diagnostics,
         "rc": proc.returncode, "stdout": proc.stdout[-400:], "stderr": proc.stderr[-1200:], "egress": egress,
         "alive_inference": len(alive_reqs), "dead_paths": [f"{r.path} [{r.dialect}]" for r in dead_reqs],
         "alive_paths": [f"{r.path} [{r.dialect}]" for r in alive_reqs],
