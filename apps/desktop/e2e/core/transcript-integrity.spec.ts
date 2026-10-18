@@ -37,6 +37,7 @@ import {
 } from './harness'
 import { assertTranscriptOracle, installDuplicateSampler, type OracleTarget } from './oracle'
 import { gate, startScriptedProvider } from './provider'
+import { observeTransportEvidence } from './transport-evidence-cdp'
 
 const nonce = Math.random()
   .toString(36)
@@ -86,8 +87,11 @@ test('transcript oracle holds across every transition', async () => {
   const sessionA: OracleTarget = { sessionId: '', expectUserMarkers: [] }
   const sessionB: OracleTarget = { sessionId: '', expectUserMarkers: [] }
   let currentDocumentSocketStart = 0
+  let evidence: Awaited<ReturnType<typeof observeTransportEvidence>> | undefined
+  let failed = false
 
   try {
+    evidence = await observeTransportEvidence(page, 'transcript-integrity')
     await waitForInteractive(app, page)
     await installDuplicateSampler(page)
 
@@ -333,7 +337,11 @@ test('transcript oracle holds across every transition', async () => {
       await openSession(page, sessionB.sessionId, A(7))
       await assertTranscriptOracle(page, ws, provider, sessionB, 'final reload B')
     })
+  } catch (error) {
+    failed = true
+    throw error
   } finally {
+    await evidence?.finish(test.info(), failed)
     await app.close().catch(() => undefined)
 
     for (const proxy of proxies) {

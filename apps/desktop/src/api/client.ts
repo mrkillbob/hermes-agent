@@ -248,6 +248,10 @@ export class HermesGateway extends JsonRpcGatewayClient {
     const profile = typeof named === 'string' && named ? named :
       replayOwner?.sessionId === sid ? replayOwner.profile : previous
 
+    if (previous === 'default' && typeof named === 'string' && named) {
+      this.protocol.bindImplicitLaunchProfile(sid, profile, snapshot)
+    }
+
     this.profileAliases.set(canonicalSessionKey(sid, previous), profile)
 
     if (typeof snapshot.info?.profile_id === 'string') {
