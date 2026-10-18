@@ -155,9 +155,9 @@ class TestExternalSkillsInFindAll:
             patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}),
             patch("tools.skills_tool.SKILLS_DIR", local_skills),
         ):
-            from tools.skills_tool import _find_all_skills
+            from tools.skills_tool import find_all_skills
 
-            skills = _find_all_skills()
+            skills = find_all_skills()
 
         assert any(s["name"] == "shared-skill" for s in skills)
 
@@ -179,9 +179,9 @@ class TestExternalSkillsInFindAll:
             patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}),
             patch("tools.skills_tool.SKILLS_DIR", local_skills),
         ):
-            from tools.skills_tool import _find_all_skills
+            from tools.skills_tool import find_all_skills
 
-            skills = _find_all_skills()
+            skills = find_all_skills()
 
         matching = [s for s in skills if s["name"] == "shared-skill"]
         assert len(matching) == 1

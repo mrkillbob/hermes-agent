@@ -19,6 +19,7 @@ class Service:
 def bind_authorities(monkeypatch, authorities):
     monkeypatch.setattr(hosted, 'active_authority', lambda runner: authorities[0])
     monkeypatch.setattr(hosted, 'all_authorities', lambda runner: authorities)
+    monkeypatch.setattr(hosted, 'serving_authorities', lambda runner: authorities)
 
 
 @pytest.mark.asyncio

@@ -155,7 +155,7 @@ def _prepare_bound_skill_source_results(
     messages = body.get("messages")
     if not isinstance(messages, list):
         return body
-    from tools.skills_tool import _locate_skill, _skill_lookup_path_error, _skill_search_dirs
+    from tools.skills_tool import locate_skill, skill_lookup_path_error, skill_search_dirs
 
     all_ids = [call.get("id") for message in messages if isinstance(message, Mapping)
                and message.get("role") == "assistant"
@@ -209,13 +209,13 @@ def _prepare_bound_skill_source_results(
             if not isinstance(args, Mapping) or args.get("file_path") or message.get("tool_call_id") in duplicates:
                 raise ValueError("unbound_skill")
             name = args.get("name")
-            if not isinstance(name, str) or ":" in name or _skill_lookup_path_error(name):
+            if not isinstance(name, str) or ":" in name or skill_lookup_path_error(name):
                 raise ValueError("unsupported_skill")
             payload = json.loads(raw) if isinstance(raw, str) else None
             if not isinstance(payload, Mapping) or payload.get("success") is not True or payload.get("name") != name:
                 raise ValueError("invalid_result")
-            roots, _ = _skill_search_dirs()
-            error, _, source = _locate_skill(name, None, roots)
+            roots, _ = skill_search_dirs()
+            error, _, source = locate_skill(name, None, roots)
             if error is not None or source is None:
                 raise ValueError("missing_source")
             source = Path(source)
