@@ -22,36 +22,45 @@ root, home = map(pathlib.Path, sys.argv[1:3])
 (home/"worker-entered").write_text("entered")
 phase = "imports"
 def worker_error(kind, error, traceback):
-    report = {"type": kind.__name__, "phase": phase}
+    frames = []
+    while traceback is not None:
+        frame = traceback.tb_frame
+        frames.append({"module": frame.f_globals.get("__name__"),
+                       "function": frame.f_code.co_name, "line": traceback.tb_lineno})
+        traceback = traceback.tb_next
+    report = {"type": kind.__name__, "phase": phase, "frames": frames[-8:]}
     if isinstance(error, ModuleNotFoundError):
         report["missing_module"] = error.name
     (home/"worker-error.json").write_text(json.dumps(report))
-sys.excepthook = worker_error
-sys.path.insert(0, sys.argv[3])
-sys.path.insert(0, str(root))
-from hermes_cli import gateway_runtime_start as start
-from hermes_cli.gateway_runtime_service import RuntimeStartError
-from hermes_platform.host.windows_job import current_process_job_limits
-phase = "ordinary-launch"
-real_popen = subprocess.Popen
-program = "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); p.write_text('ready'); release=pathlib.Path(sys.argv[2]);\nwhile not release.exists(): time.sleep(0.02)"
-ordinary = real_popen([sys.executable, '-I', '-c', program, str(home/'ordinary-ready'), str(home/'release')], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-calls = []
-def inert(argv, **kwargs):
-    calls.append(kwargs['creationflags'])
-    return real_popen([argv[0], '-I', '-c', program, str(home/'daemon-ready'), str(home/'release')], **kwargs)
-start.subprocess.Popen = inert
-report = {'job': current_process_job_limits(), 'ordinary': ordinary.pid}
-phase = "gateway-launch"
 try:
-    child = start.spawn_unmanaged_gateway(home, deadline=time.monotonic()+20)
-    report['daemon'] = child.pid
-except RuntimeStartError as exc:
-    report['refusal'] = {'reason': exc.reason, 'errno': getattr(exc.__cause__, 'errno', None), 'winerror': getattr(exc.__cause__, 'winerror', None)}
-report['attempts'] = len(calls)
-report['creation_flags'] = calls
-(home/'report.json').write_text(json.dumps(report))
-while not (home/'release').exists(): time.sleep(0.05)
+    sys.path.insert(0, sys.argv[3])
+    sys.path.insert(0, str(root))
+    from hermes_cli import gateway_runtime_start as start
+    from hermes_cli.gateway_runtime_service import RuntimeStartError
+    from hermes_platform.host.windows_job import current_process_job_limits
+    phase = "ordinary-launch"
+    real_popen = subprocess.Popen
+    program = "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); p.write_text('ready'); release=pathlib.Path(sys.argv[2]);\nwhile not release.exists(): time.sleep(0.02)"
+    ordinary = real_popen([sys.executable, '-I', '-c', program, str(home/'ordinary-ready'), str(home/'release')], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    calls = []
+    def inert(argv, **kwargs):
+        calls.append(kwargs['creationflags'])
+        return real_popen([argv[0], '-I', '-c', program, str(home/'daemon-ready'), str(home/'release')], **kwargs)
+    start.subprocess.Popen = inert
+    report = {'job': current_process_job_limits(), 'ordinary': ordinary.pid}
+    phase = "gateway-launch"
+    try:
+        child = start.spawn_unmanaged_gateway(home, deadline=time.monotonic()+20)
+        report['daemon'] = child.pid
+    except RuntimeStartError as exc:
+        report['refusal'] = {'reason': exc.reason, 'errno': getattr(exc.__cause__, 'errno', None), 'winerror': getattr(exc.__cause__, 'winerror', None)}
+    report['attempts'] = len(calls)
+    report['creation_flags'] = calls
+    (home/'report.json').write_text(json.dumps(report))
+    while not (home/'release').exists(): time.sleep(0.05)
+except BaseException as error:
+    worker_error(type(error), error, error.__traceback__)
+    raise SystemExit(1) from None
 '''
 
 
