@@ -79,6 +79,37 @@ async def test_owner_duplicate_result_question_failure_and_ack_survive_reconnect
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('reply', ['x' * 100_000, '🙂' * 30_000], ids=['ascii', 'unicode'])
+async def test_large_terminal_receipt_is_bounded_before_durable_projection(owner, reply):
+    from hermes_state_runtime import get_session_admission
+    from hermes_state_a2a import _MAX_BYTES, encoded
+    from plugins.platforms.a2a import protocol
+    from plugins.platforms.a2a.client import MAX_BYTES
+    from plugins.platforms.a2a.event_return import wire_task
+    conn, authority = owner
+    params = request()
+    accepted = await call(conn, params)
+    row = get_session_admission(authority.db, admission_id=accepted['admission_id'])
+    running = claim_session_input(authority.db, epoch=authority.epoch, session_id=row['target_session_id'])
+    settle_session_input(authority.db, epoch=authority.epoch, admission_id=running['admission_id'],
+        generation=running['generation'], outcome='completed',
+        result={'result': {'final_response': reply, 'messages': []}, 'usage': {}})
+    read = {k: params[k] for k in ('agent', 'tenant', 'peer')} | {'op': 'observe', 'task_id': accepted['task']['id']}
+    terminal = await call(conn, read)
+    assert terminal['event'] is not None
+    task = terminal['task']
+    payload = json.loads(task['artifacts'][0]['parts'][0]['text'])
+    assert payload['summary'].endswith('[result truncated to fit A2A receipt limits]')
+    assert len(payload['summary']) < len(reply)
+    with authority.db._read_ctx() as sql:
+        persisted = json.loads(sql.execute('SELECT value FROM state_meta WHERE key LIKE ?',
+            ('a2a.event.v1:%:' + task['id'],)).fetchone()[0])
+    assert len(encoded(persisted).encode()) <= _MAX_BYTES
+    frame = protocol.sse_data(protocol.stream_task(wire_task(terminal)), 'request').encode()
+    assert len(frame) <= MAX_BYTES
+
+
+@pytest.mark.asyncio
 async def test_observations_read_only_on_completion_or_one_replay_gap():
     class Client:
         def __init__(self):

@@ -11,6 +11,45 @@ from hermes_state_runtime import RuntimeStoreError
 from plugins.platforms.a2a import protocol, security
 
 
+def _bounded_result_task(record, body, state):
+    """Keep terminal projections inside both durable-store and SSE frame limits."""
+    import hermes_state_a2a as a2a_state
+    from plugins.platforms.a2a.client import MAX_BYTES
+    from plugins.platforms.a2a.event_return import wire_task
+
+    def build(summary):
+        payload = dict(body, summary=summary,
+                       questions=[summary] if body['kind'] == 'question' else [])
+        task = protocol.build_task(record['task_id'], record['context_id'], state)
+        if body['kind'] == 'question':
+            task['status']['message'] = protocol.text_message(protocol.ROLE_AGENT, json.dumps(payload), record['context_id'])
+        else:
+            task['artifacts'] = [{'artifactId': record['task_id'] + ':result',
+                                  'parts': [protocol.text_part(json.dumps(payload))]}]
+        event = {'id': 'event-' + a2a_state.digest(task), 'sha256': a2a_state.digest(task), 'task': task}
+        persisted = dict(record, event=event)
+        framed = protocol.sse_data(protocol.stream_task(wire_task({'task': task, 'event': event, 'acked': False})), 'size-check')
+        return task, len(a2a_state.encoded(persisted).encode()) <= a2a_state._MAX_BYTES and len(framed.encode()) <= MAX_BYTES
+
+    summary = body['summary']
+    task, fits = build(summary)
+    if fits:
+        return task
+    marker = ' … [result truncated to fit A2A receipt limits]'
+    low, high, best = 0, len(summary), None
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = summary[:middle] + marker
+        task, fits = build(candidate)
+        if fits:
+            best, low = task, middle + 1
+        else:
+            high = middle - 1
+    if best is None:
+        raise RuntimeStoreError('invalid_params')
+    return best
+
+
 def assignment(text):
     from plugins.platforms.a2a.client import decode_json
     value = decode_json(text)
@@ -40,12 +79,7 @@ def result_task(record, receipt, result):
             'summary': summary, 'findings': [], 'questions': [summary] if kind == 'question' else []}
     state = {'completed': protocol.STATE_COMPLETED, 'error': protocol.STATE_FAILED,
              'question': protocol.STATE_INPUT_REQUIRED}[kind]
-    task = protocol.build_task(record['task_id'], record['context_id'], state)
-    if kind == 'question':
-        task['status']['message'] = protocol.text_message(protocol.ROLE_AGENT, json.dumps(body), record['context_id'])
-    else:
-        task['artifacts'] = [{'artifactId': record['task_id'] + ':result', 'parts': [protocol.text_part(json.dumps(body))]}]
-    return task
+    return _bounded_result_task(record, body, state)
 
 
 async def rpc(connection, params):
