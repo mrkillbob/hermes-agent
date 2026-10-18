@@ -14,6 +14,7 @@ process that already imported it mount it before the listener starts, exactly as
 
 import asyncio
 from dataclasses import dataclass
+import importlib
 import logging
 import socket
 import sys
@@ -88,7 +89,6 @@ class GatewayDashboardMount:
                 return self.web
             if self._closed:
                 raise RuntimeError("gateway API stopped")
-            import importlib
             web = sys.modules.get("hermes_cli.web_server") or await asyncio.to_thread(
                 importlib.import_module, "hermes_cli.web_server")
             if self._closed:  # the listener stopped while the import ran
@@ -161,6 +161,9 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0) -
     listener = socket.socket(family, kind, proto)
     _ACTIVE_RUNNER = runner
     try:
+        # Native transport is a readiness dependency: its cold import must not run
+        # on the owner loop inside an already-issued ticket's WebSocket handshake.
+        await asyncio.to_thread(importlib.import_module, "tui_gateway.ws")
         listener.bind(address)
         listener.setblocking(False)
         state.bound_port = listener.getsockname()[1]
