@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 import json
 import os
 from pathlib import Path
 import time
+
+from hermes_cli.gateway_client_diagnostics import connection_stack, record
 
 # The owner's protocol name; session_contract is dependency-free (no config/plugins load).
 from gateway.session_contract import CANONICAL_GATEWAY_PROTOCOL as GATEWAY_WS_PROTOCOL
@@ -100,12 +102,15 @@ class GatewayClient:
 
     async def __aenter__(self):
         self.reader = asyncio.create_task(self._read())
+        record("reader_started")
         return self
 
     async def __aexit__(self, *exc):
+        record("reader_close_started")
         self.reader.cancel()
         with suppress(asyncio.CancelledError):
             await self.reader
+        record("reader_close_finished")
 
     async def _read(self):
         from websockets.exceptions import ConnectionClosed
@@ -119,10 +124,15 @@ class GatewayClient:
                     else:
                         future.set_result(frame.get("result", {}))
                 elif "method" in frame:
+                    params = frame.get("params")
+                    if (frame["method"] == "session.event" and isinstance(params, dict)
+                            and params.get("type") == "message.complete"):
+                        record("message_complete_received")
                     self.events.put_nowait(frame)
-        except (ConnectionClosed, OSError, ValueError, asyncio.QueueFull):
-            pass
+        except (ConnectionClosed, OSError, ValueError, asyncio.QueueFull) as exc:
+            record("reader_failed", error=exc)
         finally:
+            record("reader_stopped")
             error = GatewayClientError("Gateway disconnected; turn outcome is unknown. "
                 "Resume the printed session ID to check whether it completed or was interrupted; do not resend the work.")
             for future in self.pending.values():
@@ -141,8 +151,13 @@ class GatewayClient:
         future = asyncio.get_running_loop().create_future()
         self.pending[rid] = future
         try:
+            if method == "prompt.receipt":
+                record("prompt_receipt_started")
             await self.websocket.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}))
-            return await asyncio.wait_for(future, DEFAULT_RPC_TIMEOUT if _timeout is None else _timeout)
+            result = await asyncio.wait_for(future, DEFAULT_RPC_TIMEOUT if _timeout is None else _timeout)
+            if method == "prompt.receipt":
+                record("prompt_receipt_finished")
+            return result
         finally:
             self.pending.pop(rid, None)
 
@@ -193,7 +208,9 @@ async def connect_gateway(endpoint=None):
     remote = "" if endpoint is not None else os.environ.get("HERMES_TUI_GATEWAY_URL", "").strip()
     protocols = None
     if endpoint is not None:
+        record("ticket_started")
         ticket = await asyncio.to_thread(_session_ticket, get_hermes_home().resolve(), endpoint)
+        record("ticket_ready")
         url, protocols = gateway_ws_target(endpoint, ticket)
     elif remote:
         parsed = urlsplit(remote)
@@ -204,8 +221,10 @@ async def connect_gateway(endpoint=None):
         home = get_hermes_home().resolve()
         # A client's own start: the daemon it may launch ends itself once idle (no client, adapter,
         # cron/kanban work or admission), and the next client starts a fresh one.
+        record("runtime_ensure_started")
         result = await asyncio.to_thread(ensure_gateway_runtime, home, idle_exit=True)
         if not attachable(result):
+            record("runtime_unavailable")
             detail = getattr(result, "detail", None)
             if result.reason_code == "runtime_exited" and detail:
                 # A multi-line startup report (redacted traceback tail + where the full log is).
@@ -214,17 +233,23 @@ async def connect_gateway(endpoint=None):
             raise GatewayUnavailableError(f"Gateway {result.state}: {result.reason_code or 'not_ready'}{detail}",
                                           result.state)
         endpoint = result.endpoint
+        record("runtime_ready")
+        record("ticket_started")
         ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
+        record("ticket_ready")
         url, protocols = gateway_ws_target(endpoint, ticket)
-    async with AsyncExitStack() as stack:
+    async with connection_stack() as stack:
         # The gateway is a loopback (or explicitly named) peer, never something to route through the
         # user's HTTP(S) proxy; websockets>=14 reads HTTP_PROXY/HTTPS_PROXY by default and a proxy that
         # cannot reach 127.0.0.1 turns every launch into a 10 s open timeout.
         try:
+            record("websocket_open_started")
             ws = await stack.enter_async_context(connect(
                 url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024, proxy=None))
         except (OSError, TimeoutError) as exc:
+            record("websocket_open_failed", error=exc)
             raise GatewayClientError("Gateway connection failed; no local fallback") from exc
+        record("websocket_open_finished")
         if protocols and ws.subprotocol != GATEWAY_WS_PROTOCOL:
             raise GatewayClientError("Gateway protocol mismatch; update/restart required")
         async with GatewayClient(ws) as client:
