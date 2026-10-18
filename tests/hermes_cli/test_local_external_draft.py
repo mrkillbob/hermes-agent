@@ -276,7 +276,7 @@ def test_installed_models_missing_their_draft_get_it_from_the_engine_update(monk
     assert lm._missing_drafts("b11671") == []
 
 
-def test_the_update_job_downloads_missing_drafts_then_restarts_the_server(client, monkeypatch):
+def test_the_update_job_downloads_missing_drafts_without_restarting_the_server(client, monkeypatch):
     lm = _staged(monkeypatch, ENTRY)
     engine = SimpleNamespace(tag="b11671", backend="cpu")
     monkeypatch.setattr(lm, "_runtime_target", lambda backend=None: ("b11671", "cpu"))
@@ -291,7 +291,7 @@ def test_the_update_job_downloads_missing_drafts_then_restarts_the_server(client
 
     assert poll(client, job_id, until=("done", "error"))["status"] == "done"
     assert [dest.name for _, dest, _ in fetched] == [ENTRY.draft.local_name]
-    assert events == ["restart"]
+    assert events == []  # the shared server loads the draft at its next owner-driven restart
 
 
 def test_a_draft_that_fails_to_download_leaves_the_model_downloaded(client, monkeypatch, tmp_path):
@@ -334,9 +334,9 @@ def _update_job(monkeypatch, *, serving: str, on_download=None):
     return lm, events
 
 
-def test_a_pause_between_the_drafts_and_the_restart_still_restarts_on_resume(client, monkeypatch):
-    """The pause lands as the last draft finishes. On resume no draft is missing, and the server
-    still needs the restart that loads them."""
+def test_a_pause_between_the_drafts_and_the_end_still_finishes_on_resume(client, monkeypatch):
+    """The pause lands as the last draft finishes. On resume no draft is missing and the update
+    finishes; the shared server is never restarted by the update."""
     def download(job, plan):
         for _, dest, _ in plan:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -351,22 +351,22 @@ def test_a_pause_between_the_drafts_and_the_restart_still_restarts_on_resume(cli
     assert client.post("/api/local-models/download/resume", json={"job_id": job_id}).json()["resumed"]
 
     assert poll(client, job_id, until=("done", "error"))["status"] == "done"
-    assert events == ["restart"]
+    assert events == []
 
 
 def _failing_download(job, plan):
     raise RuntimeError("download failed from https://huggingface.co/lab/Hybrid-DFlash-GGUF: HTTP Error 404")
 
 
-def test_a_failed_draft_download_still_switches_the_server_to_the_new_build(client, monkeypatch):
+def test_a_failed_draft_download_still_completes_the_update_without_a_restart(client, monkeypatch):
     """The draft only speeds generation up. A draft that fails to download leaves the model on MTP,
-    and the server still moves to the build the update installed."""
+    and the update still completes; switching the server to the new build waits for its owner."""
     _, events = _update_job(monkeypatch, serving="b11370", on_download=_failing_download)
 
     job_id = client.post("/api/local-models/runtime/install", json={"backend": "cpu"}).json()["job_id"]
 
     assert poll(client, job_id, until=("done", "error"))["status"] == "done"
-    assert events == ["restart"]
+    assert events == []
 
 
 def test_a_failed_draft_download_alone_leaves_the_server_running(client, monkeypatch):
@@ -394,9 +394,9 @@ def test_a_pause_during_the_draft_download_pauses_the_update(client, monkeypatch
     assert events == []
 
 
-def test_the_update_restarts_a_server_still_on_an_older_build(client, monkeypatch):
-    """An earlier update installed b11671 and stopped before its restart: the server still runs
-    the old build, and the next update switches it over."""
+def test_the_update_leaves_a_server_still_on_an_older_build_to_its_owner(client, monkeypatch):
+    """An earlier update installed b11671 and the server still runs the old build: the update
+    reports the staged build and leaves the restart to the server's owner."""
     draft = bootstrap.assets_dir() / ENTRY.draft.local_name
     draft.parent.mkdir(parents=True, exist_ok=True)
     draft.touch()
@@ -405,7 +405,7 @@ def test_the_update_restarts_a_server_still_on_an_older_build(client, monkeypatc
     job_id = client.post("/api/local-models/runtime/install", json={"backend": "cpu"}).json()["job_id"]
 
     assert poll(client, job_id, until=("done", "error"))["status"] == "done"
-    assert events == ["restart"]
+    assert events == []
 
 
 def test_an_installed_model_without_its_draft_still_reads_as_downloaded(monkeypatch):
