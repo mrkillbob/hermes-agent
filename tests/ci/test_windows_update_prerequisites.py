@@ -3,6 +3,7 @@ import pytest
 
 from tests.e2e.core.windows_update._machine import Journey
 from tests.e2e.core.windows_update import test_interpreter as interpreter
+from tests.e2e.core.windows_update import test_git_and_holders as git_holders
 
 
 class _Machine:
@@ -53,3 +54,20 @@ def test_interpreter_cells_surface_original_install_failure(cell):
     with pytest.raises(RuntimeError, match="journey step 'install' failed") as caught:
         cell(journey)
     assert caught.value.__cause__ is original
+
+
+@pytest.mark.parametrize("cell", [git_holders.test_update_fetches_into_the_installers_partial_clone,
+                                 git_holders.test_list_venv_holders_reports_live_holders,
+                                 git_holders.test_list_venv_holders_empty_once_they_exit])
+@pytest.mark.parametrize("failed_step", ["install", "install_ok"])
+def test_git_holder_cells_surface_original_installer_failure(cell, failed_step):
+    journey = Journey(_Machine())
+    original = AssertionError("synthetic installer failed while npm ci was pending")
+    journey.results["install"] = "completed"
+    journey.results[failed_step] = original
+
+    with pytest.raises(RuntimeError, match=f"journey step '{failed_step}' failed") as caught:
+        cell(journey)
+
+    assert caught.value.__cause__ is original
+    assert "never ran" not in str(caught.value)
