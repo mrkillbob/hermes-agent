@@ -212,6 +212,9 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
             return self._error(400, None, protocol.ERR_PARSE, "parse error")
         if not isinstance(req, dict):
             return self._error(400, None, protocol.ERR_INVALID_PARAMS, "JSON-RPC request must be an object")
+        if adapter._event_returns and "id" not in req:
+            from .event_return import no_content
+            return no_content(self)
         req_id, method = req.get("id"), str(req.get("method", ""))
         params = req["params"] if req.get("params") is not None else {}
         version = (self.headers.get("A2A-Version") or "").strip()

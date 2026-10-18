@@ -1,6 +1,7 @@
 """Real owner admissions and event RPC, without gateway sockets or model calls."""
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -268,3 +269,42 @@ async def test_started_owner_restart_stays_unknown_without_second_admission(tmp_
         assert sql.execute('SELECT COUNT(*) FROM session_admissions').fetchone()[0] == 1
     await restored.close()
     replacement.db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reply', ['4', '[INPUT_REQUIRED] Which input?'], ids=['completed', 'question'])
+async def test_concurrent_terminal_observations_share_one_persisted_projection(owner, monkeypatch, reply):
+    from hermes_state_a2a import EventTasks
+    from hermes_state_runtime import get_session_admission
+
+    conn, authority = owner
+    params = request()
+    accepted = await call(conn, params)
+    admission = get_session_admission(authority.db, admission_id=accepted['admission_id'])
+    running = claim_session_input(authority.db, epoch=authority.epoch,
+                                  session_id=admission['target_session_id'])
+    settle_session_input(authority.db, epoch=authority.epoch, admission_id=running['admission_id'],
+        generation=running['generation'], outcome='completed',
+        result={'result': {'final_response': reply, 'messages': []}, 'usage': {}})
+
+    both_publishers_ready = threading.Barrier(2)
+    stamps = iter(('2026-10-18T00:00:01.000Z', '2026-10-18T00:00:02.000Z'))
+    monkeypatch.setattr('plugins.platforms.a2a.protocol.now_iso', lambda: next(stamps))
+    publish = EventTasks.publish
+    def concurrent_publish(self, task_id, task):
+        both_publishers_ready.wait(timeout=10)
+        return publish(self, task_id, task)
+    monkeypatch.setattr(EventTasks, 'publish', concurrent_publish)
+
+    read = {k: params[k] for k in ('agent', 'tenant', 'peer')} | {
+        'op': 'observe', 'task_id': accepted['task']['id']}
+    first, second = await asyncio.gather(call(conn, read), call(conn, read))
+
+    assert first['event'] == second['event']
+    assert first['task'] == second['task']
+    assert first['event'] == EventTasks(authority.db, authority.epoch,
+        (conn.actor.subject, 'dev', 'team', 'alice')).read(accepted['task']['id'])['event']
+    if reply.startswith('[INPUT_REQUIRED]'):
+        first_message = first['task']['status']['message']
+        second_message = second['task']['status']['message']
+        assert first_message['messageId'] == second_message['messageId']

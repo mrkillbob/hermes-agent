@@ -1,5 +1,6 @@
 """Opt-in A2A event tasks through the canonical owner; no polling or auto-start."""
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from functools import partial
 import asyncio
 import json
@@ -81,6 +82,35 @@ def result_task(record, receipt, result):
     return _bounded_result_task(record, body, state)
 
 
+def _same_terminal_projection(saved_event, candidate):
+    """Match duplicate projections while ignoring only generated timestamp and question ID."""
+    import hermes_state_a2a as a2a_state
+
+    if not isinstance(saved_event, dict) or set(saved_event) != {'id', 'sha256', 'task'}:
+        return False
+    saved = saved_event['task']
+    if (not isinstance(saved, dict) or saved_event['sha256'] != a2a_state.digest(saved)
+            or saved_event['id'] != 'event-' + saved_event['sha256']):
+        return False
+    if not isinstance(candidate, dict) or saved.get('id') != candidate.get('id'):
+        return False
+    state = (candidate.get('status') or {}).get('state')
+    if state not in {protocol.STATE_COMPLETED, protocol.STATE_FAILED, protocol.STATE_INPUT_REQUIRED}:
+        return False
+    left, right = deepcopy(saved), deepcopy(candidate)
+    for task in (left, right):
+        status = task.get('status')
+        if not isinstance(status, dict) or not isinstance(status.get('timestamp'), str):
+            return False
+        status.pop('timestamp')
+        if state == protocol.STATE_INPUT_REQUIRED:
+            message = status.get('message')
+            if not isinstance(message, dict) or not isinstance(message.get('messageId'), str):
+                return False
+            message.pop('messageId')
+    return left == right
+
+
 async def rpc(connection, params):
     actor, owner = connection.actor, connection.authority
     required = {'session:create', 'session:submit', 'session:read'}
@@ -130,7 +160,16 @@ async def rpc(connection, params):
         saved = await asyncio.to_thread(admission_result, owner.db, receipt.admission_id)
         if saved is None:
             raise RuntimeStoreError('storage_unavailable')
-        event = await write(tasks.publish, rec['task_id'], result_task(rec, receipt, saved['result']))
+        projected = result_task(rec, receipt, saved['result'])
+        try:
+            event = await write(tasks.publish, rec['task_id'], projected)
+        except RuntimeStoreError as exc:
+            if exc.reason != 'admission_conflict':
+                raise
+            current = await asyncio.to_thread(tasks.read, rec['task_id'])
+            event = current['event']
+            if not _same_terminal_projection(event, projected):
+                raise
         rec['event'] = event
     task = rec['event']['task'] if rec['event'] else protocol.build_task(rec['task_id'], rec['context_id'],
         protocol.STATE_WORKING if receipt.status == 'started' else protocol.STATE_SUBMITTED)

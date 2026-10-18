@@ -11,6 +11,7 @@ LOOKUP_SCHEMA = 'hermes.a2a.lookup.v1'
 EVENT_MODE = 'hermes.events.v1'
 DELIVERY = 'hermes.delivery.v1'
 MAX_REQUEST_ID_BYTES = 1024
+MISSING_REQUEST_ID = object()
 
 
 def request_id_fits(request_id):
@@ -22,6 +23,12 @@ def request_id_fits(request_id):
         return len(raw) <= MAX_REQUEST_ID_BYTES
     except (TypeError, ValueError, UnicodeError):
         return False
+
+
+def no_content(handler):
+    """Complete a notification without a JSON-RPC response body."""
+    handler.send_response(204)
+    handler.end_headers()
 
 
 def ack_data(params):
@@ -95,7 +102,7 @@ async def serve(adapter, handler, method, req_id, params, peer, agent, *, client
                 return handler._json(200, payload)
             opened = False
             async for value in observations(client, request):
-                payload = protocol.sse_data(protocol.stream_task(wire_task(value)), req_id)
+                payload = protocol.sse_jsonrpc_data(protocol.stream_task(wire_task(value)), req_id)
                 if len(payload.encode()) > MAX_BYTES:
                     raise ValueError('A2A event exceeds frame bound')
                 if not opened:
@@ -109,6 +116,11 @@ async def serve(adapter, handler, method, req_id, params, peer, agent, *, client
 def dispatch(adapter, handler, method, req_id, params, peer, agent):
     # Runs on the existing HTTP request thread; disconnect only detaches delivery.
     # Canonical execution has its own durable owner and is not cancelled here.
+    # Reliable event returns need a response-bearing request to correlate the
+    # stream. JSON-RPC notifications have no response by definition, so do not
+    # turn the missing-ID sentinel into an id:null error envelope.
+    if req_id is MISSING_REQUEST_ID:
+        return no_content(handler)
     if not request_id_fits(req_id):
         return handler._json(200, protocol.jsonrpc_error(None, protocol.ERR_INVALID_PARAMS,
             'Event request ID must be scalar and at most 1024 serialized bytes'))

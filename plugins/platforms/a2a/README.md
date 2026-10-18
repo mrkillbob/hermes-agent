@@ -145,7 +145,10 @@ Dot/Codex callback, Claude endpoint/account or live peer is qualified by this so
 
 Reliable-mode JSON-RPC IDs must be null, a finite number or text, with at most
 1,024 bytes in their ASCII-escaped JSON representation (including string quotes).
-An invalid ID is refused before owner access, with a null response ID. Terminal
+An explicit `id: null` is valid and remains in every JSON-RPC SSE response. A
+request with no `id` is a notification; reliable event return completes it with
+HTTP 204 and no body, without dispatching it to the owner. An invalid ID is
+refused before owner access, with a null response ID. Terminal
 receipts reserve that entire ID budget and fit both the 49,152-byte SSE frame and
 GetTask/find JSON response, including outer Unicode identifiers. Oversized result
 text carries an explicit truncation marker; it does not change outcome or binding.

@@ -112,11 +112,68 @@ def test_invalid_event_request_id_is_refused_before_owner_access(request_id):
     assert json.loads(raw)['error']['code'] == protocol.ERR_INVALID_PARAMS
 
 
+def test_missing_event_request_id_notification_has_no_response():
+    from plugins.platforms.a2a import event_return
+
+    handler = Handler()
+    assert dispatch(None, handler, '_rpc_tasks_get', event_return.MISSING_REQUEST_ID,
+        {}, 'peer', {}) is None
+    assert handler.code == 204
+    assert handler.wfile.getvalue() == b''
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('request_id', ['short', 123, 1.25, None])
 async def test_scalar_get_request_id_is_echoed_unchanged(request_id):
     raw, _ = await response(terminal_value('context', 'short result'), 'get', request_id)
     assert json.loads(raw)['id'] == request_id
+
+
+@pytest.mark.asyncio
+async def test_null_stream_request_id_keeps_jsonrpc_envelope():
+    raw, _ = await response(terminal_value('context', 'short result'), 'stream', None)
+    envelope, = frames(io.BytesIO(raw), None, time.monotonic() + 5)
+    assert envelope['jsonrpc'] == '2.0'
+    assert envelope['id'] is None
+    assert envelope['result']['task']['id'].startswith('task-')
+
+
+def test_event_post_distinguishes_missing_request_id_from_explicit_null(monkeypatch):
+    from plugins.platforms.a2a.adapter import A2ARequestHandler
+    from plugins.platforms.a2a import event_return
+
+    seen = []
+    monkeypatch.setattr(event_return, 'dispatch', lambda *args: seen.append(args[3]))
+
+    class Security:
+        def authenticate(self, _authorization, _client_ip):
+            return 'peer'
+        def is_trusted_peer(self, _identity):
+            return True
+
+    adapter = SimpleNamespace(_event_returns=True, _security_context=Security(),
+        _rate_limiter=SimpleNamespace(allow=lambda _identity: True),
+        _route_for_request=lambda _path, _params: {'agent': {'slug': 'agent', 'local': True}})
+
+    def post(payload):
+        raw = json.dumps(payload).encode()
+        handler = object.__new__(A2ARequestHandler)
+        handler.server = SimpleNamespace(adapter=adapter)
+        handler.headers = {'Content-Length': str(len(raw))}
+        handler.rfile, handler.path, handler.client_address = io.BytesIO(raw), '/', ('127.0.0.1', 1)
+        handler.wfile = io.BytesIO()
+        handler.send_response = lambda code: setattr(handler, 'code', code)
+        handler.send_header = lambda _name, _value: None
+        handler.end_headers = lambda: None
+        handler.do_POST()
+        return handler
+
+    notification = post({'jsonrpc': '2.0', 'method': 'not-a-method', 'params': {}})
+    post({'jsonrpc': '2.0', 'id': None, 'method': 'tasks/get', 'params': {}})
+    assert notification.code == 204
+    assert notification.wfile.getvalue() == b''
+    assert len(seen) == 1
+    assert seen[0] is None
 
 
 @pytest.mark.asyncio
