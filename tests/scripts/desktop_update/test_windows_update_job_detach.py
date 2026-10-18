@@ -55,7 +55,8 @@ try:
     def inert(argv, **kwargs):
         calls.append(kwargs['creationflags'])
         return real_popen([argv[0], '-I', '-c', program, str(home/'daemon-ready'), str(home/'release')], **kwargs)
-    start.subprocess.Popen = inert
+    from types import SimpleNamespace
+    start.subprocess = SimpleNamespace(Popen=inert, DEVNULL=subprocess.DEVNULL)
     report = {'job': current_process_job_limits(), 'ordinary': ordinary.pid}
     set_phase("gateway-launch")
     try:
