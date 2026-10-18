@@ -183,6 +183,8 @@ class A2AExecutor:
         # to ACK the peer while losing the question needed by Kanban attention.
         latest = self._latest(delivery)
         if latest is not None and latest['response'] is not None:
+            if self._cached_terminal(delivery) is not None:
+                return
             status = self.status(delivery)
             if status is not None and status.state == protocol.STATE_INPUT_REQUIRED and status.questions:
                 return

@@ -56,11 +56,19 @@ def consume(executor, delivery, method, params):
             executor._ingest(delivery, {'result': {'task': task}}, 'SendMessage')
             seen = True
             if event is not None:
-                return receive_event(executor, delivery, event)
+                return receive_event(executor, delivery, task, event)
     raise ValueError('Stream closed without a delivery event' if seen else 'Stream closed before task ACK')
 
 
-def receive_event(executor, delivery, event):
+def receive_event(executor, delivery, task, event):
+    # A cached terminal receipt makes _ingest idempotent, so a later Task with
+    # the same peer ID/context may be ignored there. Bind transport ACKs to the
+    # exact owner observation that backs the saved result/question.
+    from hermes_cli.kanban_a2a_executor import _task as peer_task
+    observed = executor._latest(delivery)
+    if (observed is None or observed['response'] is None
+            or peer_task(observed['response'], observed['method']) != task):
+        raise ValueError('Delivery event differs from the saved peer observation')
     status = executor.status(delivery)
     saved = executor.lookup(delivery)
     if (saved is None or saved.kind not in {'completed', 'error'}) and (
@@ -100,7 +108,7 @@ def recover_once(executor, delivery, recovery_id):
         task, event = _task({'result': {'task': found['result']}})
         executor._ingest(delivery, {'result': {'task': task}}, 'SendMessage')
         if event is not None:
-            return receive_event(executor, delivery, event)
+            return receive_event(executor, delivery, task, event)
         remote = executor._remote(delivery)
     return consume(executor, delivery, 'SubscribeToTask', {'id': remote['task_id']})
 

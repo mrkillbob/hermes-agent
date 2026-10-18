@@ -154,6 +154,44 @@ def test_lost_question_ack_preserves_attention_for_explicit_recovery(configured,
     assert peer.calls == ['SendStreamingMessage', 'SendMessage', 'SendMessage']
 
 
+def test_recovery_does_not_ack_new_event_over_a_saved_terminal_result(configured, monkeypatch):
+    from hermes_cli import kanban_a2a_events as events
+    conn, peer = enable(configured, monkeypatch)
+    original_mark = events.delivery_mark
+
+    def lose_delivery_marker(executor, bound_delivery, kind, payload, *, exclusive=False):
+        if kind == 'external_a2a_delivery':
+            raise OSError('synthetic crash before delivery marker')
+        return original_mark(executor, bound_delivery, kind, payload, exclusive=exclusive)
+
+    monkeypatch.setattr(events, 'delivery_mark', lose_delivery_marker)
+    tid = task(conn)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    assert kb.get_task(conn, tid).status == 'done'
+    monkeypatch.setattr(events, 'delivery_mark', original_mark)
+
+    original_terminal = peer.saved
+    different = protocol.build_task('remote', 'context', protocol.STATE_WORKING)
+    event_hash = digest(different)
+    peer.saved = {'task': different, 'event': {'id': 'event-' + event_hash,
+                  'sha256': event_hash, 'task': different}}
+    executor = configured_lanes(conn)._lanes['external-house'].executor
+    bound_delivery = delivery(conn, tid)
+    with pytest.raises(ValueError, match='saved peer observation'):
+        executor.recover_events_once(bound_delivery, recovery_id='changed-event')
+
+    assert peer.calls == ['SendStreamingMessage', 'SubscribeToTask']
+    kinds = [e.kind for e in kb.list_events(conn, tid)]
+    assert 'external_a2a_delivery' not in kinds
+    assert 'external_a2a_delivery_ack' not in kinds
+
+    # A fresh explicit attempt can still recover the original bound event.
+    peer.saved = original_terminal
+    executor.recover_events_once(bound_delivery, recovery_id='original-event')
+    assert peer.calls == ['SendStreamingMessage', 'SubscribeToTask', 'SubscribeToTask', 'SendMessage']
+    assert any(e.kind == 'external_a2a_delivery_ack' for e in kb.list_events(conn, tid))
+
+
 def test_lost_initial_ack_uses_one_bound_lookup_without_new_send(configured, monkeypatch):
     conn, peer = enable(configured, monkeypatch)
     peer.drop_task_ack = True
