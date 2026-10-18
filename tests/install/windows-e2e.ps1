@@ -1149,6 +1149,9 @@ function Invoke-PhaseInstallGui {
 # Phase: update-gui -- OLD -> HEAD through the selected route
 # ----------------------------------------------------------------------------
 function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {
+    # The OS-open route does not pass through hermes desktop launch capture,
+    # where the sibling GUI route already verifies historical installer churn.
+    Clear-HistoricalInstallerChurn
     Write-Step "UPDATE (GUI, route=desktop): advance served main -> $TargetSha, click Update now"
     $proof = Join-Path $ProofRoot "update-gui"
     New-Item -ItemType Directory -Path $proof -Force | Out-Null
