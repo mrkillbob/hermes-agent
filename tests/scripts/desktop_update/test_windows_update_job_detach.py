@@ -68,10 +68,11 @@ def test_update_step_allows_explicit_daemon_escape_but_cancels_ordinary_children
         "$ErrorActionPreference='Stop'\n"
         f". {_ps_literal(str(helper))}\n"
         f"$s=[HermesUpdateJob]::StartAssigned({_ps_literal(python)}, {_ps_literal(args)})\n"
+        "$stdout=$s.StandardOutput.ReadToEndAsync(); $stderr=$s.StandardError.ReadToEndAsync()\n"
         "try {\n [HermesUpdateJob]::Resume($s)\n"
         f" $until=[DateTime]::UtcNow.AddSeconds(90); while (-not (Test-Path -LiteralPath {_ps_literal(str(cancel))})) {{ if ([DateTime]::UtcNow -gt $until) {{ throw 'probe controller deadline' }}; Start-Sleep -Milliseconds 20 }}\n"
         " if (-not [HermesUpdateJob]::TerminateAndWait($s.Job, 1, 5000)) { throw 'contained tree did not quiesce' }\n"
-        "} finally { [void][HermesUpdateJob]::TerminateAndWait($s.Job, 1, 5000); [HermesUpdateJob]::Close($s.Job) }\n"
+        "} finally { [void][HermesUpdateJob]::TerminateAndWait($s.Job, 1, 5000); [HermesUpdateJob]::Close($s.Job); if ($stdout.Wait(3000)) { [Console]::WriteLine($stdout.GetAwaiter().GetResult()) }; if ($stderr.Wait(3000)) { [Console]::Error.WriteLine($stderr.GetAwaiter().GetResult()) } }\n"
     )
     # Only OS launch essentials enter the inert tree; CI/provider credentials do not.
     env = {key: value for key, value in os.environ.items() if key.upper() in {
@@ -123,6 +124,8 @@ def test_update_step_allows_explicit_daemon_escape_but_cancels_ordinary_children
         except subprocess.TimeoutExpired:
             controller.kill()
             output, _ = controller.communicate(timeout=5)
+        if output:
+            print("Inert controller/worker output:\n" + output)
         if daemon is not None:
             try:
                 daemon.wait(timeout=5)
