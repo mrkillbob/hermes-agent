@@ -227,7 +227,7 @@ prototype adds no native Codex/Dot callback, SDK conversation binding or A2A end
 
 `hermes_cli.kanban_a2a_executor.A2AExecutor` is a caller-registered library adapter.
 It reuses the bundled A2A JSON-RPC client transport and durable Kanban events;
-there is no new broker or automatic lane registration. Its owner supplies an
+there is no new broker. Direct callers supply an
 immutable `PeerPlan` and trusted client for one exact URL, tenant, protocol version
 and authority reference. Construction does not contact a peer or read credentials.
 
@@ -275,6 +275,60 @@ cannot bound stalled process scheduling, DNS or kernel I/O. Existing public A2A
 tools retain their legacy transport behavior. Tests use in-process fake responses;
 no listener, real peer, Herdr/CLI executor or model is qualified. Streaming, push,
 server task persistence and native Dot/Codex result return remain separate work.
+
+## Configured A2A lanes in normal dispatch
+
+CLI `kanban dispatch`, gateway watcher ticks and dashboard dispatch nudges all use
+`dispatch_once`. When that call has no custom `spawn_fn`, it reads the owning
+profile's `kanban.external_lanes` configuration and builds the explicit registry.
+The default is disabled. Installation-root policy merging does not grant a named
+profile the root profile's peers. Configuration is read without modifying the
+loader's cached dictionaries.
+
+A source-level configuration example (keep disabled until the runtime owner has
+qualified the existing peer and account):
+
+```yaml
+kanban:
+  external_lanes:
+    enabled: false
+    lanes:
+      external-house:
+        peer: house
+        executor_id: house-receipts-v1
+        authority_id: approved-house-account-v1
+```
+
+`peer` must name an existing entry in the same profile's `a2a_agents`; its URL must
+be the exact JSON-RPC endpoint. There is no discovery, endpoint substitution or
+URL supplied by a card. HTTPS is required except for explicit loopback HTTP;
+query strings and endpoint-changing redirects are refused. Existing A2A bearer
+authentication is reused only over HTTPS; no credential storage or lookup route
+is added. Tokens stay in the existing peer configuration and transport headers,
+never lane configuration or receipt events. `authority_id` identifies the owner's
+approved existing account context; it is a correlation reference, not an access
+grant or evidence that the peer has been authenticated. Change it when switching
+account authority so old runs stay fenced. Disabling or changing a lane does not
+settle its outstanding remote effects.
+
+An enabled registry requires one to four canonical `external-*` lane names and
+exact `peer`, `executor_id`, `authority_id` fields. Invalid enabled configuration
+pauses the tick before claims or peer requests. Only explicitly assigned ready
+cards use these lanes; unassigned cards, profile dispatch and explicit custom
+spawn functions retain their behavior. Dry runs validate the registry and expose
+its spawnable lanes without claims, send intents or peer requests.
+
+Normal non-dry ticks reconcile saved terminal receipts, then refresh at most four
+current bound external runs through `GetTask`, at most once per run per minute.
+Exact-card dispatch restricts refresh to those same cards. A persisted poll marker
+rotates work across eligible runs and throttles repeated dashboard nudges; no new
+worker, timer or queue is started. Refresh runs under the existing dispatcher
+locks, with the client's one-second cooperative request budget. A stalled OS can
+still delay a tick. Missing remote IDs, changed authority/claims, malformed or
+conflicting evidence remain held without resubmission. The ordinary event stream
+retains bounded input-required questions; automatic answers and continuation are
+not supplied. A peer must implement the structured receipt contract above for
+completion or failure to reach the existing Kanban lifecycle.
 
 ## Failure modes the dispatcher handles
 

@@ -2230,9 +2230,16 @@ def dispatch_once(
     selected_task_ids = normalize_task_ids(task_ids)
 
     def _locked_tick() -> DispatchResult:
+        effective_spawn = spawn_fn
+        if effective_spawn is None:
+            from hermes_cli.kanban_external_config import configured_lanes
+
+            effective_spawn = configured_lanes(conn)
+            if effective_spawn is not None and not dry_run:
+                effective_spawn.refresh(conn, task_ids=selected_task_ids)
         return dispatch_tick(
             conn,
-            spawn_fn=spawn_fn,
+            spawn_fn=effective_spawn,
             ttl_seconds=ttl_seconds,
             dry_run=dry_run,
             max_spawn=max_spawn,
