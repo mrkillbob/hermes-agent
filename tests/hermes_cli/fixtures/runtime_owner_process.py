@@ -15,8 +15,8 @@ from tests.waiting import wait_until
 
 root, role = Path(sys.argv[1]), sys.argv[2]
 real_supervisor = supervisor.LlamaServerSupervisor
-bootstrap._generate_presets = lambda *args: None
-bootstrap._admitted_models_max = lambda directory, count: count
+bootstrap._generate_presets = lambda *args, **kwargs: None
+bootstrap._admitted_models_max = lambda directory, count, engine_tag=None: count
 bootstrap._start_idle_sweeper = lambda sup: None
 supervisor._stable_port = lambda: 12345
 binaries.installed_engine = lambda backend: binaries.Engine(backend, 'fixture', Path(sys.executable))

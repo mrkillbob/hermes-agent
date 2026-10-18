@@ -1054,9 +1054,13 @@ def _select_pool_entry(provider: str) -> tuple[bool, Optional[Any]]:
         return True, None
 
 
-def _peek_pool_entry(provider: str) -> Optional[Any]:
-    """Best-effort current/next pool entry without mutating selection order."""
-    pool = _load_pool_with_credentials(provider, " (peek)")
+def _peek_pool_entry(provider: str, pool: Any = None) -> Optional[Any]:
+    """Best-effort current/next pool entry without mutating selection order.
+
+    ``pool`` skips the disk re-read when the caller already loaded it.
+    """
+    if pool is None:
+        pool = _load_pool_with_credentials(provider, " (peek)")
     if pool is None:
         return None
     try:
