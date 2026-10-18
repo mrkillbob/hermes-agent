@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def _copy_fixture_source(source: Path) -> None:
     for name in ("pm", "hermes_cli", "hermes_platform"):
         shutil.copytree(ROOT / name, source / name, ignore=shutil.ignore_patterns("__pycache__"))
-    for name in ("utils.py", "hermes_constants.py", "hermes_yaml.py", "hermes_bootstrap.py", "setup-hermes.sh",
-                 "hermes_state_dbfile.py", "hermes_state_holders.py", "hermes_state_errors.py", "hermes_state_file_identity.py"):
+    for name in ("utils.py", "hermes_constants.py", "hermes_dir_acl.py", "hermes_yaml.py", "hermes_bootstrap.py",
+                 "setup-hermes.sh", "hermes_state_dbfile.py", "hermes_state_holders.py", "hermes_state_errors.py", "hermes_state_file_identity.py"):
         shutil.copy2(ROOT / name, source / name)
     # Include the i18n kernel and lightweight scope/media helpers needed by real maintenance;
     # the agent runtime stays out of this small install fixture.

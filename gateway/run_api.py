@@ -258,6 +258,31 @@ class GatewayRuntimeAPI:
         self.app, self.runner, self.web_app = app, runner, web_app
 
     async def __call__(self, scope, receive, send):
+        if scope['type'] != 'websocket' or scope.get('path') != '/api/ws':
+            return await self._serve(scope, receive, send)
+        started = accepted = False
+
+        async def send_watched(message):
+            nonlocal started, accepted
+            started = True
+            accepted = accepted or message.get('type') == 'websocket.accept'
+            await send(message)
+
+        try:
+            return await self._serve(scope, receive, send_watched)
+        except Exception as exc:
+            # Uvicorn answers an upgrade that raised before accept with HTTP 500 and logs it only to
+            # its own logger, never gateway.log: the dialing cron worker or managed worker sees a bare
+            # InvalidStatus (#139922). Name the cause here; uvicorn still sends the 500, but only when
+            # nothing was sent yet: a handler that had closed the upgrade already got its 403 out.
+            if not accepted:
+                logger.error('Gateway refused a session WebSocket upgrade from %s %s: %s: %s',
+                             scope.get('hermes.gateway_socket_peer') or scope.get('client'),
+                             'after its handler had refused it' if started else 'with HTTP 500',
+                             type(exc).__name__, exc, exc_info=True)
+            raise
+
+    async def _serve(self, scope, receive, send):
         descriptor = getattr(self.runner, 'session_runtime_descriptor', None)
         if scope['type'] not in {'http', 'websocket'} or descriptor is None:
             return await self.app(scope, receive, send)
@@ -273,9 +298,8 @@ class GatewayRuntimeAPI:
                 await JSONResponse({'error': 'gateway_not_ready', 'state': descriptor['state']},
                                    status_code=503)(scope, receive, send)
             return
-        if scope['type'] == 'http':
-            # Capture before Uvicorn's proxy middleware rewrites scope.client.
-            scope['hermes.gateway_socket_peer'] = scope.get('client')
+        # Capture before Uvicorn's proxy middleware rewrites scope.client (native grants, both kinds).
+        scope['hermes.gateway_socket_peer'] = scope.get('client')
         from gateway.run_idle_exit import attached_client, note_client_activity
         if scope['type'] != 'websocket' or scope['path'] != '/api/ws':
             note_client_activity(self.runner)  # dashboard/API traffic keeps an idle-exit gateway up
