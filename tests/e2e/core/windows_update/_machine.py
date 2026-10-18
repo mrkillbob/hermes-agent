@@ -618,6 +618,11 @@ class Journey:
     def ok(self, name: str) -> bool:
         return name in self.results and not isinstance(self.results[name], BaseException)
 
+    def require_steps(self, *names: str) -> None:
+        """A dependent cell names its prerequisites, so their original failure is surfaced first."""
+        for name in names:
+            self[name]
+
     def __getitem__(self, name: str) -> Any:
         if name not in self.results:
             raise RuntimeError(f"journey step {name!r} never ran\n{self.machine.evidence()}")
