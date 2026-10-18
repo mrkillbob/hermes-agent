@@ -8,6 +8,9 @@ import psutil
 
 def owner_reclaim_paused(conn, task_id):
     """Missing/ambiguous owner receipts never authorize another attempt."""
+    from hermes_cli.kanban_external import reclaim_paused
+    if reclaim_paused(conn, task_id):
+        return True
     marker = conn.execute(
         "SELECT e.payload FROM task_events e JOIN tasks t ON t.current_run_id=e.run_id "
         "WHERE t.id=? AND e.task_id=t.id AND e.kind='owner_admitted' ORDER BY e.id DESC LIMIT 1",

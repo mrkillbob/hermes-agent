@@ -50,9 +50,8 @@ def _auth_header(auth: dict) -> dict:
 
 
 def _http_json(url: str, headers: dict, timeout: int, method: str, data: Optional[bytes] = None) -> dict:
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    from .client import http_json
+    return http_json(url, headers, timeout, method, data, opener=urllib.request.urlopen)
 
 
 def _http_get_json(url: str, headers: dict, timeout: int) -> dict:
