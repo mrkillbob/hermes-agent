@@ -417,6 +417,23 @@ canonical_method("a2a.forward", params=A2aForwardParams, result=A2aForwardResult
                  doc="Forward one A2A input into the conversation its identity tuple names.")
 
 
+class A2aEventParams(Params):
+    event_task: dict[str, JsonValue]
+
+
+class A2aEventResult(Result):
+    task: dict[str, JsonValue] | None = None
+    event: dict[str, JsonValue] | None = None
+    admission_id: str | None = None
+    acked: bool | None = None
+    acknowledged: str | None = None
+    sha256: str | None = None
+
+
+canonical_method("a2a.event", params=A2aEventParams, result=A2aEventResult,
+                 doc="Owner-bound A2A event admission, exact observation and delivery acknowledgment.")
+
+
 # ── managed workers ───────────────────────────────────────────────────────────────────────────
 
 

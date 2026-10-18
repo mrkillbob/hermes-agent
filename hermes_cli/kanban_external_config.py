@@ -23,7 +23,8 @@ def _identity(value):
 
 
 def _peer(config, entry):
-    if not isinstance(entry, dict) or set(entry) != {'peer', 'executor_id', 'authority_id'}:
+    if (not isinstance(entry, dict) or not {'peer', 'executor_id', 'authority_id'} <= set(entry)
+            or set(entry) - {'peer', 'executor_id', 'authority_id', 'return_mode'}):
         raise ValueError('External lane requires peer, executor_id and authority_id')
     name = entry['peer']
     peers = config.get('a2a_agents')
@@ -66,8 +67,12 @@ def _lane(database, config, entry):
 
     peer = _peer(config, entry)
     plan = PeerPlan(_identity(entry['executor_id']), peer['url'], tenant=peer.get('tenant', ''),
-                    authority_id=_identity(entry['authority_id']))
-    client = JSONRPCClient(plan.url, version=plan.version, headers=_headers(peer))
+                    authority_id=_identity(entry['authority_id']), return_mode=entry.get('return_mode', 'legacy'))
+    if plan.return_mode == 'events':
+        from plugins.platforms.a2a.client_stream import StreamClient
+        client = StreamClient(plan.url, version=plan.version, headers=_headers(peer))
+    else:
+        client = JSONRPCClient(plan.url, version=plan.version, headers=_headers(peer))
     return Lane(plan.executor_id, A2AExecutor(database, plan, client))
 
 
@@ -190,6 +195,8 @@ class ConfiguredLanes(ExternalLanes):
         executor = self._lanes[delivery.lane].executor
         status = executor.status(delivery)
         if self._attention(conn, delivery, status):
+            return
+        if executor.plan.return_mode == 'events':
             return
         if status is not None and status.task_id is not None:
             executor.refresh_once(delivery)

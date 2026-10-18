@@ -88,3 +88,52 @@ via `tasks/get`.
 | `A2A_ADVERTISED_TOOLSETS` | all registered | Restrict skills on the Agent Card. |
 
 See `DESIGN.md` for architecture and the requirement-tracing table.
+
+## Opt-in durable event-return candidate
+
+`gateway.platforms.a2a.extra.reliable_events` defaults to `false`. When explicitly
+`true`, the existing A2A endpoint serves a narrower event-return contract through
+the already-running canonical owner. It does not start an owner, expose a new
+listener, or grant another profile access. Legacy mode remains unchanged.
+
+The event mode accepts `SendStreamingMessage`, `SubscribeToTask`, exact `GetTask`
+and typed delivery acknowledgments using `SendMessage`. It requires the
+`hermes.a2a.assignment.v1` assignment/receipt contract documented in
+[Kanban worker lanes](../../../website/docs/user-guide/features/kanban-worker-lanes.md).
+The first SSE Task identifies admission. A committed result/question/failure Task
+has `metadata["hermes.delivery.v1"] = {id, sha256}` and every Task advertises
+`metadata["hermes.events.v1"].ack_schema = "hermes.a2a.delivery_ack.v1"`.
+The hash covers the canonical Task without this transport metadata. The receiver
+stores the receipt before sending one data Part containing
+`{schema, task_id, event_id, sha256}` in `SendMessage`. This is an application
+extension negotiated by these peers, not a standard A2A ACK method. A matching
+receipt response marks delivery; an SSE write or bare HTTP success does not.
+
+Outer task IDs, request fingerprints and exact owner admissions are retained in
+the owning profile's existing `state_meta` store. Results and delivery IDs are
+saved once, before emission. Duplicate messages from the same authenticated peer,
+agent, tenant and local producer resolve to the same task/admission; changed
+payloads under that key are refused. The store retains up to 500 projections per
+scope, each at most 64 KiB, and never silently evicts live/unacknowledged work.
+Capacity exhaustion refuses admission. Retention cleanup remains an operator
+source follow-up; do not treat the store as unbounded history.
+
+A lost initial ACK can be resolved with one read-only `GetTask` application lookup:
+`metadata["hermes.a2a.lookup.v1"] = {message_id, request_sha256}`. The fingerprint is
+SHA256 of the canonical compact JSON `[request, correlation]`, where `request`
+contains the original extracted `context_id` and assignment `text`. Scope and
+fingerprint must match an existing projection; this never submits a task.
+
+The active stream waits for canonical owner events. Disconnect detaches delivery,
+not execution. A peer may make one bounded explicit recovery read/reattachment;
+there is no watcher, periodic receipt read, automatic reconnect or retry timer.
+Saved terminal receipts can be returned after owner restart without a model call.
+An unknown owner admission remains uncertain and is never re-executed.
+
+This candidate does not implement push in event mode (its Agent Card advertises
+push disabled), remote cancellation/listing, or automatic question continuation.
+Questions are delivered and acknowledged on the same bound task; answering or
+settling them remains an explicit owner action. Streaming is bounded to 120 seconds
+per foreground connection and existing owner/event-queue limits; cooperative OS
+I/O can still stall. A CLI that exits cannot claim unattended return. No native
+Dot/Codex callback, Claude endpoint/account or live peer is qualified by this source.
