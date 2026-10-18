@@ -42,9 +42,9 @@ on:
 permissions:
   contents: read
 
-# Cancel in-progress runs for the same ref
+# Keep independent callers (CI, Nightly E2E) separate while superseding the same caller/ref.
 concurrency:
-  group: tests-${{ (github.ref_type == 'tag' || inputs.commit != '') && github.run_id || github.ref }}
+  group: tests-${{ github.workflow }}-${{ (github.ref_type == 'tag' || inputs.commit != '') && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' && inputs.commit == '' }}
 
 jobs:

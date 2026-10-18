@@ -2040,11 +2040,10 @@ export function useSessionActions({
         let prefetchedStoredSessionId: string | null = null
         let prefetchedTranscriptMessages: ChatMessage[] | null = null
 
-        // REST transcript prefetch and the gateway resume RPC are independent
-        // — run them concurrently so a big session's wall time is
-        // max(prefetch, resume) instead of their sum. The prefetch paints the
-        // transcript as soon as it lands; the RPC binds the runtime id.
-        // Watch windows skip the prefetch — lazy resume attaches the live mirror.
+        // Freeze known runtimes before dispatch; first-seen runtimes retain their ACK merge baseline.
+        const resumeRuntimeBaselines = new Map([...sessionStateByRuntimeIdRef.current].map(([id, state]) => [id, state.messages]))
+
+        // Prefetch paints durable history; watch windows only attach the live mirror.
         const prefetchPromise =
           watchWindow || options?.authoritativeSnapshot
             ? null
@@ -2062,8 +2061,9 @@ export function useSessionActions({
             ),
           { requiresMessages: options?.authoritativeSnapshot, scope: sessionOwner }
         ).then(resumed => {
-          resumeRuntimeBaselineMessages =
-            sessionStateByRuntimeIdRef.current.get(resumed.session_id)?.messages ?? resumeRuntimeBaselineMessages
+          resumeRuntimeBaselineMessages = resumeRuntimeBaselines.has(resumed.session_id)
+            ? resumeRuntimeBaselines.get(resumed.session_id)!
+            : sessionStateByRuntimeIdRef.current.get(resumed.session_id)?.messages ?? []
 
           return resumed
         })
