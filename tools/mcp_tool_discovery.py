@@ -764,7 +764,7 @@ def _not_connected(wanted: set[str], scope) -> set[str]:
         # recorded an error since its last success, and a lazy registration whose first-use connect failed
         # (a timed-out one leaves no task; one that never started has no error).
         serving_nothing = {name for name in wanted
-                           if ((key := _resolve_server_key(name, scope, current=False)) in _core._servers
+                           if ((key := _resolve_server_key(name, scope, current=False, lock_held=True)) in _core._servers
                                and (key in _core._server_connect_errors
                                     or getattr(_core._servers[key], "_park_reason", None) is not None))
                            or (key in _core._lazy_server_configs and key in _core._server_connect_errors)}
@@ -784,7 +784,7 @@ def mcp_servers_ready() -> list[str]:
     wanted, scope = _enabled_config_names(), _core._mcp_registry_scope()
     with _core._lock:
         registered = {name for name in wanted
-                      if (key := _resolve_server_key(name, scope, current=False)) in _core._servers
+                      if (key := _resolve_server_key(name, scope, current=False, lock_held=True)) in _core._servers
                       or key in _core._lazy_server_configs}
     return sorted(registered - _not_connected(wanted, scope))
 
