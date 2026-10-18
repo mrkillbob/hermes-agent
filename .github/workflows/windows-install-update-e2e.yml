@@ -29,6 +29,11 @@ on:
   # `gh workflow run windows-install-update-e2e.yml --ref <branch> -f strict_acceptance=upd-txn`.
   workflow_dispatch:
     inputs:
+      inert_job_probe:
+        description: 'Run only the isolated inert updater job lifetime diagnostic (no installation).'
+        type: boolean
+        required: false
+        default: false
       strict_acceptance:
         description: >-
           Acceptance runs only: known_failure owners whose gaps FAIL this run instead of xfailing ('upd-txn', a comma list, or '1' for every gap). Sets HERMES_E2E_STRICT_ACCEPTANCE for the E2E suites (tests/e2e/core/_pending_fixes.py).
@@ -47,7 +52,49 @@ concurrency:
   cancel-in-progress: ${{ inputs.commit == '' }}
 
 jobs:
+  invalid-probe-selection:
+    if: github.event_name == 'workflow_dispatch' && inputs.inert_job_probe == true && (github.ref != 'refs/heads/codex/probe-windows-update-job-manual-20261018' || inputs.strict_acceptance != '')
+    name: Reject invalid diagnostic selection
+    runs-on: windows-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require the isolated probe ref without acceptance inputs
+        shell: pwsh
+        run: |
+          Write-Error 'The inert probe requires its isolated diagnostic branch and an empty strict_acceptance input.'
+          exit 1
+  inert-job-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.inert_job_probe == true && github.ref == 'refs/heads/codex/probe-windows-update-job-manual-20261018' && inputs.strict_acceptance == ''
+    name: Inert updater job lifetime diagnostic
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout reviewed probe source
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - name: Set up locked test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '["messaging"]'
+          test-environment: 'true'
+          prune-python-cache: true
+      - name: Run the inert contract probe once
+        shell: bash
+        env:
+          HERMES_TEST_FILE_RETRIES: '0'
+        run: |
+          set -o pipefail
+          bash scripts/run_tests.sh tests/scripts/desktop_update/test_windows_update_job_detach.py -- -v --tb=short -rA 2>&1 | tee "$RUNNER_TEMP/inert-job-probe.log"
+      - name: Preserve the probe result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inert-job-probe-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/inert-job-probe.log
+          if-no-files-found: ignore
   install-update:
+    if: github.event_name != 'workflow_dispatch' || inputs.inert_job_probe != true
     name: Windows install.ps1 + hermes update E2E (${{ matrix.test_file }})
     runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'windows-latest-32-core' || 'windows-latest' }}
     strategy:
