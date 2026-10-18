@@ -71,6 +71,53 @@ def test_lost_ack_unknown_id_stays_fenced_and_never_replays(configured):
     assert [v['method'] for v in peer.calls] == ['SendMessage']
 
 
+@pytest.mark.parametrize('body', ['/private/synthetic/file.py', 'API token sk-abcdefghij1234567890ABCD', 'x' * 49000],
+                         ids=['local-path', 'credential', 'oversized'])
+def test_preflight_rejection_blocks_visibly_without_uncertain_effects(configured, body):
+    from hermes_cli.kanban_external import unresolved_history
+
+    conn, _, peer = configured
+    tid = kb.create_task(conn, title='Synthetic assignment', body=body, assignee='external-house')
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    assert kb.get_task(conn, tid).status == 'blocked'
+    events = kb.list_events(conn, tid)
+    assert any(e.kind == 'external_terminal' for e in events)
+    assert not any(e.kind in {'external_uncertain', 'external_a2a_send_intent'} for e in events)
+    assert not unresolved_history(conn, tid)
+    assert not peer.calls
+    # An explicit correction and unblock can create a new attempt, never replay the rejected one.
+    conn.execute('UPDATE tasks SET body=? WHERE id=?', ('Calculate two plus two', tid))
+    conn.commit()
+    assert kb.unblock_task(conn, tid)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    assert [v['method'] for v in peer.calls] == ['SendMessage']
+
+
+def test_rejected_assignment_terminal_receipt_recovers_after_lifecycle_failure(configured, monkeypatch):
+    conn, _, peer = configured
+    tid = kb.create_task(conn, title='Synthetic assignment', body='/private/synthetic/file.py', assignee='external-house')
+    original = kb.block_task
+    def fail(*args, **kwargs):
+        raise RuntimeError('synthetic lifecycle interruption')
+    monkeypatch.setattr(kb, 'block_task', fail)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    assert kb.get_task(conn, tid).status == 'running'
+    assert any(e.kind == 'external_terminal' for e in kb.list_events(conn, tid))
+    monkeypatch.setattr(kb, 'block_task', original)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    assert kb.get_task(conn, tid).status == 'blocked'
+    assert not peer.calls
+
+
+def test_external_lane_defaults_are_discoverable_and_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    loaded = config.load_config_readonly()
+    assert loaded['kanban']['external_lanes'] == {'enabled': False, 'lanes': {}}
+    for key in ('kanban.external_lanes.enabled', 'kanban.external_lanes.lanes.external-house.peer'):
+        assert config._validate_config_key(key) == (True, None)
+    assert config._default_value_for_key('kanban.external_lanes.enabled') is False
+
+
 def test_unknown_lane_and_explicit_spawn_do_not_gain_peer_authority(configured):
     conn, _, peer = configured
     tid = task(conn, 'external-other')

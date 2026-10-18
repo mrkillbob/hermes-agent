@@ -22,6 +22,14 @@ TERMINAL = frozenset({'completed', 'question', 'blocked', 'error'})
 KINDS = TERMINAL | {'accepted', 'ack', 'started'}
 
 
+class SubmissionRejected(ValueError):
+    """Executor guarantees rejection before any send intent or external effect.
+
+    Only deterministic request preparation may raise this. Once submission could
+    have started, ordinary failures must retain the uncertain delivery fence.
+    """
+
+
 def _digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
                                      ensure_ascii=False).encode()).hexdigest()
@@ -278,6 +286,9 @@ class ExternalLanes:
         # dispatch defers this hook until both admission locks have been released.
         try:
             receipt = lane.executor.submit(delivery)
+        except SubmissionRejected:
+            # Fixed local text: an executor exception may contain assignment secrets.
+            receipt = Artifact(delivery, 'error', 'Assignment rejected before submission; correct the assignment and unblock')
         except Exception as exc:  # health: allow BLE001 -- untrusted transport errors may contain secrets; retain only class and uncertainty, never retry
             with kb.write_txn(conn):
                 kb._append_event(conn, delivery.task_id, 'external_uncertain', {'error_class': type(exc).__name__}, run_id=delivery.run_id)

@@ -245,6 +245,11 @@ prefix; whitespace and quoting delimiters end a component. Standalone separators
 (`input / output`, `/`, `//`) and project-relative names (`src/module.py`) are
 allowed. Ordinary HTTP(S) URL spans are exempt from this lexical classification;
 exact local authority/path values and credential refusal still apply to all text.
+Deterministic request-preparation rejection happens before any A2A send intent
+or peer call. The lane saves a terminal local error receipt and blocks the card
+with a correction prompt. After explicit correction and unblock, a new attempt
+may submit. A failure after send intent remains uncertain and cannot authorize
+another send; a lost reply is never treated as a preparation rejection.
 
 `lookup()` reads local receipts only. An owner explicitly calls `refresh_once()`
 for one remote `GetTask`, then invokes normal lane reconciliation. Terminal result

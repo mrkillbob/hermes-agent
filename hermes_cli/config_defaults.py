@@ -1924,6 +1924,8 @@ DEFAULT_CONFIG = {
     # promotes dependency-satisfied todos to ready, and fires `hermes -p <assignee> chat -q ...` per
     # claimable task. Run ONE dispatcher per profile; two on the same kanban.db race for claims.
     "kanban": {
+        # Explicit current-profile A2A lanes. Empty defaults grant no peer authority.
+        "external_lanes": {"enabled": False, "lanes": {}},
         # Optional installation topology guard. When non-empty, every board
         # creation surface (CLI, dashboard, and gateway) accepts only these
         # normalized slugs. Empty preserves Hermes' general multi-board mode.

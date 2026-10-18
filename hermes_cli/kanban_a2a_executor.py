@@ -10,7 +10,7 @@ import sqlite3
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_coordinator_executor import (CoordinatorExecutor, CoordinatorLimits,
     bounded_connection, digest, event, validate_binding)
-from hermes_cli.kanban_external import Artifact, Delivery, TERMINAL, artifact_from_envelope
+from hermes_cli.kanban_external import Artifact, Delivery, SubmissionRejected, TERMINAL, artifact_from_envelope
 from plugins.platforms.a2a import protocol, security
 from plugins.platforms.a2a.client import MAX_BYTES, decode_json, validate_url
 
@@ -216,9 +216,14 @@ class A2AExecutor:
         accepted = Artifact(delivery, 'accepted', 'A2A send intent retained; peer acceptance unproven')
         if old is not None:
             return self.lookup(delivery) or accepted
-        params = _params(delivery, self.plan)
-        if len(json.dumps(params).encode()) > MAX_BYTES - 1024:
-            raise ValueError('Assignment exceeds bounded A2A request')
+        try:
+            params = _params(delivery, self.plan)
+            if len(json.dumps(params).encode()) > MAX_BYTES - 1024:
+                raise ValueError('Assignment exceeds bounded A2A request')
+        except ValueError:
+            # This scope is pure preparation, before the durable send intent and RPC.
+            # Never classify an existing send or a transport failure as definitely unsent.
+            raise SubmissionRejected('Assignment rejected before submission') from None
         intent = _send_intent(delivery, self.plan)
         if not self.journal.record(delivery, _PREFIX + 'send_intent', intent, exclusive=True):
             self._intent(delivery)
