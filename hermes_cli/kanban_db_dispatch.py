@@ -2226,13 +2226,17 @@ def dispatch_once(
     ``skipped_locked=True`` and writes nothing.
     """
     from hermes_cli.kanban_dispatch_tick import dispatch_tick, normalize_task_ids
+    from hermes_cli.kanban_external_config import prepare_dispatch_lanes
 
     selected_task_ids = normalize_task_ids(task_ids)
+    runtime_lanes = None
 
     def _locked_tick() -> DispatchResult:
+        nonlocal runtime_lanes
+        runtime_lanes = prepare_dispatch_lanes(conn, spawn_fn, dry_run, selected_task_ids)
         return dispatch_tick(
             conn,
-            spawn_fn=spawn_fn,
+            spawn_fn=runtime_lanes or spawn_fn,
             ttl_seconds=ttl_seconds,
             dry_run=dry_run,
             max_spawn=max_spawn,
@@ -2267,23 +2271,12 @@ def dispatch_once(
                     result = _locked_tick()
                     # Still under both locks: periodic PASSIVE WAL checkpoint.
                     _kbc._maybe_checkpoint_wal(conn, db_path)
+    if runtime_lanes is not None and not dry_run:
+        runtime_lanes.finish(conn)
     # Lock released. Fire the tick observer strictly OUTSIDE the critical
     # section: a slow subscriber must never stall a sibling dispatcher's tick.
     _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
     return result
-
-
-def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -> Optional[int]:
-    """Back-compat: older spawn_fn signatures (and test stubs) accept only
-    ``(task, workspace)``; pass ``board`` only when the callable supports it."""
-    import inspect
-    try:
-        sig = inspect.signature(spawn_fn)
-        if "board" in sig.parameters:
-            return spawn_fn(task, workspace, board=board)
-        return spawn_fn(task, workspace)
-    except (TypeError, ValueError):
-        return spawn_fn(task, workspace)
 
 
 def _dispatch_lane_task(
@@ -2312,22 +2305,16 @@ def _dispatch_lane_task(
     # would fail ``hermes -p <assignee>`` at startup and loop ready→crash→ready
     # forever. Bucketed apart from skipped_unassigned: the operator cannot fix
     # it by assigning a profile, and health telemetry suppresses "stuck" for it.
+    from hermes_cli.kanban_external import (
+        ExternalLanes, call_profile_spawn, has_external_intent, profile_spawnable,
+        record_nonspawnable, unresolved_history,
+    )
+
+    external = isinstance(spawn_fn, ExternalLanes) and spawn_fn.registered(assignee)
+    held = unresolved_history(conn, task_id) or (external and lane != "ready")
     profile_exists = _profile_exists_fn()
-    if profile_exists is not None and not profile_exists(assignee):
-        result.skipped_nonspawnable.append(task_id)
-        # Per-task diagnostic so ``show``/``tail`` name the missing profile instead of leaving
-        # the card in ``ready`` with zero board evidence (#122422). Unlike a respawn guard the
-        # condition never expires on its own, so write it once: a repeat only when something
-        # else happened on the card since (reassign, comment) — not one row per tick forever,
-        # and not one row per foreign home per tick on a shared board (#101015).
-        if not dry_run:
-            with _kb.write_txn(conn):
-                last = conn.execute(
-                    "SELECT kind, payload FROM task_events WHERE task_id = ? "
-                    "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
-                if (last is None or last["kind"] != "skipped_nonspawnable"
-                        or last["payload"] != _kb._json_or_null({"assignee": assignee})):
-                    _kb._append_event(conn, task_id, "skipped_nonspawnable", {"assignee": assignee})
+    if held or (not external and not profile_spawnable(assignee, profile_exists)):
+        record_nonspawnable(conn, task_id, assignee, result, dry_run, held=held)
         return False
     if not capacity.allows(row, assignee, result):
         return False
@@ -2435,7 +2422,14 @@ def _dispatch_lane_task(
         # worker's system prompt via KANBAN_GUIDANCE.
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
     try:
-        pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
+        if external:
+            # The external boundary owns uncertain delivery. Never route its failures
+            # through profile spawn retry accounting or invent a local worker PID.
+            spawn_fn.deliver(conn, claimed, str(workspace))
+            result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
+            _count_spawn(claimed.assignee)
+            return True
+        pid = call_profile_spawn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
         if pid:
             _set_worker_pid(conn, claimed.id, int(pid), run_id=claimed.current_run_id, claim_lock=claimed.claim_lock)
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
@@ -2447,6 +2441,10 @@ def _dispatch_lane_task(
         _count_spawn(claimed.assignee)
         return True
     except Exception as exc:
+        if has_external_intent(conn, external, claimed):
+            result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
+            _count_spawn(claimed.assignee)
+            return True
         from tools.process_registry import RestartSafeScopeUnavailable
 
         # The host refused the spawn (no restart-safe scope): nothing about the

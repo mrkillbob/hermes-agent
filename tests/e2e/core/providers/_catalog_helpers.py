@@ -32,6 +32,7 @@ import hermes_yaml as yaml
 
 from tests.e2e.core._pending_fixes import known_failure
 from tests.e2e.core._pm_dependencies import select_test_dependencies
+from tests.e2e.core.providers._catalog_diagnostics import snapshot
 from tests.fakes.providers.catalog_fake import USAGE_IN, USAGE_OUT, CatalogFake, Recorded
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -232,7 +233,7 @@ def write_home(root: Path, model: dict[str, Any], extra_cfg: dict[str, Any] | No
 
 
 def run_hermes(home: Path, cwd: Path, env_extra: dict[str, str], *args: str,
-               timeout: float = TURN_TIMEOUT) -> subprocess.CompletedProcess:
+               timeout: float = TURN_TIMEOUT, diagnostics: dict | None = None) -> subprocess.CompletedProcess:
     """Run the real CLI; a child that outlives ``timeout`` is killed (rc -9, reason in stderr)."""
     with tempfile.TemporaryFile("w+", encoding="utf-8") as out, tempfile.TemporaryFile("w+", encoding="utf-8") as err:
         proc = subprocess.Popen([sys.executable, "-m", "hermes_cli.main", *args], cwd=cwd,
@@ -241,12 +242,19 @@ def run_hermes(home: Path, cwd: Path, env_extra: dict[str, str], *args: str,
         try:
             rc, why = proc.wait(timeout=timeout), ""
         except subprocess.TimeoutExpired:
+            if diagnostics is not None:
+                diagnostics.update(snapshot(home))
             proc.kill()
             proc.wait()
             rc, why = -9, f"\nTIMEOUT after {timeout}s"
         out.seek(0)
         err.seek(0)
-        return subprocess.CompletedProcess(proc.args, rc, out.read(), err.read() + why)
+        stdout, stderr = out.read(), err.read() + why
+        if rc != 0 and diagnostics is not None:
+            if not why:
+                diagnostics.update(snapshot(home))
+            diagnostics.update(cli_timed_out=bool(why), final_marker_seen=FINAL in stdout)
+        return subprocess.CompletedProcess(proc.args, rc, stdout, stderr)
 
 
 def session_usage(home: Path) -> dict[str, Any] | None:
@@ -282,6 +290,7 @@ class TurnResult:
     canary: str
     wall_s: float
     cells: dict[str, bool] = field(default_factory=dict)
+    diagnostics: dict = field(default_factory=dict)
 
     def signature(self) -> str:
         """Observed facts a KNOWN bug's pattern keys on (one line, first in every gated message)."""
@@ -291,7 +300,8 @@ class TurnResult:
     def detail(self) -> str:
         reqs = [f"{r.method} {r.path} [{r.dialect}] creds={credential_values(r, self.secrets)}" for r in self.requests]
         return (f"rc={self.rc} wall={self.wall_s}s\n  usage={self.usage}\n"
-                f"  requests={reqs}\n  stdout={self.stdout[-600:]!r}\n  stderr={self.stderr[-1200:]!r}")
+                f"  requests={reqs}\n  stdout={self.stdout[-600:]!r}\n  stderr={self.stderr[-1200:]!r}\n"
+                f"  lifecycle={json.dumps(self.diagnostics, sort_keys=True)}")
 
 
 def drive_turn(row: Row, root: Path, catalog: list[Row]) -> TurnResult:
@@ -301,15 +311,18 @@ def drive_turn(row: Row, root: Path, catalog: list[Row]) -> TurnResult:
     canary = f"CANARY-{row.name}-{os.urandom(4).hex()}"
     (project / "canary.txt").write_text(canary + "\n", encoding="utf-8")
     keys = decoy_keys(catalog)
+    diagnostics = {}
     started = time.monotonic()
     with CatalogFake(tool_args={"path": str(project / "canary.txt")}, final_text=FINAL, routes=row.routes()) as fake:
         home = write_home(root, {"provider": row.name, "base_url": fake.origin + row.base_path})
-        proc = run_hermes(home, project, {**keys, **fake.proxy_env()}, "-z", "Read canary.txt and report.")
+        proc = run_hermes(home, project, {**keys, **fake.proxy_env()}, "-z", "Read canary.txt and report.",
+                          diagnostics=diagnostics)
         requests = list(fake.requests)
         egress = fake.egress_hosts()
     return TurnResult(row=row, rc=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, requests=requests,
                       egress=egress, own_key=keys[row.key_env or ""], secrets=set(keys.values()),
-                      usage=session_usage(home), canary=canary, wall_s=round(time.monotonic() - started, 1))
+                      usage=session_usage(home), canary=canary, wall_s=round(time.monotonic() - started, 1),
+                      diagnostics=diagnostics)
 
 
 def provider_hosts(catalog: list[Row]) -> set[str]:

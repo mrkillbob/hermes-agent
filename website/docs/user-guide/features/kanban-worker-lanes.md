@@ -26,7 +26,7 @@ To be a kanban worker lane, an integration must provide three things:
 
 ### 1. An assignee string
 
-The dispatcher matches `task.assignee` against either a Hermes profile name (the default lane shape) or a registered non-spawnable identifier (the plugin lane shape — see [Adding an external CLI worker lane](#adding-an-external-cli-worker-lane) below). Tasks whose assignee doesn't resolve are left on `ready` with a `skipped_nonspawnable` event so a board operator can fix them; they are not silently dropped or executed by an arbitrary fallback.
+The dispatcher matches `task.assignee` against either a Hermes profile name (the default lane shape) or an explicitly registered `external-` assignee (the source integration boundary — see [Adding an external CLI worker lane](#adding-an-external-cli-worker-lane) below). Tasks whose assignee doesn't resolve are left on `ready` with a `skipped_nonspawnable` event so a board operator can fix them; they are not silently dropped or executed by an arbitrary fallback.
 
 ### 2. A spawn mechanism
 
@@ -44,7 +44,7 @@ For Hermes profile lanes, the dispatcher's `_default_spawn` runs `hermes -p <ass
 | `HERMES_PROFILE` | the worker's own profile name (for `kanban_comment` author attribution) |
 | `HERMES_TENANT` | tenant namespace, if the task has one |
 
-For non-Hermes lanes (registered via a plugin), the plugin supplies its own `spawn_fn` callable that gets `task`, `workspace`, and `board` and returns an optional pid for crash detection.
+For non-Hermes lanes, a trusted in-process owner can explicitly supply `ExternalLanes` through `dispatch_once(spawn_fn=...)`. A plain custom `spawn_fn` does not bypass profile validation. No plugin discovery or installed CLI runner is registered automatically.
 
 ### Descendant process scope
 
@@ -118,15 +118,234 @@ A specialisation of the profile lane: an orchestrator is a Hermes profile whose 
 
 ## Adding an external CLI worker lane
 
-Wiring a non-Hermes CLI tool (Codex CLI, Claude Code CLI, OpenCode CLI, a local coding-model runner, etc.) as a kanban worker lane is *not yet a paved path*. The dispatcher's spawn function is pluggable (`spawn_fn` is a parameter on `dispatch_once`), and a plugin could register its own `spawn_fn` for a non-Hermes assignee, but the surrounding integration work — wrapping the CLI's exit code into `kanban_complete` / `kanban_block` calls, mapping the CLI's workspace/sandbox conventions onto the dispatcher's `HERMES_KANBAN_WORKSPACE` env, handling auth and per-CLI policy — is still per-integration design work.
+The owner-side Python boundary is `hermes_cli.kanban_external`. It is source-only:
+no CLI executor, service, callback, polling loop, credentials or built-in lane
+registration is supplied. A trusted owner explicitly constructs
+`ExternalLanes({"external-example": Lane("executor-identity", executor)})` and
+passes it to `dispatch_once(spawn_fn=lanes)`. The executor implements bounded
+`submit(Delivery) -> Artifact | None` and read-only
+`lookup(Delivery) -> Artifact | None`. Actual profile names retain profile dispatch,
+including the existing profile allowlist. Unknown external assignees fail closed.
+External review-lane dispatch is unsupported and held; use the existing profile
+review path. Host capacity, dependency, claim and workspace checks still apply.
 
-If you're considering adding a CLI lane, open an issue describing the specific CLI and the workflow you're trying to enable. The contract above is the constraints any such lane must satisfy; the implementation shape (one plugin per CLI vs a generic CLI-runner plugin parameterised by config) is open.
+`Delivery` is immutable and binds database path, task, run, claim, lane, executor,
+random idempotency key, payload digest, task title/body and resolved workspace.
+Only those fields cross this boundary; no process environment, profile credentials,
+callback recipient or arbitrary task metadata is inherited. A 64 KiB limit bounds
+both deliveries and artifacts. `Artifact` accepts only `accepted`, `ack`, `started`,
+`completed`, `question`, `blocked` or `error`, plus a summary and immutable findings
+and questions. `artifact_from_envelope` validates the closed JSON-compatible
+`{"artifact": ..., "sha256": ...}` shape. Digests provide correlation and integrity,
+not peer authentication or task authority. An eventual transport must authenticate
+its peer and enforce the owner's approved execution scope separately.
 
-The historical issue for this is [#19931](https://github.com/NousResearch/hermes-agent/issues/19931) and the closed-not-merged Codex-specific PR [#19924](https://github.com/NousResearch/hermes-agent/pull/19924) — those describe the original architecture proposal but didn't land a runner.
+The delivery intent commits to the existing `task_events` journal **before** submit.
+The task stays `running` after transport acceptance, ACK or start; a broker ACK
+never means the work completed. A completed artifact calls the existing
+`complete_task(expected_run_id=...)`, retaining completion and repository policies.
+Question, blocked and error artifacts call `block_task` with a sticky `needs_input`
+block and preserve their distinct typed evidence. Findings and questions remain
+in the event artifact; no returned text executes commands or grants permissions.
+
+Duplicate submit requests reuse the committed delivery and never call submit again.
+A lost ACK, exception, dispatcher restart or crash between intent and submit is
+uncertain. Automatic TTL/stale/orphan recovery holds such a run instead of guessing
+from a missing local PID. An unresolved prior delivery also prevents redispatch,
+even after an operator reclaim. The owner can explicitly call
+`lanes.reconcile(conn, delivery)`: it applies a saved terminal artifact first,
+otherwise asks **the same registered executor's read-only lookup** for a receipt.
+Lookup must never start/resume work. No automatic resend, retry deadline, unsafe
+"not found means retry" rule or override API is provided. Unresolved/superseded
+runs require owner investigation; timeout alone cannot release the hold.
+
+Terminal artifacts commit before lifecycle mutation, allowing reconciliation after
+an interruption between the two. Identical terminal receipts are idempotent;
+conflicting evidence and foreign/stale task, run, claim, executor, board or payload
+bindings reject. Existing `hermes kanban tail` / `runs` surfaces retain the audit
+trail in `task_events` and `task_runs`; no new queue or ledger is created.
+
+Local CLI interfaces may be candidates for a future executor using existing approved
+accounts: Codex `exec --json --output-schema` and Claude Code
+`--print --output-format json --json-schema`. A process exit or parseable output is
+not an authenticated ACK, an idempotent lookup guarantee, containment proof or a
+native application callback. No private account tokens are read or extracted by
+this boundary. A2A can be mapped to Delivery/Artifact only when existing authenticated
+endpoints and task lookup capabilities are separately established. This patch
+creates no A2A endpoint and no native Codex/Dot callback. The historical uncertain
+App MCP callback must not be replayed; unattended result return remains unqualified.
+
+## Explicit coordinator receipt prototype (fixture only)
+
+`kanban_coordinator_executor.CoordinatorExecutor` is a concrete local receipt
+adapter. Its `submit` records an offer in the existing Kanban event stream; it
+launches nothing. `lookup` uses a read-only/query-only SQLite connection and
+never starts, resumes or repairs work. Separate SQL deadlines cap application
+work at 2 seconds for submit and 1 second for lookup, with lock waits capped at
+200/100 ms, no retries, exact indexed queries and 64 KiB event envelopes.
+Stalled kernel/filesystem operations are outside hard real-time guarantees.
+
+An authorized owner must explicitly invoke
+`kanban_coordinator_runner.receive_once` for the exact database/task/run/key and
+an immutable `ExecutionPlan`. One receiver claim and one launch intent commit
+before the process starts. ACK means the coordinator inbox accepted the delivery;
+`started` means a process was created. Neither asserts model acceptance. There is
+no watcher, automatic registration, daemon, account access or CLI activation.
+
+This version accepts only the pinned POSIX fake program and synthetic fixture
+input. Live mode, arbitrary argv and changed program/input hashes reject before
+receiver admission. No Claude or Codex executable can be selected. Structured
+fake provider metadata is validation test data, not proof of real model use.
+
+The receiver drains bounded stdout/stderr under a monotonic execution deadline
+(at most 120 seconds and the remaining task budget), with 64 KiB per stream.
+It can terminate only its new process group while the live leader's birth identity
+still matches: 3 seconds for TERM, then at most 2 seconds for KILL. A leader exit
+alone is insufficient; a remaining group retains uncertainty. It never signals a
+shared server or a historical session. No OS containment or escaped-descendant
+protection is claimed. Receiver death or a stalled OS can leave an uncertain
+attempt; these bounds require the receiver to remain alive and scheduled.
+Synchronous process creation itself cannot be bounded by the subsequent execution
+deadline. If process identity cannot be verified, the receiver closes its pipes
+and records uncertainty without signaling the group; a child may remain alive.
+
+Exit receipts bind launch/PID/birth, input bytes and bounded output hashes.
+Result validation uses those same retained bytes, exact task/run/key/payload and
+strict synthetic CLI/provider metadata before calling the existing lifecycle API.
+A crash after exit or terminal persistence can reconcile from saved evidence
+without another launch. Changed evidence, ambiguous start or unsettled effects
+remain fenced. Evidence files are private same-user consistency records, not
+cryptographic peer authentication. Existing lifecycle APIs retain their own
+transaction/policy handling; their finalization latency is separate from the
+child execution deadline.
+
+Live no-tools CLI qualification, authenticated executor authority, crash-surviving
+host enforcement and native application result return remain separate work. This
+prototype adds no native Codex/Dot callback, SDK conversation binding or A2A endpoint.
+
+## Explicit A2A receipt transport
+
+`hermes_cli.kanban_a2a_executor.A2AExecutor` is a caller-registered library adapter.
+It reuses the bundled A2A JSON-RPC client transport and durable Kanban events;
+there is no new broker. Direct callers supply an
+immutable `PeerPlan` and trusted client for one exact URL, tenant, protocol version
+and authority reference. Construction does not contact a peer or read credentials.
+
+`submit()` commits one send intent with a stable message ID before one
+`SendMessage`. Local `accepted` means only that the send intent exists; a bound
+remote submitted Task produces `ack`, and working produces `started`. Duplicate
+submit, a crash or a lost reply never causes another send. Returned server task
+and context IDs are saved separately from Hermes task/run/key/payload identity.
+Raw claim locks, database paths and local workspace paths are not sent. Assignments
+with embedded local authority values, rooted slash/backslash, home, drive, UNC or file-URI paths or
+relative path escapes, or that would change under the existing outbound secret
+redactor, are refused for explicit preparation; the adapter never silently changes the assignment. The lexical rule requires a
+following path component after the rooted/home/drive/file-URI/relative-escape
+prefix; whitespace and quoting delimiters end a component. Standalone separators
+(`input / output`, `/`, `//`) and project-relative names (`src/module.py`) are
+allowed. Ordinary HTTP(S) URL spans are exempt from this lexical classification;
+exact local authority/path values and credential refusal still apply to all text.
+Deterministic request-preparation rejection happens before any A2A send intent
+or peer call. The lane saves a terminal local error receipt and blocks the card
+with a correction prompt. After explicit correction and unblock, a new attempt
+may submit. A failure after send intent remains uncertain and cannot authorize
+another send; a lost reply is never treated as a preparation rejection.
+
+`lookup()` reads local receipts only. An owner explicitly calls `refresh_once()`
+for one remote `GetTask`, then invokes normal lane reconciliation. Terminal result
+application still validates the current Hermes claim and persists the artifact
+before existing complete/block APIs. Saved results reconcile without a new model
+request or an available peer. Remote task-not-found after peer memory loss remains
+uncertain; the bundled server's in-memory TaskStore and separate conversation log
+cannot reconstruct the missing task receipt.
+
+A qualified result is a single bounded JSON text artifact with schema
+`hermes.a2a.receipt.v1`, exact `correlation` (task_id, run_id, key, payload_sha256),
+kind `completed` or `error`, nonblank summary and text-array findings/questions.
+The A2A terminal state must match. General peer prose or a normal Hermes answer
+does not establish this application contract. Same-user hashes are consistency
+checks; trusted client/peer authority is an explicit caller responsibility.
+
+`status()` exposes a typed saved observation. Input-required retains bounded,
+bound questions without finalizing the external receipt. Auth-required, canceled,
+rejected and unknown states also hold with their exact peer state; there is no
+automatic login, continuation, cancellation or retry. The frozen receipt vocabulary
+does not yet represent these lifecycles. Missing remote IDs, malformed results and
+binding conflicts remain fenced.
+
+The raw client caps request/response JSON at 48 KiB to leave journal-envelope room,
+rejects duplicate members/nonfinite numbers and endpoint-changing redirects, and
+uses at most two seconds per request (one for refresh). These cooperative budgets
+cannot bound stalled process scheduling, DNS or kernel I/O. Existing public A2A
+tools retain their legacy transport behavior. Tests use in-process fake responses;
+no listener, real peer, Herdr/CLI executor or model is qualified. Streaming, push,
+server task persistence and native Dot/Codex result return remain separate work.
+
+## Configured A2A lanes in normal dispatch
+
+CLI `kanban dispatch`, gateway watcher ticks and dashboard dispatch nudges all use
+`dispatch_once`. When that call has no custom `spawn_fn`, it reads the owning
+profile's `kanban.external_lanes` configuration and builds the explicit registry.
+The default is disabled. Installation-root policy merging does not grant a named
+profile the root profile's peers. Configuration is read without modifying the
+loader's cached dictionaries.
+
+A source-level configuration example (keep disabled until the runtime owner has
+qualified the existing peer and account):
+
+```yaml
+kanban:
+  external_lanes:
+    enabled: false
+    lanes:
+      external-house:
+        peer: house
+        executor_id: house-receipts-v1
+        authority_id: approved-house-account-v1
+```
+
+`peer` must name an existing entry in the same profile's `a2a_agents`; its URL must
+be the exact JSON-RPC endpoint. There is no discovery, endpoint substitution or
+URL supplied by a card. HTTPS is required except for explicit loopback HTTP;
+query strings and endpoint-changing redirects are refused. Existing A2A bearer
+authentication is reused only over HTTPS; no credential storage or lookup route
+is added. Tokens stay in the existing peer configuration and transport headers,
+never lane configuration or receipt events. `authority_id` identifies the owner's
+approved existing account context; it is a correlation reference, not an access
+grant or evidence that the peer has been authenticated. Change it when switching
+account authority so old runs stay fenced. Disabling or changing a lane does not
+settle its outstanding remote effects.
+
+An enabled registry requires one to four canonical `external-*` lane names and
+exact `peer`, `executor_id`, `authority_id` fields. Invalid enabled configuration
+pauses the tick before claims or peer requests. Only explicitly assigned ready
+cards use these lanes; unassigned cards, profile dispatch and explicit custom
+spawn functions retain their behavior. Dry runs validate the registry and expose
+its spawnable lanes without claims, send intents or peer requests.
+
+Normal non-dry ticks reconcile saved terminal receipts, then refresh at most four
+current bound external runs through `GetTask`, at most once per run per minute.
+Exact-card dispatch restricts refresh to those same cards. A persisted poll marker
+rotates work across eligible runs and throttles repeated dashboard nudges; no new
+worker, timer or queue is started. Delivery intents and poll reservations are persisted under the existing dispatcher
+locks. Both SendMessage and GetTask run after releasing those locks; active runs
+reserve capacity before sending. Ordinary per-task processing failures record a
+sanitized hold and do not abandon other prepared tasks in the same tick. A caller
+crash still retains uncertainty without replay. The client uses one-second cooperative refresh
+budgets. A stalled OS can still delay the calling tick, while unrelated boards
+can acquire admission locks. Missing remote IDs, changed authority/claims, malformed or
+conflicting evidence remain held without resubmission. Input-required responses create a visible sticky `needs_input` block whose reason
+contains the validated question (or an explicit missing-question notice). Bound
+attention evidence is saved first, without an `external_terminal` receipt: the
+remote task may still be active. Unblocking the card never authorizes a resend;
+remote continuation and settlement require explicit owner recovery. A peer must implement the structured receipt contract above for
+completion or failure to reach the existing Kanban lifecycle.
 
 ## Failure modes the dispatcher handles
 
-So lane authors don't have to reimplement these:
+These PID-based rules describe profile workers. External delivery intents use the
+conservative reconciliation hold above; their TTL or runtime expiry does not prove
+that remote effects stopped.
 
 - **Stale claim TTL** — a worker that claims and then never heartbeats / completes / blocks gets reclaimed after `DEFAULT_CLAIM_TTL_SECONDS` (15 min default) — but only if the worker process has actually died. A live worker (slow model spending 20+ min in one tool-free LLM call) gets the claim *extended* instead of killed; only a dead PID is reclaimed.
 - **Crashed worker** — a worker whose host-local PID has vanished is detected by `detect_crashed_workers` and reaped; the task increments `consecutive_failures` and may auto-block when the breaker trips.
@@ -141,3 +360,35 @@ So lane authors don't have to reimplement these:
 - [Kanban overview](./kanban) — the user-facing intro.
 - [Kanban tutorial](./kanban-tutorial) — walkthrough with the dashboard open.
 - [`KANBAN_GUIDANCE`](https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py) — the worker + orchestrator lifecycle injected into every kanban worker's system prompt.
+
+## Opt-in event return without periodic peer reads
+
+A configured external lane may explicitly set `return_mode: events`; omission
+retains the legacy behavior. All external lanes remain disabled by default. An
+existing run's peer plan includes the chosen mode, so changing modes does not
+reinterpret an outstanding send. Legacy plan serialization remains unchanged.
+
+In event mode, the source executor makes one bounded foreground
+`SendStreamingMessage` connection, saves typed Task observations and then sends a
+bound delivery ACK after durable receipt storage. It never uses periodic
+`GetTask`. The normal dispatcher may reconcile already saved local evidence but
+makes no background peer requests for this mode. The foreground connection runs
+after dispatch locks are released, can occupy its calling tick for up to the
+120-second stream budget, and is not a detached subscription service.
+
+`A2AExecutor.recover_events_once(delivery, recovery_id=...)` is an explicit recovery action after a
+known disconnect. Its durable per-ID marker prevents duplicate recovery calls
+from generating traffic. The trusted caller supplies a new ID only for a known
+disconnect or explicit operator recovery decision; at most three distinct
+attempts are allowed per task, with no automatic retry schedule. With a known remote ID it makes one `SubscribeToTask`;
+with a lost initial ACK it first makes one payload-bound read-only lookup, then
+reattaches only if needed. It never sends the assignment again. The caller still
+uses the existing lane reconciliation API to apply a recovered result. Recovery
+failure remains held until explicit owner recovery; no watcher retries it.
+
+The peer must implement the opt-in durable event/ACK contract in the bundled
+[A2A plugin README](../../../../plugins/platforms/a2a/README.md). The current ordinary
+A2A/prose endpoint does not qualify automatically. Question and failure returns
+are durable; automatic answer/continuation, Mira/Claude endpoints, remote account
+authority and live restart qualification remain separate work. This source adds
+no credential, listener, service, network permission or native app callback.

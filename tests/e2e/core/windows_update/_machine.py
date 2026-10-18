@@ -64,6 +64,7 @@ from tests.e2e.core.windows._helpers import (
     wait_until,
 )
 from tests.fakes.fake_llm_provider import write_hermes_home
+from tests.e2e.core.windows_update._command_evidence import CommandEvidence
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 OPT_IN_ENV = "HERMES_E2E_WINDOWS_INSTALL"
@@ -358,6 +359,7 @@ class Machine:
         chunks: list[bytes] = []
         proc = subprocess.Popen(argv, cwd=cwd or self.profile, env=self.env(env_extra),
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        status = CommandEvidence(log.with_suffix(".status.json"), started, timeout)
 
         def pump() -> None:
             # Every transcript line carries its offset: install.ps1 prints no timestamps, and
@@ -366,22 +368,33 @@ class Machine:
             with log.open("w", encoding="utf-8") as fh:
                 for raw in iter(proc.stdout.readline, b""):
                     chunks.append(raw)
-                    fh.write(f"[{time.monotonic() - started:7.1f}s] {_decode(raw).rstrip()}\n")
+                    elapsed, line = time.monotonic() - started, _decode(raw).rstrip()
+                    status.observe_line(line, elapsed)
+                    fh.write(f"[{elapsed:7.1f}s] {line}\n")
                     fh.flush()
 
         reader = threading.Thread(target=pump, name=f"pump-{label}", daemon=True)
         reader.start()
         try:
-            code = proc.wait(timeout=timeout)
-            self.timings.append((label, round(time.monotonic() - started, 1)))
-        except subprocess.TimeoutExpired:
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=60, check=False)
-            proc.wait(timeout=60)
-            reader.join(timeout=10)
-            raise AssertionError(
-                f"{label} did not finish within {timeout:.0f}s\n{self._tail(log)}\n{self.evidence()}") from None
-        reader.join(timeout=20)
-        return Run(code, _decode(b"".join(chunks)), "")
+            try:
+                code = proc.wait(timeout=timeout)
+                self.timings.append((label, round(time.monotonic() - started, 1)))
+            except subprocess.TimeoutExpired:
+                status.timeout_reached_s = round(time.monotonic() - started, 3)
+                status.observed_returncode_before_cleanup = proc.returncode
+                status.termination_started = True
+                status.save(returncode=proc.returncode, reader_finished=not reader.is_alive())
+                killed = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                        capture_output=True, timeout=60, check=False)
+                status.taskkill_returncode = killed.returncode
+                proc.wait(timeout=60)
+                reader.join(timeout=10)
+                raise AssertionError(
+                    f"{label} did not finish within {timeout:.0f}s\n{self._tail(log)}\n{self.evidence()}") from None
+            reader.join(timeout=20)
+            return Run(code, _decode(b"".join(chunks)), "")
+        finally:
+            status.save(returncode=proc.returncode, reader_finished=not reader.is_alive())
 
     @staticmethod
     def _tail(path: Path, n: int = 6000) -> str:
@@ -617,6 +630,11 @@ class Journey:
 
     def ok(self, name: str) -> bool:
         return name in self.results and not isinstance(self.results[name], BaseException)
+
+    def require_steps(self, *names: str) -> None:
+        """A dependent cell names its prerequisites, so their original failure is surfaced first."""
+        for name in names:
+            self[name]
 
     def __getitem__(self, name: str) -> Any:
         if name not in self.results:

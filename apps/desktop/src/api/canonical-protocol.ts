@@ -1,6 +1,8 @@
 // Canonical local authority wire adapter. Remote legacy transports keep their
 // existing protocol; unsupported explicit semantics fail before network admission.
 
+import { acceptExecutionEvent, type ExecutionStampedEvent } from '@/lib/execution-authority'
+
 export const CANONICAL_GATEWAY_PROTOCOL = 'hermes-gateway-v1'
 
 export const canonicalProfile = (profile: unknown): string =>
@@ -200,6 +202,7 @@ export class CanonicalDesktopProtocol {
   private revisions = new Map<string, number>()
   private mutations = new Map<string, Record<string, unknown>>()
   private generations = new Map<string, number>()
+  private executionAuthorities: Parameters<typeof acceptExecutionEvent>[0] = new Map()
   private prompts = new Map<string, Record<string, unknown>>()
   // admission_id → generation of a turn the authority recovered as `unknown`
   // (owner died mid-turn). Only these rows may be acknowledged, and only with
@@ -500,13 +503,18 @@ export class CanonicalDesktopProtocol {
     }
   }
 
-  event(event: { type: string; session_id?: string; profile?: string; execution_generation?: unknown; payload?: unknown }) {
+  event(event: ExecutionStampedEvent & { type: string; session_id?: string; profile?: string }) {
     const payload = event.payload as Record<string, unknown> | undefined
 
-    if (!payload || !event.session_id) { return }
+    if (!event.session_id) { return }
     const sid = event.session_id
     const profile = canonicalProfile(event.profile)
     const owner = canonicalSessionKey(sid, profile)
+    // Observe lifecycle order for delayed snapshots; event adaptation below
+    // keeps its existing generation and metadata rules.
+    acceptExecutionEvent(this.executionAuthorities, owner, event.type, event)
+
+    if (!payload) { return }
 
     if (Array.isArray(payload.pending)) { payload.pending_submissions = payload.pending.map(row => ({ ...row, user: row.text })) }
 
@@ -639,9 +647,43 @@ export class CanonicalDesktopProtocol {
     }
   }
 
+  // Called only when an attach snapshot identifies the implicit launch route's
+  // named owner. Carry its matching terminal fence, never another profile's
+  // caches or a fence older than the named owner's established authority.
+  bindImplicitLaunchProfile(sessionId: string, profile: string, snapshot: ExecutionStampedEvent): void {
+    if (canonicalProfile(profile) === 'default') { return }
+    const implicit = this.executionAuthorities.get(canonicalSessionKey(sessionId, 'default'))
+
+    if (!implicit?.terminal || implicit.epoch !== String(snapshot.authority_epoch)
+        || implicit.generation !== snapshot.execution_generation) { return }
+
+    const owner = canonicalSessionKey(sessionId, profile)
+    const named = this.executionAuthorities.get(owner)
+
+    // Epochs are opaque: an existing different epoch cannot be replaced by an
+    // alias ACK. Keep both owners' retired epochs when their fences can unite.
+    if (named && (named.epoch !== implicit.epoch || named.generation > implicit.generation
+        || named.retiredEpochs.has(implicit.epoch))) { return }
+
+    this.executionAuthorities.set(owner, {
+      ...implicit,
+      retiredEpochs: new Set([...implicit.retiredEpochs, ...(named?.retiredEpochs ?? [])])
+    })
+  }
+
   private snapshotResult(value: any, route: unknown): any {
     const sid = value.session_id
     const profile = canonicalProfile(route)
+    const execution = this.executionAuthorities.get(canonicalSessionKey(sid, profile))
+
+    // Attach subscribes before its inventory awaits. A terminal frame can beat
+    // the older running snapshot's ACK; only that exact owner's execution may
+    // settle it. Pending admissions/prompts retain their own authority.
+    if (value.running === true && execution?.terminal && execution.epoch === String(value.authority_epoch)
+        && execution.generation === value.execution_generation) {
+      value = { ...value, running: false }
+    }
+
     this.event({ type: 'session.info', session_id: sid, profile, payload: value })
 
     const prompts = (value.prompts ?? []).map((prompt: Record<string, unknown>) => {

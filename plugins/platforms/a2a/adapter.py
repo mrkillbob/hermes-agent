@@ -202,11 +202,19 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             if length > _MAX_BODY:
                 return self._error(413, None, protocol.ERR_PARSE, "payload too large")
-            req = json.loads((self.rfile.read(length) if length else b"{}").decode("utf-8"))
+            raw = (self.rfile.read(length) if length else b"{}").decode("utf-8")
+            if adapter._event_returns:
+                from .client import decode_json
+                req = decode_json(raw)
+            else:
+                req = json.loads(raw)
         except Exception:
             return self._error(400, None, protocol.ERR_PARSE, "parse error")
         if not isinstance(req, dict):
             return self._error(400, None, protocol.ERR_INVALID_PARAMS, "JSON-RPC request must be an object")
+        if adapter._event_returns and "id" not in req:
+            from .event_return import no_content
+            return no_content(self)
         req_id, method = req.get("id"), str(req.get("method", ""))
         params = req["params"] if req.get("params") is not None else {}
         version = (self.headers.get("A2A-Version") or "").strip()
@@ -228,6 +236,9 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
                     protocol.metrics.rate_limit_triggers += 1
                 return self._error(http, req_id, code, msg)
         agent = route["agent"]
+        if adapter._event_returns:
+            from .event_return import dispatch
+            return dispatch(adapter, self, handler_name, req_id, params, identity, agent)
         if handler_name == "_rpc_message_send":
             self._json(200, adapter._rpc_message_send(req_id, params, identity, agent=agent, v1_response=is_v1))
         elif handler_name == "_rpc_message_stream":
@@ -244,6 +255,12 @@ class A2AAdapter(BasePlatformAdapter):
     def __init__(self, config, **kwargs):
         super().__init__(config=config, platform=Platform("a2a"))
         extra = getattr(config, "extra", {}) or {}
+        self._event_returns = extra.get("reliable_events", False)
+        if type(self._event_returns) is not bool:
+            raise ValueError("reliable_events requires a boolean")
+        if self._event_returns:
+            from hermes_constants import get_hermes_home
+            self._event_owner_home = str(get_hermes_home().resolve())
         # Scope-aware: a secondary multiplex profile must not borrow the default profile's bridged
         # A2A_PORT (falls closed to the module default). advertised_toolsets is deliberately unscoped.
         # (advertised_toolsets has the same env-leak shape but is left unscoped here — see the "Scope note"
@@ -439,7 +456,7 @@ class A2AAdapter(BasePlatformAdapter):
         return protocol.build_agent_card(
             name=agent.get("name") or self.agent_name, url=_join_url(self._base_url(public_url), agent.get("path", "")),
             description=agent.get("description") or _DEFAULT_DESCRIPTION, skills=self._advertised_skills(agent),
-            streaming=bool(agent.get("local", True)), push_notifications=True,
+            streaming=self._event_returns or bool(agent.get("local", True)), push_notifications=not self._event_returns,
             auth_required=not self._security_context.localhost_only(), tenant=str(agent.get("tenant") or ""),
         )
 
