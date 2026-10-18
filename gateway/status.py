@@ -922,10 +922,8 @@ def _cleanup_invalid_pid_path(
 def _try_acquire_file_lock(handle) -> bool:
     try:
         if _IS_WINDOWS:
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write("\n")
-                handle.flush()
+            # Windows permits locking beyond EOF. A probe must not write into
+            # another owner's empty JSON publication window before taking the lock.
             handle.seek(_WINDOWS_LOCK_OFFSET)
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         else:
