@@ -19,6 +19,7 @@ pytestmark = pytest.mark.platforms("windows")
 WORKER = r'''
 import json, pathlib, subprocess, sys, time
 root, home = map(pathlib.Path, sys.argv[1:3])
+(home/"worker-entered").write_text("entered")
 sys.path.insert(0, sys.argv[3])
 sys.path.insert(0, str(root))
 from hermes_cli import gateway_runtime_start as start
@@ -72,7 +73,7 @@ def test_update_step_allows_explicit_daemon_escape_but_cancels_ordinary_children
         "try {\n [HermesUpdateJob]::Resume($s)\n"
         f" $until=[DateTime]::UtcNow.AddSeconds(90); while (-not (Test-Path -LiteralPath {_ps_literal(str(cancel))})) {{ if ([DateTime]::UtcNow -gt $until) {{ throw 'probe controller deadline' }}; Start-Sleep -Milliseconds 20 }}\n"
         " if (-not [HermesUpdateJob]::TerminateAndWait($s.Job, 1, 5000)) { throw 'contained tree did not quiesce' }\n"
-        "} finally { [void][HermesUpdateJob]::TerminateAndWait($s.Job, 1, 5000); [HermesUpdateJob]::Close($s.Job); if ($stdout.Wait(3000)) { [Console]::WriteLine($stdout.GetAwaiter().GetResult()) }; if ($stderr.Wait(3000)) { [Console]::Error.WriteLine($stderr.GetAwaiter().GetResult()) } }\n"
+        "} finally { try { $s.Process.Refresh(); if ($s.Process.HasExited) { Write-Output ('inert_worker_exit=' + $s.Process.ExitCode) } else { Write-Output 'inert_worker_running=true' } } finally { [void][HermesUpdateJob]::TerminateAndWait($s.Job, 1, 5000); [HermesUpdateJob]::Close($s.Job); if ($stdout.Wait(3000)) { [Console]::WriteLine($stdout.GetAwaiter().GetResult()) }; if ($stderr.Wait(3000)) { [Console]::Error.WriteLine($stderr.GetAwaiter().GetResult()) } } }\n"
     )
     # Only OS launch essentials enter the inert tree; CI/provider credentials do not.
     env = {key: value for key, value in os.environ.items() if key.upper() in {
@@ -83,6 +84,9 @@ def test_update_step_allows_explicit_daemon_escape_but_cancels_ordinary_children
         folder = tmp_path / key.lower()
         folder.mkdir()
         env[key] = str(folder)
+    baseline = subprocess.run([python, "-I", "-c", "pass"], env=env,
+                              capture_output=True, text=True, timeout=10, check=False)
+    assert baseline.returncode == 0, (baseline.returncode, baseline.stdout, baseline.stderr)
     controller = subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-File", str(control)],
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                   env=env)
@@ -124,6 +128,7 @@ def test_update_step_allows_explicit_daemon_escape_but_cancels_ordinary_children
         except subprocess.TimeoutExpired:
             controller.kill()
             output, _ = controller.communicate(timeout=5)
+        print("Inert worker entered:", (tmp_path / "worker-entered").exists())
         if output:
             print("Inert controller/worker output:\n" + output)
         if daemon is not None:
