@@ -271,3 +271,72 @@ def test_root_policy_does_not_supply_missing_profile_peer_authority(configured, 
     assert dispatch.dispatch_once(conn, task_ids=[tid]).skipped_nonspawnable == [tid]
     assert kb.get_task(conn, tid).status == 'ready'
     assert not peer.calls
+
+
+def test_send_and_get_run_outside_both_dispatch_locks(configured, monkeypatch):
+    conn, _, peer = configured
+    db = Path(conn.execute('PRAGMA database_list').fetchone()['file'])
+    acquired = []
+    original = peer.open
+    def inspect_locks(request, timeout):
+        with kbc._dispatch_host_admission_lock() as host:
+            with kbc._dispatch_tick_lock(db) as board:
+                acquired.append((host, board))
+        assert not conn.in_transaction
+        return original(request, timeout)
+    monkeypatch.setattr(peer, 'open', inspect_locks)
+    tid = task(conn)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    assert [v['method'] for v in peer.calls] == ['SendMessage', 'GetTask']
+    assert acquired == [(True, True), (True, True)]
+
+
+@pytest.mark.parametrize('states', [('INPUT_REQUIRED',), ('SUBMITTED', 'INPUT_REQUIRED')])
+def test_peer_question_is_visible_needs_input_without_settling_remote_effects(configured, states):
+    from hermes_cli.kanban_external import unresolved_history
+    conn, _, peer = configured
+    peer.states = list(states)
+    tid = task(conn)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    if len(states) > 1:
+        dispatch.dispatch_once(conn, task_ids=[tid])
+    held = kb.get_task(conn, tid)
+    assert held.status == 'blocked'
+    assert held.block_kind == 'needs_input'
+    blocked = [e for e in kb.list_events(conn, tid) if e.kind == 'blocked'][-1]
+    assert 'Which synthetic input?' in blocked.payload['reason']
+    assert not any(e.kind == 'external_terminal' for e in kb.list_events(conn, tid))
+    assert unresolved_history(conn, tid)
+    before = len(peer.calls)
+    assert kb.unblock_task(conn, tid)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    assert len(peer.calls) == before
+
+
+def test_crash_before_deferred_send_leaves_intent_without_replay(configured, monkeypatch):
+    from hermes_cli.kanban_external_config import ConfiguredLanes
+    conn, _, peer = configured
+    original = ConfiguredLanes.finish
+    def crash(*args):
+        raise SystemExit('synthetic owner crash before deferred send')
+    monkeypatch.setattr(ConfiguredLanes, 'finish', crash)
+    tid = task(conn)
+    with pytest.raises(SystemExit):
+        dispatch.dispatch_once(conn, task_ids=[tid])
+    assert kb.get_task(conn, tid).status == 'running'
+    assert any(e.kind == 'external_intent' for e in kb.list_events(conn, tid))
+    monkeypatch.setattr(ConfiguredLanes, 'finish', original)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    assert not peer.calls
+
+
+def test_contended_tick_does_not_reserve_or_contact_peer(configured):
+    conn, _, peer = configured
+    tid = task(conn)
+    with kbc._dispatch_host_admission_lock() as held:
+        assert held
+        assert dispatch.dispatch_once(conn, task_ids=[tid]).skipped_locked
+    assert kb.get_task(conn, tid).status == 'ready'
+    assert not peer.calls
+    assert not any(e.kind == 'external_intent' for e in kb.list_events(conn, tid))

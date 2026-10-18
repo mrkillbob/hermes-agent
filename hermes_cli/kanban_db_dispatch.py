@@ -2226,20 +2226,17 @@ def dispatch_once(
     ``skipped_locked=True`` and writes nothing.
     """
     from hermes_cli.kanban_dispatch_tick import dispatch_tick, normalize_task_ids
+    from hermes_cli.kanban_external_config import prepare_dispatch_lanes
 
     selected_task_ids = normalize_task_ids(task_ids)
+    runtime_lanes = None
 
     def _locked_tick() -> DispatchResult:
-        effective_spawn = spawn_fn
-        if effective_spawn is None:
-            from hermes_cli.kanban_external_config import configured_lanes
-
-            effective_spawn = configured_lanes(conn)
-            if effective_spawn is not None and not dry_run:
-                effective_spawn.refresh(conn, task_ids=selected_task_ids)
+        nonlocal runtime_lanes
+        runtime_lanes = prepare_dispatch_lanes(conn, spawn_fn, dry_run, selected_task_ids)
         return dispatch_tick(
             conn,
-            spawn_fn=effective_spawn,
+            spawn_fn=runtime_lanes or spawn_fn,
             ttl_seconds=ttl_seconds,
             dry_run=dry_run,
             max_spawn=max_spawn,
@@ -2274,6 +2271,8 @@ def dispatch_once(
                     result = _locked_tick()
                     # Still under both locks: periodic PASSIVE WAL checkpoint.
                     _kbc._maybe_checkpoint_wal(conn, db_path)
+    if runtime_lanes is not None and not dry_run:
+        runtime_lanes.finish(conn)
     # Lock released. Fire the tick observer strictly OUTSIDE the critical
     # section: a slow subscriber must never stall a sibling dispatcher's tick.
     _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)

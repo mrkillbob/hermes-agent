@@ -8,7 +8,8 @@ import time
 from urllib.parse import urlsplit
 
 from hermes_cli import kanban_db as kb
-from hermes_cli.kanban_external import Delivery, ExternalLanes, Lane
+from hermes_cli.kanban_external import Artifact, Delivery, ExternalLanes, Lane, _owns
+from hermes_cli.kanban_coordinator_executor import envelope, event
 
 _MAX_LANES = 4
 _REFRESH_SECONDS = 60
@@ -92,6 +93,15 @@ def configured_lanes(conn):
     return ConfiguredLanes({name: _lane(database, config, entry) for name, entry in entries.items()})
 
 
+def prepare_dispatch_lanes(conn, spawn_fn, dry_run, task_ids):
+    if spawn_fn is not None:
+        return None
+    registry = configured_lanes(conn)
+    if registry is not None and not dry_run:
+        registry.reserve_refresh(conn, task_ids)
+    return registry
+
+
 def _mark(conn, task_id, run_id, kind, payload):
     with kb.write_txn(conn):
         kb._append_event(conn, task_id, kind, payload, run_id=run_id)
@@ -99,7 +109,17 @@ def _mark(conn, task_id, run_id, kind, payload):
 
 class ConfiguredLanes(ExternalLanes):
     """Poll at most four current bound runs, at most once per run per minute."""
-    def refresh(self, conn, task_ids=None):
+    def __init__(self, lanes):
+        super().__init__(lanes)
+        self._sends = []
+        self._refreshes = []
+
+    def _submit(self, conn, delivery, lane):
+        # The durable external_intent already consumes this attempt. A caller
+        # crash before finish is uncertainty, never permission to submit again.
+        self._sends.append((delivery, lane))
+
+    def reserve_refresh(self, conn, task_ids=None):
         names = tuple(self._lanes)
         params = [*names, time.time() - _REFRESH_SECONDS]
         selection = ''
@@ -116,11 +136,45 @@ class ConfiguredLanes(ExternalLanes):
         for row in rows:
             _mark(conn, row['task_id'], row['run_id'], 'external_a2a_poll', {})
             try:
-                self._refresh_one(conn, Delivery(**json.loads(row['payload'])))
+                self._refreshes.append((row['task_id'], row['run_id'], Delivery(**json.loads(row['payload']))))
             except (ValueError, TypeError, KeyError, AttributeError, OSError) as error:
                 # Configuration/receipt problems hold the run; no fallback or replay.
                 _mark(conn, row['task_id'], row['run_id'], 'external_a2a_refresh_hold',
                       {'error_class': type(error).__name__})
+
+    def finish(self, conn):
+        """Peer I/O and lifecycle APIs run outside dispatcher admission locks."""
+        sends, self._sends = self._sends, []
+        refreshes, self._refreshes = self._refreshes, []
+        for delivery, lane in sends:
+            super()._submit(conn, delivery, lane)
+            self._attention(conn, delivery, lane.executor.status(delivery))
+        for task_id, run_id, delivery in refreshes:
+            try:
+                self._refresh_one(conn, delivery)
+            except (ValueError, TypeError, KeyError, AttributeError, OSError) as error:
+                _mark(conn, task_id, run_id, 'external_a2a_refresh_hold',
+                      {'error_class': type(error).__name__})
+
+    def _attention(self, conn, delivery, status):
+        from plugins.platforms.a2a.protocol import STATE_INPUT_REQUIRED
+
+        if status is None or status.state != STATE_INPUT_REQUIRED:
+            return False
+        reason = 'External peer requires input: ' + ('; '.join(status.questions) or 'No validated question supplied')
+        artifact = Artifact(delivery, 'question', reason, questions=status.questions)
+        with kb.write_txn(conn):
+            self._binding(conn, delivery)
+            if not _owns(kb.get_task(conn, delivery.task_id), delivery):
+                raise ValueError('External question ownership changed')
+            previous = event(conn, delivery, 'external_a2a_attention')
+            if previous is not None and previous != envelope(artifact):
+                raise ValueError('Conflicting external question')
+            if previous is None:
+                kb._append_event(conn, delivery.task_id, 'external_a2a_attention', envelope(artifact), run_id=delivery.run_id)
+        # Deliberately no external_terminal: the peer remains resumable, so the
+        # unresolved intent still forbids a resend after this visible local hold.
+        return kb.block_task(conn, delivery.task_id, reason=reason, kind='needs_input', expected_run_id=delivery.run_id)
 
     def _refresh_one(self, conn, delivery):
         if not self.registered(delivery.lane):
@@ -129,6 +183,9 @@ class ConfiguredLanes(ExternalLanes):
             return
         executor = self._lanes[delivery.lane].executor
         status = executor.status(delivery)
+        if self._attention(conn, delivery, status):
+            return
         if status is not None and status.task_id is not None:
             executor.refresh_once(delivery)
-            self.reconcile(conn, delivery)
+            if not self.reconcile(conn, delivery):
+                self._attention(conn, delivery, executor.status(delivery))

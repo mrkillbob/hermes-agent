@@ -270,13 +270,17 @@ class ExternalLanes:
                                 task.assignee, lane.executor_id, uuid4().hex,
                                 _digest([task.title, task.body or '', workspace]), task.title, task.body or '', workspace)
             kb._append_event(conn, task.id, 'external_intent', asdict(delivery), run_id=task.current_run_id)
-        # Never hold a database transaction through executor effects. A crash here is
-        # indistinguishable from lost acceptance and intentionally consumes the attempt.
+        self._submit(conn, delivery, lane)
+        return delivery
+
+    def _submit(self, conn, delivery, lane):
+        # Never hold a database transaction through executor effects. Configured
+        # dispatch defers this hook until both admission locks have been released.
         try:
             receipt = lane.executor.submit(delivery)
         except Exception as exc:  # health: allow BLE001 -- untrusted transport errors may contain secrets; retain only class and uncertainty, never retry
             with kb.write_txn(conn):
-                kb._append_event(conn, task.id, 'external_uncertain', {'error_class': type(exc).__name__}, run_id=delivery.run_id)
+                kb._append_event(conn, delivery.task_id, 'external_uncertain', {'error_class': type(exc).__name__}, run_id=delivery.run_id)
             return delivery
         if receipt is not None:
             self._receive_for(conn, delivery, receipt)

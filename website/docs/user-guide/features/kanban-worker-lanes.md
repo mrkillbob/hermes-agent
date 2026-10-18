@@ -322,12 +322,16 @@ Normal non-dry ticks reconcile saved terminal receipts, then refresh at most fou
 current bound external runs through `GetTask`, at most once per run per minute.
 Exact-card dispatch restricts refresh to those same cards. A persisted poll marker
 rotates work across eligible runs and throttles repeated dashboard nudges; no new
-worker, timer or queue is started. Refresh runs under the existing dispatcher
-locks, with the client's one-second cooperative request budget. A stalled OS can
-still delay a tick. Missing remote IDs, changed authority/claims, malformed or
-conflicting evidence remain held without resubmission. The ordinary event stream
-retains bounded input-required questions; automatic answers and continuation are
-not supplied. A peer must implement the structured receipt contract above for
+worker, timer or queue is started. Delivery intents and poll reservations are persisted under the existing dispatcher
+locks. Both SendMessage and GetTask run after releasing those locks; active runs
+reserve capacity before sending. The client uses one-second cooperative refresh
+budgets. A stalled OS can still delay the calling tick, while unrelated boards
+can acquire admission locks. Missing remote IDs, changed authority/claims, malformed or
+conflicting evidence remain held without resubmission. Input-required responses create a visible sticky `needs_input` block whose reason
+contains the validated question (or an explicit missing-question notice). Bound
+attention evidence is saved first, without an `external_terminal` receipt: the
+remote task may still be active. Unblocking the card never authorizes a resend;
+remote continuation and settlement require explicit owner recovery. A peer must implement the structured receipt contract above for
 completion or failure to reach the existing Kanban lifecycle.
 
 ## Failure modes the dispatcher handles
