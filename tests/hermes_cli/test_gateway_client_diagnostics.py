@@ -34,6 +34,9 @@ async def test_websocket_failure_keeps_numeric_cause_and_existing_refusal(monkey
     rows = [json.loads(r.message.split(PREFIX, 1)[1]) for r in caplog.records if PREFIX in r.message]
     failure_row = next(r for r in rows if r["phase"] == "websocket_open_failed")
     assert failure_row["error_type"] == "ConnectionRefusedError" and failure_row["errno"] == 61
+    phases = [row["phase"] for row in rows]
+    assert "websocket_close_started" not in phases
+    assert "websocket_close_exited" not in phases
     assert secret not in caplog.text
 
 

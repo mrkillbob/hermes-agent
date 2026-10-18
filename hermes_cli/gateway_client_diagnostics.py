@@ -20,6 +20,19 @@ _ERROR_TYPES = frozenset({"OSError", "TimeoutError", "ConnectionError", "Connect
                           "ConnectionResetError", "ConnectionAbortedError", "BrokenPipeError"})
 
 
+class _ConnectionExitStack(AsyncExitStack):
+    """Track whether a WebSocket context was actually entered before reporting its close."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.connection_opened = False
+
+    async def enter_async_context(self, cm):
+        value = await super().enter_async_context(cm)
+        self.connection_opened = True
+        return value
+
+
 def safe_event(value: object) -> dict:
     """Rebuild an event from fixed labels and numeric facts; never copy arbitrary log data."""
     if not isinstance(value, dict) or value.get("phase") not in PHASES:
@@ -55,11 +68,14 @@ def record(phase: str, *, error: BaseException | None = None) -> None:
 @asynccontextmanager
 async def connection_stack():
     """Keep the normal exit stack's semantics while locating a blocked socket teardown."""
+    stack = _ConnectionExitStack()
     try:
-        async with AsyncExitStack() as stack:
+        async with stack:
             try:
                 yield stack
             finally:
-                record("websocket_close_started")
+                if stack.connection_opened:
+                    record("websocket_close_started")
     finally:
-        record("websocket_close_exited")
+        if stack.connection_opened:
+            record("websocket_close_exited")
