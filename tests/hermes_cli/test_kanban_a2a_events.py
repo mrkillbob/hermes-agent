@@ -44,6 +44,7 @@ class Peer:
         self.state, self.calls, self.saved = state, [], None
         self.drop_result = self.drop_ack = self.drop_task_ack = False
         self.change = lambda value: value
+        self.already_acked = False
     def open(self, request, timeout):
         rpc = json.loads(request.data)
         self.calls.append(rpc['method'])
@@ -74,7 +75,7 @@ class Peer:
         frames = [initial] if self.drop_result and rpc['method'] == 'SendStreamingMessage' else [initial, self.saved]
         if self.drop_task_ack and rpc['method'] == 'SendStreamingMessage':
             raise TimeoutError('lost initial task ACK')
-        return SSE(''.join(protocol.sse_data(protocol.stream_task(self.change(wire_task(v))), rpc['id']) for v in frames).encode())
+        return SSE(''.join(protocol.sse_data(protocol.stream_task(self.change(wire_task(v | {'acked': self.already_acked}))), rpc['id']) for v in frames).encode())
 
 
 def enable(configured, monkeypatch, state='COMPLETED'):
@@ -114,8 +115,8 @@ def test_disconnect_has_one_explicit_reattach_without_resubmission(configured, m
     assert peer.calls == ['SendStreamingMessage']
     ex = configured_lanes(conn)._lanes['external-house'].executor
     d = delivery(conn, tid)
-    assert ex.recover_events_once(d).kind == 'completed'
-    assert ex.recover_events_once(d).kind == 'completed'
+    assert ex.recover_events_once(d, recovery_id='disconnect-1').kind == 'completed'
+    assert ex.recover_events_once(d, recovery_id='disconnect-1').kind == 'completed'
     assert peer.calls == ['SendStreamingMessage', 'SubscribeToTask', 'SendMessage']
     assert configured_lanes(conn).reconcile(conn, d)
     assert kb.get_task(conn, tid).status == 'done'
@@ -131,7 +132,7 @@ def test_lost_delivery_ack_retains_terminal_and_recovers_without_execution(confi
     peer.drop_ack = False
     ex = configured_lanes(conn)._lanes['external-house'].executor
     d = delivery(conn, tid)
-    ex.recover_events_once(d)
+    ex.recover_events_once(d, recovery_id='disconnect-1')
     assert peer.calls == ['SendStreamingMessage', 'SendMessage', 'SendMessage']
 
 
@@ -143,9 +144,9 @@ def test_lost_initial_ack_uses_one_bound_lookup_without_new_send(configured, mon
     assert kb.get_task(conn, tid).status == 'running'
     ex = configured_lanes(conn)._lanes['external-house'].executor
     d = delivery(conn, tid)
-    assert ex.recover_events_once(d).kind == 'completed'
+    assert ex.recover_events_once(d, recovery_id='disconnect-1').kind == 'completed'
     assert configured_lanes(conn).reconcile(conn, d)
-    assert ex.recover_events_once(d).kind == 'completed'
+    assert ex.recover_events_once(d, recovery_id='disconnect-1').kind == 'completed'
     assert peer.calls == ['SendStreamingMessage', 'GetTask', 'SendMessage']
 
 
@@ -169,3 +170,49 @@ def test_unbound_event_is_held_without_ack_or_resubmission(configured, monkeypat
     dispatch.dispatch_once(conn, task_ids=[tid])
     assert kb.get_task(conn, tid).status == 'running'
     assert peer.calls == ['SendStreamingMessage']
+
+
+def test_transient_recovery_can_be_explicitly_retried_with_hard_cap(configured, monkeypatch):
+    conn, peer = enable(configured, monkeypatch)
+    peer.drop_result = True
+    tid = task(conn)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    ex = configured_lanes(conn)._lanes['external-house'].executor
+    d = delivery(conn, tid)
+    original = ex.client._opener
+    def unavailable(request, timeout):
+        raise TimeoutError('synthetic known disconnect')
+    ex.client._opener = unavailable
+    with pytest.raises(TimeoutError):
+        ex.recover_events_once(d, recovery_id='disconnect-1')
+    ex.client._opener = original
+    assert ex.recover_events_once(d, recovery_id='disconnect-2').kind == 'completed'
+    assert peer.calls == ['SendStreamingMessage', 'SubscribeToTask', 'SendMessage']
+
+
+def test_failed_recovery_cap_stops_even_explicit_unique_ids(configured, monkeypatch):
+    conn, peer = enable(configured, monkeypatch)
+    peer.drop_result = True
+    tid = task(conn)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    ex = configured_lanes(conn)._lanes['external-house'].executor
+    d = delivery(conn, tid)
+    def unavailable(request, timeout):
+        raise TimeoutError('synthetic known disconnect')
+    ex.client._opener = unavailable
+    for number in range(3):
+        with pytest.raises(TimeoutError):
+            ex.recover_events_once(d, recovery_id=f'disconnect-{number}')
+    with pytest.raises(ValueError, match='Recovery limit'):
+        ex.recover_events_once(d, recovery_id='disconnect-four')
+    assert peer.calls == ['SendStreamingMessage']
+
+
+def test_requested_already_acknowledged_result_does_not_send_another_ack(configured, monkeypatch):
+    conn, peer = enable(configured, monkeypatch)
+    peer.already_acked = True
+    tid = task(conn)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    assert kb.get_task(conn, tid).status == 'done'
+    assert peer.calls == ['SendStreamingMessage']
+    assert any(e.kind == 'external_a2a_delivery_ack' for e in kb.list_events(conn, tid))

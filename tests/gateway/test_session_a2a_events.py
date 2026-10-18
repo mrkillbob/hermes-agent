@@ -133,7 +133,7 @@ async def test_real_owner_stream_and_disconnect_without_cancelling_work(owner, m
                 generation=running['generation'], outcome='completed',
                 result={'result': {'final_response': '4', 'messages': []}, 'usage': {}})
             client.events.put_nowait({'params': {'type': 'message.complete', 'payload': {'admission_id': running['admission_id']}}})
-    adapter = SimpleNamespace(_active_profile='default', _sse_headers=lambda h: None, _sse_write=write)
+    adapter = SimpleNamespace(_active_profile='default', _event_owner_home='synthetic-home', _sse_headers=lambda h: None, _sse_write=write)
     params = request()
     message = {'message': {'messageId': params['message_id'], 'parts': [{'text': params['text']}]}}
     operation = serve(adapter, handler, '_rpc_message_stream', 'r', message, 'alice', {'slug': 'dev', 'local': True}, client_factory=factory)
@@ -217,3 +217,23 @@ async def test_concurrent_duplicate_acceptance_and_bound_lost_ack_lookup(owner):
     assert 'error' in bad
     with authority.db._read_ctx() as sql:
         assert sql.execute('SELECT COUNT(*) FROM session_admissions').fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_started_owner_restart_stays_unknown_without_second_admission(tmp_path, monkeypatch):
+    from hermes_state_runtime import get_session_admission
+    conn, authority = await create_owner(tmp_path, monkeypatch)
+    params = request()
+    accepted = await call(conn, params)
+    row = get_session_admission(authority.db, admission_id=accepted['admission_id'])
+    claim_session_input(authority.db, epoch=authority.epoch, session_id=row['target_session_id'])
+    await conn.close()
+    authority.db.close()
+    restored, replacement = await create_owner(tmp_path, monkeypatch)
+    read = {k: params[k] for k in ('agent', 'tenant', 'peer')} | {'op': 'observe', 'task_id': accepted['task']['id']}
+    response = await restored.dispatch({'id': 2, 'method': 'a2a.event', 'params': {'event_task': read}})
+    assert response['error']['message'] == 'unknown_execution'
+    with replacement.db._read_ctx() as sql:
+        assert sql.execute('SELECT COUNT(*) FROM session_admissions').fetchone()[0] == 1
+    await restored.close()
+    replacement.db.close()

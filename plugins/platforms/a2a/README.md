@@ -101,13 +101,16 @@ and typed delivery acknowledgments using `SendMessage`. It requires the
 `hermes.a2a.assignment.v1` assignment/receipt contract documented in
 [Kanban worker lanes](../../../website/docs/user-guide/features/kanban-worker-lanes.md).
 The first SSE Task identifies admission. A committed result/question/failure Task
-has `metadata["hermes.delivery.v1"] = {id, sha256}` and every Task advertises
+has `metadata["hermes.delivery.v1"] = {id, sha256, acknowledged}` and every Task advertises
 `metadata["hermes.events.v1"].ack_schema = "hermes.a2a.delivery_ack.v1"`.
 The hash covers the canonical Task without this transport metadata. The receiver
 stores the receipt before sending one data Part containing
 `{schema, task_id, event_id, sha256}` in `SendMessage`. This is an application
 extension negotiated by these peers, not a standard A2A ACK method. A matching
 receipt response marks delivery; an SSE write or bare HTTP success does not.
+Explicit reads/subscriptions may replay the same saved result after ACK, marked
+`acknowledged: true`; this is not a new delivery obligation and the client does
+not send another ACK. ACK never deletes the result or changes execution outcome.
 
 Outer task IDs, request fingerprints and exact owner admissions are retained in
 the owning profile's existing `state_meta` store. Results and delivery IDs are
@@ -125,7 +128,9 @@ contains the original extracted `context_id` and assignment `text`. Scope and
 fingerprint must match an existing projection; this never submits a task.
 
 The active stream waits for canonical owner events. Disconnect detaches delivery,
-not execution. A peer may make one bounded explicit recovery read/reattachment;
+not execution. A caller may make one bounded read/reattachment per explicit recovery ID,
+with at most three distinct recovery attempts retained per task. A repeated ID
+is inert, and transient failure requires a fresh explicit operator decision;
 there is no watcher, periodic receipt read, automatic reconnect or retry timer.
 Saved terminal receipts can be returned after owner restart without a model call.
 An unknown owner admission remains uncertain and is never re-executed.

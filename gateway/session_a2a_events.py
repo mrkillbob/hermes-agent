@@ -33,6 +33,8 @@ def result_task(record, receipt, result):
     kind = 'completed' if receipt.outcome == 'completed' and not result.get('failed') else 'error'
     if kind == 'completed' and reply.lstrip().upper().startswith(protocol.INPUT_REQUIRED_MARKER):
         kind, reply = 'question', reply.lstrip()[len(protocol.INPUT_REQUIRED_MARKER):].strip()
+    if kind == 'question' and not reply:
+        raise RuntimeStoreError('invalid_params')
     summary = reply or 'Owner execution failed without a result'
     body = {'schema': 'hermes.a2a.receipt.v1', 'correlation': record['correlation'], 'kind': kind,
             'summary': summary, 'findings': [], 'questions': [summary] if kind == 'question' else []}

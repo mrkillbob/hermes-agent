@@ -268,11 +268,11 @@ class A2AExecutor:
         except (ValueError, TypeError, KeyError, AttributeError):
             return None
 
-    def recover_events_once(self, delivery: Delivery):
+    def recover_events_once(self, delivery: Delivery, *, recovery_id: str):
         if self.plan.return_mode != 'events':
             raise ValueError('Event return mode required')
         from hermes_cli.kanban_a2a_events import recover_once
-        return recover_once(self, delivery)
+        return recover_once(self, delivery, recovery_id)
 
     def refresh_once(self, delivery: Delivery):
         if self.plan.return_mode == 'events':

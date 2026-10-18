@@ -376,9 +376,11 @@ makes no background peer requests for this mode. The foreground connection runs
 after dispatch locks are released, can occupy its calling tick for up to the
 120-second stream budget, and is not a detached subscription service.
 
-`A2AExecutor.recover_events_once(delivery)` is an explicit recovery action after a
-known disconnect. Its durable one-shot marker prevents repeated recovery calls
-from generating traffic. With a known remote ID it makes one `SubscribeToTask`;
+`A2AExecutor.recover_events_once(delivery, recovery_id=...)` is an explicit recovery action after a
+known disconnect. Its durable per-ID marker prevents duplicate recovery calls
+from generating traffic. The trusted caller supplies a new ID only for a known
+disconnect or explicit operator recovery decision; at most three distinct
+attempts are allowed per task, with no automatic retry schedule. With a known remote ID it makes one `SubscribeToTask`;
 with a lost initial ACK it first makes one payload-bound read-only lookup, then
 reattaches only if needed. It never sends the assignment again. The caller still
 uses the existing lane reconciliation API to apply a recovered result. Recovery

@@ -27,6 +27,7 @@ def wire_task(value):
     task['metadata'] = {EVENT_MODE: {'ack_schema': ACK_SCHEMA}}
     if value['event']:
         task['metadata'][DELIVERY] = {k: value['event'][k] for k in ('id', 'sha256')}
+        task['metadata'][DELIVERY]['acknowledged'] = bool(value.get('acked', False))
     return task
 
 
@@ -36,7 +37,7 @@ async def serve(adapter, handler, method, req_id, params, peer, agent, *, client
     factory = client_factory or owner_client
     base = dict(agent=str(agent.get('slug') or 'local'), tenant=str(agent.get('tenant') or ''), peer=peer)
     profile = agent.get('profile') or (adapter._active_profile if agent.get('local', True) else agent.get('slug'))
-    home = _profile_home(profile)
+    home = adapter._event_owner_home if agent.get('local', True) else _profile_home(profile)
     if not home:
         raise ValueError('Explicit owner profile required')
     async with asyncio.timeout(120):

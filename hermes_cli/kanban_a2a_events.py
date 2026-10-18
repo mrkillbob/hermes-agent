@@ -2,6 +2,7 @@
 from contextlib import closing
 from dataclasses import asdict
 import json
+import re
 
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_coordinator_executor import bounded_connection, event as journal_event, validate_binding
@@ -24,7 +25,8 @@ def _task(frame):
             or set(meta) - {EVENT_MODE, DELIVERY}):
         raise ValueError('Negotiated application delivery ACK required')
     event = meta.get(DELIVERY)
-    if event is not None and (not isinstance(event, dict) or set(event) != {'id', 'sha256'}
+    if event is not None and (not isinstance(event, dict) or set(event) != {'id', 'sha256', 'acknowledged'}
+            or type(event['acknowledged']) is not bool
             or event['sha256'] != digest(task) or event['id'] != 'event-' + event['sha256']):
         raise ValueError('Conflicting delivery event')
     return task, event
@@ -64,15 +66,24 @@ def receive_event(executor, delivery, event):
     if (saved is None or saved.kind not in {'completed', 'error'}) and (
             status is None or status.state != protocol.STATE_INPUT_REQUIRED or not status.questions):
         raise ValueError('Delivery requires a validated saved result/question')
-    delivery_mark(executor, delivery, _PREFIX + 'delivery', event)
-    acknowledge(executor, delivery, event)
+    metadata = {k: event[k] for k in ('id', 'sha256')}
+    delivery_mark(executor, delivery, _PREFIX + 'delivery', metadata)
+    if event['acknowledged']:
+        delivery_mark(executor, delivery, _PREFIX + 'delivery_ack', metadata)
+    else:
+        acknowledge(executor, delivery, metadata)
     return saved
 
 
-def recover_once(executor, delivery):
+def recover_once(executor, delivery, recovery_id):
     """Explicit caller action after a known disconnect; never called by dispatch ticks."""
+    if not isinstance(recovery_id, str) or re.fullmatch(r'[A-Za-z0-9_-]{1,64}', recovery_id) is None:
+        raise ValueError('Explicit bounded recovery identity required')
     executor._intent(delivery)
-    if not delivery_mark(executor, delivery, _PREFIX + 'event_recovery', {'key': delivery.key}, exclusive=True):
+    if executor.journal.read(delivery, _PREFIX + 'delivery_ack') is not None:
+        return executor.lookup(delivery)
+    if not delivery_mark(executor, delivery, _PREFIX + 'event_recovery:' + recovery_id,
+                         {'key': delivery.key, 'recovery_id': recovery_id}, exclusive=True):
         return executor.lookup(delivery)
     event = executor.journal.read(delivery, _PREFIX + 'delivery')
     if event is not None:
@@ -100,7 +111,8 @@ def delivery_mark(executor, delivery, kind, payload, *, exclusive=False):
     No permission to submit/continue work or change a task lifecycle is added.
     An unsettled delivery still requires the current owned run.
     """
-    if kind not in {_PREFIX + 'delivery', _PREFIX + 'delivery_ack', _PREFIX + 'event_recovery'}:
+    recovering = kind.startswith(_PREFIX + 'event_recovery:')
+    if kind not in {_PREFIX + 'delivery', _PREFIX + 'delivery_ack'} and not recovering:
         raise ValueError('Delivery metadata only')
     journal = executor.journal
     with bounded_connection(journal.database, journal.limits.submit_seconds, writable=True) as conn:
@@ -111,7 +123,13 @@ def delivery_mark(executor, delivery, kind, payload, *, exclusive=False):
             if not exclusive and old != value:
                 raise ValueError('Conflicting delivery metadata')
             return False
-        # A saved typed result is the sole exception to running ownership here.
+        if recovering:
+            prefix = _PREFIX + 'event_recovery:'
+            count = conn.execute('SELECT COUNT(*) FROM task_events WHERE task_id=? AND run_id=? AND substr(kind,1,?)=?',
+                                 (delivery.task_id, delivery.run_id, len(prefix), prefix)).fetchone()[0]
+            if count >= 3:
+                raise ValueError('Recovery limit reached; owner intervention required')
+        # A saved typed result/question is the sole exception to running ownership here.
         terminal = journal_event(conn, delivery, _PREFIX + 'terminal')
         frozen = terminal['envelope'] if terminal else journal_event(conn, delivery, _PREFIX + 'attention')
         if frozen is None:

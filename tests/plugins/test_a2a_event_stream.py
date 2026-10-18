@@ -54,3 +54,18 @@ def test_stream_rejects_changed_endpoint_without_request_replay():
     with pytest.raises(ValueError):
         list(client.stream('SendStreamingMessage', {}, 'request'))
     assert calls == ['SendStreamingMessage']
+
+
+def test_event_owner_captures_custom_home_before_callback_scope_changes(tmp_path, monkeypatch):
+    first = tmp_path / 'custom-owner'
+    monkeypatch.setenv('HERMES_HOME', str(first))
+    adapter = A2AAdapter(PlatformConfig(enabled=True, extra={'reliable_events': True}))
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'other-owner'))
+    assert adapter._event_owner_home == str(first.resolve())
+
+
+def test_saved_delivery_ack_is_visible_on_requested_result_replay():
+    from plugins.platforms.a2a.event_return import wire_task
+    task = {'id': 'task', 'contextId': 'context', 'status': {'state': 'TASK_STATE_COMPLETED'}}
+    value = {'task': task, 'event': {'id': 'event', 'sha256': 'hash'}, 'acked': True}
+    assert wire_task(value)['metadata']['hermes.delivery.v1']['acknowledged'] is True

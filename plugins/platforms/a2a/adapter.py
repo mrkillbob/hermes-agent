@@ -255,6 +255,9 @@ class A2AAdapter(BasePlatformAdapter):
         self._event_returns = extra.get("reliable_events", False)
         if type(self._event_returns) is not bool:
             raise ValueError("reliable_events requires a boolean")
+        if self._event_returns:
+            from hermes_constants import get_hermes_home
+            self._event_owner_home = str(get_hermes_home().resolve())
         # Scope-aware: a secondary multiplex profile must not borrow the default profile's bridged
         # A2A_PORT (falls closed to the module default). advertised_toolsets is deliberately unscoped.
         # (advertised_toolsets has the same env-leak shape but is left unscoped here — see the "Scope note"
