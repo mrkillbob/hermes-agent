@@ -14,8 +14,7 @@ from plugins.platforms.a2a import protocol, security
 def _bounded_result_task(record, body, state):
     """Keep terminal projections inside both durable-store and SSE frame limits."""
     import hermes_state_a2a as a2a_state
-    from plugins.platforms.a2a.client import MAX_BYTES
-    from plugins.platforms.a2a.event_return import wire_task
+    from plugins.platforms.a2a.event_return import receipt_fits
 
     def build(summary):
         payload = dict(body, summary=summary,
@@ -28,8 +27,8 @@ def _bounded_result_task(record, body, state):
                                   'parts': [protocol.text_part(json.dumps(payload))]}]
         event = {'id': 'event-' + a2a_state.digest(task), 'sha256': a2a_state.digest(task), 'task': task}
         persisted = dict(record, event=event)
-        framed = protocol.sse_data(protocol.stream_task(wire_task({'task': task, 'event': event, 'acked': False})), 'size-check')
-        return task, len(a2a_state.encoded(persisted).encode()) <= a2a_state._MAX_BYTES and len(framed.encode()) <= MAX_BYTES
+        fits = receipt_fits({'task': task, 'event': event, 'acked': False})
+        return task, len(a2a_state.encoded(persisted).encode()) <= a2a_state._MAX_BYTES and fits
 
     summary = body['summary']
     task, fits = build(summary)

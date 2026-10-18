@@ -142,3 +142,13 @@ settling them remains an explicit owner action. Streaming is bounded to 120 seco
 per foreground connection and existing owner/event-queue limits; cooperative OS
 I/O can still stall. A CLI that exits cannot claim unattended return. No native
 Dot/Codex callback, Claude endpoint/account or live peer is qualified by this source.
+
+Reliable-mode JSON-RPC IDs must be null, a finite number or text, with at most
+1,024 bytes in their ASCII-escaped JSON representation (including string quotes).
+An invalid ID is refused before owner access, with a null response ID. Terminal
+receipts reserve that entire ID budget and fit both the 49,152-byte SSE frame and
+GetTask/find JSON response, including outer Unicode identifiers. Oversized result
+text carries an explicit truncation marker; it does not change outcome or binding.
+An already saved receipt that exceeds a response bound is retained and explicitly
+refused, rather than rewritten under a new hash. The full truncated text is not
+retrievable over this A2A interface.

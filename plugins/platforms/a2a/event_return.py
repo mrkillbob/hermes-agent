@@ -1,6 +1,7 @@
 """Opt-in existing A2A endpoint -> canonical owner -> durable SSE delivery."""
 import asyncio
 from copy import deepcopy
+import json
 
 from . import protocol
 from .client import MAX_BYTES
@@ -9,6 +10,18 @@ ACK_SCHEMA = 'hermes.a2a.delivery_ack.v1'
 LOOKUP_SCHEMA = 'hermes.a2a.lookup.v1'
 EVENT_MODE = 'hermes.events.v1'
 DELIVERY = 'hermes.delivery.v1'
+MAX_REQUEST_ID_BYTES = 1024
+
+
+def request_id_fits(request_id):
+    if request_id is not None and type(request_id) not in (str, int, float):
+        return False
+    try:
+        raw = json.dumps(request_id, allow_nan=False).encode()
+        json.dumps(request_id, ensure_ascii=False, allow_nan=False).encode()
+        return len(raw) <= MAX_REQUEST_ID_BYTES
+    except (TypeError, ValueError, UnicodeError):
+        return False
 
 
 def ack_data(params):
@@ -31,7 +44,19 @@ def wire_task(value):
     return task
 
 
+def receipt_fits(value):
+    # Use the largest admitted serialized ID, not an example caller's short ID.
+    # GetTask escapes outer Unicode IDs; SSE emits UTF-8 and adds a task wrapper.
+    request_id = 'x' * (MAX_REQUEST_ID_BYTES - 2)
+    task = wire_task(value)
+    lookup = json.dumps(protocol.jsonrpc_result(request_id, task), allow_nan=False).encode()
+    stream = protocol.sse_data(protocol.stream_task(task), request_id).encode()
+    return len(lookup) <= MAX_BYTES and len(stream) <= MAX_BYTES
+
+
 async def serve(adapter, handler, method, req_id, params, peer, agent, *, client_factory=None):
+    if not request_id_fits(req_id):
+        raise ValueError('Bounded scalar event request ID required')
     from gateway.session_a2a_events import observations, owner_client
     from plugins.platforms.a2a.adapter import _profile_home
     factory = client_factory or owner_client
@@ -64,7 +89,10 @@ async def serve(adapter, handler, method, req_id, params, peer, agent, *, client
                         raise ValueError('Bound read-only lookup required')
                     request = base | {'op': 'find', **lookup}
                 value = await client.rpc('a2a.event', event_task=request)
-                return handler._json(200, protocol.jsonrpc_result(req_id, wire_task(value)))
+                payload = protocol.jsonrpc_result(req_id, wire_task(value))
+                if len(json.dumps(payload, allow_nan=False).encode()) > MAX_BYTES:
+                    raise ValueError('A2A event exceeds JSON bound')
+                return handler._json(200, payload)
             opened = False
             async for value in observations(client, request):
                 payload = protocol.sse_data(protocol.stream_task(wire_task(value)), req_id)
@@ -81,6 +109,9 @@ async def serve(adapter, handler, method, req_id, params, peer, agent, *, client
 def dispatch(adapter, handler, method, req_id, params, peer, agent):
     # Runs on the existing HTTP request thread; disconnect only detaches delivery.
     # Canonical execution has its own durable owner and is not cancelled here.
+    if not request_id_fits(req_id):
+        return handler._json(200, protocol.jsonrpc_error(None, protocol.ERR_INVALID_PARAMS,
+            'Event request ID must be scalar and at most 1024 serialized bytes'))
     try:
         return asyncio.run(serve(adapter, handler, method, req_id, params, peer, agent))
     except (BrokenPipeError, ConnectionResetError):
