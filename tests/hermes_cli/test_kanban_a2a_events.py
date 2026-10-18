@@ -136,6 +136,24 @@ def test_lost_delivery_ack_retains_terminal_and_recovers_without_execution(confi
     assert peer.calls == ['SendStreamingMessage', 'SendMessage', 'SendMessage']
 
 
+def test_lost_question_ack_preserves_attention_for_explicit_recovery(configured, monkeypatch):
+    conn, peer = enable(configured, monkeypatch, 'INPUT_REQUIRED')
+    peer.drop_ack = True
+    tid = task(conn)
+    dispatch.dispatch_once(conn, task_ids=[tid])
+    assert kb.get_task(conn, tid).status == 'blocked'
+    peer.drop_ack = False
+    ex = configured_lanes(conn)._lanes['external-house'].executor
+    d = delivery(conn, tid)
+    # Questions remain attention observations rather than terminal artifacts.
+    assert ex.recover_events_once(d, recovery_id='question-ack-recovery') is None
+    assert ex.status(d).questions == ('Which input?',)
+    configured_lanes(conn).reconcile(conn, d)
+    assert kb.get_task(conn, tid).status == 'blocked'
+    assert any(e.kind == 'external_a2a_attention' for e in kb.list_events(conn, tid))
+    assert peer.calls == ['SendStreamingMessage', 'SendMessage', 'SendMessage']
+
+
 def test_lost_initial_ack_uses_one_bound_lookup_without_new_send(configured, monkeypatch):
     conn, peer = enable(configured, monkeypatch)
     peer.drop_task_ack = True

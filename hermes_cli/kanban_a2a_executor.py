@@ -177,6 +177,15 @@ class A2AExecutor:
                 kb._append_event(conn, delivery.task_id, _PREFIX + 'observation', value, run_id=delivery.run_id)
 
     def _failure(self, delivery, error):
+        # An input-required frame is already a useful, validated owner
+        # observation. Preserve it if a later delivery-ACK RPC fails: replacing
+        # it with an error-only observation would make explicit recovery able
+        # to ACK the peer while losing the question needed by Kanban attention.
+        latest = self._latest(delivery)
+        if latest is not None and latest['response'] is not None:
+            status = self.status(delivery)
+            if status is not None and status.state == protocol.STATE_INPUT_REQUIRED and status.questions:
+                return
         self._save(delivery, error_class=type(error).__name__)
 
     def _remote(self, delivery):
