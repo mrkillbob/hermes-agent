@@ -59,6 +59,11 @@ jobs:
           test-environment: 'true'
           prune-python-cache: true
 
+      - name: Probe updater job detach contract with inert children
+        if: github.event_name == 'push' && github.ref == 'refs/heads/wine2e/windows-update-job-detach-20261018' && inputs.release != true
+        shell: bash
+        run: bash scripts/run_tests.sh tests/scripts/desktop_update/test_windows_update_job_detach.py
+
       - name: Run venv-holder live E2E
         # Canonical runner (scripts/run_tests.sh) — never bare pytest: it
         # enforces credential hygiene, TZ, temp HERMES_HOME and subprocess
