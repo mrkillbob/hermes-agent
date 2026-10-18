@@ -4809,6 +4809,17 @@ export interface A2aForwardResult {
   session_id: string
   result: unknown | null
 }
+export interface A2aEventParams {
+  event_task: Record<string, unknown>
+}
+export interface A2aEventResult {
+  task?: Record<string, unknown> | null
+  event?: Record<string, unknown> | null
+  admission_id?: string | null
+  acked?: boolean | null
+  acknowledged?: string | null
+  sha256?: string | null
+}
 export interface WorkerRegisterParams {
   profile_id: string
   session_id: string
@@ -6737,6 +6748,8 @@ export const RPC_METHODS = [
 
 // ── Canonical (hermes-gateway-v1) methods only the session authority serves ──
 export interface CanonicalRpcMethods {
+  /** Owner-bound A2A event admission, exact observation and delivery acknowledgment. */
+  'a2a.event': { params: A2aEventParams; result: A2aEventResult }
   /** Forward one A2A input into the conversation its identity tuple names. */
   'a2a.forward': { params: A2aForwardParams; result: A2aForwardResult }
   'approval.respond': { params: CanonicalApprovalParams; result: PromptResponseResult }
@@ -6807,6 +6820,7 @@ export interface CanonicalRpcMethods {
 }
 export type CanonicalRpcMethod = keyof CanonicalRpcMethods
 export const CANONICAL_RPC_METHODS = [
+  'a2a.event',
   'a2a.forward',
   'approval.respond',
   'bot_relay.deliver',

@@ -139,7 +139,7 @@ class AuthorityConnection:
                     'session.list': self.list_sessions, 'session.info': self.info,
                     'session.mutate': self.mutate, 'bot_relay.deliver': self.bot_deliver,
                     'bot_relay.roster.sync': self.bot_roster, 'bot_relay.outbox.drain': self.bot_outbox,
-                    'bot_relay.reply': self.bot_reply, 'a2a.forward': self.a2a_forward,
+                    'bot_relay.reply': self.bot_reply, 'a2a.forward': self.a2a_forward, 'a2a.event': self.a2a_event,
                     'kanban.run': self.kanban_run,
                     'cron.submit': self.cron_submit, 'cron.status': self.cron_status,
                     'cron.cancel': self.cron_cancel, 'cron.recover': self.cron_recover,
@@ -263,6 +263,10 @@ class AuthorityConnection:
         except sqlite3.Error:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}}
+
+    async def a2a_event(self, ref, params):
+        from gateway.session_a2a_events import rpc
+        return await rpc(self, params['event_task'])
 
     async def a2a_forward(self, ref, params):
         from gateway.session_a2a import forward

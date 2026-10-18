@@ -4797,6 +4797,102 @@
   ],
   "components": {
     "schemas": {
+      "A2aEventParams": {
+        "additionalProperties": false,
+        "properties": {
+          "event_task": {
+            "additionalProperties": true,
+            "title": "Event Task",
+            "type": "object"
+          }
+        },
+        "required": [
+          "event_task"
+        ],
+        "title": "A2aEventParams",
+        "type": "object"
+      },
+      "A2aEventResult": {
+        "additionalProperties": false,
+        "properties": {
+          "task": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Task"
+          },
+          "event": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Event"
+          },
+          "admission_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Admission Id"
+          },
+          "acked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Acked"
+          },
+          "acknowledged": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Acknowledged"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sha256"
+          }
+        },
+        "title": "A2aEventResult",
+        "type": "object"
+      },
       "A2aForwardParams": {
         "additionalProperties": false,
         "properties": {
@@ -46965,6 +47061,24 @@
     }
   },
   "x-canonical-methods": [
+    {
+      "name": "a2a.event",
+      "summary": "Owner-bound A2A event admission, exact observation and delivery acknowledgment.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/A2aEventParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/A2aEventResult"
+        }
+      }
+    },
     {
       "name": "a2a.forward",
       "summary": "Forward one A2A input into the conversation its identity tuple names.",

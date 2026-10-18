@@ -25,11 +25,13 @@ class PeerPlan:
     tenant: str = ''
     version: str = protocol.PROTOCOL_VERSION
     authority_id: str = 'fixture-only'
+    return_mode: str = 'legacy'
 
     def __post_init__(self):
         validate_url(self.url)
         if (any(not isinstance(v, str) or len(v) > 2048 for v in asdict(self).values())
-                or not self.executor_id.strip() or not self.authority_id.strip() or self.version != protocol.PROTOCOL_VERSION):
+                or not self.executor_id.strip() or not self.authority_id.strip() or self.version != protocol.PROTOCOL_VERSION
+                or self.return_mode not in {'legacy', 'events'}):
             raise ValueError('Explicit bounded peer plan required')
 
 
@@ -78,8 +80,15 @@ def _params(delivery, plan):
     return {'message': _message(delivery), **({'tenant': plan.tenant} if plan.tenant else {})}
 
 
+def _plan_dict(plan):
+    value = asdict(plan)
+    if plan.return_mode == 'legacy':
+        value.pop('return_mode')  # Preserve pre-event journal bindings byte-for-byte.
+    return value
+
+
 def _send_intent(delivery, plan):
-    return {'plan': asdict(plan), 'message_id': delivery.key, 'request_sha256': digest(_params(delivery, plan))}
+    return {'plan': _plan_dict(plan), 'message_id': delivery.key, 'request_sha256': digest(_params(delivery, plan))}
 
 
 def _task(response, method):
@@ -152,12 +161,12 @@ class A2AExecutor:
         with bounded_connection(self.journal.database, self.journal.limits.lookup_seconds) as conn:
             validate_binding(conn, delivery, self.journal.database, self.plan.executor_id)
             value = event(conn, delivery, _PREFIX + 'observation')
-            if value is not None and (value.get('binding') != digest(asdict(delivery)) or value.get('plan') != asdict(self.plan)):
+            if value is not None and (value.get('binding') != digest(asdict(delivery)) or value.get('plan') != _plan_dict(self.plan)):
                 raise ValueError('Foreign A2A observation')
             return value
 
     def _save(self, delivery, response=None, error_class=None, method=None):
-        value = {'binding': digest(asdict(delivery)), 'plan': asdict(self.plan),
+        value = {'binding': digest(asdict(delivery)), 'plan': _plan_dict(self.plan),
                  'response': response, 'error_class': error_class, 'method': method}
         if len(json.dumps(value, allow_nan=False).encode()) > 65536:
             raise ValueError('Observation exceeds journal bound')
@@ -168,12 +177,23 @@ class A2AExecutor:
                 kb._append_event(conn, delivery.task_id, _PREFIX + 'observation', value, run_id=delivery.run_id)
 
     def _failure(self, delivery, error):
+        # An input-required frame is already a useful, validated owner
+        # observation. Preserve it if a later delivery-ACK RPC fails: replacing
+        # it with an error-only observation would make explicit recovery able
+        # to ACK the peer while losing the question needed by Kanban attention.
+        latest = self._latest(delivery)
+        if latest is not None and latest['response'] is not None:
+            if self._cached_terminal(delivery) is not None:
+                return
+            status = self.status(delivery)
+            if status is not None and status.state == protocol.STATE_INPUT_REQUIRED and status.questions:
+                return
         self._save(delivery, error_class=type(error).__name__)
 
     def _remote(self, delivery):
         remote = self.journal.read(delivery, _PREFIX + 'remote')
         if remote is not None and (set(remote) != {'binding', 'task_id', 'context_id', 'plan'}
-                or remote['plan'] != asdict(self.plan)
+                or remote['plan'] != _plan_dict(self.plan)
                 or any(not isinstance(remote[k], str) or not remote[k].strip() or len(remote[k]) > 1024
                        for k in ('task_id', 'context_id'))):
             raise ValueError('Malformed remote task binding')
@@ -181,7 +201,7 @@ class A2AExecutor:
 
     def _ingest(self, delivery, response, method):
         task = _task(response, method)
-        remote = {'task_id': task['id'], 'context_id': task['contextId'], 'plan': asdict(self.plan)}
+        remote = {'task_id': task['id'], 'context_id': task['contextId'], 'plan': _plan_dict(self.plan)}
         old = self._remote(delivery)
         if old is not None and {k: old[k] for k in remote} != remote:
             raise ValueError('A2A task/context changed')
@@ -229,12 +249,15 @@ class A2AExecutor:
             self._intent(delivery)
             return self.lookup(delivery) or accepted
         try:
+            if self.plan.return_mode == 'events':
+                from hermes_cli.kanban_a2a_events import consume
+                return consume(self, delivery, 'SendStreamingMessage', params) or accepted
             response = self.client.rpc('SendMessage', params, delivery.key + ':send', timeout=self.journal.limits.submit_seconds)
             return self._ingest(delivery, response, 'SendMessage') or accepted
         except (ValueError, TypeError, KeyError, AttributeError, OSError, sqlite3.Error) as error:
             # No exception text (which may contain remote output or credentials) is retained.
             self._failure(delivery, error)
-            return accepted
+            return (self.lookup(delivery) or accepted) if self.plan.return_mode == 'events' else accepted
 
     def lookup(self, delivery: Delivery):
         if self._intent(delivery) is None:
@@ -256,7 +279,15 @@ class A2AExecutor:
         except (ValueError, TypeError, KeyError, AttributeError):
             return None
 
+    def recover_events_once(self, delivery: Delivery, *, recovery_id: str):
+        if self.plan.return_mode != 'events':
+            raise ValueError('Event return mode required')
+        from hermes_cli.kanban_a2a_events import recover_once
+        return recover_once(self, delivery, recovery_id)
+
     def refresh_once(self, delivery: Delivery):
+        if self.plan.return_mode == 'events':
+            raise ValueError('Periodic refresh is disabled in event return mode')
         if self._intent(delivery) is None:
             raise ValueError('Send intent required before refresh')
         saved = self.lookup(delivery)
