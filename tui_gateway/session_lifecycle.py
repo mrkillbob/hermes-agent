@@ -417,6 +417,26 @@ def _lifecycle_own_sid(session: dict, sid_hint: str = "") -> str:
     return own_sid
 
 
+def _end_session_row(session: dict, session_id: str, session_key, end_reason: str,
+                     tui_owns_lifecycle: bool, automatic_cleanup: bool) -> bool:
+    """End the session's state.db row when this runtime owns it; returns whether it still owns the lifecycle."""
+    # The *session's* profile state.db (app-global remote mode), not the launch profile's.
+    with contextlib.suppress(Exception), _session_db(session) as db:
+        if db is None:
+            return tui_owns_lifecycle
+        # Never end gateway-originated sessions: Groundhog Day loop (gateway self-heals to the parent,
+        # compression splits back to the reaped child, forever).
+        if _is_gateway_owned_source((db.get_session(session_id) or {}).get("source", "")):
+            return False
+        # Automatic Desktop cleanup (ws_orphan_reap, idle_timeout, etc.) reclaims
+        # runtime but must not end the durable row — the conversation stays open
+        # and resumable until the user explicitly closes or archives it.  #105588
+        # A turn the gateway's ledger still holds keeps the row open too (#140642).
+        if tui_owns_lifecycle and not automatic_cleanup:
+            return _end_unless_ledger_busy(db, session_id, session_key, end_reason)
+    return tui_owns_lifecycle
+
+
 def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
     """Best-effort finalize hook + memory commit; mirrors the CLI exit path so a force-quit mid-turn (double
     Ctrl-C, terminal close, SIGHUP) loses nothing."""
@@ -477,20 +497,8 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         if _other_runtime_owns_lifecycle:
             logger.info("Preserving session %s during %s: another backend owns an active lease", session_id, end_reason)
         if session_id:
-            # The *session's* profile state.db (app-global remote mode), not the launch profile's.
-            with contextlib.suppress(Exception), _session_db(session) as db:
-                if db is not None:
-                    # Never end gateway-originated sessions: Groundhog Day loop (gateway self-heals to the parent,
-                    # compression splits back to the reaped child, forever).
-                    if _is_gateway_owned_source((db.get_session(session_id) or {}).get("source", "")):
-                        _tui_owns_lifecycle = False
-                    elif _tui_owns_lifecycle and not _desktop_automatic_cleanup:
-                        # Automatic Desktop cleanup (ws_orphan_reap, idle_timeout, etc.) reclaims
-                        # runtime but must not end the durable row — the conversation stays open
-                        # and resumable until the user explicitly closes or archives it.  #105588
-                        # A turn the gateway's ledger still holds keeps the row open too (#140642).
-                        if not _end_unless_ledger_busy(db, session_id, session_key, end_reason):
-                            _tui_owns_lifecycle = False
+            _tui_owns_lifecycle = _end_session_row(
+                session, session_id, session_key, end_reason, _tui_owns_lifecycle, _desktop_automatic_cleanup)
     # ``_teardown_session`` follows with ``agent.close()``, whose ``_finalize_owned_session_row`` ends the row as
     # ``agent_close`` through the agent's own handle — every spare decision above would be undone one call later.
     if agent is not None and (_desktop_automatic_cleanup or not _tui_owns_lifecycle):
