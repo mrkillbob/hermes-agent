@@ -113,6 +113,9 @@ class StreamJsonEmitter:
         for key in ("admission_id", "admission_status", "settled", "outcome", "needs_input"):
             if key in data:
                 payload[key] = data[key]
+        if data.get("replay_gap"):
+            # The viewer fell behind and re-attached: ``text`` events stopped there; ``text`` is the whole reply.
+            payload["replay_gap"] = True
         self._emit(payload)
         print(f"\nsession_id: {session_id or self._session_id}", file=sys.stderr)  # same stderr contract as -Q
         return exit_code
