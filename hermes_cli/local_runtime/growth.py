@@ -175,8 +175,12 @@ def maybe_grow_window(model_id: str, *, base_url: str, session_tokens: int,
             logger.debug("growth %s: %s (%s)", model_id, decision.action, decision.reason)
             return None
 
-        # The growing model's residency becomes available at its eventual reload.
-        live = _launch_budget(budget, own_bytes=resident_footprint(gguf, budget, current_window) or 0)
+        # The growing model's residency becomes available at its eventual reload, draft
+        # included when its running preset has one.
+        running = read_preset_decisions().get(model_id)
+        drafting = running is not None and (running.keys or {}).get("spec-type") == "draft-dflash"
+        own_bytes = resident_footprint(gguf, budget, current_window, drafting=drafting) or 0
+        live = _launch_budget(budget, own_bytes=own_bytes)
         plan = preset_for_model(gguf, budget, set(), requested_window=decision.next_window, live=live)
     if plan is None or plan.refusal or plan.window < decision.next_window:
         logger.debug("growth %s: the next rung does not fit beside other programs' GPU memory",

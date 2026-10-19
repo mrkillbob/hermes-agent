@@ -39,8 +39,8 @@ def test_engine_install_reports_staged_build_without_restarting_owner(monkeypatc
     from hermes_cli.web_routers import local_models as lm
 
     changes = []
-    monkeypatch.setattr(lm, '_runtime_target', lambda backend: ('fixture-tag', 'cpu'))
-    monkeypatch.setattr(lm, '_install_engine_job', lambda job, backend: SimpleNamespace(tag='fixture-tag'))
+    monkeypatch.setattr(lm, '_runtime_target', lambda backend: ('b1', 'cpu'))
+    monkeypatch.setattr(lm, '_install_engine_job', lambda job, backend: SimpleNamespace(tag='b1'))
     monkeypatch.setattr(lm, '_spawn_job', lambda job, name, run, **kwargs: run())
     monkeypatch.setattr(lm.bootstrap, 'shutdown_local_runtime', lambda: changes.append('interrupted'))
     result = lm.local_models_runtime_install(lm.RuntimeInstallBody(backend='cpu'))

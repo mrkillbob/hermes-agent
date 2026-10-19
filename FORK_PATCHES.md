@@ -7,6 +7,8 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 
 | Patch | Files | Guard test |
 |---|---|---|
+| Browse schema fixtures scope native descriptor inventories to registered disposable processes while retaining holder refusal and home guards | `tests/_fixtures/owned_native_holders.py`, `tests/hermes_cli/test_browse_schema_drift.py` | `tests/hermes_cli/test_owned_holder_projection.py` |
+| Gateway chat records fixed-label loop entry/return/raise and top-level oneshot return phases without changing results, exceptions, or timeout budgets | `hermes_cli/gateway_chat.py`, `hermes_cli/gateway_client_diagnostics.py`, `hermes_cli/main.py` | `tests/hermes_cli/test_gateway_chat_exit_diagnostics.py` |
 | Frozen session policies preserve YAML dates/timestamps as ISO strings, so unrelated plugin dates cannot block cron admission | `gateway/session_policy.py`, `gateway/session_policy_config.py` | `tests/gateway/test_session_policy_yaml_dates.py` |
 | Skill env passthrough is keyed per conversation session, not process-wide (sibling chats cannot inherit a skill's secret names) | `tools/env_passthrough.py` | `tests/tools/test_env_passthrough_fork_isolation.py` |
 | Media proxy enforces its 25 MB cap while streaming | `hermes_cli/web_routers/files.py` | `tests/hermes_cli/test_media_proxy_streaming_limit.py` |
@@ -16,11 +18,13 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 | Docs-site `npm audit` gate allow-lists advisories with no upstream fix (`braces`, GHSA-vfj7-8cjw-p6xm); everything else high/critical still fails | `.github/workflows/docs-site-checks.yml`, `scripts/ci/npm_audit_gate.py` | `tests/scripts/test_npm_audit_gate.py` |
 | xAI streaming defers end-of-audio until `transcript.created` instead of dropping queued PCM | `tools/transcription_streaming.py` | `tests/tools/test_xai_streaming_early_eos.py` |
 | Desktop dictation falls back to the recorded blob when the startup PCM buffer overflows | `apps/desktop/src/app/chat/composer/hooks/use-voice-recorder.ts` | `use-voice-recorder-warmup.test.tsx` ("startup PCM buffer overflows") |
+| Desktop reconnect rereads the durable transcript after a finished attach when the terminal wire frame was missed | `apps/desktop/src/app/session/hooks/use-session-actions/{index,reconnect-transcript}.ts` | `reconnect-terminal-transcript.test.tsx` ("without terminal wire frames") |
 | Pooled account-usage cache/refresh keys include the route host | `agent/account_usage_cache.py`, `hermes_cli/inventory.py` | `tests/agent/test_account_usage_cache_route_host.py` |
 | Capabilities ▸ Plugins withholds the settings gear for an agent on a non-active connection (Settings only reaches the active gateway) | `apps/desktop/src/app/capabilities/plugins/plugins-tab.tsx`, `plugin-scope.ts` | `plugin-scope.test.ts` (vitest) |
 | Reasoning-markup parser recognizes CommonMark fences (tilde, up to 3-space indent, fence length) | `web/src/lib/reasoning-markup.ts` | `web/src/lib/reasoning-markup.test.ts` (vitest) |
 | API server: structured `reasoning.effort` outranks legacy `reasoning_effort` | `gateway/platforms/api_server_request_options.py` | `tests/gateway/test_api_server_reasoning_precedence.py` |
 | `update-ui.test.mjs` "probe Git reaches the staged main" gets a 60s timeout (spawns Python repeatedly; 5s default flakes on CI) | `tests-js/update-ui.test.mjs` | itself |
+| Browse reconciliation enforces its deadline during macOS durability setup, SQLite transaction lock waits and shared schema execution, preserving history on expiration | `hermes_state_reconcile.py` | `tests/hermes_state/test_browse_reconcile_budget.py` |
 | Google installs pin OAuthlib 4.0.0 and Google Chat repairs stale OAuthlib while preserving client state, PKCE and token exchange | `pyproject.toml`, `uv.lock`, `plugins/platforms/google_chat/oauth.py` | `tests/gateway/test_google_chat_oauth_dependencies.py`, `tests/gateway/test_google_chat_oauth_client.py` |
 
 ```bash

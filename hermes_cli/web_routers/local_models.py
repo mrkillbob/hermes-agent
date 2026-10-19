@@ -486,10 +486,39 @@ def _download_plan(entry, variant) -> list:
     return plan
 
 
-def _run_download_plan(job: dict[str, Any], plan: list, label: str) -> None:
-    """The downloader counts completed files and every part of this plan."""
+def _missing_drafts(engine_tag: str) -> list:
+    """Download-plan rows for the DFlash drafts of downloaded models that ``engine_tag`` can load
+    but that aren't on disk: models downloaded before their draft joined the catalog."""
+    staged = set(bootstrap.staged_model_ids())
+    build = int(engine_tag.removeprefix("b"))
+    plan = []
+    for entry in catalog.CATALOG:
+        asset = entry.draft
+        if asset is None or entry.draft_spec_type != "draft-dflash":
+            continue
+        if not any(v.model_id in staged for v in entry.variants):
+            continue
+        if entry.draft_min_engine and build < int(entry.draft_min_engine.removeprefix("b")):
+            continue
+        dest = bootstrap.assets_dir() / asset.local_name
+        if not dest.is_file():
+            plan.append((_hf_url(asset.repo or entry.repo, asset.path, asset.revision), dest, asset.size_bytes))
+    return plan
+
+
+def _run_download_plan(job: dict[str, Any], plan: list, label: str, entry=None) -> None:
+    """The downloader counts completed files and every part of this plan. A catalog entry's draft
+    downloads last and only speeds generation up, so a draft that fails costs the model nothing."""
+    draft = bootstrap.assets_dir() / entry.draft.local_name if entry is not None and entry.draft else None
+    required = [row for row in plan if row[1] != draft]
     _step(job, "downloading", f"Downloading {label}")
-    _download_job(job, plan)
+    _download_job(job, required)
+    optional = [row for row in plan if row[1] == draft]
+    if optional:
+        with _JOBS_LOCK:
+            job.update(done_bytes=0, total_bytes=None, ranges={})
+        _step(job, "downloading", "Downloading the draft model that speeds up generation")
+        _download_optional(job, optional)
 
 
 def _download_progress_hook(job: dict[str, Any]):
@@ -505,6 +534,19 @@ def _download_job(job: dict[str, Any], plan) -> None:
     running = _RUNNING.get(job["job_id"], {})
     dl = Download([Source(url, dest) for url, dest, _ in plan], pause_event=running.get("pause"))
     dl.run(progress=_download_progress_hook(job))
+
+
+def _download_optional(job: dict[str, Any], plan) -> bool:
+    """Download files that only speed generation up, such as a DFlash draft. A failure leaves the
+    model running without them, so it is logged instead of failing the job; a pause still pauses."""
+    try:
+        _download_job(job, plan)
+    except DownloadPaused:
+        raise
+    except (RuntimeError, OSError) as exc:  # the downloader's transfer, hash and rename failures, and disk errors
+        logger.warning("optional download failed; continuing without it: %s", exc)
+        return False
+    return True
 
 
 def _loaded_models(running: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
@@ -628,11 +670,17 @@ _QUANT_REASONS = {
 _QUANT_REASON_COMPACT = "Compact build sized for this machine ({quant}) — larger than GPU memory, runs slower"
 
 
+def _installed(entry, variant) -> bool:
+    """Every file the variant needs is on disk. The draft is optional: a model downloaded before
+    its draft joined the catalog stays downloaded."""
+    return all(((bootstrap.models_dir() if f in variant.files else bootstrap.assets_dir())
+                / f.local_name).is_file() for f in entry.install_files(variant))
+
+
 def _catalog_row(entry, budget, recommended, recommended_reason, staged_ids) -> dict[str, Any]:
     choice = catalog.select_variant(entry, budget)
     # Any variant of this family on disk counts as downloaded.
-    dl = next((v for v in entry.variants if v.model_id in staged_ids
-               and all(dest.is_file() for _, dest, _ in _download_plan(entry, v))), None)
+    dl = next((v for v in entry.variants if v.model_id in staged_ids and _installed(entry, v)), None)
     row: dict[str, Any] = {
         "id": entry.id, "display_name": entry.display_name, "description": entry.description,
         "native_context": entry.n_ctx_train, "native_context_label": _k_label(entry.n_ctx_train),
@@ -731,6 +779,11 @@ def local_models_runtime_install(body: RuntimeInstallBody, profile: Optional[str
     def run():
         with _config_profile_scope(profile):
             engine = _install_engine_job(job, backend)
+            # Staged drafts speed up generation; the running server picks them up at its next restart.
+            drafts = _missing_drafts(engine.tag)
+            if drafts:
+                _step(job, "downloading", "Downloading draft models that speed up generation")
+                _download_optional(job, drafts)
         _finish(job, f"llama.cpp {engine.tag} installed ({backend}). "
                      "Start or restart the local server from its default-profile gateway to use this build.")
 
@@ -763,7 +816,7 @@ def local_models_download(body: ModelDownloadBody):
         return {"job_id": None, "already_downloaded": True, "model_id": variant.model_id}
     job = _job("model-download", f"{entry.display_name} ({variant.quant})", model_id=entry.id)
     def _run():
-        _run_download_plan(job, plan, entry.display_name)
+        _run_download_plan(job, plan, entry.display_name, entry)
         hint = _refresh_runtime("post-download runtime refresh skipped")
         _finish(job, f"{entry.display_name} downloaded. {hint}")
 
@@ -825,7 +878,7 @@ def _quickstart_target(body: QuickstartBody, budget):
                 status_code=409,
                 detail="No automatic recommendation for this machine — open Local Models to browse or choose a model explicitly",
             )
-        candidates = [picked[0]] + [e for e in catalog.CATALOG if e.id != picked[0].id]
+        candidates = [picked[0]] + [e for e in catalog.CATALOG if e.id != picked[0].id and e.recommend]
     for candidate in candidates:
         choice = catalog.select_variant(candidate, budget)
         if choice is not None and not _engine_too_old(candidate.min_engine):
@@ -881,7 +934,7 @@ def _accept_quickstart(body: QuickstartBody, profile: Optional[str], generation:
             if job["phase"] != "downloading":
                 with _JOBS_LOCK:
                     job.update(done_bytes=0, total_bytes=None, ranges={})
-            _run_download_plan(job, download_plan, entry.display_name)
+            _run_download_plan(job, download_plan, entry.display_name, entry)
         _step(job, "starting-server", "Starting the local server")
         with _config_profile_scope(profile):
             with bootstrap.runtime_control_scope(generation):

@@ -52,15 +52,18 @@ def test_is_connected_needs_both_credentials(monkeypatch):
     assert is_connected(PlatformConfig(enabled=True)) is True
 
 
-def test_qqbot_platform_hint_comes_from_the_builtin_table():
+def test_qqbot_platform_hint_comes_from_its_platform_entry():
     import types
 
-    from agent.prompt_builder import PLATFORM_HINTS
     from agent.system_prompt import platform_hint
+    from gateway.platform_registry import platform_registry
+    from hermes_cli.plugins import discover_plugins
 
-    assert "MEDIA:" in PLATFORM_HINTS["qqbot"]
+    discover_plugins()
+    hint = platform_registry.get("qqbot").platform_hint
+    assert "MEDIA:" in hint
     agent = types.SimpleNamespace(platform="qqbot", _platform_hint_overrides={})
-    assert platform_hint(agent) == PLATFORM_HINTS["qqbot"]
+    assert platform_hint(agent) == hint
 
 
 def test_qqbot_is_a_builtin_deliver_target():

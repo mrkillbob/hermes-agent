@@ -65,6 +65,8 @@ jobs:
           - test_pause_durable.py
           - test_update_lock_tree.py
           - test_update_spares_other_installs.py
+          - test_elevated_gateway_attach.py
+          - test_upgrade_over_old_gateway.py
     # Each file provisions a cold install that takes about 17-22 minutes. Isolate files on
     # separate hosted runners so the fork does not serialize those installs into a single serial job.
     timeout-minutes: 75

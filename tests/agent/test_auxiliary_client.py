@@ -148,7 +148,7 @@ def test_blocked_recovery_screens_remote_auth_before_resolving_local(
         "providers": {"screening-remote": {"base_url": "https://remote.invalid/v1",
                                                 "key_env": "SCREENING_REMOTE_API_KEY"},
                       "screening-local-override": {"base_url": "https://remote.invalid/v1", "api_key": "local-test-key"},
-                      "screening-explicit-remote": {"base_url": "http://127.0.0.1:11434/v1", "key_env": "SCREENING_REMOTE_API_KEY"},
+                      "screening-explicit-remote": {"key_env": "SCREENING_REMOTE_API_KEY", "base_url": f"http://127.0.0.1:{11434 if remote_provider == 'screening-explicit-remote' else 19999}/v1"},
                       "vllm": {"base_url": "https://remote.invalid/v1", "key_env": "SCREENING_REMOTE_API_KEY"}},
     }
     if profile_case and chain[0]["provider"] == "custom":

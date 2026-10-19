@@ -45,6 +45,8 @@ def test_turn_failure_retains_connection_diagnostics_without_changing_exit(monke
     (logs / "agent.log").write_text(PREFIX + json.dumps({"phase": "websocket_open_failed"}) + "\n")
 
     class Process:
+        pid = 123
+
         def __init__(self, argv, **kwargs):
             self.args = argv
             kwargs["stderr"].write("Error: Gateway connection failed; no local fallback\n")
@@ -71,6 +73,8 @@ def test_timeout_captures_terminal_phase_before_kill(monkeypatch, tmp_path):
     path.write_text(PREFIX + json.dumps({"phase": "message_complete_received"}) + "\n")
 
     class Process:
+        pid = 123
+
         def __init__(self, argv, **kwargs):
             self.args = argv
             kwargs["stdout"].write(helpers.FINAL)

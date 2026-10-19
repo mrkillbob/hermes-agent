@@ -33,6 +33,7 @@ import hermes_yaml as yaml
 from tests.e2e.core._pending_fixes import known_failure
 from tests.e2e.core._pm_dependencies import select_test_dependencies
 from tests.e2e.core.providers._catalog_diagnostics import snapshot
+from tests.e2e.core.providers._catalog_process_probe import client_probe, read_probe
 from tests.fakes.providers.catalog_fake import USAGE_IN, USAGE_OUT, CatalogFake, Recorded
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -235,15 +236,20 @@ def write_home(root: Path, model: dict[str, Any], extra_cfg: dict[str, Any] | No
 def run_hermes(home: Path, cwd: Path, env_extra: dict[str, str], *args: str,
                timeout: float = TURN_TIMEOUT, diagnostics: dict | None = None) -> subprocess.CompletedProcess:
     """Run the real CLI; a child that outlives ``timeout`` is killed (rc -9, reason in stderr)."""
-    with tempfile.TemporaryFile("w+", encoding="utf-8") as out, tempfile.TemporaryFile("w+", encoding="utf-8") as err:
+    env = hermetic_env(home, env_extra)
+    probe = client_probe(home, env, timeout, args) if diagnostics is not None else contextlib.nullcontext((env, None))
+    with probe as (child_env, sink), tempfile.TemporaryFile("w+", encoding="utf-8") as out, \
+            tempfile.TemporaryFile("w+", encoding="utf-8") as err:
+        started = time.monotonic()
         proc = subprocess.Popen([sys.executable, "-m", "hermes_cli.main", *args], cwd=cwd,
-                                env=hermetic_env(home, env_extra), stdout=out, stderr=err, text=True,
+                                env=child_env, stdout=out, stderr=err, text=True,
                                 stdin=subprocess.DEVNULL)
         try:
             rc, why = proc.wait(timeout=timeout), ""
         except subprocess.TimeoutExpired:
             if diagnostics is not None:
                 diagnostics.update(snapshot(home))
+                diagnostics.update(timeout_capture_monotonic_s=round(time.monotonic(), 3))
             proc.kill()
             proc.wait()
             rc, why = -9, f"\nTIMEOUT after {timeout}s"
@@ -254,6 +260,7 @@ def run_hermes(home: Path, cwd: Path, env_extra: dict[str, str], *args: str,
             if not why:
                 diagnostics.update(snapshot(home))
             diagnostics.update(cli_timed_out=bool(why), final_marker_seen=FINAL in stdout)
+            diagnostics.update(child_started_monotonic_s=round(started, 3), process_probe=read_probe(sink, proc.pid))
         return subprocess.CompletedProcess(proc.args, rc, stdout, stderr)
 
 

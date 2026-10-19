@@ -15,8 +15,8 @@ def inert_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(bootstrap, '_EXIT_HOOKED', True)
     monkeypatch.setattr(bootstrap, 'adopt_legacy_models', list)
     monkeypatch.setattr(bootstrap, 'staged_models', lambda: [tmp_path / 'fixture.gguf'])
-    monkeypatch.setattr(bootstrap, '_admitted_models_max', lambda directory, configured: configured)
-    monkeypatch.setattr(bootstrap, '_generate_presets', lambda *args: None)
+    monkeypatch.setattr(bootstrap, '_admitted_models_max', lambda directory, configured, engine_tag=None: configured)
+    monkeypatch.setattr(bootstrap, '_generate_presets', lambda *args, **kwargs: None)
     monkeypatch.setattr(bootstrap, '_start_idle_sweeper', lambda sup: None)
     monkeypatch.setattr(endpoint, '_state_endpoint', lambda: None)
     monkeypatch.setattr(binaries, 'installed_engine', lambda backend: SimpleNamespace(
