@@ -219,6 +219,22 @@ class _Budget:
             raise BrowseBudgetExceeded('browse schema catch-up exceeded its time budget')
 
 
+class _BudgetCursor:
+    """Stop shared schema helpers from swallowing an expired SQLite interruption."""
+
+    def __init__(self, cursor, budget: _Budget):
+        self._cursor = cursor
+        self._budget = budget
+
+    def execute(self, *args, **kwargs):
+        self._budget.check()
+        try:
+            return self._cursor.execute(*args, **kwargs)
+        except sqlite3.OperationalError:
+            self._budget.check()
+            raise
+
+
 def _apply_additive_schema(path: Path, budget: _Budget | None = None) -> None:
     """Missing SCHEMA_SQL tables and columns, in ONE ``BEGIN IMMEDIATE`` transaction.
 
@@ -241,7 +257,7 @@ def _apply_additive_schema(path: Path, budget: _Budget | None = None) -> None:
         try:
             budget.arm(conn)
             conn.execute('BEGIN IMMEDIATE')
-            cursor = conn.cursor()
+            cursor = _BudgetCursor(conn.cursor(), budget)
             apply_declared_schema(cursor)
             # Postcondition, still inside the transaction: every declared table/column resolves.
             for statement in schema_read_probe_statements():

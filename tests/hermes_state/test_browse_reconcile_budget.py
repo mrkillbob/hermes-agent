@@ -140,3 +140,89 @@ def test_browse_busy_wait_uses_budget_left_after_prior_work(tmp_path, monkeypatc
         assert time.monotonic() - started < 2.0
     finally:
         booting.close()
+
+
+@pytest.mark.parametrize('phase', ['execute', 'fetch'])
+def test_expired_schema_interrupt_stops_before_another_statement(tmp_path, monkeypatch, phase):
+    """The shared column reconciler catches interruption; a browse must not keep issuing SQL.
+
+    Move only the deadline clock at a real schema execute/fetch boundary. SQLite's progress callback
+    raises SQLITE_INTERRUPT, and native cursors record any later statement attempts.
+    """
+    from gateway.run_bootstrap import _reserve_waiting_out_browse_reconcile
+    from gateway.runtime_ownership import ProfileOwnership, exclusive_maintenance
+
+    path = tmp_path / 'state.db'
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)')
+        conn.execute("INSERT INTO sessions VALUES ('kept', 'cli')")
+        conn.execute('CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT)')
+        conn.execute("INSERT INTO messages VALUES (1, 'history survives')")
+        conn.commit()
+    before = path.read_bytes()
+    clock = [0.0]
+    budget = reconcile._Budget(reconcile.BROWSE_RECONCILE_BUDGET_S)
+    budget._clock = lambda: clock[0]
+    budget.deadline = reconcile.BROWSE_RECONCILE_BUDGET_S
+    interrupted = []
+    after_expiration = []
+
+    class DeadlineCursor(sqlite3.Cursor):
+        def execute(self, statement, *args):
+            if budget.expired:
+                after_expiration.append(statement)
+            self.statement = statement
+            if phase == 'execute' and statement.startswith('ALTER TABLE "sessions" ADD COLUMN'):
+                clock[0] = budget.deadline + 1
+            try:
+                return super().execute(statement, *args)
+            except sqlite3.OperationalError as exc:
+                if exc.sqlite_errorcode == sqlite3.SQLITE_INTERRUPT:
+                    interrupted.append(statement)
+                raise
+
+        def fetchall(self):
+            if phase == 'fetch' and self.statement == 'PRAGMA table_info("sessions")':
+                clock[0] = budget.deadline + 1
+            try:
+                return super().fetchall()
+            except sqlite3.OperationalError as exc:
+                if exc.sqlite_errorcode == sqlite3.SQLITE_INTERRUPT:
+                    interrupted.append(self.statement)
+                raise
+
+    class DeadlineConnection(sqlite3.Connection):
+        def cursor(self):
+            return super().cursor(factory=DeadlineCursor)
+
+        def set_progress_handler(self, handler, n):
+            return super().set_progress_handler(handler, 1)
+
+    connect = safe_read.connect_tracked
+
+    def open_tracked(*args, **kwargs):
+        return connect(*args, **kwargs, factory=DeadlineConnection)
+
+    monkeypatch.setattr(safe_read, 'connect_tracked', open_tracked)
+    with exclusive_maintenance([tmp_path], purpose=reconcile.BROWSE_RECONCILE_PURPOSE):
+        lock_info = (tmp_path / 'gateway.lock').stat()
+        with pytest.raises(reconcile.BrowseBudgetExceeded):
+            reconcile._apply_additive_schema(path, budget)
+    assert budget.expired
+    assert interrupted, 'the real SQLite VM must interrupt the schema statement or fetch'
+    assert path.read_bytes() == before
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute('SELECT id FROM sessions').fetchall() == [('kept',)]
+        assert conn.execute('SELECT content FROM messages').fetchall() == [('history survives',)]
+        assert [row[1] for row in conn.execute('PRAGMA table_info(sessions)')] == ['id', 'source']
+        conn.execute('BEGIN IMMEDIATE')
+        conn.rollback()
+    after = (tmp_path / 'gateway.lock').stat()
+    assert (after.st_dev, after.st_ino) == (lock_info.st_dev, lock_info.st_ino)
+    booting = ProfileOwnership()
+    try:
+        _reserve_waiting_out_browse_reconcile(booting, [tmp_path])
+        assert booting.owns(tmp_path)
+    finally:
+        booting.close()
+    assert not after_expiration, (len(after_expiration), after_expiration[:3])

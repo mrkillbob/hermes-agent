@@ -7,6 +7,7 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 
 | Patch | Files | Guard test |
 |---|---|---|
+| Browse schema fixtures scope native descriptor inventories to registered disposable processes while retaining holder refusal and home guards | `tests/_fixtures/owned_native_holders.py`, `tests/hermes_cli/test_browse_schema_drift.py` | `tests/hermes_cli/test_owned_holder_projection.py` |
 | Gateway chat records fixed-label loop entry/return/raise and top-level oneshot return phases without changing results, exceptions, or timeout budgets | `hermes_cli/gateway_chat.py`, `hermes_cli/gateway_client_diagnostics.py`, `hermes_cli/main.py` | `tests/hermes_cli/test_gateway_chat_exit_diagnostics.py` |
 | Frozen session policies preserve YAML dates/timestamps as ISO strings, so unrelated plugin dates cannot block cron admission | `gateway/session_policy.py`, `gateway/session_policy_config.py` | `tests/gateway/test_session_policy_yaml_dates.py` |
 | Skill env passthrough is keyed per conversation session, not process-wide (sibling chats cannot inherit a skill's secret names) | `tools/env_passthrough.py` | `tests/tools/test_env_passthrough_fork_isolation.py` |
@@ -23,7 +24,7 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 | Reasoning-markup parser recognizes CommonMark fences (tilde, up to 3-space indent, fence length) | `web/src/lib/reasoning-markup.ts` | `web/src/lib/reasoning-markup.test.ts` (vitest) |
 | API server: structured `reasoning.effort` outranks legacy `reasoning_effort` | `gateway/platforms/api_server_request_options.py` | `tests/gateway/test_api_server_reasoning_precedence.py` |
 | `update-ui.test.mjs` "probe Git reaches the staged main" gets a 60s timeout (spawns Python repeatedly; 5s default flakes on CI) | `tests-js/update-ui.test.mjs` | itself |
-| Browse reconciliation enforces its deadline during macOS durability setup and SQLite transaction lock waits, preserving history on expiration | `hermes_state_reconcile.py` | `tests/hermes_state/test_browse_reconcile_budget.py` |
+| Browse reconciliation enforces its deadline during macOS durability setup, SQLite transaction lock waits and shared schema execution, preserving history on expiration | `hermes_state_reconcile.py` | `tests/hermes_state/test_browse_reconcile_budget.py` |
 
 ```bash
 scripts/run_tests.sh tests/tools/test_env_passthrough_fork_isolation.py \

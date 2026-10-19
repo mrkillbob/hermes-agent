@@ -19,6 +19,9 @@ from hermes_cli.web_server_sessions import _open_session_db_at_path
 from hermes_state import SessionDB
 from hermes_state_common import SCHEMA_VERSION
 
+pytest_plugins = ['tests._fixtures.owned_native_holders']
+pytestmark = pytest.mark.usefixtures('owned_native_holders')
+
 _ADDED_TABLES = ("runtime_epoch", "session_admissions", "worker_executions", "worker_receipts")
 _ADDED_COLUMNS = (("sessions", "runtime_revision"), ("sessions", "runtime_generation"),
                   ("async_delegations", "owner_execution_id"))
@@ -368,14 +371,14 @@ def test_concurrent_browses_from_processes_all_succeed(tmp_path):
 
 
 _PURPOSE_HOLDER = r'''
-import sys, time
+import select, sys
 from pathlib import Path
 from gateway.runtime_ownership import ProfileOwnership
 purpose = sys.argv[3] or None
 owner = ProfileOwnership()
 owner.reserve([Path(sys.argv[1])], purpose=purpose)
 print("held", flush=True)
-time.sleep(float(sys.argv[2]))
+select.select([sys.stdin], [], [], float(sys.argv[2]))
 '''
 
 
@@ -384,9 +387,15 @@ def _hold(home, seconds, purpose=""):
     import subprocess
     import sys
     proc = subprocess.Popen([sys.executable, "-c", _PURPOSE_HOLDER, str(home), str(seconds), purpose],
-                            env=os.environ, stdout=subprocess.PIPE, text=True)
+                            env=os.environ, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     assert proc.stdout.readline().strip() == "held"
     return proc
+
+
+def _release_holder(proc):
+    """Release only our explicit pipe-controlled helper, without signalling any PID."""
+    proc.stdin.close()
+    assert proc.wait(timeout=10) == 0
 
 
 @pytest.mark.platforms("linux", "macos")
@@ -403,8 +412,7 @@ def test_stuck_maintenance_holder_gets_busy_retry_not_a_gateway_remedy(tmp_path)
         with pytest.raises(HTTPException) as caught:
             _open_session_db_at_path(path, read_only=True)
     finally:
-        holder.kill()
-        holder.wait()
+        _release_holder(holder)
     detail = str(caught.value.detail)
     assert caught.value.status_code == 503
     assert "Retry" in detail
@@ -432,8 +440,7 @@ def test_gateway_boot_reserve_waits_out_a_browse_reconcile(tmp_path):
         assert time.monotonic() - started < 9
     finally:
         booting.close()
-        holder.kill()
-        holder.wait()
+        _release_holder(holder)
 
     gateway = _hold(home, 30)  # an unmarked holder is a runtime owner: refuse at once
     contender = ProfileOwnership()
@@ -444,22 +451,21 @@ def test_gateway_boot_reserve_waits_out_a_browse_reconcile(tmp_path):
         assert time.monotonic() - started < 2
     finally:
         contender.close()
-        gateway.kill()
-        gateway.wait()
+        _release_holder(gateway)
 
 
 # ── Independent review round 2 ──
 
 
 _RAW_FLOCK_HOLDER = r'''
-import fcntl, os, sys, time
+import fcntl, os, select, sys
 from pathlib import Path
 home = Path(sys.argv[1]); home.mkdir(parents=True, exist_ok=True)
 fh = open(home / "gateway.lock", "a+")
 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 fh.seek(0); fh.truncate(); fh.flush()  # flock held, record not yet published (reserve()'s window)
 print("held", flush=True)
-time.sleep(float(sys.argv[2]))
+select.select([sys.stdin], [], [], float(sys.argv[2]))
 '''
 
 
@@ -477,7 +483,7 @@ def test_gateway_boot_waits_while_the_holder_has_not_published_its_record(tmp_pa
 
     home = _profile_home(tmp_path)
     holder = subprocess.Popen([sys.executable, "-c", _RAW_FLOCK_HOLDER, str(home), "1.0"],
-                              env=os.environ, stdout=subprocess.PIPE, text=True)
+                              env=os.environ, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     assert holder.stdout.readline().strip() == "held"
     booting = ProfileOwnership()
     try:
@@ -488,12 +494,11 @@ def test_gateway_boot_waits_while_the_holder_has_not_published_its_record(tmp_pa
         assert 0.5 < time.monotonic() - started < 9
     finally:
         booting.close()
-        holder.kill()
-        holder.wait()
+        _release_holder(holder)
 
     # Still bounded: an unpublished holder that never lets go is refused once the wait expires.
     holder = subprocess.Popen([sys.executable, "-c", _RAW_FLOCK_HOLDER, str(home), "30"],
-                              env=os.environ, stdout=subprocess.PIPE, text=True)
+                              env=os.environ, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     assert holder.stdout.readline().strip() == "held"
     contender = ProfileOwnership()
     try:
@@ -503,8 +508,7 @@ def test_gateway_boot_waits_while_the_holder_has_not_published_its_record(tmp_pa
         assert 0.5 < time.monotonic() - started < 3
     finally:
         contender.close()
-        holder.kill()
-        holder.wait()
+        _release_holder(holder)
 
 
 _SLOW_BROWSE = r'''
@@ -855,8 +859,7 @@ def test_boot_refuses_at_once_when_another_home_has_a_real_owner(tmp_path):
     finally:
         booting.close()
         for proc in (gateway, browse):
-            proc.kill()
-            proc.wait()
+            _release_holder(proc)
 
 
 def test_budget_refusal_on_unowned_store_names_repair_not_a_gateway(tmp_path, monkeypatch):
@@ -896,11 +899,11 @@ def test_budget_refusal_on_unowned_store_names_repair_not_a_gateway(tmp_path, mo
 
 
 _LEGACY_GATEWAY = r'''
-import sqlite3, sys, time
+import select, sqlite3, sys
 conn = sqlite3.connect(sys.argv[1])  # what a pre-v0.22.1 multiplexer does: no per-profile gateway.lock
 conn.execute("SELECT count(*) FROM sessions").fetchone()
 print("holding", flush=True)
-time.sleep(60)
+select.select([sys.stdin], [], [], 60)
 '''
 
 
@@ -918,15 +921,14 @@ def test_legacy_gateway_holding_the_store_without_a_lock_is_not_written(tmp_path
     path = _lagging_store_with_history(home, rows=10)
     before = _file_state(path)
     legacy = subprocess.Popen(["hermes", "-c", _LEGACY_GATEWAY, str(path), "gateway", "run"],
-                              executable=sys.executable, env=os.environ, stdout=subprocess.PIPE, text=True)
+                              executable=sys.executable, env=os.environ, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     try:
         assert legacy.stdout.readline().strip() == "holding"
         assert not (home / "gateway.lock").exists() or not (home / "gateway.lock").read_text()
         with pytest.raises(HTTPException) as caught:
             _open_session_db_at_path(path, read_only=True)
     finally:
-        legacy.kill()
-        legacy.wait()
+        _release_holder(legacy)
     assert caught.value.status_code == 503
     assert "running gateway owns it" in caught.value.detail
     assert f"PID {legacy.pid}" in caught.value.detail
@@ -935,13 +937,13 @@ def test_legacy_gateway_holding_the_store_without_a_lock_is_not_written(tmp_path
 
 
 _MULTIPLEXER_LOCK = r'''
-import fcntl, json, os, sys, time
+import fcntl, json, os, select, sys
 fh = open(sys.argv[1], "a+")
 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 fh.seek(0); fh.truncate()
 json.dump({"pid": os.getpid(), "kind": "hermes-gateway", "hermes_home": sys.argv[2]}, fh); fh.flush()
 print("held", flush=True)
-time.sleep(60)
+select.select([sys.stdin], [], [], 60)
 '''
 
 
@@ -958,14 +960,13 @@ def test_owned_refusal_names_the_owning_multiplexers_restart(tmp_path):
     home = _profile_home(tmp_path)
     path = _lagging_store_with_history(home, rows=10)
     host = subprocess.Popen([sys.executable, "-c", _MULTIPLEXER_LOCK, str(home / "gateway.lock"), str(tmp_path)],
-                            env=os.environ, stdout=subprocess.PIPE, text=True)
+                            env=os.environ, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     try:
         assert host.stdout.readline().strip() == "held"
         with pytest.raises(HTTPException) as caught:
             _open_session_db_at_path(path, read_only=True)
     finally:
-        host.kill()
-        host.wait()
+        _release_holder(host)
     detail = caught.value.detail
     assert caught.value.status_code == 503 and "running gateway owns it" in detail
     assert "`hermes gateway restart`" in detail
