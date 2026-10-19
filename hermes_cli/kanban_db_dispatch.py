@@ -93,18 +93,7 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 
 @dataclass
 class DispatchResult:
-    """Outcome of a single ``dispatch`` pass.
-
-    ``kanban.default_assignee`` applied this tick before spawning (#27145). Surfaces the auto-assignment to
-    telemetry / CLI / dashboard so the operator can see when the dispatcher is acting on the fallback rule
-    ``kanban.max_in_progress_per_profile`` (#21582). Each entry is ``(task_id, assignee,
-    current_running_count)``. NOT an operator-actionable failure — the task will be picked up on a
-    subsequent tick when the assignee has capacity. Separate bucket so telemetry / dashboards can show "this
-    profile is busy" vs
-    the board's dispatch lock (issue #35240). A losing dispatcher does no DB writes this tick — the lock
-    holder is making progress on the same board. This is the steady-state signal that a single-writer guard
-    is
-    """
+    """Outcome of a single ``dispatch`` pass; each bucket is explained on its field."""
 
     reclaimed: int = 0
     promoted: int = 0
@@ -159,6 +148,9 @@ class DispatchResult:
     watchdog_restarted: list[str] = field(default_factory=list)
     watchdog_needs_operator: list[str] = field(default_factory=list)
     host_capacity_saturated: bool = False
+    routing_refused: list[tuple[str, str, str]] = field(default_factory=list)
+    """``(task_id, target_profile, reason)``: the orchestrator lane could not hand the card on
+    because PR write authority for the target is unverified or read-only. Operator-actionable."""
     memory_pressure: Optional[str] = None
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
@@ -184,6 +176,8 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
             counts[reason] = counts.get(reason, 0) + 1
         if res.rate_limited:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
+        if res.routing_refused:
+            counts["routing_refused"] = counts.get("routing_refused", 0) + len(res.routing_refused)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:

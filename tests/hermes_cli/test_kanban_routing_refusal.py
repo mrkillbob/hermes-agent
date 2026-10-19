@@ -55,7 +55,11 @@ def test_unverifiable_write_authority_is_recorded_once_and_visible(tmp_path, mon
         task = kb.get_task(conn, tid)
     assert spawned == []
     assert task is not None and task.status == "ready" and task.assignee == "task-intake-router"
-    assert all(tid in res.skipped_unassigned for res in results)
+    for res in results:
+        assert [(t, who) for t, who, _ in res.routing_refused] == [(tid, "pr-repair-steward")]
+        assert "cannot verify write authority" in res.routing_refused[0][2]
+        assert tid not in res.skipped_unassigned
+        assert "routing_refused=1" in kbd.describe_suppression([res])
     assert len(events) == 1
     assert events[0].payload["assignee"] == "pr-repair-steward"
     assert "cannot verify write authority" in events[0].payload["reason"]
@@ -70,3 +74,16 @@ def test_verified_write_profile_routes_the_same_card(tmp_path, monkeypatch):
     assert (tid, "pr-repair-steward") in res.routed_to_specialist
     assert task is not None and task.assignee == "pr-repair-steward"
     assert "routing_refused" not in events
+
+
+def test_refusal_is_deduplicated_against_a_future_dated_imported_event(tmp_path, monkeypatch):
+    tid = _orchestrator_pr_card(tmp_path, monkeypatch, authority=None)
+    with kbc.connect() as conn:
+        # kanban_transfer keeps imported timestamps while assigning new local ids.
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "commented", {"author": "import"})
+            conn.execute("UPDATE task_events SET created_at = created_at + 31536000 WHERE task_id = ?", (tid,))
+        for _ in range(3):
+            kbd.dispatch_once(conn, dry_run=False, spawn_fn=lambda *a, **k: None)
+        events = [e.kind for e in kb.list_events(conn, tid)]
+    assert events.count("routing_refused") == 1

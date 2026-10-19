@@ -207,18 +207,19 @@ def _record_routing_refused(conn, task_id: str, target: str, reason: str, *, dry
     """Make an authority refusal visible instead of stranding the card silently in ``ready``.
 
     The card deliberately stays in ``ready``: a PR-feedback card parked in ``triage`` is promoted
-    straight back by ``recompute_ready``, which would loop. Written once per change so ``tail``
-    names the profile that needs ``execution_authority`` without a row per tick.
+    straight back by ``recompute_ready``, which would loop. Deduplicated against the newest
+    appended event by id (imported cards can carry future timestamps), so ``tail`` names the
+    profile that needs ``execution_authority`` without a row per tick.
     """
     from hermes_cli import kanban_db as kb
 
-    result.skipped_unassigned.append(task_id)
+    result.routing_refused.append((task_id, target, reason))
     if dry_run:
         return
     payload = {"assignee": target, "reason": reason}
     with kb.write_txn(conn):
         last = conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1",
             (task_id,)).fetchone()
         if last is None or last["kind"] != "routing_refused" or last["payload"] != kb._json_or_null(payload):
             kb._append_event(conn, task_id, "routing_refused", payload)
