@@ -158,6 +158,7 @@ import { markSessionCreatedThisRun, sessionCreatedThisRun } from './created-this
 import { captureDisplayHydration } from './display-hydration'
 import { reconcilePersistedLiveTurn } from './persisted-live-turn'
 import { provisionalTranscriptPaint, transcriptRestScope } from './provisional-transcript'
+import { captureReconnectTurn, reconnectTranscriptPrefetch } from './reconnect-transcript'
 import { rememberedOwnerForResume } from './remembered-owner'
 import { restorePendingApproval } from './restore-pending-approval'
 import { pendingClarifyToolPayload, restorePendingClarifyFromSnapshot } from './restore-pending-clarify'
@@ -1275,6 +1276,7 @@ export function useSessionActions({
       }
 
       const resumeStartMessages = resumedSameSelectedSession ? $messages.get() : []
+      const resumeStartState = captureReconnectTurn(viewRuntimeId, sessionStateByRuntimeIdRef.current, resumeStartMessages)
 
       // Paint the click before the profile-resolve / gateway-swap awaits below,
       // so there's zero dead air: highlight the row instantly (the sidebar reads
@@ -2068,15 +2070,19 @@ export function useSessionActions({
           return resumed
         })
 
-        // The rejection is consumed by the `await` below; this guard only
-        // keeps it from surfacing as unhandled while the prefetch settles.
+        // The await below consumes rejection after the prefetch settles.
         resumePromise.catch(() => undefined)
 
         let prefetchedResult: SessionMessagesResponse | null = null
 
         try {
           if (prefetchPromise) {
-            prefetchedResult = await prefetchPromise
+            prefetchedResult = await reconnectTranscriptPrefetch({
+              prefetch: prefetchPromise, resume: resumePromise,
+              previousState: resumeStartState,
+              currentState: id => sessionStateByRuntimeIdRef.current.get(id),
+              read: () => getLatestSessionMessages(storedSessionId, sessionRestScope)
+            })
           }
         } catch {
           // Non-fatal: gateway resume below can still hydrate the session.
@@ -2102,14 +2108,8 @@ export function useSessionActions({
           saveTranscriptTail(storedSessionId, toChatMessages(prefetchedResult.messages), sessionRestScope)
         }
 
-        // Paint the persisted transcript as soon as REST returns instead of
-        // holding it until the runtime resume settles. A cold profile build
-        // (skills, MCP, memory) can keep `session.resume` pending far longer
-        // than the hydration budget while the complete history is already in
-        // hand — holding it stranded Bot Chats on the loader (#90130). The
-        // runtime path below grafts only its live projection onto this same
-        // snapshot, so an unchanged acknowledgement keeps reference identity
-        // and never rebuilds the transcript a second time.
+        // Cold history paints before the runtime build (#90130); an unfinished
+        // reconnect waits for attach so a missed terminal can be read durably.
         if (prefetchedResult && isCurrentResume()) {
           const previousMessages = resumedSameSelectedSession
             ? preserveLocalPendingTurnMessages(viewMessagesForReconcile(), resumeStartMessages)

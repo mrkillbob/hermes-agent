@@ -16,11 +16,13 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 | Docs-site `npm audit` gate allow-lists advisories with no upstream fix (`braces`, GHSA-vfj7-8cjw-p6xm); everything else high/critical still fails | `.github/workflows/docs-site-checks.yml`, `scripts/ci/npm_audit_gate.py` | `tests/scripts/test_npm_audit_gate.py` |
 | xAI streaming defers end-of-audio until `transcript.created` instead of dropping queued PCM | `tools/transcription_streaming.py` | `tests/tools/test_xai_streaming_early_eos.py` |
 | Desktop dictation falls back to the recorded blob when the startup PCM buffer overflows | `apps/desktop/src/app/chat/composer/hooks/use-voice-recorder.ts` | `use-voice-recorder-warmup.test.tsx` ("startup PCM buffer overflows") |
+| Desktop reconnect rereads the durable transcript after a finished attach when the terminal wire frame was missed | `apps/desktop/src/app/session/hooks/use-session-actions/{index,reconnect-transcript}.ts` | `reconnect-terminal-transcript.test.tsx` ("without terminal wire frames") |
 | Pooled account-usage cache/refresh keys include the route host | `agent/account_usage_cache.py`, `hermes_cli/inventory.py` | `tests/agent/test_account_usage_cache_route_host.py` |
 | Capabilities ▸ Plugins withholds the settings gear for an agent on a non-active connection (Settings only reaches the active gateway) | `apps/desktop/src/app/capabilities/plugins/plugins-tab.tsx`, `plugin-scope.ts` | `plugin-scope.test.ts` (vitest) |
 | Reasoning-markup parser recognizes CommonMark fences (tilde, up to 3-space indent, fence length) | `web/src/lib/reasoning-markup.ts` | `web/src/lib/reasoning-markup.test.ts` (vitest) |
 | API server: structured `reasoning.effort` outranks legacy `reasoning_effort` | `gateway/platforms/api_server_request_options.py` | `tests/gateway/test_api_server_reasoning_precedence.py` |
 | `update-ui.test.mjs` "probe Git reaches the staged main" gets a 60s timeout (spawns Python repeatedly; 5s default flakes on CI) | `tests-js/update-ui.test.mjs` | itself |
+| Browse reconciliation enforces its deadline during macOS durability setup and SQLite transaction lock waits, preserving history on expiration | `hermes_state_reconcile.py` | `tests/hermes_state/test_browse_reconcile_budget.py` |
 
 ```bash
 scripts/run_tests.sh tests/tools/test_env_passthrough_fork_isolation.py \

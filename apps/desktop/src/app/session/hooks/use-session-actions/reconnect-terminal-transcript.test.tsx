@@ -251,3 +251,185 @@ it.each<{
   expect(api!.sessionStateByRuntimeIdRef.current.get(SID)?.messages.map(chatMessageText)).toEqual(expectedMessages)
   expect($messages.get().map(chatMessageText)).toEqual(expectedMessages)
 })
+
+it.each<{
+  warm: boolean
+  profile: string
+  firstOutput?: boolean
+  acceptedOnly?: boolean
+  rebound?: boolean
+  failRecovery?: boolean
+}>([
+  { warm: true, profile: 'default' },
+  { warm: false, profile: 'default' },
+  { warm: true, profile: 'work' },
+  { warm: false, profile: 'work' },
+  { warm: true, profile: 'default', firstOutput: false },
+  { warm: false, profile: 'default', firstOutput: false },
+  { warm: true, profile: 'work', firstOutput: false },
+  { warm: false, profile: 'work', firstOutput: false },
+  { warm: false, profile: 'default', firstOutput: false, acceptedOnly: true },
+  { warm: false, profile: 'work', firstOutput: false, acceptedOnly: true },
+  { warm: false, profile: 'default', firstOutput: false, rebound: true },
+  { warm: false, profile: 'work', firstOutput: false, rebound: true },
+  { warm: false, profile: 'default', failRecovery: true },
+  { warm: false, profile: 'work', failRecovery: true }
+])(
+  'recovers a completed reply without terminal wire frames (warm=$warm, profile=$profile, firstOutput=$firstOutput, accepted=$acceptedOnly, rebound=$rebound, failed read=$failRecovery)',
+  async ({ warm, profile, firstOutput = true, acceptedOnly = false, rebound = false, failRecovery = false }) => {
+    $activeGatewayProfile.set(profile)
+    setSessions([{ id: SID, message_count: 3, profile }] as never)
+    const ack = deferred<unknown>()
+    const resumedRuntimeId = rebound ? `${SID}-new-runtime` : SID
+
+    const history = [
+      { id: 15, row_id: 15, role: 'user' as const, content: 'earlier prompt', timestamp: 0 },
+      { id: 16, row_id: 16, role: 'assistant' as const, content: 'earlier reply', timestamp: 0 }
+    ]
+
+    const user = { id: 17, row_id: 17, role: 'user' as const, content: PROMPT, timestamp: 1 }
+    const final = { id: 18, row_id: 18, role: 'assistant' as const, content: FINAL, timestamp: 2 }
+
+    const base = {
+      session_id: SID,
+      stored_session_id: SID,
+      replay_epoch: EPOCH,
+      authority_epoch: 1,
+      execution_generation: 6,
+      revision: 6,
+      last_sequence: 106,
+      running: false,
+      messages: [...history, user],
+      message_count: 3,
+      pending: [],
+      prompts: [],
+      info: { profile_name: profile }
+    }
+
+    let reconnecting = false
+    let committed = false
+
+    const wire = vi.spyOn(JsonRpcGatewayClient.prototype, 'request').mockImplementation(async method => {
+      if (method === 'session.events.since') {
+        return { events: [], replay_epoch: EPOCH, latest_seq: 113, snapshot_required: false, truncated: false } as never
+      }
+
+      if (method === 'session.resume') {
+        return reconnecting ? ((await ack.promise) as never) : (base as never)
+      }
+
+      throw new Error(`Unexpected fixture method: ${method}`)
+    })
+
+    const client = new HermesGateway()
+    clients.push(client)
+    await client.connect('ws://localhost/api/ws?native_dial=fixture&ticket=fixture')
+    await client.request('session.resume', { session_id: SID })
+    vi.mocked(getSession).mockResolvedValue({ id: SID, profile, message_count: 3 } as never)
+    vi.mocked(getLatestSessionMessages).mockImplementation(async () => {
+      if (committed && failRecovery) {
+        throw new Error('Transient transcript read failure')
+      }
+
+      return {
+        session_id: SID,
+        messages: [...history, user, ...(committed ? [final] : [])]
+      } as never
+    })
+    vi.mocked(requestGatewayForProfile).mockImplementation(
+      (_profile, method, params) => client.request(method, params) as never
+    )
+    vi.mocked(pendingSessionReplay).mockReturnValue(undefined)
+    let api: Ready | undefined
+    render(
+      <Harness
+        client={client}
+        ready={value => {
+          api = value
+        }}
+      />
+    )
+    await waitFor(() => expect(api).toBeDefined())
+    act(() =>
+      api!.updateSessionState(
+        SID,
+        state => ({ ...state, storedSessionId: SID, messages: toChatMessages([...history, user]) }),
+        SID
+      )
+    )
+
+    const emit = (type: string, seq: number, payload: Record<string, unknown>, generation = 7) =>
+      act(() => {
+        const event = {
+          type,
+          session_id: SID,
+          seq,
+          replay_epoch: EPOCH,
+          authority_epoch: 1,
+          execution_generation: generation,
+          payload
+        }
+
+        const channel = (client as unknown as { channel: { handleFrame(text: string): void } }).channel
+        channel.handleFrame(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: event }))
+      })
+
+    // The owner's pre-start metadata supplies a real replay cursor even when
+    // the socket drops before message.start or the first assistant payload.
+    emit('session.info', 107, { running: false }, 6)
+
+    if (acceptedOnly) {
+      act(() => api!.updateSessionState(SID, state => ({ ...state, busy: true, awaitingResponse: true }), SID))
+    } else {
+      emit('message.start', 108, {})
+    }
+
+    if (firstOutput) {
+      emit('message.delta', 110, { text: PREFIX })
+    }
+
+    await waitFor(() =>
+      expect($messages.get().map(chatMessageText)).toEqual([
+        ...history.map(row => row.content),
+        PROMPT,
+        ...(firstOutput ? [PREFIX] : [])
+      ])
+    )
+    reconnecting = true
+    await client.connect('ws://localhost/api/ws?native_dial=fixture&ticket=reconnect')
+    await client.request('session.events.since', { session_id: SID, last_seen: 113, replay_epoch: EPOCH })
+
+    if (!warm) {
+      api!.runtimeIdByStoredSessionIdRef.current.delete(SID)
+    }
+
+    let resume: Promise<unknown> | undefined
+    act(() => {
+      resume = api!.resumeSession(SID, true)
+    })
+    await waitFor(() => expect(wire.mock.calls.filter(([method]) => method === 'session.resume')).toHaveLength(2))
+
+    // The cold prefetch can finish while the provider is still held. Then the
+    // turn commits before the new socket subscribes; no terminal frame arrives.
+    await act(async () => {
+      committed = true
+      ack.resolve({
+        ...base,
+        session_id: resumedRuntimeId,
+        messages: [],
+        messages_omitted: true,
+        message_count: 4,
+        execution_generation: 7,
+        last_sequence: 132,
+        revision: 7,
+        running: false
+      })
+      await resume
+    })
+    const expected = [...history.map(row => row.content), PROMPT, failRecovery ? PREFIX : FINAL]
+    expect(api!.sessionStateByRuntimeIdRef.current.get(resumedRuntimeId)?.messages.map(chatMessageText)).toEqual(
+      expected
+    )
+    await waitFor(() => expect($messages.get().map(chatMessageText)).toEqual(expected))
+  }
+)
