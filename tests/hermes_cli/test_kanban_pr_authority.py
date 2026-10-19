@@ -140,7 +140,7 @@ def test_reassign_rejects_read_only_owner_and_preserves_current_owner(
         payload.pop("action")
     body = ("Repair and push the repository.\n" if rendered else "") + json.dumps(payload)
     monkeypatch.setattr(repair_routing, "repair_profile_for_task", lambda *_: target)
-    result = SimpleNamespace(auto_reassigned_invalid=[], routed_to_specialist=[])
+    result = SimpleNamespace(auto_reassigned_invalid=[], routed_to_specialist=[], skipped_unassigned=[])
     with _hermes_cli_kanban_db_connect.connect() as conn:
         tid = kb.create_task(conn, title="Repair and push PR #132", body=body,
                              assignee="pr-repair-steward",
@@ -176,7 +176,8 @@ def test_reassign_rejects_read_only_owner_and_preserves_current_owner(
             assert after["assignee"] == target
         else:
             assert after == before
-            assert len(kb.list_events(conn, tid)) == events
+            # Only the router refusal is reported; it is a diagnostic event, never an owner change.
+            assert len(kb.list_events(conn, tid)) == events + (path == "router")
             assert result.auto_reassigned_invalid == result.routed_to_specialist == []
 
 
