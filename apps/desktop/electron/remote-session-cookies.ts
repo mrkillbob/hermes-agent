@@ -22,14 +22,15 @@
  *     non-primary registered remotes, #92183) and then by origin, so two
  *     same-origin gateways that ride separate jars never see each other's
  *     credentials through this mirror either;
- *   - each cookie keeps its effective `Path` and is only presented to requests
- *     whose path matches it (RFC 6265 §5.1.4);
+ *   - each cookie is identified by name + effective `Path`, so disjoint proxy
+ *     prefixes can share a jar without overwriting each other; presentation
+ *     still requires a matching path (RFC 6265 §5.1.4);
  *   - a `Set-Cookie` with `Max-Age<=0`, a past `Expires`, or an empty value
  *     DELETES the mirror entry, so a server-side sign-out is honoured.
  *
  * Secrets stay in process memory only (never persisted to disk), and
- * `clear(partition, origin)` drops a stale identity so an old session can
- * never cross into a newly selected one.
+ * `clearGateway` drops only the resolved gateway's canonical cookie Path on
+ * re-login; explicit `clear(partition, origin)` remains origin-wide.
  */
 
 export interface ParsedCookie {
@@ -42,8 +43,13 @@ export interface ParsedCookie {
 }
 
 interface MirroredCookie {
+  name: string
   value: string
   path: string
+}
+
+function cookieKey(name: string, path: string): string {
+  return JSON.stringify([name, path])
 }
 
 function normalizeCookiePath(raw: string | undefined): string {
@@ -140,7 +146,7 @@ export function cookiePathMatches(cookiePath: string, requestPath: string): bool
 }
 
 export class RemoteSessionCookieStore {
-  /** partition → origin → cookie name → mirrored cookie */
+  /** partition → origin → (cookie name, effective Path) → mirrored cookie */
   private readonly byPartition = new Map<string, Map<string, Map<string, MirroredCookie>>>()
 
   private jarFor(partition: string, origin: string, create: boolean): Map<string, MirroredCookie> | undefined {
@@ -183,12 +189,16 @@ export class RemoteSessionCookieStore {
       }
 
       if (parsed.expired) {
-        this.jarFor(partition, origin, false)?.delete(parsed.name)
+        this.jarFor(partition, origin, false)?.delete(cookieKey(parsed.name, parsed.path))
 
         continue
       }
 
-      this.jarFor(partition, origin, true)!.set(parsed.name, { value: parsed.value, path: parsed.path })
+      this.jarFor(partition, origin, true)!.set(cookieKey(parsed.name, parsed.path), {
+        name: parsed.name,
+        value: parsed.value,
+        path: parsed.path
+      })
     }
   }
 
@@ -206,9 +216,12 @@ export class RemoteSessionCookieStore {
 
     for (const cookie of cookies) {
       if (typeof cookie?.name === 'string' && typeof cookie?.value === 'string' && cookie.name && cookie.value) {
-        this.jarFor(partition, origin, true)!.set(cookie.name, {
+        const path = normalizeCookiePath(typeof cookie.path === 'string' ? cookie.path : undefined)
+
+        this.jarFor(partition, origin, true)!.set(cookieKey(cookie.name, path), {
+          name: cookie.name,
           value: cookie.value,
-          path: normalizeCookiePath(typeof cookie.path === 'string' ? cookie.path : undefined)
+          path
         })
       }
     }
@@ -225,11 +238,33 @@ export class RemoteSessionCookieStore {
 
     const requestPath = requestPathFor(url)
 
-    const pairs = [...jar.entries()]
-      .filter(([, cookie]) => cookiePathMatches(cookie.path, requestPath))
-      .map(([name, cookie]) => `${name}=${cookie.value}`)
+    // Stable sort preserves mirror first-seen order for ties, including rotations.
+    // Chromium creation times are not available in the jar snapshot.
+    const pairs = [...jar.values()]
+      .filter(cookie => cookiePathMatches(cookie.path, requestPath))
+      .sort((a, b) => b.path.length - a.path.length)
+      .map(cookie => `${cookie.name}=${cookie.value}`)
 
     return pairs.length ? pairs.join('; ') : null
+  }
+
+  /** Clear only the canonical cookie Path of an already resolved, trusted gateway base. */
+  clearGateway(partition: string, gatewayBase: string): void {
+    const origin = originKeyFor(gatewayBase)
+    const jar = partition && origin ? this.jarFor(partition, origin, false) : undefined
+
+    if (!jar) {
+      return
+    }
+
+    const path = requestPathFor(gatewayBase)
+
+    for (const [key, cookie] of jar) {
+      // An ancestor, nested path or sibling can belong to a different gateway.
+      if (cookie.path === path) {
+        jar.delete(key)
+      }
+    }
   }
 
   /**

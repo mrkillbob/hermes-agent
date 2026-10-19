@@ -122,7 +122,89 @@ describe('RemoteSessionCookieStore', () => {
     ])
 
     expect(store.cookieHeaderFor(LEGACY, 'https://gw.example.com/x')).toBe('hermes_session=jar-value')
-    expect(store.cookieHeaderFor(LEGACY, 'https://gw.example.com/gw-a/x')).toBe('hermes_session=jar-value; scoped=s')
+    expect(store.cookieHeaderFor(LEGACY, 'https://gw.example.com/gw-a/x')).toBe('scoped=s; hermes_session=jar-value')
+  })
+
+  it('keeps same-name sibling cookies through rotation, expiry and incremental jar snapshots', () => {
+    const store = new RemoteSessionCookieStore()
+    const a = 'https://gw.example.com/a/api/status'
+    const b = 'https://gw.example.com/b/api/status'
+
+    store.record(LEGACY, a, 'session=a1; Path=/a; Secure; Domain=gw.example.com')
+    store.record(LEGACY, b, 'session=b1; Path=/b; Secure; Domain=gw.example.com')
+    expect(store.cookieHeaderFor(LEGACY, a)).toBe('session=a1')
+    expect(store.cookieHeaderFor(LEGACY, b)).toBe('session=b1')
+
+    store.record(LEGACY, a, 'session=a2; Path=/a; Secure; Domain=gw.example.com')
+    expect(store.cookieHeaderFor(LEGACY, a)).toBe('session=a2')
+    expect(store.cookieHeaderFor(LEGACY, b)).toBe('session=b1')
+    store.record(LEGACY, a, 'session=; Path=/a; Max-Age=0')
+    expect(store.cookieHeaderFor(LEGACY, a)).toBeNull()
+    expect(store.cookieHeaderFor(LEGACY, b)).toBe('session=b1')
+
+    store.recordFromJar(LEGACY, a, [{ name: 'session', value: 'a3', path: '/a' }])
+    store.recordFromJar(LEGACY, b, [{ name: 'session', value: 'b2', path: '/b' }])
+    expect(store.cookieHeaderFor(LEGACY, a)).toBe('session=a3')
+    expect(store.cookieHeaderFor(LEGACY, b)).toBe('session=b2')
+  })
+
+  it('orders overlapping paths longest first, retaining tie order on rotation and exact path identity', () => {
+    const store = new RemoteSessionCookieStore()
+    const url = 'https://gw.example.com/a/inner/status'
+
+    store.record(LEGACY, url, ['session=root; Path=/', 'session=a; Path=/a', 'tie=first; Path=/a'])
+    store.record(LEGACY, url, ['session=inner; Path=/a/inner', 'session=rotated; Path=/a'])
+    expect(store.cookieHeaderFor(LEGACY, url)).toBe('session=inner; session=rotated; tie=first; session=root')
+    store.record(LEGACY, url, ['session=slash; Path=/a/', 'session=encoded; Path=/a%2Finner'])
+    expect(store.cookieHeaderFor(LEGACY, 'https://gw.example.com/a')).toBe('session=rotated; tie=first; session=root')
+    expect(store.cookieHeaderFor(LEGACY, 'https://gw.example.com/a%2Finner/status')).toBe(
+      'session=encoded; session=root'
+    )
+    expect(store.cookieHeaderFor(LEGACY, url)).toBe(
+      'session=inner; session=slash; session=rotated; tie=first; session=root'
+    )
+  })
+
+  it('clears only the resolved gateway cookie path and retains partition, origin and path boundaries', () => {
+    const store = new RemoteSessionCookieStore()
+    const origin = 'https://gw.example.com'
+    const paths = ['/', '/a', '/a/', '/a/inner', '/ab', '/b', '/A', '/a%2Fb']
+
+    for (const path of paths) {
+      store.record(LEGACY, origin, `session=${path}; Path=${path}; Secure; Domain=.example.com`)
+    }
+
+    // Even a parent Domain cookie stays owned by the source origin here.
+    const otherOrigins = ['http://gw.example.com', 'https://other.example.com', 'https://gw.example.com:8443']
+
+    for (const other of otherOrigins) {
+      expect(store.cookieHeaderFor(LEGACY, `${other}/a/status`)).toBeNull()
+      store.record(LEGACY, other, 'other=retained; Path=/a')
+    }
+
+    store.record(CONN_A, origin, 'private=retained; Path=/a')
+    for (const invalid of ['not a url', 'file:///a', 'ftp://gw.example.com/a']) {
+      store.clearGateway(LEGACY, invalid)
+      expect(store.cookieHeaderFor(LEGACY, `${origin}/a`)).toBe('session=/a; session=/')
+    }
+
+    store.clearGateway(LEGACY, `${origin}/a`)
+    expect(store.cookieHeaderFor(LEGACY, `${origin}/a`)).toBe('session=/')
+    for (const path of paths.filter(path => path !== '/' && path !== '/a')) {
+      const header = store.cookieHeaderFor(LEGACY, `${origin}${path}`)
+
+      expect(header).toContain(`session=${path}`)
+      expect(header?.split('; ')).not.toContain('session=/a')
+    }
+
+    for (const other of otherOrigins) {
+      expect(store.cookieHeaderFor(LEGACY, `${other}/a/status`)).toBe('other=retained')
+    }
+
+    expect(store.cookieHeaderFor(CONN_A, `${origin}/a/status`)).toBe('private=retained')
+    store.clearGateway(LEGACY, origin)
+    expect(store.cookieHeaderFor(LEGACY, `${origin}/`)).toBeNull()
+    expect(store.cookieHeaderFor(LEGACY, `${origin}/b`)).toBe('session=/b')
   })
 
   it('clear drops the target partition+origin, a whole partition, or everything', () => {
