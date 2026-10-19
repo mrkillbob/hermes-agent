@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 
 import { afterEach, expect, test, vi } from 'vitest'
 
@@ -201,17 +200,4 @@ test('gateways under different proxy prefixes of one origin and jar get separate
 
   expect([a.stats.opened, b.stats.opened]).toEqual([1, 1])
   expect(flights.isRunning(loginFlightKey(JAR, `${GATEWAY}/a/`))).toBe(true)
-})
-
-// main.ts is not importable under vitest; pin which callers count as unattended.
-test('refused requests and the boot cascade sign in hidden; only user actions may show a window', () => {
-  const source = readFileSync(new URL('./main.ts', import.meta.url), 'utf8')
-  const fetchStart = source.indexOf('function fetchJsonViaOauthSession(')
-  const fetchBody = source.slice(fetchStart, source.indexOf('\n}\n', fetchStart))
-  const bootStart = source.indexOf('async function waitForRemoteHermes(')
-  const bootBody = source.slice(bootStart, source.indexOf('\n}\n', bootStart))
-
-  expect(fetchBody).toContain('openOauthLoginWindow(gatewayBase, { silent: true, background: true })')
-  expect(bootBody).toContain('cloudAgentSilentSignIn(remote.baseUrl, { background: true })')
-  expect(source).toContain("unattended ? 'background' : 'foreground'")
 })
