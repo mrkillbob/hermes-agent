@@ -87,10 +87,9 @@ def configured_dispatch_kwargs() -> dict[str, Any]:
     without its limits.
     """
     from hermes_cli import kanban_db_dispatch as dispatch
-    from hermes_cli.config import load_config
+    from hermes_cli.kanban_dispatch_config import load_dispatch_section
 
-    cfg = load_config()
-    section = dispatch.shared_kanban_config((cfg.get("kanban", {}) if isinstance(cfg, dict) else {}) or {})
+    section = load_dispatch_section()
     return dict(
         default_assignee=(section.get("default_assignee") or "").strip() or None,
         max_spawn=dispatch._positive_int(section.get("max_spawn"), None),

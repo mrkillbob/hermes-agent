@@ -79,3 +79,25 @@ def test_nudge_fails_closed_when_config_is_unreadable(client, captured, monkeypa
     response = client.post("/api/plugins/kanban/dispatch")
     assert response.status_code == 503
     assert captured == []
+
+
+@pytest.mark.parametrize("text", ["kanban: [unterminated\n", "kanban: []\n", "kanban: null\n",
+                                  "kanban:\n  max_in_progress: invalid\n"])
+def test_nudge_refuses_real_malformed_config_without_dispatch(client, captured, text):
+    from hermes_cli.config import get_config_path
+
+    get_config_path().write_text(text)
+    response = client.post("/api/plugins/kanban/dispatch")
+    assert response.status_code == 503
+    assert captured == []
+
+
+def test_nudge_refuses_last_known_good_fallback(client, captured):
+    from hermes_cli.config import get_config_path, load_config
+
+    get_config_path().write_text("kanban:\n  max_in_progress: 2\n")
+    assert load_config()["kanban"]["max_in_progress"] == 2
+    get_config_path().write_text("kanban: [unterminated\n")
+    response = client.post("/api/plugins/kanban/dispatch")
+    assert response.status_code == 503
+    assert captured == []
