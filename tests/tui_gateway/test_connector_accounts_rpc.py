@@ -17,8 +17,20 @@ from tui_gateway import server
 def _gate(monkeypatch):
     live.reset_for_tests()
     monkeypatch.setattr("tools.connectors.connectors_available", lambda: True)
+    monkeypatch.setattr("tools.connectors.ensure_guest_identity", lambda: None)
+    setup_calls = []
+
+    def forbidden_setup(*args, **kwargs):
+        from hermes_cli.auth_constants import AuthError
+
+        setup_calls.append(True)
+        raise AuthError("account RPC fixture must not provision guest identity")
+
+    monkeypatch.setattr("tools.connectors.gateway.config.guest_identity_pending", lambda: True)
+    monkeypatch.setattr("hermes_cli.anon_auth.ensure_portal_identity", forbidden_setup)
     yield
     live.reset_for_tests()
+    assert setup_calls == []
 
 
 class _Transport:
@@ -148,9 +160,13 @@ def test_a_session_retry_with_the_open_accounts_id_reissues_it(monkeypatch):
 
 
 def test_rename_to_a_name_another_account_holds_is_alias_taken(monkeypatch):
+    calls = []
+
     def taken(self, connection_id, alias):
+        calls.append((connection_id, alias))
         raise IdempotencyConflict("alias taken", code="alias_taken", status=409)
 
     monkeypatch.setattr("tools.connectors.portal.client.PortalConnectorClient.rename_account", taken)
     reply = _rpc("connectors.accounts.rename", connection_id="ca_1", alias="home")
     assert reply["error"]["data"]["reason"] == "ALIAS_TAKEN"
+    assert calls == [("ca_1", "home")]
