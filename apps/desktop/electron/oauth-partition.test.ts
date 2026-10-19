@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
+import { LEGACY_OAUTH_PARTITION, resolveGatewayBase, resolveOauthPartition } from './oauth-partition'
 
 // #92183 — two basic-auth (cookie-flow) gateways registered in the v2
 // connections registry must not share one cookie jar. Chromium cookie jars
@@ -361,5 +361,58 @@ describe('resolveOauthPartition with connectionId (pre-save sign-in identity)', 
 
     expect(got.startsWith('persist:')).toBe(true)
     expect(got).not.toMatch(/[\s/€]/)
+  })
+})
+
+describe('resolveGatewayBase (login-flight scope: origin + proxy prefix)', () => {
+  const reg = registry('p', [
+    remote('p', 'https://host.example.test/a'),
+    remote('w', 'https://host.example.test/b/'),
+    remote('deep', 'https://host.example.test/b/inner'),
+    { id: 'tok', kind: 'remote', url: 'https://tok.example.test/x', authMode: 'token' }
+  ])
+
+  it('resolves a request URL to the registered gateway it sits under', () => {
+    expect(resolveGatewayBase('https://host.example.test/a/api/status', { registry: reg })).toBe(
+      'https://host.example.test/a'
+    )
+    expect(resolveGatewayBase('https://host.example.test/b', { registry: reg })).toBe('https://host.example.test/b')
+    expect(resolveGatewayBase('https://tok.example.test/x/api', { registry: reg })).toBe('https://tok.example.test/x')
+  })
+
+  it('the longest registered prefix wins and siblings never match', () => {
+    expect(resolveGatewayBase('https://host.example.test/b/inner/api', { registry: reg })).toBe(
+      'https://host.example.test/b/inner'
+    )
+    expect(resolveGatewayBase('https://host.example.test/ab/api', { registry: reg })).toBe('https://host.example.test')
+  })
+
+  it('falls back to the request origin for unregistered URLs and a missing registry', () => {
+    expect(resolveGatewayBase('https://other.example.test/a/api?x=1')).toBe('https://other.example.test')
+    expect(resolveGatewayBase('https://host.example.test.evil.test/a', { registry: reg })).toBe(
+      'https://host.example.test.evil.test'
+    )
+  })
+
+  it('counts the v1 remote as a gateway', () => {
+    expect(resolveGatewayBase('https://v1.example.test/hermes/api', { v1RemoteUrl: 'https://v1.example.test/hermes' })).toBe(
+      'https://v1.example.test/hermes'
+    )
+  })
+
+  it('matches case-insensitively and respects ports; query and fragment are dropped', () => {
+    const ported = registry('p', [remote('p', 'https://Host.Example.test:8443/a')])
+
+    expect(resolveGatewayBase('HTTPS://host.example.test:8443/a/api?x=1#f', { registry: ported })).toBe(
+      'https://host.example.test:8443/a'
+    )
+    expect(resolveGatewayBase('https://host.example.test/a/api', { registry: ported })).toBe(
+      'https://host.example.test'
+    )
+  })
+
+  it('returns non-http input unchanged instead of throwing', () => {
+    expect(resolveGatewayBase('not a url', { registry: reg })).toBe('not a url')
+    expect(resolveGatewayBase(undefined)).toBe('')
   })
 })

@@ -407,7 +407,7 @@ import { loginFlightKey, OauthLoginFlights } from './oauth-login-flights'
 import { startOauthLoginWindow } from './oauth-login-window'
 import { isExpectedOauthNavigationAbort } from './oauth-navigation'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
-import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
+import { LEGACY_OAUTH_PARTITION, resolveGatewayBase, resolveOauthPartition } from './oauth-partition'
 import {
   canShowInteractiveOauthLogin,
   mintGatewayWsTicket as mintOauthGatewayWsTicket,
@@ -7115,6 +7115,18 @@ function resolveOauthPartitionForUrl(url, { connectionId = '', pendingAuthMode =
 
 function getOauthSessionForUrl(url, { connectionId = '', pendingAuthMode = '', pendingKind = '' } = {}) {
   const partition = resolveOauthPartitionForUrl(url, { connectionId, pendingAuthMode, pendingKind })
+// The gateway (origin + proxy prefix) a URL belongs to, for the login-flight key.
+function resolveGatewayBaseForUrl(url) {
+  try {
+    return resolveGatewayBase(url, {
+      registry: readDesktopConnectionsRegistry(),
+      v1RemoteUrl: readDesktopConnectionConfig()?.remote?.url
+    })
+  } catch {
+    return resolveGatewayBase(url)
+  }
+}
+
 
   if (partition === OAUTH_SESSION_PARTITION) {
     return getOauthSession()
@@ -7326,7 +7338,7 @@ function openOauthLoginWindow(
   const unattended = background || !canShowInteractiveOauthLogin()
   const partition = resolveOauthPartitionForUrl(baseUrl, identity)
 
-  return oauthLoginFlights.run(loginFlightKey(partition, baseUrl), unattended ? 'background' : 'foreground', () => {
+  return oauthLoginFlights.run(loginFlightKey(partition, resolveGatewayBaseForUrl(baseUrl)), unattended ? 'background' : 'foreground', () => {
     const sess = app.isReady() ? getOauthSessionForUrl(baseUrl, identity) : null
 
     if (!sess) {
@@ -7491,13 +7503,13 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
     })
 
   return attempt().catch(async error => {
-    const origin = new URL(url).origin
+    const gatewayBase = resolveGatewayBaseForUrl(url)
 
     return retryCookie401WithLogin(error, options, {
       // One burst shares one clear: a joiner must not wipe the mirror the
       // running window is about to fill.
       clearCookies: () => {
-        if (!oauthLoginFlights.isRunning(loginFlightKey(partition, origin))) {
+        if (!oauthLoginFlights.isRunning(loginFlightKey(partition, gatewayBase))) {
           remoteSessionCookies.clear(partition, url)
         }
       },
@@ -7506,7 +7518,7 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
           // A refused request is never a user gesture: try the hidden
           // auto-SSO, and on failure leave the 401 to the app's own "Sign in"
           // surface instead of opening a window nobody asked for.
-          await openOauthLoginWindow(origin, { silent: true, background: true })
+          await openOauthLoginWindow(gatewayBase, { silent: true, background: true })
         } catch (reloginError) {
           rememberLog(
             `Remote session re-login after 401 failed for ${new URL(url).host}: ${reloginError?.message || reloginError}`

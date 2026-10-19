@@ -246,3 +246,42 @@ export function resolveOauthPartition(requestUrl: unknown, opts: ResolveOauthPar
 
   return `${CONNECTION_PARTITION_PREFIX}${sanitizePartitionComponent(best.id)}`
 }
+
+/**
+ * The gateway a request belongs to: the longest registered connection base URL
+ * (or the v1 remote) that the request URL sits under, else the request origin.
+ * Hermes scopes its session and PKCE cookies to the proxy prefix, so two
+ * gateways mounted under different prefixes of one origin are independent
+ * login flows even when they share a cookie jar. The registry only ever picks
+ * among URLs the user already registered; nothing new becomes a login target.
+ */
+export function resolveGatewayBase(
+  requestUrl: unknown,
+  opts: Pick<ResolveOauthPartitionOptions, 'registry' | 'v1RemoteUrl'> = {}
+): string {
+  const requestNorm = normalizeForMatch(requestUrl)
+
+  if (!requestNorm) {
+    return typeof requestUrl === 'string' ? requestUrl : ''
+  }
+
+  const candidates = [opts.v1RemoteUrl]
+
+  if (Array.isArray(opts.registry?.connections)) {
+    for (const entry of opts.registry.connections) {
+      candidates.push(entryField(entry, 'url'))
+    }
+  }
+
+  let best = ''
+
+  for (const candidate of candidates) {
+    const baseNorm = normalizeForMatch(candidate)
+
+    if (baseNorm && baseNorm.length > best.length && matchesBase(requestNorm, baseNorm)) {
+      best = baseNorm
+    }
+  }
+
+  return best || new URL(requestNorm).origin
+}
