@@ -16,9 +16,7 @@ name: Install & Update E2E red tracker
 on:
   workflow_run:
     workflows: ['Install & Update E2E']
-    # requested: a run can sit queued for hours behind runner capacity; the open tracker says so
-    # instead of presenting the previous run's legs as current.
-    types: [requested, completed]
+    types: [completed]
   workflow_dispatch:
     inputs:
       run-id:
