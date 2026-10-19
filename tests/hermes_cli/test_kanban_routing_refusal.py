@@ -87,3 +87,19 @@ def test_refusal_is_deduplicated_against_a_future_dated_imported_event(tmp_path,
             kbd.dispatch_once(conn, dry_run=False, spawn_fn=lambda *a, **k: None)
         events = [e.kind for e in kb.list_events(conn, tid)]
     assert events.count("routing_refused") == 1
+
+
+def test_a_routing_refusal_is_not_an_idle_dispatch_tick(tmp_path, monkeypatch):
+    from hermes_cli.plugins import get_plugin_manager
+
+    _orchestrator_pr_card(tmp_path, monkeypatch, authority=None)
+    manager = get_plugin_manager()
+    saved = {name: list(callbacks) for name, callbacks in manager._hooks.items()}
+    outcomes = []
+    manager._hooks.setdefault("on_kanban_dispatch_tick", []).append(lambda **kw: outcomes.append(kw["outcome"]))
+    try:
+        with kbc.connect() as conn:
+            kbd.dispatch_once(conn, dry_run=False, spawn_fn=lambda *a, **k: None)
+    finally:
+        manager._hooks = saved
+    assert outcomes == ["ok"]
