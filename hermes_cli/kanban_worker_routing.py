@@ -207,17 +207,29 @@ def _record_routing_refused(conn, task_id: str, target: str, reason: str, *, dry
     """Make an authority refusal visible instead of stranding the card silently in ``ready``.
 
     The card deliberately stays in ``ready``: a PR-feedback card parked in ``triage`` is promoted
-    straight back by ``recompute_ready``, which would loop. Deduplicated against the newest
-    appended event by id (imported cards can carry future timestamps), so ``tail`` names the
-    profile that needs ``execution_authority`` without a row per tick.
+    straight back by ``recompute_ready``, which would loop. The card is re-read inside the write
+    transaction because the tick's snapshot can be stale (an operator may have reassigned, edited
+    or archived it since); a card that no longer qualifies is neither recorded nor reported.
+    Deduplicated against the newest appended event by id (imported cards can carry future
+    timestamps), so ``tail`` names the profile that needs ``execution_authority`` without a row
+    per tick.
     """
     from hermes_cli import kanban_db as kb
 
-    result.routing_refused.append((task_id, target, reason))
+    def still_in_lane() -> bool:
+        return conn.execute(
+            "SELECT 1 FROM tasks WHERE id=? AND status='ready' AND claim_lock IS NULL AND assignee IN "
+            "('task-orchestrator', 'task-intake-router', 'intake-router')", (task_id,)).fetchone() is not None
+
     if dry_run:
+        if still_in_lane():
+            result.routing_refused.append((task_id, target, reason))
         return
     payload = {"assignee": target, "reason": reason}
     with kb.write_txn(conn):
+        if not still_in_lane():
+            return
+        result.routing_refused.append((task_id, target, reason))
         last = conn.execute(
             "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1",
             (task_id,)).fetchone()

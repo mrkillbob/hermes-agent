@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
@@ -103,3 +105,22 @@ def test_a_routing_refusal_is_not_an_idle_dispatch_tick(tmp_path, monkeypatch):
     finally:
         manager._hooks = saved
     assert outcomes == ["ok"]
+
+
+@pytest.mark.parametrize("change", [
+    "UPDATE tasks SET assignee = 'pr-repair-steward' WHERE id = 't_refused'",
+    "UPDATE tasks SET status = 'archived' WHERE id = 't_refused'",
+])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_stale_snapshot_is_not_recorded_after_the_card_left_the_lane(tmp_path, monkeypatch, change, dry_run):
+    from hermes_cli.kanban_worker_routing import route_orchestrator_task
+
+    tid = _orchestrator_pr_card(tmp_path, monkeypatch, authority=None)
+    with kbc.connect() as conn:
+        snapshot = conn.execute("SELECT id, assignee, title, body FROM tasks WHERE id = ?", (tid,)).fetchone()
+        conn.execute(change)
+        conn.commit()
+        res = kbd.DispatchResult()
+        assert route_orchestrator_task(conn, snapshot, dry_run=dry_run, result=res) is None
+        events = [e.kind for e in kb.list_events(conn, tid)]
+    assert res.routing_refused == [] and "routing_refused" not in events
