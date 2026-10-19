@@ -7,6 +7,7 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 
 | Patch | Files | Guard test |
 |---|---|---|
+| Gateway chat records fixed-label loop entry/return/raise and top-level oneshot return phases without changing results, exceptions, or timeout budgets | `hermes_cli/gateway_chat.py`, `hermes_cli/gateway_client_diagnostics.py`, `hermes_cli/main.py` | `tests/hermes_cli/test_gateway_chat_exit_diagnostics.py` |
 | Frozen session policies preserve YAML dates/timestamps as ISO strings, so unrelated plugin dates cannot block cron admission | `gateway/session_policy.py`, `gateway/session_policy_config.py` | `tests/gateway/test_session_policy_yaml_dates.py` |
 | Skill env passthrough is keyed per conversation session, not process-wide (sibling chats cannot inherit a skill's secret names) | `tools/env_passthrough.py` | `tests/tools/test_env_passthrough_fork_isolation.py` |
 | Media proxy enforces its 25 MB cap while streaming | `hermes_cli/web_routers/files.py` | `tests/hermes_cli/test_media_proxy_streaming_limit.py` |

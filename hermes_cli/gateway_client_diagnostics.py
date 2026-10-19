@@ -15,6 +15,7 @@ PHASES = frozenset({
     "websocket_close_started", "websocket_close_exited",
     "reader_started", "reader_failed", "reader_stopped", "reader_close_started", "reader_close_finished",
     "message_complete_received", "prompt_receipt_started", "prompt_receipt_finished",
+    "chat_loop_started", "chat_loop_returned", "chat_loop_raised", "oneshot_launch_returned",
 })
 _ERROR_TYPES = frozenset({"OSError", "TimeoutError", "ConnectionError", "ConnectionRefusedError",
                           "ConnectionResetError", "ConnectionAbortedError", "BrokenPipeError"})

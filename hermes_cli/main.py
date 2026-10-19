@@ -3062,12 +3062,12 @@ def _set_chat_arg_defaults(args) -> None:
 
 
 def _run_oneshot_from_args(args) -> None:
-    """Top-level --oneshot / -z: single-shot mode, stdout = final response only.
-
-    Bypasses cli.py entirely; the transport launcher never returns.
-    """
+    """Top-level -z: print the final response and exit with the transport's code."""
     from hermes_cli.gateway_chat_startup import launch_gateway_chat
-    sys.exit(launch_gateway_chat(args))
+    from hermes_cli.gateway_client_diagnostics import record
+    rc = launch_gateway_chat(args)
+    record("oneshot_launch_returned")
+    sys.exit(rc)
 
 
 def _light_chat_parser():
