@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
+import uuid
 
 from hermes_cli._subprocess_compat import windows_detach_popen_kwargs, _WINDOWS_GATEWAY_BREAKAWAY_ENV
 from hermes_cli.gateway_runtime_service import RuntimeStartError, remaining
@@ -65,6 +67,7 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
     for key in (*DAEMON_STRIPPED_ENV, *_VAR_MAP):
         env.pop(key, None)
     remaining(deadline)
+    launch_options = windows_detach_popen_kwargs()
     logs = home / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     try:
@@ -73,13 +76,30 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
             try:
                 return subprocess.Popen(command, cwd=root, env=env, close_fds=True,
                                         stdin=subprocess.DEVNULL, stdout=output, stderr=output,
-                                        **windows_detach_popen_kwargs())
+                                        **launch_options)
             except OSError as exc:
                 # A Windows refusal is not necessarily a job-policy denial. Keep
                 # its native code without recording argv, environment or private
                 # paths from the exception; no weaker detach fallback is safe.
                 report: dict[str, object] = {"event": "gateway_spawn_failed", "errno": exc.errno,
                                              "winerror": getattr(exc, "winerror", None)}
+                launch: dict[str, object] = {
+                    "failure_id": uuid.uuid4().hex, "timestamp_ns": time.time_ns(),
+                    "stage": "gateway_popen", "creationflags": launch_options.get("creationflags", 0),
+                }
+                try:
+                    from hermes_platform.host.process_diagnostics import process_launch_context
+                    launch["context"] = process_launch_context(command[0], root)
+                except Exception:  # health: allow BLE001 -- A diagnostic query must not replace the spawn refusal or disclose exception text.
+                    launch["context"] = {"unavailable": True}
+                try:
+                    from hermes_platform.host.job_ancestry import process_job_ancestry
+                    ancestry = process_job_ancestry(root)
+                    if ancestry is not None:
+                        launch["job_ancestry"] = ancestry
+                except Exception:  # health: allow BLE001 -- A diagnostic query must not replace the spawn refusal or disclose exception text.
+                    launch["job_ancestry"] = {"unavailable": True}
+                report["launch"] = launch
                 try:
                     from hermes_platform.host.windows_job import current_process_job_limits
                     job = current_process_job_limits()
