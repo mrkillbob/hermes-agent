@@ -58,7 +58,7 @@ def _log_refusal(profile, method, exc: RuntimeStoreError) -> None:
     args = (method, _profile_label(profile), exc.reason,
             f' field={exc.field}' if getattr(exc, 'field', None) else '',
             f' detail={exc.detail}' if getattr(exc, 'detail', None) else '')
-    if getattr(exc, 'field', None) or getattr(exc, 'detail', None):
+    if exc.reason != 'session_busy' and (getattr(exc, 'field', None) or getattr(exc, 'detail', None)):
         logger.warning(line, *args)
     else:
         logger.debug(line, *args)
@@ -101,6 +101,13 @@ def display_projection(history, profile_home):
     from tui_gateway import server
     rows = [{**row, '_row_id': row['row_id']} if 'row_id' in row else row for row in history]
     return server._history_to_messages(rows, profile_home=profile_home)
+
+
+def model_only(row):
+    """A live row the model reads but nobody typed as one message (a micro-compaction merge): never rendered."""
+    from agent.context_compressor import MODEL_ONLY_DISPLAY_METADATA_KEY
+    metadata = row.get('display_metadata')
+    return isinstance(metadata, dict) and bool(metadata.get(MODEL_ONLY_DISPLAY_METADATA_KEY))
 
 
 class AuthorityConnection:
@@ -427,9 +434,10 @@ class AuthorityConnection:
             return await self._create(params, title)
 
     async def _create(self, params, title):
-        from gateway.session_local import stage_local_session
+        from gateway.session_local import stage_local_session, staged_creation_follows
         from gateway.session_local_recovery import restore_local_session
         from gateway.session_local_title import resolve_titled_session, title_new_session
+        from gateway.session_policy import BYPASS_FIELDS
         from gateway.session_runtime_workers import tracked_write
         from hermes_state_local import commit_local_session
         # Bot Mode's forever-chat mint: born hidden from the sidebar. `follow_profile_config` stays in
@@ -438,6 +446,13 @@ class AuthorityConnection:
         if type(hidden) is not bool:
             raise RuntimeStoreError('invalid_params', field='hidden', detail='must be a boolean')
         ref = title and resolve_titled_session(self.authority, self.actor, title, missing_ok=True)
+        if (not ref and title == 'Bot Chat'
+                and not any(params.get(name) is True for name in BYPASS_FIELDS)
+                and staged_creation_follows(self.authority, self.actor, params.get('request_id'))):
+            # ``chat -c "Bot Chat" --create-if-missing`` and any other titled create. A safe-mode
+            # or ignore-user-config launch never reads the profile, so it stays frozen. An exact
+            # retry of a creation staged without the flag keeps that frozen request.
+            params.setdefault('follow_profile_config', True)
         if not ref:
             skills_prompt = None
             if 'skills' in params:
@@ -604,11 +619,12 @@ class AuthorityConnection:
         # reopens it (``reopen_local_session`` in the drain), so opening a finished chat
         # never re-lights DB-derived liveness with no new activity.
         self.authority.authorize(self.actor, ref, 'session:read')
-        if 'session:control' in self.actor.capabilities and ref.session_id not in self.subscriptions:
+        if 'session:control' in self.actor.capabilities:
             # A client attaching (main's `hermes -c` was a new process) re-reads the config-derived settings
-            # (CFG-2); a snapshot poll on this attachment does not.
+            # (CFG-2); a snapshot poll on this attachment does not. Any open still adopts a frozen Bot Chat
+            # whose earlier open found it busy (Desktop's warm `session.activate` resumes on one connection).
             from gateway.session_policy_refresh import refresh_resumed_policy
-            await refresh_resumed_policy(self.authority, ref)
+            await refresh_resumed_policy(self.authority, ref, attached=ref.session_id in self.subscriptions)
         snapshot = await self.authority.attach(self.actor, ref)
         self.subscriptions[ref.session_id] = snapshot.subscription_id
         self._spawn_notice(ref)
@@ -623,7 +639,9 @@ class AuthorityConnection:
         from gateway.session_connections import pending_connection
         display = {}
         if params.get('display_projection'):
-            display['display_messages'] = display_projection(snapshot.history, self.authority.profile_id)
+            # A micro-compaction merge stays in ``messages`` (an undo target); its originals are what shows.
+            display['display_messages'] = display_projection(
+                [row for row in snapshot.history if not model_only(row)], self.authority.profile_id)
         return {'session_id': ref.session_id, 'stored_session_id': ref.session_id,
                 'messages': list(snapshot.history), **display, 'message_count': len(snapshot.history),
                 'running': snapshot.handle.execution_state == 'running',
@@ -705,13 +723,13 @@ class AuthorityConnection:
 
     async def mutate(self, ref, params):
         from gateway.session_mutations import mutate_session
-        from hermes_state_mutation_guards import MUTATION_GUARD_REFUSALS
+        from hermes_state_mutation_guards import MUTATION_GUARD_REFUSALS, busy_refusal
         try:
             result = await mutate_session(self.authority, self.actor, ref, params)
         except MUTATION_GUARD_REFUSALS as exc:
             # A live turn lease / compression lock is the same retryable busy verdict a
             # running admission gets (REST maps it to 409), not an internal error.
-            raise RuntimeStoreError('session_busy') from exc
+            raise busy_refusal(exc) from exc
         except RuntimeStoreError as exc:
             if exc.reason in {'revision_conflict', 'stale_generation'}:
                 # The fresh fences ride on the refusal, so the client retries once without a re-read.
