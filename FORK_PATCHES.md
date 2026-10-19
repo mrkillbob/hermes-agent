@@ -25,6 +25,7 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 | API server: structured `reasoning.effort` outranks legacy `reasoning_effort` | `gateway/platforms/api_server_request_options.py` | `tests/gateway/test_api_server_reasoning_precedence.py` |
 | `update-ui.test.mjs` "probe Git reaches the staged main" gets a 60s timeout (spawns Python repeatedly; 5s default flakes on CI) | `tests-js/update-ui.test.mjs` | itself |
 | Browse reconciliation enforces its deadline during macOS durability setup, SQLite transaction lock waits and shared schema execution, preserving history on expiration | `hermes_state_reconcile.py` | `tests/hermes_state/test_browse_reconcile_budget.py` |
+| Google installs pin OAuthlib 4.0.0 and Google Chat repairs stale OAuthlib while preserving client state, PKCE and token exchange | `pyproject.toml`, `uv.lock`, `plugins/platforms/google_chat/oauth.py` | `tests/gateway/test_google_chat_oauth_dependencies.py`, `tests/gateway/test_google_chat_oauth_client.py` |
 
 ```bash
 scripts/run_tests.sh tests/tools/test_env_passthrough_fork_isolation.py \
