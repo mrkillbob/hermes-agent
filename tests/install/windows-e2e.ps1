@@ -161,6 +161,7 @@ $env:HERMES_DESKTOP_USER_DATA_DIR = Join-Path $WorkRoot 'electron-user-data'
 $script:ChatMock = $null
 $script:ChatFailure = $false
 . (Join-Path $AssetsDir 'desktop-smoke-windows.ps1')
+. (Join-Path $AssetsDir 'out-of-job.ps1')
 
 function Start-JourneyChat {
     if (-not $script:ChatMock) {
@@ -176,10 +177,22 @@ function Invoke-DesktopCheckpoint([string]$ChatPhase, [string]$Commit, [string]$
     $prevEap = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & $DriverNode (Join-Path $AssetsDir 'source-desktop-smoke.mjs') `
-            --root $InstallDir --home $HermesHome --user-data $env:HERMES_DESKTOP_USER_DATA_DIR `
-            --out $ProofRoot --phase $ChatPhase --expect-commit $Commit --desktop $script:ExpectedDesktop --method $Method
-        $chatExit = $LASTEXITCODE
+        $smokeArgs = @((Join-Path $AssetsDir 'source-desktop-smoke.mjs'),
+            '--root', $InstallDir, '--home', $HermesHome, '--user-data', $env:HERMES_DESKTOP_USER_DATA_DIR,
+            '--out', $ProofRoot, '--phase', $ChatPhase, '--expect-commit', $Commit,
+            '--desktop', $script:ExpectedDesktop, '--method', $Method)
+        $chatExit = $null
+        if ($ChatPhase -eq 'new' -and (Test-OutOfJobLaunchWanted)) {
+            # The updated app has to start its own gateway, which the runner step's job forbids
+            # (issue 301, e2e-assets/out-of-job.ps1). $null: the task could not start; run in-process.
+            $chatExit = Invoke-OutsideRunnerJob -FilePath $DriverNode -ArgumentList $smokeArgs `
+                -WorkingDirectory (Get-Location).Path -StageDir (Join-Path $WorkRoot 'out-of-job-new') |
+                Select-Object -Last 1
+        }
+        if ($null -eq $chatExit) {
+            & $DriverNode @smokeArgs
+            $chatExit = $LASTEXITCODE
+        }
     } finally { $ErrorActionPreference = $prevEap }
     if ($chatExit -ne 0) { throw "Mandatory desktop chat $ChatPhase failed (exit $chatExit)" }
     $script:ChatFailure = $false
