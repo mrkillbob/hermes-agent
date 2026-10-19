@@ -469,6 +469,9 @@ google = [
   "google-auth==2.55.1",
   "google-auth-oauthlib==1.3.1",
   "google-auth-httplib2==0.3.1",
+  # OAuthlib 4 removes JSONP revocation and fixes PKCE comparisons
+  # (CVE-2026-49264, CVE-2026-49265); pin unlocked Google installs too.
+  "oauthlib==4.0.0",
   # The Google SDKs permit older vulnerable transitives, so unlocked installs
   # must carry the same fixed floors as uv.lock and the runtime installers:
   # httplib2 0.32.0 (GHSA-j5g9-f88f-gfj3 decompression bomb DoS),
