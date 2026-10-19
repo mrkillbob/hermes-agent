@@ -50,27 +50,19 @@ def _reset_call_name(node) -> str | None:
     return name if name in _RESET_CALLS else None
 
 
-def _find_compression_exhausted_reset_block() -> ast.If:
-    """Return the ``if agent_result.get('compression_exhausted') ...`` block."""
+def _find_compression_exhausted_reset_block() -> ast.AsyncFunctionDef:
+    """Return ``_hmwa_rotate_exhausted_session``, the body that performs the compression-exhaustion reset
+    (the ``if agent_result.get('compression_exhausted')`` branch only dispatches to it)."""
     tree = ast.parse(inspect.getsource(gateway_run_turn_persistence))
 
     for node in ast.walk(tree):
-        if not isinstance(node, ast.If):
-            continue
-        consts = [
-            n.value
-            for n in ast.walk(node.test)
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)
-        ]
-        # Identify the auto-reset branch by the literal passed to .get(...).
-        if "compression_exhausted" in consts:
-            # Only the branch that actually performs the reset, not the
-            # earlier classifier that merely reads the flag into a bool.
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_hmwa_rotate_exhausted_session":
+            # Only the function that actually performs the reset, not a wrapper that merely names it.
             if any(_reset_call_name(sub) for sub in ast.walk(node)):
                 return node
     raise AssertionError(
-        "Could not locate the compression-exhausted auto-reset block "
-        "(if agent_result.get('compression_exhausted') ... reset_session / reset_and_rehome_messages) "
+        "Could not locate the compression-exhausted auto-reset body "
+        "(_hmwa_rotate_exhausted_session calling reset_session / reset_and_rehome_messages) "
         "in gateway/run_turn_persistence.py — the structure changed or the AST walker is stale."
     )
 
