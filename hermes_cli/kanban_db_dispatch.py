@@ -3077,7 +3077,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         cmd += ["--route", json.dumps({
             "provider": routed_task.provider_override, "model": routed_task.model_override,
             "reasoning": routed_task.reasoning_effort,
-            "base_url": env.get("CUSTOM_BASE_URL") if routed_task.provider_override == "ollama" else None,
+            "base_url": env.get("CUSTOM_BASE_URL"),
         })]
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker

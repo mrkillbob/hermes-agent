@@ -10,7 +10,8 @@ from urllib.parse import urlparse
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
-_LOCAL_KANBAN_PROVIDERS = frozenset({"ollama", "ollama-launch", "local", "llamacpp", "llama.cpp", "llama-cpp"})
+_OLLAMA_KANBAN_PROVIDERS = frozenset({"ollama", "ollama-launch"})
+_LOCAL_KANBAN_PROVIDERS = _OLLAMA_KANBAN_PROVIDERS | {"local", "llamacpp", "llama.cpp", "llama-cpp"}
 
 
 def prepare_worker_route(task, profile_home, env):
@@ -28,7 +29,10 @@ def prepare_worker_route(task, profile_home, env):
     endpoint = _resolve_process_local_provider_endpoint(provider)
     if endpoint:
         env["CUSTOM_BASE_URL"] = endpoint
-        provider = "ollama"
+        # Only Ollama pins take the Ollama label; relabelling a llama.cpp pin would hand its
+        # worker Ollama-specific behaviour (vision probes, finish_reason rewrites) on a non-Ollama server.
+        if provider in _OLLAMA_KANBAN_PROVIDERS:
+            provider = "ollama"
     else:
         # An ambient value belongs to some other bare-custom model; the local route must not inherit it.
         env.pop("CUSTOM_BASE_URL", None)
