@@ -21,6 +21,7 @@ Resolve sync conflicts by hand (never `--theirs` a whole file listed here).
 | Reasoning-markup parser recognizes CommonMark fences (tilde, up to 3-space indent, fence length) | `web/src/lib/reasoning-markup.ts` | `web/src/lib/reasoning-markup.test.ts` (vitest) |
 | API server: structured `reasoning.effort` outranks legacy `reasoning_effort` | `gateway/platforms/api_server_request_options.py` | `tests/gateway/test_api_server_reasoning_precedence.py` |
 | `update-ui.test.mjs` "probe Git reaches the staged main" gets a 60s timeout (spawns Python repeatedly; 5s default flakes on CI) | `tests-js/update-ui.test.mjs` | itself |
+| Google installs pin OAuthlib 4.0.0 and Google Chat repairs stale OAuthlib while preserving client state, PKCE and token exchange | `pyproject.toml`, `uv.lock`, `plugins/platforms/google_chat/oauth.py` | `tests/gateway/test_google_chat_oauth_dependencies.py`, `tests/gateway/test_google_chat_oauth_client.py` |
 
 ```bash
 scripts/run_tests.sh tests/tools/test_env_passthrough_fork_isolation.py \
