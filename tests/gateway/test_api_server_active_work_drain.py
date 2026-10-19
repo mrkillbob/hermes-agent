@@ -134,7 +134,7 @@ class TestDrainWaitsForApiWork:
         def delayed_create_task(coro, **kwargs):
             # The patch is process-wide, so aiohttp's own client tasks (which pass
             # eager_start=) must pass through; only the run task is held back.
-            if getattr(coro, "__name__", "") != "_execute_run":
+            if not getattr(coro, "__name__", "").startswith("_execute_run"):
                 return original_create_task(coro, **kwargs)
 
             async def delayed():
