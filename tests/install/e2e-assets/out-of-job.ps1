@@ -9,10 +9,11 @@
 # historical release leave no gateway behind for the new app to reuse, so they
 # hit it (issue 301); legs where something outside the job starts the app never do.
 #
-# A one-shot scheduled task is started by the Task Scheduler service, not by this
-# step, so what it runs is outside the runner's job. The task runs as the current
-# user with an interactive token so Electron still gets the desktop the AHK/Playwright
-# drivers use. If the task cannot start, the caller runs the driver in-process as before.
+# Run 1 tried a one-shot scheduled task: the Task Scheduler also wraps its tasks in a Job Object
+# without breakaway rights (limit_flags 0), so the refusal persisted. Explorer is already running in
+# the interactive session and is not in the runner's job; `explorer.exe <file.cmd>` makes it start
+# the file, so the process tree hangs off Explorer instead of this step. If the wrapper does not
+# start, the caller runs the driver in-process as before.
 
 $script:OutOfJobSecretNames = '(?i)(TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE_KEY)'
 
@@ -34,7 +35,7 @@ $script:OutOfJobWrapper = @'
 $ErrorActionPreference = 'Continue'
 $stage = Split-Path -Parent $MyInvocation.MyCommand.Path
 $log = Join-Path $stage 'output.log'
-Set-Content -LiteralPath (Join-Path $stage 'started.txt') -Value 'started'
+Set-Content -LiteralPath (Join-Path $stage 'started.txt') -Value $PID
 $exitCode = 98
 try {
     $spec = Get-Content -LiteralPath (Join-Path $stage 'spec.json') -Raw | ConvertFrom-Json
@@ -73,7 +74,7 @@ function Invoke-OutsideRunnerJob {
         Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
     }
 
-    # A scheduled task starts from the service's environment, not this step's.
+    # A process started by Explorer gets Explorer's environment, not this step's.
     $envMap = [ordered]@{}
     foreach ($item in (Get-ChildItem Env:)) {
         if ($item.Name -notmatch $script:OutOfJobSecretNames) { $envMap[$item.Name] = $item.Value }
@@ -82,16 +83,15 @@ function Invoke-OutsideRunnerJob {
     $spec | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $specPath -Encoding UTF8
     Set-Content -LiteralPath $wrapperPath -Value $script:OutOfJobWrapper -Encoding UTF8
 
-    $taskName = 'hermes-e2e-out-of-job-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    # Explorer starts the .cmd; it only starts the wrapper (a ps1 would open in an editor).
+    $launcherPath = Join-Path $StageDir 'launch.cmd'
     $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $action = New-ScheduledTaskAction -Execute $psExe -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $wrapperPath)
-    $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes $TimeoutMinutes)
+    Set-Content -LiteralPath $launcherPath -Encoding ASCII -Value ('@"{0}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}"' -f $psExe, $wrapperPath)
     $result = $null
+    $wrapperPid = $null
     try {
-        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
-        Start-ScheduledTask -TaskName $taskName
-        Write-Host "  out-of-job: started scheduled task $taskName (driver runs outside the runner step's job)"
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('"{0}"' -f $launcherPath)
+        Write-Host "  out-of-job: asked explorer.exe to start $launcherPath (driver runs outside the runner step's job)"
         $begin = Get-Date
         $printed = 0
         $endedAt = $null
@@ -109,12 +109,16 @@ function Invoke-OutsideRunnerJob {
             }
             if ($finished) { break }
             $elapsed = (Get-Date) - $begin
-            if (-not (Test-Path -LiteralPath $startedPath) -and $elapsed.TotalSeconds -gt $StartTimeoutSeconds) {
-                Write-Host "  out-of-job: the task did not start within ${StartTimeoutSeconds}s (no interactive session for this user?); running the driver in-process"
+            if ($null -eq $wrapperPid -and (Test-Path -LiteralPath $startedPath)) {
+                $wrapperPid = [int](Get-Content -LiteralPath $startedPath -Raw).Trim()
+                Write-Host "  out-of-job: wrapper running as pid $wrapperPid"
+            }
+            if ($null -eq $wrapperPid -and $elapsed.TotalSeconds -gt $StartTimeoutSeconds) {
+                Write-Host "  out-of-job: explorer did not start the wrapper within ${StartTimeoutSeconds}s (no interactive shell?); running the driver in-process"
                 break
             }
-            if ((Test-Path -LiteralPath $startedPath) -and ((Get-ScheduledTask -TaskName $taskName).State -eq 'Ready')) {
-                # The wrapper ran and the task is idle without an exit file: it died.
+            if ($null -ne $wrapperPid -and -not (Get-Process -Id $wrapperPid -ErrorAction SilentlyContinue)) {
+                # The wrapper is gone without an exit file: it died.
                 if ($null -eq $endedAt) { $endedAt = Get-Date }
                 elseif (((Get-Date) - $endedAt).TotalSeconds -gt 10) { $result = 97; break }
             }
@@ -124,8 +128,9 @@ function Invoke-OutsideRunnerJob {
             $result = [int](Get-Content -LiteralPath $exitPath -Raw).Trim()
         }
     } finally {
-        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        if ($null -ne $wrapperPid -and -not (Test-Path -LiteralPath $exitPath)) {
+            Stop-Process -Id $wrapperPid -Force -ErrorAction SilentlyContinue
+        }
         # The snapshot holds this step's environment.
         Remove-Item -LiteralPath $specPath -Force -ErrorAction SilentlyContinue
     }
