@@ -78,3 +78,33 @@ def test_failed_membership_query_keeps_collected_ancestry():
     assert report['processes'] == original['processes']
     assert report['job'] == {'scope': 'immediate_job_tree', 'unavailable': True}
     assert 'private' not in json.dumps(report)
+
+
+@pytest.mark.parametrize('failure', ['denied', 'gone', 'oserror'])
+def test_unreadable_ancestor_image_preserves_numeric_chain(tmp_path, failure):
+    import psutil
+    from hermes_platform.host.job_ancestry import _ancestry
+
+    queried = []
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+            queried.append(pid)
+        def create_time(self):
+            return float(self.pid * 10)
+        def ppid(self):
+            return self.pid - 10
+        def exe(self):
+            if self.pid == 20:
+                raise {'denied': psutil.AccessDenied(20), 'gone': psutil.NoSuchProcess(20),
+                       'oserror': OSError(5, 'private-path-error')}[failure]
+            return str(tmp_path / 'private-path' / 'python.exe')
+
+    report = _ancestry(30, tmp_path, Process)
+    assert queried == [30, 20, 10]
+    assert [row['pid'] for row in report['processes']] == [30, 20, 10]
+    assert report['processes'][1] == {'pid': 20, 'parent_pid': 10, 'create_time': 200.0,
+                                      'image': {'unavailable': True}}
+    assert report['processes'][2]['image']['path_sha256']
+    assert report['stop'] == 'root'
+    assert 'private-path' not in json.dumps(report)

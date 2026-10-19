@@ -25,9 +25,12 @@ def _ancestry(pid: int, root: Path, process_factory) -> dict[str, object]:
             if created > child_time:
                 return {"processes": processes, "stop": "newer_parent"}
             parent = process.ppid()
-            image = process.exe()
         except (psutil.Error, OSError):
             return {"processes": processes, "stop": "unavailable"}
+        try:
+            image = process.exe()
+        except (psutil.Error, OSError):
+            image = None  # Image access is independent of the already observed numeric parentage.
         processes.append({"pid": pid, "parent_pid": parent, "create_time": created,
                           "image": _image(image, root) if image else {"unavailable": True}})
         pid, child_time = parent, created
