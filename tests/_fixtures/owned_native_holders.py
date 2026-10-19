@@ -13,7 +13,10 @@ import pytest
 class OwnedNativeHolders:
     def __init__(self, manifest):
         self.manifest = Path(manifest)
-        record = json.dumps([os.getpid(), psutil.Process().create_time()]) + '\n'
+        self.register(os.getpid())
+
+    def register(self, pid):
+        record = json.dumps([pid, psutil.Process(pid).create_time()]) + '\n'
         fd = os.open(self.manifest, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             os.write(fd, record.encode())
@@ -75,7 +78,7 @@ def owned_native_holders(monkeypatch, tmp_path, request):
     scope = OwnedNativeHolders(tmp_path / 'owned-holder-pids.jsonl')
     scope.install(monkeypatch.setattr)
     for name in ('_PROC_BROWSE', '_PURPOSE_HOLDER', '_RAW_FLOCK_HOLDER', '_SLOW_BROWSE',
-                 '_SLOW_SCAN_BROWSE', '_LEGACY_GATEWAY', '_MULTIPLEXER_LOCK'):
+                 '_SLOW_SCAN_BROWSE', '_MULTIPLEXER_LOCK'):
         script = getattr(request.module, name, None)
         if script is not None:
             monkeypatch.setattr(request.module, name, scope.bootstrap(script))

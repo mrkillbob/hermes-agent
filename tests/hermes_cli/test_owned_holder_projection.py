@@ -22,17 +22,19 @@ def test_owned_legacy_gateway_is_a_real_native_holder(tmp_path, owned_native_hol
     path = _pre_merge_store(_profile_home(tmp_path) / 'state.db')
     script = tmp_path / 'hermes_cli' / 'main.py'
     script.parent.mkdir()
-    script.write_text(owned_native_holders.bootstrap(
+    script.write_text(
         'import sqlite3,sys\n'
         'conn=sqlite3.connect(sys.argv[-1])\n'
         'conn.execute("SELECT count(*) FROM sessions").fetchone()\n'
         'print("holding",flush=True)\n'
-        'sys.stdin.read()\n'))
+        'sys.stdin.read()\n')
     before = path.read_bytes()
     child = subprocess.Popen([sys.executable, str(script), 'gateway', 'run', str(path)],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     try:
         assert child.stdout.readline().strip() == 'holding'
+        assert child.pid not in owned_native_holders.pids()
+        owned_native_holders.register(child.pid)
         assert child.pid in [pid for pid, _ in holders.foreign_state_db_holders(path)]
         targets = (dbfile._iter_darwin_fd_targets() if sys.platform == 'darwin'
                    else dbfile._iter_proc_fd_targets())

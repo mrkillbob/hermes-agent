@@ -908,7 +908,7 @@ select.select([sys.stdin], [], [], 60)
 
 
 @pytest.mark.platforms("linux")
-def test_legacy_gateway_holding_the_store_without_a_lock_is_not_written(tmp_path):
+def test_legacy_gateway_holding_the_store_without_a_lock_is_not_written(tmp_path, owned_native_holders):
     """alt-glitch W1: a v0.22.0 multiplex gateway keeps a named profile's state.db open without writing
     that profile's gateway.lock/gateway.pid. Browse must still treat it as the owner: no DDL, a named
     503. Plain readers (sibling browses, Desktop) are not owners, so only a holder identified as a
@@ -924,6 +924,9 @@ def test_legacy_gateway_holding_the_store_without_a_lock_is_not_written(tmp_path
                               executable=sys.executable, env=os.environ, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     try:
         assert legacy.stdout.readline().strip() == "holding"
+        # Renaming Python's argv[0] can hide its dependency environment on Linux.
+        # This stdlib-only holder needs registration, but never scans other holders.
+        owned_native_holders.register(legacy.pid)
         assert not (home / "gateway.lock").exists() or not (home / "gateway.lock").read_text()
         with pytest.raises(HTTPException) as caught:
             _open_session_db_at_path(path, read_only=True)
