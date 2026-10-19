@@ -150,6 +150,9 @@ class DispatchResult:
     host_capacity_saturated: bool = False
     paused: bool = False
     """The global emergency stop (``hermes pause``) was engaged: nothing was reclaimed or spawned."""
+    routing_refused: list[tuple[str, str, str]] = field(default_factory=list)
+    """``(task_id, target_profile, reason)``: the orchestrator lane could not hand the card on
+    because PR write authority for the target is unverified or read-only. Operator-actionable."""
     memory_pressure: Optional[str] = None
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
@@ -175,6 +178,8 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
             counts[reason] = counts.get(reason, 0) + 1
         if res.rate_limited:
             counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
+        if res.routing_refused:
+            counts["routing_refused"] = counts.get("routing_refused", 0) + len(res.routing_refused)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:

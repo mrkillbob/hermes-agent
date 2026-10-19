@@ -178,6 +178,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "skipped_locked": res.skipped_locked,
             "memory_pressure": res.memory_pressure,
             "paused": res.paused,
+            "routing_refused": [
+                {"task_id": tid, "assignee": who, "reason": reason}
+                for (tid, who, reason) in res.routing_refused
+            ],
         }, ascii=True)
         return 0
     if res.paused:
@@ -215,6 +219,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
             f"{', '.join(res.skipped_nonspawnable)}"
         )
+    for tid, who, reason in res.routing_refused:
+        print(f"Routing refused ({who}): {tid} - {reason}")
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
     if res.rate_limited:
