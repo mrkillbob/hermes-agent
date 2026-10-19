@@ -49,3 +49,42 @@ def test_absent_or_unreadable_job_does_not_query_members(failure):
     result = job._query_membership(Api(), lambda: 5, [321])
     assert result['members'][0]['present'] is (None if failure else False)
     assert result['membership_error'] == (5 if failure else None)
+
+
+@pytest.mark.platforms('windows')
+def test_native_owned_child_job_queries_real_pid_list_without_exposing_other_members():
+    import json
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    # Only this disposable child joins the fresh job; the test runner is untouched.
+    program = r'''
+import ctypes,json,os,sys
+sys.path.insert(0,sys.argv[1])
+from hermes_platform.host.windows_job import _kernel32,current_job_membership,current_process_job_limits
+k=_kernel32()
+k.CreateJobObjectW.argtypes=[ctypes.c_void_p,ctypes.c_wchar_p]
+k.CreateJobObjectW.restype=ctypes.c_void_p
+k.AssignProcessToJobObject.argtypes=[ctypes.c_void_p,ctypes.c_void_p]
+k.AssignProcessToJobObject.restype=ctypes.c_int32
+k.CloseHandle.argtypes=[ctypes.c_void_p]
+k.CloseHandle.restype=ctypes.c_int32
+job=k.CreateJobObjectW(None,None)
+if not job:raise ctypes.WinError(ctypes.get_last_error())
+try:
+    if not k.AssignProcessToJobObject(job,k.GetCurrentProcess()):
+        raise ctypes.WinError(ctypes.get_last_error())
+    print(json.dumps({'pid':os.getpid(),'job':current_job_membership([os.getpid(),0]),
+                      'limits':current_process_job_limits()}))
+finally:
+    k.CloseHandle(job)
+'''
+    result = subprocess.run([sys.executable, '-c', program, str(Path(__file__).resolve().parents[2])],
+                            capture_output=True, text=True, encoding='utf-8', timeout=20, check=True)
+    report = json.loads(result.stdout)
+    assert report['limits']['in_job'] is True and report['limits']['limit_flags'] == 0
+    job = report['job']
+    assert job['in_job'] is True and job['complete'] is True
+    assert job['membership_error'] is None and job['query_error'] is None
+    assert job['members'] == [{'pid': report['pid'], 'present': True}, {'pid': 0, 'present': False}]
