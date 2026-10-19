@@ -141,3 +141,26 @@ def test_identity_probe_failure_preserves_original_spawn_refusal(tmp_path, monke
     report = json.loads((tmp_path / "logs/gateway-stdio.log").read_text().splitlines()[-1])
     assert report["launch"]["context"] == {"unavailable": True}
     assert "private" not in json.dumps(report)
+
+
+def test_ancestry_probe_failure_does_not_erase_successful_image_evidence(tmp_path, monkeypatch):
+    from hermes_cli import gateway_runtime_start as start
+    from hermes_cli.gateway_runtime_service import RuntimeStartError
+    from hermes_platform.host import job_ancestry
+
+    def broken(root):
+        raise OSError(errno.EACCES, 'private-ancestry-text')
+
+    failure = OSError(errno.EACCES, 'private-original')
+    def refuse(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(job_ancestry, 'process_job_ancestry', broken)
+    monkeypatch.setattr(start.subprocess, 'Popen', refuse)
+    with pytest.raises(RuntimeStartError) as caught:
+        start.spawn_unmanaged_gateway(tmp_path, deadline=time.monotonic() + 10)
+    assert caught.value.__cause__ is failure
+    report = json.loads((tmp_path / 'logs/gateway-stdio.log').read_text().splitlines()[-1])
+    assert report['launch']['context']['client']['image']['path_sha256']
+    assert report['launch']['job_ancestry'] == {'unavailable': True}
+    assert 'private-' not in json.dumps(report)
