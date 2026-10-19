@@ -1,12 +1,16 @@
 """Dispatch lane selection and the locked tick, with an optional exact-card fence."""
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import DispatchResult
+
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_task_ids(task_ids: Optional[Sequence[str]]) -> Optional[tuple[str, ...]]:
@@ -74,6 +78,34 @@ def _any_spawnable_review(
     return False
 
 
+def configured_dispatch_kwargs() -> dict[str, Any]:
+    """``dispatch_once`` arguments from ``kanban.*``, resolved as the gateway loop does.
+
+    Every surface that nudges the dispatcher by hand (CLI, dashboard) needs the same host
+    caps, per-profile caps and ``default_assignee``; a bare ``dispatch_once`` is uncapped.
+    Raises when the config cannot be read, so a caller fails closed instead of dispatching
+    without its limits.
+    """
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from hermes_cli.config import load_config
+
+    cfg = load_config()
+    section = dispatch.shared_kanban_config((cfg.get("kanban", {}) if isinstance(cfg, dict) else {}) or {})
+    return dict(
+        default_assignee=(section.get("default_assignee") or "").strip() or None,
+        max_spawn=dispatch._positive_int(section.get("max_spawn"), None),
+        # Memory-derived default when unset — the same fallback the gateway applies.
+        max_in_progress=dispatch.resolve_global_max_in_progress(
+            dispatch._positive_int(section.get("max_in_progress"), None),
+        ),
+        max_in_progress_per_profile=dispatch._positive_int(section.get("max_in_progress_per_profile"), None),
+        max_in_progress_by_profile=section.get("max_in_progress_by_profile"),
+        max_in_progress_per_model=section.get("max_in_progress_per_model"),
+        max_in_progress_by_model=section.get("max_in_progress_by_model"),
+        local_model_cap=dispatch.resolve_priority_runtime_local_cap(section.get("priority_runtime_guard", {})),
+    )
+
+
 def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
     """``kanban.default_assignee`` when it names a real profile this home may
     claim (``kanban.dispatch_profiles`` gated, same predicate as the spawn
@@ -116,9 +148,15 @@ def dispatch_tick(
     call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
     the PID so later ticks catch crashes before the TTL. Cap semantics:
     :func:`dispatch._tick_spawn_budget`."""
+    from agent.estop import check_paused
     from hermes_cli import kanban_db_dispatch as dispatch
 
     result = dispatch.DispatchResult()
+    # ``hermes pause`` is documented to hold kanban dispatch; the gateway loop checks it, but the CLI,
+    # the dashboard nudge and the standalone daemon all enter here. A dry run only reports.
+    if not dry_run and check_paused("kanban", logger):
+        result.paused = True
+        return result
     # An exact-card tick never sweeps unrelated ownership or promotes new work.
     # Running, held and staged cards remain for the normal maintenance owner.
     if task_ids is None:

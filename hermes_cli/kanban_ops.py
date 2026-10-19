@@ -132,51 +132,28 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         task_ids = normalize_task_ids(getattr(args, "task_ids", None))
     except ValueError as exc:
         return _err(f"kanban dispatch: {exc}", 2)
-    # Honour kanban.default_assignee, kanban.max_in_progress,
-    # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
-    # semantics as the gateway dispatch path.
+    # Honour the same kanban.* limits and default_assignee as the gateway dispatch path.
     try:
-        from hermes_cli.config import load_config
-        _cfg = load_config()
-        _kanban_cfg = kbd.shared_kanban_config(
-            (_cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}) or {}
-        )
-        default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
-        max_in_progress_per_profile = kbd._positive_int(
-            _kanban_cfg.get("max_in_progress_per_profile"), None
-        )
-        # Memory-derived default when unset — same fallback the gateway applies.
-        max_in_progress = kbd.resolve_global_max_in_progress(
-            kbd._positive_int(_kanban_cfg.get("max_in_progress"), None),
-        )
-        local_model_cap = kbd.resolve_priority_runtime_local_cap(
-            _kanban_cfg.get("priority_runtime_guard", {})
-        )
+        from hermes_cli.kanban_dispatch_tick import configured_dispatch_kwargs
+        limits = configured_dispatch_kwargs()
         # CLI --max is the more explicit signal, so it wins over kanban.max_spawn.
         cli_max = getattr(args, "max", None)
-        max_spawn = (
-            cli_max if cli_max is not None else kbd._positive_int(_kanban_cfg.get("max_spawn"), None)
-        )
+        if cli_max is not None:
+            limits["max_spawn"] = cli_max
     except Exception as exc:
         if getattr(args, "json", False):
             _print_json({"error": type(exc).__name__, "status": "config_unavailable"})
         else:
             print(f"Dispatch paused: configuration unavailable ({type(exc).__name__}).")
         return 1
+    default_assignee = limits["default_assignee"]
     with kbc.connect_closing() as conn:
         res = kbd.dispatch_once(
             conn,
             dry_run=args.dry_run,
             task_ids=task_ids,
-            max_spawn=max_spawn,
-            max_in_progress=max_in_progress,
             failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
-            default_assignee=default_assignee,
-            max_in_progress_per_profile=max_in_progress_per_profile,
-            max_in_progress_by_profile=_kanban_cfg.get("max_in_progress_by_profile"),
-            max_in_progress_per_model=_kanban_cfg.get("max_in_progress_per_model"),
-            max_in_progress_by_model=_kanban_cfg.get("max_in_progress_by_model"),
-            local_model_cap=local_model_cap,
+            **limits,
         )
     if getattr(args, "json", False):
         _print_json({
@@ -200,7 +177,12 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "rate_limited": res.rate_limited,
             "skipped_locked": res.skipped_locked,
             "memory_pressure": res.memory_pressure,
+            "paused": res.paused,
         }, ascii=True)
+        return 0
+    if res.paused:
+        print("Dispatch paused by the global emergency stop (`hermes pause`); nothing was reclaimed or spawned. "
+              "Run `hermes resume` to lift it.")
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
     if res.reaped_terminal_workers:

@@ -236,6 +236,20 @@ def seed_revenue_evidence(source: Path, workspace: Path) -> None:
     (workspace / "readiness-evidence.json").write_text(json.dumps(packet, indent=2), encoding="utf-8")
 
 
+def new_evidence_workspace(department):
+    """A directory for the card's seeded evidence that outlives the system temp purge.
+
+    The card can wait in `ready` for days; the system temp dir is purged meanwhile and the
+    dispatcher would silently recreate it empty, so the worker would "complete IDLE" on a
+    missing evidence file. Keep it under the board's own workspaces root instead.
+    """
+    from hermes_cli.kanban_db import workspaces_root
+
+    root = workspaces_root(board=department['board'])
+    root.mkdir(parents=True, exist_ok=True)
+    return tempfile.mkdtemp(prefix='hermes-discovery-' + department['id'] + '-', dir=str(root))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--hermes', required=True)
@@ -264,7 +278,7 @@ def main():
     receipts = []
     for department in plan:
         body = discovery_body(spec, department)
-        workspace = tempfile.mkdtemp(prefix='hermes-discovery-' + department['id'] + '-')
+        workspace = new_evidence_workspace(department)
         seed_discovery_evidence(root, Path(workspace), department, tasks)
         if department['id'] == 'revenue_lab' and department.get('evidence_root'):
             seed_revenue_evidence(Path(department['evidence_root']), Path(workspace))
