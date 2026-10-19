@@ -820,7 +820,7 @@ def restart_mcp_servers_with_new_inputs(names: set[str]) -> list[str]:
             for name in sorted(names):
                 config = servers.get(name)
                 with _core._lock:
-                    key = _resolve_server_key(name, scope, current=False)
+                    key = _resolve_server_key(name, scope, current=False, lock_held=True)
                     server = _core._servers.get(key)
                 recorded = getattr(server, "_resolved_identity", None)
                 if config is None or recorded is None or not mcp_server_enabled(config):
