@@ -24,18 +24,25 @@ test('one tracker: a red run opens it, the next red run rewrites it, a green run
   expect(planTracker(run('success'), [jobs[2]], null).action).toBe('none')
 })
 
-test('each red leg says how often it was red in the previous scheduled runs', () => {
+test('each red leg says how often it was red in the previous scheduled runs it ran in', () => {
   const steady = 'windows: a -> hermes-update (v1 -> HEAD) / e2e'
   const flaky = 'windows: b -> hermes-update (v1 -> HEAD) / e2e'
   const fresh = 'windows: c -> hermes-update (v1 -> HEAD) / e2e'
-  const jobs = [leg(steady, 'failure', 'Update A'), leg(flaky, 'failure', 'Update A'), leg(fresh, 'failure', 'Update A')]
-  const history = [new Set([steady, flaky]), new Set([steady]), new Set([steady, flaky])]
+  const renamed = 'windows: d -> hermes-update (v2 -> HEAD) / e2e'
+  const jobs = [steady, flaky, fresh, renamed].map((name) => leg(name, 'failure', 'Update A'))
+  const history = [
+    new Map([[steady, 'failure'], [flaky, 'failure'], [fresh, 'success']]),
+    new Map([[steady, 'failure'], [flaky, 'success'], [fresh, 'success']]),
+    new Map([[steady, 'failure'], [flaky, 'failure'], [fresh, 'skipped']]),
+  ]
 
   const { body } = planTracker(run('failure'), jobs, null, { history })
   expect(body).toContain(`[${steady}](https://example.test/job/${steady.length}) — red in all 3 previous scheduled run(s)`)
-  expect(body).toContain('— intermittent: also red in 2 of the previous 3 scheduled run(s)')
-  expect(body).toContain('— new: green in the previous 3 scheduled run(s)')
-  expect(body).toContain('Over the previous 3 scheduled run(s): 1 leg(s) red every time, 1 intermittent, 1 new.')
+  expect(body).toContain('— intermittent: also red in 2 of the 3 previous scheduled run(s) it ran in')
+  // Green where it ran (skipped once) is "new"; a leg absent from every previous run is not called green.
+  expect(body).toContain('— new: green in the 2 previous scheduled run(s) it ran in')
+  expect(body).toContain('— new: it did not run in the previous 3 scheduled run(s)')
+  expect(body).toContain('Over the previous 3 scheduled run(s): 1 leg(s) red every time they ran, 1 intermittent, 2 new.')
 
   // No history (first run, or the lookup is skipped): the rows are unchanged.
   expect(planTracker(run('failure'), jobs, null).body).not.toContain('previous scheduled run')

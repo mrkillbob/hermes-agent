@@ -32,18 +32,36 @@ const PENDING_START = '<!-- e2e-pending:start -->';
 const PENDING_END = '<!-- e2e-pending:end -->';
 
 /**
- * How often a red leg was red in the previous scheduled runs (newest first,
- * the current run excluded).
+ * How a leg fared in the previous scheduled runs (newest first, the current
+ * run excluded). A run counts for a leg only if the leg actually ran there
+ * (success or red): an absent or skipped job says nothing about it, which
+ * matters when a newly sampled release renames every job.
  *
  * @param {string} name
- * @param {Set<string>[]} history
+ * @param {Map<string, string | null>[]} history job name -> conclusion, one map per previous run
+ * @returns {{ran: number, red: number}}
  */
+function legStats(name, history) {
+  let ran = 0;
+  let red = 0;
+  for (const outcomes of history) {
+    const conclusion = String(outcomes.get(name));
+    if (RED.has(conclusion)) { ran += 1; red += 1; }
+    else if (conclusion === 'success') ran += 1;
+  }
+  return { ran, red };
+}
+
+/** @param {string} name @param {Map<string, string | null>[]} history */
 function legHistory(name, history) {
   if (history.length === 0) return '';
-  const count = history.filter((reds) => reds.has(name)).length;
-  if (count === 0) return ` — new: green in the previous ${history.length} scheduled run(s)`;
-  if (count === history.length) return ` — red in all ${count} previous scheduled run(s)`;
-  return ` — intermittent: also red in ${count} of the previous ${history.length} scheduled run(s)`;
+  const { ran, red } = legStats(name, history);
+  if (ran === 0) return ` — new: it did not run in the previous ${history.length} scheduled run(s)`;
+  if (red === 0) return ` — new: green in the ${ran} previous scheduled run(s) it ran in`;
+  if (red === ran) return ran === history.length
+    ? ` — red in all ${ran} previous scheduled run(s)`
+    : ` — red in every previous scheduled run it ran in (${ran} of ${history.length})`;
+  return ` — intermittent: also red in ${red} of the ${ran} previous scheduled run(s) it ran in`;
 }
 
 /**
@@ -69,7 +87,7 @@ export function withPendingNote(body, run) {
  * @param {{conclusion: string | null, html_url: string, head_sha: string, created_at: string}} run
  * @param {{name: string, conclusion: string | null, html_url: string, steps?: {name: string, conclusion: string | null}[]}[]} jobs
  * @param {{number: number, body?: string} | null} openIssue
- * @param {{history?: Set<string>[]}} [context] red leg names of the previous scheduled runs, newest first
+ * @param {{history?: Map<string, string | null>[]}} [context] job conclusions of the previous scheduled runs, newest first
  * @returns {{action: 'open' | 'update' | 'close' | 'note' | 'none', title?: string, body?: string}}
  */
 export function planTracker(run, jobs, openIssue, context = {}) {
@@ -107,10 +125,10 @@ export function planTracker(run, jobs, openIssue, context = {}) {
     '### Red legs by failure class',
   ];
   if (history.length > 0) {
-    const counts = red.map((job) => history.filter((reds) => reds.has(job.name)).length);
-    const consistent = counts.filter((c) => c === history.length).length;
-    const fresh = counts.filter((c) => c === 0).length;
-    lines.push('', `Over the previous ${history.length} scheduled run(s): ${consistent} leg(s) red every time, ${red.length - consistent - fresh} intermittent, ${fresh} new.`);
+    const stats = red.map((job) => legStats(job.name, history));
+    const consistent = stats.filter((x) => x.ran > 0 && x.red === x.ran).length;
+    const fresh = stats.filter((x) => x.red === 0).length;
+    lines.push('', `Over the previous ${history.length} scheduled run(s): ${consistent} leg(s) red every time they ran, ${red.length - consistent - fresh} intermittent, ${fresh} new.`);
   }
   let rows = 0;
   for (const [key, members] of [...classes].sort((a, b) => b[1].length - a[1].length)) {
@@ -132,19 +150,22 @@ function gh(args) {
 }
 
 /**
- * Red leg names of the last HISTORY_RUNS completed scheduled runs before `run`.
+ * Job conclusions of the last HISTORY_RUNS completed scheduled runs that started
+ * before `run` (a replay of an older run must not see later outcomes).
  *
  * @param {string} repo
- * @param {{id: number, workflow_id: number}} run
- * @returns {Set<string>[]}
+ * @param {{id: number, workflow_id: number, created_at: string}} run
+ * @returns {Map<string, string | null>[]}
  */
-function previousRedLegs(repo, run) {
-  const previous = JSON.parse(gh(['api', `repos/${repo}/actions/workflows/${run.workflow_id}/runs?event=schedule&status=completed&per_page=${HISTORY_RUNS + 1}`])).workflow_runs
-    .filter((/** @type {any} */ r) => r.id !== run.id)
+function previousRuns(repo, run) {
+  const before = Date.parse(run.created_at);
+  const previous = JSON.parse(gh(['api', `repos/${repo}/actions/workflows/${run.workflow_id}/runs?event=schedule&status=completed&per_page=100`])).workflow_runs
+    .filter((/** @type {any} */ r) => r.id !== run.id && Date.parse(r.created_at) < before)
+    .sort((/** @type {any} */ a, /** @type {any} */ b) => Date.parse(b.created_at) - Date.parse(a.created_at))
     .slice(0, HISTORY_RUNS);
-  return previous.map((/** @type {any} */ r) => new Set(
-    gh(['api', '--paginate', `repos/${repo}/actions/runs/${r.id}/jobs?per_page=100`, '--jq', '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "startup_failure") | .name'])
-      .split('\n').filter((l) => l.trim())));
+  return previous.map((/** @type {any} */ r) => new Map(
+    gh(['api', '--paginate', `repos/${repo}/actions/runs/${r.id}/jobs?per_page=100`, '--jq', '.jobs[] | [.name, .conclusion] | @tsv'])
+      .split('\n').filter((l) => l.trim()).map((l) => { const [name, conclusion] = l.split('\t'); return [name, conclusion]; })));
 }
 
 async function main() {
@@ -159,7 +180,7 @@ async function main() {
   const open = JSON.parse(gh(['api', `repos/${repo}/issues?labels=${LABEL}&state=open&per_page=5`]))
     .filter((/** @type {any} */ i) => !i.pull_request);
   const openIssue = open.length ? { number: open[0].number, body: open[0].body || '' } : null;
-  const plan = planTracker(run, jobs, openIssue, { history: run.status === 'completed' ? previousRedLegs(repo, run) : [] });
+  const plan = planTracker(run, jobs, openIssue, { history: run.status === 'completed' ? previousRuns(repo, run) : [] });
   console.log(`run ${runId}: conclusion=${run.conclusion} red-legs=${jobs.filter((j) => RED.has(String(j.conclusion))).length} open-tracker=${openIssue ? `#${openIssue.number}` : 'none'} -> ${plan.action}`);
   if (values['dry-run'] || plan.action === 'none') {
     if (plan.body) console.log(`\n--- ${plan.title || 'comment'} ---\n${plan.body}`);
