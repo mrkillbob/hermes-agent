@@ -87,7 +87,9 @@ export function withPendingNote(body, run) {
  * @param {{conclusion: string | null, html_url: string, head_sha: string, created_at: string}} run
  * @param {{name: string, conclusion: string | null, html_url: string, steps?: {name: string, conclusion: string | null}[]}[]} jobs
  * @param {{number: number, body?: string} | null} openIssue
- * @param {{history?: Map<string, string | null>[]}} [context] job conclusions of the previous scheduled runs, newest first
+ * @param {{history?: Map<string, string | null>[], pending?: {html_url: string, status: string | null, created_at: string} | null}} [context]
+ *   history: job conclusions of the previous scheduled runs, newest first;
+ *   pending: a scheduled run newer than this one that has not finished (its note survives this rewrite)
  * @returns {{action: 'open' | 'update' | 'close' | 'note' | 'none', title?: string, body?: string}}
  */
 export function planTracker(run, jobs, openIssue, context = {}) {
@@ -141,7 +143,8 @@ export function planTracker(run, jobs, openIssue, context = {}) {
   }
   if (red.length > rows) lines.push('', `…and ${red.length - rows} more; see the run's jobs list.`);
   const title = `Install & Update E2E matrix is red (${red.length} leg${red.length === 1 ? '' : 's'})`;
-  return { action: openIssue ? 'update' : 'open', title, body: lines.join('\n') };
+  const body = lines.join('\n');
+  return { action: openIssue ? 'update' : 'open', title, body: context.pending ? withPendingNote(body, context.pending) : body };
 }
 
 /** @param {string[]} args @returns {string} */
@@ -158,14 +161,35 @@ function gh(args) {
  * @returns {Map<string, string | null>[]}
  */
 function previousRuns(repo, run) {
+  // The created filter keeps a replay of an old run from paging past the newest runs; the
+  // client-side guard drops the run itself and any equal-timestamp neighbour.
+  const created = encodeURIComponent(`<${run.created_at}`);
   const before = Date.parse(run.created_at);
-  const previous = JSON.parse(gh(['api', `repos/${repo}/actions/workflows/${run.workflow_id}/runs?event=schedule&status=completed&per_page=100`])).workflow_runs
+  const previous = JSON.parse(gh(['api', `repos/${repo}/actions/workflows/${run.workflow_id}/runs?event=schedule&status=completed&created=${created}&per_page=${HISTORY_RUNS + 1}`])).workflow_runs
     .filter((/** @type {any} */ r) => r.id !== run.id && Date.parse(r.created_at) < before)
     .sort((/** @type {any} */ a, /** @type {any} */ b) => Date.parse(b.created_at) - Date.parse(a.created_at))
     .slice(0, HISTORY_RUNS);
   return previous.map((/** @type {any} */ r) => new Map(
     gh(['api', '--paginate', `repos/${repo}/actions/runs/${r.id}/jobs?per_page=100`, '--jq', '.jobs[] | [.name, .conclusion] | @tsv'])
       .split('\n').filter((l) => l.trim()).map((l) => { const [name, conclusion] = l.split('\t'); return [name, conclusion]; })));
+}
+
+/**
+ * The newest scheduled run, started after `run`, that is still queued or running. A successor cancels an
+ * in-progress scheduled run, so an older run's completion can arrive after the successor's `requested`
+ * event already wrote its note; the rewrite must carry that note forward.
+ *
+ * @param {string} repo
+ * @param {{id: number, workflow_id: number, created_at: string}} run
+ * @returns {{html_url: string, status: string | null, created_at: string} | null}
+ */
+function newerPendingRun(repo, run) {
+  const after = Date.parse(run.created_at);
+  const newer = ['queued', 'in_progress'].flatMap((status) =>
+    JSON.parse(gh(['api', `repos/${repo}/actions/workflows/${run.workflow_id}/runs?event=schedule&status=${status}&per_page=20`])).workflow_runs)
+    .filter((/** @type {any} */ r) => r.id !== run.id && Date.parse(r.created_at) > after)
+    .sort((/** @type {any} */ a, /** @type {any} */ b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  return newer[0] || null;
 }
 
 async function main() {
@@ -180,7 +204,8 @@ async function main() {
   const open = JSON.parse(gh(['api', `repos/${repo}/issues?labels=${LABEL}&state=open&per_page=5`]))
     .filter((/** @type {any} */ i) => !i.pull_request);
   const openIssue = open.length ? { number: open[0].number, body: open[0].body || '' } : null;
-  const plan = planTracker(run, jobs, openIssue, { history: run.status === 'completed' ? previousRuns(repo, run) : [] });
+  const completed = run.status === 'completed';
+  const plan = planTracker(run, jobs, openIssue, completed ? { history: previousRuns(repo, run), pending: newerPendingRun(repo, run) } : {});
   console.log(`run ${runId}: conclusion=${run.conclusion} red-legs=${jobs.filter((j) => RED.has(String(j.conclusion))).length} open-tracker=${openIssue ? `#${openIssue.number}` : 'none'} -> ${plan.action}`);
   if (values['dry-run'] || plan.action === 'none') {
     if (plan.body) console.log(`\n--- ${plan.title || 'comment'} ---\n${plan.body}`);

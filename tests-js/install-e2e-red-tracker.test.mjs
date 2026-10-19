@@ -67,3 +67,16 @@ test('a run that has not finished only annotates an open tracker, and its report
   expect(done.action).toBe('update')
   expect(done.body).not.toContain('e2e-pending')
 })
+
+test('an older run finishing after its successor was requested keeps the successor\'s note', () => {
+  const pending = { status: 'queued', html_url: 'https://example.test/runs/9', created_at: '2026-09-27T09:00:00Z' }
+  const jobs = [leg('windows: x', 'failure', 'Update A')]
+
+  const rewritten = planTracker(run('cancelled'), jobs, { number: 7, body: 'old' }, { pending })
+  expect(rewritten.action).toBe('update')
+  expect(rewritten.body).toContain('A newer scheduled run is still queued (https://example.test/runs/9')
+  expect(rewritten.body).toContain('windows: x')
+
+  // No newer run: no note.
+  expect(planTracker(run('failure'), jobs, { number: 7, body: 'old' }, { pending: null }).body).not.toContain('e2e-pending')
+})
