@@ -6,12 +6,16 @@ import json
 import logging
 from typing import Any
 
+# Bundled profiles import this package under different synthetic namespaces.
+# Use one canonical owner for capacity; profile credentials stay on the adapter.
+from plugins.platforms.feishu.webhook_capacity import capacity as _PROCESS_CAPACITY
+
 from . import adapter as feishu
 
 logger = logging.getLogger(__name__)
 
-# Non-queuing admission bounds aggregate body buffers and slow-reader tasks.
-# Per-peer capacity leaves room for other peers without keeping denial history.
+# Non-queuing admission bounds body buffers/slow readers across all profiles.
+# Per-adapter peer capacity leaves room without keeping denial history.
 _MAX_ACTIVE_REQUESTS = 32
 _MAX_ACTIVE_PER_PEER = 8
 
@@ -86,18 +90,23 @@ def _authentication_error(adapter: Any, headers: Any, body: bytes, payload: dict
 async def handle_webhook_request(adapter: Any, request: Any) -> Any:
     remote_ip = getattr(request, "remote", None) or "unknown"
     active = adapter._webhook_active_reads
-    # No await between checking and reserving: all handlers share the server loop.
-    if active.get(remote_ip, 0) >= _MAX_ACTIVE_PER_PEER or sum(active.values()) >= _MAX_ACTIVE_REQUESTS:
-        return feishu.web.Response(status=503, text="Webhook capacity exhausted")
-    active[remote_ip] = active.get(remote_ip, 0) + 1
+    # Shared-ingress profiles have distinct adapters. Reserve process capacity
+    # too; the short lock also covers independent listener event-loop threads.
+    with _PROCESS_CAPACITY.lock:
+        if active.get(remote_ip, 0) >= _MAX_ACTIVE_PER_PEER or _PROCESS_CAPACITY.active >= _MAX_ACTIVE_REQUESTS:
+            return feishu.web.Response(status=503, text="Webhook capacity exhausted")
+        active[remote_ip] = active.get(remote_ip, 0) + 1
+        _PROCESS_CAPACITY.active += 1
     try:
         return await _handle_admitted_request(adapter, request)
     finally:
-        remaining = active[remote_ip] - 1
-        if remaining:
-            active[remote_ip] = remaining
-        else:
-            del active[remote_ip]
+        with _PROCESS_CAPACITY.lock:
+            _PROCESS_CAPACITY.active -= 1
+            remaining = active[remote_ip] - 1
+            if remaining:
+                active[remote_ip] = remaining
+            else:
+                del active[remote_ip]
 
 
 async def _handle_admitted_request(adapter: Any, request: Any) -> Any:

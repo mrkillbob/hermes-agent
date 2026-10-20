@@ -134,3 +134,79 @@ def test_active_body_reads_are_bounded_and_capacity_is_released(scope, cancel, m
             await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("profile_modules", [False, True])
+def test_shared_listener_capacity_spans_profile_adapters(monkeypatch, tmp_path, profile_modules):
+    from types import SimpleNamespace
+
+    from aiohttp import web
+    from aiohttp.test_utils import make_mocked_request
+
+    from gateway.platforms.shared_ingress import dispatch_profile_ingress
+    from plugins.platforms.feishu import webhook_ingress
+
+    monkeypatch.setattr(webhook_ingress, "_MAX_ACTIVE_REQUESTS", 3)
+
+    async def scenario():
+        ready = asyncio.Event()
+        release = asyncio.Event()
+        entered = 0
+        runner = SimpleNamespace(_profile_adapters={})
+        tasks = []
+
+        async def slow_read(_size):
+            nonlocal entered
+            entered += 1
+            if entered == 3:
+                ready.set()
+            await release.wait()
+            raise asyncio.IncompleteReadError(b"{}", 3)
+
+        def request(profile, *, slow=False):
+            original = make_request({"type": "url_verification", "token": "test-token", "challenge": "ok"})
+            if slow:
+                original.content.readexactly.side_effect = slow_read
+            return make_mocked_request("POST", f"/p/{profile}/feishu", payload=original.content)
+
+        for index in range(4):
+            adapter = make_adapter()
+            if profile_modules:
+                import importlib
+                from pathlib import Path
+
+                from hermes_cli.plugins import PluginManager
+                from hermes_cli.plugins_manifest import PluginManifest
+
+                manager = PluginManager(scope_key=str(tmp_path / f"home-{index}"))
+                manifest = PluginManifest(name=f"feishu-admission-{tmp_path.name}", source="bundled",
+                                          path=str(Path(webhook_ingress.__file__).parent))
+                package = manager._load_directory_module(manifest)
+                scoped = importlib.import_module(f"{package.__name__}.adapter")
+                ingress = importlib.import_module(f"{package.__name__}.webhook_ingress")
+                monkeypatch.setattr(ingress, "_MAX_ACTIVE_REQUESTS", 3)
+                adapter = object.__new__(scoped.FeishuAdapter)
+                adapter.__dict__.update(make_adapter().__dict__)
+            app = web.Application()
+            app.router.add_post("/feishu", adapter._handle_webhook_request)
+            app.freeze()
+            adapter._shared_ingress_app = app
+            runner._profile_adapters[f"profile-{index}"] = {"feishu": adapter}
+        try:
+            for index in range(3):
+                profile = f"profile-{index}"
+                tasks.append(asyncio.create_task(dispatch_profile_ingress(
+                    runner, profile, "feishu", request(profile, slow=True), scoped=True,
+                )))
+            await asyncio.wait_for(ready.wait(), 2)
+            overflow = request("profile-3")
+            assert (await dispatch_profile_ingress(runner, "profile-3", "feishu", overflow, scoped=True)).status == 503
+            overflow.content.readexactly.assert_not_called()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        recovered = request("profile-3")
+        assert (await dispatch_profile_ingress(runner, "profile-3", "feishu", recovered, scoped=True)).status == 200
+
+    asyncio.run(scenario())
