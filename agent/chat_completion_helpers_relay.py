@@ -9,6 +9,7 @@ collector-observed state only, never from the consumer loop's closures. Sibling 
 
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -80,3 +81,20 @@ class RelayChatAccumulator:
         # "stop" also covers Nous Portal ``lastOne`` usage frames, which carry no finish_reason.
         return {"model": self._model, "usage": self._usage,
             "choices": [{"message": message, "finish_reason": self._finish_reason or "stop"}]}
+
+
+def stream_final_text(response) -> str:
+    with contextlib.suppress(Exception):
+        choices = getattr(response, "choices", None)
+        first_choice = choices[0] if isinstance(choices, (list, tuple)) and choices else None
+        content = getattr(getattr(first_choice, "message", None), "content", None)
+        if isinstance(content, str):
+            return content
+    with contextlib.suppress(Exception):
+        content = getattr(response, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(t for t in (getattr(part, "text", None) for part in content) if isinstance(t, str))
+    return ""
+
