@@ -3141,8 +3141,7 @@ def _load_policy_from_context(ctx: Any) -> PluginPolicy:
     # Each scan wrapper pins its board in the child environment. This keeps
     # repository-specific scans from inheriting the plugin's global default.
     board = os.environ.get("HERMES_KANBAN_BOARD", "").strip()
-    from .caller_repository import current_repository
-    if board and current_repository() is None:
+    if board:
         settings["board"] = board
     return load_policy(settings)
 

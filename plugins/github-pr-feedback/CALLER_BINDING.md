@@ -47,6 +47,8 @@ do not enumerate legacy pool leases whose slot namespace cannot prove repository
 ownership. This may retain capacity longer; existing timeout handling remains.
 Per-common-directory/repository scan locks isolate concurrent calls. Administrative
 scans acquire those same locks in sorted order before the legacy control-home lock.
+The existing `HERMES_KANBAN_BOARD` worker pin remains authoritative for successor
+task creation and promotion; it does not restore fleet-wide board enumeration.
 
 Fleet-wide behavior is separate: `scan-admin --all-configured` requires an explicit
 `administrative_batch: true` plugin setting and refuses protected worker/delegation
