@@ -57,6 +57,10 @@ global targets implicitly. This candidate does not authorize that migration.
 
 1. Qualify the host and plugin patch together in isolated, offline A/B fixtures.
    Keep the installed deny, cron state and ESTOP intact throughout qualification.
+   The general cron wrapper requires `--workspace /absolute/repository`; it passes
+   that directory only to its child and leaves the scheduler's cwd unchanged.
+   Existing repository selectors confirm this identity. No target is inferred from
+   shared config, and the wrapper never opts into administrative scanning.
 2. Retain the general skill as the canonical instructions. Replace the LunaBot
    same-name skill with a differently named native-workflow reference or repository
    policy pointer, preserving all writer-identity and GitHub-write requirements.

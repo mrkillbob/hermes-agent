@@ -2587,11 +2587,14 @@ def test_cron_wrapper_invokes_only_the_fixed_scan_argv_with_an_absolute_hermes_e
         stdout = '{"status":"ok"}\n'
         stderr = ""
 
-    def run(argv: list[str], *, check: bool, capture_output: bool, text: bool, env: dict[str, str]) -> Completed:
+    def run(argv: list[str], *, check: bool, capture_output: bool, text: bool, env: dict[str, str],
+            stdin: int, cwd: Path) -> Completed:
         assert "_HERMES_GATEWAY" not in env
         assert env["HERMES_HOME"] == str(tmp_path / "profile")
         assert capture_output is True
         assert text is True
+        assert stdin == subprocess.DEVNULL
+        assert cwd == tmp_path.resolve()
         calls.append((argv, check))
         return Completed()
 
@@ -2604,7 +2607,7 @@ def test_cron_wrapper_invokes_only_the_fixed_scan_argv_with_an_absolute_hermes_e
 
     monkeypatch.setenv("_HERMES_GATEWAY", "1")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
-    assert module.main() == 0
+    assert module.main(["--workspace", str(tmp_path)]) == 0
     assert calls == [([str(executable), "github-pr-feedback", "scan"], False)]
 
 
@@ -2635,7 +2638,7 @@ def test_cron_wrapper_reports_missing_child_stdout_as_a_failure(
     executable.chmod(0o755)
     monkeypatch.setenv("HERMES_EXECUTABLE", str(executable))
 
-    assert module.main() == 1
+    assert module.main(["--workspace", str(tmp_path)]) == 1
     assert json.loads(capsys.readouterr().out) == {
         "child_returncode": 0,
         "status": "worker_output_missing",
