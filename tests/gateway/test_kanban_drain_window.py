@@ -120,8 +120,11 @@ async def test_held_owner_start_does_not_recover_or_connect(tmp_path, monkeypatc
     runner._abort_startup_if_shutdown_requested = no_op
     runner._start_recover_previous_run = forbidden
     runner._spawn_supervised = lambda *a, **k: None
+    states = []
+    runner._update_runtime_status = states.append
     assert await runner._start_impl()
     assert runner._running and runner._external_drain_active
+    assert states == ['draining']
 
 
 def test_generic_drain_cancel_cannot_remove_one_card_hold(tmp_path, monkeypatch):

@@ -1653,6 +1653,7 @@ class GatewayStartupMixin:
         if held(self):
             self._external_drain_active = True
             self._running = True
+            self._update_runtime_status('draining')
             self._spawn_supervised(self._drain_control_watcher, 'drain_control_watcher')
             return True  # native listener is already owned; no adapters/recovery/warm-up
         await self._start_recover_previous_run()

@@ -86,6 +86,7 @@ def main():
     try:
         with daemon(root, home, env, barrier=False, expected_state='draining') as (_, desc):
             assert desc.get('drain_reason') == 'kanban_once', desc
+            assert json.loads((home / 'gateway_state.json').read_text())['gateway_state'] == 'draining'
             assert pending_row() == pending
             import sqlite3
             with closing(sqlite3.connect((home / 'state.db').as_uri() + '?mode=ro', uri=True)) as snapshot:
@@ -158,6 +159,7 @@ def main():
             (home / 'ESTOP').write_text('fixture hold')
         with daemon(root, home, env, barrier=False, expected_state='draining') as (_, new):
             assert new['instance_id'] != desc['instance_id']
+            assert json.loads((home / 'gateway_state.json').read_text())['gateway_state'] == 'draining'
             asyncio.run(refused(new))
             assert pending_row() == pending
             async def old_claim_refused():
