@@ -22,6 +22,8 @@ def test_budget_copied_and_retry_cannot_remove_or_replace_it():
     frozen = claim | {'execution_budget': BUDGET}
     assert retry_matches_frozen_claim(frozen, frozen)
     assert not retry_matches_frozen_claim(claim, frozen)
+    assert retry_matches_frozen_claim(claim | {'execution_budget': None}, claim)
+    assert not retry_matches_frozen_claim(claim | {'execution_budget': None}, frozen)
     assert not retry_matches_frozen_claim(claim | {'execution_budget': BUDGET | {'requests': True}}, frozen)
     assert not retry_matches_frozen_claim(claim | {'execution_budget': BUDGET | {'requests': 2}}, frozen)
 

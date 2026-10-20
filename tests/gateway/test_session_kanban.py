@@ -6,8 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 
-@pytest.mark.parametrize('budget', [None, {'wall_seconds': 2, 'output_bytes': 1024, 'requests': 1}])
-def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch, budget):
+@pytest.mark.parametrize('present,budget', [(False, None), (True, None),
+    (True, {'wall_seconds': 2, 'output_bytes': 1024, 'requests': 1})])
+def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch, present, budget):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
     from gateway.session_contract import Principal
@@ -32,7 +33,7 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch, bu
     actor = Principal('owner', str(tmp_path), frozenset({'session:create'}), 'transport')
     connection = SimpleNamespace(authority=SimpleNamespace(profile_id=str(tmp_path)), actor=actor, native_owner=True)
     params = dict(board='owned', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
-    if budget is not None:
+    if present:
         params['execution_budget'] = budget
     from gateway.session_kanban import build_kanban_policy
     config = {'model': {'default': 'loop-model', 'provider': 'custom'}, 'platform_toolsets': {'cli': ['terminal', 'file']},
@@ -40,6 +41,8 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch, bu
     policy, _secrets = build_kanban_policy(connection, params, config)
     context = json.loads(policy.kanban_json)
     assert context.get('execution_budget') == budget
+    if budget is None:
+        assert 'execution_budget' not in context
     assert policy.source == 'kanban' and policy.cwd == str(workspace)
     assert policy.model == task.model_override and policy.provider == task.provider_override
     assert {'kanban', 'terminal', 'file'} <= set(policy.toolsets)

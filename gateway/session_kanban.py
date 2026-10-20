@@ -20,6 +20,8 @@ def build_kanban_policy(connection, params, config):
         raise RuntimeStoreError('permission_denied')
     if actor.profile_id != authority.profile_id:
         raise RuntimeStoreError('profile_mismatch')
+    # Canonical clients may serialize the optional budget as null: freeze it as absent.
+    params = {k: v for k, v in params.items() if k != 'execution_budget' or v is not None}
     claim_keys = {'board', 'task_id', 'run_id', 'claim_lock'}
     route = params.get('route', {})
     if (set(params) - {'db', 'route', 'execution_budget'} != claim_keys
@@ -91,6 +93,7 @@ def build_kanban_policy(connection, params, config):
 
 def retry_matches_frozen_claim(params, context):
     """A resend of an admitted attempt may carry the same optional db/route and nothing else new."""
+    params = {k: v for k, v in params.items() if k != 'execution_budget' or v is not None}
     if 'execution_budget' in params:
         from hermes_cli.kanban_execution_budget import validate_budget
         try:
