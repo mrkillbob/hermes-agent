@@ -27,7 +27,8 @@ from hermes_state_common import (
 from hermes_state_detached_results import SessionDetachedResultsMixin
 from hermes_state_todo import SessionTodoResultMixin
 from hermes_state_identity import (
-    _absorbed_uids_json, _restore_identity_columns, _stable_tool_key, _tool_call_uid_map, _tool_call_uid_or_none, _tool_call_uids_json, _uid_list)
+    _absorbed_uids_json, _single_visible_display_origins, _restore_identity_columns, _stable_tool_key,
+    _tool_call_uid_map, _tool_call_uid_or_none, _tool_call_uids_json, _uid_list)
 
 logger = logging.getLogger("hermes_state")  # caplog tests pin the origin module's name
 
@@ -1112,8 +1113,10 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
             # 30k-row resume ~0.17 s, RT-39). No removed row at all: nothing can hide a copy.
             removed_ts = {row["timestamp"] for row in rows if not row["active"] and not row["compacted"]}
             drop_removed = bool(removed_ts)
+        uid_origins = _single_visible_display_origins(rows, drop_removed)
         for row in rows:
             copies, key = None, None
+            origin = uid_origins.get(row["message_uid"], row["id"])
             if drop_removed:
                 # A removed row is read without its body (``_removed_identity_rows``): its stored display identity.
                 gone = not row["active"] and not row["compacted"]
@@ -1133,9 +1136,10 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
             if cur is None or (row["active"], row["id"]) > (cur["active"], cur["id"]):
                 seen[key] = row
                 identities[key] = copies
-            first_id[key] = min(first_id.get(key, row["id"]), row["id"])
+            first_id[key] = min(first_id.get(key, origin), origin)
         # Order by the logical message's FIRST row, not the chosen representative's: a protected-tail
-        # copy in a newer generation has a higher id than messages emitted after the original.
+        # copy in a newer generation has a higher id than messages emitted after the original. Retired
+        # originals still anchor live copies by logical uid even when the carrier was rewritten.
         keys = sorted(seen, key=first_id.__getitem__)
         if drop_removed:
             keys = [key for key in keys if not any(removed[copy] for copy in identities[key])]
@@ -1151,11 +1155,16 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
         on one definition of a logical message; the live copy wins its group via the read
         path's ``ORDER BY candidate.active DESC, candidate.id DESC``. Writes only on drift."""
         first_id: dict[bytes, int] = {}
+        # Metadata only: retired copies retain chronology without loading their archived bodies.
+        uid_origins = dict(conn.execute(
+            "SELECT message_uid, MIN(id) FROM messages WHERE session_id = ? "
+            "AND message_uid IS NOT NULL AND message_uid <> '' GROUP BY message_uid "
+            "HAVING SUM(active = 1 OR compacted = 1) = 1", (session_id,)))
         last_id = 0
         while True:
             rows = conn.execute(
                 "SELECT id, role, content, timestamp, tool_call_id, tool_calls, tool_name, "
-                "display_kind, display_metadata, display_order, display_identity "
+                "display_kind, display_metadata, display_order, display_identity, message_uid "
                 "FROM messages INDEXED BY idx_messages_session_id "
                 "WHERE session_id = ? AND id > ? AND (active = 1 OR compacted = 1) "
                 "ORDER BY id LIMIT 1000",
@@ -1168,7 +1177,8 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
                 # A row already holding this identity keeps its stored slot (an in-place prune changes a
                 # row's content, not its place); otherwise the slot is the identity's first row.
                 kept = row["display_order"] if row["display_identity"] == identity else None
-                order = first_id.setdefault(identity, last_id if kept is None else kept)
+                order = first_id.setdefault(identity, min(
+                    last_id if kept is None else kept, uid_origins.get(row["message_uid"], last_id)))
                 if order != row["display_order"] or identity != row["display_identity"]:
                     updates.append((order, identity, last_id))
             rows.close()

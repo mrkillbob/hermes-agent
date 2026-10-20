@@ -63,6 +63,12 @@ async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monke
             # This row never reached the compressor, so it cannot be a superseded tail copy.
             assert system_row is not None
             assert tuple(db._read_one('SELECT active, compacted FROM messages WHERE id=?', (system_row,))) == (0, 1)
+            for displayed in (
+                db.get_messages_as_conversation(ref.session_id, include_compacted=True),
+                db.get_messages(ref.session_id, include_compacted=True),
+            ):
+                text = '\n'.join(str(m.get('content', '')) for m in displayed)
+                assert text.index('s6w199') < text.index('SYSTEMMARK') < text.index('s7w000')
     finally:
         await owner.close()
         store.close_all_db_handles()

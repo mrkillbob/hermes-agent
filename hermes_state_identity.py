@@ -109,3 +109,16 @@ def _stable_tool_key(row: Any) -> Optional[tuple[Any, ...]]:
     if call_ids and all(call_ids):
         return ("assistant", None, row["timestamp"], row["tool_call_id"], call_ids, row["tool_name"])
     return None
+
+
+def _single_visible_display_origins(rows, drop_removed: bool) -> dict[str, int]:
+    """Anchor a sole visible copy to its original; distinct retained payloads need separate slots."""
+    if not drop_removed:
+        return {}
+    first, visible = {}, {}
+    for row in rows:
+        uid = row["message_uid"]
+        if uid:
+            first.setdefault(uid, row["id"])
+            visible[uid] = visible.get(uid, 0) + bool(row["active"] or row["compacted"])
+    return {uid: origin for uid, origin in first.items() if visible[uid] == 1}
