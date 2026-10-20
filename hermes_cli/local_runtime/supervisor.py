@@ -140,6 +140,7 @@ class LlamaServerSupervisor:
         self._stopping = False
         self._stop_event = threading.Event()
         self._lifecycle_lock = threading.RLock()
+        self._readiness_requests: set = set()
         self._state: dict | None = None
         self._watchdog: threading.Thread | None = None
         self._log_handle = None
@@ -295,6 +296,8 @@ class LlamaServerSupervisor:
         with self._lifecycle_lock:
             self._stopping = True
             self._stop_event.set()
+            for request in tuple(self._readiness_requests):
+                request.cancel(timeout_s=0)
             try:
                 if self.proc and self.proc.poll() is None:
                     self._terminate_tree(self.proc)
@@ -434,19 +437,75 @@ class LlamaServerSupervisor:
                 logger.warning("idle unload of %s failed: %s", model_id, exc)
         return unloaded
 
+    def _readiness_identity(self) -> tuple | None:
+        """Reuse the recorded process/birth authority; endpoint strings confer no ownership."""
+        from hermes_cli.local_runtime.recovery import recorded_process
+
+        state = self._state
+        if (not state or state.get('owner_pid') != os.getpid()
+                or state.get('base_url') != self.base_url or recorded_process(state) is None):
+            return None
+        return (state['pid'], state.get('start_time') or state['create_time'], state['executable'],
+                state['owner_pid'], state.get('owner_start_time') or state['owner_create_time'])
+
+    def _wait_readiness_load(self, probe, identity: tuple, deadline: float) -> bool:
+        # /models/load starts the child asynchronously. Observe that existing load;
+        # the readiness transport must not autoload an absent or failed child.
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set() or self._readiness_identity() != identity:
+                return False
+            status = probe.model_status(deadline=deadline)
+            if status != 'loading':
+                return status in _RESIDENT
+            self._stop_event.wait(min(0.1, max(0, deadline - time.monotonic())))
+        return False
+
     def touch_generate(self, model_id: str, timeout_s: int = 300) -> bool:
         """The readiness proof. Generous budget + reasoning_content scan — small token budgets
         false-fail reasoning models, which spend their first tokens thinking."""
+        from hermes_cli.local_runtime.request_control import ManagedChildProbe, ScopedRequest
+
+        request = None
+        response = None
         try:
-            resp = self._request("/v1/chat/completions", {
+            deadline = time.monotonic() + timeout_s
+            identity = self._readiness_identity()
+            if identity is None:
+                return False
+            probe = ManagedChildProbe(self._url(''), self.api_key, model_id)
+            request = ScopedRequest(probe, {
                 "model": model_id, "messages": [{"role": "user", "content": TOUCH_PROMPT}],
-                "max_tokens": 512, "temperature": 0}, timeout_s=timeout_s)
+                "max_tokens": 512, "temperature": 0}, request_timeout_s=timeout_s,
+                lease_identity=identity, owner_check=lambda: self._readiness_identity() == identity
+                and not self._stop_event.is_set(), absolute_deadline=deadline)
+            with self._lifecycle_lock:
+                if self._stopping:
+                    return False
+                self._readiness_requests.add(request)
+            if not self._wait_readiness_load(probe, identity, deadline):
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            request.start(bind_timeout_s=min(5, remaining))
+            response = request.wait(max(0, deadline - time.monotonic()))
+            if response is None or response[0] != 200:
+                return False
+            resp = json.loads(response[1])
             msg = resp["choices"][0]["message"]
             blob = (msg.get("content") or "") + " " + (msg.get("reasoning_content") or "")
-            return TOUCH_EXPECT in blob.lower()
+            return (not self._stop_event.is_set() and self._readiness_identity() == identity
+                    and TOUCH_EXPECT in blob.lower())
         except Exception as exc:
             logger.warning("touch generation failed for %s: %s", model_id, exc)
             return False
+        finally:
+            if request is not None:
+                if response is None:
+                    # Close this readiness socket only. Idle telemetry cannot acknowledge native cancellation.
+                    request.cancel(timeout_s=0)
+                with self._lifecycle_lock:
+                    self._readiness_requests.discard(request)
 
     def ensure_model_ready(self, model_id: str, timeout_s: int = 600) -> bool:
         """Load if needed, then prove readiness with a touch generation."""
