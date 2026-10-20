@@ -142,6 +142,35 @@ def _request(fake: _Fake) -> ScopedRequest:
     return ScopedRequest(probe, {"model": MODEL, "messages": []}, request_timeout_s=20)
 
 
+@pytest.mark.parametrize("failure_at", ["construction", "start"])
+def test_worker_creation_failure_releases_unused_lease(fake, monkeypatch, failure_at):
+    from hermes_cli.local_runtime import request_control
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("can't start new thread")
+
+    class UnstartedWorker:
+        start = unavailable
+
+    request = _request(fake)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            request_control,
+            "spawn_context_thread",
+            unavailable if failure_at == "construction" else lambda *a, **kw: UnstartedWorker(),
+        )
+        with pytest.raises(RequestRefused, match="before dispatch"):
+            request.start()
+    assert fake.posts == 0
+    assert request.cancel(timeout_s=0).detail == "no dispatched request"
+
+    fake.release.set()
+    retry = _request(fake)
+    retry.start()
+    assert retry.wait(5)[0] == 200
+    assert fake.posts == 1
+
+
 def test_closed_transport_and_idle_child_are_observation_not_native_proof(fake):
     req = _request(fake)
     assert req.start() == "observed"

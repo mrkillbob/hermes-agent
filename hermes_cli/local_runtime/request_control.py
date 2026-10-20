@@ -315,10 +315,15 @@ class ScopedRequest:
                     raise RequestRefused("cancelled before dispatch")
                 self._check_owner()
                 self._state = "active"
-                self._worker = spawn_context_thread(
-                    self._run, name="scoped-llamacpp-request"
-                )
-                self._worker.start()
+                try:
+                    self._worker = spawn_context_thread(
+                        self._run, name="scoped-llamacpp-request"
+                    )
+                    self._worker.start()
+                except RuntimeError as exc:
+                    # No worker owns cleanup when thread creation/start fails before dispatch.
+                    self._worker = None
+                    raise RequestRefused("request worker unavailable") from exc
         except (ProbeError, RequestRefused):
             self._release_lease()
             with self._lock:
