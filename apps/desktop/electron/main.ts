@@ -403,19 +403,13 @@ import { runNativeLogin } from './native-oauth-login'
 import { loadNativeTokenSet, type NativeTokenStoreIo, persistNativeTokenSet } from './native-token-store'
 import { execGit, killTimedGitChildren, setNoConsoleGitRoots } from './no-console-git'
 import { registerNativeNotifications } from './notification-ipc'
-import { loginFlightKey, OauthLoginFlights } from './oauth-login-flights'
-import { startOauthLoginWindow } from './oauth-login-window'
-import { isExpectedOauthNavigationAbort } from './oauth-navigation'
-import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import {
-  canShowInteractiveOauthLogin,
   mintGatewayWsTicket as mintOauthGatewayWsTicket,
   requestWithOauthFallback,
-  retryCookie401WithLogin,
   withoutInteractiveOauthLogin
 } from './oauth-rest-request'
-import { wireOauthSessionResponse } from './oauth-session-response'
+import { createOauthSessionHandlers } from './oauth-session-handlers'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver } from './parent-process-identity'
 import { bundledPayload, installIdForRoot, type PayloadInfo, payloadPythonPath } from './payload-backend'
@@ -529,7 +523,6 @@ import {
   createRegistryGatewayWsUrlHandler,
   createRemoteWsHeaderStore,
   type InjectedHeadersByRequest,
-  oauthLoginLoadUrlOptions,
   resolveRemoteRequestHeaders
 } from './remote-ws-headers'
 import { enableRendererAccessibility } from './renderer-accessibility'
@@ -7096,8 +7089,6 @@ function getOauthSession() {
 // the port, so two dashboards on one VPN host used to collide in the shared
 // jar above). The primary / v1 remote / cloud / portal flows keep the legacy
 // shared partition; see oauth-partition.ts for the full rules.
-const oauthSessionsByPartition = new Map()
-
 function resolveOauthPartitionForUrl(url, { connectionId = '', pendingAuthMode = '', pendingKind = '' } = {}) {
   try {
     return resolveOauthPartition(url, {
@@ -7113,27 +7104,24 @@ function resolveOauthPartitionForUrl(url, { connectionId = '', pendingAuthMode =
   }
 }
 
-function getOauthSessionForUrl(url, { connectionId = '', pendingAuthMode = '', pendingKind = '' } = {}) {
-  const partition = resolveOauthPartitionForUrl(url, { connectionId, pendingAuthMode, pendingKind })
-
-  if (partition === OAUTH_SESSION_PARTITION) {
-    return getOauthSession()
-  }
-
-  if (!app.isReady()) {
-    return null
-  }
-
-  let sess = oauthSessionsByPartition.get(partition)
-
-  if (!sess) {
-    sess = session.fromPartition(partition)
-    oauthSessionsByPartition.set(partition, sess)
-    installRemoteHeaderRulesOnSession(sess)
-  }
-
-  return sess
-}
+// One shared composition owns explicit login and REST 401 recovery.
+const { getOauthSessionForUrl, openOauthLoginWindow, fetchJsonViaOauthSession } = createOauthSessionHandlers({
+  app,
+  session,
+  getOauthSession,
+  installRemoteHeaderRulesOnSession,
+  resolveOauthPartitionForUrl,
+  readDesktopConnectionsRegistry,
+  readDesktopConnectionConfig,
+  BrowserWindow,
+  hasOauthSessionCookie,
+  headersForRemoteRequest,
+  rememberLog,
+  onWindowCreated: win => installWindowRendererLifecycle(win, { kind: 'oauth', callbacks: { log: rememberLog } }),
+  captureRemoteSessionCookiesIntoMirror,
+  remoteSessionCookies,
+  electronNet
+})
 
 // Cold-start cookie-jar warm-up. A `persist:` partition materialized via
 // session.fromPartition() loads its on-disk cookie store LAZILY: the very first
@@ -7308,215 +7296,6 @@ async function clearOauthSession(baseUrl) {
   } catch {
     // Best effort — a stale cookie self-expires anyway.
   }
-}
-
-// Open a gateway login window in the OAuth session partition; window mechanics
-// and the silent/background contract live in oauth-login-window.ts. A refused
-// background request is never a user gesture, so `background` (or a
-// withoutInteractiveOauthLogin scope) keeps the window hidden; only a
-// user-driven caller may show one. oauth-login-flights.ts keeps one flow per
-// cookie jar, so a burst of callers shares one window.
-const oauthLoginFlights = new OauthLoginFlights()
-
-function openOauthLoginWindow(
-  baseUrl,
-  { silent = false, background = false, connectionId = '', pendingAuthMode = '', pendingKind = '' } = {}
-) {
-  const identity = { connectionId, pendingAuthMode, pendingKind }
-  const unattended = background || !canShowInteractiveOauthLogin()
-  const partition = resolveOauthPartitionForUrl(baseUrl, identity)
-
-  return oauthLoginFlights.run(loginFlightKey(partition, baseUrl), unattended ? 'background' : 'foreground', () => {
-    const sess = app.isReady() ? getOauthSessionForUrl(baseUrl, identity) : null
-
-    if (!sess) {
-      throw new Error(
-        app.isReady() ? 'OAuth session partition is unavailable.' : 'Desktop is not ready to start an OAuth login.'
-      )
-    }
-
-    return startOauthLoginWindow(
-      { baseUrl: normalizeRemoteBaseUrl(baseUrl), session: sess, silent, background: unattended },
-      {
-        createWindow: ({ session: windowSession, show, title }) =>
-          new BrowserWindow({
-            width: 520,
-            height: 720,
-            title,
-            autoHideMenuBar: true,
-            show,
-            webPreferences: {
-              contextIsolation: true,
-              nodeIntegration: false,
-              sandbox: true,
-              session: windowSession,
-              webSecurity: true
-            }
-          }),
-        hasSessionCookie: () => hasOauthSessionCookie(baseUrl, identity),
-        isExpectedNavigationAbort: isExpectedOauthNavigationAbort,
-        loadOptionsFor: loginUrl => {
-          const loginHeaders = headersForRemoteRequest(loginUrl)
-          rememberLog(
-            `OAuth login: attaching ${Object.keys(loginHeaders).length} extra gateway header(s) to ${new URL(loginUrl).host}`
-          )
-
-          return oauthLoginLoadUrlOptions(loginHeaders)
-        },
-        log: rememberLog,
-        // #61457: mirror the fresh cookies before the jar can drop them again.
-        onLanded: () => void captureRemoteSessionCookiesIntoMirror(sess, partition, baseUrl),
-        // A crashed sign-in renderer never settles the promise; log it (#81290).
-        onWindowCreated: win =>
-          installWindowRendererLifecycle(win as BrowserWindow, { kind: 'oauth', callbacks: { log: rememberLog } })
-      }
-    )
-  })
-}
-
-// JSON request routed through the OAuth session partition so the HttpOnly
-// session cookie is attached automatically by Electron's net stack. Used for
-// authed REST against a gated gateway, including minting WS tickets.
-//
-// #61457: the partition's Chromium jar is not a reliable cookie source — it can
-// drop the `hermes_session*` cookies (Windows %3A profile folders, lazy
-// hydration, flush races) and `useSessionCookies: true` then intermittently
-// omits the cookie → 401 `no_cookie` right after a successful sign-in. Two
-// mitigations, both keyed by the request's resolved OAuth partition + origin
-// (the same owner the jar itself is scoped to, so same-origin gateways on
-// separate jars stay separate here too):
-//   1. an explicit `Cookie` header built from the in-memory session-cookie
-//      mirror (remote-session-cookies.ts) — an explicit header bypasses the
-//      network stack's jar lookup entirely, and every `Set-Cookie` observed
-//      here (and in the login window) feeds the mirror back; and
-//   2. one forced silent re-login + single retry when the gateway still
-//      answers 401 — ONLY when shouldReplayAfterCookie401 holds: the 401 is
-//      the auth gate's pre-handler refusal AND the operation is idempotent or
-//      vouched replay-safe (`options.replayOn401`). Anything else keeps the
-//      no-replay rule of requestWithOauthFallback.
-function fetchJsonViaOauthSession(url, options: any = {}) {
-  const partition = resolveOauthPartitionForUrl(url)
-
-  const attempt = (): Promise<unknown> =>
-    new Promise((resolve, reject) => {
-      const sess = getOauthSessionForUrl(url)
-
-      if (!sess) {
-        reject(new Error('OAuth session partition is unavailable.'))
-
-        return
-      }
-
-      let parsed
-
-      try {
-        parsed = new URL(url)
-      } catch (error) {
-        reject(new Error(`Invalid URL: ${error.message}`))
-
-        return
-      }
-
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
-
-        return
-      }
-
-      const body = serializeJsonBody(options.body)
-      const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
-
-      const request = electronNet.request({
-        method: options.method || 'GET',
-        url,
-        session: sess,
-        useSessionCookies: true,
-        redirect: 'follow'
-      } as any)
-
-      setJsonRequestHeaders(request)
-
-      const headerBag = { ...headersForRemoteRequest(url), ...(options.headers || {}) }
-
-      // Explicit mirror cookies ride last so an existing caller-supplied
-      // Cookie header still wins, and the mirror never clobbers intent.
-      const mirroredCookies = remoteSessionCookies.cookieHeaderFor(partition, url)
-
-      if (mirroredCookies && headerBag.Cookie === undefined && headerBag.cookie === undefined) {
-        headerBag.Cookie = mirroredCookies
-      }
-
-      for (const [name, value] of Object.entries(headerBag)) {
-        request.setHeader(name, String(value))
-      }
-
-      let timedOut = false
-
-      const timer = setTimeout(() => {
-        timedOut = true
-
-        try {
-          request.abort()
-        } catch {
-          // already finished
-        }
-
-        reject(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
-      }, timeoutMs)
-
-      request.on('response', (res: Electron.IncomingMessage): void => {
-        wireOauthSessionResponse(res, {
-          url,
-          isTimedOut: (): boolean => timedOut,
-          clearTimer: (): void => clearTimeout(timer),
-          resolve,
-          reject,
-          onSetCookies: setCookie => remoteSessionCookies.record(partition, url, setCookie)
-        })
-      })
-      request.on('error', error => {
-        if (timedOut) {
-          return
-        }
-
-        clearTimeout(timer)
-        reject(error)
-      })
-
-      if (body) {
-        request.write(body)
-      }
-
-      request.end()
-    })
-
-  return attempt().catch(async error => {
-    const origin = new URL(url).origin
-
-    return retryCookie401WithLogin(error, options, {
-      // One burst shares one clear: a joiner must not wipe the mirror the
-      // running window is about to fill.
-      clearCookies: () => {
-        if (!oauthLoginFlights.isRunning(loginFlightKey(partition, origin))) {
-          remoteSessionCookies.clear(partition, url)
-        }
-      },
-      login: async () => {
-        try {
-          // A refused request is never a user gesture: try the hidden
-          // auto-SSO, and on failure leave the 401 to the app's own "Sign in"
-          // surface instead of opening a window nobody asked for.
-          await openOauthLoginWindow(origin, { silent: true, background: true })
-        } catch (reloginError) {
-          rememberLog(
-            `Remote session re-login after 401 failed for ${new URL(url).host}: ${reloginError?.message || reloginError}`
-          )
-          throw reloginError
-        }
-      },
-      retry: attempt
-    })
-  })
 }
 
 // ---------------------------------------------------------------------------
