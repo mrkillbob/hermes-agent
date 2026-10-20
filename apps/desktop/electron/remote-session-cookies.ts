@@ -227,7 +227,7 @@ export class RemoteSessionCookieStore {
     }
   }
 
-  /** Serialize the partition+origin mirror as a `Cookie` header for this request path; null when empty. */
+  /** Present the most specific matching value per name; null when this scope has no cookies. */
   cookieHeaderFor(partition: string, url: string): string | null {
     const origin = originKeyFor(url)
     const jar = partition && origin ? this.jarFor(partition, origin, false) : undefined
@@ -240,9 +240,22 @@ export class RemoteSessionCookieStore {
 
     // Stable sort preserves mirror first-seen order for ties, including rotations.
     // Chromium creation times are not available in the jar snapshot.
+    const seenNames = new Set<string>()
+
     const pairs = [...jar.values()]
       .filter(cookie => cookiePathMatches(cookie.path, requestPath))
       .sort((a, b) => b.path.length - a.path.length)
+      .filter(cookie => {
+        // Starlette keeps the last duplicate name; send only the most specific
+        // value so a broader gateway's cookie cannot replace this credential.
+        if (seenNames.has(cookie.name)) {
+          return false
+        }
+
+        seenNames.add(cookie.name)
+
+        return true
+      })
       .map(cookie => `${cookie.name}=${cookie.value}`)
 
     return pairs.length ? pairs.join('; ') : null

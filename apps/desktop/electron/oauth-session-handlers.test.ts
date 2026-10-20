@@ -241,6 +241,21 @@ test('401 re-login is hidden, keeps the prefix and jar, then retries with the fr
   expect(h.requests[1].headers.Cookie).toBe('__Secure-hermes_session_at=fresh-c')
 })
 
+test('401 recovery presents the scoped credential once and preserves its same-name ancestor', async () => {
+  const scoped = `${HOST}/a/api/status`
+  const h = harness()
+
+  h.mirror.record(LEGACY_OAUTH_PARTITION, HOST, '__Secure-hermes_session_at=ancestor; Path=/; Secure')
+  h.mirror.record(LEGACY_OAUTH_PARTITION, scoped, '__Secure-hermes_session_at=stale-a; Path=/a; Secure')
+  await expect(h.fetchJsonViaOauthSession(scoped)).resolves.toEqual({ ok: true })
+  expect(h.requests.map(request => request.headers.Cookie)).toEqual([
+    '__Secure-hermes_session_at=stale-a',
+    '__Secure-hermes_session_at=fresh-a'
+  ])
+  expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, HOST)).toBe('__Secure-hermes_session_at=ancestor')
+  expect(h.windows[0].url).toBe(`${HOST}/a/`)
+})
+
 test('A-only 401 recovery preserves B in the shared jar before, during and after hidden login', async () => {
   const a = `${HOST}/a/api/status`
   const b = `${HOST}/b/api/status`

@@ -148,21 +148,22 @@ describe('RemoteSessionCookieStore', () => {
     expect(store.cookieHeaderFor(LEGACY, b)).toBe('session=b2')
   })
 
-  it('orders overlapping paths longest first, retaining tie order on rotation and exact path identity', () => {
+  it('presents only the most specific value per name while retaining other names and path identities', () => {
     const store = new RemoteSessionCookieStore()
     const url = 'https://gw.example.com/a/inner/status'
 
     store.record(LEGACY, url, ['session=root; Path=/', 'session=a; Path=/a', 'tie=first; Path=/a'])
     store.record(LEGACY, url, ['session=inner; Path=/a/inner', 'session=rotated; Path=/a'])
-    expect(store.cookieHeaderFor(LEGACY, url)).toBe('session=inner; session=rotated; tie=first; session=root')
+    expect(store.cookieHeaderFor(LEGACY, url)).toBe('session=inner; tie=first')
     store.record(LEGACY, url, ['session=slash; Path=/a/', 'session=encoded; Path=/a%2Finner'])
-    expect(store.cookieHeaderFor(LEGACY, 'https://gw.example.com/a')).toBe('session=rotated; tie=first; session=root')
-    expect(store.cookieHeaderFor(LEGACY, 'https://gw.example.com/a%2Finner/status')).toBe(
-      'session=encoded; session=root'
-    )
-    expect(store.cookieHeaderFor(LEGACY, url)).toBe(
-      'session=inner; session=slash; session=rotated; tie=first; session=root'
-    )
+    expect(store.cookieHeaderFor(LEGACY, 'https://gw.example.com/a')).toBe('session=rotated; tie=first')
+    expect(store.cookieHeaderFor(LEGACY, 'https://gw.example.com/a%2Finner/status')).toBe('session=encoded')
+    expect(store.cookieHeaderFor(LEGACY, url)).toBe('session=inner; tie=first')
+    store.record(LEGACY, url, 'session=; Path=/a/inner; Max-Age=0')
+    expect(store.cookieHeaderFor(LEGACY, url)).toBe('session=slash; tie=first')
+    store.recordFromJar(LEGACY, url, [{ name: 'session', value: 'root-rotated', path: '/' }])
+    expect(store.cookieHeaderFor(LEGACY, url)).toBe('session=slash; tie=first')
+    expect(store.cookieHeaderFor(LEGACY, 'https://gw.example.com/')).toBe('session=root-rotated')
   })
 
   it('clears only the resolved gateway cookie path and retains partition, origin and path boundaries', () => {
@@ -186,7 +187,7 @@ describe('RemoteSessionCookieStore', () => {
 
     for (const invalid of ['not a url', 'file:///a', 'ftp://gw.example.com/a']) {
       store.clearGateway(LEGACY, invalid)
-      expect(store.cookieHeaderFor(LEGACY, `${origin}/a`)).toBe('session=/a; session=/')
+      expect(store.cookieHeaderFor(LEGACY, `${origin}/a`)).toBe('session=/a')
     }
 
     store.clearGateway(LEGACY, `${origin}/a`)
