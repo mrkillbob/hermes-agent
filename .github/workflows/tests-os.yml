@@ -231,11 +231,24 @@ jobs:
           # file killed by the timeout is never retried. 300 is the runner's
           # own default, so non-Windows lanes are unchanged.
           HERMES_TEST_FILE_TIMEOUT: ${{ matrix.marker == 'windows' && '900' || '300' }}
+          # Successful per-file stdout and temporary roots are discarded by the
+          # runner. Retain only this synthetic grant-lock collector's bounded
+          # post-cleanup evidence, on native Windows where contention was seen.
+          HERMES_E2E_ARTIFACTS: ${{ matrix.marker == 'windows' && runner.temp || '' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
           OPENROUTER_API_KEY: ''
           OPENAI_API_KEY: ''
           NOUS_API_KEY: ''
+
+      - name: Retain bounded grant-lock timings
+        if: always() && matrix.marker == 'windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: grant-lock-timings-${{ inputs.platform_scope }}-${{ matrix.marker }}-${{ runner.arch }}-${{ matrix.slice || 'all' }}
+          path: ${{ runner.temp }}/grant-lock-diagnostics/grant-lock-timing-*.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
