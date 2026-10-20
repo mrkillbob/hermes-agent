@@ -190,31 +190,48 @@ def _launchd(home: Path, deadline: float) -> ExistingService | None:
     account = pwd.getpwuid(os.getuid())  # windows-footgun: ok — native launchd only
     account_home = Path(account.pw_dir)
     plist = account_home / "Library/LaunchAgents" / f"{label}.plist"
-    from hermes_cli.gateway_runtime_service_identity import verify_launchd_loaded, verify_launchd_plist, read_definition
+    from hermes_cli.gateway_runtime_service_identity import ForeignRoot, verify_launchd_loaded, verify_launchd_plist, read_definition
     installed = _exists(plist)
     domains = [f"gui/{os.getuid()}", f"user/{os.getuid()}"]  # windows-footgun: ok — native launchd only
-    found = []
     loaded = []
     for domain in domains:
         result = _run(["launchctl", "print", f"{domain}/{label}"], deadline)
         if result.returncode == 0:
-            loaded.append(result.stdout)
-            found.append(ExistingService("launchd", ("launchctl", "kickstart", f"{domain}/{label}"),
-                                         "state = running" in result.stdout))
+            loaded.append((domain, result.stdout))
             continue
         # launchctl's native absent-service code; other errors retain uncertainty.
         if result.returncode != 113:
             raise RuntimeStartError("service_manager_unavailable")
-    if len(found) > 1:
-        raise RuntimeStartError("service_scope_conflict", "conflict")
-    if found:
-        _verify_binding(verify_launchd_loaded, loaded[0], home, uid=os.getuid(), username=account.pw_name)  # windows-footgun: ok — native launchd only
-        return found[0]
-    if installed:
-        definition = _verify_binding(plistlib.loads, read_definition(plist))
-        _verify_binding(verify_launchd_plist, definition, label, home)
-        # Load ONLY the existing file, never bootout/rewrite or kickstart -k.
-        return ExistingService("launchd", ("launchctl", "bootstrap", domains[0], str(plist)))
+    try:
+        found = []
+        for domain, output in loaded:
+            try:
+                verify_launchd_loaded(output, home, uid=os.getuid(), username=account.pw_name)  # windows-footgun: ok — native launchd only
+            except ForeignRoot:
+                continue
+            found.append(ExistingService("launchd", ("launchctl", "kickstart", f"{domain}/{label}"),
+                                         "state = running" in output))
+        if len(found) > 1:
+            raise RuntimeStartError("service_scope_conflict", "conflict")
+        if found:
+            return found[0]
+        # Loaded bindings outrank a stale plist, even when all belong to other roots.
+        if loaded:
+            return None
+        if installed:
+            definition = _verify_binding(plistlib.loads, read_definition(plist))
+            verify_launchd_plist(definition, label, home)
+            # Load ONLY the existing file, never bootout/rewrite or kickstart -k.
+            return ExistingService("launchd", ("launchctl", "bootstrap", domains[0], str(plist)))
+    except ForeignRoot:
+        # A fake HOME can share a label with the account's installed gateway.
+        # Its explicit foreign root neither serves nor blocks the requested home.
+        return None
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        reason = str(exc)
+        raise RuntimeStartError(reason if reason in {
+            "profile_mismatch", "service_account_mismatch", "service_disabled"
+        } else "service_identity_unverified") from None
     return None
 
 
