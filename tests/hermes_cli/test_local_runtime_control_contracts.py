@@ -7,14 +7,6 @@ import pytest
 from hermes_cli.local_runtime.request_control import ChildState, ScopedRequest
 
 
-
-
-
-
-
-
-
-
 def idle_probe():
     return SimpleNamespace(
         model_id="target-model", read=lambda **kw: ChildState(True, (), 0.0, 0.0)
@@ -88,8 +80,6 @@ def test_malformed_slot_boolean_is_not_idle(monkeypatch):
         probe.read()
 
 
-
-
 def test_cancel_before_start_prevents_later_dispatch():
     from hermes_cli.local_runtime.request_control import RequestRefused
 
@@ -97,13 +87,3 @@ def test_cancel_before_start_prevents_later_dispatch():
     request.cancel(timeout_s=0)
     with pytest.raises(RequestRefused):
         request.start()
-
-
-
-
-
-
-
-
-
-

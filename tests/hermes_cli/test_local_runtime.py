@@ -89,7 +89,7 @@ class _StubHandler(BaseHTTPRequestHandler):
                 self._send(self.metrics_error, {})
             else:
                 self._send(
-                    200, f"llamacpp:requests_processing {self.requests_processing}\n"
+                    200, f"llamacpp:requests_processing {self.requests_processing}\nllamacpp:requests_deferred 0\n"
                 )
         elif path == "/slots":
             if self.slots_error:
@@ -235,11 +235,14 @@ def _make_supervisor(tmp_path, port):
 
     sup = LlamaServerSupervisor(
         binary=tmp_path / "llama-server", models_dir=tmp_path, port=port)
+    sup._readiness_identity = lambda: ('fixture-router', port)
     return sup
 
 
 def test_touch_generate_is_the_readiness_proof(stub_server, tmp_path):
     port, handler = stub_server
+    handler.models = {"data": [{"id": "m", "status": {"value": "loaded"}}]}
+    handler.slots = [{"id": 0, "is_processing": False}]
     sup = _make_supervisor(tmp_path, port)
     handler.chat_answer = "Paris"
     assert sup.touch_generate("m") is True
@@ -250,6 +253,8 @@ def test_touch_generate_is_the_readiness_proof(stub_server, tmp_path):
 def test_touch_generate_scans_reasoning_content(stub_server, tmp_path):
     """Reasoning models answer inside reasoning_content (receipted pitfall)."""
     port, handler = stub_server
+    handler.models = {"data": [{"id": "m", "status": {"value": "loaded"}}]}
+    handler.slots = [{"id": 0, "is_processing": False}]
     sup = _make_supervisor(tmp_path, port)
 
     class ReasoningHandler(handler):  # type: ignore[valid-type]

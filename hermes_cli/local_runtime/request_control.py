@@ -2,9 +2,10 @@
 
 Idle child telemetry after closing a request is useful observation, not proof that
 router forwarding has drained or a native task was cancelled. This source-only
-helper reports IDLE_AFTER_CLOSE (cancelled=False). It is not wired to the durable
-owner. Exclusion here covers cooperating helpers in this process only; live owner
-admission, incarnation fencing and router/native cancellation proof remain gates.
+helper reports IDLE_AFTER_CLOSE (cancelled=False). Supervisor readiness supplies
+its verified incarnation and rechecks it before dispatch; generic callers supply
+no owner authority. Exclusion covers cooperating helpers in this process only;
+router/native cancellation proof remains unavailable.
 Eviction is deliberately unavailable through this unbound helper.
 """
 
@@ -17,6 +18,7 @@ import json
 import math
 import threading
 import time
+from typing import Callable
 from urllib.parse import urlsplit
 
 from agent.memory_provider import spawn_context_thread
@@ -242,11 +244,17 @@ class ScopedRequest:
     """Single-use request; lifecycle facts and idle observations never confer owner authority."""
 
     def __init__(
-        self, probe: ManagedChildProbe, body: dict, *, request_timeout_s: float = 600.0
+        self, probe: ManagedChildProbe, body: dict, *, request_timeout_s: float = 600.0,
+        lease_identity: tuple | None = None, owner_check: Callable[[], bool] | None = None,
     ):
         if body.get("model") != probe.model_id:
             raise ValueError("request model must match the telemetry model exactly")
         self._probe, self._payload = probe, json.dumps(body).encode()
+        if (lease_identity is None) != (owner_check is None):
+            raise ValueError('owner check and lease identity must be supplied together')
+        if lease_identity is not None and (type(lease_identity) is not tuple or not callable(owner_check)):
+            raise ValueError('owner lease requires an immutable identity and check')
+        self._owner_check = owner_check
         self._request_timeout_s = _seconds(request_timeout_s, zero=False)
         self._lock, self._cancel_lock = threading.RLock(), threading.Lock()
         self._finished, self._cancel_intent = threading.Event(), threading.Event()
@@ -257,9 +265,14 @@ class ScopedRequest:
             getattr(probe, "host", id(probe)),
             getattr(probe, "port", None),
             probe.model_id,
+            lease_identity,
         )
         self.bound_slot = self.bound_task = None
         self.binding = "unbound"
+
+    def _check_owner(self) -> None:
+        if self._owner_check is not None and not self._owner_check():
+            raise RequestRefused('readiness owner incarnation changed')
 
     def _release_lease(self) -> None:
         with _LEASE_LOCK:
@@ -285,11 +298,13 @@ class ScopedRequest:
         self._request_deadline = time.monotonic() + self._request_timeout_s
         deadline = min(self._request_deadline, time.monotonic() + bind_timeout_s)
         try:
+            self._check_owner()
             if not self._probe.read(deadline=deadline).idle:
                 raise RequestRefused("child is not resident and idle")
             with self._lock:
                 if self._cancel_intent.is_set():
                     raise RequestRefused("cancelled before dispatch")
+                self._check_owner()
                 self._state = "active"
                 self._worker = spawn_context_thread(
                     self._run, name="scoped-llamacpp-request"
@@ -338,6 +353,7 @@ class ScopedRequest:
             with self._lock:
                 if self._cancel_intent.is_set():
                     return
+                self._check_owner()
                 # Once sending begins, a failure cannot establish that no bytes reached the router.
                 send_attempted = True
                 conn.request(
@@ -352,7 +368,7 @@ class ScopedRequest:
             response = read_response(conn, limit=8 << 20)
             with self._lock:
                 self._response = response
-        except (OSError, ValueError, http.client.HTTPException) as exc:
+        except (OSError, ValueError, http.client.HTTPException, RequestRefused) as exc:
             self._error = exc
         finally:
             try:
