@@ -7,11 +7,9 @@ import sqlite3
 from hermes_state_runtime import RuntimeStoreError
 
 
-def _selected_target(args):
-    from hermes_cli import kanban_db as kb
+def _selected_target(args, path):
     from hermes_cli.profiles import resolve_profile_env
     from gateway.drain_kanban import _target
-    path = kb.kanban_db_path(board=args.board).resolve()
     with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
         db.row_factory = sqlite3.Row
         task = db.execute('SELECT id,assignee,status FROM tasks WHERE id=?', (args.task_id,)).fetchone()
@@ -34,7 +32,17 @@ def _status():
 
 def _begin(args):
     from gateway.drain_kanban import begin
-    begin(_selected_target(args), seconds=args.seconds)
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import _dispatch_host_admission_lock, _dispatch_tick_lock
+    path = kb.kanban_db_path(board=args.board).resolve()
+    # Match dispatch's lock order and keep its admission fenced until publication.
+    with _dispatch_host_admission_lock(strict=True) as host_acquired:
+        if not host_acquired:
+            raise RuntimeStoreError('kanban_window_dispatch_busy')
+        with _dispatch_tick_lock(path, strict=True) as board_acquired:
+            if not board_acquired:
+                raise RuntimeStoreError('kanban_window_dispatch_busy')
+            begin(_selected_target(args, path), seconds=args.seconds)
     return _status()
 
 
