@@ -58,7 +58,7 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch, bu
         build_policy({'source': 'kanban', 'cwd': str(workspace)}, config)
 
 
-@pytest.mark.parametrize('mode', ['complete', 'timeout', 'rate_limit', 'billing', 'crash'])
+@pytest.mark.parametrize('mode', ['complete', 'timeout', 'rate_limit', 'billing', 'crash', 'budget'])
 def test_real_dispatcher_lifecycle(tmp_path, mode):
     import os
     import subprocess
@@ -73,6 +73,10 @@ def test_real_dispatcher_lifecycle(tmp_path, mode):
     receipt = json.loads((tmp_path / 'state' / 'receipt.json').read_text())
     print(json.dumps(receipt))
     if mode != 'complete':
+        if mode == 'budget':
+            assert receipt['physical_requests'] == 1 and receipt['worker_exit_code'] == 130
+            assert receipt['task_status'] != 'done'
+            return
         assert receipt['task_status'] == 'ready'
         return
     assert receipt['task_status'] == 'done' and receipt['source'] == 'kanban'

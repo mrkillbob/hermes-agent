@@ -121,7 +121,9 @@ def main():
             subprocess.Popen = spawn
             try:
                 with closing(connect(board='owned')) as conn:
-                    launched = dispatch.dispatch_once(conn, board='owned', max_spawn=1)
+                    bounded = {'task_ids': [tid], 'execution_budget': {
+                        'wall_seconds': 60, 'output_bytes': 65536, 'requests': 1}} if peer.mode == 'budget' else {}
+                    launched = dispatch.dispatch_once(conn, board='owned', max_spawn=1, **bounded)
                     assert [s[0] for s in launched.spawned] == [tid], launched
                     task = kb.get_task(conn, tid)
                     params = dict(task_id=tid, board='owned', run_id=task.current_run_id, claim_lock=task.claim_lock)
@@ -158,6 +160,13 @@ def main():
                     receipt.update(task_status=task.status, failures=task.consecutive_failures, run_outcome=run['outcome'],
                         run_metadata=kb._json_dict(run['metadata']), rate_limited=swept.rate_limited,
                         cooldown=dispatch.check_respawn_guard(conn, tid))
+                    if peer.mode == 'budget':
+                        from gateway.session_kanban import worker_result
+                        final = worker_result(kb.kanban_db_path(board='owned'), params)
+                        receipt['physical_requests'] = len(peer.requests)
+                        receipt['worker_exit_code'] = final.get('exit_code')
+                        assert receipt['physical_requests'] == 1 and receipt['worker_exit_code'] == 130, receipt
+                        assert task.status != 'done' and receipt['client_exit'][1] == 130, receipt
                     if peer.mode in {'rate_limit', 'billing'}:
                         assert task.status == 'ready' and task.consecutive_failures == 0 and run['outcome'] == 'rate_limited', receipt
                         assert receipt['client_exit'] == ('rate_limited', kb.KANBAN_RATE_LIMIT_EXIT_CODE), receipt
