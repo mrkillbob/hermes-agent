@@ -1,4 +1,4 @@
-"""Ingress work and authenticated deliveries have independent bounded budgets."""
+"""Rejected work and authenticated deliveries have independent bounded budgets."""
 
 import asyncio
 from unittest.mock import Mock
@@ -10,7 +10,7 @@ from tests.plugins.test_feishu_webhook_quota import make_adapter, make_request
 
 
 @pytest.mark.parametrize("failure", ["type", "size", "read", "json", "token", "signature"])
-def test_ingress_budget_rejects_before_another_body_read(monkeypatch, failure):
+def test_rejected_request_budget_does_not_block_authenticated_callback(monkeypatch, failure):
     adapter = make_adapter()
     monkeypatch.setattr(feishu, "_FEISHU_WEBHOOK_INGRESS_RATE_LIMIT_MAX", 1, raising=False)
     monkeypatch.setattr(feishu.time, "time", lambda: 100.0)
@@ -29,36 +29,37 @@ def test_ingress_budget_rejects_before_another_body_read(monkeypatch, failure):
 
     next_request = make_request(payload)
     adapter._is_webhook_signature_valid = Mock(return_value=True)
-    assert asyncio.run(adapter._handle_webhook_request(next_request)).status == 429
-    next_request.content.readexactly.assert_not_awaited()
-    adapter._is_webhook_signature_valid.assert_not_called()
-    adapter._on_message_event.assert_not_called()
-    assert adapter._webhook_rate_counts == {}
+    assert asyncio.run(adapter._handle_webhook_request(next_request)).status == 200
+    next_request.content.readexactly.assert_awaited_once()
+    adapter._is_webhook_signature_valid.assert_called_once()
+    adapter._on_message_event.assert_called_once()
+    assert adapter._webhook_rate_counts == {"test-app:/feishu:192.0.2.1": (1, 100.0)}
 
 
-def test_ingress_window_reopens_without_spending_delivery_quota(monkeypatch):
+def test_rejected_request_window_reopens_without_spending_delivery_quota(monkeypatch):
     adapter = make_adapter()
     now = [100.0]
     monkeypatch.setattr(feishu.time, "time", lambda: now[0])
     monkeypatch.setattr(feishu, "_FEISHU_WEBHOOK_INGRESS_RATE_LIMIT_MAX", 1, raising=False)
     assert asyncio.run(adapter._handle_webhook_request(make_request({"token": "invalid"}))).status == 401
+    assert asyncio.run(adapter._handle_webhook_request(make_request({"token": "invalid"}))).status == 429
     assert adapter._webhook_rate_counts == {}
     now[0] += feishu._FEISHU_WEBHOOK_RATE_WINDOW_SECONDS
-    payload = {"header": {"token": "test-token", "event_type": "im.message.receive_v1"}}
-    assert asyncio.run(adapter._handle_webhook_request(make_request(payload))).status == 200
-    assert adapter._webhook_rate_counts == {"test-app:/feishu:192.0.2.1": (1, now[0])}
-    adapter._on_message_event.assert_called_once()
+    assert asyncio.run(adapter._handle_webhook_request(make_request({"token": "invalid"}))).status == 401
+    assert adapter._webhook_rate_counts == {}
+    adapter._on_message_event.assert_not_called()
 
 
-def test_unsigned_challenge_is_bounded_only_by_ingress(monkeypatch):
+def test_token_authenticated_challenge_bypasses_rejected_request_budget(monkeypatch):
     adapter = make_adapter()
     monkeypatch.setattr(feishu, "_FEISHU_WEBHOOK_INGRESS_RATE_LIMIT_MAX", 1, raising=False)
+    assert asyncio.run(adapter._handle_webhook_request(make_request({"token": "invalid"}))).status == 401
     payload = {"type": "url_verification", "token": "test-token", "challenge": "inert-challenge"}
     response = asyncio.run(adapter._handle_webhook_request(make_request(payload, signed=False)))
     assert response.status == 200
     assert "inert-challenge" in response.text
     assert adapter._webhook_rate_counts == {}
-    assert asyncio.run(adapter._handle_webhook_request(make_request(payload, signed=False))).status == 429
+    assert asyncio.run(adapter._handle_webhook_request(make_request(payload, signed=False))).status == 200
     adapter._on_message_event.assert_not_called()
 
 
@@ -108,8 +109,10 @@ def test_authenticated_success_clears_its_anomaly_without_resetting_ingress():
     adapter = make_adapter()
     adapter._record_webhook_anomaly("192.0.2.1", "401")
     adapter._record_webhook_anomaly("other", "400")
+    key = "test-app:/feishu:192.0.2.1"
+    adapter._check_webhook_rate_limit(key, pre_auth=True)
     payload = {"header": {"token": "test-token", "event_type": "im.message.receive_v1"}}
     assert asyncio.run(adapter._handle_webhook_request(make_request(payload))).status == 200
     assert "192.0.2.1" not in adapter._webhook_anomaly_counts
     assert "other" in adapter._webhook_anomaly_counts
-    assert adapter._webhook_ingress_rate_counts["test-app:/feishu:192.0.2.1"][0] == 1
+    assert adapter._webhook_ingress_rate_counts[key][0] == 1
