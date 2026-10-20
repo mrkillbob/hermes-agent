@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import type { BrowserWindow, BrowserWindowConstructorOptions, ClientRequest, Session } from 'electron'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
+import { normalizeRemoteBaseUrl } from './connection-config'
 import { resolveDesktopRemoteRoute } from './desktop-remote-route'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import { createOauthSessionHandlers } from './oauth-session-handlers'
@@ -21,7 +22,7 @@ const registry = {
   ]
 }
 
-function harness(config: { profiles?: Record<string, unknown> } | null = null) {
+function harness(config: { remote?: { url?: unknown }; profiles?: Record<string, unknown> } | null = null) {
   const cookies = new Map<Session, Set<string>>()
   const sessions = new Map<string, Session>()
   const windows: Array<{ options: BrowserWindowConstructorOptions; url: string; destroyed: boolean }> = []
@@ -176,6 +177,47 @@ test.each(['remote', 'cloud'])('401 recovery preserves a legacy per-profile %s o
   expect(h.windows[0].url).toBe(`${base}/`)
   expect(h.windows[0].options.webPreferences?.session).toBe(h.fromPartition(LEGACY_OAUTH_PARTITION))
   expect(h.requests.every(request => request.session === h.fromPartition(LEGACY_OAUTH_PARTITION))).toBe(true)
+  expect(h.requests[1].headers.Cookie).toBe('__Secure-hermes_session_at=fresh-legacy-b')
+})
+
+test.each([
+  { scope: 'settings', mode: 'remote' },
+  { scope: 'profile', mode: 'remote' },
+  { scope: 'profile', mode: 'cloud' }
+])('401 recovery normalizes a scheme-less legacy $scope $mode URL like the dialer', async ({ scope, mode }) => {
+  const rawUrl = 'host.example.test/legacy-b'
+  const base = normalizeRemoteBaseUrl(rawUrl)
+  const entry = { mode, authMode: 'oauth', url: rawUrl }
+
+  const config = {
+    mode: scope === 'settings' ? mode : 'local',
+    remote: scope === 'settings' ? entry : undefined,
+    profiles: {
+      malformed: { mode: 'remote', authMode: 'oauth', url: 'https://[' },
+      ...(scope === 'profile' ? { work: entry } : {}),
+      local: { mode: 'local', url: 'host.example.test/legacy-b/api' },
+      ssh: { mode: 'ssh', host: 'ssh.example.test', url: 'host.example.test/legacy-b/api/status' }
+    }
+  }
+
+  const route = resolveDesktopRemoteRoute({
+    config,
+    profile: 'work',
+    registry: { version: 2, primary: '', launchMode: 'primary', lastUsed: '', connections: [] }
+  })
+
+  expect(route).toMatchObject({ source: scope === 'profile' ? 'profile' : 'settings', url: rawUrl })
+
+  if (!route || route.kind === 'ssh') {
+    throw new Error('Expected the real remote route')
+  }
+
+  const h = harness(config)
+
+  await expect(h.fetchJsonViaOauthSession(`${normalizeRemoteBaseUrl(route.url)}/api/status`)).resolves.toEqual({
+    ok: true
+  })
+  expect(h.windows[0].url).toBe(`${base}/`)
   expect(h.requests[1].headers.Cookie).toBe('__Secure-hermes_session_at=fresh-legacy-b')
 })
 

@@ -42,6 +42,20 @@ interface OauthSessionHandlerDeps {
   electronNet: Pick<Net, 'request'>
 }
 
+/** Legacy settings retain raw URLs; match the dialer's normalization per candidate. */
+function configuredGatewayBase(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') {
+    return undefined
+  }
+
+  try {
+    return normalizeRemoteBaseUrl(raw)
+  } catch {
+    // A malformed unrelated profile must not discard the other valid gateways.
+    return undefined
+  }
+}
+
 /** Keep login and 401 recovery in one importable scope; Electron I/O stays at the boundary. */
 export function createOauthSessionHandlers(deps: OauthSessionHandlerDeps) {
   const {
@@ -73,10 +87,10 @@ export function createOauthSessionHandlers(deps: OauthSessionHandlerDeps) {
 
       return resolveGatewayBase(url, {
         registry: readDesktopConnectionsRegistry(),
-        v1RemoteUrl: config?.remote?.url,
+        v1RemoteUrl: configuredGatewayBase(config?.remote?.url),
         // Match the actual routing ladder; local/SSH saved URLs are not gateways.
-        profileRemoteUrls: Object.keys(config?.profiles ?? {}).map(
-          profile => profileRemoteOverride(config, profile)?.url
+        profileRemoteUrls: Object.keys(config?.profiles ?? {}).map(profile =>
+          configuredGatewayBase(profileRemoteOverride(config, profile)?.url)
         )
       })
     } catch {
