@@ -164,7 +164,7 @@ class ScopedContext:
 
     def _verify_deployment(self, lane):
         deployment = lane.get("post_merge")
-        if isinstance(deployment, dict) and deployment.get("enabled") is True:
+        if lane.get("enabled") is True and isinstance(deployment, dict) and deployment.get("enabled") is True:
             self.binding.verify_workspace(deployment.get("deployment_path"), self.binding.repository)
 
     def __getattr__(self, name):

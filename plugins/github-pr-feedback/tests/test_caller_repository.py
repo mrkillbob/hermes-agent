@@ -341,6 +341,25 @@ def test_selected_deployment_cannot_relocate_to_another_clone(repos, tmp_path):
         scoped.get_config("merge_maintainer")
 
 
+@pytest.mark.parametrize("plural", [False, True])
+@pytest.mark.parametrize("repository", ["fixture/alpha", "fixture/beta"])
+def test_disabled_merge_lane_does_not_validate_retained_deployment(repos, monkeypatch, plural, repository):
+    from github_pr_feedback import cli
+    a, b = repos
+    settings = settings_for(a, b)
+    lane = dict(enabled=False, repository=repository,
+                post_merge=dict(enabled=True, deployment_path=str(b)))
+    settings["merge_maintainers" if plural else "merge_maintainer"] = [lane] if plural else lane
+    def inspect(ctx, _args):
+        policy = cli._load_policy_from_context(ctx)
+        assert set(policy.targets) == {"fixture/alpha"}
+        assert policy.merge_policy_for("fixture/alpha") is None
+        return 0
+    monkeypatch.setattr(cli, "handle_cli_with_context", inspect)
+    args = argparse.Namespace(github_pr_feedback_action="status", repository=None)
+    assert cli.cli_bindings(Context(a, settings))[1](args) == 0
+
+
 def _resolve_in_child(root):
     from github_pr_feedback.caller_repository import CallerRepository, current_repository, repository_scope
     assert current_repository() is None
