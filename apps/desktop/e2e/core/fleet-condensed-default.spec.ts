@@ -99,7 +99,7 @@ test("the condensed fleet menu lists the active gateway's default on both sides 
   const remote = await startRemoteBackend(remoteBox)
   writeConnectionsRegistry(clientBox.userDataDir, remote.url, remote.token)
 
-  const { app, page } = await launchCoreApp(coreAppEnv(clientBox))
+  const { app, page } = await launchCoreApp(coreAppEnv(clientBox, { HERMES_DATA_DIR_SUFFIX: '-fleet-e2e' }))
 
   try {
     await waitForInteractive(app, page)
@@ -114,6 +114,14 @@ test("the condensed fleet menu lists the active gateway's default on both sides 
     })
 
     await test.step(`on ${REMOTE_LABEL}: its default is listed beside This device`, async () => {
+      const deadline = performance.now() + 120_000
+      const remaining = () => Math.max(1, deadline - performance.now())
+      const switcher = page.locator('[data-slot="connection-switcher"]')
+
+      await expect(switcher.getByRole('button', { name: `Registered gateways: ${REMOTE_LABEL}`, exact: true }))
+        .toBeVisible({ timeout: remaining() })
+      await expect(switcher).toHaveAttribute('aria-busy', 'false', { timeout: remaining() })
+
       await expect
         .poll(
           async () => {
@@ -125,7 +133,7 @@ test("the condensed fleet menu lists the active gateway's default on both sides 
 
             return atRestLocal
           },
-          { message: `the window re-homed onto ${REMOTE_LABEL}`, timeout: 120_000, intervals: [1_000, 2_000] }
+          { message: `the window re-homed onto ${REMOTE_LABEL}`, timeout: remaining(), intervals: [1_000, 2_000] }
         )
         .toBe(1)
 
