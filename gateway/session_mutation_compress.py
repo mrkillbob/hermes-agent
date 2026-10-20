@@ -93,8 +93,9 @@ async def prepare_compress(authority, live, payload, prepared):
             joined = rejoin_compressed_head_and_tail(compressed, tail)
             displayed = {authority.db._message_display_identity(m) for m in joined}
             # Unchanged originals remain archived display anchors and dedupe by their existing key.
-            # Retire only originals whose display payload the new carrier supersedes.
-            carried = [m for m in messages if m.get('_row_id') in carried_ids
+            # Full tool outputs remain archived beside pruned replay stubs.
+            # Human summary carriers supersede their original display payload instead.
+            carried = [m for m in messages if m.get('_row_id') in carried_ids and m.get('role') != 'tool'
                        and authority.db._message_display_identity(m) not in displayed]
             return joined, compressor, carried
     compressed, compressor, carried = await asyncio.to_thread(summarize)

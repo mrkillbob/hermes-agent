@@ -112,3 +112,56 @@ async def test_compress_and_resume_keep_each_original_reply_once(
     finally:
         await owner.close()
         store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+async def test_canonical_compress_retains_full_tool_result(tmp_path, monkeypatch):
+    """A pruned replay stub must not hide the archived full tool output."""
+    monkeypatch.setattr(run, '_load_gateway_config', lambda *args: {
+        'compression': {'protect_first_n': 3, 'protect_last_n': 2, 'min_tail_user_messages': 1},
+        'platform_toolsets': {'cli': []}})
+    monkeypatch.setattr(ContextCompressor, '_call_summary_llm', lambda *args: 'SUMMARYMARK earlier turns')
+    store = SessionStore(tmp_path / 'sessions', GatewayConfig())
+    db = store._db
+    runner = SimpleNamespace(session_store=store, _session_db=db, adapters={}, _draining=False,
+        _cached_agent_for=lambda route: None, _evict_cached_agent=lambda *a, **kw: None,
+        _resolve_session_agent_runtime=lambda **kw: ('fake-model', {
+            'provider': 'custom', 'base_url': 'http://127.0.0.1:9/v1', 'api_key': 'fixture-only'}))
+    runner._adapter_for_source = lambda source: runner.adapters.get(source.platform)
+    authority = SessionAuthority(runner, profile_id=str(tmp_path), instance_id='owner', db=db,
+        epoch=rt.begin_runtime_epoch(db, instance_id='owner'))
+    owner = AuthorityConnection(authority, object(), {'user_id': 'human'})
+    try:
+        ref = create_local_session(authority, owner.actor, dict(request_id='transcript', source='cli',
+            cwd=str(tmp_path), model='fake-model', toolsets=[]))
+        for turn in range(1, 7):
+            db.append_message(ref.session_id, 'user', f'turn {turn}')
+            db.append_message(ref.session_id, 'assistant', 'historical detail ' * 200)
+        payload = 'UNIQUE_FULL_TOOL_PAYLOAD ' + ('R' * 200_000)
+        db.append_messages_batch(ref.session_id, [
+            {'role': 'user', 'content': 'read the file'},
+            {'role': 'assistant', 'content': 'reading', 'tool_calls': [{'id': 'read-tail', 'type': 'function',
+                'function': {'name': 'read_file', 'arguments': json.dumps({'path': 'example.txt'})}}]},
+            {'role': 'tool', 'tool_call_id': 'read-tail', 'tool_name': 'read_file', 'content': payload},
+            *[message for i in range(3) for message in (
+                {'role': 'assistant', 'content': 'more', 'tool_calls': [{'id': f'next-{i}', 'type': 'function', 'function': {'name': 'read_file', 'arguments': '{}'}}]},
+                {'role': 'tool', 'content': f'small output {i}', 'tool_call_id': f'next-{i}', 'tool_name': 'read_file'})],
+            {'role': 'assistant', 'content': 'Finished reading'}])
+        before = db.get_session(ref.session_id)
+        response = await owner.dispatch({'id': 1, 'method': 'session.mutate', 'params': {
+            'session_id': ref.session_id, 'request_id': 'compress', 'operation': 'compress', 'payload': {},
+            'expected_revision': before['runtime_revision'], 'expected_generation': before['runtime_generation']}})
+        assert 'result' in response, response
+        rows = db.get_messages(ref.session_id, include_inactive=True)
+        full = [r for r in rows if r['role'] == 'tool' and r['content'] == payload]
+        assert len(full) == 1 and (full[0]['active'], full[0]['compacted']) == (0, 1)
+        live = db.get_messages_as_conversation(ref.session_id)
+        assert payload not in [m.get('content') for m in live]
+        assert any(m['role'] == 'tool' and m.get('tool_call_id') == 'read-tail'
+                   and len(m.get('content', '')) < len(payload) for m in live)
+        for reader in ('get_messages', 'get_messages_as_conversation'):
+            shown = getattr(db, reader)(ref.session_id, include_compacted=True)
+            assert payload in [m.get('content') for m in shown], reader
+    finally:
+        await owner.close()
+        store.close_all_db_handles()
