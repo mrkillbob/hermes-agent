@@ -10,13 +10,13 @@ be called with ITS OWN key only, and the primary's key must never reach the fall
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from tests.e2e.core.providers._catalog_helpers import (
-    AUTH_HEADER_OF_DIALECT, FINAL, Known, Row, decoy_keys, discover_catalog, gate, known_gate, run_hermes, write_home,
+    AUTH_HEADER_OF_DIALECT, FINAL, Known, Row, decoy_keys, discover_catalog, gate, known_gate, row_runtime,
+    run_hermes, write_home,
 )
 from tests.fakes.providers.catalog_fake import CatalogFake
 
@@ -51,10 +51,11 @@ def _drive(primary: Row, fallback: Row, root: Path) -> dict:
         home = write_home(root, {"provider": primary.name, "base_url": dead.origin + primary.base_path}, {
             "fallback_providers": [{"provider": fallback.name, "model": "catalog-model-a",
                                     "base_url": alive.origin + fallback.base_path}]})
-        proc = run_hermes(home, project, {**keys, **dead.proxy_env()}, "-z", "Read canary.txt and report.",
-                          diagnostics=diagnostics)
-        dead_reqs, alive_reqs = dead.inference(), alive.inference()
-        egress = dead.egress_hosts()
+        with row_runtime(home):
+            proc = run_hermes(home, project, {**keys, **dead.proxy_env()}, "-z", "Read canary.txt and report.",
+                              diagnostics=diagnostics)
+            dead_reqs, alive_reqs = dead.inference(), alive.inference()
+            egress = dead.egress_hosts()
     pk, fk = keys[primary.key_env or ""], keys[fallback.key_env or ""]
     return {
         "lifecycle": diagnostics,
@@ -78,9 +79,9 @@ def _drive(primary: Row, fallback: Row, root: Path) -> dict:
 @pytest.fixture(scope="module")
 def results(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict]:
     pairs = {r.name: (r, ROWS[(i + 1) % len(ROWS)]) for i, r in enumerate(ROWS)}
-    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="fallback") as pool:
-        futs = {n: pool.submit(_drive, p, f, Path(tmp_path_factory.mktemp(f"fb-{n}"))) for n, (p, f) in pairs.items()}
-        out = {n: f.result() for n, f in futs.items()}
+    # The outer runner owns concurrency; each completed row retires its gateway
+    # before the next synthetic home starts another one.
+    out = {n: _drive(p, f, Path(tmp_path_factory.mktemp(f"fb-{n}"))) for n, (p, f) in pairs.items()}
     for n, (_p, f) in pairs.items():
         out[n]["fallback"] = f.name
     return out

@@ -27,7 +27,9 @@ from hermes_state_common import (
 from hermes_state_detached_results import SessionDetachedResultsMixin
 from hermes_state_todo import SessionTodoResultMixin
 from hermes_state_identity import (
-    _absorbed_uids_json, _restore_identity_columns, _stable_tool_key, _tool_call_uid_map, _tool_call_uid_or_none, _tool_call_uids_json, _uid_list)
+    _absorbed_uids_json, _single_visible_display_origins, _reconcile_rewritten_display_origins,
+    _restore_identity_columns, _stable_tool_key,
+    _tool_call_uid_map, _tool_call_uid_or_none, _tool_call_uids_json, _uid_list)
 
 logger = logging.getLogger("hermes_state")  # caplog tests pin the origin module's name
 
@@ -250,6 +252,12 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
                     (conversation_id, lease["holder"]))
         if _ended_by_compression(conn.execute(_ENDED_ROW_SQL, (session_id,)).fetchone()) and not allow_closed_compression_parent:
             raise CompressionSessionClosedError(session_id)
+
+    def _message_display_identity(self, msg: dict[str, Any]) -> bytes:
+        """Classify a prepared copy with the exact insert codec, including user/tool display lenses."""
+        params = self._message_row_params('', msg.get('role', 'unknown'), msg,
+            _parse_tool_calls(msg.get('tool_calls')), msg.get('timestamp'), keep_reasoning=False)
+        return params[_MESSAGE_WRITE_COLUMNS.index('display_identity')]
 
     def _message_row_params(self, session_id: str, role: str, msg: dict[str, Any], tool_calls: Any,
         message_timestamp: float, *, keep_reasoning: bool) -> tuple:
@@ -1112,8 +1120,11 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
             # 30k-row resume ~0.17 s, RT-39). No removed row at all: nothing can hide a copy.
             removed_ts = {row["timestamp"] for row in rows if not row["active"] and not row["compacted"]}
             drop_removed = bool(removed_ts)
+        uid_origins = _single_visible_display_origins(
+            rows, drop_removed, lambda row: self._display_identity(self._display_dedupe_key(row)))
         for row in rows:
             copies, key = None, None
+            origin = uid_origins.get(row["message_uid"], row["id"])
             if drop_removed:
                 # A removed row is read without its body (``_removed_identity_rows``): its stored display identity.
                 gone = not row["active"] and not row["compacted"]
@@ -1133,9 +1144,10 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
             if cur is None or (row["active"], row["id"]) > (cur["active"], cur["id"]):
                 seen[key] = row
                 identities[key] = copies
-            first_id[key] = min(first_id.get(key, row["id"]), row["id"])
+            first_id[key] = min(first_id.get(key, origin), origin)
         # Order by the logical message's FIRST row, not the chosen representative's: a protected-tail
-        # copy in a newer generation has a higher id than messages emitted after the original.
+        # copy in a newer generation has a higher id than messages emitted after the original. Retired
+        # originals still anchor live copies by logical uid even when the carrier was rewritten.
         keys = sorted(seen, key=first_id.__getitem__)
         if drop_removed:
             keys = [key for key in keys if not any(removed[copy] for copy in identities[key])]
@@ -1155,7 +1167,7 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
         while True:
             rows = conn.execute(
                 "SELECT id, role, content, timestamp, tool_call_id, tool_calls, tool_name, "
-                "display_kind, display_metadata, display_order, display_identity "
+                "display_kind, display_metadata, display_order, display_identity, message_uid "
                 "FROM messages INDEXED BY idx_messages_session_id "
                 "WHERE session_id = ? AND id > ? AND (active = 1 OR compacted = 1) "
                 "ORDER BY id LIMIT 1000",
@@ -1176,6 +1188,7 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
                 break
             conn.executemany(
                 "UPDATE messages SET display_order = ?, display_identity = ? WHERE id = ?", updates)
+        _reconcile_rewritten_display_origins(conn, session_id)
 
     def _ensure_display_order(self, session_id: str) -> bool:
         """Backfill one legacy session once, preserving the pre-index display identity exactly."""

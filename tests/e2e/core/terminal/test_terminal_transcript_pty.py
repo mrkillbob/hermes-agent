@@ -143,7 +143,11 @@ def test_terminal_transcript_integrity(surface: str, scenario: str, tmp_path: Pa
     script = [r for turn in spec.turns for r in turn.responses]
     rows, cols = spec.rows, 100
     with FakeLLMServer(script, aux=lambda _req: Text(TITLE)) as llm:
-        term = PtyHermes(tmp_path, SURFACES[surface], llm, rows=rows, cols=cols)
+        # --cli selects the prompt_toolkit interface; the classic transcript contract also
+        # needs an explicit layout now that the default CLI has a reasoning-title footer.
+        extra_config = "display:\n  cli_layout: classic\n" if surface == "cli" else ""
+        term = PtyHermes(tmp_path, SURFACES[surface], llm, rows=rows, cols=cols,
+                         extra_config=extra_config)
         try:
             term.wait_ready()
             expected_main = 0

@@ -46,7 +46,7 @@ async def prepare_compress(authority, live, payload, prepared):
     model, runtime = authority.runner._resolve_session_agent_runtime(source=live.source, session_key=live.route)
     if runtime.get('api_mode') == 'codex_app_server':
         raise RuntimeStoreError('runtime_coordination_required')
-    history = authority.db.get_messages_as_conversation(snapshot['target'])
+    history = authority.db.get_messages_as_conversation(snapshot['target'], include_row_ids=True)
     messages = [m for m in history if m.get('role') in {'user', 'assistant', 'tool'}]
     head, tail = messages, []
     if request.partial:
@@ -67,6 +67,11 @@ async def prepare_compress(authority, live, payload, prepared):
 
     def summarize():
         with policy_scope(policy, authority=authority):
+            from agent.message_metadata import stamp_message_uid
+            # Legacy rows awaiting bounded backfill need an identity that survives summary rewrites.
+            # This touches only prepared dicts; publication binds carried originals atomically.
+            for message in messages:
+                stamp_message_uid(message)
             from agent.conversation_compression import _pre_compress_memory_context
             memory_context = _pre_compress_memory_context(resident, head, False) if resident is not None else ''
             compressor = ContextCompressor(model, base_url=runtime.get('base_url') or '',
@@ -78,9 +83,22 @@ async def prepare_compress(authority, live, payload, prepared):
             compressed = compressor.compress(json.loads(json.dumps(head)), force=True,
                                                focus_topic=request.focus_topic, memory_context=memory_context)
             if not any(m.get('_compressed_summary') for m in compressed):
-                return None, compressor
-            return rejoin_compressed_head_and_tail(compressed, tail), compressor
-    compressed, compressor = await asyncio.to_thread(summarize)
+                return None, compressor, []
+            # A summary may rewrite the first protected tail row. Its original must be
+            # superseded, not archived as a second visible copy beside that carrier.
+            # Name originals before the partial seam folds rows or a summary rewrites one.
+            # A positional count would also consume filtered-out system rows in the DB suffix.
+            carried_ids = {m.get('_row_id') for m in compressed if m.pop('_compaction_tail', False)}
+            carried_ids.update(m.get('_row_id') for m in tail)
+            joined = rejoin_compressed_head_and_tail(compressed, tail)
+            displayed = {authority.db._message_display_identity(m) for m in joined}
+            # Unchanged originals remain archived display anchors and dedupe by their existing key.
+            # Full tool outputs remain archived beside pruned replay stubs.
+            # Human summary carriers supersede their original display payload instead.
+            carried = [m for m in messages if m.get('_row_id') in carried_ids and m.get('role') != 'tool'
+                       and authority.db._message_display_identity(m) not in displayed]
+            return joined, compressor, carried
+    compressed, compressor, carried = await asyncio.to_thread(summarize)
     # The same report every native /compress prints ("Compressed: N → M messages").
     from agent.manual_compression_feedback import summarize_manual_compression
     if compressed is None:
@@ -96,7 +114,7 @@ async def prepare_compress(authority, live, payload, prepared):
     hook = None if policy.safe_mode else {  # same rough basis as the agent path's compaction record
         'before_tokens': estimate_messages_tokens_rough(messages),
         'after_tokens': estimate_messages_tokens_rough(compressed), 'messages_removed': len(messages) - len(compressed)}
-    return dict(prepared, messages=compressed, summary=summary, post_compaction=hook,
+    return dict(prepared, messages=compressed, carried_messages=carried, summary=summary, post_compaction=hook,
                 in_place=is_truthy_value(options.get('in_place'), default=True))
 
 

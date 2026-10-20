@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -156,6 +155,7 @@ class Row:
 
 
 _CATALOG: list[Row] | None = None
+_ROW_HOMES: set[Path] = set()
 
 _DISCOVER = """
 import json, providers
@@ -230,6 +230,7 @@ def write_home(root: Path, model: dict[str, Any], extra_cfg: dict[str, Any] | No
         "fetched_at": time.time(), "curated": [["catalog-model-a", "Catalog fixture model"]],
     }), encoding="utf-8")
     select_test_dependencies(home / ".hermes", REPO_ROOT)
+    _ROW_HOMES.add(home.resolve())
     return home
 
 
@@ -311,6 +312,47 @@ class TurnResult:
                 f"  lifecycle={json.dumps(self.diagnostics, sort_keys=True)}")
 
 
+def retire_runtime(home: Path) -> None:
+    """Retire only this row's Linux processes, identified by exact synthetic HERMES_HOME."""
+    assert home.is_absolute() and home.resolve() in _ROW_HOMES, "expected a registered absolute synthetic home"
+    if sys.platform.startswith("linux"):
+        import psutil
+        from tests.e2e.core.cli_tmux._classic import home_pids
+
+        hermes_home = home / ".hermes"
+        owned = []
+        for pid in home_pids(hermes_home):
+            try:
+                # Capture identity before rechecking ownership. psutil's signal
+                # methods reject reuse of this Process object's PID afterward.
+                process = psutil.Process(pid)
+                if process.environ().get("HERMES_HOME") != str(hermes_home):
+                    continue
+                process.terminate()
+                owned.append(process)
+            except psutil.NoSuchProcess:
+                continue
+        _gone, alive = psutil.wait_procs(owned, timeout=8)
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                continue
+        _gone, alive = psutil.wait_procs(alive, timeout=2)
+        assert not alive, "catalog row's temporary runtime survived teardown"
+        assert not home_pids(hermes_home), "catalog row's temporary runtime survived teardown"
+    _ROW_HOMES.remove(home.resolve())
+
+
+@contextlib.contextmanager
+def row_runtime(home: Path):
+    """Keep evidence collection inside the lifetime; retire even when a child launch fails."""
+    try:
+        yield
+    finally:
+        retire_runtime(home)
+
+
 def drive_turn(row: Row, root: Path, catalog: list[Row]) -> TurnResult:
     """One oneshot turn with one tool round trip for ``row`` against its own fake."""
     project = root / "project"
@@ -322,14 +364,14 @@ def drive_turn(row: Row, root: Path, catalog: list[Row]) -> TurnResult:
     started = time.monotonic()
     with CatalogFake(tool_args={"path": str(project / "canary.txt")}, final_text=FINAL, routes=row.routes()) as fake:
         home = write_home(root, {"provider": row.name, "base_url": fake.origin + row.base_path})
-        proc = run_hermes(home, project, {**keys, **fake.proxy_env()}, "-z", "Read canary.txt and report.",
-                          diagnostics=diagnostics)
-        requests = list(fake.requests)
-        egress = fake.egress_hosts()
-    return TurnResult(row=row, rc=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, requests=requests,
-                      egress=egress, own_key=keys[row.key_env or ""], secrets=set(keys.values()),
-                      usage=session_usage(home), canary=canary, wall_s=round(time.monotonic() - started, 1),
-                      diagnostics=diagnostics)
+        with row_runtime(home):
+            proc = run_hermes(home, project, {**keys, **fake.proxy_env()}, "-z", "Read canary.txt and report.",
+                              diagnostics=diagnostics)
+            return TurnResult(row=row, rc=proc.returncode, stdout=proc.stdout, stderr=proc.stderr,
+                              requests=list(fake.requests), egress=fake.egress_hosts(),
+                              own_key=keys[row.key_env or ""], secrets=set(keys.values()),
+                              usage=session_usage(home), canary=canary, wall_s=round(time.monotonic() - started, 1),
+                              diagnostics=diagnostics)
 
 
 def provider_hosts(catalog: list[Row]) -> set[str]:
@@ -393,13 +435,13 @@ def shard_params(shard: int) -> list:
 
 
 def drive_shard(shard: int, tmp_path_factory: pytest.TempPathFactory) -> dict[str, TurnResult]:
-    """Every runnable row of the shard driven concurrently (own home, fake and process each)."""
+    """Spend the outer test runner's one process-tree slot on one row at a time."""
     catalog = discover_catalog()
     runnable = [r for r in shard_rows(shard) if r.skip_reason() is None and r.dialect]
     roots = {r.name: Path(tmp_path_factory.mktemp(f"cat-{r.name}")) for r in runnable}
-    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="catalog") as pool:
-        futs = {r.name: pool.submit(drive_turn, r, roots[r.name], catalog) for r in runnable}
-        return {name: f.result() for name, f in futs.items()}
+    # Three E2E files already run concurrently. Nested pools multiplied that
+    # budget by eight, starving gateway startup before the 75-second turn bound.
+    return {r.name: drive_turn(r, roots[r.name], catalog) for r in runnable}
 
 
 def check_row(row: Row, turns: dict[str, TurnResult]) -> None:
