@@ -305,15 +305,17 @@ def test_refused_gateway_resume_after_commit_is_a_followup_not_exit_1(completion
     context.write_text(json.dumps(request), encoding="utf-8")
     child = run("scm-before-resume" if before_resume else "scm")
     assert child.returncode == 0, child.stdout + child.stderr
+    # A refused first attempt stays owed, but neither the child's finally nor its historical
+    # parent may replay it. A fleet failure before that boundary must still get one rescue.
+    assert json.loads((source / "resume-calls.json").read_text()) == 1
     receipt = json.loads((home / "logs/update_receipts/latest.json").read_text())
     assert receipt["update_id"] == request["update_id"]
     assert receipt["outcome"] == "success"
     owed = {row["step"]: row["reason"] for row in receipt["followups"]}
     step = "windows_resume" if before_resume else "gateway_restart"
-    assert "Could not restart Windows gateway service(s): HermesGatewayProbe" in owed.get(step, ""), child.stdout + child.stderr
-    # A refused first attempt stays owed, but neither the child's finally nor its historical
-    # parent may replay it. A fleet failure before that boundary must still get one rescue.
-    assert json.loads((source / "resume-calls.json").read_text()) == 1
+    assert owed.get(step), child.stdout + child.stderr
+    detail = owed[step] if before_resume else receipt["gateway_restart"]["phase_error"]
+    assert "Could not restart Windows gateway service(s): HermesGatewayProbe" in detail, child.stdout + child.stderr
     assert (home / ".update_exit_code").read_text().strip() == "0"
     # The attempt is reported: the historical parent must not replay it at its own exit.
     assert json.loads(result.read_text())["resume_handled"] is True
