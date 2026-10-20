@@ -24,10 +24,18 @@ _active = ContextVar("github_feedback_caller_repository", default=None)
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _GIT_ROUTING = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
                           "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"})
+_GIT_CONFIG_ISOLATION = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+                         "GIT_CONFIG_NOSYSTEM": "1"}
 
 
 def reject_git_overrides():
-    if _GIT_ROUTING.intersection(os.environ) or any(key.startswith("GIT_CONFIG_") for key in os.environ):
+    config_keys = (key for key in os.environ if key == "GIT_CONFIG" or key.startswith("GIT_CONFIG_"))
+    # Hermes deliberately disables global/system config in sanitized children.
+    # Only those exact inert settings are safe; arbitrary files/injections refuse.
+    if _GIT_ROUTING.intersection(os.environ) or any(
+        key not in _GIT_CONFIG_ISOLATION or os.environ[key] != _GIT_CONFIG_ISOLATION[key]
+        for key in config_keys
+    ):
         raise RepositoryBindingError("ambient_git_routing_override")
 
 

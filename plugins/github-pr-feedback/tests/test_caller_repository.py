@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 import argparse
+import os
 import subprocess
 import threading
 
@@ -174,6 +175,40 @@ def test_other_repository_push_url_is_refused(repos):
     a, _ = repos
     git(a, "remote", "set-url", "--push", "origin", "https://github.com/fixture/beta.git")
     with pytest.raises(RepositoryBindingError):
+        CallerRepository.resolve(Context(a))
+
+
+@pytest.mark.parametrize("key,value", [
+    ("GIT_CONFIG_GLOBAL", os.devnull),
+    ("GIT_CONFIG_SYSTEM", os.devnull),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+])
+def test_host_config_isolation_preserves_caller_binding(repos, monkeypatch, key, value):
+    from github_pr_feedback.caller_repository import CallerRepository, RepositoryBindingError
+    a, b = repos
+    monkeypatch.setenv(key, value)
+    binding = CallerRepository.resolve(Context(a))
+    assert binding.repository == "fixture/alpha"
+    with pytest.raises(RepositoryBindingError):
+        binding.verify_workspace(b, binding.repository)
+
+
+@pytest.mark.parametrize("key", ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"])
+def test_other_config_files_still_refuse_before_repository_resolution(repos, monkeypatch, key):
+    from github_pr_feedback.caller_repository import CallerRepository, RepositoryBindingError
+    a, b = repos
+    monkeypatch.setenv(key, str(b / ".git" / "config"))
+    with pytest.raises(RepositoryBindingError, match="ambient_git_routing_override"):
+        CallerRepository.resolve(Context(a))
+
+
+@pytest.mark.parametrize("key,value", [("GIT_DIR", ""), ("GIT_CONFIG_COUNT", "0"), ("GIT_CONFIG", "")])
+def test_host_isolation_does_not_bypass_other_overrides(repos, monkeypatch, key, value):
+    from github_pr_feedback.caller_repository import CallerRepository, RepositoryBindingError
+    a, _ = repos
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv(key, value)
+    with pytest.raises(RepositoryBindingError, match="ambient_git_routing_override"):
         CallerRepository.resolve(Context(a))
 
 

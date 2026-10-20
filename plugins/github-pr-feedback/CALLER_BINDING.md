@@ -18,7 +18,10 @@ plugin code.
 Both the caller and configured checkout must share a Git common directory and
 canonical remote identity. Nested directories and linked worktrees are admitted;
 another clone with the same branch and commit is not. Ambient Git routing/config
-overrides and a conflicting origin push URL refuse. Only GitHub HTTPS/SSH origins
+overrides and a conflicting origin push URL refuse. The host's exact null-device
+global/system config isolation and `GIT_CONFIG_NOSYSTEM=1` remain supported;
+arbitrary config files/injections, including bare `GIT_CONFIG`, still refuse.
+Only GitHub HTTPS/SSH origins
 are currently supported; ambiguous/missing origins and other hosts refuse.
 
 All nested maintenance/review policies are narrowed before parsing/client access.
