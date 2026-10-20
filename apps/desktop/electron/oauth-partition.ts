@@ -249,7 +249,7 @@ export function resolveOauthPartition(requestUrl: unknown, opts: ResolveOauthPar
 
 /**
  * The gateway a request belongs to: the longest registered connection base URL
- * (or the v1 remote) that the request URL sits under, else the request origin.
+ * (or a v1 global/profile remote) that the request URL sits under, else its origin.
  * Hermes scopes its session and PKCE cookies to the proxy prefix, so two
  * gateways mounted under different prefixes of one origin are independent
  * login flows even when they share a cookie jar. The registry only ever picks
@@ -257,7 +257,7 @@ export function resolveOauthPartition(requestUrl: unknown, opts: ResolveOauthPar
  */
 export function resolveGatewayBase(
   requestUrl: unknown,
-  opts: Pick<ResolveOauthPartitionOptions, 'registry' | 'v1RemoteUrl'> = {}
+  opts: Pick<ResolveOauthPartitionOptions, 'registry' | 'v1RemoteUrl'> & { profileRemoteUrls?: unknown[] } = {}
 ): string {
   const requestNorm = normalizeForMatch(requestUrl)
 
@@ -265,7 +265,7 @@ export function resolveGatewayBase(
     return typeof requestUrl === 'string' ? requestUrl : ''
   }
 
-  const candidates = [opts.v1RemoteUrl]
+  const candidates = [opts.v1RemoteUrl, ...(opts.profileRemoteUrls ?? [])]
 
   if (Array.isArray(opts.registry?.connections)) {
     for (const entry of opts.registry.connections) {

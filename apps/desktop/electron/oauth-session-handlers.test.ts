@@ -4,6 +4,8 @@ import { EventEmitter } from 'node:events'
 import type { BrowserWindow, BrowserWindowConstructorOptions, ClientRequest, Session } from 'electron'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
+import { normalizeRemoteBaseUrl } from './connection-config'
+import { resolveDesktopRemoteRoute } from './desktop-remote-route'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import { createOauthSessionHandlers } from './oauth-session-handlers'
 import { RemoteSessionCookieStore } from './remote-session-cookies'
@@ -20,7 +22,10 @@ const registry = {
   ]
 }
 
-function harness({ onLogin = () => {}, onCapture = () => {}, refusedAttempts = 1 } = {}) {
+function harness(
+  config: { remote?: { url?: unknown }; profiles?: Record<string, unknown> } | null = null,
+  { onLogin = () => {}, onCapture = () => {}, refusedAttempts = 1 } = {}
+) {
   const cookies = new Map<Session, Set<string>>()
   const sessions = new Map<string, Session>()
   const windows: Array<{ options: BrowserWindowConstructorOptions; url: string; destroyed: boolean }> = []
@@ -82,7 +87,7 @@ function harness({ onLogin = () => {}, onCapture = () => {}, refusedAttempts = 1
     installRemoteHeaderRulesOnSession: () => {},
     resolveOauthPartitionForUrl: partitionFor,
     readDesktopConnectionsRegistry: () => registry,
-    readDesktopConnectionConfig: () => null,
+    readDesktopConnectionConfig: () => config,
     BrowserWindow: Window as unknown as new (options: BrowserWindowConstructorOptions) => BrowserWindow,
     hasOauthSessionCookie: async (url: string, identity = {}) =>
       cookies.get(fromPartition(partitionFor(url, identity)))!.has(url.replace(/\/+$/, '')),
@@ -92,6 +97,7 @@ function harness({ onLogin = () => {}, onCapture = () => {}, refusedAttempts = 1
     captureRemoteSessionCookiesIntoMirror: (sess: Session, partition: string, url: string) => {
       if (cookies.get(sess)!.has(url)) {
         onCapture()
+
         const path = new URL(url).pathname
 
         mirror.recordFromJar(partition, url, [
@@ -147,6 +153,80 @@ test('explicit login loads the registered prefix chooser in its request cookie j
   expect(h.windows[0].destroyed).toBe(true)
 })
 
+test.each(['remote', 'cloud'])('401 recovery preserves a legacy per-profile %s override prefix', async mode => {
+  const base = `${HOST}/legacy-b`
+
+  const config = {
+    profiles: {
+      work: { mode, authMode: 'oauth', url: base },
+      local: { mode: 'local', url: `${base}/deeper` },
+      ssh: { mode: 'ssh', host: 'ssh.example.test', url: `${base}/deeper/api` }
+    }
+  }
+
+  const route = resolveDesktopRemoteRoute({
+    config,
+    profile: 'work',
+    registry: { version: 2, primary: '', launchMode: 'primary', lastUsed: '', connections: [] }
+  })
+
+  expect(route).toMatchObject({ kind: mode, source: 'profile', url: base, authMode: 'oauth' })
+
+  if (!route || route.kind === 'ssh') {
+    throw new Error('Expected the real remote route')
+  }
+
+  const h = harness(config)
+
+  await expect(h.fetchJsonViaOauthSession(`${route.url}/deeper/api/status`)).resolves.toEqual({ ok: true })
+  expect(h.windows).toHaveLength(1)
+  expect(h.windows[0].url).toBe(`${base}/`)
+  expect(h.windows[0].options.webPreferences?.session).toBe(h.fromPartition(LEGACY_OAUTH_PARTITION))
+  expect(h.requests.every(request => request.session === h.fromPartition(LEGACY_OAUTH_PARTITION))).toBe(true)
+  expect(h.requests[1].headers.Cookie).toBe('__Secure-hermes_session_at=fresh-legacy-b')
+})
+
+test.each([
+  { scope: 'settings', mode: 'remote' },
+  { scope: 'profile', mode: 'remote' },
+  { scope: 'profile', mode: 'cloud' }
+])('401 recovery normalizes a scheme-less legacy $scope $mode URL like the dialer', async ({ scope, mode }) => {
+  const rawUrl = 'host.example.test/legacy-b'
+  const base = normalizeRemoteBaseUrl(rawUrl)
+  const entry = { mode, authMode: 'oauth', url: rawUrl }
+
+  const config = {
+    mode: scope === 'settings' ? mode : 'local',
+    remote: scope === 'settings' ? entry : undefined,
+    profiles: {
+      malformed: { mode: 'remote', authMode: 'oauth', url: 'https://[' },
+      ...(scope === 'profile' ? { work: entry } : {}),
+      local: { mode: 'local', url: 'host.example.test/legacy-b/api' },
+      ssh: { mode: 'ssh', host: 'ssh.example.test', url: 'host.example.test/legacy-b/api/status' }
+    }
+  }
+
+  const route = resolveDesktopRemoteRoute({
+    config,
+    profile: 'work',
+    registry: { version: 2, primary: '', launchMode: 'primary', lastUsed: '', connections: [] }
+  })
+
+  expect(route).toMatchObject({ source: scope === 'profile' ? 'profile' : 'settings', url: rawUrl })
+
+  if (!route || route.kind === 'ssh') {
+    throw new Error('Expected the real remote route')
+  }
+
+  const h = harness(config)
+
+  await expect(h.fetchJsonViaOauthSession(`${normalizeRemoteBaseUrl(route.url)}/api/status`)).resolves.toEqual({
+    ok: true
+  })
+  expect(h.windows[0].url).toBe(`${base}/`)
+  expect(h.requests[1].headers.Cookie).toBe('__Secure-hermes_session_at=fresh-legacy-b')
+})
+
 test('401 re-login is hidden, keeps the prefix and jar, then retries with the fresh cookie', async () => {
   const h = harness()
 
@@ -164,7 +244,8 @@ test('401 re-login is hidden, keeps the prefix and jar, then retries with the fr
 test('A-only 401 recovery preserves B in the shared jar before, during and after hidden login', async () => {
   const a = `${HOST}/a/api/status`
   const b = `${HOST}/b/api/status`
-  const h = harness({
+
+  const h = harness(null, {
     onLogin: () => {
       expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, a)).toBeNull()
       expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, b)).toBe('__Secure-hermes_session_at=existing-b')
@@ -192,7 +273,8 @@ test('A-only 401 recovery preserves B in the shared jar before, during and after
 test('a second 401 joins the A flight without clearing cookies captured while login is running', async () => {
   const a = `${HOST}/a/api/status`
   const b = `${HOST}/b/api/status`
-  const h = harness({
+
+  const h = harness(null, {
     refusedAttempts: 2,
     onLogin: () => {
       // A navigation response can update the mirror before the login settles.

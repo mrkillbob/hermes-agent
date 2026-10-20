@@ -183,6 +183,7 @@ describe('RemoteSessionCookieStore', () => {
     }
 
     store.record(CONN_A, origin, 'private=retained; Path=/a')
+
     for (const invalid of ['not a url', 'file:///a', 'ftp://gw.example.com/a']) {
       store.clearGateway(LEGACY, invalid)
       expect(store.cookieHeaderFor(LEGACY, `${origin}/a`)).toBe('session=/a; session=/')
@@ -190,6 +191,7 @@ describe('RemoteSessionCookieStore', () => {
 
     store.clearGateway(LEGACY, `${origin}/a`)
     expect(store.cookieHeaderFor(LEGACY, `${origin}/a`)).toBe('session=/')
+
     for (const path of paths.filter(path => path !== '/' && path !== '/a')) {
       const header = store.cookieHeaderFor(LEGACY, `${origin}${path}`)
 

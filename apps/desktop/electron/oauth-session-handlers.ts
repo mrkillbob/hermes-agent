@@ -6,7 +6,7 @@ import type {
   Session
 } from 'electron'
 
-import { normalizeRemoteBaseUrl } from './connection-config'
+import { normalizeRemoteBaseUrl, profileRemoteOverride } from './connection-config'
 import { DEFAULT_FETCH_TIMEOUT_MS, resolveTimeoutMs } from './hardening'
 import { loginFlightKey, OauthLoginFlights } from './oauth-login-flights'
 import { startOauthLoginWindow } from './oauth-login-window'
@@ -31,7 +31,7 @@ interface OauthSessionHandlerDeps {
   installRemoteHeaderRulesOnSession: (session: Session) => void
   resolveOauthPartitionForUrl: (url: string, identity?: OauthIdentity) => string
   readDesktopConnectionsRegistry: () => PartitionRegistrySnapshot | null
-  readDesktopConnectionConfig: () => { remote?: { url?: unknown } } | null
+  readDesktopConnectionConfig: () => { remote?: { url?: unknown }; profiles?: Record<string, unknown> } | null
   BrowserWindow: new (options: BrowserWindowConstructorOptions) => ElectronBrowserWindow
   hasOauthSessionCookie: (url: string, identity?: OauthIdentity) => Promise<boolean>
   headersForRemoteRequest: (url: string) => Record<string, string>
@@ -40,6 +40,20 @@ interface OauthSessionHandlerDeps {
   captureRemoteSessionCookiesIntoMirror: (session: Session, partition: string, baseUrl: string) => unknown
   remoteSessionCookies: RemoteSessionCookieStore
   electronNet: Pick<Net, 'request'>
+}
+
+/** Legacy settings retain raw URLs; match the dialer's normalization per candidate. */
+function configuredGatewayBase(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') {
+    return undefined
+  }
+
+  try {
+    return normalizeRemoteBaseUrl(raw)
+  } catch {
+    // A malformed unrelated profile must not discard the other valid gateways.
+    return undefined
+  }
 }
 
 /** Keep login and 401 recovery in one importable scope; Electron I/O stays at the boundary. */
@@ -69,9 +83,15 @@ export function createOauthSessionHandlers(deps: OauthSessionHandlerDeps) {
   // The gateway (origin + proxy prefix) a URL belongs to, for the login-flight key.
   function resolveGatewayBaseForUrl(url) {
     try {
+      const config = readDesktopConnectionConfig()
+
       return resolveGatewayBase(url, {
         registry: readDesktopConnectionsRegistry(),
-        v1RemoteUrl: readDesktopConnectionConfig()?.remote?.url
+        v1RemoteUrl: configuredGatewayBase(config?.remote?.url),
+        // Match the actual routing ladder; local/SSH saved URLs are not gateways.
+        profileRemoteUrls: Object.keys(config?.profiles ?? {}).map(profile =>
+          configuredGatewayBase(profileRemoteOverride(config, profile)?.url)
+        )
       })
     } catch {
       return resolveGatewayBase(url)

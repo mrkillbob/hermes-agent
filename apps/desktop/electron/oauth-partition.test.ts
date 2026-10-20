@@ -400,6 +400,28 @@ describe('resolveGatewayBase (login-flight scope: origin + proxy prefix)', () =>
     )
   })
 
+  it('includes normalized legacy profile URLs without matching sibling paths, hosts, schemes or ports', () => {
+    const opts = {
+      registry: reg,
+      v1RemoteUrl: 'https://host.example.test',
+      profileRemoteUrls: [
+        'HTTPS://Host.Example.test:443/legacy/',
+        'https://host.example.test/legacy/deeper',
+        'file:///x'
+      ]
+    }
+
+    expect(resolveGatewayBase('https://host.example.test/legacy/deeper/api', opts)).toBe(
+      'https://host.example.test/legacy/deeper'
+    )
+    expect(resolveGatewayBase('https://host.example.test/legacy/api', opts)).toBe('https://host.example.test/legacy')
+    expect(resolveGatewayBase('https://host.example.test/legacy-other/api', opts)).toBe('https://host.example.test')
+
+    for (const origin of ['https://other.example.test', 'http://host.example.test', 'https://host.example.test:8443']) {
+      expect(resolveGatewayBase(`${origin}/legacy/api`, opts)).toBe(origin)
+    }
+  })
+
   it('matches case-insensitively and respects ports; query and fragment are dropped', () => {
     const ported = registry('p', [remote('p', 'https://Host.Example.test:8443/a')])
 
