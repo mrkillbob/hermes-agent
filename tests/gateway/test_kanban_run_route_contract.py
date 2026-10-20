@@ -11,3 +11,11 @@ def test_kanban_run_accepts_the_local_route():
     contract = CANONICAL_METHODS["kanban.run"]
     assert canonical_param_problems(contract, {**_CLAIM, "route": route}) == []
     assert canonical_param_problems(contract, {**_CLAIM, "route": {"bogus": "x"}}) == ["route.bogus"]
+
+
+def test_kanban_run_accepts_closed_execution_budget():
+    contract = CANONICAL_METHODS["kanban.run"]
+    budget = {"wall_seconds": 2, "output_bytes": 1024, "requests": 1}
+    assert canonical_param_problems(contract, {**_CLAIM, "execution_budget": budget}) == []
+    assert canonical_param_problems(contract, {**_CLAIM, "execution_budget": None}) == []
+    assert canonical_param_problems(contract, {**_CLAIM, "execution_budget": budget | {"extra": 1}}) == ["execution_budget.extra"]

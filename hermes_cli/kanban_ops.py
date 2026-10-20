@@ -130,6 +130,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
 
     try:
         task_ids = normalize_task_ids(getattr(args, "task_ids", None))
+        from hermes_cli.kanban_execution_budget import dispatch_budget
+        budget = dispatch_budget(args, task_ids)
     except ValueError as exc:
         return _err(f"kanban dispatch: {exc}", 2)
     # Honour the same kanban.* limits and default_assignee as the gateway dispatch path.
@@ -152,6 +154,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             conn,
             dry_run=args.dry_run,
             task_ids=task_ids,
+            **({"execution_budget": budget} if budget is not None else {}),
             failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
             **limits,
         )

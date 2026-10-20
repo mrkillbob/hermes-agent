@@ -2210,6 +2210,7 @@ def dispatch_once(
     local_model_cap: Optional[int] = None,
     reconcile_orphans: bool = True,
     task_ids: Optional[list[str] | tuple[str, ...]] = None,
+    execution_budget: Optional[dict] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under host admission and board writer locks.
 
@@ -2225,6 +2226,18 @@ def dispatch_once(
     from hermes_cli.kanban_external_config import prepare_dispatch_lanes
 
     selected_task_ids = normalize_task_ids(task_ids)
+    if execution_budget is not None:
+        from functools import partial
+        from hermes_cli.kanban_execution_budget import validate_budget
+        execution_budget = validate_budget(execution_budget)
+        if selected_task_ids is None or len(selected_task_ids) != 1 or max_spawn != 1 or spawn_fn is not None:
+            raise ValueError('execution_budget requires one exact task, max_spawn=1 and the managed owner')
+        # A bounded native claim must never escape into an external executor lacking these controls.
+        from hermes_cli.kanban_external_config import configured_lanes
+        lanes = configured_lanes(conn)
+        if lanes is not None:
+            raise ValueError('execution_budget cannot be used with external lanes')
+        spawn_fn = partial(_default_spawn, execution_budget=execution_budget)
     runtime_lanes = None
 
     def _locked_tick() -> DispatchResult:
@@ -2900,45 +2913,10 @@ def _open_worker_log(task: Task, board: Optional[str]):
     return open(log_path, "ab")
 
 
-def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
-    """Wrap a systemd-hosted dispatcher's worker in the shared restart-safe scope.
-
-    Kanban workers are long-lived agentic runs that outlive the dispatcher
-    tick, so they never take cron's degraded mode under the managed gateway:
-    ``require_restart_safe_scope=True`` makes the helper raise
-    ``RestartSafeScopeUnavailable`` there (an infrastructure spawn failure the
-    dispatcher does not charge to the card). Under any other systemd unit
-    (``Type=oneshot`` dispatch timers, #113612) ``outlives_parent=True`` gets the
-    worker its own scope so the unit's cgroup teardown cannot kill it.
-    """
-    from tools.process_registry import restart_safe_gateway_child_argv
-
-    if task.current_run_id is None:
-        # Outside managed systemd this is harmless, but a managed dispatch must
-        # never mint an untraceable scope.  Check topology through the shared
-        # helper first, using a placeholder suffix that cannot be launched.
-        dispatch = restart_safe_gateway_child_argv(
-            command,
-            unit_suffix=f"kanban-{task.id}-run-missing",
-            require_restart_safe_scope=True,
-            outlives_parent=True,
-        )
-        if dispatch.mode != "in_process":
-            raise RuntimeError(
-                "cannot create restart-safe systemd scope for Kanban worker: "
-                "the claimed task has no current run id"
-            )
-        return command
-
-    return restart_safe_gateway_child_argv(
-        command,
-        unit_suffix=f"kanban-{task.id}-run-{task.current_run_id}",
-        require_restart_safe_scope=True,
-        outlives_parent=True,
-    ).argv
+from hermes_cli.kanban_worker_process import restart_safe_worker_argv as _restart_safe_worker_argv
 
 
-def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:
+def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, execution_budget=None) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
     Returns the child's PID so the dispatcher can detect crashes before the
@@ -3078,6 +3056,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.
+    if execution_budget is not None:
+        cmd += ["--budget", json.dumps(execution_budget)]
     cmd = _restart_safe_worker_argv(task, cmd)
     from tools.process_registry import systemd_user_bus_env
     env = systemd_user_bus_env(env)

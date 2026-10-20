@@ -142,7 +142,7 @@ def _managed(tmp_path, monkeypatch, text):
 
     async def _acquire(*_args, **_kwargs):
         spawned.append(True)
-        return object()
+        return object(), None
 
     scope = {'profile_id': str(tmp_path), 'session_id': 'sid', 'execution_id': 'x', 'generation': 1,
              'pid': 1, 'birth': 0, 'secret': 's', 'epoch': 1}

@@ -2637,6 +2637,8 @@ def _dispatch_auxiliary_request(
     model: str | None,
     api_mode: str | None,
 ) -> Any:
+    from agent.managed_request_budget import prepare_provider_client
+    prepare_provider_client(client)
     binding = _auxiliary_egress_binding(
         client, provider=provider, model=model or request.get("model"), api_mode=api_mode
     )
@@ -2781,6 +2783,8 @@ async def _relay_async_completion(
     raw_callback = callback
 
     async def _authorized_callback(request: dict[str, Any]) -> Any:
+        from agent.managed_request_budget import prepare_provider_client
+        prepare_provider_client(client)
         binding = _auxiliary_egress_binding(
             client, provider=provider, model=request.get("model"), api_mode=api_mode,
         )
@@ -7480,22 +7484,18 @@ async def _acreate_with_stream(client: Any, kwargs: dict[str, Any], task: Option
     return await _aggregate_chat_stream_async(chunks, model=model, total_ceiling=total_ceiling)
 
 
-def _async_client_streams_internally(client: Any) -> bool:
-    """Async twin of :func:`_client_streams_internally` (the async adapters are separate classes)."""
-    return isinstance(client, (AsyncCodexAuxiliaryClient, AsyncAnthropicAuxiliaryClient, AsyncBedrockAuxiliaryClient))
-
-
 async def _acreate_with_progress(
     client: Any, kwargs: dict[str, Any], task: Optional[str] = None, *, force_stream: bool = False
 ) -> Any:
     """Async :func:`_create_with_progress`: stream + re-aggregate (ticking the hook per substantive
     chunk) when a progress hook is active or the provider is stream-only; plain create otherwise."""
+    from agent.auxiliary_async_rebuild import async_client_streams_internally
     kwargs = bypass_chat_sdk_request_transform(kwargs, client)
     _notify_aux_dispatch()
     # Same contract as the sync twin (#114938): dispatch alone is not progress.
-    if (not _aux_progress_active() and not force_stream) or _async_client_streams_internally(client):
+    if (not _aux_progress_active() and not force_stream) or async_client_streams_internally(client):
         response = await client.chat.completions.create(**kwargs)
-        if not _async_client_streams_internally(client):
+        if not async_client_streams_internally(client):
             _notify_aux_provider_response()
         return response
     stream_kwargs, model, total_ceiling = _stream_request_plan(kwargs, client)

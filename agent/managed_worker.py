@@ -51,6 +51,8 @@ def _billing_block(value):
 
 def result_frame(result):
     """Worker side: the receipt fields of ``run_conversation``'s result, scalars only, text bounded."""
+    from agent.managed_request_budget import stamp_request_budget_result
+    result = stamp_request_budget_result(result)
     frame = {k: (v[:4096] if isinstance(v, str) and k != 'final_response' else v) for k, v in result.items()
              if k in RESULT_FIELDS and k != 'billing_block' and (v is None or type(v) in (bool, int, float, str))}
     block = result.get('billing_block')
@@ -131,6 +133,8 @@ def bind_worker_policy(frame):
     server definitions included). Ordinary sessions keep plugins, MCP and hooks; bypass sessions
     also bind the safe / ignore-user-config policy.
     """
+    from agent.managed_request_budget import bind_worker_request_budget
+    bind_worker_request_budget(frame)
     config = json.loads(frame['policy']['config_json'])
     if not frame['ignore_user_config']:
         from agent.safe_worker_policy import _bind_worker_config
@@ -183,6 +187,8 @@ class WorkerControls:
         self.reader.start()
 
     def stop(self):
+        from agent.managed_request_budget import stop_provider_requests
+        stop_provider_requests()
         self.stopped.set()
         if self.agent is not None:
             from agent.interrupt_compat import request_hard_interrupt
@@ -354,6 +360,8 @@ def execute(frame, channel):
     from gateway.session_worker_construct import checkpoint_agent_kwargs, construct_kwargs, routing_agent_kwargs
     construct = {'ephemeral_system_prompt': policy.skills_prompt, **construct_kwargs(frame)}
     controls = WorkerControls(channel, frame['route'])
+    from agent.managed_request_budget import register_request_stop
+    register_request_stop(lambda: controls.stop())
     register_gateway_notify(frame['route'], controls.approval)
     agent = None
     try:

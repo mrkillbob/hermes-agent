@@ -189,6 +189,7 @@ def test_spawn_resolves_claimed_task_policy(
 
     monkeypatch.setattr(kanban_worker_client, "run", resolve_at_owner)
     with monkeypatch.context() as child:
+        child.setattr(sys, 'argv', captured['cmd'][2:])
         for key, value in captured["env"].items():
             child.setenv(key, value)
         assert kanban_worker_client.main() == 0

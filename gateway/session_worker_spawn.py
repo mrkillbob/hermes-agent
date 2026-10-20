@@ -2,8 +2,11 @@
 import asyncio
 import threading
 
+from hermes_state_runtime import RuntimeStoreError
 
-async def acquire_process(spawn, *args, **kwargs):
+
+async def acquire_process(spawn, *args, budget=None, **kwargs):
+    """Return (handle, loss); the caller owns a returned handle even on deadline/cancel."""
     from gateway.session_managed_worker import ManagedWorker
     lock = threading.Lock()
     state = {'cancelled': False, 'process': None}
@@ -20,17 +23,21 @@ async def acquire_process(spawn, *args, **kwargs):
 
     pending = asyncio.create_task(asyncio.to_thread(create))
     try:
-        process = await asyncio.shield(pending)
+        # Keep the handle owned here until the budget accepts the handoff. An outer
+        # deadline check could discard a child returned exactly as the deadline expires.
+        process = await (asyncio.shield(pending) if budget is None else budget.wait(asyncio.shield(pending)))
         with lock:
             state['process'] = None
-        return process
-    except asyncio.CancelledError:
+        return process, None
+    except (asyncio.CancelledError, RuntimeStoreError) as exc:
         with lock:
             state['cancelled'] = True
             process = state['process']
             state['process'] = None
         if process is not None:
-            await asyncio.to_thread(ManagedWorker(process).close)
+            # Let the existing owner finally retain teardown/retry ownership. Do not
+            # hide a close error here and discard the handle before the owner sees it.
+            return process, exc
         # If creation still runs, its thread owns cleanup; consume an eventual spawn exception.
         pending.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
         raise

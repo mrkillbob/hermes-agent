@@ -376,6 +376,9 @@ _SPECS = [
     ], help="Archive one or more tasks"),
     _cmd("tail", [_TASK_ID, _arg("--interval", type=float, default=1.0)], help="Follow a task's event stream"),
     _cmd("dispatch", [
+        _arg("--wall-seconds", type=int, help="Bound one exact managed worker to at most 120 seconds; requires all budget flags"),
+        _arg("--output-bytes", type=int, help="Combined worker output ceiling, at most 65536 bytes"),
+        _arg("--requests", type=int, help="Provider request ceiling, at most 4; requires --task-id and --max 1"),
         _arg("--task-id", action="append", dest="task_ids", metavar="ID",
              help="Dispatch only this exact ready/review card; repeat for a finite set. "
                   "Skips board-wide reclaim, watchdog and promotion."),

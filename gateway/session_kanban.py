@@ -20,14 +20,22 @@ def build_kanban_policy(connection, params, config):
         raise RuntimeStoreError('permission_denied')
     if actor.profile_id != authority.profile_id:
         raise RuntimeStoreError('profile_mismatch')
+    # Canonical clients may serialize the optional budget as null: freeze it as absent.
+    params = {k: v for k, v in params.items() if k != 'execution_budget' or v is not None}
     claim_keys = {'board', 'task_id', 'run_id', 'claim_lock'}
     route = params.get('route', {})
-    if (set(params) - {'db', 'route'} != claim_keys
+    if (set(params) - {'db', 'route', 'execution_budget'} != claim_keys
             or not isinstance(route, dict) or set(route) - {'provider', 'model', 'reasoning', 'base_url'}
             or any(v is not None and (not isinstance(v, str) or not v) for v in route.values())
             or any(not isinstance(params[k], str) or not params[k] for k in ('board', 'task_id', 'claim_lock'))
             or type(params['run_id']) is not int):
         raise RuntimeStoreError('invalid_params')
+    if 'execution_budget' in params:
+        from hermes_cli.kanban_execution_budget import validate_budget
+        try:
+            validate_budget(params['execution_budget'])
+        except ValueError as exc:
+            raise RuntimeStoreError('invalid_params') from exc
     try:
         board = kb._require_slug(params['board'])
         path = Path(params['db']).resolve(strict=True) if 'db' in params else kb.kanban_db_path(board=board).resolve()
@@ -60,6 +68,8 @@ def build_kanban_policy(connection, params, config):
         value = route.get(name) or value
         if value:
             params_policy[name] = value
+    if 'execution_budget' in params:
+        params_policy['run_budget'] = params['execution_budget']['wall_seconds']
     private = {}
     policy = build_policy(params_policy, config, private_secrets=private)
     if policy.model is None:
@@ -83,8 +93,16 @@ def build_kanban_policy(connection, params, config):
 
 def retry_matches_frozen_claim(params, context):
     """A resend of an admitted attempt may carry the same optional db/route and nothing else new."""
+    params = {k: v for k, v in params.items() if k != 'execution_budget' or v is not None}
+    if 'execution_budget' in params:
+        from hermes_cli.kanban_execution_budget import validate_budget
+        try:
+            validate_budget(params['execution_budget'])
+        except ValueError:
+            return False
     claim = {'board', 'task_id', 'run_id', 'claim_lock'}
-    return claim <= set(params) <= claim | {'db', 'route'} and all(params[k] == context.get(k) for k in params)
+    return claim <= set(params) <= claim | {'db', 'route', 'execution_budget'} and all(params[k] == context.get(k) for k in params) and (
+        ('execution_budget' in params) == ('execution_budget' in context))
 
 
 async def run_task(connection, params):
