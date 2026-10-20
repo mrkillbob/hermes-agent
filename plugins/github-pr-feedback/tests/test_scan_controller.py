@@ -15,11 +15,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from github_pr_feedback.git_commands import GitCommandResult
 from github_pr_feedback.controller import (
     LOCAL_CI_FEEDBACK_ID,
     MAX_ADMISSIONS_PER_SCAN,
     MAX_PARALLEL_PR_READS,
-    GitCommandResult,
     LocalGitRepository,
     PreparedWorktree,
     ScanController,

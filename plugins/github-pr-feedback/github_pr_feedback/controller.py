@@ -61,6 +61,7 @@ from .policy import (
 )
 
 from .worktree_capacity import WorktreeCapacityAdmission, control_capacity_admission
+from .git_commands import GitCommandRunner, SubprocessGitRunner
 
 MAX_ADMISSIONS_PER_SCAN = 128
 # The subprocess boundary is globally serialized across profiles, but keeping
@@ -156,37 +157,10 @@ class KanbanClient(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class GitCommandResult:
-    returncode: int
-    stdout: str
-    stderr: str = ""
-
-
-class GitCommandRunner(Protocol):
-    def run(self, argv: list[str]) -> GitCommandResult: ...
-
-
-@dataclass(frozen=True, slots=True)
 class PreparedWorktree:
     path: Path
     branch: str
     expected_sha: str
-
-
-class SubprocessGitRunner:
-    def run(self, argv: list[str]) -> GitCommandResult:
-        try:
-            completed = subprocess.run(
-                argv,
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise RuntimeError("local Git verification failed") from error
-        return GitCommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,12 +451,16 @@ class LocalGitRepository:
         self._worktree_root = Path(
             worktree_root or Path.cwd() / ".github-pr-feedback-worktrees"
         )
+        from .caller_repository import current_repository
+        self._binding = current_repository()
         self._runner = runner or SubprocessGitRunner()
         self._capacity = capacity
 
     def prepare_receipt_worktree(
         self, path: Path, receipt: FeedbackReceipt
     ) -> PreparedWorktree:
+        if self._binding is not None:
+            self._binding.verify_workspace(path, receipt.repository)
         if not _SHA.fullmatch(receipt.head_sha):
             raise ValueError("head SHA is not a full Git object ID")
         workspace = (
@@ -502,6 +480,8 @@ class LocalGitRepository:
                     "deterministic receipt worktree path must not be a symlink"
                 )
             if workspace.exists():
+                if self._binding is not None:
+                    self._binding.verify_workspace(workspace, receipt.repository)
                 self._verify_worktree(workspace, receipt.head_sha)
             else:
                 self._run(
@@ -679,6 +659,8 @@ class LocalGitRepository:
         return branch
 
     def _ensure_exact_head(self, path: Path, receipt: FeedbackReceipt) -> None:
+        if self._binding is not None:
+            self._binding.verify_workspace(path, receipt.repository)
         object_argv = [
             "git",
             "-C",
@@ -735,12 +717,16 @@ class LocalGitRepository:
     ) -> Path:
         """Materialize one isolated, immutable workspace for a maintenance lane."""
 
+        if self._binding is not None:
+            self._binding.verify_workspace(repository_path, repository)
         if not _SHA.fullmatch(head_sha):
             raise ValueError("head SHA is not a full Git object ID")
         if not repository.strip() or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", lane):
             raise ValueError("maintenance workspace identity is invalid")
         digest = sha256(f"{repository}\0{head_sha}\0{lane}".encode()).hexdigest()
         workspace = self._worktree_root / f"maintenance-{digest}"
+        if self._binding is not None and workspace.exists():
+            self._binding.verify_workspace(workspace, repository)
         admission = self._capacity.reserve(workspace) if self._capacity else nullcontext()
         with admission:
             self._run(
@@ -914,6 +900,8 @@ class PooledLocalGitRepository:
         self._worktree_root = Path(
             worktree_root or Path.cwd() / ".github-pr-feedback-worktree-pool"
         )
+        from .caller_repository import current_repository
+        self._binding = current_repository()
         self._runner = runner or SubprocessGitRunner()
         self._capacity = capacity
         self._slot_count = slot_count
@@ -925,6 +913,8 @@ class PooledLocalGitRepository:
     def prepare_receipt_worktree(
         self, path: Path, receipt: FeedbackReceipt
     ) -> PreparedWorktree:
+        if self._binding is not None:
+            self._binding.verify_workspace(path, receipt.repository)
         if not _SHA.fullmatch(receipt.head_sha):
             raise ValueError("head SHA is not a full Git object ID")
 
@@ -997,6 +987,10 @@ class PooledLocalGitRepository:
         Returns the number of slots released.
         """
 
+        if self._binding is not None:
+            # Legacy slots encode source, not repository. Never infer repo
+            # ownership from a shared source path to release another lane.
+            return 0
         task_status = getattr(kanban, "task_status", None)
         if not callable(task_status):
             return 0
@@ -1149,6 +1143,8 @@ class PooledLocalGitRepository:
         return False
 
     def _ensure_exact_head(self, path: Path, receipt: FeedbackReceipt) -> None:
+        if self._binding is not None:
+            self._binding.verify_workspace(path, receipt.repository)
         object_argv = [
             "git", "-C", str(path), "cat-file", "-e", f"{receipt.head_sha}^{{commit}}",
         ]
@@ -1263,9 +1259,11 @@ class ScanController:
         if not callable(archive_task) or not callable(pending_prs):
             return
         configured_boards = [self._policy.board or ""]
+        from .caller_repository import current_repository
         configured_boards.extend(
             board.strip()
-            for board in os.environ.get("HERMES_KANBAN_RECONCILE_BOARDS", "").split(",")
+            for board in (os.environ.get("HERMES_KANBAN_RECONCILE_BOARDS", "")
+                          if current_repository() is None else "").split(",")
             if board.strip()
         )
         boards = tuple(dict.fromkeys(board for board in configured_boards if board))
@@ -1274,7 +1272,8 @@ class ScanController:
         pending_pr_numbers = pending_prs(repository)
         if not pending_pr_numbers:
             return
-        status_snapshot = getattr(self._kanban, "task_status_snapshot", None)
+        status_snapshot = (getattr(self._kanban, "task_status_snapshot", None)
+                           if current_repository() is None else None)
         if callable(status_snapshot) and self._kanban_task_statuses is None:
             self._kanban_task_statuses = {}
             for board in boards:
