@@ -7,7 +7,7 @@
  * After a session lapse (overnight sleep, a gateway restart, an IdP outage)
  * every background poll opened one, and the user woke to a stack of them.
  *
- * Rules, per (partition, origin), the scope one cookie jar serves:
+ * Rules, per (partition, origin, proxy prefix), the scope one gateway's cookies serve:
  *   - At most one login flow is in flight. A second start would also replace
  *     the gateway's single PKCE state cookie and fail the first callback with
  *     `state_mismatch`.
@@ -57,17 +57,24 @@ export class LoginJoinTimeoutError extends Error {
   }
 }
 
-/** Cookies live per jar and per origin, and so does a login flow. */
-export function loginFlightKey(partition: string, baseUrl: string): string {
-  let origin = baseUrl
+/**
+ * Cookies live per jar, per origin and per proxy prefix, and so does a login
+ * flow. `gatewayBase` is the gateway's base URL (origin plus its proxy prefix,
+ * see `resolveGatewayBase`); a bare request URL under it must be resolved
+ * first, or one gateway splits into several flights.
+ */
+export function loginFlightKey(partition: string, gatewayBase: string): string {
+  let scope = gatewayBase
 
   try {
-    origin = new URL(baseUrl).origin
+    const url = new URL(gatewayBase)
+
+    scope = `${url.origin}${url.pathname.replace(/\/+$/, '')}`
   } catch {
     // an unparsable URL still keys consistently
   }
 
-  return `${partition} ${origin}`
+  return `${partition} ${scope}`
 }
 
 interface Flight {
