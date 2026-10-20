@@ -181,7 +181,7 @@ def _retain_grant_timings(tmp_path):
     payload = json.dumps(report, separators=(',', ':')).encode('utf-8')
     if len(payload) > 256 * 1024:
         payload = json.dumps({'schema': 1, 'unavailable': 'summary exceeds byte bound'}).encode('utf-8')
-    root = Path(destination)
+    root = Path(destination) / 'grant-lock-diagnostics'
     root.mkdir(parents=True, exist_ok=True)
     (root / f'grant-lock-timing-{os.getpid()}-{time.monotonic_ns()}.json').write_bytes(payload)
 
