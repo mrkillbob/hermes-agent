@@ -361,7 +361,7 @@ def execute(frame, channel):
     construct = {'ephemeral_system_prompt': policy.skills_prompt, **construct_kwargs(frame)}
     controls = WorkerControls(channel, frame['route'])
     from agent.managed_request_budget import register_request_stop
-    register_request_stop(controls.stop)
+    register_request_stop(lambda: controls.stop())
     register_gateway_notify(frame['route'], controls.approval)
     agent = None
     try:
