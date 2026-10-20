@@ -26,7 +26,8 @@ def _make_task(kb, *, assignee: str):
     )
 
 
-def test_default_spawn_pins_assignee_profile_cli_toolsets(monkeypatch, tmp_path):
+@pytest.mark.parametrize('budget', [None, {'wall_seconds': 2, 'output_bytes': 1024, 'requests': 1}])
+def test_default_spawn_pins_assignee_profile_cli_toolsets(monkeypatch, tmp_path, budget):
     """The transport client reaches the assigned profile with its exact run claim."""
     root = tmp_path / ".hermes"
     profile = root / "profiles" / "elias"
@@ -74,12 +75,17 @@ agent:
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    pid = kbd._default_spawn(_make_task(kb, assignee="elias"), str(workspace))
+    pid = kbd._default_spawn(_make_task(kb, assignee="elias"), str(workspace), execution_budget=budget)
 
     assert pid == 4242
     assert captured["env"]["HERMES_HOME"] == str(profile)
     assert captured["env"]["HERMES_KANBAN_TASK"] == "t_spawn_tools"
-    assert captured["cmd"][-2:] == ["-m", "hermes_cli.kanban_worker_client"]
+    if budget is None:
+        assert captured["cmd"][-2:] == ["-m", "hermes_cli.kanban_worker_client"]
+    else:
+        import json
+        assert captured["cmd"][-2] == "--budget"
+        assert json.loads(captured["cmd"][-1]) == budget
     assert captured["env"]["HERMES_KANBAN_RUN_ID"] == "7"
     assert captured["env"]["HERMES_KANBAN_CLAIM_LOCK"] == "lock"
 

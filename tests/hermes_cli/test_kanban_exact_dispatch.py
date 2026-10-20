@@ -89,6 +89,23 @@ def test_exact_unknown_id_does_not_fall_back_to_all_cards(conn):
     assert _snapshot(conn, [tid]) == before
 
 
+def test_bounded_exact_tick_passes_budget_to_managed_spawn_only(conn, monkeypatch):
+    budget = {'wall_seconds': 2, 'output_bytes': 1024, 'requests': 1}
+    selected = kb.create_task(conn, title='selected', assignee='default')
+    other = kb.create_task(conn, title='untouched', assignee='default')
+    before = _snapshot(conn, [other])
+    captured = []
+
+    def spawn(task, workspace, *, board=None, execution_budget=None):
+        captured.append((task.id, execution_budget))
+        return os.getpid()
+    monkeypatch.setattr(kbd, '_default_spawn', spawn)
+    result = kbd.dispatch_once(conn, task_ids=[selected], max_spawn=1, execution_budget=budget)
+    assert [item[0] for item in result.spawned] == [selected]
+    assert captured == [(selected, budget)]
+    assert _snapshot(conn, [other]) == before
+
+
 @pytest.mark.parametrize("status", ["todo", "blocked", "running", "done", "triage"])
 def test_exact_selection_does_not_recover_or_promote_selected_other_lanes(conn, status):
     tid = kb.create_task(conn, title="staged or held", assignee="default")

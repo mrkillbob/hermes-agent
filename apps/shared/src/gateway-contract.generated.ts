@@ -4826,12 +4826,18 @@ export interface KanbanRunParams {
   claim_lock: string
   db?: string | null
   route?: KanbanRoute | null
+  execution_budget?: KanbanExecutionBudget | null
 }
 export interface KanbanRoute {
   provider?: string | null
   model?: string | null
   reasoning?: string | null
   base_url?: string | null
+}
+export interface KanbanExecutionBudget {
+  wall_seconds: number
+  output_bytes: number
+  requests: number
 }
 export interface KanbanRunResult {
   session_id: string
