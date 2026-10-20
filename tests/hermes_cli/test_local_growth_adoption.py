@@ -144,20 +144,79 @@ def test_concurrent_process_grants_preserve_every_model(tmp_path):
 
     path = tmp_path / 'windows.json'
     program = '''
-import sys,time
+import json,os,sys,time
+from collections import deque
 from pathlib import Path
+from hermes_cli import auth
 from hermes_cli.local_runtime import growth
 path=Path(sys.argv[1]);prefix=sys.argv[2]
 growth.window_overrides_path=lambda:path
+events=deque(maxlen=512)
+index=None
+def event(phase,error=None):
+    events.append(dict(phase=phase,monotonic_ns=time.monotonic_ns(),pid=os.getpid(),
+                       prefix=prefix,index=index,error=type(error).__name__ if error else None,
+                       errno=getattr(error,'errno',None),winerror=getattr(error,'winerror',None)))
+real_lock=auth._kernel_lock
+def traced_lock(lock_file,acquire):
+    event('lock-attempt' if acquire else 'unlock-attempt')
+    try:
+        result=real_lock(lock_file,acquire)
+    except BaseException as error:
+        event('lock-error' if acquire else 'unlock-error',error)
+        raise
+    event('lock-acquired' if acquire else 'lock-released')
+    return result
+auth._kernel_lock=traced_lock
 real=growth.load_window_overrides
 def slow(*args,**kwargs):
+    event('critical-read-start')
     result=real(*args,**kwargs)
     time.sleep(.003)
+    event('critical-read-end')
     return result
 growth.load_window_overrides=slow
-for index in range(20):
-    growth.save_window_override(prefix+str(index),98304)
+real_write=growth._write_overrides
+def traced_write(overrides):
+    event('critical-write-start')
+    try:
+        result=real_write(overrides)
+    except BaseException as error:
+        event('critical-write-error',error)
+        raise
+    event('critical-write-end')
+    return result
+growth._write_overrides=traced_write
+try:
+    for index in range(20):
+        event('grant-start')
+        try:
+            growth.save_window_override(prefix+str(index),98304)
+        except BaseException as error:
+            event('grant-error',error)
+            raise
+        event('grant-end')
+finally:
+    # No trace I/O while holding the grant lock. Hard-killed children may leave no trace.
+    trace=path.with_name('grant-trace-'+prefix+'.jsonl')
+    try:
+        with trace.open('w',encoding='utf-8') as stream:
+            for row in events:
+                stream.write(json.dumps(row)+'\\n')
+    except OSError as error:
+        print('grant trace unavailable:',error,file=sys.stderr)
 '''
+    def diagnostics():
+        traces = []
+        for prefix in ('a', 'b'):
+            trace = tmp_path / f'grant-trace-{prefix}.jsonl'
+            try:
+                body = trace.read_text(encoding='utf-8')
+            except OSError as error:
+                body = f'trace unavailable: {error}'
+            traces.append(f'child {prefix} (last 512 events):\n{body}')
+        return '\n'.join(traces)
+
     children = [subprocess.Popen([sys.executable, '-c', program, str(path), prefix],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) for prefix in ('a', 'b')]
     try:
@@ -189,8 +248,10 @@ for index in range(20):
             if child.poll() is None:
                 child.kill()
                 child.wait(timeout=5)
+        if sys.exc_info()[0] is not None:
+            print(diagnostics())
     assert json.loads(path.read_text(encoding='utf-8')) == {
-        prefix + str(index): 98304 for prefix in ('a', 'b') for index in range(20)}
+        prefix + str(index): 98304 for prefix in ('a', 'b') for index in range(20)}, diagnostics()
 
 
 def test_failed_atomic_publication_preserves_existing_grants(tmp_path, monkeypatch):
