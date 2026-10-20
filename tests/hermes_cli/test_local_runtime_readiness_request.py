@@ -12,6 +12,8 @@ from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
 def readiness_server(tmp_path):
     posted, release = threading.Event(), threading.Event()
     state = {'block': False, 'posts': 0, 'bad_metrics': False, 'queries': [], 'generation': ('fixture-owner', 1)}
+    models_seen = threading.Event()
+    state.update(status='loaded', models_seen=models_seen, loading_seen=threading.Event(), load_posts=0)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -31,7 +33,11 @@ def readiness_server(tmp_path):
         def do_GET(self):
             state['queries'].append(self.path)
             if self.path == '/models':
-                self.reply({'data': [{'id': 'fixture', 'status': {'value': 'loaded'}}]})
+                status = state['status']
+                models_seen.set()
+                if status == 'loading':
+                    state['loading_seen'].set()
+                self.reply({'data': [{'id': 'fixture', 'status': {'value': status}}]})
             elif self.path.startswith('/slots?'):
                 self.reply([{'id': 0, 'is_processing': False}])
             elif self.path.startswith('/metrics?'):
@@ -43,6 +49,12 @@ def readiness_server(tmp_path):
                 self.reply(text, 'text/plain')
 
         def do_POST(self):
+            if self.path == '/models/load':
+                self.rfile.read(int(self.headers['Content-Length']))
+                state['load_posts'] += 1
+                state['status'] = 'loading'
+                self.reply({'success': True})
+                return
             state['posts'] += 1
             self.rfile.read(int(self.headers['Content-Length']))
             posted.set()
@@ -143,3 +155,55 @@ def test_real_identity_reader_refuses_missing_foreign_or_unverified_owner(readin
     monkeypatch.setattr(recovery, 'recorded_process', lambda record: None)
     assert supervisor.touch_generate('fixture', timeout_s=1) is False
     assert state['posts'] == 0
+
+
+def test_readiness_waits_for_an_already_requested_load(readiness_server):
+    supervisor, state, _, _ = readiness_server
+    state['status'] = 'unloaded'
+    result, done = [], threading.Event()
+
+    def touch():
+        try:
+            result.append(supervisor.ensure_model_ready('fixture', timeout_s=3))
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=touch, daemon=True)
+    thread.start()
+    assert state['loading_seen'].wait(2)
+    assert state['posts'] == 0
+    state['status'] = 'loaded'
+    assert done.wait(3)
+    thread.join(2)
+    assert result == [True]
+    assert state['posts'] == 1
+    assert state['load_posts'] == 1
+
+
+def test_stop_during_loading_never_sends_readiness(readiness_server):
+    supervisor, state, _, _ = readiness_server
+    state['status'] = 'loading'
+    result, done = [], threading.Event()
+
+    def touch():
+        try:
+            result.append(supervisor.touch_generate('fixture', timeout_s=3))
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=touch, daemon=True)
+    thread.start()
+    assert state['models_seen'].wait(2)
+    supervisor.stop()
+    assert done.wait(2)
+    thread.join(2)
+    assert result == [False]
+    assert state['posts'] == 0
+
+
+def test_loading_deadline_never_sends_or_reloads(readiness_server):
+    supervisor, state, _, _ = readiness_server
+    state['status'] = 'loading'
+    assert supervisor.touch_generate('fixture', timeout_s=0.2) is False
+    assert state['posts'] == 0
+    assert state['load_posts'] == 0

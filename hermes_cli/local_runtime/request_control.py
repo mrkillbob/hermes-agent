@@ -246,6 +246,7 @@ class ScopedRequest:
     def __init__(
         self, probe: ManagedChildProbe, body: dict, *, request_timeout_s: float = 600.0,
         lease_identity: tuple | None = None, owner_check: Callable[[], bool] | None = None,
+        absolute_deadline: float | None = None,
     ):
         if body.get("model") != probe.model_id:
             raise ValueError("request model must match the telemetry model exactly")
@@ -256,6 +257,7 @@ class ScopedRequest:
             raise ValueError('owner lease requires an immutable identity and check')
         self._owner_check = owner_check
         self._request_timeout_s = _seconds(request_timeout_s, zero=False)
+        self._absolute_deadline = _seconds(absolute_deadline) if absolute_deadline is not None else None
         self._lock, self._cancel_lock = threading.RLock(), threading.Lock()
         self._finished, self._cancel_intent = threading.Event(), threading.Event()
         self._conn = self._response = self._error = self._result = self._worker = None
@@ -274,6 +276,10 @@ class ScopedRequest:
         if self._owner_check is not None and not self._owner_check():
             raise RequestRefused('readiness owner incarnation changed')
 
+    def _check_deadline(self) -> None:
+        if time.monotonic() >= self._request_deadline:
+            raise RequestRefused('request deadline expired before dispatch')
+
     def _release_lease(self) -> None:
         with _LEASE_LOCK:
             if self._lease:
@@ -286,6 +292,10 @@ class ScopedRequest:
         with self._lock:
             if self._state != "new" or self._cancel_intent.is_set():
                 raise RequestRefused("request is single-use or already cancelled")
+            self._request_deadline = time.monotonic() + self._request_timeout_s
+            if self._absolute_deadline is not None:
+                self._request_deadline = min(self._request_deadline, self._absolute_deadline)
+            self._check_deadline()
             self._state = "starting"
             with _LEASE_LOCK:
                 if self._lease_key in _LEASES:
@@ -295,7 +305,6 @@ class ScopedRequest:
                     )
                 _LEASES.add(self._lease_key)
                 self._lease = True
-        self._request_deadline = time.monotonic() + self._request_timeout_s
         deadline = min(self._request_deadline, time.monotonic() + bind_timeout_s)
         try:
             self._check_owner()
@@ -342,6 +351,7 @@ class ScopedRequest:
         try:
             if self._cancel_intent.is_set():
                 return
+            self._check_deadline()
             conn = DeadlineConnection(
                 self._probe.host, self._probe.port, self._request_deadline
             )
@@ -354,6 +364,7 @@ class ScopedRequest:
                 if self._cancel_intent.is_set():
                     return
                 self._check_owner()
+                self._check_deadline()
                 # Once sending begins, a failure cannot establish that no bytes reached the router.
                 send_attempted = True
                 conn.request(

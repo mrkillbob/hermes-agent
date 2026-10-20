@@ -3,11 +3,54 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from hermes_cli.local_runtime import request_control as rc
 from hermes_cli.local_runtime.request_io import DeadlineConnection
+
+
+def test_loading_time_and_delayed_worker_cannot_extend_original_deadline(monkeypatch):
+    clock = [90.0]
+    posts = []
+    reads = []
+    monkeypatch.setattr(rc, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+
+    class DeferredWorker:
+        def start(self):
+            pass
+
+    class Connection:
+        def __init__(self, *args):
+            pass
+
+        def connect(self):
+            pass
+
+        def request(self, *args, **kwargs):
+            posts.append(True)
+
+        def finish(self):
+            pass
+
+    def read(**kwargs):
+        reads.append(True)
+        return rc.ChildState(True, () if len(reads) == 1 else ((0, 1),), 0, 0)
+
+    monkeypatch.setattr(rc, 'spawn_context_thread', lambda *args, **kwargs: DeferredWorker())
+    monkeypatch.setattr(rc, 'DeadlineConnection', Connection)
+    monkeypatch.setattr(rc, 'read_response', lambda *args, **kwargs: (200, b'complete'))
+    probe = SimpleNamespace(model_id='fixture', host='fixture', port=1, api_key='fixture', read=read)
+    request = rc.ScopedRequest(probe, {'model': 'fixture'}, request_timeout_s=10, absolute_deadline=100)
+    clock[0] = 99.9  # most of the original deadline was spent waiting for load
+    request.start()
+    clock[0] = 100.1  # the request worker was scheduled only after that deadline
+    request._run()
+    assert posts == []
+    assert isinstance(request.error, rc.RequestRefused)
+    assert request._finished.is_set()
+    assert not request._lease
 
 
 def test_deadline_abort_survives_late_socket_creation(monkeypatch):

@@ -448,6 +448,18 @@ class LlamaServerSupervisor:
         return (state['pid'], state.get('start_time') or state['create_time'], state['executable'],
                 state['owner_pid'], state.get('owner_start_time') or state['owner_create_time'])
 
+    def _wait_readiness_load(self, probe, identity: tuple, deadline: float) -> bool:
+        # /models/load starts the child asynchronously. Observe that existing load;
+        # the readiness transport must not autoload an absent or failed child.
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set() or self._readiness_identity() != identity:
+                return False
+            status = probe.model_status(deadline=deadline)
+            if status != 'loading':
+                return status in _RESIDENT
+            self._stop_event.wait(min(0.1, max(0, deadline - time.monotonic())))
+        return False
+
     def touch_generate(self, model_id: str, timeout_s: int = 300) -> bool:
         """The readiness proof. Generous budget + reasoning_content scan — small token budgets
         false-fail reasoning models, which spend their first tokens thinking."""
@@ -456,20 +468,26 @@ class LlamaServerSupervisor:
         request = None
         response = None
         try:
+            deadline = time.monotonic() + timeout_s
             identity = self._readiness_identity()
             if identity is None:
                 return False
-            request = ScopedRequest(ManagedChildProbe(self._url(''), self.api_key, model_id), {
+            probe = ManagedChildProbe(self._url(''), self.api_key, model_id)
+            request = ScopedRequest(probe, {
                 "model": model_id, "messages": [{"role": "user", "content": TOUCH_PROMPT}],
                 "max_tokens": 512, "temperature": 0}, request_timeout_s=timeout_s,
                 lease_identity=identity, owner_check=lambda: self._readiness_identity() == identity
-                and not self._stop_event.is_set())
-            deadline = time.monotonic() + timeout_s
+                and not self._stop_event.is_set(), absolute_deadline=deadline)
             with self._lifecycle_lock:
                 if self._stopping:
                     return False
                 self._readiness_requests.add(request)
-            request.start(bind_timeout_s=min(5, timeout_s))
+            if not self._wait_readiness_load(probe, identity, deadline):
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            request.start(bind_timeout_s=min(5, remaining))
             response = request.wait(max(0, deadline - time.monotonic()))
             if response is None or response[0] != 200:
                 return False
