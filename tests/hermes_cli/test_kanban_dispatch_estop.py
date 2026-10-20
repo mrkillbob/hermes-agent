@@ -66,3 +66,50 @@ def test_cli_dispatch_reports_the_pause(tmp_path, monkeypatch, capsys):
         estop.disengage()
     out = json.loads(capsys.readouterr().out)
     assert out["paused"] is True and out["spawned"] == []
+
+
+def test_paused_standalone_daemon_does_not_report_a_stuck_dispatcher(tmp_path, monkeypatch, capsys):
+    from hermes_cli import kanban_ops
+
+    tid = _ready_card(tmp_path, monkeypatch)
+    spawned = []
+
+    def drive_ticks(**kwargs):
+        with kbc.connect() as conn:
+            for _ in range(8):
+                result = kbd.dispatch_once(conn, spawn_fn=lambda *args, **kw: spawned.append(args))
+                assert result.paused
+                kwargs["on_tick"](result)
+            task = kb.get_task(conn, tid)
+            assert task.status == "ready" and task.claim_lock is None
+
+    monkeypatch.setattr(kbd, "run_daemon", drive_ticks)
+    estop.engage("scratch daemon health test")
+    try:
+        args = argparse.Namespace(force=True, interval=1, max=None, verbose=False, pidfile=None)
+        assert kanban_ops._cmd_daemon(args) == 0
+    finally:
+        estop.disengage()
+    assert spawned == []
+    assert "dispatcher stuck" not in capsys.readouterr().err
+
+
+def test_pause_resets_daemon_stuck_window_and_resume_keeps_real_alerts(tmp_path, monkeypatch, capsys):
+    from hermes_cli import kanban_ops
+
+    _ready_card(tmp_path, monkeypatch)
+
+    def drive_ticks(**kwargs):
+        on_tick = kwargs["on_tick"]
+        for _ in range(5):
+            on_tick(kbd.DispatchResult())
+        on_tick(kbd.DispatchResult(paused=True))
+        for _ in range(5):
+            on_tick(kbd.DispatchResult())
+        assert "dispatcher stuck" not in capsys.readouterr().err
+        on_tick(kbd.DispatchResult())
+
+    monkeypatch.setattr(kbd, "run_daemon", drive_ticks)
+    args = argparse.Namespace(force=True, interval=1, max=None, verbose=False, pidfile=None)
+    assert kanban_ops._cmd_daemon(args) == 0
+    assert "dispatcher stuck" in capsys.readouterr().err

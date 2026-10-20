@@ -289,6 +289,9 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             return False
 
     def _on_tick(res):
+        if res.paused:
+            health_state["bad_ticks"] = 0
+            return
         ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
         if ready_pending and not res.spawned:
             health_state["bad_ticks"] += 1
