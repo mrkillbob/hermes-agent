@@ -48,7 +48,7 @@ def test_owner_binds_reservation_to_verified_descendant_of_the_handle_only(tmp_p
         with closing(SessionDB(tmp_path / 'state.db')) as db:
             db.create_session('owned', 'cli')
             epoch = begin_runtime_epoch(db, instance_id='owner')
-            authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None)
+            authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda *, session_id=None: None)
             admitted = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='input', payload={})
             claim_session_input(db, epoch=epoch, session_id='owned')
             kwargs = dict(admission_id=admitted['admission_id'], process=launcher, principal_id='human')

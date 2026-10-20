@@ -8,11 +8,12 @@ from websockets.exceptions import ConnectionClosed
 
 def test_worker_persistence_explicitly_bypasses_proxy(tmp_path, monkeypatch):
     from agent.runtime_session_store import WorkerRPC
+    from hermes_cli.gateway_runtime import GatewayDiscovery
     monkeypatch.setenv('HTTPS_PROXY', 'http://127.0.0.1:1')
     monkeypatch.delenv('NO_PROXY', raising=False)
     endpoint = SimpleNamespace(api_origin='http://127.0.0.1:1234')
-    discoveries = iter([SimpleNamespace(state='ready', endpoint=endpoint),
-                        SimpleNamespace(state='draining', endpoint=None)])
+    discoveries = iter([GatewayDiscovery(state='ready', endpoint=endpoint),
+                        GatewayDiscovery(state='draining')])
     monkeypatch.setattr('hermes_cli.gateway_runtime.discover_gateway_endpoint',
                         lambda *a, **k: next(discoveries))
     monkeypatch.setattr('hermes_cli.gateway_runtime.control_home_for', lambda home, endpoint: home)

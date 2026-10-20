@@ -25,7 +25,9 @@ def test_started_admission_binds_only_exact_owned_process_and_principal(tmp_path
     try:
         db.create_session('owned', 'cli')
         epoch = begin_runtime_epoch(db, instance_id='owner')
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None)
+        checked_sessions = []
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path),
+                                    _require_admission_open=lambda *, session_id=None: checked_sessions.append(session_id))
         admitted = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='input', payload={})
         kwargs = dict(admission_id=admitted['admission_id'], process=process, principal_id='human', hello=hello(process))
         with pytest.raises(Exception, match='producer_not_started'):
@@ -37,6 +39,7 @@ def test_started_admission_binds_only_exact_owned_process_and_principal(tmp_path
             register_worker_execution(db, epoch=epoch, execution_id='public', session_id='owned',
                 generation=claim['generation'], kind='compute', adoption_secret='public', require_idle=True)
         scope = reserve_admission_worker(authority, **kwargs)
+        assert checked_sessions[-1] == 'owned'
         assert scope['session_id'] == 'owned' and scope['generation'] == claim['generation']
         assert scope['pid'] == process.pid and scope['profile_id'] == str(tmp_path)
         assert db._read_one('SELECT COUNT(*) FROM worker_executions')[0] == 1
@@ -62,7 +65,7 @@ async def test_reserved_process_uses_existing_authenticated_adoption_and_persist
     try:
         db.create_session('owned', 'cli')
         epoch = begin_runtime_epoch(db, instance_id='owner')
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None,
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda *, session_id=None: None,
                                     wake_after_worker=lambda session_id: None)
         admitted = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='input', payload={})
         claim_session_input(db, epoch=epoch, session_id='owned')
@@ -169,7 +172,7 @@ def test_reservation_survives_a_clock_step_on_macos(tmp_path, stale_psutil_boot_
         assert psutil.Process(process.pid).create_time() != frame['birth']  # the step is real
         db.create_session('owned', 'cli')
         epoch = begin_runtime_epoch(db, instance_id='owner')
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None)
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda *, session_id=None: None)
         admitted = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='input', payload={})
         claim_session_input(db, epoch=epoch, session_id='owned')
         kwargs = dict(admission_id=admitted['admission_id'], process=process, principal_id='human')
