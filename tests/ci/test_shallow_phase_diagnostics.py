@@ -5,11 +5,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.e2e.core.upgrade.git import test_shallow_install as shallow
+pytestmark = pytest.mark.platforms("posix")
 
 
 @pytest.fixture
-def world(monkeypatch):
+def shallow():
+    # The real Git-world harness imports POSIX account APIs. Defer it until the host marker
+    # admits the test, so Windows collection can skip without importing those APIs.
+    from tests.e2e.core.upgrade.git import test_shallow_install
+    return test_shallow_install
+
+
+@pytest.fixture
+def world(monkeypatch, shallow):
     events = []
     state = SimpleNamespace(evidence="first attempt", head="target", returncode=0)
     request = SimpleNamespace(command="fetch", body_bytes=10)
@@ -44,7 +52,7 @@ def world(monkeypatch):
     return w, state, events
 
 
-def test_first_leg_stops_before_second_update_and_freezes_evidence(tmp_path, world):
+def test_first_leg_stops_before_second_update_and_freezes_evidence(tmp_path, world, shallow):
     w, state, events = world
     with ExitStack() as stack:
         run = shallow._depth1(tmp_path, stack)
@@ -60,7 +68,7 @@ def test_first_leg_stops_before_second_update_and_freezes_evidence(tmp_path, wor
     assert events[-1] == "exit"
 
 
-def test_failed_first_leg_refuses_second_update(tmp_path, world):
+def test_failed_first_leg_refuses_second_update(tmp_path, world, shallow):
     _, state, events = world
     state.returncode = 1
     with ExitStack() as stack:
@@ -71,7 +79,7 @@ def test_failed_first_leg_refuses_second_update(tmp_path, world):
     assert events[-1] == "exit"
 
 
-def test_second_leg_runs_after_successful_first_update(tmp_path, world):
+def test_second_leg_runs_after_successful_first_update(tmp_path, world, shallow):
     w, state, events = world
 
     def publish(*args):
@@ -92,7 +100,7 @@ def test_second_leg_runs_after_successful_first_update(tmp_path, world):
         assert "first attempt" in run["diag1"] and "second attempt" not in run["diag1"]
 
 
-def test_setup_exception_closes_entered_world(tmp_path, world):
+def test_setup_exception_closes_entered_world(tmp_path, world, shallow):
     w, _, events = world
 
     def failed_update():
