@@ -12,7 +12,7 @@ def compress_in_transaction(db, conn, session_id, payload, prepared):
     # obligations on this exact connection. No separate legacy transaction runs.
     if prepared['in_place']:
         child = target
-        archive_on_connection(db, conn, target, prepared['messages'])
+        archive_on_connection(db, conn, target, prepared['messages'], tail_count=prepared['tail_count'])
         affected = {session_id, target}
     else:
         child = uuid.uuid4().hex
