@@ -114,22 +114,18 @@ test("the condensed fleet menu lists the active gateway's default on both sides 
     })
 
     await test.step(`on ${REMOTE_LABEL}: its default is listed beside This device`, async () => {
-      await expect
-        .poll(
-          async () => {
-            const menu = await openMenu(page)
-            const atRestLocal = await menu
-              .locator('[data-slot="profile-dropdown-gateway"][data-connection-id="local"]')
-              .count()
-            await page.keyboard.press('Escape')
-
-            return atRestLocal
-          },
-          { message: `the window re-homed onto ${REMOTE_LABEL}`, timeout: 120_000, intervals: [1_000, 2_000] }
-        )
-        .toBe(1)
+      // A source switch refreshes the active roster before lowering this busy
+      // signal. Opening sooner can target a dropdown replaced by that refresh.
+      const gateway = page.locator('[data-slot="connection-switcher"]')
+      await expect(
+        gateway.getByRole('button', { name: `Registered gateways: ${REMOTE_LABEL}`, exact: true })
+      ).toBeVisible()
+      await expect(gateway).toHaveAttribute('aria-busy', 'false')
 
       const menu = await expectActiveDefault(page, `${REMOTE_LABEL} active`)
+      await expect(
+        menu.locator('[data-slot="profile-dropdown-gateway"][data-connection-id="local"]')
+      ).toBeVisible()
       await expect(menu.getByRole('menuitemradio', { name: REMOTE_NAMED[0], exact: true })).toBeVisible()
       await expect(menu.getByRole('menuitem', { name: /^This device/ }), 'This device at rest').toBeVisible()
     })
