@@ -310,3 +310,14 @@ def test_unproven_cancel_quarantines_cooperating_requests(fake):
     with pytest.raises(RequestRefused):
         _request(fake).start()
     assert fake.posts == 1
+
+
+def test_full_framed_completion_releases_cooperating_lease(fake):
+    fake.release.set()
+    first = _request(fake)
+    second = _request(fake)
+    first.start()
+    assert first.wait(2) is not None
+    second.start()
+    assert second.wait(2) is not None
+    assert fake.posts == 2

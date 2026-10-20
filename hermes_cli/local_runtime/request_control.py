@@ -323,6 +323,7 @@ class ScopedRequest:
 
     def _run(self) -> None:
         conn = None
+        send_attempted = False
         try:
             if self._cancel_intent.is_set():
                 return
@@ -337,6 +338,8 @@ class ScopedRequest:
             with self._lock:
                 if self._cancel_intent.is_set():
                     return
+                # Once sending begins, a failure cannot establish that no bytes reached the router.
+                send_attempted = True
                 conn.request(
                     "POST",
                     "/v1/chat/completions",
@@ -352,13 +355,19 @@ class ScopedRequest:
         except (OSError, ValueError, http.client.HTTPException) as exc:
             self._error = exc
         finally:
-            if conn is not None:
-                conn.finish()
-            with self._lock:
-                self._state = "finished"
-                self._finished.set()
-            if self._response is not None or conn is None:
-                self._release_lease()
+            try:
+                if conn is not None:
+                    conn.finish()
+            except (OSError, http.client.HTTPException) as exc:
+                if self._error is None:
+                    self._error = exc
+            finally:
+                if self._response is not None or not send_attempted:
+                    self._release_lease()
+                # Publish completion only after cleanup and lease disposition are settled.
+                with self._lock:
+                    self._state = "finished"
+                    self._finished.set()
             # An interrupted POST stays quarantined: idle child telemetry cannot drain router work.
 
     def wait(self, timeout_s: float | None = None) -> tuple[int, bytes] | None:

@@ -172,3 +172,106 @@ def test_unframed_response_cannot_establish_completion_after_socket_close():
     )
     with pytest.raises(http.client.HTTPException):
         read_response(connection, limit=1024)
+
+
+@pytest.mark.parametrize("phase", ["connect_failure", "cancel_before_send"])
+def test_predispatch_exit_releases_lease_for_a_fresh_request(monkeypatch, phase):
+    requests, posts = {}, []
+
+    class Connection:
+        def __init__(self, *args):
+            pass
+
+        def connect(self):
+            if phase == "connect_failure":
+                raise OSError("synthetic connect failure")
+            requests["current"].cancel(timeout_s=0)
+
+        def request(self, *args, **kwargs):
+            posts.append(True)
+
+        def abort(self):
+            pass
+
+        def finish(self):
+            pass
+
+    monkeypatch.setattr(rc, "DeadlineConnection", Connection)
+    model = f"predispatch-{phase}"
+    probe = rc.ManagedChildProbe("http://127.0.0.1:12414", "key", model)
+    monkeypatch.setattr(probe, "read", lambda **kw: rc.ChildState(True, (), 0.0, 0.0))
+    first = rc.ScopedRequest(probe, {"model": model})
+    second = rc.ScopedRequest(probe, {"model": model})
+    try:
+        for request in (first, second):
+            requests["current"] = request
+            request.start(bind_timeout_s=1, interval_s=0.01)
+            request._worker.join(2)
+            assert not request._worker.is_alive()
+        assert posts == []
+    finally:
+        first._release_lease()
+        second._release_lease()
+
+
+def test_cleanup_failure_still_publishes_predispatch_completion_and_releases_lease(
+    monkeypatch,
+):
+    class Connection:
+        def __init__(self, *args):
+            pass
+
+        def connect(self):
+            raise OSError("synthetic connect failure")
+
+        def finish(self):
+            raise OSError("synthetic cleanup failure")
+
+    monkeypatch.setattr(rc, "DeadlineConnection", Connection)
+    model = "predispatch-cleanup-error"
+    probe = rc.ManagedChildProbe("http://127.0.0.1:12414", "key", model)
+    monkeypatch.setattr(probe, "read", lambda **kw: rc.ChildState(True, (), 0.0, 0.0))
+    first = rc.ScopedRequest(probe, {"model": model})
+    second = rc.ScopedRequest(probe, {"model": model})
+    try:
+        first.start(bind_timeout_s=1, interval_s=0.01)
+        first._worker.join(2)
+        assert first._finished.is_set()
+        second.start(bind_timeout_s=1, interval_s=0.01)
+        second._worker.join(2)
+        assert second._finished.is_set()
+    finally:
+        first._release_lease()
+        second._release_lease()
+
+
+def test_failed_send_remains_quarantined(monkeypatch):
+    posts = []
+
+    class Connection:
+        def __init__(self, *args):
+            pass
+
+        def connect(self):
+            pass
+
+        def request(self, *args, **kwargs):
+            posts.append(True)
+            raise OSError("synthetic uncertain send failure")
+
+        def finish(self):
+            pass
+
+    monkeypatch.setattr(rc, "DeadlineConnection", Connection)
+    model = "uncertain-send"
+    probe = rc.ManagedChildProbe("http://127.0.0.1:12414", "key", model)
+    monkeypatch.setattr(probe, "read", lambda **kw: rc.ChildState(True, (), 0.0, 0.0))
+    request = rc.ScopedRequest(probe, {"model": model})
+    try:
+        request.start(bind_timeout_s=1, interval_s=0.01)
+        request._worker.join(2)
+        assert request._finished.is_set() and len(posts) == 1
+        with pytest.raises(rc.RequestRefused):
+            rc.ScopedRequest(probe, {"model": model}).start()
+    finally:
+        request._release_lease()
