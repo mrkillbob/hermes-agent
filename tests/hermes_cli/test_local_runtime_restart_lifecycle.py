@@ -18,12 +18,16 @@ def _watchdog_fixture(tmp_path, monkeypatch):
     crashed = subprocess.Popen([sys.executable, "-c", "pass"])
     crashed.wait(timeout=10)
     sup.proc = crashed
+    # A synthetic containment capability, not a claim about this host's native tree.
+    sup._owned_job_closed = True
     spawned: list[subprocess.Popen] = []
 
     def spawn():
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
         spawned.append(proc)
         sup.proc = proc
+        sup._owned_job_closed = False
+        sup._job = type("OwnedFixture", (), {"close": lambda self: None})()
 
     monkeypatch.setattr(sup, "_spawn", spawn)
     monkeypatch.setattr(sup, "_reap_orphaned_children", lambda: None)

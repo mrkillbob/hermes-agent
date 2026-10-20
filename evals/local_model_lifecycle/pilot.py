@@ -243,6 +243,8 @@ def plan(args) -> dict:
     model, engine = Path(args.model), Path(args.engine) if args.engine else newest_engine()
     mem = psutil.virtual_memory()
     blockers = other_activity()
+    if os.name != "nt":
+        blockers.append("native tree containment is unverified; destructive router-crash pilot held")
     if not model.is_file():
         blockers.append(f"model missing: {model}")
     if engine is None or not engine.is_file():

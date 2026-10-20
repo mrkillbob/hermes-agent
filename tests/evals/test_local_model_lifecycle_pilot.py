@@ -60,3 +60,15 @@ def test_real_plan_never_downloads_or_spawns(tmp_path, tripwires):
     assert report["would_download"] is False
     assert any("model missing" in b for b in report["blockers"])
     assert tripwires == []
+
+
+@pytest.mark.platforms("posix")
+def test_native_crash_pilot_refuses_even_with_window_and_files(tmp_path, monkeypatch, tripwires):
+    model, engine = tmp_path / "staged.gguf", tmp_path / "staged-engine"
+    model.write_bytes(b"fixture")
+    engine.write_bytes(b"fixture")
+    monkeypatch.setattr(pilot, "other_activity", list)
+    assert pilot.main(["--run", "--window-ack", "admitted-window", "--model", str(model),
+                       "--engine", str(engine), "--work-root", str(tmp_path / "work")]) == 2
+    assert tripwires == []
+    assert not (tmp_path / "work").exists()

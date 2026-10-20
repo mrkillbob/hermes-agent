@@ -1,7 +1,8 @@
 """Supervision of one llama-server in router mode.
 
-The router process is ours (restart with backoff on crash); router children are its problem — child
-failures surface via GET /models exit_code, never auto-retried here. Learned on real hardware:
+The router process is ours; crash restart requires an owned OS containment handle. Without one,
+durable custody uncertainty prevents replacement. Child failures surface via GET /models exit_code,
+never auto-retried here. Learned on real hardware:
 health-200 is NOT readiness — every readiness claim requires a touch generation (temp-0, expected
 token, generous budget, reasoning_content scanned); always dial 127.0.0.1 — resolving localhost adds
 ~2s per request on Windows via IPv6 fallback.
@@ -17,7 +18,6 @@ import os
 import secrets
 import socket
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -135,6 +135,7 @@ class LlamaServerSupervisor:
         self.preset_path = preset_path
         self.proc: subprocess.Popen | None = None
         self._job = None
+        self._owned_job_closed = False
         self.primary_model: str | None = None
         self._restarts = 0
         self._stopping = False
@@ -144,6 +145,7 @@ class LlamaServerSupervisor:
         self._state: dict | None = None
         self._watchdog: threading.Thread | None = None
         self._log_handle = None
+        self._spawn_intent: dict | None = None
         self._idle_since: dict[str, float] = {}
         # Launch budget the preset file was last planned against (bootstrap.refit_idle_presets).
         self._refit_usable: int | None = None
@@ -176,6 +178,13 @@ class LlamaServerSupervisor:
     # ── lifecycle ────────────────────────────────────────────
 
     def _spawn(self) -> None:
+        # A prior Job close authorizes no new attempt that may fail mid-spawn.
+        self._owned_job_closed = False
+        if os.name != "nt":
+            from hermes_cli.local_runtime.tree_custody import reserve_uncontained_tree
+
+            # This also precedes the executable's --help capability probe.
+            self._spawn_intent = reserve_uncontained_tree(state_path())
         exe = self.binary
         cmd = [
             str(exe),
@@ -244,9 +253,16 @@ class LlamaServerSupervisor:
                        "owner_create_time": psutil.Process().create_time(),
                        "owner_start_time": get_process_start_time(os.getpid())}
         path = state_path()
+        if os.name != "nt":
+            from hermes_cli.local_runtime.tree_custody import verify_spawn_intent
+
+            if self._spawn_intent is None:
+                raise RuntimeError("local runtime has no pre-spawn custody record")
+            verify_spawn_intent(path, self._spawn_intent)
+            self._state.update(self._spawn_intent)
         from hermes_constants import mkdir_under_hermes_home
         mkdir_under_hermes_home(path.parent)
-        atomic_json_write(path, self._state, mode=0o600)
+        atomic_json_write(path, self._state, mode=0o600, fsync_dir=os.name != "nt")
 
     def _wait_health(self, timeout_s: int, *, cancel_event=None) -> None:
         deadline = time.monotonic() + timeout_s
@@ -264,7 +280,7 @@ class LlamaServerSupervisor:
         raise TimeoutError(f"llama-server not healthy after {timeout_s}s (log: {self.log_path})")
 
     def _watch(self) -> None:
-        """Restart the router (not its children) on crash, with backoff."""
+        """Restart only contained router trees on crash, with backoff."""
         while not self._stopping:
             proc = self.proc
             if proc is None:
@@ -274,6 +290,12 @@ class LlamaServerSupervisor:
                 time.sleep(2)
                 continue
             if self._stopping:
+                return
+            if self._job is None and not self._owned_job_closed:
+                # Polling the dead root cannot establish that its native children exited.
+                # Keep the pre-spawn record across owner restart; do not reap by PID/name.
+                logger.error("llama-server exited rc=%s; tree custody unverified, restart refused", rc)
+                self._stop_event.set()
                 return
             backoff = _RESTART_BACKOFF_S[min(self._restarts, len(_RESTART_BACKOFF_S) - 1)]
             logger.warning("llama-server exited rc=%s; restart #%s in %ss", rc, self._restarts + 1, backoff)
@@ -302,10 +324,9 @@ class LlamaServerSupervisor:
         """A restarted router that is alive but never healthy would otherwise be polled forever,
         holding its memory with nothing serving; closing it lets the next pass retry with backoff.
 
-        Unresolved limits: if terminating the router fails it stays alive and is not retried
-        (the failure is logged); on POSIX a model child spawned while the tree is being
-        terminated is not enumerated, and _reap_orphaned_children skips it once it is
-        reparented to PID 1."""
+        A successful owned Job close preserves the existing Windows retry authorization;
+        it does not measure native process exit or RAM/VRAM release. A failed close retains
+        the handle. POSIX watchdog crashes remain quarantined instead of entering this path."""
         with self._lifecycle_lock:
             if self._stopping or self.proc is None or self.proc.poll() is not None:
                 return
@@ -316,11 +337,14 @@ class LlamaServerSupervisor:
                 logger.exception("could not close unhealthy llama-server pid=%s", self.proc.pid)
             finally:
                 if self._job is not None:
-                    job, self._job = self._job, None
+                    job = self._job
                     try:
                         job.close()
                     except OSError:
                         logger.exception("could not close the unhealthy router's job object")
+                    else:
+                        self._job = None
+                        self._owned_job_closed = True
 
     def stop(self) -> None:
         with self._lifecycle_lock:
@@ -375,33 +399,15 @@ class LlamaServerSupervisor:
                 _quiet(lambda: child.is_running() and child.kill())
 
     def _reap_orphaned_children(self) -> None:
-        """Kill model children orphaned by a router crash, before respawn.
-
-        A dead parent can't be walked, so match by identity: any process running OUR
-        llama-server binary whose parent is gone is an orphan of a previous router. Its VRAM must
-        come back before the new router loads models next to the ghosts.
-        """
+        """Close only the owned OS containment handle before respawn."""
         if self._job is not None:
             self._job.close()
             self._job = None
+            self._owned_job_closed = True
             return
-        if sys.platform == "win32":
-            return  # Unrecorded processes are not ours merely because the binary matches.
-        try:
-            import psutil
-
-            exe = str(self.binary)
-        except Exception:
+        if self._owned_job_closed:
             return
-        own_pid = self.proc.pid if self.proc is not None else None
-        for p in psutil.process_iter(["exe", "ppid"]):
-            with suppress(psutil.NoSuchProcess, psutil.AccessDenied):
-                ppid = p.info.get("ppid") or 0
-                if (p.info.get("exe") != exe or p.pid == own_pid
-                        or (ppid and psutil.pid_exists(ppid))):
-                    continue
-                logger.warning("reaping orphaned llama-server child pid=%s", p.pid)
-                p.kill()
+        raise RuntimeError("local runtime tree custody is unverified; restart refused")
 
     # ── model management (router endpoints) ──────────────────
 

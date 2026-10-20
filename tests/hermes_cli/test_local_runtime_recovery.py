@@ -244,6 +244,10 @@ def test_spawn_state_records_process_incarnations(tmp_path, monkeypatch):
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         sup.proc = proc
+        if os.name != "nt":
+            from hermes_cli.local_runtime.tree_custody import reserve_uncontained_tree
+
+            sup._spawn_intent = reserve_uncontained_tree(supervisor.state_path())
         sup._write_state()
         state = json.loads(supervisor.state_path().read_text())
         assert state.get("create_time") == psutil.Process(proc.pid).create_time()
@@ -365,7 +369,7 @@ def test_explicit_stop_preserves_verified_root_incarnation(tmp_path, monkeypatch
     replacement.kill.assert_not_called()
     root.children.assert_called_once_with(recursive=True)
     factory.assert_not_called()
-    assert stopped is (reuse_at == "never")
+    assert stopped is (reuse_at == "never" and os.name == "nt")
     if reuse_at != "never":
         root.terminate.assert_not_called()
         root.kill.assert_not_called()
@@ -422,6 +426,9 @@ def test_clock_step_keeps_the_recorded_router(tmp_path, monkeypatch):
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         sup.proc = proc
+        from hermes_cli.local_runtime.tree_custody import reserve_uncontained_tree
+
+        sup._spawn_intent = reserve_uncontained_tree(supervisor.state_path())
         sup._write_state()
         stepped = psutil._pslinux.boot_time() + 22
         monkeypatch.setattr(psutil._pslinux, "boot_time", lambda: stepped)
@@ -459,7 +466,7 @@ def test_startup_preserves_router_and_only_explicit_stop_recovers_an_orphan(tmp_
 
         assert bootstrap._incumbent_allows_boot() is False
         assert router.poll() is None
-        assert recovery.stop_recorded_orphan() is (owner == "exited")
+        assert recovery.stop_recorded_orphan() is False  # root stop does not prove tree closure
 
         if owner == "exited":
             router.wait(timeout=10)

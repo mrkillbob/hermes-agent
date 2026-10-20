@@ -206,6 +206,11 @@ def _incumbent_allows_boot() -> bool:
     if not _valid_pid(state.get('pid')) or psutil.pid_exists(state['pid']):
         logger.info("Recorded local router is live or uncertain; leaving recovery to explicit stop")
         return False
+    if os.name != "nt":
+        # Even normal root termination cannot prove closure of a reparented native
+        # child. Preserve modern and legacy records until qualified tree recovery.
+        logger.error("Recorded local runtime tree custody is unverified; replacement refused")
+        return False
     return True
 
 
