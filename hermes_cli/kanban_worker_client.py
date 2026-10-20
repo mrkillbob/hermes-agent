@@ -40,7 +40,17 @@ async def run(params, board_db):
     deadline = time.monotonic() + OWNER_WAIT_S
     while True:
         try:
-            async with connect_gateway() as client:
+            options = {}
+            if 'execution_budget' in params:
+                # Starting an ordinary owner also starts cron/dispatch/recovery services.
+                # An operator must prepare an existing quiescent owner for a bounded run.
+                from hermes_constants import get_hermes_home
+                from hermes_cli.gateway_runtime import discover_gateway_endpoint, gateway_profile_home
+                found = await asyncio.to_thread(discover_gateway_endpoint, gateway_profile_home(get_hermes_home()))
+                if found.state != 'ready' or found.endpoint is None:
+                    raise GatewayUnavailableError('Bounded Kanban requires an existing ready owner', found.state)
+                options['endpoint'] = found.endpoint
+            async with connect_gateway(**options) as client:
                 # kanban.run subscribes this socket to the card's session, but only receipts matter
                 # here: discard the turn's events, or they fill the client's bounded queue and its
                 # reader stops, with the next receipt behind it.
@@ -78,12 +88,24 @@ async def _submit_claim(client, params, board_db):
         receipt = await client.rpc('prompt.receipt', session_id=sid, admission_id=receipt['admission_id'])
     if receipt['status'] == 'unknown':
         raise GatewayClientError('Kanban execution unknown; retained by owner')
+    final_code = 0
+    if 'execution_budget' in params:
+        # Auxiliary cleanup may exhaust admission after the earlier board worker_result event.
+        # The final owner receipt must dominate that event's optimistic exit code.
+        settled = await client.rpc('prompt.receipt', session_id=sid,
+                                   admission_id=receipt['admission_id'], include_result=True)
+        if settled.get('status') != 'terminal' or not isinstance(settled.get('result'), dict):
+            raise GatewayClientError('Bounded Kanban requires the final owner result')
+        from hermes_cli.turn_exit import turn_exit_code
+        final_code = turn_exit_code(settled['result'], kanban_worker=True)
+        if final_code:
+            print('Kanban owner returned a non-success result.', file=sys.stderr)
     from gateway.session_kanban import worker_result
     result = worker_result(board_db, params)
     # The attempt's reply ends the log, as a one-shot worker's did: crash diagnostics quote it.
     if result.get('last_output'):
         print(result['last_output'])
-    return result.get('exit_code', 1)
+    return final_code or result.get('exit_code', 1)
 
 
 def main():
@@ -103,8 +125,16 @@ def _submit(argv):
         params = {'board': os.environ['HERMES_KANBAN_BOARD'], 'task_id': os.environ['HERMES_KANBAN_TASK'],
             'run_id': int(os.environ['HERMES_KANBAN_RUN_ID']), 'claim_lock': os.environ['HERMES_KANBAN_CLAIM_LOCK']}
         board_db = os.environ['HERMES_KANBAN_DB']
-        if argv[:1] == ['--route']:
-            params['route'] = json.loads(argv[1])
+        if len(argv) % 2:
+            raise ValueError('Invalid worker options')
+        for option, raw in zip(argv[::2], argv[1::2]):
+            key = {'--route': 'route', '--budget': 'execution_budget'}.get(option)
+            if key is None or key in params:
+                raise ValueError('Invalid worker options')
+            params[key] = json.loads(raw)
+        if 'execution_budget' in params:
+            from hermes_cli.kanban_execution_budget import validate_budget
+            params['execution_budget'] = validate_budget(params['execution_budget'])
         # Owner startup must never inherit this worker's task/tool/goal identity.
         for key in list(os.environ):
             # The busy timeout is a host tuning knob, not task identity: the answer budget reads it.

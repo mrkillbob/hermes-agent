@@ -810,6 +810,8 @@ def _attach_source_provenance_sidecar(
 def _dispatch_provider_request(agent, request, callback):
     """Apply the exact provider-bound egress policy at a physical call site."""
 
+    from agent.managed_request_budget import require_counted_route
+    require_counted_route(getattr(agent, 'api_mode', ''), getattr(agent, 'provider', ''))
     mark_local_task_context(agent)
     # Native SDK callers can enter the provider path with a live Relay turn
     # before the normal conversation loop has stamped its per-request fields.
@@ -841,6 +843,8 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     so callers can register it with their abort/close machinery; bedrock / MoA
     manage their own clients. Interrupt/abort/close semantics stay in callers.
     """
+    from agent.managed_request_budget import require_counted_route
+    require_counted_route(getattr(agent, 'api_mode', ''), getattr(agent, 'provider', ''))
     if agent.api_mode == "codex_responses":
         codex_client = make_client("codex_stream_request")
         return _dispatch_provider_request(
@@ -876,7 +880,8 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
             agent, api_kwargs,
             lambda authorized: agent.client.chat.completions.create(**authorized),
         )
-    request_client = make_client("chat_completion_request")
+    from agent.managed_request_budget import prepare_provider_client
+    request_client = prepare_provider_client(make_client("chat_completion_request"))
     return _dispatch_provider_request(
         agent, api_kwargs,
         lambda authorized: request_client.chat.completions.create(
@@ -2694,21 +2699,6 @@ def _relay_stream_metadata(agent, api_mode: str) -> dict:
         "call_role": call_role}
 
 
-def _stream_final_text(response) -> str:
-    with contextlib.suppress(Exception):
-        choices = getattr(response, "choices", None)
-        first_choice = choices[0] if isinstance(choices, (list, tuple)) and choices else None
-        content = getattr(getattr(first_choice, "message", None), "content", None)
-        if isinstance(content, str):
-            return content
-    with contextlib.suppress(Exception):
-        content = getattr(response, "content", None)
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return "".join(t for t in (getattr(part, "text", None) for part in content) if isinstance(t, str))
-    return ""
-
 
 def _with_stream_emitters(agent, run):
     """Bracket ``run()`` with the agent's ``_emit_stream_start`` / ``_emit_stream_end``
@@ -2726,7 +2716,8 @@ def _with_stream_emitters(agent, run):
         raise
     end = getattr(agent, "_emit_stream_end", None)
     if end is not None:
-        end(final_text=_stream_final_text(response), finished=True, error=None)
+        from agent.chat_completion_helpers_relay import stream_final_text
+        end(final_text=stream_final_text(response), finished=True, error=None)
     return response
 
 
@@ -3147,8 +3138,9 @@ class _StreamingCall(StreamingWaitMonitor):
         # already 4xx'd on it this session (``_stream_options_unsupported``, see #9705).
         if not is_native_gemini_base_url(self.agent.base_url) and not getattr(self.agent, "_stream_options_unsupported", False):
             stream_kwargs["stream_options"] = {"include_usage": True}
-        request_client = self._attempt_request_client = self.clients.set_client(
-            self.agent._create_request_openai_client(reason="chat_completion_stream_request", api_kwargs=stream_kwargs))
+        from agent.managed_request_budget import prepare_provider_client
+        request_client = self._attempt_request_client = self.clients.set_client(prepare_provider_client(
+            self.agent._create_request_openai_client(reason="chat_completion_stream_request", api_kwargs=stream_kwargs)))
         self.last_chunk_time["t"] = time.time()
         self.agent._touch_activity("waiting for provider response (streaming)")
         return _dispatch_provider_request(
@@ -4208,6 +4200,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     text token (tool-call turns suppress them) and returns a SimpleNamespace in
     the non-streaming response shape. codex_responses delegates to the already-
     streaming codex runner; cron turns and delegated children run inline."""
+    from agent.managed_request_budget import require_counted_route
+    require_counted_route(getattr(agent, 'api_mode', ''), getattr(agent, 'provider', ''))
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
     if agent.api_mode == "codex_responses":

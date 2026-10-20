@@ -333,6 +333,31 @@ are excluded unless their exact IDs are explicitly selected in a later pass.
 This selection restricts which cards the dispatcher may consider; it does not
 restrict the actions an admitted worker may perform.
 
+For one exact native-owner attempt, opt into all three execution ceilings together:
+
+```bash
+hermes kanban dispatch --task-id t_abcd1234 --max 1 \
+  --wall-seconds 120 --output-bytes 65536 --requests 4
+```
+
+Each limit must be a positive integer no greater than the value shown. The output
+ceiling counts combined worker protocol frames and stderr. Provider requests share
+one counter across the worker's turns, recovery, retries and auxiliary calls;
+unsupported transports fail closed. External executor lanes cannot use this mode.
+The claim freezes these limits, and a retry cannot omit or change them.
+
+A bounded attempt requires an existing ready owner and never starts a gateway.
+Prepare that owner and stop automatic dispatch, cron and other work sources before
+resuming a globally paused installation for an exclusively owned one-card window.
+The command still honors ESTOP and all existing safety and routing gates.
+
+On wall or output exhaustion, the owner closes its worker through the existing
+managed lifecycle and retains an unknown outcome behind the execution fence.
+Ledger settlement may take longer than the execution deadline. Local process
+cleanup cannot prove that an already submitted remote request stopped. Inspect the
+final owner receipt before resolving uncertainty; the worker client treats a late
+owner failure as non-success even if an earlier board event reported success.
+
 Normal ownership, dependency, profile, respawn, workspace, model, host capacity
 and memory-pressure controls still apply. Unselected running work still counts
 against capacity. `--max` remains the live board concurrency cap and does not

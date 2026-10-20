@@ -430,6 +430,12 @@ class KanbanRoute(Params):
     base_url: str | None = None
 
 
+class KanbanExecutionBudget(Params):
+    wall_seconds: int
+    output_bytes: int
+    requests: int
+
+
 class KanbanRunParams(Params):
     board: str
     task_id: str
@@ -437,6 +443,7 @@ class KanbanRunParams(Params):
     claim_lock: str
     db: str | None = None
     route: KanbanRoute | None = None
+    execution_budget: KanbanExecutionBudget | None = None
 
 
 class KanbanRunResult(Result):

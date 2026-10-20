@@ -21566,6 +21566,30 @@
         "title": "InterruptStatus",
         "type": "string"
       },
+      "KanbanExecutionBudget": {
+        "additionalProperties": false,
+        "properties": {
+          "wall_seconds": {
+            "title": "Wall Seconds",
+            "type": "integer"
+          },
+          "output_bytes": {
+            "title": "Output Bytes",
+            "type": "integer"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "wall_seconds",
+          "output_bytes",
+          "requests"
+        ],
+        "title": "KanbanExecutionBudget",
+        "type": "object"
+      },
       "KanbanRoute": {
         "additionalProperties": false,
         "properties": {
@@ -21656,6 +21680,17 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/KanbanRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "execution_budget": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KanbanExecutionBudget"
               },
               {
                 "type": "null"
