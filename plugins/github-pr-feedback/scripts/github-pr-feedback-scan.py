@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import os
 import subprocess
 import sys
@@ -156,7 +157,7 @@ def _cron_exit_code(stdout: str, process_returncode: int, stderr: str = "") -> i
     return 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     configured = os.environ.get("HERMES_EXECUTABLE", "").strip()
     executable = Path(configured) if configured else None
     if (
@@ -170,6 +171,18 @@ def main() -> int:
             file=sys.stderr,
         )
         return 127
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workspace", type=Path, required=True,
+                        help="Absolute configured repository workspace for this scheduled call")
+    options = parser.parse_args(argv)
+    workspace = options.workspace
+    try:
+        if not workspace.is_absolute() or not workspace.is_dir():
+            raise ValueError("invalid workspace")
+        workspace = workspace.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        print("--workspace must name an existing absolute repository directory", file=sys.stderr)
+        return 127
     scan_cmd = [str(executable), "github-pr-feedback", "scan"]
     repository_filter = os.environ.get("HERMES_PR_FEEDBACK_REPOSITORY", "").strip()
     if repository_filter:
@@ -181,6 +194,7 @@ def main() -> int:
     completed = subprocess.run(
         scan_cmd,
         stdin=subprocess.DEVNULL,
+        cwd=workspace,
         env=child_env,
         check=False,
         capture_output=True,
