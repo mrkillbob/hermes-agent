@@ -8,7 +8,7 @@ import sys
 
 def finish_update(*, root, assume_yes, gateway_mode, pre_update_snapshot_id,
                   had_desktop_app_before_update, pre_update_version,
-                  plan, windows_resume, followups=None, pending=None) -> None:
+                  plan, windows_resume, followups=None, pending=None, _on_windows_resume=None) -> None:
     """Finish the selected checkout; never fetch, switch branches or restore a stash.
 
     Same contract as the current completion (C3): the code is committed, so a failed build,
@@ -16,7 +16,8 @@ def finish_update(*, root, assume_yes, gateway_mode, pre_update_snapshot_id,
     ``followups`` carries the steps that already failed (the product build); while any is owed
     the install stamp is withheld, the source-update tail stays pending for the next launch, and
     the gateway topology is left alone. An unsafe SQLite runtime is reported by maintenance and
-    vetoes migration only.
+    vetoes migration only. ``_on_windows_resume`` transfers attempt ownership to this tail before
+    its resume call, including a call that leaves readiness debt outstanding.
     """
     from hermes_cli.update_cmd import (
         _run_post_update_maintenance,
@@ -59,6 +60,8 @@ def finish_update(*, root, assume_yes, gateway_mode, pre_update_snapshot_id,
     update_id = run.data.get("update_id") if run is not None else None
     try:
         restarted = _restart_gateway_fleet_after_update(plan, gateway_mode)
+        if _on_windows_resume is not None:
+            _on_windows_resume()
         _resume_windows_gateways_and_merge_outcome(restarted, windows_resume, gateway_mode)
         _verify_fleet_after_update(restarted, _pre_update_plan=plan, _windows_gateway_resume=windows_resume,
                                   update_complete=bool(runtime_safe) and not tail_owed)
@@ -93,6 +96,12 @@ def main(context: Path, result: Path) -> int:
     restarting = request.get("restart_update", False)
     cli_started = False
     begun = False
+    attempted = False
+
+    def own_windows_resume() -> None:
+        nonlocal attempted
+        attempted = True
+
     code = 1
     try:
         if not restarting:
@@ -161,6 +170,7 @@ def main(context: Path, result: Path) -> int:
                     had_desktop_app_before_update=desktop,
                     pre_update_version=request.get("pre_update_version"),
                     plan=plan, windows_resume=token, followups=owed, pending=pending,
+                    _on_windows_resume=own_windows_resume,
                 )
         code = 0
     except SystemExit as exc:
@@ -183,12 +193,14 @@ def main(context: Path, result: Path) -> int:
             # receipt. Preserve the original handoff, just like preparation.
             update_receipt.begin_update_receipt(previous=request.get("receipt"), correlation_id=request["update_id"])
             begun = update_receipt._current.get() is not None
-        attempted = False
-        if resume is not None:
+        # Readiness debt is not permission to replay this run's completed attempt. A late
+        # successor can already be alive; replaying its --replace watcher kills it again.
+        # Preserve rescue when completion failed before it reached the resume boundary.
+        if resume is not None and not attempted:
+            attempted = True
             try:
                 resume(token)
             except Exception as exc:
-                attempted = True
                 update_receipt.owe_followup(request["update_id"], "windows_resume", f"Windows gateway recovery failed: {exc}")
         handled = cli_started or (begun and update_receipt._current.get() is None)
         written = update_receipt.finalize_pending_update_receipt(code, "historical takeover completion")
