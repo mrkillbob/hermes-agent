@@ -1,7 +1,7 @@
 accelerate==1.15.0
 antlr4-python3-runtime==4.9.3
 attrs==26.1.0
-certifi==2026.7.22
+certifi==2026.10.19
 charset-normalizer==3.5.1
 diffusers==0.38.0
 einops==0.8.2
@@ -27,7 +27,7 @@ omegaconf==2.3.1
 onnxruntime==1.29.0
 opencv-python-headless==4.14.0.94
 packaging==26.3
-pillow==12.3.0
+pillow==13.0.0
 platformdirs==4.11.4
 pooch==1.9.0
 protobuf==7.36.0
