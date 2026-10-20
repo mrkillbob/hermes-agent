@@ -106,6 +106,16 @@ def retry_matches_frozen_claim(params, context):
 
 
 async def run_task(connection, params):
+    from gateway.drain_kanban import claim_scope
+    from gateway.session_local_recovery import local_identity
+    authority = connection.authority
+    request_id = 'kanban:' + json.dumps([params.get('board'), params.get('task_id'), params.get('run_id')], separators=(',', ':'))
+    sid = local_identity(authority.profile_id, connection.actor.subject, request_id)
+    with claim_scope(connection, params, sid):
+        return await _run_task(connection, params)
+
+
+async def _run_task(connection, params):
     if not connection.native_owner or 'session:create' not in connection.actor.capabilities:
         raise RuntimeStoreError('permission_denied')
     from gateway.run import _load_gateway_config

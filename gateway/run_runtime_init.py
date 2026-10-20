@@ -182,6 +182,10 @@ class GatewayRuntimeInitMixin:
             logger.warning("SQLite session store not available: %s", e, exc_info=True)
             self._session_db_init_error = str(e)  # surfaced on the home channel(s) once connected
 
+        from gateway.drain_kanban import held
+        if held(self):
+            return  # prime the store, but defer unrelated maintenance until ordinary startup
+
         # Opportunistic state.db maintenance (prune + optional VACUUM), at most once per min_interval_hours.
         # A few blocking seconds per day is fine for a long-lived gateway; failures log, never raise.
         # Surface the failure to the user via their home channel(s) once the gateway connects. Without this,

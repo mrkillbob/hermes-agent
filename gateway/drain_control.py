@@ -75,6 +75,8 @@ RESTART_WAIT_WS_METHODS = frozenset({
 
 def ws_method_refused_while_draining(runner, method) -> bool:
     """True when an interactive WebSocket verb must be refused because *runner* is draining."""
+    if getattr(runner, "_external_drain_active", False):
+        return method not in {'ping', 'runtime.describe', 'prompt.receipt', 'session.events.since', 'session.interrupt'}
     return bool(getattr(runner, "_draining", False)) and method not in RESTART_WAIT_WS_METHODS
 
 _DRAIN_REQUEST_FILENAME = ".drain_request.json"
@@ -112,6 +114,32 @@ def drain_request_path(home: Optional[Path] = None) -> Path:
     return Path(home if home is not None else get_hermes_home()) / _DRAIN_REQUEST_FILENAME
 
 
+@contextlib.contextmanager
+def drain_marker_lock(*, home=None):
+    """All canonical marker writers serialize check and replacement on one stable inode."""
+    from hermes_cli.kanban_db_connect import _try_lock_nb, _unlock
+    path = drain_request_path(home).with_suffix('.lock')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a+b') as handle:
+        if not _try_lock_nb(handle):
+            raise RuntimeError('drain marker busy')
+        try:
+            yield
+        finally:
+            _unlock(handle)
+
+
+def _protected_marker(home):
+    try:
+        drain_request_path(home).stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    current = read_drain_request(home=home)
+    return not current or 'kanban_once' in current
+
+
 def write_drain_request(
     *, principal: str = "drain-control", suppress_notification: bool = False, home: Optional[Path] = None
 ) -> dict[str, Any]:
@@ -123,23 +151,31 @@ def write_drain_request(
     are quiet is the caller's policy.  Stamped with the instantiation epoch so a
     copy surviving a machine restart on the durable volume reads as stale.
     """
-    payload = {
-        "action": "drain", "requested_at": datetime.now(UTC).isoformat(), "principal": principal,
-        "epoch": current_instantiation_epoch(), "suppress_notification": bool(suppress_notification),
-    }
-    atomic_json_write(drain_request_path(home), payload)
-    return payload
+    with drain_marker_lock(home=home):
+        if _protected_marker(home):
+            raise RuntimeError('kanban window requires verified restoration')
+        payload = {
+            "action": "drain", "requested_at": datetime.now(UTC).isoformat(), "principal": principal,
+            "epoch": current_instantiation_epoch(), "suppress_notification": bool(suppress_notification),
+        }
+        atomic_json_write(drain_request_path(home), payload)
+        return payload
 
 
 def clear_drain_request(*, home: Optional[Path] = None) -> bool:
-    """Remove the drain marker (cancel-drain, idempotent). Returns True if one existed."""
+    """Remove an ordinary marker; a window requires verified restoration."""
     path = drain_request_path(home)
+    if not path.parent.exists():
+        return False
     try:
-        path.unlink()
-        return True
-    except OSError as e:
-        if not isinstance(e, FileNotFoundError):
-            _log.warning("drain-control: failed to remove %s: %s", path, e)
+        with drain_marker_lock(home=home):
+            if _protected_marker(home):
+                return False
+            path.unlink()
+            return True
+    except (OSError, RuntimeError) as exc:
+        if not isinstance(exc, FileNotFoundError):
+            _log.warning("drain-control: failed to remove %s: %s", path, exc)
         return False
 
 
@@ -174,6 +210,10 @@ def _active_drain_body(home: Optional[Path]) -> Optional[dict[str, Any]]:
     body = read_drain_request(home=home)
     if body is None:
         return None
+    # A one-card permission may expire or lose its owner; the surrounding hold must
+    # survive both. Only verified restoration may remove this operator-owned marker.
+    if 'kanban_once' in body:
+        return body
     current, marker_epoch = current_instantiation_epoch(), body.get("epoch")
     if (current and marker_epoch and marker_epoch != current) or _marker_is_expired(body):
         return None

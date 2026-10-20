@@ -118,6 +118,9 @@ def _tick_admitted(
             if _estop_check_paused("cron", _sched.logger):
                 return 0
 
+        from gateway.drain_kanban import held
+        if held():
+            return 0
         if can_dispatch is not None and not can_dispatch():
             _sched.logger.debug("Cron dispatch paused while gateway drains existing work")
             return 0

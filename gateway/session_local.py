@@ -286,8 +286,8 @@ def stage_local_session(authority, actor, params, *, trusted_policy=None, truste
     from gateway.session import SessionEntry
     from gateway.session_lifecycle import _now
     from gateway.session_local_recovery import local_identity, restore_local_session
-    authority._require_admission_open()
     sid = local_identity(authority.profile_id, actor.subject, request_id)
+    authority._require_admission_open(session_id=sid)
     from gateway.session_policy import bind_launch_key, restore_policy, launch_key
     if authority.db.get_session(sid) is not None:
         from hermes_state_local import local_receipt

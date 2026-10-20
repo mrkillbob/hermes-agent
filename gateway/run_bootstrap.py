@@ -342,8 +342,9 @@ async def _start_gateway_start_control_socket(runner):
             except concurrent.futures.TimeoutError:
                 return {"multiplex": True, "pending": True, "served_profiles": runner.served_profile_names()}
 
+        from gateway.drain_kanban import control_handlers
         _control_server = GatewayControlServer(
-            verb_handlers={"pause-for-update": _pause_for_update_handler, "identify": _identify_runtime,
+            verb_handlers=control_handlers(runner, {"pause-for-update": _pause_for_update_handler, "identify": _identify_runtime,
                            "rescan-profiles": _rescan_profiles_handler,
                            "migrate-profile-identity": migrate_profile_identity_verb(runner),
                            "unserve-profile": unserve_profile_verb(runner),
@@ -351,7 +352,7 @@ async def _start_gateway_start_control_socket(runner):
                            "purge-profile-identity": purge_profile_identity_verb(runner),
                            # A plugin installed/enabled by another process loads now and re-wires the
                            # live adapters' handlers (#87770); tools/prompt still wait for the next session.
-                           "reload-plugins": reload_plugins_verb(runner, _main_loop)})
+                           "reload-plugins": reload_plugins_verb(runner, _main_loop)}))
         _control_server.ticket_store = runner.session_ticket_store
         if not await _control_server.start():
             _control_server = None
@@ -369,6 +370,18 @@ async def _start_gateway_start_control_socket(runner):
 def _start_gateway_start_cron_and_housekeeping(runner):
     """Start the cron scheduler thread + gateway housekeeping thread; returns
     ``(cron_stop, cron_provider, cron_thread, housekeeping_thread)``."""
+    from gateway.drain_kanban import held
+    if held(runner):
+        from cron.scheduler_provider import InProcessCronScheduler
+        import threading
+        stop = threading.Event()
+        from gateway.runtime_ownership import process_ownership
+        from agent.memory_provider import spawn_context_thread
+        threads = [spawn_context_thread(target=stop.wait, name=name, daemon=True)
+                   for name in ('cron-held', 'housekeeping-held')]
+        for thread in threads:
+            process_ownership.start_writer(thread)
+        return stop, InProcessCronScheduler(), *threads
     from gateway.run import (Dict, Platform, _cron_profile_gate, _cron_tick_profile_homes, _start_gateway_housekeeping, asyncio, logger, threading)
     # The event loop is passed so cron delivery can use live adapters (E2EE support).
     from cron.scheduler_provider import (
@@ -665,7 +678,9 @@ async def _start_gateway_run_runner(runner, _signal_initiated_shutdown: list) ->
         # configured MCP server is slow or unreachable.  discover_mcp_tools() uses a blocking 120s wait
         # internally; calling it from the loop thread would freeze platform heartbeats (Discord shard,
         # Telegram polling) until it returned. See #16856.
-        await _discover_gateway_mcp_tools(runner.config)
+        from gateway.drain_kanban import held
+        if not held(runner):
+            await _discover_gateway_mcp_tools(runner.config)
     except Exception:
         logger.debug("MCP tool discovery failed (non-fatal)", exc_info=True)
 
@@ -703,6 +718,9 @@ async def _start_gateway_run_runner(runner, _signal_initiated_shutdown: list) ->
 def _start_gateway_early_environment_probe() -> None:
     """Background-start the host toolchain probe the warm-up and first prompt read (idempotent;
     honours ``agent.environment_probe: false``). Never raises: the warm-up still runs it lazily."""
+    from gateway.drain_kanban import held
+    if held():
+        return
     try:
         from hermes_cli.config import load_config_readonly
         agent_cfg = load_config_readonly().get("agent")
@@ -797,9 +815,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         _start_gateway_configure_logging(verbosity)
 
         from gateway.run_startup import recover_left_core_at_gateway_start
-        await asyncio.to_thread(recover_left_core_at_gateway_start)  # before the runner loads platform config
+        from gateway.drain_kanban import held
+        if not held():
+            await asyncio.to_thread(recover_left_core_at_gateway_start)  # before the runner loads platform config
 
         runner = GatewayRunner(resolved_config)
+        from gateway.drain_kanban import latch
+        latch(runner)  # before any runtime mailbox/session recovery
         from gateway.run_runtime import initialize_gateway_runtime
         await initialize_gateway_runtime(runner)
         # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
@@ -867,6 +889,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             return record_startup()
 
         def _start_keepalive() -> None:
+            from gateway.drain_kanban import held
+            if held(runner):
+                return
             from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive
             start_nous_auth_keepalive()
 
@@ -878,8 +903,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         if _early_verdict is not None:
             return _early_verdict
         from gateway.run_local_runtime import start_owned_local_runtime
-        start_owned_local_runtime(runner, idle_exit=idle_exit)
-        if _unclean_exit is not None:
+        from gateway.drain_kanban import held
+        if not held(runner):
+            start_owned_local_runtime(runner, idle_exit=idle_exit)
+        if _unclean_exit is not None and not held(runner):
             _start_deferred_state_db_integrity_check(_unclean_exit)
 
         cron_stop, cron_provider, cron_thread, housekeeping_thread = (
@@ -899,7 +926,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 # dashboard routes right away: mount them now, after READY. A client's own idle-exit
                 # gateway (chat -q, TUI) only uses the native WebSocket; it mounts on first request.
                 from gateway.run_api import warm_gateway_dashboard
-                warm_gateway_dashboard(runner)
+                if not held(runner):
+                    warm_gateway_dashboard(runner)
             await wait_gateway_runtime(runner)
         finally:
             try:

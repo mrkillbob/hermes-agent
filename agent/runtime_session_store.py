@@ -141,7 +141,9 @@ class WorkerRPC:
         # A served secondary has no socket; its multiplexer's descriptor names it.
         from hermes_cli.gateway_runtime import discover_gateway_endpoint
         discovery = discover_gateway_endpoint(self.home, timeout=5)
-        if discovery.state == 'ready' and discovery.endpoint is not None:
+        from gateway.drain_kanban import REASON
+        held_owner = discovery.state == 'draining' and discovery.reason_code == REASON
+        if (discovery.state == 'ready' or held_owner) and discovery.endpoint is not None:
             self.endpoint = discovery.endpoint
         elif discovery.state != 'draining' or self.endpoint is None:
             raise WorkerPersistenceError('owner_unavailable')

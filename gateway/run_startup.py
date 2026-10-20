@@ -1649,6 +1649,12 @@ class GatewayStartupMixin:
             return True
         if self._start_check_access_policy():
             return True
+        from gateway.drain_kanban import held
+        if held(self):
+            self._external_drain_active = True
+            self._running = True
+            self._spawn_supervised(self._drain_control_watcher, 'drain_control_watcher')
+            return True  # native listener is already owned; no adapters/recovery/warm-up
         await self._start_recover_previous_run()
         # Serialize startup restore against inbound: adapters receive as soon as they connect, so inbound
         # queues until every synthetic resume turn has finished.

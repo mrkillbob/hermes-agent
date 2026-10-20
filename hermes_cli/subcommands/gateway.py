@@ -256,3 +256,5 @@ def build_gateway_parser(
     proxy_subparsers.add_parser("providers", help="List available proxy upstream providers")
     proxy_parser.set_defaults(func=cmd_proxy)
     gateway_parser.set_defaults(func=cmd_gateway)
+    from hermes_cli.gateway_kanban_window import add_parser
+    add_parser(gateway_subparsers)
