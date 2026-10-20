@@ -133,6 +133,59 @@ def test_corrupt_pending_grants_are_not_overwritten(tmp_path, monkeypatch):
     assert path.read_text(encoding='utf-8') == '{incomplete'
 
 
+def _retain_grant_timings(tmp_path):
+    """Keep synthetic timing evidence after runner cleanup, without changing lock behavior."""
+    import json
+    import os
+    import time
+    from pathlib import Path
+
+    destination = os.environ.get('HERMES_E2E_ARTIFACTS')
+    if not destination:
+        return
+    children = []
+    for prefix in ('a', 'b'):
+        try:
+            with (tmp_path / f'grant-trace-{prefix}.jsonl').open('rb') as stream:
+                body = stream.read(128 * 1024 + 1)
+            if len(body) > 128 * 1024:
+                raise ValueError('trace exceeds byte bound')
+            rows = [json.loads(line) for line in body.splitlines()]
+            if len(rows) > 512:
+                raise ValueError('trace exceeds event bound')
+            waits, holds = [], []
+            waiting = held = None
+            for row in rows:
+                phase, timestamp = row['phase'], row['monotonic_ns']
+                if phase == 'lock-attempt' and waiting is None:
+                    waiting = timestamp
+                elif phase == 'lock-acquired':
+                    if waiting is not None:
+                        waits.append(timestamp - waiting)
+                    waiting, held = None, timestamp
+                elif phase == 'lock-released' and held is not None:
+                    holds.append(timestamp - held)
+                    held = None
+            children.append({'prefix': prefix, 'events': rows, 'retained_events': len(rows),
+                             'completed_grants': sum(row['phase'] == 'grant-end' for row in rows),
+                             'lock_errors': sum(row['phase'] == 'lock-error' for row in rows),
+                             'max_acquired_wait_ns': max(waits, default=None),
+                             'max_released_hold_ns': max(holds, default=None),
+                             'open_wait_since_ns': waiting, 'open_hold_since_ns': held})
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            children.append({'prefix': prefix, 'unavailable': type(error).__name__})
+    report = {'schema': 1, 'phase': 'after-owned-child-cleanup', 'children': children,
+              'timing_scope': 'Completed spans in the retained 512-event tail; earlier spans may be absent.',
+              'observer_effect': 'Instrumented timings; event collection adds work inside the lock. '
+                                 'Retention happens after cleanup. Success does not establish a fix.'}
+    payload = json.dumps(report, separators=(',', ':')).encode('utf-8')
+    if len(payload) > 256 * 1024:
+        payload = json.dumps({'schema': 1, 'unavailable': 'summary exceeds byte bound'}).encode('utf-8')
+    root = Path(destination)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f'grant-lock-timing-{os.getpid()}-{time.monotonic_ns()}.json').write_bytes(payload)
+
+
 @pytest.mark.platforms("any")
 def test_concurrent_process_grants_preserve_every_model(tmp_path):
     import errno
@@ -248,6 +301,11 @@ finally:
             if child.poll() is None:
                 child.kill()
                 child.wait(timeout=5)
+        try:
+            _retain_grant_timings(tmp_path)
+        except Exception as error:
+            # Diagnostics must not replace the original assertion or cleanup outcome.
+            print('grant timing retention unavailable:', type(error).__name__)
         if sys.exc_info()[0] is not None:
             print(diagnostics())
     assert json.loads(path.read_text(encoding='utf-8')) == {
