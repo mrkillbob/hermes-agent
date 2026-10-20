@@ -458,13 +458,64 @@ def test_empty_all_target_policies_remain_enabled_only_for_caller(repos, monkeyp
     assert cli.cli_bindings(Context(a, settings))[1](argparse.Namespace(repository=None)) == 0
 
 
-@pytest.mark.parametrize("field", ["base_repository", "head_repository"])
+@pytest.mark.parametrize("administrative", [False, True])
+def test_explicitly_admitted_fork_keeps_base_workspace(repos, monkeypatch, administrative):
+    from contextlib import contextmanager
+    from dataclasses import replace
+    from github_pr_feedback import cli
+    from github_pr_feedback.caller_repository import current_repository
+    from github_pr_feedback.policy import PullRequest
+    a, b = repos
+    settings = settings_for(a, b)
+    settings["repositories"] = settings["repositories"][:1]
+    settings["repositories"][0]["head_repository"] = "fixture/beta"
+    settings["administrative_batch"] = administrative
+    locks = []
+    @contextmanager
+    def lock():
+        locks.append(current_repository().repository)
+        yield True
+    def inspect(ctx, _args):
+        policy = cli._load_policy_from_context(ctx)
+        assert set(policy.targets) == {"fixture/alpha"}
+        selected = policy.targets["fixture/alpha"]
+        assert selected.local_path == a.resolve()
+        assert selected.head_repository == "fixture/beta"
+        pull = PullRequest(1, "OPEN", "fixture/alpha", "fixture/beta",
+                           "fixture", "same-branch", git(a, "rev-parse", "HEAD"))
+        assert policy.admit_pull_request(pull).admitted
+        assert not policy.admit_pull_request(replace(pull, head_repository="fixture/gamma")).admitted
+        if not administrative:
+            binding = current_repository()
+            assert binding.repository == "fixture/alpha"
+            binding.verify_workspace(selected.local_path, binding.repository)
+        return 0
+    monkeypatch.setattr(cli, "_exclusive_scan_lock", lock)
+    monkeypatch.setattr(cli, "handle_cli_with_context", inspect)
+    args = argparse.Namespace(github_pr_feedback_action="scan-admin" if administrative else "scan",
+                              all_configured=administrative, repository=None)
+    assert cli.cli_bindings(Context(a, settings))[1](args) == 0
+    assert locks == (["fixture/alpha"] if administrative else [])
+
+
+def test_admitted_head_fork_is_not_a_workspace_selector(repos, monkeypatch):
+    from github_pr_feedback import cli
+    a, b = repos
+    settings = settings_for(a, b)
+    settings["repositories"][0]["head_repository"] = "fixture/beta"
+    monkeypatch.setattr(cli, "handle_cli_with_context",
+                        lambda *_: pytest.fail("fork selector reached handler"))
+    args = argparse.Namespace(github_pr_feedback_action="scan", repository="fixture/beta")
+    assert cli.cli_bindings(Context(a, settings))[1](args) == 1
+
+
+@pytest.mark.parametrize("field", ["base_repository", "local_path"])
 def test_admin_wrong_origin_refuses_before_locks_or_handler(repos, monkeypatch, field):
     from contextlib import contextmanager
     from github_pr_feedback import cli
-    a, _ = repos
+    a, b = repos
     configured = target(a, "fixture/alpha")
-    configured[field] = "fixture/beta"
+    configured[field] = str(b) if field == "local_path" else "fixture/beta"
     settings = dict(administrative_batch=True, repositories=[configured])
     reached = []
     @contextmanager

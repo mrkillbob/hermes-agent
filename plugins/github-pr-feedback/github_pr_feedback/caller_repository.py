@@ -154,8 +154,8 @@ class ScopedContext:
         if len(selected) != 1:
             raise RepositoryBindingError("caller_repository_not_configured")
         target = selected[0]
-        if str(target.get("head_repository", "")).casefold() != binding.repository.casefold():
-            raise RepositoryBindingError("configured_head_differs_from_caller")
+        # The checkout belongs to the base. An explicitly allowed head fork is
+        # admission policy, not an alternate workspace or lock identity.
         binding.verify_workspace(target.get("local_path", ""), binding.repository)
         # Git identity/locks are case-insensitive; existing admission/intake
         # contracts retain the configured spelling used by GitHub responses.
@@ -280,9 +280,6 @@ def _administrative_scan(ctx, handler, args):
         if not isinstance(repository, str) or not _REPO.fullmatch(repository):
             raise RepositoryBindingError("administrative_targets_unavailable")
         source = CallerRepository.resolve(_WorkspaceContext(target.get("local_path", "")), repository)
-        head = target.get("head_repository")
-        if not isinstance(head, str) or head.casefold() != source.repository.casefold():
-            raise RepositoryBindingError("configured_head_differs_from_caller")
         bindings[source.lock_key] = source
     with ExitStack() as held:
         for key in sorted(bindings):
