@@ -1,6 +1,7 @@
 """Disposable Python router fixture; no model engine, network listener or provider call."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -33,6 +34,10 @@ class PythonRouter(real_supervisor):
     def _spawn(self):
         from hermes_cli.local_runtime.processes import spawn_server
 
+        if os.name != 'nt':
+            from hermes_cli.local_runtime.tree_custody import reserve_uncontained_tree
+
+            self._spawn_intent = reserve_uncontained_tree(supervisor.state_path())
         self.proc, self._job = spawn_server(
             [sys.executable, '-c', 'import threading; threading.Event().wait(90)'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
