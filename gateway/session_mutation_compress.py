@@ -46,7 +46,7 @@ async def prepare_compress(authority, live, payload, prepared):
     model, runtime = authority.runner._resolve_session_agent_runtime(source=live.source, session_key=live.route)
     if runtime.get('api_mode') == 'codex_app_server':
         raise RuntimeStoreError('runtime_coordination_required')
-    history = authority.db.get_messages_as_conversation(snapshot['target'])
+    history = authority.db.get_messages_as_conversation(snapshot['target'], include_row_ids=True)
     messages = [m for m in history if m.get('role') in {'user', 'assistant', 'tool'}]
     head, tail = messages, []
     if request.partial:
@@ -78,13 +78,16 @@ async def prepare_compress(authority, live, payload, prepared):
             compressed = compressor.compress(json.loads(json.dumps(head)), force=True,
                                                focus_topic=request.focus_topic, memory_context=memory_context)
             if not any(m.get('_compressed_summary') for m in compressed):
-                return None, compressor, 0
+                return None, compressor, []
             # A summary may rewrite the first protected tail row. Its original must be
             # superseded, not archived as a second visible copy beside that carrier.
-            # Count before the partial-compress seam can fold two dicts into one.
-            tail_count = sum(bool(m.pop('_compaction_tail', False)) for m in compressed) + len(tail)
-            return rejoin_compressed_head_and_tail(compressed, tail), compressor, tail_count
-    compressed, compressor, tail_count = await asyncio.to_thread(summarize)
+            # Name originals before the partial seam folds rows or a summary rewrites one.
+            # A positional count would also consume filtered-out system rows in the DB suffix.
+            carried_ids = {m.get('_row_id') for m in compressed if m.pop('_compaction_tail', False)}
+            carried_ids.update(m.get('_row_id') for m in tail)
+            carried = [m for m in messages if m.get('_row_id') in carried_ids]
+            return rejoin_compressed_head_and_tail(compressed, tail), compressor, carried
+    compressed, compressor, carried = await asyncio.to_thread(summarize)
     # The same report every native /compress prints ("Compressed: N → M messages").
     from agent.manual_compression_feedback import summarize_manual_compression
     if compressed is None:
@@ -100,7 +103,7 @@ async def prepare_compress(authority, live, payload, prepared):
     hook = None if policy.safe_mode else {  # same rough basis as the agent path's compaction record
         'before_tokens': estimate_messages_tokens_rough(messages),
         'after_tokens': estimate_messages_tokens_rough(compressed), 'messages_removed': len(messages) - len(compressed)}
-    return dict(prepared, messages=compressed, tail_count=tail_count, summary=summary, post_compaction=hook,
+    return dict(prepared, messages=compressed, carried_messages=carried, summary=summary, post_compaction=hook,
                 in_place=is_truthy_value(options.get('in_place'), default=True))
 
 

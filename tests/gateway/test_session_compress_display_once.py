@@ -17,7 +17,8 @@ import hermes_state_runtime as rt
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('focus', ['', 'here 1', 'here 2'])
-async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monkeypatch, focus):
+@pytest.mark.parametrize('system_in_tail', [False, True])
+async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monkeypatch, focus, system_in_tail):
     monkeypatch.setattr(run, '_load_gateway_config', lambda *args: {
         'compression': {'protect_first_n': 3, 'protect_last_n': 2, 'min_tail_user_messages': 1},
         'platform_toolsets': {'cli': []},
@@ -38,9 +39,12 @@ async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monke
     try:
         ref = create_local_session(authority, owner.actor, dict(
             request_id='transcript', source='cli', cwd=str(tmp_path), model='fake-model', toolsets=[]))
+        system_row = None
         for turn in range(1, 8):
             db.append_message(ref.session_id, 'user', f'long session turn zq{turn}q')
             db.append_message(ref.session_id, 'assistant', ' '.join(f's{turn}w{i:03d}' for i in range(200)))
+            if system_in_tail and turn == 6:
+                system_row = db.append_message(ref.session_id, 'system', 'SYSTEMMARK retained session note')
         before = db.get_session(ref.session_id)
         response = await owner.dispatch({'id': 1, 'method': 'session.mutate', 'params': {
             'session_id': ref.session_id, 'request_id': 'compress', 'operation': 'compress', 'payload': {'focus': focus},
@@ -54,6 +58,11 @@ async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monke
             assert 'result' in resumed, resumed
             text = '\n'.join(str(m.get('content', '')) for m in resumed['result']['messages'])
             assert Counter(re.findall(r'\bs\dw\d{3}\b', text)) == expected
+            assert text.count('SYSTEMMARK') == int(system_in_tail)
+        if system_in_tail:
+            # This row never reached the compressor, so it cannot be a superseded tail copy.
+            assert system_row is not None
+            assert tuple(db._read_one('SELECT active, compacted FROM messages WHERE id=?', (system_row,))) == (0, 1)
     finally:
         await owner.close()
         store.close_all_db_handles()
