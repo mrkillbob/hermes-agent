@@ -114,6 +114,12 @@ test("the condensed fleet menu lists the active gateway's default on both sides 
     })
 
     await test.step(`on ${REMOTE_LABEL}: its default is listed beside This device`, async () => {
+      // The target descriptor publishes before its profile refresh settles. A
+      // menu opened in that interval can unmount as the rail changes shape.
+      const connections = page.locator('[data-slot="connection-switcher"]')
+      await expect(connections).toContainText(REMOTE_LABEL)
+      await expect(connections).toHaveAttribute('aria-busy', 'false')
+
       await expect
         .poll(
           async () => {
