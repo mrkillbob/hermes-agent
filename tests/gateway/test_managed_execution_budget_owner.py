@@ -15,6 +15,14 @@ me = psutil.Process()
 print(json.dumps({'type':'hello', 'pid':me.pid, 'birth':me.create_time(),
                   'ancestors':[p.pid for p in me.parents()[:3]]}), flush=True)
 sys.stdin.buffer.readline()
+if sys.argv[1] in ('finished_output', 'finished_clean'):
+    print(json.dumps({'type':'result','result':{'final_response':'DONE','completed':True}}), flush=True)
+    assert json.loads(sys.stdin.buffer.readline()) == {'type':'finish'}
+    if sys.argv[1] == 'finished_output':
+        sys.stderr.write('x' * 4096)
+        sys.stderr.flush()
+    print(json.dumps({'type':'finished'}), flush=True)
+    raise SystemExit(0)
 if sys.argv[1] == 'output':
     sys.stderr.write('x' * 4096)
     sys.stderr.flush()
@@ -24,7 +32,7 @@ threading.Event().wait()
 
 @pytest.mark.platforms('posix')
 @pytest.mark.live_system_guard_bypass
-@pytest.mark.parametrize('mode', ['wall', 'output', 'wall_close_error'])
+@pytest.mark.parametrize('mode', ['wall', 'output', 'wall_close_error', 'finished_output', 'finished_clean'])
 def test_budget_loss_fences_admission_and_closes_owned_child(tmp_path, monkeypatch, mode):
     from gateway import session_managed_worker as managed
     from gateway.session_authority import LiveSession, SessionAuthority
@@ -51,6 +59,22 @@ def test_budget_loss_fences_admission_and_closes_owned_child(tmp_path, monkeypat
             super().__init__([sys.executable, '-c', CHILD, mode], **kw)
             children.append(self)
     monkeypatch.setattr(managed.subprocess, 'Popen', Child)
+    if mode == 'finished_output':
+        import threading
+        release = threading.Event()
+        real_drain, real_close = managed.ManagedWorker.drain_stderr, managed.ManagedWorker.close
+
+        def delayed_drain(worker, path, consume_bytes=None):
+            def consume(size):
+                assert release.wait(5)
+                return consume_bytes(size)
+            real_drain(worker, path, consume)
+
+        def close_and_release(worker):
+            release.set()
+            real_close(worker)
+        monkeypatch.setattr(managed.ManagedWorker, 'drain_stderr', delayed_drain)
+        monkeypatch.setattr(managed.ManagedWorker, 'close', close_and_release)
     if mode == 'wall_close_error':
         original_close = managed.ManagedWorker.close
         attempts = []
@@ -76,6 +100,11 @@ def test_budget_loss_fences_admission_and_closes_owned_child(tmp_path, monkeypat
         await authority.submit(actor, Submission('turn', ref, {'text': 'go'}, 'queue'))
         await authority.submit(actor, Submission('follower', ref, {'text': 'must remain queued'}, 'queue'))
         row = claim_session_input(db, epoch=authority.epoch, session_id='s')
+        authority._stamp_claim(ref, authority.sessions['s'], row)
+        if mode == 'finished_clean':
+            assert await managed.execute_managed(authority, ref, row, policy) == 'DONE'
+            assert authority.pending_results[row['admission_id']]['result']['completed'] is True
+            return
         with pytest.raises(managed.ManagedExecutionUnknown):
             async with asyncio.timeout(15):
                 await managed.execute_managed(authority, ref, row, policy)

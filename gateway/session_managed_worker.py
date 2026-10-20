@@ -598,6 +598,7 @@ async def execute_managed(authority, ref, row, policy):
             if frame == {'type': 'finished'} and accepted is not None:
                 # 'finished' follows the worker's durable execution.finish: the turn is complete.
                 # A slow or non-zero interpreter exit after it is close()'s cleanup, not a loss.
+                await budget.finish(worker)
                 with suppress(subprocess.TimeoutExpired):
                     await asyncio.to_thread(process.wait, 10)
                 accepted = _with_stop_cause(accepted, worker)

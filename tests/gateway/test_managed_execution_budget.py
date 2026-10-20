@@ -7,6 +7,35 @@ import pytest
 from hermes_state_runtime import RuntimeStoreError
 
 
+@pytest.mark.parametrize('text', ['hello', '\U0001f600' * 20])
+def test_protocol_ceiling_counts_exact_wire_encoding(text):
+    from agent.managed_worker import encode_frame
+    from gateway.session_execution_budget import ExecutionBudget
+
+    async def probe():
+        frame = {'type': 'delta', 'text': text}
+        size = len(encode_frame(frame))
+        exact = ExecutionBudget({'wall_seconds': 2, 'output_bytes': size, 'requests': 1})
+        exact.frame(frame)
+        too_small = ExecutionBudget({'wall_seconds': 2, 'output_bytes': size - 1, 'requests': 1})
+        with pytest.raises(RuntimeStoreError, match='execution_output_budget'):
+            too_small.frame(frame)
+    asyncio.run(probe())
+
+
+def test_terminal_result_refuses_unconfirmed_stderr_drain():
+    from types import SimpleNamespace
+    from gateway.session_execution_budget import ExecutionBudget
+
+    async def probe():
+        worker = SimpleNamespace(close=lambda: None, process=SimpleNamespace(poll=lambda: 0),
+                                 stderr_drain=SimpleNamespace(is_alive=lambda: True))
+        budget = ExecutionBudget({'wall_seconds': 2, 'output_bytes': 1024, 'requests': 1})
+        with pytest.raises(RuntimeStoreError, match='execution_output_unconfirmed'):
+            await budget.finish(worker)
+    asyncio.run(probe())
+
+
 def test_silent_worker_is_bounded():
     from gateway.session_execution_budget import ExecutionBudget
 

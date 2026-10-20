@@ -1,7 +1,6 @@
 """Bound managed-owner supervision; loss still follows the existing unknown/fence path."""
 import asyncio
 import contextvars
-import json
 import threading
 import time
 
@@ -34,7 +33,8 @@ class ExecutionBudget:
         if self.value is None:
             return
         # Include protocol overhead and non-delta frames: no tool/result bypass.
-        size = len(json.dumps(frame, ensure_ascii=False).encode('utf-8')) + 1
+        from agent.managed_worker import encode_frame
+        size = len(encode_frame(frame))
         if not self.consume(size):
             raise RuntimeStoreError('execution_output_budget')
         self.check()
@@ -42,7 +42,9 @@ class ExecutionBudget:
     def check(self, reservation_error=None):
         if reservation_error is not None:
             raise reservation_error
-        if self._overflow.is_set():
+        with self._lock:
+            overflow = self.value is not None and self._bytes > self.value['output_bytes']
+        if overflow:
             raise RuntimeStoreError('execution_output_budget')
         if self.deadline is not None and time.monotonic() >= self.deadline:
             raise RuntimeStoreError('execution_wall_budget')
@@ -87,6 +89,15 @@ class ExecutionBudget:
         if isinstance(error, RuntimeStoreError) and error.reason in {
                 'execution_wall_budget', 'execution_output_budget'}:
             await self._close_before_fence(worker)
+
+    async def finish(self, worker):
+        """Seal output accounting before publishing a bounded worker's terminal result."""
+        if self.value is None:
+            return
+        await self._close_before_fence(worker)
+        if worker.process.poll() is None or (worker.stderr_drain is not None and worker.stderr_drain.is_alive()):
+            raise RuntimeStoreError('execution_output_unconfirmed')
+        self.check()
 
     async def _close_before_fence(self, worker):
         """Join the same owner teardown despite cancellation; preserve the original loss."""
