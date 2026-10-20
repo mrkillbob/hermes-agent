@@ -190,6 +190,10 @@ def _incumbent_allows_boot() -> bool:
     state = read_state()
     if not state:
         return not state_path().exists()  # an unreadable record is not evidence of absence
+    if not _valid_pid(state.get('pid')):
+        # Pre-spawn custody intents intentionally have no router PID/birth yet.
+        logger.error("Recorded local runtime has no verified router; replacement refused")
+        return False
     if is_modern(state) and not _owner_is_dead(state):
         # A previous server of this exact process may have stopped cleanly. A different live
         # owner can still respawn its child, so even a currently dead router is not replaceable.
@@ -203,7 +207,7 @@ def _incumbent_allows_boot() -> bool:
     # Owner death is not an admission fence: adopters may still be using an orphan. Only the
     # explicit stop action may recover its tree. Even an unverified/reused live PID must not
     # cause startup to kill a process or overwrite the uncertain machine record.
-    if not _valid_pid(state.get('pid')) or psutil.pid_exists(state['pid']):
+    if psutil.pid_exists(state['pid']):
         logger.info("Recorded local router is live or uncertain; leaving recovery to explicit stop")
         return False
     if os.name != "nt":

@@ -96,6 +96,14 @@ def test_dead_router_watchdog_never_scans_or_respawns(tmp_path, monkeypatch):
 
 
 @pytest.mark.platforms("posix")
+def test_same_owner_incomplete_spawn_intent_refuses_without_identity_exception(tmp_path, monkeypatch):
+    monkeypatch.setattr(supervisor, "runtimes_root", lambda: tmp_path)
+    intent = tree_custody.reserve_uncontained_tree(supervisor.state_path())
+    assert bootstrap._incumbent_allows_boot() is False
+    assert json.loads(supervisor.state_path().read_text()) == intent
+
+
+@pytest.mark.platforms("posix")
 @pytest.mark.parametrize("replacement", [None, "{broken", '{"spawn_ticket":"other"}'])
 def test_router_publication_refuses_lost_or_changed_intent(tmp_path, replacement):
     path = tmp_path / "server.json"
