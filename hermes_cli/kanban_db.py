@@ -323,7 +323,7 @@ _TICK_ACTIVITY_FIELDS = (
     "spawned", "reclaimed", "promoted", "reconciled_orphans", "crashed", "stale",
     "timed_out", "auto_blocked", "rate_limited", "auto_assigned_default",
     "respawn_guarded", "skipped_per_profile_capped", "skipped_per_model_capped", "workspace_collisions", "skipped_unassigned",
-    "skipped_nonspawnable",
+    "skipped_nonspawnable", "routing_refused",
 )
 
 

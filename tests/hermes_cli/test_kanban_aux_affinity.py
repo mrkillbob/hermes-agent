@@ -66,10 +66,10 @@ def test_dashboard_estimate_declares_an_affinity_key_too():
     """The dashboard estimate endpoints are the same headless aux call: per task when one exists,
     one stable key for the create dialog (no task yet)."""
     from agent.portal_tags import get_affinity_scope
-    api = _dashboard_plugin_api()
+    from plugins.kanban.dashboard.plugin_api_estimate import run_estimate
     seen: list = []
     with patch("agent.auxiliary_client.call_llm", _capturing_call_llm(seen)):
-        api._run_estimate("title", "body", task_id="t_1")
-        api._run_estimate("title", "body", task_id=None)
+        run_estimate("title", "body", task_id="t_1")
+        run_estimate("title", "body", task_id=None)
     assert seen == ["kanban:t_1", "kanban:estimate"]
     assert get_affinity_scope() is None

@@ -207,6 +207,40 @@ def recover_generated_assignee(conn, row, default_assignee, *, dry_run, result):
     return default_assignee
 
 
+def _record_routing_refused(conn, task_id: str, target: str, reason: str, *, dry_run: bool, result) -> None:
+    """Make an authority refusal visible instead of stranding the card silently in ``ready``.
+
+    The card deliberately stays in ``ready``: a PR-feedback card parked in ``triage`` is promoted
+    straight back by ``recompute_ready``, which would loop. The card is re-read inside the write
+    transaction because the tick's snapshot can be stale (an operator may have reassigned, edited
+    or archived it since); a card that no longer qualifies is neither recorded nor reported.
+    Deduplicated against the newest appended event by id (imported cards can carry future
+    timestamps), so ``tail`` names the profile that needs ``execution_authority`` without a row
+    per tick.
+    """
+    from hermes_cli import kanban_db as kb
+
+    def still_in_lane() -> bool:
+        return conn.execute(
+            "SELECT 1 FROM tasks WHERE id=? AND status='ready' AND claim_lock IS NULL AND assignee IN "
+            "('task-orchestrator', 'task-intake-router', 'intake-router')", (task_id,)).fetchone() is not None
+
+    if dry_run:
+        if still_in_lane():
+            result.routing_refused.append((task_id, target, reason))
+        return
+    payload = {"assignee": target, "reason": reason}
+    with kb.write_txn(conn):
+        if not still_in_lane():
+            return
+        result.routing_refused.append((task_id, target, reason))
+        last = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1",
+            (task_id,)).fetchone()
+        if last is None or last["kind"] != "routing_refused" or last["payload"] != kb._json_or_null(payload):
+            kb._append_event(conn, task_id, "routing_refused", payload)
+
+
 def route_orchestrator_task(conn, row, *, dry_run: bool, result, board: Optional[str] = None) -> Optional[str]:
     """Hand a routed task to its repair owner before any worker is spawned."""
     if row["assignee"] not in {"task-orchestrator", "task-intake-router", "intake-router"}:
@@ -235,7 +269,9 @@ def route_orchestrator_task(conn, row, *, dry_run: bool, result, board: Optional
             title=detail["title"], body=detail["body"], idempotency_key=detail["idempotency_key"],
             assignee=profile or "task-intake-router",
         )
-    except ValueError:
+    except ValueError as exc:
+        _record_routing_refused(conn, row["id"], profile or "task-intake-router", str(exc),
+                                dry_run=dry_run, result=result)
         return None
     if profile is None:
         if not dry_run:
