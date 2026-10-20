@@ -19,6 +19,33 @@ def test_silent_worker_is_bounded():
     assert time.monotonic() - start < 3
 
 
+def test_owner_cancellation_cannot_abandon_pre_fence_cleanup():
+    import threading
+    from gateway.session_execution_budget import ExecutionBudget
+
+    async def probe():
+        entered, release = threading.Event(), threading.Event()
+        closed = []
+
+        class Worker:
+            def close(self):
+                entered.set()
+                assert release.wait(5)
+                closed.append(True)
+        budget = ExecutionBudget({'wall_seconds': 2, 'output_bytes': 1024, 'requests': 1})
+        task = asyncio.create_task(budget.close_exhausted(Worker(), RuntimeStoreError('execution_wall_budget')))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+        await asyncio.wait_for(task, 2)
+        assert closed == [True]
+    asyncio.run(probe())
+
+
 def test_stderr_overflow_wakes_owner_and_discards_further_output():
     from gateway.session_execution_budget import ExecutionBudget
 
@@ -44,7 +71,8 @@ def test_chatty_frames_cannot_renew_deadline():
     asyncio.run(probe())
 
 
-def test_deadline_closes_child_before_waiting_for_late_reservation():
+@pytest.mark.parametrize('close_error', [False, True])
+def test_deadline_closes_child_before_waiting_for_late_reservation(close_error):
     from gateway.session_execution_budget import ExecutionBudget
 
     async def probe():
@@ -56,6 +84,8 @@ def test_deadline_closes_child_before_waiting_for_late_reservation():
             def close(self):
                 closed.append(True)
                 loop.call_soon_threadsafe(released.set)
+                if close_error:
+                    raise BrokenPipeError('fixture closed pipe')
 
         async def commit():
             await released.wait()
@@ -65,4 +95,37 @@ def test_deadline_closes_child_before_waiting_for_late_reservation():
         scope, error = await budget.reserve(Worker(), commit())
         assert scope == {'execution_id': 'late'}
         assert isinstance(error, RuntimeStoreError) and error.reason == 'execution_wall_budget'
+    asyncio.run(probe())
+
+
+def test_cancellation_after_close_still_recovers_late_reservation():
+    from gateway.session_execution_budget import ExecutionBudget
+
+    async def probe():
+        closed, commit = asyncio.Event(), asyncio.Event()
+        budget = ExecutionBudget({'wall_seconds': 1, 'output_bytes': 1024, 'requests': 1})
+        original_close = budget._close_before_fence
+
+        async def close(worker):
+            await original_close(worker)
+            closed.set()
+        budget._close_before_fence = close
+
+        class Worker:
+            def close(self):
+                pass
+
+        async def reservation():
+            await commit.wait()
+            return {'execution_id': 'late'}
+        task = asyncio.create_task(budget.reserve(Worker(), reservation()))
+        try:
+            await asyncio.wait_for(closed.wait(), 3)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            commit.set()
+        scope, error = await asyncio.wait_for(task, 2)
+        assert scope == {'execution_id': 'late'} and error.reason == 'execution_wall_budget'
     asyncio.run(probe())

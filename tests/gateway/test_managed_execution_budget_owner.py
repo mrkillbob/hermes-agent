@@ -24,7 +24,7 @@ threading.Event().wait()
 
 @pytest.mark.platforms('posix')
 @pytest.mark.live_system_guard_bypass
-@pytest.mark.parametrize('mode', ['wall', 'output'])
+@pytest.mark.parametrize('mode', ['wall', 'output', 'wall_close_error'])
 def test_budget_loss_fences_admission_and_closes_owned_child(tmp_path, monkeypatch, mode):
     from gateway import session_managed_worker as managed
     from gateway.session_authority import LiveSession, SessionAuthority
@@ -51,6 +51,23 @@ def test_budget_loss_fences_admission_and_closes_owned_child(tmp_path, monkeypat
             super().__init__([sys.executable, '-c', CHILD, mode], **kw)
             children.append(self)
     monkeypatch.setattr(managed.subprocess, 'Popen', Child)
+    if mode == 'wall_close_error':
+        original_close = managed.ManagedWorker.close
+        attempts = []
+
+        def close_with_pipe_error(worker):
+            original_close(worker)
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise BrokenPipeError('fixture pipe closed after termination')
+        monkeypatch.setattr(managed.ManagedWorker, 'close', close_with_pipe_error)
+    from gateway import session_worker_reservation
+    original_loss = session_worker_reservation.lose_admission_worker
+
+    def fence_after_close(*args):
+        assert children[0].poll() is not None, 'ledger contention must not extend worker execution'
+        return original_loss(*args)
+    monkeypatch.setattr(session_worker_reservation, 'lose_admission_worker', fence_after_close)
     policy = build_policy({'cwd': str(tmp_path), 'model': 'm'}, {}, profile_terminal=False)
     policy = replace(policy, kanban_json=json.dumps({'execution_budget': {
         'wall_seconds': 2, 'output_bytes': 1024, 'requests': 1}}))

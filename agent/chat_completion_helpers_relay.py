@@ -97,4 +97,3 @@ def stream_final_text(response) -> str:
         if isinstance(content, list):
             return "".join(t for t in (getattr(part, "text", None) for part in content) if isinstance(t, str))
     return ""
-

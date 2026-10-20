@@ -1,5 +1,6 @@
 """Bound managed-owner supervision; loss still follows the existing unknown/fence path."""
 import asyncio
+import contextvars
 import json
 import threading
 import time
@@ -78,5 +79,31 @@ class ExecutionBudget:
         try:
             return await self.wait(asyncio.shield(reservation)), None
         except (RuntimeStoreError, asyncio.CancelledError) as exc:
-            await asyncio.to_thread(worker.close)
-            return await asyncio.shield(reservation), exc
+            await self._close_before_fence(worker)
+            return await self._join_loss(reservation), exc
+
+    async def close_exhausted(self, worker, error):
+        """End local execution before any potentially contended loss/fencing write."""
+        if isinstance(error, RuntimeStoreError) and error.reason in {
+                'execution_wall_budget', 'execution_output_budget'}:
+            await self._close_before_fence(worker)
+
+    async def _close_before_fence(self, worker):
+        """Join the same owner teardown despite cancellation; preserve the original loss."""
+        cleanup = asyncio.get_running_loop().run_in_executor(None, contextvars.copy_context().run, worker.close)
+        try:
+            await self._join_loss(cleanup)
+        except (OSError, RuntimeError, ValueError) as exc:
+            # A pipe/signalling error cannot skip the original loss's unknown fence.
+            # The owner's finally still retries this same lifecycle's teardown.
+            import logging
+            logging.getLogger(__name__).warning('Budget worker cleanup unconfirmed (%s)', type(exc).__name__)
+
+    async def _join_loss(self, pending):
+        """Recover a committed scope/teardown even if this caller is canceled meanwhile."""
+        while True:
+            try:
+                return await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                if pending.cancelled():
+                    raise

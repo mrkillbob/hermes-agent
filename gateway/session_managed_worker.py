@@ -608,6 +608,7 @@ async def execute_managed(authority, ref, row, policy):
                 return accepted['final_response']
             raise RuntimeStoreError('invalid_worker_frame')
     except (Exception, asyncio.CancelledError) as exc:
+        await budget.close_exhausted(worker, exc)
         import logging
         logging.getLogger(__name__).warning('Managed worker lost: %s',
             exc.reason if isinstance(exc, RuntimeStoreError) else type(exc).__name__)
