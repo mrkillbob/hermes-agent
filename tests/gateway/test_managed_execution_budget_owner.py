@@ -122,7 +122,8 @@ def test_budget_loss_fences_admission_and_closes_owned_child(tmp_path, monkeypat
 
 
 @pytest.mark.platforms('posix')
-def test_spawn_finishing_at_deadline_keeps_cleanup_ownership(tmp_path, monkeypatch):
+@pytest.mark.parametrize('close_error', [False, True])
+def test_spawn_finishing_at_deadline_keeps_cleanup_ownership(tmp_path, monkeypatch, close_error):
     from gateway import session_execution_budget, session_managed_worker as managed
     from gateway.session_policy import build_policy
     from hermes_state_runtime import RuntimeStoreError
@@ -144,12 +145,30 @@ def test_spawn_finishing_at_deadline_keeps_cleanup_ownership(tmp_path, monkeypat
             budgets[0].deadline = 0
     monkeypatch.setattr(managed.subprocess, 'Popen', LateChild)
     monkeypatch.setattr(managed, '_worker_env', lambda authority: None)
+    if close_error:
+        original_close, attempts = managed.ManagedWorker.close, []
+
+        def fail_before_close(worker):
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise BrokenPipeError('fixture cleanup failed before termination')
+            original_close(worker)
+        monkeypatch.setattr(managed.ManagedWorker, 'close', fail_before_close)
     authority = SimpleNamespace(profile_id=str(tmp_path), pending_results={},
                                 adopt_agent=lambda *args: None)
     row = {'admission_id': 'a', 'generation': 1, 'payload': {'text': 'go'}}
     policy = build_policy({'cwd': str(tmp_path), 'model': 'm'}, {}, profile_terminal=False)
     policy = replace(policy, kanban_json=json.dumps({'execution_budget': {
         'wall_seconds': 2, 'output_bytes': 1024, 'requests': 1}}))
-    with pytest.raises(RuntimeStoreError, match='execution_wall_budget'):
-        asyncio.run(managed.execute_managed(authority, SessionRef(str(tmp_path), 's'), row, policy))
-    assert len(children) == 1 and children[0].poll() is not None
+    try:
+        with pytest.raises(RuntimeStoreError, match='execution_wall_budget'):
+            asyncio.run(managed.execute_managed(authority, SessionRef(str(tmp_path), 's'), row, policy))
+        assert len(children) == 1 and children[0].poll() is not None
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+            for stream in (child.stdin, child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()

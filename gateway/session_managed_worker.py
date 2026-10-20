@@ -526,12 +526,12 @@ async def execute_managed(authority, ref, row, policy):
     budget = ExecutionBudget(json.loads(getattr(policy, 'kanban_json', None) or '{}').get('execution_budget'))
     try:
         env = await budget.wait(asyncio.to_thread(_worker_env, authority))
-        cwd = (await asyncio.to_thread(Path(__file__).resolve)).parents[1]
+        cwd = (await budget.wait(asyncio.to_thread(Path(__file__).resolve))).parents[1]
         from gateway.session_worker_spawn import acquire_process
         from gateway.session_managed_worker_log import worker_log_path
         log_path = worker_log_path(authority.profile_id)
-        process = await acquire_process(subprocess.Popen, [sys.executable, '-m', 'agent.managed_worker'],
-            cwd=cwd, stdin=subprocess.PIPE, env=env, stdout=subprocess.PIPE,
+        process, acquisition_error = await acquire_process(subprocess.Popen, [sys.executable, '-m', 'agent.managed_worker'],
+            budget=budget, cwd=cwd, stdin=subprocess.PIPE, env=env, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE if log_path is not None or budget.value is not None else subprocess.DEVNULL, **WORKER_POPEN)
     except asyncio.CancelledError:
         # acquire_process owns late-child cleanup; no bootstrap or reservation was sent.
@@ -549,6 +549,7 @@ async def execute_managed(authority, ref, row, policy):
     accepted = usage = None
     scope = None
     try:
+        budget.check(acquisition_error)
         # The interpreter behind the handle introduces itself first; the owner verifies that
         # identity (alive, same birth, descends from the handle) before reserving for it.
         hello = await budget.wait(worker.next_frame(HELLO_SECONDS, ack=0))
