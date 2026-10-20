@@ -6,7 +6,7 @@ submitting work to threads; no process cwd or environment is rewritten.
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -106,10 +106,10 @@ class CallerRepository:
 
     @property
     def lock_key(self):
-        return sha256(f"{self.common_dir}\0{self.repository}".encode()).hexdigest()
+        return sha256(f"{self.common_dir}\0{self.repository.casefold()}".encode()).hexdigest()
 
     def verify_workspace(self, workspace, repository):
-        if not isinstance(repository, str) or repository.casefold() != self.repository:
+        if not isinstance(repository, str) or repository.casefold() != self.repository.casefold():
             raise RepositoryBindingError("workspace_repository_differs_from_caller")
         if not isinstance(workspace, (str, Path)):
             raise RepositoryBindingError("absolute_caller_workspace_required")
@@ -150,15 +150,17 @@ class ScopedContext:
         if not isinstance(targets, list):
             raise RepositoryBindingError("caller_repository_not_configured")
         selected = [t for t in targets if isinstance(t, dict)
-                    and str(t.get("base_repository", "")).casefold() == binding.repository]
+                    and str(t.get("base_repository", "")).casefold() == binding.repository.casefold()]
         if len(selected) != 1:
             raise RepositoryBindingError("caller_repository_not_configured")
         target = selected[0]
-        if str(target.get("head_repository", "")).casefold() != binding.repository:
+        if str(target.get("head_repository", "")).casefold() != binding.repository.casefold():
             raise RepositoryBindingError("configured_head_differs_from_caller")
         binding.verify_workspace(target.get("local_path", ""), binding.repository)
-        self._target = {**target, "base_repository": binding.repository,
-                        "head_repository": binding.repository, "local_path": str(binding.root)}
+        # Git identity/locks are case-insensitive; existing admission/intake
+        # contracts retain the configured spelling used by GitHub responses.
+        self.binding = replace(binding, repository=target["base_repository"])
+        self._target = {**target, "local_path": str(binding.root)}
 
     def _verify_deployment(self, lane):
         deployment = lane.get("post_merge")
@@ -178,8 +180,8 @@ class ScopedContext:
             "merge_maintainers": self._merge_lanes,
             "release_maintenances": self._many_lanes,
             "repair_steward": self._repository_subset,
-            "local_ci_audit": self._repository_subset,
-            "agent_labels": self._repository_subset,
+            "local_ci_audit": self._all_targets_subset,
+            "agent_labels": self._all_targets_subset,
             "github_actions_permissions_identity": self._repository_subset,
         }
         scope = scopers.get(key)
@@ -188,7 +190,7 @@ class ScopedContext:
     def _single_lane(self, value, default):
         if not isinstance(value, dict):
             return value
-        if value.get("enabled") is True and str(value.get("repository", "")).casefold() != self.binding.repository:
+        if value.get("enabled") is True and str(value.get("repository", "")).casefold() != self.binding.repository.casefold():
             return default
         return {**value, "repository": self.binding.repository} if "repository" in value else value
 
@@ -202,7 +204,7 @@ class ScopedContext:
         if not isinstance(value, list):
             return value
         selected = [{**v, "repository": self.binding.repository} for v in value if isinstance(v, dict)
-                    and str(v.get("repository", "")).casefold() == self.binding.repository]
+                    and str(v.get("repository", "")).casefold() == self.binding.repository.casefold()]
         return selected or default
 
     def _merge_lanes(self, value, default):
@@ -218,9 +220,14 @@ class ScopedContext:
         repos = value["repositories"]
         if not isinstance(repos, list):
             raise RepositoryBindingError("invalid_repository_policy")
-        if not any(isinstance(r, str) and r.casefold() == self.binding.repository for r in repos):
+        if not any(isinstance(r, str) and r.casefold() == self.binding.repository.casefold() for r in repos):
             return default
         return {**value, "repositories": [self.binding.repository]}
+
+    def _all_targets_subset(self, value, default):
+        if isinstance(value, dict) and value.get("repositories") == []:
+            return {**value, "repositories": [self.binding.repository]}
+        return self._repository_subset(value, default)
 
 
 def bind_cli(ctx, handler):
@@ -230,6 +237,7 @@ def bind_cli(ctx, handler):
                 return _administrative_scan(ctx, handler, args)
             binding = CallerRepository.resolve(ctx, getattr(args, "repository", None))
             scoped = ScopedContext(ctx, binding)
+            binding = scoped.binding
             for name in ("worktree", "repository_path"):
                 path = getattr(args, name, None)
                 if path is not None:
@@ -268,12 +276,14 @@ def _administrative_scan(ctx, handler, args):
     for target in targets:
         if not isinstance(target, dict):
             raise RepositoryBindingError("administrative_targets_unavailable")
-        source = CallerRepository.resolve(_WorkspaceContext(target.get("local_path", "")))
         repository = target.get("base_repository")
         if not isinstance(repository, str) or not _REPO.fullmatch(repository):
             raise RepositoryBindingError("administrative_targets_unavailable")
-        binding = CallerRepository(source.root, source.common_dir, repository.casefold())
-        bindings[binding.lock_key] = binding
+        source = CallerRepository.resolve(_WorkspaceContext(target.get("local_path", "")), repository)
+        head = target.get("head_repository")
+        if not isinstance(head, str) or head.casefold() != source.repository.casefold():
+            raise RepositoryBindingError("configured_head_differs_from_caller")
+        bindings[source.lock_key] = source
     with ExitStack() as held:
         for key in sorted(bindings):
             with repository_scope(bindings[key]):

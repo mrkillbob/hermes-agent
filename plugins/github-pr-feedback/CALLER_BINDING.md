@@ -32,6 +32,13 @@ Ordinary workers receive the same repository's worktree; the calling session's
 cwd/environment is never rewritten. Caller arguments are copied before canonical
 case normalization.
 
+Configured repository spelling is preserved for existing case-sensitive admission
+and intake contracts; identity checks and lock keys compare case-insensitively.
+Local-CI and label policies whose empty repository list means all configured targets
+remain enabled, narrowed to the caller. Empty lists do not grant repair or Actions
+identity scope. Administrative targets must match both configured base/head
+identities to the checkout's actual origin before any lock or handler is entered.
+
 Receipt history stays in its existing shared ledger. Summary/history queries are
 repository-filtered; caller scans ignore ambient multi-board reconciliation and
 do not enumerate legacy pool leases whose slot namespace cannot prove repository

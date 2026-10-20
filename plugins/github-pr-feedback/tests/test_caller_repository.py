@@ -400,15 +400,97 @@ def test_maintenance_receipt_workspace_must_belong_to_caller(repos, tmp_path):
 
 def test_selected_policy_and_explicit_selector_use_one_canonical_case(repos, monkeypatch):
     from github_pr_feedback import cli
+    from github_pr_feedback.policy import PullRequest
     a, b = repos
     settings = settings_for(a, b)
     settings["repositories"][0].update(base_repository="Fixture/Alpha", head_repository="Fixture/Alpha")
     def inspect(ctx, args):
         policy = cli._load_policy_from_context(ctx)
-        assert set(policy.targets) == {"fixture/alpha"}
-        assert args.repository == "fixture/alpha"
+        pull = PullRequest(1, "OPEN", next(iter(policy.targets)), "Fixture/Alpha",
+                           "fixture", "same-branch", git(a, "rev-parse", "HEAD"))
+        assert policy.admit_pull_request(pull).admitted
+        assert set(policy.targets) == {"Fixture/Alpha"}
+        assert args.repository == "Fixture/Alpha"
         return 0
     monkeypatch.setattr(cli, "handle_cli_with_context", inspect)
     args = argparse.Namespace(repository="Fixture/Alpha")
     assert cli.cli_bindings(Context(a, settings))[1](args) == 0
     assert args.repository == "Fixture/Alpha"  # caller arguments are not mutated
+
+
+def test_intake_keeps_admitted_repository_spelling(repos, monkeypatch):
+    from github_pr_feedback import intake_cli
+    a, _ = repos
+    repository = "NousResearch/hermes-agent"
+    git(a, "remote", "set-url", "origin", f"https://github.com/{repository}.git")
+    settings = dict(enabled=False, auto_dispatch=False, intake_only={"enabled": True},
+                    repositories=[target(a, repository)], reviewer_logins=["fixture"],
+                    reviewer_associations=[], not_before="2026-08-24T00:00:00Z")
+    def inspect(ctx, args):
+        policy = intake_cli.load_intake_policy(ctx, args.repository)
+        assert policy.repository == repository
+        return 0
+    monkeypatch.setattr(intake_cli, "handle_cli", inspect)
+    handler = intake_cli.cli_bindings(Context(a, settings))[1]
+    assert handler(argparse.Namespace(repository=repository, github_pr_feedback_action="scan-intake")) == 0
+
+
+def test_empty_all_target_policies_remain_enabled_only_for_caller(repos, monkeypatch):
+    from github_pr_feedback import cli
+    a, b = repos
+    settings = settings_for(a, b)
+    settings["local_ci_audit"] = dict(enabled=True, assignee="fixture", post_results=False, repositories=[])
+    settings["agent_labels"] = dict(enabled=True, max_updates_per_scan=1, create_missing=False,
+                                    repositories=[], mappings=[dict(branch_prefix="codex/", label="agent",
+                                                                     color="ffffff", description="fixture")])
+    def inspect(ctx, _args):
+        policy = cli._load_policy_from_context(ctx)
+        for scoped in (policy.local_ci_audit, policy.agent_labels):
+            assert scoped is not None
+            assert scoped.applies_to("fixture/alpha")
+            assert not scoped.applies_to("fixture/beta")
+        sentinel = object()
+        for key in ("repair_steward", "github_actions_permissions_identity"):
+            settings[key] = dict(repositories=[])
+            assert ctx.get_config(key, default=sentinel) is sentinel
+        return 0
+    monkeypatch.setattr(cli, "handle_cli_with_context", inspect)
+    assert cli.cli_bindings(Context(a, settings))[1](argparse.Namespace(repository=None)) == 0
+
+
+@pytest.mark.parametrize("field", ["base_repository", "head_repository"])
+def test_admin_wrong_origin_refuses_before_locks_or_handler(repos, monkeypatch, field):
+    from contextlib import contextmanager
+    from github_pr_feedback import cli
+    a, _ = repos
+    configured = target(a, "fixture/alpha")
+    configured[field] = "fixture/beta"
+    settings = dict(administrative_batch=True, repositories=[configured])
+    reached = []
+    @contextmanager
+    def lock():
+        reached.append("lock")
+        yield True
+    monkeypatch.setattr(cli, "_exclusive_scan_lock", lock)
+    monkeypatch.setattr(cli, "handle_cli_with_context", lambda *_: reached.append("handler") or 0)
+    handler = cli.cli_bindings(Context(a, settings))[1]
+    assert handler(argparse.Namespace(github_pr_feedback_action="scan-admin", all_configured=True)) == 1
+    assert reached == []
+
+
+def test_admin_and_caller_share_lock_across_repository_spelling(repos, tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from github_pr_feedback import cli
+    from github_pr_feedback.caller_repository import CallerRepository, ScopedContext, repository_scope
+    a, _ = repos
+    settings = dict(administrative_batch=True, repositories=[target(a, "Fixture/Alpha")])
+    ctx = Context(a, settings)
+    binding = ScopedContext(ctx, CallerRepository.resolve(ctx)).binding
+    monkeypatch.setattr(cli, "get_default_hermes_root", lambda: tmp_path.resolve() / "control")
+    monkeypatch.setattr(cli, "handle_cli_with_context", lambda *_: pytest.fail("admin overlapped caller"))
+    handler = cli.cli_bindings(ctx)[1]
+    with repository_scope(binding), cli._exclusive_scan_lock() as acquired:
+        assert acquired
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(handler, argparse.Namespace(github_pr_feedback_action="scan-admin", all_configured=True))
+            assert result.result(timeout=10) == 1
