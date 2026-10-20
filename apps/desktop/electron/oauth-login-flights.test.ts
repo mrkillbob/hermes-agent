@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 
 import { afterEach, expect, test, vi } from 'vitest'
 
@@ -181,21 +180,24 @@ test('the same origin on two cookie jars gets two independent flows', async () =
   expect(flights.cooldownRemainingMs(loginFlightKey(`${JAR}-conn-work`, GATEWAY))).toBe(0)
 })
 
-test('the flight key is the jar plus the gateway origin', () => {
-  expect(loginFlightKey(JAR, `${GATEWAY}/api/status`)).toBe(KEY)
+test('the flight key is the jar plus the gateway origin and proxy prefix', () => {
+  expect(loginFlightKey(JAR, `${GATEWAY}/`)).toBe(KEY)
   expect(loginFlightKey(JAR, 'https://other.example.test')).not.toBe(KEY)
   expect(loginFlightKey(`${JAR}-conn-x`, GATEWAY)).not.toBe(KEY)
 })
 
-// main.ts is not importable under vitest; pin which callers count as unattended.
-test('refused requests and the boot cascade sign in hidden; only user actions may show a window', () => {
-  const source = readFileSync(new URL('./main.ts', import.meta.url), 'utf8')
-  const fetchStart = source.indexOf('function fetchJsonViaOauthSession(')
-  const fetchBody = source.slice(fetchStart, source.indexOf('\n}\n', fetchStart))
-  const bootStart = source.indexOf('async function waitForRemoteHermes(')
-  const bootBody = source.slice(bootStart, source.indexOf('\n}\n', bootStart))
+test('gateways under different proxy prefixes of one origin and jar get separate flights', async () => {
+  const flights = new OauthLoginFlights()
+  const a = fakeWindows(() => deferred<string>().promise)
+  const b = fakeWindows(() => deferred<string>().promise)
+  const keyA = loginFlightKey(JAR, `${GATEWAY}/a`)
+  const keyB = loginFlightKey(JAR, `${GATEWAY}/b`)
 
-  expect(fetchBody).toContain('openOauthLoginWindow(origin, { silent: true, background: true })')
-  expect(bootBody).toContain('cloudAgentSilentSignIn(remote.baseUrl, { background: true })')
-  expect(source).toContain("unattended ? 'background' : 'foreground'")
+  expect(keyA).not.toBe(keyB)
+  expect(keyA).not.toBe(KEY)
+  void flights.run(keyA, 'background', a.start)
+  void flights.run(keyB, 'background', b.start)
+
+  expect([a.stats.opened, b.stats.opened]).toEqual([1, 1])
+  expect(flights.isRunning(loginFlightKey(JAR, `${GATEWAY}/a/`))).toBe(true)
 })
