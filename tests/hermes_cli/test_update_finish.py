@@ -145,6 +145,8 @@ def completion(tmp_path, monkeypatch):
                 assert selected_dependency.VALUE == 'selected generation'
                 if fault == 'import':
                     raise RuntimeError('application import failed before build')
+                if fault == 'startup-interrupt':
+                    raise KeyboardInterrupt()
                 spec = importlib.machinery.PathFinder.find_spec(fullname, path)
                 original = spec.loader.exec_module
                 def execute(module):
@@ -203,7 +205,7 @@ def completion(tmp_path, monkeypatch):
                     update._surviving_pre_update_serve_runtimes = lambda plan: []
                     fleet_verify._collect_fleet_snapshot = lambda *args: []
                     def restart(plan, gateway_mode):
-                        if fault in ('restart', 'scm-before-resume'):
+                        if fault in ('restart', 'scm-before-resume', 'scm-before-resume-interrupt'):
                             raise RuntimeError('systemctl restart timed out')
                         assert isinstance(plan, UpdatePlan)
                         assert isinstance(plan.runtimes[0], RuntimeRecord)
@@ -227,7 +229,7 @@ def completion(tmp_path, monkeypatch):
                         (root / 'resumed-token.json').write_text(json.dumps(token))
                         return merge(outcome, token, gateway_mode)
                     update._resume_windows_gateways_and_merge_outcome = resume
-                    if fault in ('scm', 'scm-before-resume'):
+                    if fault.startswith('scm'):
                         # The Windows service manager refuses the paused gateway's restart.
                         from hermes_cli import update_cmd_windows
                         def scm(token):
@@ -235,6 +237,8 @@ def completion(tmp_path, monkeypatch):
                             count = json.loads(calls.read_text()) if calls.exists() else 0
                             calls.write_text(json.dumps(count + 1))
                             if token and token.get('resume_needed'):
+                                if fault.endswith('interrupt'):
+                                    raise KeyboardInterrupt()
                                 raise RuntimeError('Could not restart Windows gateway service(s): HermesGatewayProbe')
                         module._resume_windows_gateways_after_update = scm
                         update_cmd_windows._resume_windows_gateways_after_update = scm
@@ -319,6 +323,42 @@ def test_refused_gateway_resume_after_commit_is_a_followup_not_exit_1(completion
     assert (home / ".update_exit_code").read_text().strip() == "0"
     # The attempt is reported: the historical parent must not replay it at its own exit.
     assert json.loads(result.read_text())["resume_handled"] is True
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("before_resume", [False, True])
+def test_interrupted_gateway_resume_remains_owed_without_replay(completion, before_resume):
+    source, home, request, context, result, run = completion
+    request["gateway_mode"] = True
+    request["receipt"]["started_at"] = "2026-10-04T12:00:00+00:00"
+    request["windows_resume"] = {"resume_needed": True, "profiles": {}, "unmapped": [],
+                                 "services": ["HermesGatewayProbe"],
+                                 "service_profiles": {"HermesGatewayProbe": "default"}}
+    context.write_text(json.dumps(request), encoding="utf-8")
+    child = run("scm-before-resume-interrupt" if before_resume else "scm-interrupt")
+    receipt = json.loads((home / "logs/update_receipts/latest.json").read_text())
+    owed = {row["step"]: row["reason"] for row in receipt.get("followups", [])}
+    assert "KeyboardInterrupt" in owed.get("windows_resume", ""), child.stdout + child.stderr
+    assert receipt["outcome"] == "interrupted"
+    assert receipt["exit_code"] == child.returncode == 130
+    assert json.loads((source / "resume-calls.json").read_text()) == 1
+    assert json.loads(result.read_text())["resume_handled"] is True
+    assert (home / ".update_exit_code").read_text().strip() == "1"
+
+
+@pytest.mark.platforms("posix")
+def test_restart_startup_interrupt_preserves_an_interrupted_receipt(completion):
+    source, home, request, context, result, run = completion
+    request.update(restart_update=True, gateway_mode=True, argv=[str(source / "hermes"), "update"])
+    request["receipt"]["started_at"] = "2026-10-04T12:00:00+00:00"
+    context.write_text(json.dumps(request), encoding="utf-8")
+    child = run("startup-interrupt")
+    receipt = json.loads((home / "logs/update_receipts/latest.json").read_text())
+    assert receipt["outcome"] == "interrupted", child.stdout + child.stderr
+    assert receipt["update_id"] == request["update_id"]
+    assert receipt["exit_code"] == child.returncode == 130
+    assert json.loads(result.read_text())["receipt_handled"] is True
+    assert (home / ".update_exit_code").read_text().strip() == "1"
 
 
 @pytest.mark.platforms("posix")
