@@ -21,7 +21,9 @@ import hermes_state_runtime as rt
 @pytest.mark.parametrize('focus', ['', 'here 1', 'here 2'])
 @pytest.mark.parametrize('system_in_tail', [False, True])
 @pytest.mark.parametrize('legacy_uids', [False, True, 'backfilled'])
-async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monkeypatch, focus, system_in_tail, legacy_uids):
+@pytest.mark.parametrize('prior_generation', [False, True])
+async def test_compress_and_resume_keep_each_original_reply_once(
+        tmp_path, monkeypatch, focus, system_in_tail, legacy_uids, prior_generation):
     monkeypatch.setattr(run, '_load_gateway_config', lambda *args: {
         'compression': {'protect_first_n': 3, 'protect_last_n': 2, 'min_tail_user_messages': 1},
         'platform_toolsets': {'cli': []},
@@ -57,6 +59,8 @@ async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monke
             db.append_message(ref.session_id, 'assistant', ' '.join(f's{turn}w{i:03d}' for i in range(200)))
             if system_in_tail and turn == 6:
                 system_row = db.append_message(ref.session_id, 'system', 'SYSTEMMARK retained session note')
+        if prior_generation:
+            db.archive_and_compact(ref.session_id, db.get_messages_as_conversation(ref.session_id))
         if legacy_uids:
             # Bounded migration can leave legacy rows without logical identities.
             db._write_sql('UPDATE messages SET message_uid=NULL WHERE session_id=?', (ref.session_id,))

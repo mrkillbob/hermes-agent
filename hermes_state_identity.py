@@ -111,35 +111,50 @@ def _stable_tool_key(row: Any) -> Optional[tuple[Any, ...]]:
     return None
 
 
+def _display_origin_history(rows, visible_identity):
+    """Effective identity state in id order, including legacy copies with per-row UIDs."""
+    removed = [row for row in rows if not row["active"] and not row["compacted"]]
+    removed_uids = {row["message_uid"] for row in removed if row["message_uid"]}
+    removed_ts = {row["timestamp"] for row in removed}
+    first, latest, histories = {}, {}, {}
+    for row in rows:
+        uid = row["message_uid"]
+        # Equal display keys share a timestamp; unrelated live rows need no extra hash.
+        if uid not in removed_uids and row["timestamp"] not in removed_ts:
+            continue
+        shown = bool(row["active"] or row["compacted"])
+        identity = visible_identity(row) if shown else row["display_identity"]
+        if identity is None:  # Legacy removed rows retain their body for this fallback.
+            identity = visible_identity(row)
+        first.setdefault(identity, row["id"])
+        latest[identity] = shown
+        if uid in removed_uids:
+            histories.setdefault(uid, set()).add(identity)
+    return first, latest, histories
+
+
 def _single_visible_display_origins(rows, drop_removed: bool, visible_identity) -> dict[str, int]:
     """Anchor rewritten carriers only; unchanged tails and distinct retained payloads keep their slots."""
     if not drop_removed:
         return {}
-    # Only a UID shared with a removed copy can need this fallback; ordinary live rows never hash here.
-    removed_uids = {row["message_uid"] for row in rows if not row["active"] and not row["compacted"]}
-    first, identities, visible = {}, {}, {}
-    for row in rows:
-        uid = row["message_uid"]
-        if uid and uid in removed_uids:
-            first.setdefault(uid, row["id"])
-            shown = bool(row["active"] or row["compacted"])
-            identity = visible_identity(row) if shown else row["display_identity"]
-            if identity is not None:
-                identities.setdefault(uid, set()).add(identity)
-                if shown:
-                    visible.setdefault(uid, set()).add(identity)
-    return {uid: origin for uid, origin in first.items()
-            if len(identities.get(uid, ())) > 1 and len(visible.get(uid, ())) == 1}
+    first, latest, histories = _display_origin_history(rows, visible_identity)
+    return {uid: min(first[identity] for identity in identities) for uid, identities in histories.items()
+            if len(identities) > 1 and sum(latest[identity] for identity in identities) == 1}
 
 
 def _reconcile_rewritten_display_origins(conn, session_id: str) -> None:
-    """Recomputed identities precede this metadata-only pass, including on backup restoration."""
+    """Use the newest row's state per identity, matching removed-copy suppression in display reads."""
     origins = conn.execute(
-        "SELECT message_uid, MIN(id) FROM messages WHERE session_id = ? "
-        "AND message_uid IS NOT NULL AND message_uid <> '' GROUP BY message_uid "
-        "HAVING COUNT(DISTINCT display_identity) > 1 AND COUNT(DISTINCT CASE "
-        "WHEN active = 1 OR compacted = 1 THEN display_identity END) = 1", (session_id,)).fetchall()
+        "WITH identities AS (SELECT display_identity, MIN(id) AS origin, MAX(id) AS newest "
+        "FROM messages WHERE session_id = ? AND display_identity IS NOT NULL GROUP BY display_identity) "
+        "SELECT m.message_uid, MIN(i.origin) FROM messages m "
+        "JOIN identities i ON i.display_identity = m.display_identity JOIN messages n ON n.id = i.newest "
+        "WHERE m.session_id = ? AND m.message_uid IS NOT NULL AND m.message_uid <> '' "
+        "GROUP BY m.message_uid HAVING COUNT(DISTINCT m.display_identity) > 1 AND COUNT(DISTINCT CASE "
+        "WHEN n.active = 1 OR n.compacted = 1 THEN m.display_identity END) = 1",
+        (session_id, session_id)).fetchall()
     conn.executemany(
-        "UPDATE messages SET display_order = ? WHERE session_id = ? AND message_uid = ? "
+        "UPDATE messages SET display_order = ? WHERE session_id = ? AND display_identity IN "
+        "(SELECT display_identity FROM messages WHERE session_id = ? AND message_uid = ?) "
         "AND (active = 1 OR compacted = 1) AND display_order IS NOT ?",
-        [(origin, session_id, uid, origin) for uid, origin in origins])
+        [(origin, session_id, session_id, uid, origin) for uid, origin in origins])
