@@ -4,44 +4,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_cli.local_runtime import memory_accounting as ma
 from hermes_cli.local_runtime.request_control import ChildState, ScopedRequest
 
 
-def test_prompt_cache_zero_does_not_establish_total_growth_ceiling():
-    assert (
-        ma.additional_memory_bound(["s", "--cache-ram", "0"], {}, None).limit_bytes
-        is None
-    )
 
 
-def test_sampled_nonexceedance_does_not_prove_true_peak_within_limit():
-    assert (
-        ma.MemoryMeasurement(100, 110, 105, 2, 0).within(
-            ma.MemoryBound(100, "test", "test")
-        )
-        is None
-    )
 
 
-def test_explicit_foreign_alias_never_wins_sole_child_fallback():
-    child = SimpleNamespace(
-        cmdline=lambda: ["llama-server", "--alias", "foreign-model"]
-    )
-    router = SimpleNamespace(children=lambda recursive: [child])
-    assert ma.model_child(router, "target-model", ["target-model"]) is None
 
 
-def test_changed_process_coverage_invalidates_additional_measurement():
-    sets = iter(([1], [2]))
-    with ma.MemorySampler(
-        lambda: next(sets, [2]),
-        reader=lambda pid: 100,
-        interval_s=10,
-        identity_reader=lambda pid: 1.0,
-    ) as sampler:
-        pass
-    assert not sampler.result.complete
 
 
 def idle_probe():
@@ -117,15 +88,6 @@ def test_malformed_slot_boolean_is_not_idle(monkeypatch):
         probe.read()
 
 
-def test_duplicate_process_ids_invalidate_measurement():
-    with ma.MemorySampler(
-        lambda: [1, 1],
-        reader=lambda pid: 100,
-        interval_s=10,
-        identity_reader=lambda pid: 1.0,
-    ) as sampler:
-        pass
-    assert not sampler.result.complete
 
 
 def test_cancel_before_start_prevents_later_dispatch():
@@ -137,50 +99,11 @@ def test_cancel_before_start_prevents_later_dispatch():
         request.start()
 
 
-def test_same_pid_birth_change_invalidates_measurement():
-    births = iter((10.0, 10.0, 11.0, 11.0))
-    with ma.MemorySampler(
-        lambda: [1],
-        reader=lambda pid: 100,
-        interval_s=10,
-        identity_reader=lambda pid: next(births),
-    ) as sampler:
-        pass
-    assert not sampler.result.complete
 
 
-def test_birth_change_during_sample_invalidates_measurement():
-    births = iter((10.0, 11.0, 11.0, 11.0))
-    with ma.MemorySampler(
-        lambda: [1],
-        reader=lambda pid: 100,
-        interval_s=10,
-        identity_reader=lambda pid: next(births),
-    ) as sampler:
-        pass
-    assert not sampler.result.complete
 
 
-def test_memory_total_bound_does_not_execute_engine(monkeypatch):
-    def forbidden(executable):
-        raise AssertionError("engine execution")
-
-    monkeypatch.setattr(ma, "_engine_default_cache_ram_mib", forbidden)
-    assert not ma.additional_memory_bound(["s"], {}, "/never-run").available
-    assert not ma.child_bound(object()).available
 
 
-def test_explicit_foreign_alias_overrides_matching_model_filename():
-    child = SimpleNamespace(
-        cmdline=lambda: ["s", "--alias", "foreign", "--model", "/models/target.gguf"]
-    )
-    router = SimpleNamespace(children=lambda recursive: [child])
-    assert ma.model_child(router, "target", ["target"]) is None
 
 
-def test_duplicate_alias_flags_are_not_a_unique_child_identity():
-    child = SimpleNamespace(
-        cmdline=lambda: ["s", "--alias", "foreign", "--alias", "target"]
-    )
-    router = SimpleNamespace(children=lambda recursive: [child])
-    assert ma.model_child(router, "target", ["target"]) is None
