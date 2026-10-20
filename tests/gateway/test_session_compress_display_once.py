@@ -18,15 +18,25 @@ import hermes_state_runtime as rt
 @pytest.mark.asyncio
 @pytest.mark.parametrize('focus', ['', 'here 1', 'here 2'])
 @pytest.mark.parametrize('system_in_tail', [False, True])
-async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monkeypatch, focus, system_in_tail):
+@pytest.mark.parametrize('legacy_uids', [False, True, 'backfilled'])
+async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monkeypatch, focus, system_in_tail, legacy_uids):
     monkeypatch.setattr(run, '_load_gateway_config', lambda *args: {
         'compression': {'protect_first_n': 3, 'protect_last_n': 2, 'min_tail_user_messages': 1},
         'platform_toolsets': {'cli': []},
     })
-    monkeypatch.setattr(ContextCompressor, '_call_summary_llm',
-                        lambda self, prompt, started_at: 'SUMMARYMARK compressed account of the earlier turns')
     store = SessionStore(tmp_path / 'sessions', GatewayConfig())
     db = store._db
+    backfilled = {}
+
+    def summarize(self, prompt, started_at):
+        if legacy_uids == 'backfilled':
+            # Another opener can advance bounded migration while the summary is prepared.
+            db._write_sql('UPDATE messages SET message_uid=lower(hex(randomblob(16))) WHERE message_uid IS NULL')
+            backfilled.update((row['id'], row['message_uid']) for row in db._read_all(
+                'SELECT id, message_uid FROM messages'))
+        return 'SUMMARYMARK compressed account of the earlier turns'
+
+    monkeypatch.setattr(ContextCompressor, '_call_summary_llm', summarize)
     runner = SimpleNamespace(session_store=store, _session_db=db, adapters={}, _draining=False,
                              _cached_agent_for=lambda route: None, _evict_cached_agent=lambda *a, **kw: None,
                              _resolve_session_agent_runtime=lambda **kwargs: ('fake-model', {
@@ -45,12 +55,17 @@ async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monke
             db.append_message(ref.session_id, 'assistant', ' '.join(f's{turn}w{i:03d}' for i in range(200)))
             if system_in_tail and turn == 6:
                 system_row = db.append_message(ref.session_id, 'system', 'SYSTEMMARK retained session note')
+        if legacy_uids:
+            # Bounded migration can leave legacy rows without logical identities.
+            db._write_sql('UPDATE messages SET message_uid=NULL WHERE session_id=?', (ref.session_id,))
         before = db.get_session(ref.session_id)
         response = await owner.dispatch({'id': 1, 'method': 'session.mutate', 'params': {
             'session_id': ref.session_id, 'request_id': 'compress', 'operation': 'compress', 'payload': {'focus': focus},
             'expected_revision': before['runtime_revision'], 'expected_generation': before['runtime_generation']}})
         assert 'result' in response, response
         assert response['result']['message_count'] < 14
+        for row_id, uid in backfilled.items():
+            assert db._read_one('SELECT message_uid FROM messages WHERE id=?', (row_id,))[0] == uid
         expected = Counter({f's{turn}w{i:03d}': 1 for turn in range(1, 8) for i in range(200)})
         for _ in range(2):
             resumed = await owner.dispatch({'id': 2, 'method': 'session.resume',

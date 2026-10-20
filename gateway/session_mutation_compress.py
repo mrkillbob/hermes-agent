@@ -67,6 +67,11 @@ async def prepare_compress(authority, live, payload, prepared):
 
     def summarize():
         with policy_scope(policy, authority=authority):
+            from agent.message_metadata import stamp_message_uid
+            # Legacy rows awaiting bounded backfill need an identity that survives summary rewrites.
+            # This touches only prepared dicts; publication binds carried originals atomically.
+            for message in messages:
+                stamp_message_uid(message)
             from agent.conversation_compression import _pre_compress_memory_context
             memory_context = _pre_compress_memory_context(resident, head, False) if resident is not None else ''
             compressor = ContextCompressor(model, base_url=runtime.get('base_url') or '',
