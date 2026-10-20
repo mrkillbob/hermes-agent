@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import type { BrowserWindow, BrowserWindowConstructorOptions, ClientRequest, Session } from 'electron'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
+import { resolveDesktopRemoteRoute } from './desktop-remote-route'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import { createOauthSessionHandlers } from './oauth-session-handlers'
 import { RemoteSessionCookieStore } from './remote-session-cookies'
@@ -20,7 +21,7 @@ const registry = {
   ]
 }
 
-function harness() {
+function harness(config: { profiles?: Record<string, unknown> } | null = null) {
   const cookies = new Map<Session, Set<string>>()
   const sessions = new Map<string, Session>()
   const windows: Array<{ options: BrowserWindowConstructorOptions; url: string; destroyed: boolean }> = []
@@ -81,7 +82,7 @@ function harness() {
     installRemoteHeaderRulesOnSession: () => {},
     resolveOauthPartitionForUrl: partitionFor,
     readDesktopConnectionsRegistry: () => registry,
-    readDesktopConnectionConfig: () => null,
+    readDesktopConnectionConfig: () => config,
     BrowserWindow: Window as unknown as new (options: BrowserWindowConstructorOptions) => BrowserWindow,
     hasOauthSessionCookie: async (url: string, identity = {}) =>
       cookies.get(fromPartition(partitionFor(url, identity)))!.has(url.replace(/\/+$/, '')),
@@ -90,7 +91,11 @@ function harness() {
     onWindowCreated: () => {},
     captureRemoteSessionCookiesIntoMirror: (sess: Session, partition: string, url: string) => {
       if (cookies.get(sess)!.has(url)) {
-        mirror.recordFromJar(partition, url, [{ name: '__Secure-hermes_session_at', value: 'fresh-c', path: '/c' }])
+        const path = new URL(url).pathname
+
+        mirror.recordFromJar(partition, url, [
+          { name: '__Secure-hermes_session_at', value: `fresh-${path.slice(1)}`, path }
+        ])
       }
     },
     remoteSessionCookies: mirror,
@@ -139,6 +144,39 @@ test('explicit login loads the registered prefix chooser in its request cookie j
   expect(h.windows[0].options.webPreferences?.session).toBe(h.fromPartition(PRIVATE_JAR))
   expect(h.windows[0].options.show).toBe(true)
   expect(h.windows[0].destroyed).toBe(true)
+})
+
+test.each(['remote', 'cloud'])('401 recovery preserves a legacy per-profile %s override prefix', async mode => {
+  const base = `${HOST}/legacy-b`
+
+  const config = {
+    profiles: {
+      work: { mode, authMode: 'oauth', url: base },
+      local: { mode: 'local', url: `${base}/deeper` },
+      ssh: { mode: 'ssh', host: 'ssh.example.test', url: `${base}/deeper/api` }
+    }
+  }
+
+  const route = resolveDesktopRemoteRoute({
+    config,
+    profile: 'work',
+    registry: { version: 2, primary: '', launchMode: 'primary', lastUsed: '', connections: [] }
+  })
+
+  expect(route).toMatchObject({ kind: mode, source: 'profile', url: base, authMode: 'oauth' })
+
+  if (!route || route.kind === 'ssh') {
+    throw new Error('Expected the real remote route')
+  }
+
+  const h = harness(config)
+
+  await expect(h.fetchJsonViaOauthSession(`${route.url}/deeper/api/status`)).resolves.toEqual({ ok: true })
+  expect(h.windows).toHaveLength(1)
+  expect(h.windows[0].url).toBe(`${base}/`)
+  expect(h.windows[0].options.webPreferences?.session).toBe(h.fromPartition(LEGACY_OAUTH_PARTITION))
+  expect(h.requests.every(request => request.session === h.fromPartition(LEGACY_OAUTH_PARTITION))).toBe(true)
+  expect(h.requests[1].headers.Cookie).toBe('__Secure-hermes_session_at=fresh-legacy-b')
 })
 
 test('401 re-login is hidden, keeps the prefix and jar, then retries with the fresh cookie', async () => {
