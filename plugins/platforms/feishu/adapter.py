@@ -1323,6 +1323,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._sender_name_cache: dict[str, tuple[str, float]] = {}  # sender_id → (name, expire_at)
         self._webhook_rate_counts: dict[str, tuple[int, float]] = {}  # rate_key → (count, window_start)
         self._webhook_ingress_rate_counts: dict[str, tuple[int, float]] = {}
+        self._webhook_active_reads: dict[str, int] = {}
         self._webhook_anomaly_counts: dict[str, tuple[int, str, float]] = {}  # ip → (count, last_status, first_seen)
         self._card_action_tokens: dict[str, float] = {}  # token → first_seen_time
         # Inbound events that arrived before the loop was ready; one drainer thread replays them.

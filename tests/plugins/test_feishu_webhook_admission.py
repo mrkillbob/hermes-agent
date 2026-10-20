@@ -75,3 +75,62 @@ def test_invalid_wire_input_and_unsupported_encryption_do_not_dispatch(kind, sta
     assert asyncio.run(adapter._handle_webhook_request(request)).status == status
     assert adapter._webhook_rate_counts == {}
     adapter._on_message_event.assert_not_called()
+
+
+@pytest.mark.parametrize("scope", ["peer", "listener"])
+@pytest.mark.parametrize("cancel", [False, True])
+def test_active_body_reads_are_bounded_and_capacity_is_released(scope, cancel, monkeypatch):
+    from plugins.platforms.feishu import webhook_ingress
+
+    monkeypatch.setattr(webhook_ingress, "_MAX_ACTIVE_PER_PEER", 2, raising=False)
+    monkeypatch.setattr(webhook_ingress, "_MAX_ACTIVE_REQUESTS", 3, raising=False)
+
+    async def scenario():
+        adapter = make_adapter()
+        count = (webhook_ingress._MAX_ACTIVE_PER_PEER if scope == "peer"
+                 else webhook_ingress._MAX_ACTIVE_REQUESTS)
+        entered = 0
+        ready = asyncio.Event()
+        release = asyncio.Event()
+        tasks = []
+
+        async def slow_read(_size):
+            nonlocal entered
+            entered += 1
+            if entered == count:
+                ready.set()
+            await release.wait()
+            raise asyncio.IncompleteReadError(b"{}", 3)
+
+        try:
+            for index in range(count):
+                request = make_request({})
+                request.remote = "shared-peer" if scope == "peer" else f"peer-{index}"
+                request.content.readexactly.side_effect = slow_read
+                tasks.append(asyncio.create_task(adapter._handle_webhook_request(request)))
+            await asyncio.wait_for(ready.wait(), 2)
+            overflow = make_request({})
+            overflow.remote = "shared-peer" if scope == "peer" else "new-peer"
+            assert (await adapter._handle_webhook_request(overflow)).status == 503
+            overflow.content.readexactly.assert_not_called()
+            if scope == "peer":
+                # One slow peer cannot consume every listener slot.
+                other = make_request({"type": "url_verification", "token": "test-token", "challenge": "ok"})
+                other.remote = "other-peer"
+                assert (await adapter._handle_webhook_request(other)).status == 200
+            if cancel:
+                for task in tasks:
+                    task.cancel()
+            else:
+                release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            assert adapter._webhook_active_reads == {}
+            recovered = make_request({"type": "url_verification", "token": "test-token", "challenge": "ok"})
+            recovered.remote = overflow.remote
+            assert (await adapter._handle_webhook_request(recovered)).status == 200
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(scenario())

@@ -10,6 +10,11 @@ from . import adapter as feishu
 
 logger = logging.getLogger(__name__)
 
+# Non-queuing admission bounds aggregate body buffers and slow-reader tasks.
+# Per-peer capacity leaves room for other peers without keeping denial history.
+_MAX_ACTIVE_REQUESTS = 32
+_MAX_ACTIVE_PER_PEER = 8
+
 
 def _parse_payload(body: bytes) -> dict:
     payload = json.loads(body.decode("utf-8"))
@@ -79,6 +84,23 @@ def _authentication_error(adapter: Any, headers: Any, body: bytes, payload: dict
 
 
 async def handle_webhook_request(adapter: Any, request: Any) -> Any:
+    remote_ip = getattr(request, "remote", None) or "unknown"
+    active = adapter._webhook_active_reads
+    # No await between checking and reserving: all handlers share the server loop.
+    if active.get(remote_ip, 0) >= _MAX_ACTIVE_PER_PEER or sum(active.values()) >= _MAX_ACTIVE_REQUESTS:
+        return feishu.web.Response(status=503, text="Webhook capacity exhausted")
+    active[remote_ip] = active.get(remote_ip, 0) + 1
+    try:
+        return await _handle_admitted_request(adapter, request)
+    finally:
+        remaining = active[remote_ip] - 1
+        if remaining:
+            active[remote_ip] = remaining
+        else:
+            del active[remote_ip]
+
+
+async def _handle_admitted_request(adapter: Any, request: Any) -> Any:
     remote_ip = getattr(request, "remote", None) or "unknown"
     # A failed peer budget cannot gate this bounded read: authentication needs
     # the raw body, and valid callbacks may share a proxy/egress with invalid ones.

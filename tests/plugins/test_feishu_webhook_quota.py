@@ -19,6 +19,7 @@ def make_adapter():
     adapter._encrypt_key = "test-key"
     adapter._webhook_rate_counts = {}
     adapter._webhook_ingress_rate_counts = {}
+    adapter._webhook_active_reads = {}
     adapter._webhook_anomaly_counts = {}
     adapter._on_message_event = Mock()
     return adapter
