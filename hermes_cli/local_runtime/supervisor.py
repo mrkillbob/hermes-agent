@@ -287,10 +287,40 @@ class LlamaServerSupervisor:
                     self._reap_orphaned_children()
                     self._spawn()
                 self._wait_health(120)
-                if self.primary_model:
-                    self.ensure_model_ready(self.primary_model)
             except Exception as exc:
-                logger.error("llama-server restart failed: %s", exc)
+                logger.exception("llama-server restart failed: %s", exc)
+                self._close_unhealthy_restart()
+                continue
+            if self.primary_model:
+                # A model that fails its touch request is not a router failure: keep the router.
+                try:
+                    self.ensure_model_ready(self.primary_model)
+                except Exception as exc:
+                    logger.exception("model %s not ready after restart: %s", self.primary_model, exc)
+
+    def _close_unhealthy_restart(self) -> None:
+        """A restarted router that is alive but never healthy would otherwise be polled forever,
+        holding its memory with nothing serving; closing it lets the next pass retry with backoff.
+
+        Unresolved limits: if terminating the router fails it stays alive and is not retried
+        (the failure is logged); on POSIX a model child spawned while the tree is being
+        terminated is not enumerated, and _reap_orphaned_children skips it once it is
+        reparented to PID 1."""
+        with self._lifecycle_lock:
+            if self._stopping or self.proc is None or self.proc.poll() is not None:
+                return
+            try:
+                self._terminate_tree(self.proc)
+            except Exception:
+                # Cleanup failure must not end the watchdog: the next pass retries the restart.
+                logger.exception("could not close unhealthy llama-server pid=%s", self.proc.pid)
+            finally:
+                if self._job is not None:
+                    job, self._job = self._job, None
+                    try:
+                        job.close()
+                    except OSError:
+                        logger.exception("could not close the unhealthy router's job object")
 
     def stop(self) -> None:
         with self._lifecycle_lock:
