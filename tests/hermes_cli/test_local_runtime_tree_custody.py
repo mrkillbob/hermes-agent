@@ -108,6 +108,14 @@ def test_router_publication_refuses_lost_or_changed_intent(tmp_path, replacement
         tree_custody.verify_spawn_intent(path, intent)
 
 
+@pytest.mark.platforms("posix")
+def test_matching_spawn_intent_accepts_editor_bom(tmp_path):
+    path = tmp_path / "server.json"
+    intent = tree_custody.reserve_uncontained_tree(path)
+    path.write_text(json.dumps(intent), encoding="utf-8-sig")
+    tree_custody.verify_spawn_intent(path, intent)
+
+
 @pytest.mark.parametrize("close_fails", [False, True])
 def test_containment_settlement_retains_proof_or_failed_handle(tmp_path, monkeypatch, close_fails):
     """The containment interface is synthetic; actual Job behavior is tested on Windows."""

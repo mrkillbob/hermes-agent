@@ -44,7 +44,7 @@ def reserve_uncontained_tree(path: Path) -> dict:
 def verify_spawn_intent(path: Path, intent: dict) -> None:
     """Do not publish over a changed, missing or unreadable admission record."""
     try:
-        current = json.loads(path.read_text(encoding="utf-8"))
+        current = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
         raise RuntimeError("local runtime spawn custody record unavailable") from exc
     if current != intent:
