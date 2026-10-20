@@ -160,7 +160,7 @@ _FEISHU_SENDER_NAME_TTL_SECONDS = 10 * 60          # 10 minutes sender-name cach
 _FEISHU_WEBHOOK_MAX_BODY_BYTES = 1 * 1024 * 1024   # 1 MB body limit
 _FEISHU_WEBHOOK_RATE_WINDOW_SECONDS = 60            # fixed window for rate limiters
 _FEISHU_WEBHOOK_RATE_LIMIT_MAX = 120               # max authenticated event deliveries per window per IP
-_FEISHU_WEBHOOK_INGRESS_RATE_LIMIT_MAX = 120        # max pre-auth request admissions per window per IP
+_FEISHU_WEBHOOK_INGRESS_RATE_LIMIT_MAX = 120        # max rejected requests per window per IP
 _FEISHU_WEBHOOK_RATE_MAX_KEYS = 4096               # max tracked keys (prevents unbounded growth)
 _FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS = 30          # max seconds to read request body
 _FEISHU_WEBHOOK_ANOMALY_THRESHOLD = 25             # consecutive error responses before WARNING log
@@ -1323,6 +1323,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._sender_name_cache: dict[str, tuple[str, float]] = {}  # sender_id → (name, expire_at)
         self._webhook_rate_counts: dict[str, tuple[int, float]] = {}  # rate_key → (count, window_start)
         self._webhook_ingress_rate_counts: dict[str, tuple[int, float]] = {}
+        self._webhook_active_reads: dict[str, int] = {}
         self._webhook_anomaly_counts: dict[str, tuple[int, str, float]] = {}  # ip → (count, last_status, first_seen)
         self._card_action_tokens: dict[str, float] = {}  # token → first_seen_time
         # Inbound events that arrived before the loop was ready; one drainer thread replays them.
@@ -2806,94 +2807,22 @@ class FeishuAdapter(BasePlatformAdapter):
     def _webhook_reject(self, remote_ip: str, anomaly: str, status: int, text: Optional[str] = None,
                         json_msg: Optional[str] = None) -> Any:
         """Record an anomaly for ``remote_ip`` and build the matching aiohttp error response."""
+        # Count only rejected work; an exhausted failure table must never deny
+        # an authenticated callback before it reaches its own delivery quota.
+        rate_key = f"{self._app_id}:{self._webhook_path}:{remote_ip}"
+        if status != 429 and not self._check_webhook_rate_limit(rate_key, pre_auth=True):
+            anomaly, status, text, json_msg = "429-rejected", 429, "Too Many Requests", None
+        if status in {401, 408, 413, 415, 429} or anomaly == "400-encrypted":
+            logger.warning("[Feishu] Webhook rejected: %s from %s", anomaly, remote_ip)
         self._record_webhook_anomaly(remote_ip, anomaly)
         if json_msg is not None:
             return web.json_response({"code": status, "msg": json_msg}, status=status)
         return web.Response(status=status, text=text)
 
     async def _handle_webhook_request(self, request: Any) -> Any:
-        remote_ip = (getattr(request, "remote", None) or "unknown")
+        from .webhook_ingress import handle_webhook_request
 
-        # Bound unauthenticated work separately from the event-delivery quota.
-        rate_key = f"{self._app_id}:{self._webhook_path}:{remote_ip}"
-        if not self._check_webhook_rate_limit(rate_key, pre_auth=True):
-            logger.warning("[Feishu] Webhook ingress rate limit exceeded for %s", remote_ip)
-            return self._webhook_reject(remote_ip, "429-ingress", 429, "Too Many Requests")
-
-        headers = getattr(request, "headers", {}) or {}
-        content_type = str(headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
-        if content_type and content_type != "application/json":  # Feishu always sends JSON
-            logger.warning("[Feishu] Webhook rejected: unexpected Content-Type %r from %s", content_type, remote_ip)
-            return self._webhook_reject(remote_ip, "415", 415, "Unsupported Media Type")
-
-        content_length = getattr(request, "content_length", None)
-        if content_length is not None and content_length > _FEISHU_WEBHOOK_MAX_BODY_BYTES:
-            logger.warning("[Feishu] Webhook body too large (%d bytes) from %s", content_length, remote_ip)
-            return self._webhook_reject(remote_ip, "413", 413, "Request body too large")
-
-        try:
-            body_bytes: bytes = await asyncio.wait_for(
-                _read_limited_feishu_webhook_body(request, _FEISHU_WEBHOOK_MAX_BODY_BYTES),
-                timeout=_FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS,
-            )
-        except ValueError:
-            logger.warning("[Feishu] Webhook body exceeds limit from %s", remote_ip)
-            return self._webhook_reject(remote_ip, "413", 413, "Request body too large")
-        except TimeoutError:
-            logger.warning("[Feishu] Webhook body read timed out after %ds from %s", _FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS, remote_ip)
-            return self._webhook_reject(remote_ip, "408", 408, "Request Timeout")
-        except Exception:
-            return self._webhook_reject(remote_ip, "400", 400, json_msg="failed to read body")
-
-        try:
-            payload = json.loads(body_bytes.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return self._webhook_reject(remote_ip, "400", 400, json_msg="invalid json")
-
-        # Verification token: second defence layer beyond the signature (matches openclaw).
-        if self._verification_token:
-            header = payload.get("header") or {}
-            incoming_token = str(header.get("token") or payload.get("token") or "")
-            # compare_digest as bytes — it raises TypeError on non-ASCII str, and the token is remote input.
-            if not incoming_token or not hmac.compare_digest(
-                incoming_token.encode(), self._verification_token.encode()
-            ):
-                logger.warning("[Feishu] Webhook rejected: invalid verification token from %s", remote_ip)
-                return self._webhook_reject(remote_ip, "401-token", 401, "Invalid verification token")
-
-        # Token is validated above BEFORE reflecting the challenge, so an unauthenticated
-        # remote can't prove endpoint control by getting its own challenge echoed back.
-        if payload.get("type") == "url_verification":
-            return web.json_response({"challenge": payload.get("challenge", "")})
-
-        if self._encrypt_key and not self._is_webhook_signature_valid(request.headers, body_bytes):
-            logger.warning("[Feishu] Webhook rejected: invalid signature from %s", remote_ip)
-            return self._webhook_reject(remote_ip, "401-sig", 401, "Invalid signature")
-
-        if payload.get("encrypt"):
-            logger.error("[Feishu] Encrypted webhook payloads are not supported by Hermes webhook mode")
-            return self._webhook_reject(
-                remote_ip, "400-encrypted", 400, json_msg="encrypted webhook payloads are not supported",
-            )
-
-        # Only authenticated event deliveries may consume the bounded per-peer quota.
-        if not self._check_webhook_rate_limit(rate_key):
-            logger.warning("[Feishu] Webhook rate limit exceeded for %s", remote_ip)
-            return self._webhook_reject(remote_ip, "429", 429, "Too Many Requests")
-
-        self._clear_webhook_anomaly(remote_ip)
-
-        event_type = str((payload.get("header") or {}).get("event_type") or "")
-        data = self._namespace_from_mapping(payload)
-        if event_type in {"im.message.reaction.created_v1", "im.message.reaction.deleted_v1"}:
-            self._on_reaction_event(event_type, data)
-        else:
-            handler = self._WEBHOOK_EVENT_HANDLERS.get(event_type)
-            if handler is None:
-                logger.debug("[Feishu] Ignoring webhook event type: %s", event_type or "unknown")
-            else:
-                getattr(self, handler)(data)
-        return web.json_response({"code": 0, "msg": "ok"})
+        return await handle_webhook_request(self, request)
 
     # Webhook event_type -> handler method name (reaction events are routed separately).
     _WEBHOOK_EVENT_HANDLERS = {
@@ -2924,7 +2853,7 @@ class FeishuAdapter(BasePlatformAdapter):
             return False
 
     def _check_webhook_rate_limit(self, rate_key: str, *, pre_auth: bool = False) -> bool:
-        """Independent ingress/delivery tables with the same bounded fixed-window semantics."""
+        """Independent rejected-request/delivery tables with bounded fixed-window semantics."""
         from .webhook_limits import admit_webhook_request
 
         counts = self._webhook_ingress_rate_counts if pre_auth else self._webhook_rate_counts

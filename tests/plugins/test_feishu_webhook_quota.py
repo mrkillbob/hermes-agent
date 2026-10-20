@@ -19,6 +19,7 @@ def make_adapter():
     adapter._encrypt_key = "test-key"
     adapter._webhook_rate_counts = {}
     adapter._webhook_ingress_rate_counts = {}
+    adapter._webhook_active_reads = {}
     adapter._webhook_anomaly_counts = {}
     adapter._on_message_event = Mock()
     return adapter
@@ -86,3 +87,32 @@ def test_url_verification_preserves_delivery_quota(valid_token):
         assert json.loads(response.text) == {"challenge": "test-challenge"}
     assert adapter._webhook_rate_counts == {}
     adapter._on_message_event.assert_not_called()
+
+
+@pytest.mark.parametrize("credentials", ["token", "signature", "both"])
+@pytest.mark.parametrize("exhaustion", ["peer", "table"])
+def test_failed_request_budget_cannot_block_authenticated_delivery(monkeypatch, credentials, exhaustion):
+    adapter = make_adapter()
+    if credentials == "token":
+        adapter._encrypt_key = ""
+    elif credentials == "signature":
+        adapter._verification_token = ""
+    monkeypatch.setattr(feishu.time, "time", lambda: 100.0)
+    monkeypatch.setattr(feishu, "_FEISHU_WEBHOOK_INGRESS_RATE_LIMIT_MAX", 1)
+    monkeypatch.setattr(feishu, "_FEISHU_WEBHOOK_RATE_LIMIT_MAX", 1)
+    monkeypatch.setattr(feishu, "_FEISHU_WEBHOOK_RATE_MAX_KEYS", 1)
+    payload = {"header": {"token": "test-token", "event_type": "im.message.receive_v1"}}
+    for expected in (401, 429):
+        invalid = make_request({"token": "invalid"}, signed=False)
+        if exhaustion == "table":
+            invalid.remote = "198.51.100.1"
+        assert asyncio.run(adapter._handle_webhook_request(invalid)).status == expected
+    assert adapter._webhook_rate_counts == {}
+
+    valid = make_request(payload, signed=credentials != "token")
+    assert asyncio.run(adapter._handle_webhook_request(valid)).status == 200
+    adapter._on_message_event.assert_called_once()
+    assert asyncio.run(adapter._handle_webhook_request(
+        make_request(payload, signed=credentials != "token"),
+    )).status == 429
+    adapter._on_message_event.assert_called_once()

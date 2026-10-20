@@ -843,7 +843,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         self.assertTrue(submit.called)
 
-    @patch.dict(os.environ, {}, clear=True)
+    @patch.dict(os.environ, {"FEISHU_VERIFICATION_TOKEN": "test-token"}, clear=True)
     def test_webhook_request_uses_same_message_dispatch_path(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -852,7 +852,7 @@ class TestAdapterBehavior(unittest.TestCase):
         adapter._on_message_event = Mock()
 
         body = json.dumps({
-            "header": {"event_type": "im.message.receive_v1"},
+            "header": {"token": "test-token", "event_type": "im.message.receive_v1"},
             "event": {"message": {"message_id": "om_test"}},
         }).encode("utf-8")
         request = SimpleNamespace(
