@@ -2243,8 +2243,8 @@ def dispatch_once(
     def _locked_tick() -> DispatchResult:
         nonlocal runtime_lanes
         from gateway.drain_kanban import dispatch_allowed
-        if not dry_run and not dispatch_allowed(conn, board=board, task_ids=selected_task_ids,
-                                                 budget=execution_budget, max_spawn=max_spawn):
+        if not dispatch_allowed(conn, board=board, task_ids=selected_task_ids,
+                                budget=execution_budget, max_spawn=max_spawn):
             return DispatchResult(paused=True)
         runtime_lanes = prepare_dispatch_lanes(conn, spawn_fn, dry_run, selected_task_ids)
         return dispatch_tick(

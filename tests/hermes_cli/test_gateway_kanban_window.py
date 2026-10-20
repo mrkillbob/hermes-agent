@@ -51,3 +51,29 @@ def test_begin_refuses_unassigned_or_running_card(tmp_path, monkeypatch):
     with pytest.raises((ValueError, RuntimeError)):
         execute(parse('begin', '--board', 'owned', '--task-id', tid))
     assert not (tmp_path / '.drain_request.json').exists()
+
+
+@pytest.mark.parametrize('dry_run', [False, True])
+def test_held_broad_dispatch_preserves_unrelated_board_state(tmp_path, monkeypatch, dry_run):
+    from hermes_cli import kanban_db as kb, kanban_db_dispatch as dispatch
+    from hermes_cli.kanban_db_connect import connect
+    from gateway import drain_kanban as window
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    monkeypatch.delenv('HERMES_KANBAN_DB', raising=False)
+    kb.create_board('owned')
+    with closing(connect(board='owned')) as db:
+        selected = kb.create_task(db, title='selected', assignee='default')
+        other = kb.create_task(db, title='must remain staged', assignee='default')
+        db.execute("UPDATE tasks SET status='todo' WHERE id=?", (other,))
+        db.commit()
+        before = {table: [tuple(row) for row in db.execute(f'SELECT * FROM {table} ORDER BY rowid')]
+                  for table in ('tasks', 'task_events', 'task_runs')}
+        (tmp_path / 'ESTOP').write_text('hold')
+        window.begin(dict(board='owned', db=str(kb.kanban_db_path(board='owned')),
+                          task_id=selected, profile_id=str(tmp_path)))
+        result = dispatch.dispatch_once(db, board='owned', dry_run=dry_run, max_spawn=1)
+        after = {table: [tuple(row) for row in db.execute(f'SELECT * FROM {table} ORDER BY rowid')]
+                 for table in before}
+        assert after == before
+        assert result.paused and not result.spawned
