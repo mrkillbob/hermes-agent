@@ -16,8 +16,10 @@ def _bind_carried_uids(db, conn, target, prepared):
         row = conn.execute('SELECT message_uid FROM messages WHERE session_id=? AND id=?',
                            (target, row_id)).fetchone()
         uid = row[0] or message[MESSAGE_UID]
-        conn.execute('UPDATE messages SET message_uid=? WHERE session_id=? AND id=? AND message_uid IS NULL',
-                     (uid, target, row_id))
+        conn.execute('UPDATE messages SET message_uid=COALESCE(message_uid, ?), '
+                     'display_identity=COALESCE(display_identity, ?), display_order=COALESCE(display_order, id) '
+                     'WHERE session_id=? AND id=?',
+                     (uid, db._message_display_identity(message), target, row_id))
         # A migration may have filled the UID since preparation; the durable value wins.
         remap[message[MESSAGE_UID]] = uid
     for message in prepared['messages']:

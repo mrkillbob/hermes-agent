@@ -1,5 +1,6 @@
 """Canonical compression must not display an original beside its rewritten tail carrier."""
 from collections import Counter
+import json
 import re
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from gateway.session import SessionStore
 from gateway.session_authority import SessionAuthority
 from gateway.session_controls import AuthorityConnection
 from gateway.session_local import create_local_session
+from hermes_state import SessionDB
 import hermes_state_runtime as rt
 
 
@@ -84,6 +86,25 @@ async def test_compress_and_resume_keep_each_original_reply_once(tmp_path, monke
             ):
                 text = '\n'.join(str(m.get('content', '')) for m in displayed)
                 assert text.index('s6w199') < text.index('SYSTEMMARK') < text.index('s7w000')
+        for generation in range(2):
+            backup = json.loads(json.dumps(db.export_session(ref.session_id, include_inactive=True)))
+            restored = SessionDB(db_path=tmp_path / f'restored-{generation}.db')
+            try:
+                assert restored.import_sessions([backup])['ok']
+                for reader in ('get_messages_as_conversation', 'get_messages'):
+                    shape = lambda database: [(m['role'], m.get('content')) for m in getattr(database, reader)(
+                        ref.session_id, include_compacted=True)]
+                    assert shape(restored) == shape(db)
+                text = '\n'.join(str(m.get('content', '')) for m in restored.get_messages(
+                    ref.session_id, include_compacted=True))
+                assert Counter(re.findall(r'\bs\dw\d{3}\b', text)) == expected
+                if system_in_tail:
+                    assert text.index('s6w199') < text.index('SYSTEMMARK') < text.index('s7w000')
+            finally:
+                restored.close()
+            if generation == 0:
+                # An unchanged later generation must retain an earlier carrier's chronology.
+                db.archive_and_compact(ref.session_id, db.get_messages_as_conversation(ref.session_id))
     finally:
         await owner.close()
         store.close_all_db_handles()

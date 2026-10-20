@@ -111,14 +111,35 @@ def _stable_tool_key(row: Any) -> Optional[tuple[Any, ...]]:
     return None
 
 
-def _single_visible_display_origins(rows, drop_removed: bool) -> dict[str, int]:
-    """Anchor a sole visible copy to its original; distinct retained payloads need separate slots."""
+def _single_visible_display_origins(rows, drop_removed: bool, visible_identity) -> dict[str, int]:
+    """Anchor rewritten carriers only; unchanged tails and distinct retained payloads keep their slots."""
     if not drop_removed:
         return {}
-    first, visible = {}, {}
+    # Only a UID shared with a removed copy can need this fallback; ordinary live rows never hash here.
+    removed_uids = {row["message_uid"] for row in rows if not row["active"] and not row["compacted"]}
+    first, identities, visible = {}, {}, {}
     for row in rows:
         uid = row["message_uid"]
-        if uid:
+        if uid and uid in removed_uids:
             first.setdefault(uid, row["id"])
-            visible[uid] = visible.get(uid, 0) + bool(row["active"] or row["compacted"])
-    return {uid: origin for uid, origin in first.items() if visible[uid] == 1}
+            shown = bool(row["active"] or row["compacted"])
+            identity = visible_identity(row) if shown else row["display_identity"]
+            if identity is not None:
+                identities.setdefault(uid, set()).add(identity)
+                if shown:
+                    visible.setdefault(uid, set()).add(identity)
+    return {uid: origin for uid, origin in first.items()
+            if len(identities.get(uid, ())) > 1 and len(visible.get(uid, ())) == 1}
+
+
+def _reconcile_rewritten_display_origins(conn, session_id: str) -> None:
+    """Recomputed identities precede this metadata-only pass, including on backup restoration."""
+    origins = conn.execute(
+        "SELECT message_uid, MIN(id) FROM messages WHERE session_id = ? "
+        "AND message_uid IS NOT NULL AND message_uid <> '' GROUP BY message_uid "
+        "HAVING COUNT(DISTINCT display_identity) > 1 AND COUNT(DISTINCT CASE "
+        "WHEN active = 1 OR compacted = 1 THEN display_identity END) = 1", (session_id,)).fetchall()
+    conn.executemany(
+        "UPDATE messages SET display_order = ? WHERE session_id = ? AND message_uid = ? "
+        "AND (active = 1 OR compacted = 1) AND display_order IS NOT ?",
+        [(origin, session_id, uid, origin) for uid, origin in origins])

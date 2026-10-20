@@ -743,6 +743,8 @@ class SessionPortabilityMixin:
             conn.executemany("UPDATE messages SET active = 0, compacted = ? WHERE id = ?",
                              [(1 if self._coerce_or(msg.get("compacted"), int, 0) else 0, msg["_row_id"])
                               for msg in archived])
+            # Insert triggers saw every copy live; restored flags now identify the retained display payload.
+            self._reconcile_display_orders(conn, session_id)
         # Pruning keys on live rows, so it runs only now: while every row was still live, an archived row's
         # newer checkpoint would strip the newest live one, and archived rows keep theirs as in the donor.
         self._prune_shadowed_checkpoints(conn, session_id, live)
