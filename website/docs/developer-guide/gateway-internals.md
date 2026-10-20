@@ -55,6 +55,45 @@ explicit restart; compression proceeds until a larger window is materialized. Th
 idle refit's documented status-check-to-reload race is unchanged: this repair prevents implicit
 server termination and consumer-exit cleanup, not every possible inference interruption.
 
+## One bounded Kanban attempt under an external hold
+
+`hermes gateway drain begin --board BOARD --task-id TASK --seconds 900` extends the
+existing `.drain_request.json` marker with a one-attempt permission. ESTOP must be
+engaged, the exact card must already be ready and assigned, and the board idle.
+The marker writer reserves the existing canonical profile ownership locks through
+publication, refusing a live or uncertain owner. The command changes no job schedule,
+job history, assignment, model pin or ESTOP file. Host resource admission and operator
+approval remain separate prerequisites.
+
+Start the ordinary assigned-profile owner while paused. A held boot takes its normal
+ownership locks and advances the runtime epoch, but defers unrelated recovery,
+adapters, cron, housekeeping, keepalive and inference startup. It publishes
+`state=draining, drain_reason=kanban_once`; general clients cannot treat it as READY.
+`hermes gateway drain arm --window-id ID` binds permission to that identified owner.
+The operator may then resume and use the existing exact dispatcher with `--task-id TASK
+--max 1 --wall-seconds 120 --output-bytes 65536 --requests 4`. All three budget flags
+are required. Dispatch consumes the permission by binding the committed run and claim
+before launching its ordinary submitter. Other cards, subsequent runs, ordinary
+sessions, REST requests and profile rescan remain refused. Only the selected child's
+existing reservation, adoption and persistence protocol crosses this hold.
+
+`drain cancel --window-id ID` revokes permission without removing the hold. The existing
+drain watcher invokes the existing session Stop owner for cancellation or expiry;
+ManagedWorker remains the sole child lifecycle authority. Expiry uses both wall and
+monotonic deadlines and never releases other work. ESTOP retains its existing semantics:
+it prevents new admission, without itself interrupting an already admitted turn.
+A restart cannot inherit the previous owner's permission or replay its claim.
+
+After re-engaging ESTOP and stopping the owner, `drain restore --window-id ID` reserves
+canonical ownership locks again and restores the exact previous marker bytes. Errors,
+cancellation and restart preserve the hold. A booted held owner also stays held if its
+marker disappears; a persisted corrupt marker holds across restart without granting work.
+Ordinary drain writers cannot replace or clear an active or unclassifiable hold.
+`drain status` reports only grant metadata, excluding the saved previous marker.
+Source fixture qualification uses disposable homes and loopback peers; it establishes
+neither permission for live provider traffic nor remote cancellation, native inference
+readiness, resource quotas or installed activation.
+
 ## Canonical group metadata and profile discovery
 
 The authenticated canonical WebSocket exposes `groups.capabilities`, `groups.list`,

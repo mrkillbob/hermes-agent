@@ -30,6 +30,7 @@ from gateway.restart import (
 from gateway.run_common import _UNSET
 from gateway.run_runtime import interrupt_side_agents, managed_turn_count, stop_managed_turns
 from gateway.run_shutdown_session_end import GatewaySessionEndMixin
+from gateway.run_shutdown_drain import GatewayExternalDrainMixin
 from gateway.shutdown_watchdog import (
     arm_shutdown_watchdog, effective_shutdown_watchdog_delay, resolve_shutdown_watchdog_delay,
 )
@@ -165,7 +166,7 @@ def _delivery_target_key(platform_value: str, chat_id, thread_id, *, profile: Op
     return _notice_target_key(platform_value, chat_id, thread_id)
 
 
-class GatewayShutdownMixin(GatewaySessionEndMixin):
+class GatewayShutdownMixin(GatewaySessionEndMixin, GatewayExternalDrainMixin):
     """Stop/drain/restart, scale-to-zero and active-work accounting methods for GatewayRunner."""
 
     @dataclasses.dataclass
@@ -695,57 +696,6 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         except Exception:
             logger.debug("scale-to-zero: redial hold toggle failed", exc_info=True)
             return False
-
-    # External drain control: the dashboard writes/removes ``.drain_request.json`` (gateway/drain_control.py);
-    # the watcher flips between accepting and refusing NEW turns WITHOUT exiting (reversible).
-    def _enter_external_drain(self) -> None:
-        """Begin external drain: refuse NEW turns (in-flight ones are NOT interrupted). Idempotent."""
-        if self._external_drain_active:
-            return
-        self._external_drain_active = True
-        logger.info(
-            "External drain ENGAGED (.drain_request.json present) — refusing "
-            "new turns; %d in-flight turn(s) will finish. Process stays up.", self._active_work_count(),
-        )
-        # Persist "draining" so /api/status tracks it; active_agents is read-merged, only state changes.
-        self._update_runtime_status("draining")
-
-    def _exit_external_drain(self) -> None:
-        """Cancel external drain: re-accept new turns. Idempotent; never resurrects a stopping gateway."""
-        if not self._external_drain_active:
-            return
-        self._external_drain_active = False
-        if self._draining or not self._running:
-            logger.info(
-                "External drain marker cleared during shutdown — not reverting "
-                "to running (shutdown takes precedence)."
-            )
-            return
-        logger.info(
-            "External drain RELEASED (.drain_request.json removed) — "
-            "re-accepting new turns; gateway_state -> %s.", self._serving_state(),
-        )
-        self._update_runtime_status(self._serving_state())
-
-    async def _drain_control_watcher(self, interval: float = 1.0) -> None:
-        """Poll ``.drain_request.json`` at 1s: present -> enter drain, absent -> exit; a stale epoch = absent."""
-        from gateway.drain_control import drain_requested
-        while self._running:
-            try:
-                # Off-thread: a synchronous marker read at 1s cadence can stall 30s+ under host I/O
-                # pressure and take every platform heartbeat down.
-                if await asyncio.to_thread(drain_requested):
-                    self._enter_external_drain()
-                    # API and cron work live outside messaging's _running_agents map; refresh the
-                    # aggregate while an external caller polls this reversible drain state.
-                    self._persist_active_agents()
-                else:
-                    self._exit_external_drain()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.debug("Drain-control watcher tick error: %s", exc, exc_info=True)
-            await asyncio.sleep(interval)
 
     def _update_platform_runtime_status(
         self, platform: str, *, platform_state: Optional[str] = None,

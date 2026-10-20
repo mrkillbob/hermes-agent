@@ -153,6 +153,9 @@ def release_unknown_turn_markers(runner):
     admission recovered ``unknown`` (the owner died before its terminal commit) owes no reply, so
     its marker is cleared rather than ledgered as a delivery the FIFO never committed. A terminal
     admission keeps its marker: its persisted reply is ledgered and sent once, never re-run."""
+    from gateway.drain_kanban import held
+    if held(runner):
+        return
     from gateway.session_authorities import admission_owner, owner_scope
     store = getattr(runner, 'session_store', None)
     if store is None:
@@ -459,8 +462,10 @@ async def start_gateway_runtime_api(runner):
     from gateway.run_api import start_gateway_api
     runner.session_api = await start_gateway_api(runner)
     runner.session_runtime_descriptor['api_origin'] = runner.session_api.api_origin
-    for authority in _authorities(runner):
-        await _recover_profile_bot_mailbox(runner, authority)
+    from gateway.drain_kanban import held
+    if not held(runner):
+        for authority in _authorities(runner):
+            await _recover_profile_bot_mailbox(runner, authority)
 
 
 async def _recover_profile_bot_mailbox(runner, authority):
@@ -538,8 +543,12 @@ def publish_gateway_runtime_ready(runner):
         raise RuntimeError('gateway stopped before session API readiness')
     descriptor.update(state='ready', capabilities=[
         'session-authority-v1', 'durable-admission-v1', 'event-replay-v1'])
-    from gateway.session_hosted_service import start_ready_hosted_services
-    start_ready_hosted_services(runner)
+    from gateway.drain_kanban import held, REASON
+    if held(runner):
+        descriptor.update(state='draining', drain_reason=REASON)
+    else:
+        from gateway.session_hosted_service import start_ready_hosted_services
+        start_ready_hosted_services(runner)
 
 
 async def wait_gateway_runtime(runner):

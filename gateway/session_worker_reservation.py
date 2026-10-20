@@ -57,7 +57,6 @@ def reserve_admission_worker(authority, *, admission_id, process, principal_id, 
     supplies physical session and generation; its durable principal must match
     the producer. Do not publish the returned secret on any client event stream.
     """
-    authority._require_admission_open()
     pid, birth = verify_worker_identity(process, hello)
     secret = secrets.token_urlsafe(32)
 
@@ -69,6 +68,7 @@ def reserve_admission_worker(authority, *, admission_id, process, principal_id, 
         if admission['principal_id'] != principal_id:
             raise RuntimeStoreError('permission_denied')
         owner, generation = admission['target_session_id'], admission['generation']
+        authority._require_admission_open(session_id=owner)
         if _session(conn, owner)['runtime_generation'] != generation:
             raise RuntimeStoreError('stale_generation')
         from hermes_state_local_lineage import local_physical_target

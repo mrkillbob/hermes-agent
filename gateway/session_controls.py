@@ -247,8 +247,8 @@ class AuthorityConnection:
             # Every handler indexes params as a mapping; refuse the frame before ``.get``.
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': 4001, 'message': 'invalid_params', 'data': {'reason': 'invalid_params'}}}
-        from gateway.drain_control import ws_method_refused_while_draining
-        if self._operator is True and ws_method_refused_while_draining(getattr(self.authority, 'runner', None), method):
+        from gateway.drain_kanban import connection_method_refused
+        if connection_method_refused(self, method, params):
             # An interactive socket reaches a draining owner only in a restart's after-turn wait:
             # it may answer the parked turn and queue input, never change this owner's state.
             exc = RuntimeStoreError('runtime_draining')

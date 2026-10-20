@@ -209,22 +209,26 @@ class SessionAuthority:
                 and source.user_id != actor.subject and 'session:operator' not in actor.capabilities):
             raise RuntimeStoreError('permission_denied')
 
-    def _require_admission_open(self, *, queue_only=False):
+    def _require_admission_open(self, *, queue_only=False, session_id=None):
         """``queue_only``: the caller only COMMITS a queued row (never claims or runs it). A restart's
         after-turn wait accepts those (#139041): the row is durable FIFO input the next owner runs
         exactly once, while this owner's claim path stays refused."""
         if self.retiring:
             raise RuntimeStoreError('runtime_draining')
+        if getattr(self.runner, '_external_drain_active', False):
+            from gateway.drain_kanban import admission_allowed
+            if not admission_allowed(self, session_id):
+                raise RuntimeStoreError('runtime_draining')
         if self.runner._draining:
             from gateway.drain_control import restart_wait_open
             if not (queue_only and restart_wait_open(self.runner)):
                 raise RuntimeStoreError('runtime_draining')
 
-    def _admission_gate(self, authorize=None, *, queue_only=False):
+    def _admission_gate(self, authorize=None, *, queue_only=False, session_id=None):
         """The admission gate re-checked inside an off-loop write transaction (with the caller's
         own guard), so a drain that began while the write waited on the writer still refuses it."""
         def guard(conn):
-            self._require_admission_open(queue_only=queue_only)
+            self._require_admission_open(queue_only=queue_only, session_id=session_id)
             if authorize is not None:
                 authorize(conn)
         return guard
@@ -637,7 +641,7 @@ class SessionAuthority:
                                           queue_only=queue_while_restarting is True, _replay_guard=_replay_guard)
 
     async def _submit(self, actor, request, *, _authorize_write=None, queue_only=False, _replay_guard=None):
-        self._require_admission_open(queue_only=queue_only)
+        self._require_admission_open(queue_only=queue_only, session_id=request.ref.session_id)
         if (request.intent != 'queue' or not {'text'} <= set(request.payload) <= {
                 'text', 'attachments', 'finite', 'unattended', 'surface', 'voice_context', 'interrupted',
                 'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch'}
@@ -672,7 +676,7 @@ class SessionAuthority:
                 return admit_session_input(self.db, epoch=self.epoch, principal_id=actor.subject,
                                            session_id=request.ref.session_id, request_id=request.request_id,
                                            payload=payload, intent=request.intent, _replay_guard=_replay_guard,
-                                           _authorize_write=self._admission_gate(_authorize_write, queue_only=queue_only))
+                                           _authorize_write=self._admission_gate(_authorize_write, queue_only=queue_only, session_id=request.ref.session_id))
             except Exception:
                 self._release_refused_capture(request, payload)
                 raise
@@ -1048,13 +1052,13 @@ class SessionAuthority:
                 # a claim now would hand this row to its busy path and settle it unrun. The head
                 # waits queued, as main's pending slot did; /stop and /new still cancel it.
                 return 'classic_busy', first
-            self._require_admission_open()
+            self._require_admission_open(session_id=ref.session_id)
             from gateway.session_runtime_workers import tracked_write
             live.rescan = False  # a _schedule from here on may not be visible to this claim's read
             # The row these checks validated, never whichever is first when the write runs: a
             # cancellation commits from a worker thread and can advance the FIFO at any point.
             row = await tracked_write(self, partial(claim_session_input, self.db, epoch=self.epoch,
-                                                    session_id=ref.session_id, _guard=self._admission_gate(),
+                                                    session_id=ref.session_id, _guard=self._admission_gate(session_id=ref.session_id),
                                                     head=first['admission_id'] if first is not None else None),
                                       then=partial(self._stamp_claim, ref, live))
             # Input scheduled while this claim's transaction ran may postdate its read: re-read
@@ -1347,17 +1351,18 @@ async def initialize_session_authority(runner, *, profile_id, instance_id, db=No
     from pathlib import Path
     db_key = await asyncio.to_thread(Path(db.db_path).resolve)
     epoch = await asyncio.to_thread(begin_runtime_epoch, db, instance_id=instance_id)
-    # Hot-serve builds a profile while the loop serves the others: both writes stay off it.
-    await asyncio.to_thread(recover_session_inputs, db, epoch=epoch)
-    # A lost automation turn has nobody to resolve it: it settles interrupted before any FIFO runs.
-    from gateway.session_unattended_unknown import settle_recovered_unattended
-    await asyncio.to_thread(settle_recovered_unattended, db, epoch)
-    await asyncio.to_thread(backfill_legacy_session_owners, db)
+    from gateway.drain_kanban import held
+    holding = held(runner)
+    if not holding:
+        # Hot-serve builds a profile while the loop serves the others: writes stay off it.
+        await asyncio.to_thread(recover_session_inputs, db, epoch=epoch)
+        from gateway.session_unattended_unknown import settle_recovered_unattended
+        await asyncio.to_thread(settle_recovered_unattended, db, epoch)
+        await asyncio.to_thread(backfill_legacy_session_owners, db)
     authority = SessionAuthority(runner, profile_id=profile_id, instance_id=instance_id, db=db, epoch=epoch)
-    # A receipt's compression catch-up (#140060) writes: it commits off the loop too, before the
-    # authority is published, so the recovery below only reads.
-    from gateway.session_local_adoption import adopt_local_compressions
-    await adopt_local_compressions(authority)
+    if not holding:
+        from gateway.session_local_adoption import adopt_local_compressions
+        await adopt_local_compressions(authority)
     if register:
         runner.session_authority = authority
     from gateway.session_cron import bind_owner
@@ -1371,5 +1376,6 @@ async def initialize_session_authority(runner, *, profile_id, instance_id, db=No
         epochs = store._local_authority_epochs = {}
     epochs[db_key] = epoch
     from gateway.session_local_recovery import recover_local_sessions
-    recover_local_sessions(authority)
+    if not holding:
+        recover_local_sessions(authority)
     return authority

@@ -32,7 +32,7 @@ def test_lost_admission_worker_compacts_its_history_receipt(tmp_path):
         db.create_session('s', 'cli')
         db.append_messages_batch('s', [{'role': 'user', 'content': 'x' * 4000}])
         epoch = begin_runtime_epoch(db, instance_id='owner')
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None)
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda *, session_id=None: None)
         admit_session_input(db, epoch=epoch, principal_id='human', session_id='s', request_id='input', payload={})
         row = claim_session_input(db, epoch=epoch, session_id='s')
         child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],

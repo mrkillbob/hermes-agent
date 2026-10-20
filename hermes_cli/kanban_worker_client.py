@@ -47,7 +47,9 @@ async def run(params, board_db):
                 from hermes_constants import get_hermes_home
                 from hermes_cli.gateway_runtime import discover_gateway_endpoint, gateway_profile_home
                 found = await asyncio.to_thread(discover_gateway_endpoint, gateway_profile_home(get_hermes_home()))
-                if found.state != 'ready' or found.endpoint is None:
+                from gateway.drain_kanban import REASON
+                held_owner = found.state == 'draining' and found.reason_code == REASON
+                if (found.state != 'ready' and not held_owner) or found.endpoint is None:
                     raise GatewayUnavailableError('Bounded Kanban requires an existing ready owner', found.state)
                 options['endpoint'] = found.endpoint
             async with connect_gateway(**options) as client:

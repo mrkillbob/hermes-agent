@@ -173,7 +173,8 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0) -
         config.loaded_app = GatewayRuntimeAPI(config.loaded_app, runner, mount)
         # A gated listener needs the dashboard's auth providers (and refuses to start without one);
         # an already-imported dashboard costs nothing to mount now.
-        if state.auth_required or loaded_web is not None:
+        from gateway.drain_kanban import held
+        if not held(runner) and (state.auth_required or loaded_web is not None):
             await mount.ensure()
         server.lifespan = config.lifespan_class(config)
         await server.startup(sockets=[listener])
@@ -352,7 +353,8 @@ class GatewayRuntimeAPI:
                     await ws.close(code=1013)
                     return
                 return await self.app(scope, receive, send)
-        allow_draining = not operator
+        from gateway.drain_kanban import held
+        allow_draining = not operator or held(self.runner)
         admitted_in_wait = restart_wait_open(self.runner)
         # A restart's after-turn wait still owns its turns: an interactive client attaches to answer
         # a parked approval/clarify (#139041); stop() closes this window.

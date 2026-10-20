@@ -21,7 +21,7 @@ async def test_reserved_worker_persists_while_runtime_drains(tmp_path):
         db.create_session('owned', 'cli')
         epoch = begin_runtime_epoch(db, instance_id='owner')
         authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path),
-            _require_admission_open=lambda: None, logical_owner=lambda sid: sid, sessions={})
+            _require_admission_open=lambda *, session_id=None: None, logical_owner=lambda sid: sid, sessions={})
         row = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='input', payload={})
         claim_session_input(db, epoch=epoch, session_id='owned')
         scope = reserve_admission_worker(authority, admission_id=row['admission_id'], process=process,

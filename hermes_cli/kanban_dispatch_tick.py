@@ -88,16 +88,17 @@ def configured_dispatch_kwargs() -> dict[str, Any]:
     """
     from hermes_cli import kanban_db_dispatch as dispatch
     from hermes_cli.kanban_dispatch_config import load_dispatch_section
+    from hermes_cli.kanban_worker_logs import positive_int
 
     section = load_dispatch_section()
     return dict(
         default_assignee=(section.get("default_assignee") or "").strip() or None,
-        max_spawn=dispatch._positive_int(section.get("max_spawn"), None),
+        max_spawn=positive_int(section.get("max_spawn"), None),
         # Memory-derived default when unset — the same fallback the gateway applies.
         max_in_progress=dispatch.resolve_global_max_in_progress(
-            dispatch._positive_int(section.get("max_in_progress"), None),
+            positive_int(section.get("max_in_progress"), None),
         ),
-        max_in_progress_per_profile=dispatch._positive_int(section.get("max_in_progress_per_profile"), None),
+        max_in_progress_per_profile=positive_int(section.get("max_in_progress_per_profile"), None),
         max_in_progress_by_profile=section.get("max_in_progress_by_profile"),
         max_in_progress_per_model=section.get("max_in_progress_per_model"),
         max_in_progress_by_model=section.get("max_in_progress_by_model"),

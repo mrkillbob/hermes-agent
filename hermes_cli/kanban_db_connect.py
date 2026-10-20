@@ -169,7 +169,7 @@ def _cross_process_init_lock(path: Path):
 
 
 @contextlib.contextmanager
-def _dispatch_tick_lock(db_path: Path):
+def _dispatch_tick_lock(db_path: Path, *, strict: bool = False):
     """Non-blocking single-writer guard around one dispatcher tick; yields
     ``True`` if this process holds the board's ``.dispatch.lock``, else
     ``False`` (caller skips the tick).
@@ -179,7 +179,8 @@ def _dispatch_tick_lock(db_path: Path):
     multi-writer corruption; this is defense-in-depth behind
     ``_guard_supervised_gateway_conflict``. Non-blocking on purpose: the
     gateway's async watcher must never stall; the loser retries next interval.
-    Without ``fcntl``/``msvcrt`` it degrades to a no-op (yields ``True``).
+    ``strict=True`` refuses lock-file errors for admission boundaries; ordinary
+    dispatcher calls retain their existing best-effort behavior.
 
     Motivation (issue #35240): a ``hermes gateway run --replace`` / ``gateway restart`` invoked from a shell
     on a systemd/launchd host can leave an orphan gateway whose dispatcher escapes the service cgroup,
@@ -199,9 +200,9 @@ def _dispatch_tick_lock(db_path: Path):
         except (OSError, AttributeError):
             acquired = False
     except OSError:
-        # Can't even open the lock file (permissions, read-only FS): degrade to
-        # a no-op so a probe failure never blocks dispatch.
-        acquired = True
+        # Preserve ordinary dispatch's best-effort fallback; explicit admission
+        # boundaries must refuse when no lock handle was acquired.
+        acquired = not strict
         handle = None
     try:
         yield acquired
@@ -217,13 +218,14 @@ def _dispatch_tick_lock(db_path: Path):
 
 
 @contextlib.contextmanager
-def _dispatch_host_admission_lock():
+def _dispatch_host_admission_lock(*, strict: bool = False):
     """Non-blocking host-wide admission guard for a dispatch tick.
 
     A board-local lock protects one database, but the dispatcher must also keep
     the cross-board running-task snapshot and claim/spawn decision atomic. All
     boards therefore share one lock under the shared Kanban home. Filesystem
-    lock failures degrade to the existing best-effort behavior.
+    lock failures degrade to the existing best-effort behavior unless the caller
+    requires positive acquisition with ``strict=True``.
     """
     from hermes_cli import kanban_db as _kb_local
 
@@ -238,7 +240,7 @@ def _dispatch_host_admission_lock():
         except (OSError, AttributeError):
             acquired = False
     except OSError:
-        acquired = True
+        acquired = not strict
         handle = None
     try:
         yield acquired

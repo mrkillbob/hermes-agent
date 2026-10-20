@@ -53,7 +53,7 @@ def test_resolve_unknown_retires_the_physical_worker_row(tmp_path):
         rt.admit_session_input(db, epoch=epoch, principal_id='human', session_id=logical,
                                request_id='second', payload={'text': 'second'})
         row = rt.claim_session_input(db, epoch=epoch, session_id=logical)
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id='profile', _require_admission_open=lambda: None)
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id='profile', _require_admission_open=lambda *, session_id=None: None)
         child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -75,7 +75,7 @@ def test_resolve_unknown_retires_the_physical_worker_row(tmp_path):
         # The follower must now be claimable and a fresh managed child reservable on the physical row.
         follower = rt.claim_session_input(db, epoch=epoch, session_id=logical)
         assert follower is not None and follower['request_id'] == 'second'
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id='profile', _require_admission_open=lambda: None)
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id='profile', _require_admission_open=lambda *, session_id=None: None)
         child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

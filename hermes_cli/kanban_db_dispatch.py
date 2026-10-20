@@ -2242,6 +2242,10 @@ def dispatch_once(
 
     def _locked_tick() -> DispatchResult:
         nonlocal runtime_lanes
+        from gateway.drain_kanban import dispatch_allowed
+        if not dispatch_allowed(conn, board=board, task_ids=selected_task_ids,
+                                budget=execution_budget, max_spawn=max_spawn):
+            return DispatchResult(paused=True)
         runtime_lanes = prepare_dispatch_lanes(conn, spawn_fn, dry_run, selected_task_ids)
         return dispatch_tick(
             conn,
@@ -2520,6 +2524,7 @@ def _run_reclaim_phase(
     board: Optional[str] = None,
 ) -> None:
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
+    from hermes_cli.kanban_worker_logs import positive_int
     from hermes_cli.kanban_worker_watchdog import load_watchdog_config, run_watchdog_tick
     watchdog = run_watchdog_tick(conn, board=_kb._lifecycle_board(conn), config=load_watchdog_config())
     result.watchdog_blocked = watchdog.blocked
@@ -2538,7 +2543,7 @@ def _run_reclaim_phase(
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     from hermes_cli.config import load_config_readonly
     default_runtime = (load_config_readonly() or {}).get("kanban", {}).get("default_max_runtime_seconds")
-    result.timed_out = enforce_max_runtime(conn, default_max_runtime_seconds=_positive_int(default_runtime, None))
+    result.timed_out = enforce_max_runtime(conn, default_max_runtime_seconds=positive_int(default_runtime, None))
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 
@@ -2604,14 +2609,6 @@ def _tick_spawn_budget(
 
 
 
-def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed >= minimum else default
-
-
 def worker_log_rotation_config(kanban_cfg: Optional[dict] = None) -> tuple[int, int]:
     """Return ``(rotate_bytes, backup_count)`` for worker log rotation.
     Defaults: rotate at 2 MiB, keep one backup (``.log.1``); both overridable
@@ -2625,13 +2622,10 @@ def worker_log_rotation_config(kanban_cfg: Optional[dict] = None) -> tuple[int, 
         except Exception:
             kanban_cfg = {}
     kanban_cfg = kanban_cfg or {}
-    max_bytes = _positive_int(kanban_cfg.get("worker_log_rotate_bytes"), DEFAULT_LOG_ROTATE_BYTES, minimum=1)
-    backup_count = _positive_int(kanban_cfg.get("worker_log_backup_count"), DEFAULT_LOG_BACKUP_COUNT, minimum=0)
+    from hermes_cli.kanban_worker_logs import positive_int
+    max_bytes = positive_int(kanban_cfg.get("worker_log_rotate_bytes"), DEFAULT_LOG_ROTATE_BYTES, minimum=1)
+    backup_count = positive_int(kanban_cfg.get("worker_log_backup_count"), DEFAULT_LOG_BACKUP_COUNT, minimum=0)
     return max_bytes, backup_count
-
-
-def _rotated_log_path(log_path: Path, generation: int) -> Path:
-    return log_path.with_suffix(log_path.suffix + f".{generation}")
 
 
 def _rotate_worker_log(
@@ -2642,24 +2636,25 @@ def _rotate_worker_log(
     """Rotate ``<log>`` when it exceeds ``max_bytes``: ``<log>`` → ``<log>.1``,
     older generations shift up to ``backup_count``.
     """
+    from hermes_cli.kanban_worker_logs import positive_int, rotated_log_path
     try:
         if not log_path.exists() or log_path.stat().st_size <= max_bytes:
             return
-        backup_count = _positive_int(backup_count, DEFAULT_LOG_BACKUP_COUNT, minimum=0)
+        backup_count = positive_int(backup_count, DEFAULT_LOG_BACKUP_COUNT, minimum=0)
         if backup_count == 0:
             log_path.unlink()
             return
-        oldest = _rotated_log_path(log_path, backup_count)
+        oldest = rotated_log_path(log_path, backup_count)
         with contextlib.suppress(OSError):
             if oldest.exists():
                 oldest.unlink()
         for generation in range(backup_count - 1, 0, -1):
-            src = _rotated_log_path(log_path, generation)
+            src = rotated_log_path(log_path, generation)
             if not src.exists():
                 continue
             with contextlib.suppress(OSError):
-                src.rename(_rotated_log_path(log_path, generation + 1))
-        log_path.rename(_rotated_log_path(log_path, 1))
+                src.rename(rotated_log_path(log_path, generation + 1))
+        log_path.rename(rotated_log_path(log_path, 1))
     except OSError:
         pass
 
@@ -2927,6 +2922,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
     """
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
+    from gateway.drain_kanban import bind_task
+    bind_task(task, execution_budget, board)
 
     from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
 

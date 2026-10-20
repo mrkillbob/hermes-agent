@@ -71,7 +71,7 @@ def websocket(home, desc):
 
 
 @contextmanager
-def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
+def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py', expected_state='ready'):
     command = [sys.executable, str(root / 'tests/gateway/fixtures' / fixture)] if barrier else [sys.executable, '-m', 'gateway.run']
     with (home / ('first.log' if barrier else 'restart.log')).open('w+') as log:
         proc = subprocess.Popen(command, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
@@ -81,14 +81,14 @@ def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
             while proc.poll() is None and time.monotonic() < deadline:
                 try:
                     desc = control(home, 'identify')
-                    if desc.get('state') == 'ready':
+                    if desc.get('state') == expected_state:
                         break
                 except (OSError, ValueError):
                     pass
                 time.sleep(.05)
             log.flush()
             log.seek(0)
-            assert desc.get('state') == 'ready', log.read()
+            assert desc.get('state') == expected_state, log.read()
             yield proc, desc
         finally:
             if proc.poll() is None:

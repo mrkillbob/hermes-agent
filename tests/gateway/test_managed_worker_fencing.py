@@ -23,7 +23,7 @@ def test_worker_loss_fences_same_generation_parent_result(tmp_path):
     with closing(SessionDB(tmp_path / 'state.db')) as db:
         db.create_session('owned', 'cli')
         epoch = begin_runtime_epoch(db, instance_id='owner')
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None)
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda *, session_id=None: None)
         admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='input', payload={})
         row = claim_session_input(db, epoch=epoch, session_id='owned')
         child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
@@ -56,7 +56,7 @@ async def test_late_bootstrap_handshake_cannot_rearm_a_recovered_admission(tmp_p
     with closing(SessionDB(tmp_path / 'state.db')) as db:
         db.create_session('owned', 'cli')
         epoch = begin_runtime_epoch(db, instance_id='owner')
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None)
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda *, session_id=None: None)
         lost = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='lost', payload={})
         row = claim_session_input(db, epoch=epoch, session_id='owned')
         follower = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='next', payload={})
@@ -67,7 +67,7 @@ async def test_late_bootstrap_handshake_cannot_rearm_a_recovered_admission(tmp_p
                                              principal_id='human', hello=hello(child))
             restarted = begin_runtime_epoch(db, instance_id='restarted')
             rt.recover_session_inputs(db, epoch=restarted)
-            owner = SimpleNamespace(db=db, epoch=restarted, profile_id=str(tmp_path), _require_admission_open=lambda: None)
+            owner = SimpleNamespace(db=db, epoch=restarted, profile_id=str(tmp_path), _require_admission_open=lambda *, session_id=None: None)
             actor = SimpleNamespace(subject='human', profile_id=str(tmp_path), capabilities={'worker:adopt'})
             identity = {k: v for k, v in scope.items() if k != 'epoch'}
             with pytest.raises(rt.RuntimeStoreError, match='stale_epoch'):

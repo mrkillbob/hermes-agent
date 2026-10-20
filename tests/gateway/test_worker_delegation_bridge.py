@@ -33,7 +33,7 @@ def test_bridge_publishes_committed_completion_and_rejects_another_principal(tmp
         epoch = begin_runtime_epoch(db, instance_id='owner')
         with closing(sqlite3.connect(tmp_path / 'state.db')) as conn:
             _initialize_schema(conn)
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id='profile', _require_admission_open=lambda: None)
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id='profile', _require_admission_open=lambda *, session_id=None: None)
         actor = SimpleNamespace(profile_id='profile', subject='alice', capabilities={'worker:adopt'})
         connection = SimpleNamespace(authority=authority, actor=actor)
         ref = SessionRef('profile', 'parent')
