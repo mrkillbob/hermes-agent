@@ -303,7 +303,7 @@ export function createOauthSessionHandlers(deps: OauthSessionHandlerDeps) {
         // running window is about to fill.
         clearCookies: () => {
           if (!oauthLoginFlights.isRunning(loginFlightKey(partition, gatewayBase))) {
-            remoteSessionCookies.clear(partition, url)
+            remoteSessionCookies.clearGateway(partition, gatewayBase)
           }
         },
         login: async () => {

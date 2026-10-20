@@ -22,13 +22,16 @@ const registry = {
   ]
 }
 
-function harness(config: { remote?: { url?: unknown }; profiles?: Record<string, unknown> } | null = null) {
+function harness(
+  config: { remote?: { url?: unknown }; profiles?: Record<string, unknown> } | null = null,
+  { onLogin = () => {}, onCapture = () => {}, refusedAttempts = 1 } = {}
+) {
   const cookies = new Map<Session, Set<string>>()
   const sessions = new Map<string, Session>()
   const windows: Array<{ options: BrowserWindowConstructorOptions; url: string; destroyed: boolean }> = []
   const requests: Array<{ url: string; session: Session; headers: Record<string, string> }> = []
   const mirror = new RemoteSessionCookieStore()
-  let rejected = false
+  let attempts = 0
 
   const fromPartition = (partition: string): Session => {
     if (!sessions.has(partition)) {
@@ -71,6 +74,7 @@ function harness(config: { remote?: { url?: unknown }; profiles?: Record<string,
       const sess = this.state.options.webPreferences!.session!
       const base = url.replace(/\/(?:login)?$/, '')
 
+      onLogin()
       cookies.get(sess)!.add(base)
       queueMicrotask(() => this.webContents.emit('did-navigate', {}, url))
     }
@@ -92,6 +96,8 @@ function harness(config: { remote?: { url?: unknown }; profiles?: Record<string,
     onWindowCreated: () => {},
     captureRemoteSessionCookiesIntoMirror: (sess: Session, partition: string, url: string) => {
       if (cookies.get(sess)!.has(url)) {
+        onCapture()
+
         const path = new URL(url).pathname
 
         mirror.recordFromJar(partition, url, [
@@ -112,11 +118,11 @@ function harness(config: { remote?: { url?: unknown }; profiles?: Record<string,
           write: () => {},
           end: () =>
             queueMicrotask(() => {
-              const statusCode = rejected ? 200 : 401
-              const body = rejected ? { ok: true } : { error: 'unauthenticated', reason: 'no_cookie' }
+              const rejected = attempts++ < refusedAttempts
+              const statusCode = rejected ? 401 : 200
+              const body = rejected ? { error: 'unauthenticated', reason: 'no_cookie' } : { ok: true }
               const response = Object.assign(new EventEmitter(), { statusCode, headers: {} })
 
-              rejected = true
               request.emit('response', response)
               response.emit('data', Buffer.from(JSON.stringify(body)))
               response.emit('end')
@@ -130,7 +136,7 @@ function harness(config: { remote?: { url?: unknown }; profiles?: Record<string,
     }
   })
 
-  return { ...handlers, windows, requests, fromPartition }
+  return { ...handlers, windows, requests, fromPartition, mirror }
 }
 
 beforeEach(() => vi.useFakeTimers())
@@ -233,4 +239,77 @@ test('401 re-login is hidden, keeps the prefix and jar, then retries with the fr
   expect(h.requests.every(request => request.session === h.fromPartition(PRIVATE_JAR))).toBe(true)
   expect(h.requests[0].headers.Cookie).toBeUndefined()
   expect(h.requests[1].headers.Cookie).toBe('__Secure-hermes_session_at=fresh-c')
+})
+
+test('401 recovery presents the scoped credential once and preserves its same-name ancestor', async () => {
+  const scoped = `${HOST}/a/api/status`
+  const h = harness()
+
+  h.mirror.record(LEGACY_OAUTH_PARTITION, HOST, '__Secure-hermes_session_at=ancestor; Path=/; Secure')
+  h.mirror.record(LEGACY_OAUTH_PARTITION, scoped, '__Secure-hermes_session_at=stale-a; Path=/a; Secure')
+  await expect(h.fetchJsonViaOauthSession(scoped)).resolves.toEqual({ ok: true })
+  expect(h.requests.map(request => request.headers.Cookie)).toEqual([
+    '__Secure-hermes_session_at=stale-a',
+    '__Secure-hermes_session_at=fresh-a'
+  ])
+  expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, HOST)).toBe('__Secure-hermes_session_at=ancestor')
+  expect(h.windows[0].url).toBe(`${HOST}/a/`)
+})
+
+test('A-only 401 recovery preserves B in the shared jar before, during and after hidden login', async () => {
+  const a = `${HOST}/a/api/status`
+  const b = `${HOST}/b/api/status`
+
+  const h = harness(null, {
+    onLogin: () => {
+      expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, a)).toBeNull()
+      expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, b)).toBe('__Secure-hermes_session_at=existing-b')
+    }
+  })
+
+  h.mirror.record(LEGACY_OAUTH_PARTITION, a, '__Secure-hermes_session_at=stale-a; Path=/a; Secure')
+  h.mirror.record(LEGACY_OAUTH_PARTITION, b, '__Secure-hermes_session_at=existing-b; Path=/b; Secure')
+  expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, a)).toBe('__Secure-hermes_session_at=stale-a')
+  expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, b)).toBe('__Secure-hermes_session_at=existing-b')
+
+  await expect(h.fetchJsonViaOauthSession(a)).resolves.toEqual({ ok: true })
+  expect(h.windows).toHaveLength(1)
+  expect(h.windows[0].url).toBe(`${HOST}/a/`)
+  expect(h.windows[0].options.show).toBe(false)
+  expect(h.windows[0].options.webPreferences?.session).toBe(h.fromPartition(LEGACY_OAUTH_PARTITION))
+  expect(h.requests.map(request => request.headers.Cookie)).toEqual([
+    '__Secure-hermes_session_at=stale-a',
+    '__Secure-hermes_session_at=fresh-a'
+  ])
+  expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, a)).toBe('__Secure-hermes_session_at=fresh-a')
+  expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, b)).toBe('__Secure-hermes_session_at=existing-b')
+})
+
+test('a second 401 joins the A flight without clearing cookies captured while login is running', async () => {
+  const a = `${HOST}/a/api/status`
+  const b = `${HOST}/b/api/status`
+
+  const h = harness(null, {
+    refusedAttempts: 2,
+    onLogin: () => {
+      // A navigation response can update the mirror before the login settles.
+      h.mirror.record(LEGACY_OAUTH_PARTITION, a, '__Secure-hermes_session_at=navigating-a; Path=/a; Secure')
+    },
+    onCapture: () => {
+      expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, a)).toBe('__Secure-hermes_session_at=navigating-a')
+      expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, b)).toBe('__Secure-hermes_session_at=existing-b')
+    }
+  })
+
+  h.mirror.record(LEGACY_OAUTH_PARTITION, b, '__Secure-hermes_session_at=existing-b; Path=/b; Secure')
+  await expect(Promise.all([h.fetchJsonViaOauthSession(a), h.fetchJsonViaOauthSession(a)])).resolves.toEqual([
+    { ok: true },
+    { ok: true }
+  ])
+  expect(h.windows).toHaveLength(1)
+  expect(h.requests.slice(2).map(request => request.headers.Cookie)).toEqual([
+    '__Secure-hermes_session_at=fresh-a',
+    '__Secure-hermes_session_at=fresh-a'
+  ])
+  expect(h.mirror.cookieHeaderFor(LEGACY_OAUTH_PARTITION, b)).toBe('__Secure-hermes_session_at=existing-b')
 })
