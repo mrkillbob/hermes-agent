@@ -380,6 +380,9 @@ class KanbanCommandRunner(Protocol):
 class SubprocessKanbanRunner:
     """Run the fixed Hermes Kanban command without a shell."""
 
+    def __init__(self, binding=None):
+        self._binding = binding
+
     def run(self, argv: list[str]) -> KanbanCommandResult:
         try:
             completed = subprocess.run(
@@ -389,6 +392,7 @@ class SubprocessKanbanRunner:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                cwd=self._binding.root if self._binding is not None else None,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             raise RuntimeError("Kanban task creation failed") from error
@@ -401,9 +405,13 @@ class KanbanSubprocessClient:
     """Kanban adapter that accepts only a valid JSON task identity."""
 
     def __init__(self, runner: KanbanCommandRunner | None = None) -> None:
-        self._runner = runner or SubprocessKanbanRunner()
+        from .caller_repository import current_repository
+        self._binding = current_repository()
+        self._runner = runner or SubprocessKanbanRunner(self._binding)
 
     def create_or_get_task(self, task: KanbanTask) -> str:
+        if self._binding is not None:
+            self._binding.verify_workspace(task.repository_path, task.evidence.get("repository"))
         result = self._runner.run(_kanban_create_argv(task))
         if result.returncode != 0:
             raise RuntimeError(_kanban_create_error(result))
@@ -658,6 +666,8 @@ def setup_cli(_ctx: Any, parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Limit scan to one configured repository (e.g. mrkillbob/luna-bot)",
     )
+    admin = subcommands.add_parser("scan-admin", help="Explicitly authorized fleet reconciliation")
+    admin.add_argument("--all-configured", action="store_true", required=True)
     historical = subcommands.add_parser(
         "historical-merged-scan",
         help="Inventory feedback on confirmed merged PRs without dispatching work",
@@ -856,11 +866,12 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     if action == "publish-issue":
         from .cli_issue_publication import handle_publish_issue
         return handle_publish_issue(ctx, args)
-    if action == "scan":
+    if action in {"scan", "scan-admin"}:
         return _scan(ctx, args)
     if action == "historical-merged-scan":
         return _historical_merged_scan(ctx, args)
-    diagnostics = {"status": _status, "doctor": partial(_doctor, ctx)}
+    from .cli_status import status, merge_status
+    diagnostics = {"status": status, "doctor": partial(_doctor, ctx)}
     if action in diagnostics:
         return diagnostics[action]()
     if action == "label-scan":
@@ -886,7 +897,7 @@ def handle_cli_with_context(ctx: Any, args: argparse.Namespace) -> int:
     if action == "merge-scan":
         return _merge_scan(ctx)
     if action == "merge-status":
-        return _merge_status(details=bool(getattr(args, "details", False)))
+        return merge_status(details=bool(getattr(args, "details", False)))
     if action == "retry-deployment":
         return _retry_deployment(ctx, args)
     if action == "merge-enable":
@@ -1043,6 +1054,10 @@ def _validate_maintenance_command_evidence(
         raise ValueError("maintenance evidence cwd does not match exact worktree")
     for evidence in command_evidence:
         worktree = Path(evidence.cwd).resolve(strict=False)
+        from .caller_repository import current_repository
+        binding = current_repository()
+        if binding is not None:
+            binding.verify_workspace(worktree, maintenance.repository)
         try:
             head_result = subprocess.run(
                 ["git", "-C", str(worktree), "rev-parse", "--verify", "HEAD"],
@@ -1146,7 +1161,8 @@ def _complete_maintenance(ctx: Any, args: argparse.Namespace) -> int:
 def cli_bindings(ctx: Any) -> tuple[Any, Any]:
     """Bind host-supplied settings access without reading global YAML."""
 
-    return partial(setup_cli, ctx), partial(handle_cli_with_context, ctx)
+    from .caller_repository import bind_cli
+    return partial(setup_cli, ctx), bind_cli(ctx, handle_cli_with_context)
 
 
 def _github_client(policy: PluginPolicy) -> GitHubClient:
@@ -1500,7 +1516,11 @@ def _run_release_maintenance_scan(
 def _exclusive_scan_lock(control_home: Path | None = None) -> Iterator[bool]:
     """Allow only one full feedback scan per Hermes control home."""
 
+    from .caller_repository import current_repository
+    binding = current_repository()
     lock_root = (control_home or get_default_hermes_root()) / "github-pr-feedback"
+    if binding is not None:
+        lock_root = lock_root / "caller-locks" / binding.lock_key
     lock_root.mkdir(parents=True, exist_ok=True)
     handle = (lock_root / "scan.lock").open("a+b")
     acquired = False
@@ -1833,16 +1853,6 @@ def _run_repair_scan_by_repository(
     }
     payload["deferred_repositories"] = deferred
     return payload
-
-
-def _status() -> int:
-    ledger = FeedbackLedger.for_current_profile()
-    try:
-        counts = ledger.status_counts()
-    finally:
-        ledger.close()
-    print(json.dumps(counts, sort_keys=True))
-    return 0
 
 
 def _reusable_ci_receipt(
@@ -2379,6 +2389,8 @@ def _run_merge_scan_for_policy(
     github: GitHubClient | None = None,
     kanban: KanbanSubprocessClient | None = None,
 ) -> dict[str, object]:
+    if merge_policy.repository not in policy.targets:
+        return {"status": "ok", "processed": 0, "merged": [], "blocked": {}}
     github = github or _github_client(policy)
     kanban = kanban or KanbanSubprocessClient()
     try:
@@ -2392,8 +2404,6 @@ def _run_merge_scan_for_policy(
             "merged": [],
             "blocked": {"canonical_read": ["github_state_unavailable"]},
         }
-    if merge_policy.repository not in policy.targets:
-        return {"status": "ok", "processed": 0, "merged": [], "blocked": {}}
     source = CanonicalMergeEvidenceSource(policy, github, ledger, merge_policy)
     manifest_path = ci_manifest_path(policy.targets[merge_policy.repository].local_path)
     if not manifest_path.is_file():
@@ -2713,19 +2723,6 @@ def _merge_maintainer_task(
         initial_status="running",
         max_retries=3,
     )
-
-
-def _merge_status(*, details: bool = False) -> int:
-    ledger = FeedbackLedger.for_current_profile()
-    try:
-        payload = {"merge": ledger.merge_status_counts()}
-        if details:
-            from .merge_receipt_history import recent_merge_receipts
-            payload["recent_receipts"] = recent_merge_receipts(ledger)
-    finally:
-        ledger.close()
-    print(json.dumps(payload, sort_keys=True))
-    return 0
 
 
 def _review_required_task(

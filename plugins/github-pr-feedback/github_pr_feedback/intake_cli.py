@@ -105,4 +105,5 @@ def handle_cli(ctx, args):
 
 
 def cli_bindings(ctx):
-    return partial(setup_cli, ctx), partial(handle_cli, ctx)
+    from .caller_repository import bind_cli
+    return partial(setup_cli, ctx), bind_cli(ctx, handle_cli)

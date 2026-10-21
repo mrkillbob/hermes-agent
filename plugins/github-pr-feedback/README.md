@@ -540,19 +540,26 @@ cp scripts/github-pr-feedback-scan.py "$HERMES_PROFILE_HOME/scripts/github-pr-fe
 chmod 755 "$HERMES_PROFILE_HOME/scripts/github-pr-feedback-scan.py"
 ```
 
-For example, set the profile explicitly in the crontab and invoke that fixed
-wrapper every five minutes:
+Each scheduled caller must name its configured repository workspace explicitly.
+For example, set the profile in the crontab and invoke the fixed wrapper every
+five minutes, with an optional existing repository confirmation selector:
 
 ```cron
 HERMES_HOME=/absolute/path/to/hermes-profile
 HERMES_EXECUTABLE=/absolute/path/to/hermes
-*/5 * * * * /usr/bin/python3 "$HERMES_HOME/scripts/github-pr-feedback-scan.py" >> "$HERMES_HOME/logs/github-pr-feedback-scan.log" 2>&1
+*/5 * * * * HERMES_PR_FEEDBACK_REPOSITORY=example-owner/example-repository /usr/bin/python3 "$HERMES_HOME/scripts/github-pr-feedback-scan.py" --workspace "/absolute/path/to/repository" >> "$HERMES_HOME/logs/github-pr-feedback-scan.log" 2>&1
 ```
 
 The wrapper refuses an unset, relative, missing, or non-executable
-`HERMES_EXECUTABLE`, then runs exactly that absolute executable with
-`github-pr-feedback scan`. It does not accept arguments, start a model, or
-create webhooks. GitHub remains read-only unless the strict merge maintainer is
+`HERMES_EXECUTABLE` or invalid/missing workspace, then runs exactly that absolute
+executable with `github-pr-feedback scan` in the supplied workspace. The CLI still
+verifies the workspace's origin/common directory and existing configured admission;
+the repository selector confirms that identity rather than choosing another target.
+Use one explicit workspace per cron entry. The wrapper does not infer a global
+target, select administrative mode, accept arbitrary CLI arguments, start a model,
+or create webhooks. Existing schedules need this explicit workspace migration;
+copying the source wrapper does not activate or migrate installed cron. GitHub
+remains read-only unless the strict merge maintainer is
 explicitly enabled and not in report-only mode.
 
 ### Scoped conflict dispatch

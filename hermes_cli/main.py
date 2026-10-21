@@ -3290,8 +3290,8 @@ def _attach_plugin_cli_command(subparsers, cmd_info) -> None:
         formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
     )
     cmd_info["setup_fn"](plugin_parser)
-    if cmd_info.get("handler_fn") is not None:
-        plugin_parser.set_defaults(func=cmd_info["handler_fn"])
+    from hermes_cli.plugin_session import attach_cli_handler
+    attach_cli_handler(plugin_parser, cmd_info.get("handler_fn"))
 
 
 def _register_plugin_cli_commands(subparsers) -> None:
