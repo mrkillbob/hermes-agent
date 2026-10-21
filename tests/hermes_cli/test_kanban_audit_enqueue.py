@@ -15,11 +15,15 @@ pytestmark = pytest.mark.platforms('posix')
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
     monkeypatch.setattr(Path, 'home', lambda: tmp_path)
     with projects_db.connect_closing(tmp_path / 'projects.db') as conn:
         ids = {name: projects_db.create_project(conn, name=name, slug=name, board_slug=board)
                for name, board in [('hermes-agent', 'default'), ('lunabot', 'tradingbot-burndown'),
                                    ('another-project', 'default'), ('unbound', None)]}
+    from hermes_cli import kanban_db
+    for slug, name in [('default', 'hermes-agent'), ('tradingbot-burndown', 'lunabot')]:
+        kanban_db.write_board_metadata(slug, project_id=ids[name])
     body = tmp_path / 'audit body.txt'
     body.write_text('Read-only audit; keep project context.\nNo source changes.\n')
     fake = tmp_path / 'fake hermes'
@@ -91,3 +95,25 @@ def test_projectless_legacy_audit_needs_reconciliation_not_duplicate(setup):
     assert result.returncode != 0
     assert 'active audit has no project binding' in result.stderr
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('owner', [None, 'another-project'])
+def test_unowned_or_rebound_board_refuses_before_cli(setup, monkeypatch, tmp_path, owner):
+    from hermes_cli import kanban_db
+    run, ids, _ = setup
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    kanban_db.write_board_metadata('default', project_id=ids[owner] if owner else '')
+    result, calls = run()
+    assert result.returncode != 0
+    assert 'board ownership' in result.stderr
+    assert calls == []
+
+
+def test_archived_board_refuses_before_cli(setup):
+    from hermes_cli import kanban_db
+    run, _, _ = setup
+    kanban_db.write_board_metadata('default', archived=True)
+    result, calls = run()
+    assert result.returncode != 0
+    assert 'archived board' in result.stderr
+    assert calls == []

@@ -36,6 +36,13 @@ def resolve_project(identity: str, board: str | None):
         raise ValueError('invalid project board binding')
     if board is not None and board != destination:
         raise ValueError('requested board does not match the project board binding')
+    from hermes_cli import kanban_db
+
+    metadata = kanban_db.read_board_metadata(destination)
+    if metadata.get('project_id') != project.id:
+        raise ValueError('board ownership does not match the registered project')
+    if metadata.get('archived'):
+        raise ValueError('archived board cannot receive a recurring audit')
     return project
 
 
@@ -75,6 +82,8 @@ def enqueue_registered(args, project):
         if task['project_id'] == project.id:
             return {'status': 'idle', 'reason': 'audit_already_active',
                     'project_id': project.id, 'board': project.board_slug, 'task_id': task.get('id')}
+    # A project/board edit during listing is not permission to use the old destination.
+    resolve_project(project.id, project.board_slug)
     result = run_json([
         *command, 'create', args.title, '--body-file', str(args.body_file),
         '--assignee', args.assignee, '--project', project.id, '--workspace', 'scratch',

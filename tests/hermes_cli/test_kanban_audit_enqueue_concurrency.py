@@ -79,6 +79,9 @@ def test_existing_project_link_preserves_repository_workspace_policy(tmp_path, m
     with projects_db.connect_closing(tmp_path / 'projects.db') as conn:
         identity = projects_db.create_project(conn, name='Hermes', board_slug='default',
                                               primary_path=str(repository))
+    from hermes_cli import kanban_db
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    kanban_db.write_board_metadata('default', project_id=identity)
     project = producer.resolve_project(identity, 'default')
     with sqlite3.connect(':memory:') as board:
         actual_id, _, repo, kind = resolve_project_link(board, project.id, None, 'scratch', None)
@@ -114,3 +117,28 @@ def test_producer_package_is_in_sealed_distribution():
     package = producer.__package__
     assert any(fnmatch.fnmatchcase(package, pattern) for pattern in discovery['include'])
     assert not any(fnmatch.fnmatchcase(package, pattern) for pattern in discovery.get('exclude', []))
+
+
+def test_board_rebound_during_listing_does_not_create(tmp_path, monkeypatch):
+    import pytest
+    from hermes_cli import projects_db, kanban_db
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    with projects_db.connect_closing(tmp_path / 'projects.db') as conn:
+        first = projects_db.create_project(conn, name='First', board_slug='default')
+        second = projects_db.create_project(conn, name='Second', board_slug='default')
+    kanban_db.write_board_metadata('default', project_id=first)
+    body = tmp_path / 'body'
+    body.write_text('audit')
+    calls = []
+    def list_and_rebind(argv):
+        calls.append(argv)
+        assert 'list' in argv
+        kanban_db.write_board_metadata('default', project_id=second)
+        return []
+    monkeypatch.setattr(producer, 'run_json', list_and_rebind)
+    with pytest.raises(ValueError, match='board ownership'):
+        producer.enqueue(SimpleNamespace(project=first, board=None, body_file=body,
+            hermes='hermes', assignee='auditor', creator='audit', title='Audit',
+            idempotency_key='week', max_runtime='6m'))
+    assert len(calls) == 1
