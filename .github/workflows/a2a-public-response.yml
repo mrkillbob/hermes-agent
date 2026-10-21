@@ -1,0 +1,24 @@
+name: Public MCP response conformance
+on:
+  push:
+    branches: [codex/a2a-public-response-20261021]
+    paths:
+      - .github/workflows/a2a-public-response.yml
+      - scripts/a2a-public-response-probe.py
+permissions:
+  contents: read
+jobs:
+  public-read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch pinned diagnostic source only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/a2a-public-response-probe.py
+          sparse-checkout-cone-mode: false
+      - name: Read public response and advertised metadata
+        shell: bash
+        run: python3 -I -B scripts/a2a-public-response-probe.py
