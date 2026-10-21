@@ -27,7 +27,7 @@ omegaconf==2.3.1
 onnxruntime==1.29.0
 opencv-python-headless==4.14.0.94
 packaging==26.3
-pillow==12.3.0
+pillow==13.0.0
 platformdirs==4.11.4
 pooch==1.9.0
 protobuf==7.36.0
