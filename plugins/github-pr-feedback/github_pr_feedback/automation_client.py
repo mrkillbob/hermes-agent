@@ -18,6 +18,12 @@ def automation_client(
         return client_type()
     if not isinstance(policy, PluginPolicy):
         raise GitHubClientError("invalid GitHub automation policy", code="invalid_policy")
+    from .caller_repository import current_repository, RepositoryBindingError
+    binding = current_repository()
+    if binding is not None:
+        if set(policy.targets) != {binding.repository}:
+            raise RepositoryBindingError("client_policy_differs_from_caller")
+        binding.verify_workspace(policy.targets[binding.repository].local_path, binding.repository)
     settings = policy.github_identity
     if settings is None:
         raise GitHubClientError(

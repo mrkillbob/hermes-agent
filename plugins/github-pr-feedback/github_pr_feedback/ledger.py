@@ -1626,16 +1626,9 @@ class FeedbackLedger:
             if result.rowcount != 1:
                 raise LedgerStateError("receipt lease is not held")
 
-    def status_counts(self) -> dict[str, int]:
-        """Return durable receipt counts without exposing receipt evidence."""
-
-        counts = {"claimed": 0, "completed": 0, "failed": 0}
-        for status, count in self._connection.execute(
-            "SELECT status, COUNT(*) FROM feedback_receipts GROUP BY status"
-        ):
-            if status in counts:
-                counts[status] = int(count)
-        return counts
+    def status_counts(self, repository: str | None = None) -> dict[str, int]:
+        from .ledger_status import status_counts
+        return status_counts(self._connection, "feedback", repository)
 
     def record_ci_receipt(self, receipt: object) -> None:
         """Atomically persist one typed receipt; prose cannot enter this boundary."""
@@ -2429,19 +2422,9 @@ class FeedbackLedger:
             if result.rowcount != 1:
                 raise LedgerStateError("merge lease is not held")
 
-    def merge_status_counts(self) -> dict[str, int]:
-        counts = {
-            "claimed": 0,
-            "verification_required": 0,
-            "completed": 0,
-            "failed": 0,
-        }
-        for status, count in self._connection.execute(
-            "SELECT status, COUNT(*) FROM merge_attempts GROUP BY status"
-        ):
-            if status in counts:
-                counts[status] = int(count)
-        return counts
+    def merge_status_counts(self, repository: str | None = None) -> dict[str, int]:
+        from .ledger_status import status_counts
+        return status_counts(self._connection, "merge", repository)
 
     def record_deployment_receipt(self, receipt: object) -> None:
         from .post_merge import DeploymentReceipt

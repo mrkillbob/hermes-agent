@@ -848,9 +848,9 @@ def test_scan_reads_disabled_policy_through_the_plugin_config_context(
 
     assert exit_code == 1
     assert json.loads(capsys.readouterr().out) == {
-        "status": "rejected", "reason": "broad_capability_unavailable"
+        "status": "rejected", "reason": "caller_repository_binding_failed"
     }
-    assert context.config_reads == ["intake_only", "intake_only", "enabled"]
+    assert context.config_reads == ["intake_only"]
 
 
 def test_scan_lock_rejects_a_concurrent_scan_for_the_same_control_home(
@@ -1119,7 +1119,12 @@ def test_status_reports_durable_receipt_counts(
     assert failed_lease is not None
     ledger.fail(failed, "Kanban unavailable", failed_lease)
     ledger.close()
-    context = RecordingContext({"enabled": True})
+    repository = tmp_path / "caller"
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "remote", "add", "origin",
+                    "https://github.com/acme/widgets.git"], check=True)
+    context = RecordingContext(enabled_settings(repository))
+    context.session_cwd = lambda **_kwargs: str(repository)
     _plugin_module().register(context)
     parser = argparse.ArgumentParser()
     context.calls[0]["setup_fn"](parser)
@@ -1146,9 +1151,9 @@ def test_doctor_reports_a_disabled_plugin_without_scanning(
 
     assert exit_code == 1
     assert json.loads(capsys.readouterr().out) == {
-        "status": "rejected", "reason": "broad_capability_unavailable"
+        "status": "rejected", "reason": "caller_repository_binding_failed"
     }
-    assert context.config_reads == ["intake_only", "intake_only", "enabled"]
+    assert context.config_reads == ["intake_only"]
 
 
 def test_namespaced_context_loads_assignee_rules_for_runtime_routing(
@@ -2406,31 +2411,8 @@ def test_doctor_fails_closed_for_an_incomplete_enabled_configuration(
     exit_code = context.calls[0]["handler_fn"](parser.parse_args(["doctor"]))
 
     assert exit_code == 1
-    assert json.loads(capsys.readouterr().out) == {"status": "invalid_configuration"}
-    assert context.config_reads == [
-        "intake_only", "intake_only", "enabled", "intake_only", "enabled",
-        "repositories",
-        "reviewer_logins",
-        "reviewer_associations",
-        "include_self_feedback",
-        "include_bot_feedback",
-        "auto_dispatch",
-        "debug",
-        "assignee_rules",
-        "routing_rules",
-        "local_ci_audit",
-        "agent_labels",
-        "merge_maintainer",
-        "merge_maintainers",
-        "repair_steward",
-        "release_maintenance",
-        "release_maintenances",
-        "github_identity",
-        "github_actions_permissions_identity",
-        "not_before",
-        "assignee",
-        "board",
-    ]
+    assert json.loads(capsys.readouterr().out) == {"status": "rejected", "reason": "caller_repository_binding_failed"}
+    assert context.config_reads == ["intake_only"]
 
 
 def test_scan_fails_closed_for_an_incomplete_enabled_configuration(
@@ -2444,7 +2426,7 @@ def test_scan_fails_closed_for_an_incomplete_enabled_configuration(
     exit_code = context.calls[0]["handler_fn"](parser.parse_args(["scan"]))
 
     assert exit_code == 1
-    assert json.loads(capsys.readouterr().out) == {"status": "invalid_configuration"}
+    assert json.loads(capsys.readouterr().out) == {"status": "rejected", "reason": "caller_repository_binding_failed"}
 
 
 def test_real_hermes_discovers_temp_profile_plugin_and_dry_scan_never_invokes_gh(
@@ -2605,11 +2587,14 @@ def test_cron_wrapper_invokes_only_the_fixed_scan_argv_with_an_absolute_hermes_e
         stdout = '{"status":"ok"}\n'
         stderr = ""
 
-    def run(argv: list[str], *, check: bool, capture_output: bool, text: bool, env: dict[str, str]) -> Completed:
+    def run(argv: list[str], *, check: bool, capture_output: bool, text: bool, env: dict[str, str],
+            stdin: int, cwd: Path) -> Completed:
         assert "_HERMES_GATEWAY" not in env
         assert env["HERMES_HOME"] == str(tmp_path / "profile")
         assert capture_output is True
         assert text is True
+        assert stdin == subprocess.DEVNULL
+        assert cwd == tmp_path.resolve()
         calls.append((argv, check))
         return Completed()
 
@@ -2622,7 +2607,7 @@ def test_cron_wrapper_invokes_only_the_fixed_scan_argv_with_an_absolute_hermes_e
 
     monkeypatch.setenv("_HERMES_GATEWAY", "1")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
-    assert module.main() == 0
+    assert module.main(["--workspace", str(tmp_path)]) == 0
     assert calls == [([str(executable), "github-pr-feedback", "scan"], False)]
 
 
@@ -2653,7 +2638,7 @@ def test_cron_wrapper_reports_missing_child_stdout_as_a_failure(
     executable.chmod(0o755)
     monkeypatch.setenv("HERMES_EXECUTABLE", str(executable))
 
-    assert module.main() == 1
+    assert module.main(["--workspace", str(tmp_path)]) == 1
     assert json.loads(capsys.readouterr().out) == {
         "child_returncode": 0,
         "status": "worker_output_missing",

@@ -597,10 +597,10 @@ class PluginContext(PassiveKanbanContext):
         from hermes_cli.plugins_injection import inject_plugin_message
         return inject_plugin_message(self, content, role, session_key=session_key, origin=origin)
 
-    def session_cwd(self) -> str:
+    def session_cwd(self, *, require_session: bool = False) -> str:
         """The calling session's recorded cwd, never the gateway's own (``plugin_session``)."""
         from hermes_cli.plugin_session import context_cwd
-        return context_cwd(self._manager)
+        return context_cwd(self._manager, require_session=require_session)
 
     def session_surface(self) -> str:
         """The calling session's client (``cli``/``tui``/``desktop``/``acp``) or messaging platform."""
