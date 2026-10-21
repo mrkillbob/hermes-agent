@@ -1,0 +1,1030 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "addresses": [],
+      "artifacts": [
+        {
+          "length": -1,
+          "location": {
+            "index": -1,
+            "uri": "uv.lock"
+          },
+          "parentIndex": -1,
+          "roles": []
+        }
+      ],
+      "graphs": [],
+      "invocations": [],
+      "language": "en-US",
+      "logicalLocations": [],
+      "newlineSequences": [
+        "\r\n",
+        "\n"
+      ],
+      "policies": [],
+      "redactionTokens": [],
+      "results": [
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "eb5dd9851e87784fe66d11daa64b078586bc8e93afb46c33acf9ac6350f12a43"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-9353' (also known as 'PYSEC-2026-2509', 'GHSA-238w-f66p-w349')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-9353",
+          "ruleIndex": 0,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "085d606557ee41e4296a18337d9c37c6346cf5fa9629f34a7e9e802786499c85"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-10223' (also known as 'PYSEC-2026-3575', 'GHSA-33qv-c5qm-799v')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-10223",
+          "ruleIndex": 1,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "3de2defb9d5d12048e189945b50473dbbd926e6035fd0f5e2fa3c630bd9cda9b"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-53869' (also known as 'PYSEC-2026-2510', 'GHSA-4pqm-j46f-795x')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-53869",
+          "ruleIndex": 2,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "cc95e218df3f621881fadf8c71d933f18d9411cc6b198e61f722959d77b3d3be"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-53870' (also known as 'PYSEC-2026-2511', 'GHSA-99f9-j8r3-p853')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-53870",
+          "ruleIndex": 3,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "ba8dd7566ba77640a9df6fc9fef946b68aa8a27949473b7a18d2b6d4d8cd60e8"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-9369' (also known as 'PYSEC-2026-2512', 'GHSA-cv5c-mh6j-wvp9')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-9369",
+          "ruleIndex": 4,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "81198e050824ee98362b656c2440ac756dfcf4d2c05eeab1c6485b4f9905314b"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-10222' (also known as 'PYSEC-2026-2513', 'GHSA-mv8x-fg99-32mf')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-10222",
+          "ruleIndex": 5,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "8ef3136606296a2ccdf92d511a64d457c63037718497a56112b424e5b06db358"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-9366' (also known as 'PYSEC-2026-2514', 'GHSA-pgp4-xr4j-h5cg')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-9366",
+          "ruleIndex": 6,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "4e895021b43a5b6025f4332dbeee4435b501ae12390f53cac2d120a2bc885d39"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-10224' (also known as 'PYSEC-2026-3576', 'GHSA-pmqc-57g8-c22c')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-10224",
+          "ruleIndex": 7,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "b68b63dab25cadf9336412d30cd450b0d72f3f157adea254dc4360acb0dc3e0f"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-9368' (also known as 'PYSEC-2026-2515', 'GHSA-wm96-9gfh-vvgq')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-9368",
+          "ruleIndex": 8,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "ca368eae2cdbf24dadc3df2d169fd379718efd5edc8b354b2139c7f8ab4a904e"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-10221' (also known as 'PYSEC-2026-3577', 'GHSA-xq8w-9jvx-gm3v')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-10221",
+          "ruleIndex": 9,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "eb5dd9851e87784fe66d11daa64b078586bc8e93afb46c33acf9ac6350f12a43"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-9353' (also known as 'PYSEC-2026-2509', 'GHSA-238w-f66p-w349')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-9353",
+          "ruleIndex": 0,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "3de2defb9d5d12048e189945b50473dbbd926e6035fd0f5e2fa3c630bd9cda9b"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-53869' (also known as 'PYSEC-2026-2510', 'GHSA-4pqm-j46f-795x')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-53869",
+          "ruleIndex": 2,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "cc95e218df3f621881fadf8c71d933f18d9411cc6b198e61f722959d77b3d3be"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-53870' (also known as 'PYSEC-2026-2511', 'GHSA-99f9-j8r3-p853')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-53870",
+          "ruleIndex": 3,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "ba8dd7566ba77640a9df6fc9fef946b68aa8a27949473b7a18d2b6d4d8cd60e8"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-9369' (also known as 'PYSEC-2026-2512', 'GHSA-cv5c-mh6j-wvp9')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-9369",
+          "ruleIndex": 4,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "81198e050824ee98362b656c2440ac756dfcf4d2c05eeab1c6485b4f9905314b"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-10222' (also known as 'PYSEC-2026-2513', 'GHSA-mv8x-fg99-32mf')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-10222",
+          "ruleIndex": 5,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "8ef3136606296a2ccdf92d511a64d457c63037718497a56112b424e5b06db358"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-9366' (also known as 'PYSEC-2026-2514', 'GHSA-pgp4-xr4j-h5cg')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-9366",
+          "ruleIndex": 6,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "b68b63dab25cadf9336412d30cd450b0d72f3f157adea254dc4360acb0dc3e0f"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-9368' (also known as 'PYSEC-2026-2515', 'GHSA-wm96-9gfh-vvgq')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-9368",
+          "ruleIndex": 8,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "085d606557ee41e4296a18337d9c37c6346cf5fa9629f34a7e9e802786499c85"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-10223' (also known as 'PYSEC-2026-3575', 'GHSA-33qv-c5qm-799v')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-10223",
+          "ruleIndex": 1,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "4e895021b43a5b6025f4332dbeee4435b501ae12390f53cac2d120a2bc885d39"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-10224' (also known as 'PYSEC-2026-3576', 'GHSA-pmqc-57g8-c22c')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-10224",
+          "ruleIndex": 7,
+          "stacks": [],
+          "taxa": []
+        },
+        {
+          "partialFingerprints": {
+            "primaryLocationLineHash": "ca368eae2cdbf24dadc3df2d169fd379718efd5edc8b354b2139c7f8ab4a904e"
+          },
+          "attachments": [],
+          "codeFlows": [],
+          "fixes": [],
+          "graphTraversals": [],
+          "graphs": [],
+          "kind": "fail",
+          "level": "warning",
+          "locations": [
+            {
+              "annotations": [],
+              "id": -1,
+              "logicalLocations": [],
+              "physicalLocation": {
+                "artifactLocation": {
+                  "index": -1,
+                  "uri": "uv.lock"
+                }
+              },
+              "relationships": []
+            }
+          ],
+          "message": {
+            "arguments": [],
+            "text": "Package 'hermes-agent@0.0.0' is vulnerable to 'CVE-2026-10221' (also known as 'PYSEC-2026-3577', 'GHSA-xq8w-9jvx-gm3v')."
+          },
+          "rank": -1,
+          "relatedLocations": [],
+          "ruleId": "CVE-2026-10221",
+          "ruleIndex": 9,
+          "stacks": [],
+          "taxa": []
+        }
+      ],
+      "runAggregates": [],
+      "taxonomies": [],
+      "threadFlowLocations": [],
+      "tool": {
+        "driver": {
+          "contents": [
+            "localizedData",
+            "nonLocalizedData"
+          ],
+          "informationUri": "https://github.com/google/osv-scanner",
+          "isComprehensive": false,
+          "language": "en-US",
+          "locations": [],
+          "name": "osv-scanner",
+          "notifications": [],
+          "rules": [
+            {
+              "deprecatedIds": [
+                "CVE-2026-9353",
+                "PYSEC-2026-2509",
+                "GHSA-238w-f66p-w349"
+              ],
+              "fullDescription": {
+                "markdown": "A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.23. Impacted is an unknown function of the file agent/skills_guard.py of the component Skills Guard Multi-Word Prompt Handler. The manipulation of the argument THREAT_PATTERNS leads to injection. Remote exploitation of the attack is possible. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way.",
+                "text": "A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.23. Impacted is an unknown function of the file agent/skills_guard.py of the component Skills Guard Multi-Word Prompt Handler. The manipulation of the argument THREAT_PATTERNS leads to injection. Remote exploitation of the attack is possible. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way."
+              },
+              "help": {
+                "markdown": "**Your dependency is vulnerable to [CVE-2026-9353](https://osv.dev/CVE-2026-9353)**\n(Also published as: [PYSEC-2026-2509](https://osv.dev/PYSEC-2026-2509), [GHSA-238w-f66p-w349](https://osv.dev/GHSA-238w-f66p-w349), ).\n\n## [PYSEC-2026-2509](https://osv.dev/PYSEC-2026-2509)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.23. Impacted is an unknown function of the file agent/skills_guard.py of the component Skills Guard Multi-Word Prompt Handler. The manipulation of the argument THREAT_PATTERNS leads to injection. Remote exploitation of the attack is possible. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-238w-f66p-w349](https://osv.dev/GHSA-238w-f66p-w349)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.23. Impacted is an unknown function of the file agent/skills_guard.py of the component Skills Guard Multi-Word Prompt Handler. The manipulation of the argument THREAT_PATTERNS leads to injection. Remote exploitation of the attack is possible. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-238w-f66p-w349 | hermes-agent | 0.15.0 |\n| PYSEC-2026-2509 | hermes-agent | 0.15.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-9353\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n",
+                "text": "**Your dependency is vulnerable to [CVE-2026-9353](https://osv.dev/CVE-2026-9353)**\n(Also published as: [PYSEC-2026-2509](https://osv.dev/PYSEC-2026-2509), [GHSA-238w-f66p-w349](https://osv.dev/GHSA-238w-f66p-w349), ).\n\n## [PYSEC-2026-2509](https://osv.dev/PYSEC-2026-2509)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.23. Impacted is an unknown function of the file agent/skills_guard.py of the component Skills Guard Multi-Word Prompt Handler. The manipulation of the argument THREAT_PATTERNS leads to injection. Remote exploitation of the attack is possible. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-238w-f66p-w349](https://osv.dev/GHSA-238w-f66p-w349)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.23. Impacted is an unknown function of the file agent/skills_guard.py of the component Skills Guard Multi-Word Prompt Handler. The manipulation of the argument THREAT_PATTERNS leads to injection. Remote exploitation of the attack is possible. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-238w-f66p-w349 | hermes-agent | 0.15.0 |\n| PYSEC-2026-2509 | hermes-agent | 0.15.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-9353\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n"
+              },
+              "id": "CVE-2026-9353",
+              "name": "CVE-2026-9353",
+              "properties": {
+                "security-severity": "7.3"
+              },
+              "relationships": [],
+              "shortDescription": {
+                "markdown": "CVE-2026-9353: hermes-agent has an Injection issue",
+                "text": "CVE-2026-9353: hermes-agent has an Injection issue"
+              }
+            },
+            {
+              "deprecatedIds": [
+                "CVE-2026-10223",
+                "PYSEC-2026-3575",
+                "GHSA-33qv-c5qm-799v"
+              ],
+              "fullDescription": {
+                "markdown": "A weakness has been identified in NousResearch hermes-agent up to 2026.4.30. This affects the function _scan_memory_content of the file tools/memory_tool.py. This manipulation causes injection. The attack can be initiated remotely. The exploit has been made available to the public and could be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.",
+                "text": "A weakness has been identified in NousResearch hermes-agent up to 2026.4.30. This affects the function _scan_memory_content of the file tools/memory_tool.py. This manipulation causes injection. The attack can be initiated remotely. The exploit has been made available to the public and could be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way."
+              },
+              "help": {
+                "markdown": "**Your dependency is vulnerable to [CVE-2026-10223](https://osv.dev/CVE-2026-10223)**\n(Also published as: [PYSEC-2026-3575](https://osv.dev/PYSEC-2026-3575), [GHSA-33qv-c5qm-799v](https://osv.dev/GHSA-33qv-c5qm-799v), ).\n\n## [PYSEC-2026-3575](https://osv.dev/PYSEC-2026-3575)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A weakness has been identified in NousResearch hermes-agent up to 2026.4.30. This affects the function _scan_memory_content of the file tools/memory_tool.py. This manipulation causes injection. The attack can be initiated remotely. The exploit has been made available to the public and could be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-33qv-c5qm-799v](https://osv.dev/GHSA-33qv-c5qm-799v)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A weakness has been identified in NousResearch hermes-agent up to 2026.4.30. This affects the function _scan_memory_content of the file tools/memory_tool.py. This manipulation causes injection. The attack can be initiated remotely. The exploit has been made available to the public and could be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-33qv-c5qm-799v | hermes-agent | 0.15.0 |\n| PYSEC-2026-3575 | hermes-agent | 0.15.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-10223\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n",
+                "text": "**Your dependency is vulnerable to [CVE-2026-10223](https://osv.dev/CVE-2026-10223)**\n(Also published as: [PYSEC-2026-3575](https://osv.dev/PYSEC-2026-3575), [GHSA-33qv-c5qm-799v](https://osv.dev/GHSA-33qv-c5qm-799v), ).\n\n## [PYSEC-2026-3575](https://osv.dev/PYSEC-2026-3575)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A weakness has been identified in NousResearch hermes-agent up to 2026.4.30. This affects the function _scan_memory_content of the file tools/memory_tool.py. This manipulation causes injection. The attack can be initiated remotely. The exploit has been made available to the public and could be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-33qv-c5qm-799v](https://osv.dev/GHSA-33qv-c5qm-799v)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A weakness has been identified in NousResearch hermes-agent up to 2026.4.30. This affects the function _scan_memory_content of the file tools/memory_tool.py. This manipulation causes injection. The attack can be initiated remotely. The exploit has been made available to the public and could be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-33qv-c5qm-799v | hermes-agent | 0.15.0 |\n| PYSEC-2026-3575 | hermes-agent | 0.15.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-10223\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n"
+              },
+              "id": "CVE-2026-10223",
+              "name": "CVE-2026-10223",
+              "properties": {
+                "security-severity": "6.3"
+              },
+              "relationships": [],
+              "shortDescription": {
+                "markdown": "CVE-2026-10223: hermes-agent has an Injection issue",
+                "text": "CVE-2026-10223: hermes-agent has an Injection issue"
+              }
+            },
+            {
+              "deprecatedIds": [
+                "CVE-2026-53869",
+                "PYSEC-2026-2510",
+                "GHSA-4pqm-j46f-795x"
+              ],
+              "fullDescription": {
+                "markdown": "Hermes Agent before 0.16.0 contains a DNS rebinding vulnerability in WebSocket endpoints that allows remote attackers to bypass Host and Origin validation. FastAPI HTTP middleware does not execute for WebSocket upgrade requests on /api/pty, /api/ws, /api/pub, and /api/events endpoints, enabling attackers to exploit DNS rebinding and inject malicious commands or read terminal output.",
+                "text": "Hermes Agent before 0.16.0 contains a DNS rebinding vulnerability in WebSocket endpoints that allows remote attackers to bypass Host and Origin validation. FastAPI HTTP middleware does not execute for WebSocket upgrade requests on /api/pty, /api/ws, /api/pub, and /api/events endpoints, enabling attackers to exploit DNS rebinding and inject malicious commands or read terminal output."
+              },
+              "help": {
+                "markdown": "**Your dependency is vulnerable to [CVE-2026-53869](https://osv.dev/CVE-2026-53869)**\n(Also published as: [PYSEC-2026-2510](https://osv.dev/PYSEC-2026-2510), [GHSA-4pqm-j46f-795x](https://osv.dev/GHSA-4pqm-j46f-795x), ).\n\n## [PYSEC-2026-2510](https://osv.dev/PYSEC-2026-2510)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e Hermes Agent before 0.16.0 contains a DNS rebinding vulnerability in WebSocket endpoints that allows remote attackers to bypass Host and Origin validation. FastAPI HTTP middleware does not execute for WebSocket upgrade requests on /api/pty, /api/ws, /api/pub, and /api/events endpoints, enabling attackers to exploit DNS rebinding and inject malicious commands or read terminal output.\n\n\u003c/details\u003e\n\n## [GHSA-4pqm-j46f-795x](https://osv.dev/GHSA-4pqm-j46f-795x)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e Hermes Agent before 0.16.0 contains a DNS rebinding vulnerability in WebSocket endpoints that allows remote attackers to bypass Host and Origin validation. FastAPI HTTP middleware does not execute for WebSocket upgrade requests on /api/pty, /api/ws, /api/pub, and /api/events endpoints, enabling attackers to exploit DNS rebinding and inject malicious commands or read terminal output.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-4pqm-j46f-795x | hermes-agent | 0.16.0 |\n| PYSEC-2026-2510 | hermes-agent | 0.16.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-53869\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n",
+                "text": "**Your dependency is vulnerable to [CVE-2026-53869](https://osv.dev/CVE-2026-53869)**\n(Also published as: [PYSEC-2026-2510](https://osv.dev/PYSEC-2026-2510), [GHSA-4pqm-j46f-795x](https://osv.dev/GHSA-4pqm-j46f-795x), ).\n\n## [PYSEC-2026-2510](https://osv.dev/PYSEC-2026-2510)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e Hermes Agent before 0.16.0 contains a DNS rebinding vulnerability in WebSocket endpoints that allows remote attackers to bypass Host and Origin validation. FastAPI HTTP middleware does not execute for WebSocket upgrade requests on /api/pty, /api/ws, /api/pub, and /api/events endpoints, enabling attackers to exploit DNS rebinding and inject malicious commands or read terminal output.\n\n\u003c/details\u003e\n\n## [GHSA-4pqm-j46f-795x](https://osv.dev/GHSA-4pqm-j46f-795x)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e Hermes Agent before 0.16.0 contains a DNS rebinding vulnerability in WebSocket endpoints that allows remote attackers to bypass Host and Origin validation. FastAPI HTTP middleware does not execute for WebSocket upgrade requests on /api/pty, /api/ws, /api/pub, and /api/events endpoints, enabling attackers to exploit DNS rebinding and inject malicious commands or read terminal output.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-4pqm-j46f-795x | hermes-agent | 0.16.0 |\n| PYSEC-2026-2510 | hermes-agent | 0.16.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-53869\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n"
+              },
+              "id": "CVE-2026-53869",
+              "name": "CVE-2026-53869",
+              "properties": {
+                "security-severity": "8.7"
+              },
+              "relationships": [],
+              "shortDescription": {
+                "markdown": "CVE-2026-53869: Hermes Agent contains a DNS rebinding vulnerability in WebSocket endpoints that allows remote attackers to bypass Host and Origin validation",
+                "text": "CVE-2026-53869: Hermes Agent contains a DNS rebinding vulnerability in WebSocket endpoints that allows remote attackers to bypass Host and Origin validation"
+              }
+            },
+            {
+              "deprecatedIds": [
+                "CVE-2026-53870",
+                "PYSEC-2026-2511",
+                "GHSA-99f9-j8r3-p853"
+              ],
+              "fullDescription": {
+                "markdown": "Hermes Agent before 0.16.0 creates response_store.db and webhook_subscriptions.json with world-readable permissions (mode 0o644), exposing conversation history and HMAC secrets to local users. Attackers with local filesystem access can read these files directly to obtain sensitive data including conversation history, tool payloads, prompts, and per-route HMAC secrets.",
+                "text": "Hermes Agent before 0.16.0 creates response_store.db and webhook_subscriptions.json with world-readable permissions (mode 0o644), exposing conversation history and HMAC secrets to local users. Attackers with local filesystem access can read these files directly to obtain sensitive data including conversation history, tool payloads, prompts, and per-route HMAC secrets."
+              },
+              "help": {
+                "markdown": "**Your dependency is vulnerable to [CVE-2026-53870](https://osv.dev/CVE-2026-53870)**\n(Also published as: [PYSEC-2026-2511](https://osv.dev/PYSEC-2026-2511), [GHSA-99f9-j8r3-p853](https://osv.dev/GHSA-99f9-j8r3-p853), ).\n\n## [PYSEC-2026-2511](https://osv.dev/PYSEC-2026-2511)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e Hermes Agent before 0.16.0 creates response_store.db and webhook_subscriptions.json with world-readable permissions (mode 0o644), exposing conversation history and HMAC secrets to local users. Attackers with local filesystem access can read these files directly to obtain sensitive data including conversation history, tool payloads, prompts, and per-route HMAC secrets.\n\n\u003c/details\u003e\n\n## [GHSA-99f9-j8r3-p853](https://osv.dev/GHSA-99f9-j8r3-p853)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e Hermes Agent before 0.16.0 creates response_store.db and webhook_subscriptions.json with world-readable permissions (mode 0o644), exposing conversation history and HMAC secrets to local users. Attackers with local filesystem access can read these files directly to obtain sensitive data including conversation history, tool payloads, prompts, and per-route HMAC secrets.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-99f9-j8r3-p853 | hermes-agent | 0.16.0 |\n| PYSEC-2026-2511 | hermes-agent | 0.16.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-53870\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n",
+                "text": "**Your dependency is vulnerable to [CVE-2026-53870](https://osv.dev/CVE-2026-53870)**\n(Also published as: [PYSEC-2026-2511](https://osv.dev/PYSEC-2026-2511), [GHSA-99f9-j8r3-p853](https://osv.dev/GHSA-99f9-j8r3-p853), ).\n\n## [PYSEC-2026-2511](https://osv.dev/PYSEC-2026-2511)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e Hermes Agent before 0.16.0 creates response_store.db and webhook_subscriptions.json with world-readable permissions (mode 0o644), exposing conversation history and HMAC secrets to local users. Attackers with local filesystem access can read these files directly to obtain sensitive data including conversation history, tool payloads, prompts, and per-route HMAC secrets.\n\n\u003c/details\u003e\n\n## [GHSA-99f9-j8r3-p853](https://osv.dev/GHSA-99f9-j8r3-p853)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e Hermes Agent before 0.16.0 creates response_store.db and webhook_subscriptions.json with world-readable permissions (mode 0o644), exposing conversation history and HMAC secrets to local users. Attackers with local filesystem access can read these files directly to obtain sensitive data including conversation history, tool payloads, prompts, and per-route HMAC secrets.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-99f9-j8r3-p853 | hermes-agent | 0.16.0 |\n| PYSEC-2026-2511 | hermes-agent | 0.16.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-53870\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n"
+              },
+              "id": "CVE-2026-53870",
+              "name": "CVE-2026-53870",
+              "properties": {
+                "security-severity": "6.8"
+              },
+              "relationships": [],
+              "shortDescription": {
+                "markdown": "CVE-2026-53870: Hermes Agent creates response_store.db and webhook_subscriptions.json with world-readable permissions (mode 0o644)",
+                "text": "CVE-2026-53870: Hermes Agent creates response_store.db and webhook_subscriptions.json with world-readable permissions (mode 0o644)"
+              }
+            },
+            {
+              "deprecatedIds": [
+                "CVE-2026-9369",
+                "PYSEC-2026-2512",
+                "GHSA-cv5c-mh6j-wvp9"
+              ],
+              "fullDescription": {
+                "markdown": "A security flaw has been discovered in NousResearch hermes-agent 2026.4.23. Affected is the function _discover_dashboard_plugins of the file hermes_cli/web_server.py of the component CLI web-dashboard Interface. Performing a manipulation of the argument HERMES_ENABLE_PROJECT_PLUGINS results in incorrect comparison. The attack is only possible with local access. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.",
+                "text": "A security flaw has been discovered in NousResearch hermes-agent 2026.4.23. Affected is the function _discover_dashboard_plugins of the file hermes_cli/web_server.py of the component CLI web-dashboard Interface. Performing a manipulation of the argument HERMES_ENABLE_PROJECT_PLUGINS results in incorrect comparison. The attack is only possible with local access. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way."
+              },
+              "help": {
+                "markdown": "**Your dependency is vulnerable to [CVE-2026-9369](https://osv.dev/CVE-2026-9369)**\n(Also published as: [PYSEC-2026-2512](https://osv.dev/PYSEC-2026-2512), [GHSA-cv5c-mh6j-wvp9](https://osv.dev/GHSA-cv5c-mh6j-wvp9), ).\n\n## [PYSEC-2026-2512](https://osv.dev/PYSEC-2026-2512)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security flaw has been discovered in NousResearch hermes-agent 2026.4.23. Affected is the function _discover_dashboard_plugins of the file hermes_cli/web_server.py of the component CLI web-dashboard Interface. Performing a manipulation of the argument HERMES_ENABLE_PROJECT_PLUGINS results in incorrect comparison. The attack is only possible with local access. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-cv5c-mh6j-wvp9](https://osv.dev/GHSA-cv5c-mh6j-wvp9)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security flaw has been discovered in NousResearch hermes-agent 2026.4.23. Affected is the function _discover_dashboard_plugins of the file hermes_cli/web_server.py of the component CLI web-dashboard Interface. Performing a manipulation of the argument HERMES_ENABLE_PROJECT_PLUGINS results in incorrect comparison. The attack is only possible with local access. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-cv5c-mh6j-wvp9 | hermes-agent | 0.15.0 |\n| PYSEC-2026-2512 | hermes-agent | 0.15.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-9369\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n",
+                "text": "**Your dependency is vulnerable to [CVE-2026-9369](https://osv.dev/CVE-2026-9369)**\n(Also published as: [PYSEC-2026-2512](https://osv.dev/PYSEC-2026-2512), [GHSA-cv5c-mh6j-wvp9](https://osv.dev/GHSA-cv5c-mh6j-wvp9), ).\n\n## [PYSEC-2026-2512](https://osv.dev/PYSEC-2026-2512)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security flaw has been discovered in NousResearch hermes-agent 2026.4.23. Affected is the function _discover_dashboard_plugins of the file hermes_cli/web_server.py of the component CLI web-dashboard Interface. Performing a manipulation of the argument HERMES_ENABLE_PROJECT_PLUGINS results in incorrect comparison. The attack is only possible with local access. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-cv5c-mh6j-wvp9](https://osv.dev/GHSA-cv5c-mh6j-wvp9)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security flaw has been discovered in NousResearch hermes-agent 2026.4.23. Affected is the function _discover_dashboard_plugins of the file hermes_cli/web_server.py of the component CLI web-dashboard Interface. Performing a manipulation of the argument HERMES_ENABLE_PROJECT_PLUGINS results in incorrect comparison. The attack is only possible with local access. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-cv5c-mh6j-wvp9 | hermes-agent | 0.15.0 |\n| PYSEC-2026-2512 | hermes-agent | 0.15.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-9369\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n"
+              },
+              "id": "CVE-2026-9369",
+              "name": "CVE-2026-9369",
+              "properties": {
+                "security-severity": "5.3"
+              },
+              "relationships": [],
+              "shortDescription": {
+                "markdown": "CVE-2026-9369: hermes-agent has an Incorrect Comparison",
+                "text": "CVE-2026-9369: hermes-agent has an Incorrect Comparison"
+              }
+            },
+            {
+              "deprecatedIds": [
+                "CVE-2026-10222",
+                "PYSEC-2026-2513",
+                "GHSA-mv8x-fg99-32mf"
+              ],
+              "fullDescription": {
+                "markdown": "A security flaw has been discovered in NousResearch hermes-agent up to 2026.4.30. Affected by this issue is the function _sanitize_env_lines of the file hermes_cli/config.py. The manipulation results in injection. It is possible to launch the attack remotely. The attack requires a high level of complexity. The exploitation is known to be difficult. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.",
+                "text": "A security flaw has been discovered in NousResearch hermes-agent up to 2026.4.30. Affected by this issue is the function _sanitize_env_lines of the file hermes_cli/config.py. The manipulation results in injection. It is possible to launch the attack remotely. The attack requires a high level of complexity. The exploitation is known to be difficult. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way."
+              },
+              "help": {
+                "markdown": "**Your dependency is vulnerable to [CVE-2026-10222](https://osv.dev/CVE-2026-10222)**\n(Also published as: [PYSEC-2026-2513](https://osv.dev/PYSEC-2026-2513), [GHSA-mv8x-fg99-32mf](https://osv.dev/GHSA-mv8x-fg99-32mf), ).\n\n## [PYSEC-2026-2513](https://osv.dev/PYSEC-2026-2513)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security flaw has been discovered in NousResearch hermes-agent up to 2026.4.30. Affected by this issue is the function _sanitize_env_lines of the file hermes_cli/config.py. The manipulation results in injection. It is possible to launch the attack remotely. The attack requires a high level of complexity. The exploitation is known to be difficult. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-mv8x-fg99-32mf](https://osv.dev/GHSA-mv8x-fg99-32mf)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security flaw has been discovered in NousResearch hermes-agent up to 2026.4.30. Affected by this issue is the function _sanitize_env_lines of the file hermes_cli/config.py. The manipulation results in injection. It is possible to launch the attack remotely. The attack requires a high level of complexity. The exploitation is known to be difficult. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-mv8x-fg99-32mf | hermes-agent | 0.18.0 |\n| PYSEC-2026-2513 | hermes-agent | 0.18.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-10222\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n",
+                "text": "**Your dependency is vulnerable to [CVE-2026-10222](https://osv.dev/CVE-2026-10222)**\n(Also published as: [PYSEC-2026-2513](https://osv.dev/PYSEC-2026-2513), [GHSA-mv8x-fg99-32mf](https://osv.dev/GHSA-mv8x-fg99-32mf), ).\n\n## [PYSEC-2026-2513](https://osv.dev/PYSEC-2026-2513)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security flaw has been discovered in NousResearch hermes-agent up to 2026.4.30. Affected by this issue is the function _sanitize_env_lines of the file hermes_cli/config.py. The manipulation results in injection. It is possible to launch the attack remotely. The attack requires a high level of complexity. The exploitation is known to be difficult. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-mv8x-fg99-32mf](https://osv.dev/GHSA-mv8x-fg99-32mf)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security flaw has been discovered in NousResearch hermes-agent up to 2026.4.30. Affected by this issue is the function _sanitize_env_lines of the file hermes_cli/config.py. The manipulation results in injection. It is possible to launch the attack remotely. The attack requires a high level of complexity. The exploitation is known to be difficult. The exploit has been released to the public and may be used for attacks. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-mv8x-fg99-32mf | hermes-agent | 0.18.0 |\n| PYSEC-2026-2513 | hermes-agent | 0.18.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-10222\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n"
+              },
+              "id": "CVE-2026-10222",
+              "name": "CVE-2026-10222",
+              "properties": {
+                "security-severity": "5.6"
+              },
+              "relationships": [],
+              "shortDescription": {
+                "markdown": "CVE-2026-10222: hermes-agent has an Injection issue",
+                "text": "CVE-2026-10222: hermes-agent has an Injection issue"
+              }
+            },
+            {
+              "deprecatedIds": [
+                "CVE-2026-9366",
+                "PYSEC-2026-2514",
+                "GHSA-pgp4-xr4j-h5cg"
+              ],
+              "fullDescription": {
+                "markdown": "A vulnerability was found in NousResearch hermes-agent 2026.4.23. The impacted element is the function _scan_context_content of the file agent/prompt_builder.py. The manipulation results in injection. The attack may be performed from remote. The exploit has been made public and could be used. The vendor was contacted early about this disclosure but did not respond in any way.",
+                "text": "A vulnerability was found in NousResearch hermes-agent 2026.4.23. The impacted element is the function _scan_context_content of the file agent/prompt_builder.py. The manipulation results in injection. The attack may be performed from remote. The exploit has been made public and could be used. The vendor was contacted early about this disclosure but did not respond in any way."
+              },
+              "help": {
+                "markdown": "**Your dependency is vulnerable to [CVE-2026-9366](https://osv.dev/CVE-2026-9366)**\n(Also published as: [PYSEC-2026-2514](https://osv.dev/PYSEC-2026-2514), [GHSA-pgp4-xr4j-h5cg](https://osv.dev/GHSA-pgp4-xr4j-h5cg), ).\n\n## [PYSEC-2026-2514](https://osv.dev/PYSEC-2026-2514)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was found in NousResearch hermes-agent 2026.4.23. The impacted element is the function _scan_context_content of the file agent/prompt_builder.py. The manipulation results in injection. The attack may be performed from remote. The exploit has been made public and could be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-pgp4-xr4j-h5cg](https://osv.dev/GHSA-pgp4-xr4j-h5cg)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was found in NousResearch hermes-agent 2026.4.23. The impacted element is the function _scan_context_content of the file agent/prompt_builder.py. The manipulation results in injection. The attack may be performed from remote. The exploit has been made public and could be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-pgp4-xr4j-h5cg | hermes-agent | 0.15.0 |\n| PYSEC-2026-2514 | hermes-agent | 0.15.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-9366\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n",
+                "text": "**Your dependency is vulnerable to [CVE-2026-9366](https://osv.dev/CVE-2026-9366)**\n(Also published as: [PYSEC-2026-2514](https://osv.dev/PYSEC-2026-2514), [GHSA-pgp4-xr4j-h5cg](https://osv.dev/GHSA-pgp4-xr4j-h5cg), ).\n\n## [PYSEC-2026-2514](https://osv.dev/PYSEC-2026-2514)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was found in NousResearch hermes-agent 2026.4.23. The impacted element is the function _scan_context_content of the file agent/prompt_builder.py. The manipulation results in injection. The attack may be performed from remote. The exploit has been made public and could be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-pgp4-xr4j-h5cg](https://osv.dev/GHSA-pgp4-xr4j-h5cg)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was found in NousResearch hermes-agent 2026.4.23. The impacted element is the function _scan_context_content of the file agent/prompt_builder.py. The manipulation results in injection. The attack may be performed from remote. The exploit has been made public and could be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-pgp4-xr4j-h5cg | hermes-agent | 0.15.0 |\n| PYSEC-2026-2514 | hermes-agent | 0.15.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-9366\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n"
+              },
+              "id": "CVE-2026-9366",
+              "name": "CVE-2026-9366",
+              "properties": {
+                "security-severity": "7.3"
+              },
+              "relationships": [],
+              "shortDescription": {
+                "markdown": "CVE-2026-9366: hermes-agent has an Injection issue",
+                "text": "CVE-2026-9366: hermes-agent has an Injection issue"
+              }
+            },
+            {
+              "deprecatedIds": [
+                "CVE-2026-10224",
+                "PYSEC-2026-3576",
+                "GHSA-pmqc-57g8-c22c"
+              ],
+              "fullDescription": {
+                "markdown": "A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.30. This vulnerability affects the function _handle_webhook_request of the file gateway/platforms/feishu.py of the component Webhook Endpoint. Such manipulation leads to resource consumption. The attack can be launched remotely. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way.",
+                "text": "A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.30. This vulnerability affects the function _handle_webhook_request of the file gateway/platforms/feishu.py of the component Webhook Endpoint. Such manipulation leads to resource consumption. The attack can be launched remotely. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way."
+              },
+              "help": {
+                "markdown": "**Your dependency is vulnerable to [CVE-2026-10224](https://osv.dev/CVE-2026-10224)**\n(Also published as: [PYSEC-2026-3576](https://osv.dev/PYSEC-2026-3576), [GHSA-pmqc-57g8-c22c](https://osv.dev/GHSA-pmqc-57g8-c22c), ).\n\n## [PYSEC-2026-3576](https://osv.dev/PYSEC-2026-3576)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.30. This vulnerability affects the function _handle_webhook_request of the file gateway/platforms/feishu.py of the component Webhook Endpoint. Such manipulation leads to resource consumption. The attack can be launched remotely. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-pmqc-57g8-c22c](https://osv.dev/GHSA-pmqc-57g8-c22c)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.30. This vulnerability affects the function _handle_webhook_request of the file gateway/platforms/feishu.py of the component Webhook Endpoint. Such manipulation leads to resource consumption. The attack can be launched remotely. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-10224\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n",
+                "text": "**Your dependency is vulnerable to [CVE-2026-10224](https://osv.dev/CVE-2026-10224)**\n(Also published as: [PYSEC-2026-3576](https://osv.dev/PYSEC-2026-3576), [GHSA-pmqc-57g8-c22c](https://osv.dev/GHSA-pmqc-57g8-c22c), ).\n\n## [PYSEC-2026-3576](https://osv.dev/PYSEC-2026-3576)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.30. This vulnerability affects the function _handle_webhook_request of the file gateway/platforms/feishu.py of the component Webhook Endpoint. Such manipulation leads to resource consumption. The attack can be launched remotely. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-pmqc-57g8-c22c](https://osv.dev/GHSA-pmqc-57g8-c22c)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A security vulnerability has been detected in NousResearch hermes-agent up to 2026.4.30. This vulnerability affects the function _handle_webhook_request of the file gateway/platforms/feishu.py of the component Webhook Endpoint. Such manipulation leads to resource consumption. The attack can be launched remotely. The exploit has been disclosed publicly and may be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-10224\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n"
+              },
+              "id": "CVE-2026-10224",
+              "name": "CVE-2026-10224",
+              "properties": {
+                "security-severity": "5.5"
+              },
+              "relationships": [],
+              "shortDescription": {
+                "markdown": "CVE-2026-10224: hermes-agent has an Uncontrolled Resource Consumption issue",
+                "text": "CVE-2026-10224: hermes-agent has an Uncontrolled Resource Consumption issue"
+              }
+            },
+            {
+              "deprecatedIds": [
+                "CVE-2026-9368",
+                "PYSEC-2026-2515",
+                "GHSA-wm96-9gfh-vvgq"
+              ],
+              "fullDescription": {
+                "markdown": "A vulnerability was identified in NousResearch hermes-agent up to 2026.4.16. This impacts the function execute_code of the file tools/code_execution_tool.py of the component Environment Variable Handler. Such manipulation leads to sandbox issue. It is possible to launch the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way.",
+                "text": "A vulnerability was identified in NousResearch hermes-agent up to 2026.4.16. This impacts the function execute_code of the file tools/code_execution_tool.py of the component Environment Variable Handler. Such manipulation leads to sandbox issue. It is possible to launch the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way."
+              },
+              "help": {
+                "markdown": "**Your dependency is vulnerable to [CVE-2026-9368](https://osv.dev/CVE-2026-9368)**\n(Also published as: [PYSEC-2026-2515](https://osv.dev/PYSEC-2026-2515), [GHSA-wm96-9gfh-vvgq](https://osv.dev/GHSA-wm96-9gfh-vvgq), ).\n\n## [PYSEC-2026-2515](https://osv.dev/PYSEC-2026-2515)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was identified in NousResearch hermes-agent up to 2026.4.16. This impacts the function execute_code of the file tools/code_execution_tool.py of the component Environment Variable Handler. Such manipulation leads to sandbox issue. It is possible to launch the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-wm96-9gfh-vvgq](https://osv.dev/GHSA-wm96-9gfh-vvgq)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was identified in NousResearch hermes-agent up to 2026.4.16. This impacts the function execute_code of the file tools/code_execution_tool.py of the component Environment Variable Handler. Such manipulation leads to sandbox issue. It is possible to launch the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-wm96-9gfh-vvgq | hermes-agent | 0.11.0 |\n| PYSEC-2026-2515 | hermes-agent | 0.11.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-9368\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n",
+                "text": "**Your dependency is vulnerable to [CVE-2026-9368](https://osv.dev/CVE-2026-9368)**\n(Also published as: [PYSEC-2026-2515](https://osv.dev/PYSEC-2026-2515), [GHSA-wm96-9gfh-vvgq](https://osv.dev/GHSA-wm96-9gfh-vvgq), ).\n\n## [PYSEC-2026-2515](https://osv.dev/PYSEC-2026-2515)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was identified in NousResearch hermes-agent up to 2026.4.16. This impacts the function execute_code of the file tools/code_execution_tool.py of the component Environment Variable Handler. Such manipulation leads to sandbox issue. It is possible to launch the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-wm96-9gfh-vvgq](https://osv.dev/GHSA-wm96-9gfh-vvgq)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was identified in NousResearch hermes-agent up to 2026.4.16. This impacts the function execute_code of the file tools/code_execution_tool.py of the component Environment Variable Handler. Such manipulation leads to sandbox issue. It is possible to launch the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nTo fix these vulnerabilities, update the vulnerabilities past the listed fixed versions below.\n\n### Fixed Versions\n\n| Vulnerability ID | Package Name | Fixed Version |\n| --- | --- | --- |\n| GHSA-wm96-9gfh-vvgq | hermes-agent | 0.11.0 |\n| PYSEC-2026-2515 | hermes-agent | 0.11.0 |\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-9368\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n"
+              },
+              "id": "CVE-2026-9368",
+              "name": "CVE-2026-9368",
+              "properties": {
+                "security-severity": "7.3"
+              },
+              "relationships": [],
+              "shortDescription": {
+                "markdown": "CVE-2026-9368: hermes-agent has a sandbox issue",
+                "text": "CVE-2026-9368: hermes-agent has a sandbox issue"
+              }
+            },
+            {
+              "deprecatedIds": [
+                "CVE-2026-10221",
+                "PYSEC-2026-3577",
+                "GHSA-xq8w-9jvx-gm3v"
+              ],
+              "fullDescription": {
+                "markdown": "A vulnerability was identified in NousResearch hermes-agent up to 0.12.0. Affected by this vulnerability is the function _compress_context of the file run_agent.py. The manipulation leads to injection. It is possible to initiate the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way.",
+                "text": "A vulnerability was identified in NousResearch hermes-agent up to 0.12.0. Affected by this vulnerability is the function _compress_context of the file run_agent.py. The manipulation leads to injection. It is possible to initiate the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way."
+              },
+              "help": {
+                "markdown": "**Your dependency is vulnerable to [CVE-2026-10221](https://osv.dev/CVE-2026-10221)**\n(Also published as: [PYSEC-2026-3577](https://osv.dev/PYSEC-2026-3577), [GHSA-xq8w-9jvx-gm3v](https://osv.dev/GHSA-xq8w-9jvx-gm3v), ).\n\n## [PYSEC-2026-3577](https://osv.dev/PYSEC-2026-3577)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was identified in NousResearch hermes-agent up to 0.12.0. Affected by this vulnerability is the function _compress_context of the file run_agent.py. The manipulation leads to injection. It is possible to initiate the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-xq8w-9jvx-gm3v](https://osv.dev/GHSA-xq8w-9jvx-gm3v)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was identified in NousResearch hermes-agent up to 0.12.0. Affected by this vulnerability is the function _compress_context of the file run_agent.py. The manipulation leads to injection. It is possible to initiate the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-10221\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n",
+                "text": "**Your dependency is vulnerable to [CVE-2026-10221](https://osv.dev/CVE-2026-10221)**\n(Also published as: [PYSEC-2026-3577](https://osv.dev/PYSEC-2026-3577), [GHSA-xq8w-9jvx-gm3v](https://osv.dev/GHSA-xq8w-9jvx-gm3v), ).\n\n## [PYSEC-2026-3577](https://osv.dev/PYSEC-2026-3577)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was identified in NousResearch hermes-agent up to 0.12.0. Affected by this vulnerability is the function _compress_context of the file run_agent.py. The manipulation leads to injection. It is possible to initiate the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n## [GHSA-xq8w-9jvx-gm3v](https://osv.dev/GHSA-xq8w-9jvx-gm3v)\n\n\u003cdetails\u003e\n\u003csummary\u003eDetails\u003c/summary\u003e\n\n\u003e A vulnerability was identified in NousResearch hermes-agent up to 0.12.0. Affected by this vulnerability is the function _compress_context of the file run_agent.py. The manipulation leads to injection. It is possible to initiate the attack remotely. The exploit is publicly available and might be used. The vendor was contacted early about this disclosure but did not respond in any way.\n\n\u003c/details\u003e\n\n---\n\n### Affected Packages\n\n| Source | Package Name | Package Version |\n| --- | --- | --- |\n| lockfile:/github/workspace/uv.lock | hermes-agent | 0.0.0 |\n\n## Remediation\n\nIf you believe these vulnerabilities do not affect your code and wish to ignore them, add them to the ignore list in an\n`osv-scanner.toml` file located in the same directory as the lockfile containing the vulnerable dependency.\n\nSee the format and more options in our documentation here: https://google.github.io/osv-scanner/configuration/\n\nAdd or append these values to the following config files to ignore this vulnerability:\n\n`/github/workspace/osv-scanner.toml`\n\n```\n[[IgnoredVulns]]\nid = \"CVE-2026-10221\"\nreason = \"Your reason for ignoring this vulnerability\"\n```\n"
+              },
+              "id": "CVE-2026-10221",
+              "name": "CVE-2026-10221",
+              "properties": {
+                "security-severity": "7.3"
+              },
+              "relationships": [],
+              "shortDescription": {
+                "markdown": "CVE-2026-10221: hermes-agent has an Injection issue",
+                "text": "CVE-2026-10221: hermes-agent has an Injection issue"
+              }
+            }
+          ],
+          "supportedTaxonomies": [],
+          "taxa": [],
+          "version": "2.3.8"
+        },
+        "extensions": []
+      },
+      "translations": [],
+      "versionControlProvenance": [],
+      "webRequests": [],
+      "webResponses": []
+    }
+  ],
+  "properties": {}
+}

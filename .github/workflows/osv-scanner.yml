@@ -72,12 +72,24 @@ jobs:
         uses: google/osv-scanner-action/osv-reporter-action@8dc09193bb540e09b23da07ad7e30bd33bf87018 # v2.3.8
         with:
           scan-args: |-
-            --output=osv-results.sarif
+            --output=osv-results.original.sarif
             --new=osv-results.json
             --gh-annotations=false
             --fail-on-vuln=false
-      - name: Upload SARIF artifact
+      - name: Normalize repeated alias-group results
+        id: normalize_sarif
+        run: python3 scripts/ci/normalize_osv_sarif.py osv-results.original.sarif osv-results.sarif
+      - name: Upload original scanner and reporter evidence
         if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: OSV Scanner original reports
+          path: |
+            osv-results.json
+            osv-results.original.sarif
+          retention-days: 5
+      - name: Upload SARIF artifact
+        if: ${{ !cancelled() && steps.normalize_sarif.outcome == 'success' }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: OSV Scanner SARIF file
@@ -87,7 +99,7 @@ jobs:
         # Reusable PR scans opt out explicitly because their findings are
         # compared against the base branch. For push, schedule, and manual
         # events the input serializes as null, which keeps upload enabled.
-        if: ${{ !cancelled() && toJSON(inputs.upload-sarif) != 'false' }}
+        if: ${{ !cancelled() && steps.normalize_sarif.outcome == 'success' && toJSON(inputs.upload-sarif) != 'false' }}
         uses: github/codeql-action/upload-sarif@cdefb33c0f6224e58673d9004f47f7cb3e328b89 # v4.31.10
         with:
           sarif_file: osv-results.sarif
