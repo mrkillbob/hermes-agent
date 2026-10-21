@@ -16,13 +16,20 @@ def isolated_board_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, 'home', lambda: tmp_path)
 
 
-def test_overlapping_recurrences_create_only_one_audit(tmp_path, monkeypatch):
+@pytest.fixture
+def audit_project(tmp_path):
+    from hermes_cli import projects_db, kanban_db
+    with projects_db.connect_closing(tmp_path / 'projects.db') as conn:
+        identity = projects_db.create_project(conn, name='existing', board_slug='default')
+        project = projects_db.get_project(conn, identity)
+    kanban_db.write_board_metadata('default', project_id=identity)
+    return project
+
+
+def test_overlapping_recurrences_create_only_one_audit(tmp_path, monkeypatch, audit_project):
     body = tmp_path / 'body.txt'
     body.write_text('audit')
-    project = SimpleNamespace(id='p_existing', board_slug='default')
-    monkeypatch.setattr(producer, 'resolve_project', lambda *_: project)
-    from hermes_cli import projects_db
-    monkeypatch.setattr(projects_db, 'projects_db_path', lambda: tmp_path / 'projects.db')
+    project = audit_project
     overlap = Barrier(2)
     guard = Lock()
     rows = []
@@ -98,12 +105,8 @@ def test_existing_project_link_preserves_repository_workspace_policy(tmp_path, m
     assert (actual_id, repo, kind) == (identity, str(repository), 'worktree')
 
 
-def test_unconfirmed_create_is_not_retried(tmp_path, monkeypatch):
+def test_unconfirmed_create_is_not_retried(tmp_path, monkeypatch, audit_project):
     import pytest
-    from hermes_cli import projects_db
-    monkeypatch.setattr(projects_db, 'projects_db_path', lambda: tmp_path / 'projects.db')
-    project = SimpleNamespace(id='p_existing', board_slug='default')
-    monkeypatch.setattr(producer, 'resolve_project', lambda *_: project)
     body = tmp_path / 'body'
     body.write_text('audit')
     calls = []
@@ -201,3 +204,77 @@ def test_binding_writer_cannot_change_owner_during_create(tmp_path, monkeypatch)
     assert observed == [first], 'board ownership changed between validation and creation'
     assert finished.is_set() and not errors
     assert kanban_db.read_board_metadata('default')['project_id'] == second
+
+
+def test_starting_audit_waits_for_in_progress_metadata_write(tmp_path, monkeypatch):
+    from threading import Event, Thread
+    from hermes_cli import projects_db, kanban_db, active_sessions
+    from hermes_cli.kanban_db_boards import board_ownership_lock
+    with projects_db.connect_closing(tmp_path / 'projects.db') as conn:
+        identity = projects_db.create_project(conn, name='Existing', board_slug='default')
+    kanban_db.write_board_metadata('default', project_id=identity)
+    path = kanban_db.board_metadata_path('default')
+    lock_path = board_ownership_lock('default').path
+    partial, release, attempted, observed, finished = (Event() for _ in range(5))
+    errors, results = [], []
+    write_text = Path.write_text
+    enter = active_sessions._FileLock.__enter__
+
+    def held_write(target, data, *args, **kwargs):
+        if target != path:
+            return write_text(target, data, *args, **kwargs)
+        with target.open('w', encoding='utf-8') as stream:
+            stream.write('{')
+            stream.flush()
+            partial.set()
+            if not release.wait(10):
+                raise TimeoutError('test did not release metadata writer')
+            stream.seek(0)
+            stream.truncate()
+            stream.write(data)
+        return len(data)
+
+    def noted_enter(lock):
+        if lock.path == lock_path:
+            attempted.set()
+            observed.set()
+        return enter(lock)
+
+    def write():
+        try:
+            kanban_db.write_board_metadata('default', name='Updated display name')
+        except Exception as exc:
+            errors.append(exc)
+
+    body = tmp_path / 'body'
+    body.write_text('audit')
+    monkeypatch.setattr(Path, 'write_text', held_write)
+    writer = Thread(target=write, daemon=True)
+    writer.start()
+    assert partial.wait(5)
+    monkeypatch.setattr(active_sessions._FileLock, '__enter__', noted_enter)
+    monkeypatch.setattr(producer, 'run_json', lambda argv: [] if 'list' in argv else
+                        {'id': 't_created', 'project_id': identity})
+
+    def audit():
+        try:
+            results.append(producer.enqueue(SimpleNamespace(project=identity, board=None,
+                body_file=body, hermes='hermes', assignee='auditor', creator='audit',
+                title='Audit', idempotency_key='week', max_runtime='6m')))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+            observed.set()
+
+    worker = Thread(target=audit, daemon=True)
+    worker.start()
+    try:
+        assert observed.wait(5)
+        assert attempted.is_set() and not finished.is_set(), 'audit read partial metadata before locking'
+    finally:
+        release.set()
+        worker.join(10)
+        writer.join(10)
+    assert not errors and finished.is_set()
+    assert results[0]['project_id'] == identity

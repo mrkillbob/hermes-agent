@@ -17,7 +17,8 @@ import subprocess
 import sys
 
 
-def resolve_project(identity: str, board: str | None):
+def registered_project(identity: str, board: str | None):
+    """Resolve the registry side without reading concurrently mutable board metadata."""
     from hermes_cli import projects_db
 
     registry = projects_db.projects_db_path()
@@ -36,9 +37,15 @@ def resolve_project(identity: str, board: str | None):
         raise ValueError('invalid project board binding')
     if board is not None and board != destination:
         raise ValueError('requested board does not match the project board binding')
+    return project
+
+
+def resolve_project(identity: str, board: str | None):
+    """Validate both sides; enqueue callers hold the selected board's lock."""
+    project = registered_project(identity, board)
     from hermes_cli import kanban_db
 
-    metadata = kanban_db.read_board_metadata(destination)
+    metadata = kanban_db.read_board_metadata(project.board_slug)
     if metadata.get('project_id') != project.id:
         raise ValueError('board ownership does not match the registered project')
     if metadata.get('archived'):
@@ -53,7 +60,7 @@ def run_json(command: list[str]):
 
 
 def enqueue(args):
-    project = resolve_project(args.project, args.board)
+    project = registered_project(args.project, args.board)
     if not args.body_file.is_file():
         raise ValueError('audit body file is missing')
     from hermes_cli.active_sessions import _FileLock
