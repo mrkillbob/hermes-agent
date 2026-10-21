@@ -248,6 +248,12 @@ def kanban_command(args: argparse.Namespace) -> int:
     if action == "boards":
         return _dispatch_boards(args)
 
+    if action == "enqueue-audit":
+        # The producer resolves its explicit project before touching a board;
+        # do not initialize the ambient board on an invalid registration.
+        from hermes_cli.kanban_audit_enqueue import command
+        return command(args)
+
     # `--board <slug>` pins HERMES_KANBAN_BOARD for the duration of this call so it inherits the
     # exact resolution the dispatcher uses for workers.
     board_override = getattr(args, "board", None)
@@ -304,7 +310,7 @@ def _unblock_author() -> str:
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
-    "init", "create", "swarm", "assign", "set-reasoning", "reclaim", "reassign", "link", "unlink",
+    "init", "create", "enqueue-audit", "swarm", "assign", "set-reasoning", "reclaim", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
