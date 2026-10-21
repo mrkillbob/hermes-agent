@@ -449,6 +449,20 @@ async def _component_health(gateway: dict[str, Any]) -> dict[str, Any]:
     return components
 
 
+def _read_fts_rebuild_status(home: Path):
+    """Keep SQLite open/read/close (including its shared lock) off the event loop."""
+    from hermes_state import SessionDB
+
+    path = home / "state.db"
+    if not path.exists():
+        return None
+    database = SessionDB(db_path=path, read_only=True)
+    try:
+        return database.fts_rebuild_status()
+    finally:
+        database.close()
+
+
 async def _advisory_pressure(status: dict[str, Any], home: Path) -> None:
     """Memory / disk pressure rollups + deferred FTS rebuild progress (coarse numbers/enums
     only; public payload). Deliberately NOT folded into components/overall: pressure is
@@ -464,17 +478,9 @@ async def _advisory_pressure(status: dict[str, Any], home: Path) -> None:
             status[key] = {"pressure": "unknown"}
 
     try:
-        from hermes_state import SessionDB as _SDB
-        from hermes_constants import get_hermes_home as _ghh
-        _db_path = _ghh() / "state.db"
-        if _db_path.exists():
-            _sdb = _SDB(db_path=_db_path, read_only=True)
-            try:
-                _rebuild = _sdb.fts_rebuild_status()
-            finally:
-                _sdb.close()
-            if _rebuild is not None:
-                status["fts_rebuild"] = _rebuild
+        rebuild = await run_in_threadpool(_read_fts_rebuild_status, home)
+        if rebuild is not None:
+            status["fts_rebuild"] = rebuild
     except Exception:
         pass
 

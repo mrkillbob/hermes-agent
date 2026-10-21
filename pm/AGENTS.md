@@ -19,7 +19,7 @@ isolated tool environments. Callers receive an interpreter or tool path, not uv.
 Nix's declarative uv2nix builds and unrelated user projects remain independently owned.
 
 The `[tool.uv] exclude-newer = "3 days"` release-age check covers **Hermes's own dependencies
-only**, exact pins included, with no per-package exemptions, and it runs when Hermes LOCKS
+only**, exact pins included, with no standing per-package exemptions, and it runs when Hermes LOCKS
 (`hermes pm lock`, CI's lock check), never on users' machines: every generated workspace drops the
 cutoff (`pm/workspace.py::_without_release_age`), so a mirror without upload times cannot break an
 install (#135589). Plugin resolution is unchanged by this: core's exact pins stay put, and a plugin
@@ -27,3 +27,9 @@ may move a transitive core package within core's declared ranges
 (`tests/pm/test_workspace_build_inputs.py::test_plugin_can_move_compatible_transitive_but_not_exact_requirement`).
 Plugin `python_dependencies` follow the plugin's own policy. Teknium's rulings: "plugins dont have to abide by our 14 day rule … Only hermes'
 dependencies themselves have to"; dates are checked by us, not users; pinned deps need >3 days.
+
+Temporary fork-owner-approved security exception (2026-10-21): only `certifi==2026.10.19`
+may use the package cutoff `2026-10-20T02:24:17Z` to remediate GHSA-6q48-6c7w-9gw2.
+Keep the exact pin and verified wheel/sdist hashes; no other package or future certifi
+version is exempt. The global three-day rule remains unchanged. Remove this cutoff and
+regenerate `uv.lock` after `2026-10-23T02:24:16.604828Z`, when both artifacts satisfy it.

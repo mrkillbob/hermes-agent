@@ -54,18 +54,32 @@ def test_starlette_server_pins_and_lock_exclude_cve_2026_48710():
 
 
 def test_every_dependency_is_held_to_one_three_day_release_age():
-    """Hermes's deps must be >= 3 days old when locked, exact pins included (Teknium ruling).
+    """Keep the global age rule and bound the owner's temporary certifi exception.
 
-    A per-package exemption or date would quietly let a fresh release into the lock; the
-    check runs at lock time only, so users never need a mirror that serves upload times.
+    The exception admits only the reviewed release and artifacts, never other packages
+    or future certifi versions. Removing it restores the uniform three-day rule.
     """
     manifest = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     uv = manifest["tool"]["uv"]
     lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
     assert uv["exclude-newer"] == "3 days"
-    assert "exclude-newer-package" not in uv
     assert lock["options"].get("exclude-newer-span") == "P3D"
-    assert "exclude-newer-package" not in lock["options"]
+    exception = uv.get("exclude-newer-package", {})
+    assert lock["options"].get("exclude-newer-package", {}) == exception
+    if not exception:
+        return
+    assert exception == {"certifi": "2026-10-20T02:24:17Z"}
+    pins = [req for req in map(Requirement, manifest["project"]["dependencies"])
+            if req.name == "certifi"]
+    assert len(pins) == 1 and str(pins[0].specifier) == "==2026.10.19"
+    releases = [row for row in lock["package"] if row["name"] == "certifi"]
+    assert len(releases) == 1 and releases[0]["version"] == "2026.10.19"
+    artifacts = [releases[0]["sdist"], *releases[0]["wheels"]]
+    assert len(artifacts) == 2
+    assert {artifact["hash"] for artifact in artifacts} == {
+        "sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b",
+        "sha256:035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae",
+    }
 
 
 def test_httpx2_pins_and_lock_exclude_ghsa_7mj9_2mp8_4m2p_family():

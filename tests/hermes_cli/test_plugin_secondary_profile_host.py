@@ -493,7 +493,6 @@ async def hang():
 def test_hung_hosted_request_answers_504_and_the_host_serves_the_next(daemon, monkeypatch):
     from hermes_cli import web_server_plugin_profiles
     monkeypatch.setattr(PluginHost, "asgi_request", _REAL_ASGI_REQUEST)
-    monkeypatch.setattr(web_server_plugin_profiles, "HOSTED_REQUEST_TIMEOUT_SECS", 1.0, raising=False)
     _beta_plugin(daemon)
     (daemon.beta / "plugins" / NAME / "dashboard" / "plugin_api.py").write_text(_HANG_API)
     selected = {"params": {"profile": "beta"}, "headers": daemon.owner}
@@ -503,6 +502,11 @@ def test_hung_hosted_request_answers_504_and_the_host_serves_the_next(daemon, mo
         async with _asgi_client() as client:
             try:
                 before = await client.get(whoami, **selected)
+                assert before.status_code == 200
+                # Cold host startup uses the normal production budget. Shorten
+                # the deadline only after readiness; slow CI process startup
+                # must not stand in for the deliberately hung request below.
+                monkeypatch.setattr(web_server_plugin_profiles, "HOSTED_REQUEST_TIMEOUT_SECS", 1.0)
                 try:
                     hung = await asyncio.wait_for(client.get(hang, **selected), 20)
                 except TimeoutError:
