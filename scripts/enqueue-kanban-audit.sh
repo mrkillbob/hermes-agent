@@ -10,6 +10,6 @@ body_file=$(mktemp) || exit 1
 trap 'rm -f "$body_file"' EXIT
 trap 'exit 1' HUP INT TERM
 printf '%s' "$6" > "$body_file"
-"$hermes_bin" --run-module hermes_cli.kanban_audit_enqueue \
+"$hermes_bin" kanban enqueue-audit \
     --hermes "$hermes_bin" --project "$7" --assignee "$1" --creator "$2" \
     --title "$3" --idempotency-key "$4" --max-runtime "$5" --body-file "$body_file"

@@ -99,13 +99,15 @@ def enqueue_registered(args, project):
     return result
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('hermes', 'project', 'assignee', 'creator', 'title', 'idempotency-key', 'max-runtime'):
-        parser.add_argument('--' + name, required=True)
-    parser.add_argument('--body-file', type=Path, required=True)
-    parser.add_argument('--board', help='Optional expected board; must match the registered project')
-    args = parser.parse_args()
+def argument_specs():
+    """Shared arguments for the public Kanban command and module entrypoint."""
+    names = ('hermes', 'project', 'assignee', 'creator', 'title', 'idempotency-key', 'max-runtime')
+    return [((f'--{name}',), {'required': True}) for name in names] + [
+        (('--body-file',), {'type': Path, 'required': True})]
+
+
+def command(args):
+    """CLI handler: emit one result without changing the ordinary enqueue policy."""
     try:
         result = enqueue(args)
     except (ValueError, OSError, RuntimeError, sqlite3.Error, subprocess.SubprocessError) as exc:
@@ -113,6 +115,14 @@ def main():
         return 1
     print(json.dumps(result))
     return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for flags, options in argument_specs():
+        parser.add_argument(*flags, **options)
+    parser.add_argument('--board', help='Optional expected board; must match the registered project')
+    return command(parser.parse_args())
 
 
 if __name__ == '__main__':

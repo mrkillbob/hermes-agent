@@ -13,6 +13,7 @@ import argparse
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_notify as kbn
+from hermes_cli.kanban_audit_enqueue import argument_specs as audit_argument_specs
 
 
 def _arg(*flags: str, **kw):
@@ -159,6 +160,8 @@ _BOARD_SPECS = [
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
     _cmd("init", help="Create kanban.db if missing (idempotent)"),
+    _cmd("enqueue-audit", audit_argument_specs(),
+         help="Enqueue a recurring audit on its explicitly registered project's board"),
     _cmd("boards", children=("boards_action", _BOARD_SPECS),
          help="Manage kanban boards (one board per project / workstream)",
          description=(
