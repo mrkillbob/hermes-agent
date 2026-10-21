@@ -1,0 +1,39 @@
+name: MCP lifecycle diagnostic
+
+on:
+  push:
+    branches: [diagnostics/mcp-lifecycle-20261021]
+
+permissions:
+  contents: read
+
+jobs:
+  mcp-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - name: Set up the same locked E2E environment
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "messaging"]'
+          test-environment: 'true'
+          prune-python-cache: true
+      - name: Exercise the two original lifecycle transitions with diagnostics
+        run: scripts/run_tests.sh --include-integration tests/e2e/core/parity/test_mcp_lifecycle.py
+        env:
+          HERMES_TEST_FILE_RETRIES: '0'
+          HERMES_TEST_FILE_TIMEOUT: '900'
+          HERMES_E2E_ARTIFACTS: ${{ runner.temp }}/mcp-diagnostic
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
+      - name: Retain only the synthetic fixture precondition snapshot
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mcp-host-crash-precondition
+          path: ${{ runner.temp }}/mcp-diagnostic/*.json
+          retention-days: 14
+          if-no-files-found: warn
