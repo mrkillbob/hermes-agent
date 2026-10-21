@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, BrokenBarrierError, Lock
 from types import SimpleNamespace
 
-from scripts import kanban_audit_enqueue as producer
+from hermes_cli import kanban_audit_enqueue as producer
 
 
 def test_overlapping_recurrences_create_only_one_audit(tmp_path, monkeypatch):
@@ -103,3 +103,14 @@ def test_unconfirmed_create_is_not_retried(tmp_path, monkeypatch):
             hermes='hermes', assignee='auditor', creator='audit', title='Audit',
             idempotency_key='week', max_runtime='6m'))
     assert len(calls) == 2
+
+
+def test_producer_package_is_in_sealed_distribution():
+    import fnmatch
+    import tomllib
+    from pathlib import Path
+    config = tomllib.loads((Path(__file__).resolve().parents[2] / 'pyproject.toml').read_text())
+    discovery = config['tool']['setuptools']['packages']['find']
+    package = producer.__package__
+    assert any(fnmatch.fnmatchcase(package, pattern) for pattern in discovery['include'])
+    assert not any(fnmatch.fnmatchcase(package, pattern) for pattern in discovery.get('exclude', []))
