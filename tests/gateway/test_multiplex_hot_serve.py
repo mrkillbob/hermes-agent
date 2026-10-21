@@ -597,3 +597,36 @@ async def test_rescan_drops_removed_platform_status_and_preserves_other_profiles
     platforms = json.loads((home / 'gateway_state.json').read_text())['platforms']
     assert 'gamma:discord' not in platforms
     assert platforms['alpha:discord']['state'] == 'connected'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('transient_failure', [False, True])
+async def test_added_profile_metadata_stays_off_loop_through_recording(tmp_path, monkeypatch, transient_failure):
+    import sys
+    import gateway.run_profile_reconcile as reconcile
+    from hermes_cli import profiles
+    runner, home = _runner(tmp_path, monkeypatch)
+    monkeypatch.setattr('gateway.status.live_gateway_pid_for_home', lambda *_: None)
+    with patch('hermes_cli.profiles.get_active_profile_name', return_value='default'):
+        await runner._start_secondary_profile_adapters()
+        _mkprofile(home, 'alpha')
+        if transient_failure:
+            async def fail(*_args):
+                raise OSError('temporary fixture failure')
+            runner._start_one_profile_adapters = fail
+        loop_thread = threading.get_ident()
+        calls = []
+        real_enumerate = profiles.profiles_to_serve
+        real_signature = reconcile.profile_serve_signature
+        def enumerate_profiles(*args, **kwargs):
+            calls.append(('enumerate', threading.get_ident(), sys._getframe(1).f_code.co_name))
+            return real_enumerate(*args, **kwargs)
+        def signature(*args, **kwargs):
+            calls.append(('signature', threading.get_ident(), sys._getframe(1).f_code.co_name))
+            return real_signature(*args, **kwargs)
+        monkeypatch.setattr(profiles, 'profiles_to_serve', enumerate_profiles)
+        monkeypatch.setattr(reconcile, 'profile_serve_signature', signature)
+        result = await runner.reconcile_served_profiles()
+        assert result['added'] == ['alpha']
+        assert all(thread != loop_thread for _, thread, _ in calls), calls
+        assert ('alpha' in runner._served_profile_signatures) is not transient_failure
