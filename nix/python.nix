@@ -66,6 +66,13 @@ let
         ] (_: null)
       )
     // {
+      # The Pillow-compatible browser-harness pin is a Git source; uv.lock
+      # omits its build backend, so supply the declared setuptools backend.
+      browser-harness = prev.browser-harness.overrideAttrs (old: {
+        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ final.resolveBuildSystem {
+          setuptools = [ ];
+        };
+      });
       # The locked sdist has no build-system metadata; setup.py imports
       # setuptools and uses CFFI to compile the bundled libolm.
       python-olm = prev.python-olm.overrideAttrs (old: {
