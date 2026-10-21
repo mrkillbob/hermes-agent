@@ -57,15 +57,17 @@ def enqueue(args):
     if not args.body_file.is_file():
         raise ValueError('audit body file is missing')
     from hermes_cli.active_sessions import _FileLock
+    from hermes_cli.kanban_db_boards import board_ownership_lock
     from hermes_cli import projects_db
 
-    # Only this producer's same-project list/create sequence is serialized.
+    # Serialize this producer's same-project list/create sequence, and keep the
+    # destination's canonical ownership stable through the confirmed create.
     # Canonical ids make slug and id callers share ownership; other projects
     # and profiles retain independent execution.
     key = hashlib.sha256(project.id.encode('utf-8')).hexdigest()
     lock = projects_db.projects_db_path().parent / 'runtime' / 'audit-enqueue' / (key + '.lock')
-    with _FileLock(lock):
-        current = resolve_project(project.id, args.board)
+    with _FileLock(lock), board_ownership_lock(project.board_slug):
+        current = resolve_project(project.id, project.board_slug)
         return enqueue_registered(args, current)
 
 

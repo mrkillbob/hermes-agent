@@ -2,8 +2,18 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, BrokenBarrierError, Lock
 from types import SimpleNamespace
+from pathlib import Path
+
+import pytest
 
 from hermes_cli import kanban_audit_enqueue as producer
+
+
+@pytest.fixture(autouse=True)
+def isolated_board_home(tmp_path, monkeypatch):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
 
 
 def test_overlapping_recurrences_create_only_one_audit(tmp_path, monkeypatch):
@@ -119,7 +129,7 @@ def test_producer_package_is_in_sealed_distribution():
     assert not any(fnmatch.fnmatchcase(package, pattern) for pattern in discovery.get('exclude', []))
 
 
-def test_board_rebound_during_listing_does_not_create(tmp_path, monkeypatch):
+def test_out_of_band_rebind_during_listing_does_not_create(tmp_path, monkeypatch):
     import pytest
     from hermes_cli import projects_db, kanban_db
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
@@ -134,7 +144,11 @@ def test_board_rebound_during_listing_does_not_create(tmp_path, monkeypatch):
     def list_and_rebind(argv):
         calls.append(argv)
         assert 'list' in argv
-        kanban_db.write_board_metadata('default', project_id=second)
+        import json
+        path = kanban_db.board_metadata_path('default')
+        metadata = json.loads(path.read_text())
+        metadata['project_id'] = second
+        path.write_text(json.dumps(metadata))  # Manual file edits do not honor API locks.
         return []
     monkeypatch.setattr(producer, 'run_json', list_and_rebind)
     with pytest.raises(ValueError, match='board ownership'):
@@ -142,3 +156,48 @@ def test_board_rebound_during_listing_does_not_create(tmp_path, monkeypatch):
             hermes='hermes', assignee='auditor', creator='audit', title='Audit',
             idempotency_key='week', max_runtime='6m'))
     assert len(calls) == 1
+
+
+def test_binding_writer_cannot_change_owner_during_create(tmp_path, monkeypatch):
+    from threading import Event, Thread
+    from hermes_cli import projects_db, kanban_db
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    with projects_db.connect_closing(tmp_path / 'projects.db') as conn:
+        first = projects_db.create_project(conn, name='First', board_slug='default')
+        second = projects_db.create_project(conn, name='Second', board_slug='default')
+    kanban_db.write_board_metadata('default', project_id=first)
+    body = tmp_path / 'body'
+    body.write_text('audit')
+    started, finished = Event(), Event()
+    errors, writers, observed = [], [], []
+    def bind():
+        started.set()
+        try:
+            kanban_db.write_board_metadata('default', project_id=second)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+    def command(argv):
+        if 'list' in argv:
+            return []
+        writer = Thread(target=bind, daemon=True)
+        writers.append(writer)
+        writer.start()
+        assert started.wait(5)
+        finished.wait(2)  # Give an unlocked writer its chance to reproduce the race.
+        observed.append(kanban_db.read_board_metadata('default')['project_id'])
+        return {'id': 't_created', 'project_id': first}
+    monkeypatch.setattr(producer, 'run_json', command)
+    try:
+        result = producer.enqueue(SimpleNamespace(project=first, board=None, body_file=body,
+            hermes='hermes', assignee='auditor', creator='audit', title='Audit',
+            idempotency_key='week', max_runtime='6m'))
+    finally:
+        for writer in writers:
+            writer.join(10)
+    assert result['project_id'] == first
+    assert observed == [first], 'board ownership changed between validation and creation'
+    assert finished.is_set() and not errors
+    assert kanban_db.read_board_metadata('default')['project_id'] == second
