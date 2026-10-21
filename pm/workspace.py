@@ -153,7 +153,7 @@ def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Pat
 
 
 def _without_release_age(text: str) -> str:
-    """Drop ``[tool.uv] exclude-newer`` from a generated root's pyproject text.
+    """Drop global and package release-age cutoffs from a generated root's pyproject text.
 
     The lock already holds checked versions; on the user's machine the cutoff only gates the
     build tools uv fetches for source builds (setuptools for Hermes itself), and a mirror that
@@ -162,7 +162,8 @@ def _without_release_age(text: str) -> str:
     """
     import re
 
-    return re.sub(r"(?m)^exclude-newer\s*=.*\n", "", text)
+    text = re.sub(r"(?ms)^\[tool\.uv\.exclude-newer-package\][^\n]*\n.*?(?=^\[|\Z)", "", text)
+    return re.sub(r"(?m)^exclude-newer(?:-package)?\s*=.*\n", "", text)
 
 
 def _is_member_candidate(plugin_dir: Path) -> bool:
