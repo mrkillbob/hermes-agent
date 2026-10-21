@@ -1,0 +1,120 @@
+"""Project identity selects audit destination and dedup scope, never the caller cwd."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+from hermes_cli import projects_db
+
+SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'kanban_audit_enqueue.py'
+pytestmark = pytest.mark.platforms('posix')
+
+
+@pytest.fixture
+def setup(tmp_path, monkeypatch):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    with projects_db.connect_closing(tmp_path / 'projects.db') as conn:
+        ids = {name: projects_db.create_project(conn, name=name, slug=name, board_slug=board)
+               for name, board in [('hermes-agent', 'default'), ('lunabot', 'tradingbot-burndown'),
+                                   ('another-project', 'default'), ('unbound', None)]}
+    body = tmp_path / 'audit body.txt'
+    body.write_text('Read-only audit; keep project context.\nNo source changes.\n')
+    fake = tmp_path / 'fake hermes'
+    fake.write_text('#!' + sys.executable + '\n' + '''import json,os,sys
+from pathlib import Path
+args=sys.argv[1:]
+with open(os.environ['AUDIT_TEST_CALLS'],'a') as f:f.write(json.dumps(args)+'\\n')
+if 'list' in args: print(Path(os.environ['AUDIT_TEST_TASKS']).read_text())
+else: print(json.dumps({'id':'t_created','project_id':args[args.index('--project')+1]}))
+''')
+    fake.chmod(0o700)
+    tasks = tmp_path / 'tasks.json'
+    tasks.write_text('[]')
+    log = tmp_path / 'calls.jsonl'
+    env = dict(os.environ, HERMES_HOME=str(tmp_path), AUDIT_TEST_CALLS=str(log), AUDIT_TEST_TASKS=str(tasks))
+    def run(project='hermes-agent', *extra):
+        result = subprocess.run([sys.executable, str(SCRIPT), '--hermes', str(fake),
+                                 '--project', project, '--assignee', 'auditor', '--creator', 'weekly-audit',
+                                 '--title', 'Audit', '--idempotency-key', 'week-key', '--max-runtime', '6m',
+                                 '--body-file', str(body), *extra], env=env, cwd=tmp_path,
+                                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                                check=False, timeout=20)
+        calls = [json.loads(x) for x in log.read_text().splitlines()] if log.exists() else []
+        return result, calls
+    return run, ids, tasks
+
+
+@pytest.mark.parametrize(('project','board'), [('hermes-agent','default'), ('lunabot','tradingbot-burndown')])
+def test_registered_project_selects_every_command_board(setup, project, board):
+    run, ids, _ = setup
+    result, calls = run(project)
+    assert result.returncode == 0, result.stderr
+    assert len(calls) == 2
+    assert all(args[args.index('--board') + 1] == board for args in calls)
+    create = calls[-1]
+    assert create[create.index('--project') + 1] == ids[project]
+    assert ids[project] in create[create.index('--idempotency-key') + 1]
+    assert '--body-file' in create and '--body' not in create
+
+
+@pytest.mark.parametrize(('project','extra','message'), [
+    ('missing', [], 'unknown project'), ('unbound', [], 'board binding'),
+    ('hermes-agent', ['--board','tradingbot-burndown'], 'board does not match'),
+])
+def test_invalid_identity_is_rejected_before_any_cli_call(setup, project, extra, message):
+    run, _, _ = setup
+    result, calls = run(project, *extra)
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize(('owner','status','expected_calls'), [('hermes-agent','ready',1),
+    ('another-project','ready',2), ('hermes-agent','done',2), ('hermes-agent','archived',2)])
+def test_deduplication_is_project_specific(setup, owner, status, expected_calls):
+    run, ids, tasks = setup
+    tasks.write_text(json.dumps([{'id':'t_existing','project_id':ids[owner],
+                                  'created_by':'weekly-audit','status':status}]))
+    result, calls = run()
+    assert result.returncode == 0, result.stderr
+    assert len(calls) == expected_calls
+
+
+def test_projectless_legacy_audit_needs_reconciliation_not_duplicate(setup):
+    run, _, tasks = setup
+    tasks.write_text(json.dumps([{'id':'t_legacy','project_id':None,
+                                  'created_by':'weekly-audit','status':'ready'}]))
+    result, calls = run()
+    assert result.returncode != 0
+    assert 'active audit has no project binding' in result.stderr
+    assert len(calls) == 1
+
+
+def test_compatibility_adapter_requires_project_and_passes_body_file(tmp_path):
+    import shutil
+    adapter = SCRIPT.with_name('enqueue-kanban-audit.sh')
+    binary = tmp_path / 'hermes'
+    binary.write_text('#!' + sys.executable + '\n' + '''import json,sys
+from pathlib import Path
+args=sys.argv[1:]
+body=Path(args[args.index('--body-file')+1])
+print(json.dumps({'argv':args,'body':body.read_text(),'path':str(body)}))
+''')
+    binary.chmod(0o700)
+    env = dict(os.environ, PATH=str(tmp_path) + os.pathsep + os.environ['PATH'])
+    shell = shutil.which('sh')
+    args = ['auditor', 'creator', 'title', 'key', '6m', 'body with spaces\nand newline']
+    refused = subprocess.run([shell, str(adapter), *args], check=False,
+                             capture_output=True, text=True, encoding='utf-8', env=env, timeout=20)
+    assert refused.returncode == 64
+    accepted = subprocess.run([shell, str(adapter), *args, 'hermes-agent'], check=False,
+                              capture_output=True, text=True, encoding='utf-8', env=env, timeout=20)
+    assert accepted.returncode == 0, accepted.stderr
+    result = json.loads(accepted.stdout)
+    assert result['argv'][:2] == ['--run-module', 'scripts.kanban_audit_enqueue']
+    assert result['argv'][result['argv'].index('--project') + 1] == 'hermes-agent'
+    assert result['body'] == args[-1]
+    assert not Path(result['path']).exists()
