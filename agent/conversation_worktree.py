@@ -282,6 +282,10 @@ def acquire_conversation_root_lease(
     lease_id = uuid.uuid4().hex
     try:
         with _lease_file_lock(lock_path, timeout=3.0):
+            # Explicit removal holds this lock through deletion and claim
+            # retirement. A prior ready lookup cannot authorize a late lease.
+            # Repository locks precede this lock, so never acquire one here.
+            _require_root_lease_binding(root_session_id, worktree_path, repo_common_dir)
             entries, valid = _read_root_leases(state_path)
             if not valid:
                 raise ConversationWorktreeError(
@@ -321,6 +325,23 @@ def _common_owner_claim_path(repo_common_dir: Path, worktree_path: Path) -> Path
     """Return the source-Git durable claim location for one exact worktree path."""
     digest = hashlib.sha256(str(worktree_path.resolve()).encode("utf-8")).hexdigest()
     return repo_common_dir / _COMMON_OWNER_CLAIMS_DIR / f"{digest}.json"
+
+
+def _require_root_lease_binding(root_session_id: str, path: Path, common: Path) -> None:
+    """Recheck the manager's exact durable claim inside the removal fence."""
+    try:
+        claim = json.loads(_common_owner_claim_path(common, path).read_text(encoding="utf-8-sig"))
+        valid = (
+            path.is_dir()
+            and _owner_claim_matches(claim, worktree_path=path, repo_common_dir=common)
+            and claim.get("root_session_id") == root_session_id
+        )
+    except (OSError, ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise ConversationWorktreeError(
+            "conversation worktree ownership is unavailable before lease acquisition", phase="lease"
+        )
 
 
 def _owner_claim_matches(
