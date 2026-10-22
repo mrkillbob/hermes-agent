@@ -100,14 +100,6 @@ _VERIFIED_DIAGNOSTIC_ATOM = re.compile(
 )
 
 
-def _read_grant_text(grant: SourceGrant) -> str | None:
-    try:
-        lines = Path(grant.canonical_path).read_bytes().splitlines(keepends=True)
-        return b"".join(lines[grant.line_start - 1 : grant.line_end]).decode("utf-8")
-    except (OSError, UnicodeDecodeError, ValueError, TypeError):
-        return None
-
-
 def _approved_sanitized(text: str, *, cap: int) -> SanitizedSegment:
     # Admission is finalized by LLMEgressFirewall so every denial is reported
     # as its content-free EgressBlocked decision. Keep only the local type and
@@ -1424,83 +1416,6 @@ def _segment_protected_tool_result(
             allow_line_split=True,
         )
     return segments[0] if len(segments) == 1 else OutboundText(tuple(segments))
-
-
-def _segment_read_file_presentation(
-    text: str,
-    metadata: Any,
-    grant_texts: Sequence[tuple[str, SourceGrant]],
-    used_grants: dict[str, SourceGrant],
-    *,
-    registry: SourceProvenanceRegistry | None = None,
-    session_id: str = "",
-    turn_id: str = "",
-    request_id: str = "",
-    policy_digest: str = "",
-) -> SourcePresentationSegment | UntrustedProvenanceSegment:
-    """Bind the real JSON/line-number presentation to one exact read grant."""
-
-    denied = UntrustedProvenanceSegment(sha256(text.encode("utf-8")).hexdigest())
-    if not isinstance(metadata, Mapping):
-        return denied
-    if metadata.get("presentation_kind") != "read_file_json_v1":
-        return denied
-    if metadata.get("content_sha256") != sha256(text.encode("utf-8")).hexdigest():
-        return denied
-    digests = metadata.get("source_grant_digests")
-    if not isinstance(digests, (list, tuple)) or not digests:
-        return denied
-    try:
-        parsed = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return denied
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("content"), str):
-        return denied
-    allowed_digests = {value for value in digests if isinstance(value, str)}
-    candidates: list[tuple[str, SourceGrant]] = []
-    for raw_text, grant in grant_texts:
-        digest = source_grant_digest(grant)
-        if digest not in allowed_digests or metadata.get("request_id") != grant.request_id:
-            continue
-        expected = "\n".join(
-            f"{line_number}|{line}"
-            for line_number, line in enumerate(
-                raw_text.splitlines(), start=grant.line_start
-            )
-        )
-        if parsed["content"] == expected:
-            candidates.append((digest, grant))
-    if not candidates and registry is not None:
-        original_request_id = metadata.get("request_id")
-        if isinstance(original_request_id, str):
-            for original_digest in allowed_digests:
-                rebound = registry.rebind_validated_presentation(
-                    original_digest,
-                    original_request_id=original_request_id,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    request_id=request_id,
-                    policy_digest=policy_digest,
-                )
-                if rebound is None:
-                    continue
-                raw_text = _read_grant_text(rebound)
-                if raw_text is None:
-                    continue
-                expected = "\n".join(
-                    f"{line_number}|{line}"
-                    for line_number, line in enumerate(
-                        raw_text.splitlines(), start=rebound.line_start
-                    )
-                )
-                if parsed["content"] == expected:
-                    candidates.append((source_grant_digest(rebound), rebound))
-    if len(candidates) != 1:
-        return denied
-    digest, grant = candidates[0]
-    used_grants[digest] = grant
-    return SourcePresentationSegment(digest, text, "read_file_json_v1")
-
 
 
 # PR76-specific constants

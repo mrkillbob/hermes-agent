@@ -87,8 +87,11 @@ def _codex_request_kwargs():
     }
 
 
+@pytest.mark.parametrize("producer_bound", [False, True])
+@pytest.mark.parametrize("system_shape", ["none", "one", "multiple", "merged"])
+@pytest.mark.parametrize("long_call_id", [False, True])
 def test_build_api_kwargs_codex_carries_trusted_read_sidecar_to_authorization(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, producer_bound, system_shape, long_call_id
 ):
     """The live builder preserves trusted read provenance until authorization."""
 
@@ -108,6 +111,7 @@ def test_build_api_kwargs_codex_carries_trusted_read_sidecar_to_authorization(
     agent._llm_egress_policy_digest = sha256(b"builder-replay-policy").hexdigest()
     agent._llm_egress_state_dir = tmp_path / "egress"
 
+    call_id = "call_" + "long_identity_" * 8 if long_call_id else "call_read_file_builder_replay"
     with tempfile.TemporaryDirectory(
         prefix="hermes-builder-replay-", dir=Path.cwd()
     ) as source_root:
@@ -115,28 +119,35 @@ def test_build_api_kwargs_codex_carries_trusted_read_sidecar_to_authorization(
         source.write_text("safe = True\n", encoding="utf-8")
         source_argument = str(source.relative_to(Path.cwd()))
 
-        with source_provenance_activation(agent, "read_file"):
+        with source_provenance_activation(agent, "read_file", tool_call_id=call_id if producer_bound else ""):
             result = read_file_tool(
                 source_argument, task_id="codex-builder-replay-read"
             )
         metadata = attach_trusted_source_provenance_metadata(
-            agent, "read_file", content=result
+            agent, "read_file", content=result, tool_call_id=call_id if producer_bound else None
         )
         tool_result = make_tool_result_message(
             "read_file",
             result,
-            "call_read_file_builder_replay",
+            call_id,
             source_provenance=metadata,
         )
+        systems = {
+            "none": [],
+            "one": [{"role": "system", "content": "You are Hermes."}],
+            "multiple": [{"role": "system", "content": "You are Hermes."},
+                         {"role": "system", "content": "Preserve source guidance."}],
+            "merged": [{"role": "system", "content": "You are Hermes.\nPreserve source guidance."}],
+        }
         api_messages = [
-            {"role": "system", "content": "You are Hermes."},
+            *systems[system_shape],
             {"role": "user", "content": "Inspect the granted source."},
             {
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [
                     {
-                        "id": "call_read_file_builder_replay",
+                        "id": call_id,
                         "function": {
                             "name": "read_file",
                             "arguments": json.dumps({"path": source_argument}),
@@ -151,7 +162,7 @@ def test_build_api_kwargs_codex_carries_trusted_read_sidecar_to_authorization(
 
         sidecar = built["_hermes_source_provenance"]
         assert len(sidecar) == 1
-        assert sidecar[0]["tool_call_id"] == "call_read_file_builder_replay"
+        assert sidecar[0]["tool_call_id"] == call_id
         assert sidecar[0]["content_sha256"] == sha256(
             result.encode("utf-8")
         ).hexdigest()

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 
+from agent.source_grant_text import _read_grant_text
 from agent.remote_task_context import owned_remote_task, require_public_task_context, mark_local_task_context
 from agent.llm_egress_firewall import (
     AuthorizedEgress,
@@ -71,7 +72,6 @@ from agent.llm_egress_terminal import (
     _kanban_assignees_terminal_call_ids,
     _plain_github_list_terminal_call_ids,
     _pytest_terminal_call_ids,
-    _read_grant_text,
     _recognized_syntax_tool_call_ids,
     _recognized_tool_call_ids,
     _rejected_terminal_call_ids,
@@ -84,6 +84,7 @@ from agent.llm_egress_schema import type_builtin_schema_words
 from agent.message_sanitization import tool_result_id_variants
 from agent.redact import redact_sensitive_text
 from agent.source_provenance import DEFAULT_POLICY_DIGEST, SourceProvenanceError, SourceProvenanceRegistry
+from agent.source_read_results import SourceReadSelection, remember_validated_sources
 
 
 # Timeout is a non-content SDK control. Header/query values remain in the
@@ -378,9 +379,10 @@ def _exact_provider_secret_values() -> tuple[str, ...]:
 
 
 def _grant_texts(grants: Sequence[SourceGrant]) -> tuple[tuple[str, SourceGrant], ...]:
+    from agent.source_context_preview import ContextPreviewGrant
     unique: dict[str, SourceGrant] = {}
     for grant in grants:
-        if not isinstance(grant, SourceGrant):
+        if not isinstance(grant, (SourceGrant, ContextPreviewGrant)):
             continue
         text = _read_grant_text(grant)
         if text:
@@ -582,6 +584,7 @@ def _restore_source_provenance_sidecar(
                     "source_grant_digests",
                     "content_sha256",
                     "presentation_kind",
+                    "read_result_binding_id",
                 )
                 if key in entry
             }
@@ -596,6 +599,10 @@ def _restore_source_provenance_sidecar(
     def _restore_input_items(input_items: Any) -> tuple[Any, bool]:
         if not isinstance(input_items, list):
             return input_items, False
+        from agent.responses_source_identity import restore_responses_sources
+        formatted = restore_responses_sources(input_items, sidecar, consumed_entries)
+        if formatted is not None:
+            return formatted, formatted != input_items
         copied_input = list(input_items)
         matches: dict[int, list[int]] = {}
         for entry_index, entry in enumerate(sidecar):
@@ -605,12 +612,7 @@ def _restore_source_provenance_sidecar(
             original_call_id = entry.get("tool_call_id")
             if not isinstance(expected_sha, str) or not isinstance(original_call_id, str):
                 continue
-            try:
-                from agent.codex_responses_adapter import _clamp_responses_call_id
-
-                expected_call_id = _clamp_responses_call_id(original_call_id)
-            except Exception:
-                expected_call_id = original_call_id
+            expected_call_id = original_call_id
             candidates: list[int] = []
             for index, item in enumerate(copied_input):
                 if not isinstance(item, Mapping):
@@ -644,6 +646,7 @@ def _restore_source_provenance_sidecar(
                     "source_grant_digests",
                     "content_sha256",
                     "presentation_kind",
+                    "read_result_binding_id",
                 )
                 if key in entry
             }
@@ -835,7 +838,7 @@ def authorize_agent_sdk_kwargs(
             32_768 if getattr(agent, "_llm_egress_aux_task", "") == "vision" else 262_144,
         )
     )
-    used_grants: dict[str, SourceGrant] = {}
+    used_grants = SourceReadSelection()
     # Protected providers must use the bounded-context path regardless of
     # whether the worker inherited the dispatcher marker.  The marker is
     # still required for path redaction and the reduced Kanban toolset, but it
@@ -1101,8 +1104,7 @@ def authorize_agent_sdk_kwargs(
         if locations:
             logger.warning("LLM egress blocked structural locations: %s", locations)
         raise
-    if isinstance(registry, SourceProvenanceRegistry):
-        registry.remember_validated_presentations(tuple(used_grants.values()))
+    remember_validated_sources(registry, used_grants)
     rebuilt = json.loads(authorization.payload_bytes)
     if not isinstance(rebuilt, dict):
         raise TypeError("authorized provider payload must be a JSON object")
