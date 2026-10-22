@@ -87,3 +87,28 @@ def _rmtree_with_retry(profile_dir: Path, onexc_handler) -> None:
                 time.sleep(0.3 * (attempt + 1))
     if last_exc is not None:
         raise last_exc
+
+
+def print_delete_summary(canon: str, profile_dir: Path, gw_running: bool, wrapper_path: Path | None) -> None:
+    """Show what ``delete_profile`` is about to remove."""
+    from hermes_cli import profiles
+
+    model, provider = profiles._read_config_model(profile_dir)
+    skill_count = profiles._count_skills(profile_dir)
+    dist_name, dist_version, dist_source = profiles._read_distribution_meta(profile_dir)
+    print(f"\nProfile: {canon}")
+    print(f"Path:    {profile_dir}")
+    if model:
+        print(f"Model:   {model}" + (f" ({provider})" if provider else ""))
+    if skill_count:
+        print(f"Skills:  {skill_count}")
+    if dist_name:
+        print(f"Distribution: {dist_name}@{dist_version or '?'}")
+        if dist_source:
+            print(f"Installed from: {dist_source}")
+    print("\nThis will permanently delete:")
+    print("  • All config, API keys, memories, sessions, skills, cron jobs")
+    if wrapper_path is not None:
+        print(f"  • Command alias ({wrapper_path})")
+    if gw_running:
+        print("  ⚠ Gateway is running — it will be stopped.")

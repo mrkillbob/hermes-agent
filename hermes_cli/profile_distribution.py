@@ -20,8 +20,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import hermes_yaml as yaml
 
+from hermes_constants import named_profile_is_deleted
 from hermes_cli._subprocess_compat import noninteractive_git_env
 from hermes_cli.archive_safe import normalize_archive_parts
+from hermes_cli.profiles_lifecycle import profile_lifecycle_reservation
 from hermes_cli.profiles import (
     DEFAULT_EXPORT_EXCLUDE_ROOT, profile_path_contains_private_store,
     profile_path_is_private,
@@ -589,19 +591,21 @@ def install_distribution(
     from hermes_cli.profiles import check_alias_collision, create_wrapper_script
     with tempfile.TemporaryDirectory(prefix="hermes_dist_install_") as tmp:
         plan = plan_install(source, Path(tmp), override_name=name)
-        if plan.existing and not force:
-            raise DistributionError(
-                f"Profile '{plan.manifest.name}' already exists at {plan.target_dir}. "
-                "Use `hermes profile update` to upgrade in place, or pass --force to overwrite."
-            )
+        with profile_lifecycle_reservation(plan.target_dir):
+            plan.existing = plan.target_dir.exists()
+            if plan.existing and not force:
+                raise DistributionError(
+                    f"Profile '{plan.manifest.name}' already exists at {plan.target_dir}. "
+                    "Use `hermes profile update` to upgrade in place, or pass --force to overwrite."
+                )
 
-        # Fresh install (or --force): config.yaml comes from the distribution. Roots the
-        # payload does not ship are left alone either way, so --force keeps user skills.
-        _bootstrap_user_dirs(plan.target_dir)
-        _copy_dist_payload(plan.staged_dir, plan.target_dir, plan.manifest, preserve_config=False)
-        if create_alias and check_alias_collision(plan.manifest.name) is None:
-            create_wrapper_script(plan.manifest.name)
-        return plan
+            # Fresh install (or --force): config.yaml comes from the distribution. Roots the
+            # payload does not ship are left alone either way, so --force keeps user skills.
+            _bootstrap_user_dirs(plan.target_dir)
+            _copy_dist_payload(plan.staged_dir, plan.target_dir, plan.manifest, preserve_config=False)
+            if create_alias and check_alias_collision(plan.manifest.name) is None:
+                create_wrapper_script(plan.manifest.name)
+            return plan
 
 
 def _existing_profile(profile_name: str) -> tuple[str, Path]:
@@ -618,6 +622,7 @@ def update_distribution(profile_name: str, force_config: bool = False) -> Instal
     """Re-pull from the installed manifest's ``source:`` and apply: dist-owned files
     overwritten, user data never touched, ``config.yaml`` preserved unless ``force_config``."""
     canon, target = _existing_profile(profile_name)
+    original_identity = target.stat()
     existing_manifest = read_manifest(target)
     if existing_manifest is None:
         raise DistributionError(
@@ -631,9 +636,18 @@ def update_distribution(profile_name: str, force_config: bool = False) -> Instal
         )
     with tempfile.TemporaryDirectory(prefix="hermes_dist_update_") as tmp:
         plan = plan_install(existing_manifest.source, Path(tmp), override_name=canon)
-        plan.preserves_config = not force_config
-        _copy_dist_payload(plan.staged_dir, plan.target_dir, plan.manifest, preserve_config=plan.preserves_config)
-        return plan
+        with profile_lifecycle_reservation(target):
+            if named_profile_is_deleted(target):
+                raise DistributionError(f"Profile '{canon}' was retired while staging; update refused.")
+            _, current_target = _existing_profile(canon)
+            current_identity = current_target.stat()
+            if (current_target != target or plan.target_dir != target
+                    or (current_identity.st_dev, current_identity.st_ino)
+                    != (original_identity.st_dev, original_identity.st_ino)):
+                raise DistributionError(f"Profile '{canon}' changed while staging; review and retry the update.")
+            plan.preserves_config = not force_config
+            _copy_dist_payload(plan.staged_dir, plan.target_dir, plan.manifest, preserve_config=plan.preserves_config)
+            return plan
 
 
 def describe_distribution(profile_name: str) -> dict[str, Any]:

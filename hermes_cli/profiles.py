@@ -19,7 +19,8 @@ from typing import Dict, List, Optional, Tuple
 from agent.file_safety import HOME_CREDENTIAL_DIRS
 from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
 from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS
-from hermes_cli.profiles_remove import _rmtree_make_writable, _rmtree_with_retry, wait_profile_unowned
+from hermes_cli.profiles_remove import _rmtree_make_writable, _rmtree_with_retry, wait_profile_unowned, print_delete_summary
+from hermes_cli.profiles_lifecycle import profile_lifecycle_reservation, reserve_profile_operation
 from hermes_constants import (
     LOCAL_RUNTIME_ROOT_DIRS, PROFILE_ID_RE, clear_named_profile_deleted, mark_named_profile_deleted,
     named_profile_has_identity, named_profile_is_deleted, named_profile_is_live,
@@ -1399,6 +1400,7 @@ def _bootstrap_profile_dir(profile_dir: Path, source_dir: Optional[Path],
         _clone_file(source_dir, profile_dir, SYNC_MANIFEST_NAME)
 
 
+@reserve_profile_operation("name")
 def create_profile(
     name: str, clone_from: Optional[str] = None, clone_all: bool = False, clone_config: bool = False,
     no_alias: bool = False, no_skills: bool = False, description: Optional[str] = None,
@@ -1738,29 +1740,6 @@ def _stop_bot_desktop(profile_dir: Path) -> None:
         reset_hermes_home_override(token)
 
 
-def _print_delete_summary(canon: str, profile_dir: Path, gw_running: bool, wrapper_path: Optional[Path]) -> None:
-    """Show what ``delete_profile`` is about to remove."""
-    model, provider = _read_config_model(profile_dir)
-    skill_count = _count_skills(profile_dir)
-    dist_name, dist_version, dist_source = _read_distribution_meta(profile_dir)
-    print(f"\nProfile: {canon}")
-    print(f"Path:    {profile_dir}")
-    if model:
-        print(f"Model:   {model}" + (f" ({provider})" if provider else ""))
-    if skill_count:
-        print(f"Skills:  {skill_count}")
-    if dist_name:
-        print(f"Distribution: {dist_name}@{dist_version or '?'}")
-        if dist_source:
-            print(f"Installed from: {dist_source}")
-    print("\nThis will permanently delete:")
-    print("  • All config, API keys, memories, sessions, skills, cron jobs")
-    if wrapper_path is not None:
-        print(f"  • Command alias ({wrapper_path})")
-    if gw_running:
-        print("  ⚠ Gateway is running — it will be stopped.")
-
-
 class ProfileIdentitySettlementPending(RuntimeError):
     """The profile's directory was deleted, but its durable session/routing identity was not
     settled (``hermes_cli.profile_identity.purge_profile_identity`` returned False).
@@ -1780,6 +1759,7 @@ class ProfileIdentitySettlementPending(RuntimeError):
             f"still pending — run: {self.retry_command}")
 
 
+@reserve_profile_operation("name")
 def delete_profile(name: str, yes: bool = False) -> Path:
     """Delete a profile, its wrapper script, and its gateway service (service disabled first
     to prevent auto-restart, gateway stopped if running)."""
@@ -1789,7 +1769,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     canon, profile_dir = _existing_profile_dir(canon)
     gw_running = _check_gateway_running(profile_dir)
     wrapper_path = _find_our_wrapper(canon)
-    _print_delete_summary(canon, profile_dir, gw_running, wrapper_path)
+    print_delete_summary(canon, profile_dir, gw_running, wrapper_path)
     if not yes:
         print()
         try:
@@ -2242,29 +2222,30 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
             "Specify a different name: hermes profile import <archive> --name <name>"
         )
     profile_dir = get_profile_dir(canon)
-    if profile_dir.exists():
-        raise _profile_exists_error(canon)
-    _get_profiles_root().mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="hermes_profile_import_") as tmpdir:
-        staging_root = Path(tmpdir)
-        safe_extract_targz(archive, staging_root)
-        extracted = staging_root / archive_root
-        if not extracted.is_dir():
-            raise ValueError(f"Profile archive root is missing or invalid: {archive_root}")
-        final_source = extracted
-        if archive_root != canon:
-            final_source = staging_root / canon
-            extracted.rename(final_source)
-        # Remove foreign runtime state before publishing, including file-shaped roots.
-        # A failed removal must abort import rather than install a stale PM selection.
-        for child in final_source.iterdir():
-            if child.name in PM_RUNTIME_ROOT_DIRS:
-                if child.is_dir():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-        shutil.move(str(final_source), str(profile_dir))
-    return profile_dir
+    with profile_lifecycle_reservation(profile_dir):
+        if profile_dir.exists():
+            raise _profile_exists_error(canon)
+        _get_profiles_root().mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="hermes_profile_import_") as tmpdir:
+            staging_root = Path(tmpdir)
+            safe_extract_targz(archive, staging_root)
+            extracted = staging_root / archive_root
+            if not extracted.is_dir():
+                raise ValueError(f"Profile archive root is missing or invalid: {archive_root}")
+            final_source = extracted
+            if archive_root != canon:
+                final_source = staging_root / canon
+                extracted.rename(final_source)
+            # Remove foreign runtime state before publishing, including file-shaped roots.
+            # A failed removal must abort import rather than install a stale PM selection.
+            for child in final_source.iterdir():
+                if child.name in PM_RUNTIME_ROOT_DIRS:
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+            shutil.move(str(final_source), str(profile_dir))
+        return profile_dir
 
 
 # Rename
@@ -2284,6 +2265,7 @@ def _record_profile_rename(new_dir: Path, old_canon: str) -> None:
         logger.debug("profile rename: could not record previous name %r in %s: %s", old_canon, new_dir, exc)
 
 
+@reserve_profile_operation("old_name", "new_name")
 def rename_profile(old_name: str, new_name: str) -> Path:
     """Rename a profile: directory, wrapper script, service, active_profile. The default
     profile's home IS the installation root, so "renaming" it sets a presentation-only
