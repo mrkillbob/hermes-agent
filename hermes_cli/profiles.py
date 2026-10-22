@@ -125,19 +125,23 @@ def _clone_all_copytree_ignore(source_dir: Path):
     only when the source is the default profile (see the two exclude sets above)."""
     source_resolved = source_dir.resolve()
     root_exclude = set(_CLONE_ALL_HISTORY_EXCLUDE_ROOT)
-    if source_resolved == _get_default_hermes_home().resolve():
+    default_source = source_resolved == _get_default_hermes_home().resolve()
+    if default_source:
         root_exclude |= _CLONE_ALL_DEFAULT_EXCLUDE_ROOT
 
     def _ignore(directory: str, names: list[str]) -> set:
         try:
-            at_root = Path(directory).resolve() == source_resolved
+            resolved = Path(directory).resolve()
+            at_root = resolved == source_resolved
         except (OSError, ValueError):
             # resolve() can fail on odd FS layouts (broken symlinks, missing parents).
             # Fail open — better to over-copy than silently drop user data.
-            at_root = False
+            resolved, at_root = None, False
         ignored = _non_exportable_entries(directory, names)
         if at_root:
             ignored.update(root_exclude & set(names))
+        if default_source and resolved == source_resolved / "runtime":
+            ignored.add("profile-lifecycle")
         return ignored
 
     return _ignore

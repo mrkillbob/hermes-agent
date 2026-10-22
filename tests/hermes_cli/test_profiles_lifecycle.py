@@ -253,3 +253,20 @@ def test_distribution_update_refuses_tombstoned_same_inode_after_staging(tmp_pat
     assert profiles.named_profile_is_deleted(home)
     assert home.stat().st_ino == identity.st_ino
     assert (home / "SOUL.md").read_text() == "before\n"
+
+
+def test_reservation_store_is_root_runtime_state_and_survives_profile_recreation(tmp_path):
+    from hermes_cli.profiles_lifecycle import _lock_path, profile_lifecycle_reservation
+    import shutil
+    root = tmp_path / "root"
+    home = root / "profiles" / "recreated"
+    home.mkdir(parents=True)
+    with profile_lifecycle_reservation(home):
+        lock = _lock_path(home)
+        assert lock.parent == root / "runtime" / "profile-lifecycle"
+        identity = lock.stat()
+        shutil.rmtree(home)
+        home.mkdir()
+        assert_reserved(home)
+        assert (lock.stat().st_dev, lock.stat().st_ino) == (identity.st_dev, identity.st_ino)
+    assert not [path for path in home.parent.iterdir() if path.name.startswith(".")]

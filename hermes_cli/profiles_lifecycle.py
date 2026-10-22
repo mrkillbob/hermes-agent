@@ -1,6 +1,6 @@
 """Cooperative per-name reservation shared by profile lifecycle and data repair.
 
-Locks live outside the profile directory so rename/delete/recreation keep using
+Locks live outside the profile collection so rename/delete/recreation keep using
 the same inode. They supplement runtime ownership, never replace gateway.lock.
 """
 from contextlib import ExitStack, contextmanager
@@ -18,7 +18,8 @@ _LOCAL = threading.local()
 
 def _lock_path(home):
     home = Path(home)
-    return home.parent.resolve() / ".lifecycle-locks" / (unicodedata.normalize("NFC", home.name) + ".lock")
+    root = home.parent.resolve().parent
+    return root / "runtime" / "profile-lifecycle" / (unicodedata.normalize("NFC", home.name) + ".lock")
 
 
 @contextmanager

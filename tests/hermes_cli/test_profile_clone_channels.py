@@ -321,3 +321,14 @@ def test_clone_all_drops_directory_shaped_channel_state(home):
     (home / "google_chat_user_tokens" / "u@x.json").write_text("{}", encoding="utf-8")
     profile_dir = create_profile("full", clone_all=True, no_alias=True)
     assert not (profile_dir / "google_chat_user_tokens").exists()
+
+
+def test_clone_all_preserves_runtime_payload_without_copying_lifecycle_store(home):
+    runtime = home / "runtime"
+    runtime.mkdir()
+    (runtime / "retained.txt").write_text("existing runtime payload\n")
+    clone = create_profile("bot2", clone_all=True, no_alias=True)
+    # The real create consumer reserves the target name before copying its source.
+    assert (runtime / "profile-lifecycle" / "bot2.lock").is_file()
+    assert (clone / "runtime" / "retained.txt").read_text() == "existing runtime payload\n"
+    assert not (clone / "runtime" / "profile-lifecycle").exists()
