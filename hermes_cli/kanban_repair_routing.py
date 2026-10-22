@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 
@@ -56,6 +57,10 @@ def repair_profile_for_task(title: Optional[str], body: Optional[str]) -> Option
     for explicit scope rather than letting the orchestrator perform work.
     """
     text = f"{title or ''}\n{body or ''}".casefold()
+    # This title owns a budget review, even when its inventory quotes unrelated
+    # stewardship jobs or their old quota failures. It grants no execution rights.
+    if re.match(r"^model spend rebalance(?:\s*[:—–-]|\s*$)", (title or "").strip().casefold()):
+        return "resource-scheduler"
     for needles, profile in _REPAIR_RULES:
         if any(needle in text for needle in needles):
             return profile
