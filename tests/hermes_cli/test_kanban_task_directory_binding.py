@@ -282,11 +282,24 @@ def test_directory_correction_refuses_incomplete_claim_identity(directory_case):
     assert _row(case[4]) == before
 
 
-def test_directory_correction_refuses_repository_completion_contract(directory_case):
+def test_directory_correction_preserves_legacy_null_local_contract(directory_case):
+    case, directory = directory_case
+    with connect_closing(board="alpha") as conn, kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET completion_contract=NULL WHERE id=?", (case[4],))
+    _correct(case, directory)
+    after = _row(case[4])
+    assert after["workspace_kind"] == "dir"
+    assert after["workspace_path"] == str(directory)
+    assert after["completion_contract"] is None
+    assert after["status"] == "triage"
+
+
+@pytest.mark.parametrize("contract", ["github-pr", "owner/repo", "https://github.com/owner/repo/pull/1", ""])
+def test_directory_correction_refuses_repository_completion_contract(directory_case, contract):
     case, directory = directory_case
     with connect_closing(board="alpha") as conn, kb.write_txn(conn):
         conn.execute(
-            "UPDATE tasks SET completion_contract='github-pr' WHERE id=?", (case[4],)
+            "UPDATE tasks SET completion_contract=? WHERE id=?", (contract, case[4])
         )
     with pytest.raises(ValueError, match="local-only"):
         _correct(case, directory)

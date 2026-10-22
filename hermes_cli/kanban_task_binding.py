@@ -200,7 +200,9 @@ def _binding_projection(
     if directory is not None:
         if task.get("claim_expires") is not None:
             raise ValueError("directory correction refuses incomplete claim identity")
-        if task.get("completion_contract") != "local-only":
+        from hermes_cli.kanban_pr_acceptance import validate_contract
+
+        if validate_contract(task.get("completion_contract")) != "local-only":
             raise ValueError(
                 "directory correction requires a local-only completion contract"
             )
