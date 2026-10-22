@@ -53,6 +53,15 @@ def _git(repo: Path, *args: str) -> str:
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "verify-bootstrap-version-stamp.py"
 
 
+def _verify(repo: Path, path: Path, *args: str) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    if os.name == "nt":
+        env.setdefault("SystemRoot", r"C:\Windows")
+        env.setdefault("ComSpec", r"C:\Windows\system32\cmd.exe")
+    return subprocess.run([sys.executable, str(_SCRIPT), "--repo", str(repo), "--stamp", str(path), *args],
+                          env=env, capture_output=True, text=True, timeout=30, check=False)
+
+
 def _install_repo(tmp_path: Path) -> Path:
     """A minimal 'installed checkout': git repo + the source identity stamp."""
     repo = tmp_path / "install"
@@ -105,11 +114,77 @@ def test_verifier_cli(tmp_path, changes, expect, error):
         (repo / "install-stamp.json").write_text(json.dumps(canonical), encoding="utf-8")
     if not error:
         expect = ["--expect-commit", stamp["pinnedCommit"], "--expect-branch", "main", *expect]
-    env = dict(os.environ)
-    if os.name == "nt":
-        env.setdefault("SystemRoot", r"C:\Windows")
-        env.setdefault("ComSpec", r"C:\Windows\system32\cmd.exe")
-    result = subprocess.run([sys.executable, str(_SCRIPT), "--repo", str(repo), "--stamp", str(path), *expect],
-                            env=env, capture_output=True, text=True, timeout=30, check=False)
+    result = _verify(repo, path, *expect)
     assert result.returncode == (1 if error else 0), result.stderr
     assert error in result.stderr if error else "stamp verified" in result.stdout
+
+
+@pytest.mark.parametrize("broken_identity", [None, "head", "source", "missing-source", "malformed-source"])
+def test_pre_receipt_upgrade_still_requires_checkout_identity(tmp_path, broken_identity):
+    repo = _install_repo(tmp_path)
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    installer = scripts / "install.ps1"
+    installer.write_text('Write-Host "Legacy install complete"\n', encoding="utf-8")
+    _git(repo, "add", "scripts/install.ps1")
+    _git(repo, "commit", "-m", "pre-receipt installer")
+    initial = _git(repo, "rev-parse", "HEAD")
+    installer.write_text('Write-Host ".hermes-bootstrap-complete"\n', encoding="utf-8")
+    _git(repo, "commit", "-am", "current installer")
+    head = _git(repo, "rev-parse", "HEAD")
+    source = repo / "install-stamp.json"
+    source.write_text(json.dumps({"commit": "a" * 40 if broken_identity == "source" else head}), encoding="utf-8")
+    if broken_identity == "missing-source":
+        source.unlink()
+    elif broken_identity == "malformed-source":
+        source.write_text("invalid JSON", encoding="utf-8")
+    result = _verify(repo, repo / ".hermes-bootstrap-complete",
+        "--initial-windows-installer", initial,
+        "--expect-commit", "b" * 40 if broken_identity == "head" else head,
+    )
+    assert result.returncode == (1 if broken_identity else 0), result.stderr
+    if broken_identity:
+        assert "FAIL:" in result.stderr
+    else:
+        assert "stamp verified" in result.stdout
+
+
+@pytest.mark.parametrize("case", [
+    "receipt-capable", "unknown-initial", "unrelated-initial", "branch-initial", "abbreviated-initial",
+    "invalid-receipt", "stale-receipt", "schema-receipt", "timestamp-receipt",
+])
+def test_legacy_mode_never_excuses_required_or_invalid_receipts(tmp_path, case):
+    repo = _install_repo(tmp_path)
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    capability = ".hermes-bootstrap-complete" if case == "receipt-capable" else "Legacy install complete"
+    (scripts / "install.ps1").write_text(f'Write-Host "{capability}"\n', encoding="utf-8")
+    _git(repo, "add", "scripts/install.ps1")
+    _git(repo, "commit", "-m", "installer")
+    head = _git(repo, "rev-parse", "HEAD")
+    (repo / "install-stamp.json").write_text(json.dumps({"commit": head}), encoding="utf-8")
+    receipt = repo / ".hermes-bootstrap-complete"
+    if case == "invalid-receipt":
+        receipt.write_text("invalid JSON", encoding="utf-8")
+    elif case in {"stale-receipt", "schema-receipt", "timestamp-receipt"}:
+        content = {"schemaVersion": 1, "pinnedCommit": head, "pinnedBranch": "main",
+                   "completedAt": "2026-08-30T12:00:00.000Z"}
+        key, value = {"stale-receipt": ("pinnedCommit", "a" * 40), "schema-receipt": ("schemaVersion", 2),
+                      "timestamp-receipt": ("completedAt", "not-a-time")}[case]
+        content[key] = value
+        receipt.write_text(json.dumps(content), encoding="utf-8")
+    initial = head
+    if case == "unknown-initial":
+        initial = "c" * 40
+    elif case == "unrelated-initial":
+        initial = _git(repo, "commit-tree", _git(repo, "rev-parse", "HEAD^{tree}"), "-m", "unrelated root")
+    elif case == "branch-initial":
+        initial = "main"
+    elif case == "abbreviated-initial":
+        initial = head[:12]
+    result = _verify(repo, receipt,
+        "--initial-windows-installer", initial,
+        "--expect-commit", head,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "FAIL:" in result.stderr
