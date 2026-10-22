@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from hashlib import sha256
+import json
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -16,7 +17,7 @@ from agent.source_provenance import active_source_provenance
 _TRUSTED_READ_TOOL_NAMES = {"read_file", "read"}
 
 
-def source_provenance_activation(agent: Any, function_name: str):
+def source_provenance_activation(agent: Any, function_name: str, *, tool_call_id: str = ''):
     """Activate request identity only around the trusted ``read_file`` tool."""
 
     if function_name not in _TRUSTED_READ_TOOL_NAMES:
@@ -51,9 +52,16 @@ def source_provenance_activation(agent: Any, function_name: str):
             turn_id=turn_id,
             request_id=request_id,
             policy_digest=policy_digest,
+            tool_call_id=tool_call_id,
         )
     except Exception:
         return nullcontext()
+
+
+def execute_with_source_provenance(agent, function_name, tool_call_id, execute, arguments):
+    """Dispatcher execution adapter: preserve the actual call label in the read context."""
+    with source_provenance_activation(agent, function_name, tool_call_id=tool_call_id):
+        return execute(arguments)
 
 
 def attach_trusted_source_provenance_metadata(
@@ -61,6 +69,7 @@ def attach_trusted_source_provenance_metadata(
     function_name: str,
     *,
     content: Any | None = None,
+    tool_call_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Return an opaque, content-bound trusted-read envelope.
 
@@ -74,6 +83,7 @@ def attach_trusted_source_provenance_metadata(
     try:
         from agent.llm_egress_firewall import source_grant_digest
         from agent.source_provenance import (
+            DEFAULT_POLICY_DIGEST,
             SourceProvenanceRegistry,
             following_api_request_id,
         )
@@ -104,6 +114,13 @@ def attach_trusted_source_provenance_metadata(
             from agent.source_context_presentation import presentation_kind
 
             envelope["presentation_kind"] = presentation_kind(content)
+        if tool_call_id is not None:
+            from agent.source_read_results import READ_RESULT_ID
+
+            owner = (str(getattr(agent, 'session_id', '') or ''), turn_id, request_id,
+                     str(getattr(agent, '_llm_egress_policy_digest', '')
+                         or getattr(agent, 'llm_egress_policy_digest', '') or DEFAULT_POLICY_DIGEST))
+            envelope[READ_RESULT_ID] = registry.commit_read_result(owner, tool_call_id, content)
         metadata[request_id] = envelope
         return envelope
     except Exception:
@@ -178,7 +195,7 @@ def issue_active_read_provenance(
             return
         if returned_content != file_ops._add_line_numbers(decoded, offset):
             return
-        context.registry.issue_file_slice(
+        grant = context.registry.issue_file_slice(
             path=source_path,
             line_start=offset,
             line_end=offset + len(selected) - 1,
@@ -188,6 +205,11 @@ def issue_active_read_provenance(
             request_id=context.request_id,
             policy_digest=context.policy_digest,
         )
+        if context.tool_call_id:
+            context.registry.remember_producer_read(
+                grant, context.tool_call_id,
+                sha256(json.dumps(result_dict, ensure_ascii=False).encode('utf-8')).hexdigest(),
+            )
     except Exception:
         return
 
@@ -195,6 +217,7 @@ def issue_active_read_provenance(
 __all__ = [
     "attach_trusted_source_provenance_metadata",
     "build_source_provenance_sidecar",
+    "execute_with_source_provenance",
     "issue_active_read_provenance",
     "source_provenance_activation",
 ]

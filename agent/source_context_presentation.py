@@ -184,7 +184,7 @@ def _hint_piece(remaining, grants, seen, source_path, *, registry, metadata, ide
 def segment_read_with_context(text, metadata, grant_texts, used_grants, *, registry=None,
                               session_id='', turn_id='', request_id='', policy_digest=''):
     """Preserve wire bytes while requiring one exact proof for each source component."""
-    from agent.llm_egress_terminal import _segment_read_file_presentation
+    from agent.source_read_presentations import _segment_read_file_presentation
 
     denied = UntrustedProvenanceSegment(sha256(text.encode('utf-8')).hexdigest())
     if metadata.get('content_sha256') != sha256(text.encode('utf-8')).hexdigest():
@@ -198,18 +198,25 @@ def segment_read_with_context(text, metadata, grant_texts, used_grants, *, regis
     prefix, remaining = text[:end], text[end:]
     identity = dict(session_id=session_id, turn_id=turn_id, request_id=request_id,
                     policy_digest=policy_digest)
+    from agent.source_read_results import READ_RESULT_ID, select_producer_read, select_complete_result
+    from agent.source_read_presentations import prefix_metadata
+
+    record = select_producer_read(text, metadata, registry, identity) if READ_RESULT_ID in metadata else None
+    if READ_RESULT_ID in metadata and record is None:
+        return denied
     collected = {}
     # Re-verify each original proof once, then share those current-request
     # grants between the JSON prefix and guidance parsers.
     grants = _guidance_grants(metadata, grant_texts, registry, identity)
-    prefix_metadata = {
-        **metadata, 'presentation_kind': 'read_file_json_v1',
-        'content_sha256': sha256(prefix.encode('utf-8')).hexdigest(),
-        'request_id': request_id,
-        'source_grant_digests': tuple(source_grant_digest(grant) for _, grant in grants.values()),
-    }
+    prefix_grants = tuple(grants.values())
+    if record is not None:
+        exact = grants.get(source_grant_digest(record.grant))
+        if exact is None:
+            return denied
+        prefix_grants = (exact,)
     first = _segment_read_file_presentation(
-        prefix, prefix_metadata, tuple(grants.values()), collected, registry=registry, **identity,
+        prefix, prefix_metadata(metadata, prefix, request_id, prefix_grants), prefix_grants,
+        collected, registry=registry, **identity,
     )
     if not isinstance(first, SourcePresentationSegment):
         return denied
@@ -233,6 +240,8 @@ def segment_read_with_context(text, metadata, grant_texts, used_grants, *, regis
         collected[source_grant_digest(grant)] = grant
         segments.extend((SanitizedSegment(header), presentation))
         remaining = remaining[length:]
+    if record is not None and not select_complete_result(used_grants, record, request_id, first.source_grant_digest):
+        return denied
     used_grants.update(collected)
     return OutboundText(tuple(segments))
 

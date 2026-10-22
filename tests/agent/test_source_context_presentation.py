@@ -174,7 +174,7 @@ def test_tool_commit_issues_guidance_proof_in_the_current_read_scope(tmp_path, m
     monkeypatch.setattr(tool_executor, '_flush_session_db_after_tool_progress', lambda *_a, **_k: True)
     monkeypatch.setattr(tool_executor.lsp_deferred, 'forward_to_agent', lambda *_: None)
     monkeypatch.setattr(tool_executor.plugin_live_notes, 'attach_to_tool_message', lambda *_: None)
-    with source_provenance_activation(agent, 'read_file'):
+    with source_provenance_activation(agent, 'read_file', tool_call_id='call_commit'):
         result = read_file_tool(str(source), task_id='context-commit-read')
     messages = []
     ref = tool_executor._ToolCallRef('read_file', {'path': str(source)}, 'context-commit-read', 'call_commit', [])

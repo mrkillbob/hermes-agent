@@ -11,7 +11,7 @@ from tests.agent.test_llm_egress_runtime import _agent
 from tools.file_tools import read_file_tool
 
 
-def validated_composites(tmp_path, monkeypatch, count, *, batched=False, shared_guidance=True):
+def validated_composites(tmp_path, monkeypatch, count, *, batched=False, shared_guidance=True, shared_prefix=False, bind_call_ids=False):
     monkeypatch.setenv('HERMES_KANBAN_PROTECTED_REMOTE', '1')
     agent = _agent(tmp_path / 'egress')
     messages = []
@@ -20,16 +20,22 @@ def validated_composites(tmp_path, monkeypatch, count, *, batched=False, shared_
         area = root / 'gateway'
         area.mkdir(parents=True)
         source = area / 'module.py'
-        source.write_text(f'value = {index}\n')
+        source.write_text(f'value = {0 if shared_prefix else index}\n')
         (area / 'AGENTS.md').write_text('Preserve repository guidance.\n' if shared_guidance else f'Preserve repository guidance {index}.\n')
         agent._current_api_request_id = 'turn-1:api:1' if batched else f'turn-1:api:{index * 2 + 1}'
         tracker = SubdirectoryHintTracker(str(root))
+        from agent.source_provenance_tools import execute_with_source_provenance
+
+        call_id = f'call_context_{index}'
+        result = execute_with_source_provenance(
+            agent, 'read_file', call_id if bind_call_ids else '',
+            lambda arguments: read_file_tool(arguments['path'], task_id='replay-capacity'), {'path':str(source)})
         with source_provenance_activation(agent, 'read_file'):
-            result = read_file_tool(str(source), task_id='replay-capacity')
             hint = tracker.check_tool_call('read_file', {'path': str(source)})
         assert hint
         content = result + hint
-        metadata = attach_trusted_source_provenance_metadata(agent, 'read_file', content=content)
+        metadata = attach_trusted_source_provenance_metadata(agent, 'read_file', content=content,
+                                                               tool_call_id=call_id if bind_call_ids else None)
         message = make_tool_result_message('read_file', content, f'call_context_{index}', source_provenance=metadata)
         if not batched:
             agent._current_api_request_id = f'turn-1:api:{index * 2 + 2}'

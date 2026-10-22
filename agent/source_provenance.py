@@ -43,6 +43,7 @@ class SourceProvenanceContext:
     turn_id: str
     request_id: str
     policy_digest: str
+    tool_call_id: str = ''
 
 
 _active_context: ContextVar[SourceProvenanceContext | None] = ContextVar(
@@ -65,6 +66,7 @@ def activate_source_provenance(
     turn_id: str,
     request_id: str,
     policy_digest: str,
+    tool_call_id: str = '',
 ) -> Iterator[SourceProvenanceContext]:
     """Temporarily make an authenticated request identity available to reads."""
 
@@ -73,7 +75,9 @@ def activate_source_provenance(
         isinstance(value, str) and value for value in values
     ):
         raise SourceProvenanceError("missing_identity")
-    context = SourceProvenanceContext(registry, *values)
+    if not isinstance(tool_call_id, str) or len(tool_call_id.encode('utf-8')) > 256:
+        raise SourceProvenanceError('invalid_tool_call_id')
+    context = SourceProvenanceContext(registry, *values, tool_call_id)
     token = _active_context.set(context)
     try:
         yield context
@@ -86,10 +90,12 @@ class SourceProvenanceRegistry:
 
     def __init__(self) -> None:
         from agent.source_context_bindings import ContextReadBindings
+        from agent.source_read_results import ReadResultBindings
 
         self._grants: dict[str, list[SourceGrant]] = {}
         self._validated_presentations: dict[str, SourceGrant] = {}
         self._context_reads = ContextReadBindings()
+        self._read_results = ReadResultBindings()
         self._lock = RLock()
 
     def issue_file_slice(
@@ -243,6 +249,27 @@ class SourceProvenanceRegistry:
         with self._lock:
             self._grants.pop(request_id, None)
             self._context_reads.clear_request(request_id, self._validated_presentations)
+            self._read_results.clear_request(request_id)
+
+    def remember_producer_read(self, grant, call_id, prefix_sha256):
+        """Only a real issued grant may acquire a bounded producer result identity."""
+        with self._lock:
+            if grant in self._grants.get(grant.request_id, ()):
+                self._read_results.issue(grant, call_id, prefix_sha256,
+                                         MAX_GRANTS_PER_REQUEST, MAX_SOURCE_SLICE_BYTES)
+
+    def commit_read_result(self, owner, call_id, content):
+        with self._lock:
+            return self._read_results.commit(owner, call_id, content)
+
+    def read_result_binding(self, record_id, original_request_id, call_id, content, identity):
+        with self._lock:
+            return self._read_results.lookup(record_id, original_request_id, call_id, content, identity,
+                                             self._grants.get(identity['request_id'], ()))
+
+    def remember_validated_read_results(self, selections, used_grants):
+        with self._lock:
+            self._read_results.remember_validated(selections, used_grants)
 
     def remember_context_read(self, grant, working_root, relative_path):
         """Associate a producer display alias only with an actually issued current grant."""
@@ -267,6 +294,7 @@ class SourceProvenanceRegistry:
             return
         with self._lock:
             self._context_reads.clear_turn(turn_id)
+            self._read_results.clear_turn(turn_id)
             stale = [
                 request_id
                 for request_id, grants in self._grants.items()

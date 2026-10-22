@@ -84,6 +84,7 @@ from agent.llm_egress_schema import type_builtin_schema_words
 from agent.message_sanitization import tool_result_id_variants
 from agent.redact import redact_sensitive_text
 from agent.source_provenance import DEFAULT_POLICY_DIGEST, SourceProvenanceError, SourceProvenanceRegistry
+from agent.source_read_results import SourceReadSelection, remember_validated_sources
 
 
 # Timeout is a non-content SDK control. Header/query values remain in the
@@ -582,6 +583,7 @@ def _restore_source_provenance_sidecar(
                     "source_grant_digests",
                     "content_sha256",
                     "presentation_kind",
+                    "read_result_binding_id",
                 )
                 if key in entry
             }
@@ -644,6 +646,7 @@ def _restore_source_provenance_sidecar(
                     "source_grant_digests",
                     "content_sha256",
                     "presentation_kind",
+                    "read_result_binding_id",
                 )
                 if key in entry
             }
@@ -835,7 +838,7 @@ def authorize_agent_sdk_kwargs(
             32_768 if getattr(agent, "_llm_egress_aux_task", "") == "vision" else 262_144,
         )
     )
-    used_grants: dict[str, SourceGrant] = {}
+    used_grants = SourceReadSelection()
     # Protected providers must use the bounded-context path regardless of
     # whether the worker inherited the dispatcher marker.  The marker is
     # still required for path redaction and the reduced Kanban toolset, but it
@@ -1101,8 +1104,7 @@ def authorize_agent_sdk_kwargs(
         if locations:
             logger.warning("LLM egress blocked structural locations: %s", locations)
         raise
-    if isinstance(registry, SourceProvenanceRegistry):
-        registry.remember_validated_presentations(tuple(used_grants.values()))
+    remember_validated_sources(registry, used_grants)
     rebuilt = json.loads(authorization.payload_bytes)
     if not isinstance(rebuilt, dict):
         raise TypeError("authorized provider payload must be a JSON object")

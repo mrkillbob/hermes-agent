@@ -76,11 +76,12 @@ from agent.llm_egress_terminal import (
     _scratch_read_file_tool_call_ids,
     _segment_protected_context,
     _segment_protected_tool_result,
-    _segment_read_file_presentation,
     _segment_text,
 )
 from agent.redact import redact_sensitive_text
 from agent.source_provenance import SourceProvenanceRegistry
+from agent.source_read_results import observed_source_metadata
+from agent.source_read_presentations import _segment_read_file_presentation
 
 _PROTOCOL_LITERAL_FIELDS = frozenset({"role", "type"})
 _TOOL_PROTOCOL_IDENTIFIER_FIELDS = frozenset(
@@ -552,7 +553,7 @@ def _typed_payload_mapping(
     request_identity: tuple[str, str, str, str] = ("", "", "", ""),
 ) -> Any:
     if isinstance(value, Mapping):
-        source_metadata = value.get("_source_provenance")
+        source_metadata = observed_source_metadata(value)
         is_read_file_result = (
             value.get("role") == "tool"
             and (
