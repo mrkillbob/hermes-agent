@@ -78,6 +78,7 @@ def test_discovery_dispatch_seeds_relative_metadata_without_private_source_probe
     from pathlib import Path
     import scripts.federation_discovery as discovery
     from hermes_cli import kanban_db
+    from hermes_cli import projects_db
     from agent.llm_egress_firewall import content_free_violation_locations
 
     root = tmp_path / "source"
@@ -134,6 +135,8 @@ def test_discovery_dispatch_seeds_relative_metadata_without_private_source_probe
         for i in range(35)
     ]
     created = []
+    with projects_db.connect_closing() as project_conn:
+        projects_db.create_project(project_conn, name="Hermes", slug="hermes-agent", board_slug="default")
 
     def command(_hermes, *argv):
         if "list" in argv:

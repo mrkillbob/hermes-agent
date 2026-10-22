@@ -73,6 +73,13 @@ assignee ownership and blocked work consume capacity. Workers must deduplicate
 findings, link bounded children, and provide measurable output rather than invent
 work to satisfy a quota.
 
+Before planning, discovery reads the calling profile's project registry without
+changing it. Archived or missing projects and projects bound to another board are
+reported in `skipped_projects`; they reserve no discovery slot and receive no
+evidence workspace or card. An unavailable registry returns an explicit
+`project_registry_unavailable` idle result. Restoring an archived project remains
+an operator decision; discovery never restores it automatically.
+
 Revenue Lab retains its separate guarded cron pipeline. Federation intake routes
 opportunities there; discovery does not grant spending, publication, customer
 contact, trading, or deployment authority. Library summaries remain bounded,
