@@ -8,6 +8,7 @@ from agent.llm_egress_firewall import (
 )
 from agent.source_provenance import SourceProvenanceRegistry
 from agent.source_read_results import READ_RESULT_ID, select_complete_result, select_producer_read
+from agent.llm_egress_refusal_origins import SourceBoundRefusalSegment
 
 
 def prefix_metadata(metadata, prefix, request_id, grants):
@@ -23,7 +24,7 @@ def prefix_metadata(metadata, prefix, request_id, grants):
 def segment_bound_read(text, metadata, grant_texts, used_grants, *, registry, **identity):
     from agent.source_context_presentation import _guidance_grants
 
-    denied = UntrustedProvenanceSegment(sha256(text.encode('utf-8')).hexdigest())
+    denied = SourceBoundRefusalSegment(sha256(text.encode('utf-8')).hexdigest())
     if metadata.get('presentation_kind') != 'read_file_json_v1':
         return denied
     record = select_producer_read(text, metadata, registry, identity)
@@ -73,7 +74,7 @@ def _segment_read_file_presentation(
         return segment_bound_read(text, metadata, grant_texts, used_grants, registry=registry,
                                   session_id=session_id, turn_id=turn_id, request_id=request_id,
                                   policy_digest=policy_digest)
-    denied = UntrustedProvenanceSegment(sha256(text.encode("utf-8")).hexdigest())
+    denied = SourceBoundRefusalSegment(sha256(text.encode("utf-8")).hexdigest())
     if not isinstance(metadata, Mapping):
         return denied
     if metadata.get("presentation_kind") != "read_file_json_v1":

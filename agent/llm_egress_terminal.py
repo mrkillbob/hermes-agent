@@ -19,12 +19,12 @@ from agent.llm_egress_firewall import (
     SourceBoundSegment,
     SourceGrant,
     SourcePresentationSegment,
-    UntrustedProvenanceSegment,
     ValidatedToolSyntaxSegment,
     redact_remote_unsafe_text,
     source_grant_digest,
     validate_tool_syntax,
 )
+from agent.llm_egress_refusal_origins import ToolResultRefusalSegment
 from agent.message_sanitization import tool_result_id_variants
 from agent.source_provenance import SourceProvenanceRegistry
 
@@ -1371,7 +1371,7 @@ def _segment_protected_tool_result(
     *,
     sanitized_cap: int,
     require_provenance: bool = False,
-) -> SanitizedSegment | SourceBoundSegment | OutboundText | UntrustedProvenanceSegment:
+) -> SanitizedSegment | SourceBoundSegment | OutboundText | ToolResultRefusalSegment:
     """Require provenance on ordinary protected routes, retaining worker policy.
 
     Marked workers keep their established bounded, source-aware non-source
@@ -1381,7 +1381,7 @@ def _segment_protected_tool_result(
     """
 
     if require_provenance:
-        return UntrustedProvenanceSegment(sha256(text.encode("utf-8")).hexdigest())
+        return ToolResultRefusalSegment(sha256(text.encode("utf-8")).hexdigest())
 
     segments: list[SanitizedSegment | SourceBoundSegment | ValidatedToolSyntaxSegment] = []
     cursor = 0

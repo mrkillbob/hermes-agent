@@ -25,6 +25,10 @@ _STAGES = {
     'consumer': frozenset({'bound', 'no_trace'}),
 }
 _BOOL_FIELDS = frozenset({'same_registry', 'request_matches', 'owner_matches', 'binding_present'})
+_REFUSAL_ORIGINS = frozenset({
+    'tool_result', 'source_bound', 'assistant_history', 'user_task',
+    'system_or_schema', 'other',
+})
 _install_lock = RLock()
 _active = ContextVar('source_diagnostic_producer', default=None)
 _receipt = ContextVar('source_diagnostic_receipt', default=None)
@@ -68,6 +72,11 @@ def _observe(function):
         except Exception:  # health: allow BLE001 -- Private exception data must not escape optional diagnostics or affect admission.
             return None
     return observed
+
+
+@_observe
+def _observe_refusal_origins(callback):
+    return callback()
 
 
 @_observe
@@ -141,14 +150,14 @@ def _snapshot(agent, registry, owner):
 
 
 @_observe
-def _begin_receipt(agent, registry, owner):
+def _begin_receipt(agent, registry, owner, refusal_origins=None):
     snapshot = _snapshot(agent, registry, owner)
-    return _receipt.set((owner, snapshot))
+    return _receipt.set((owner, snapshot, refusal_origins))
 
 
 @contextmanager
-def receipt_scope(agent, registry, owner):
-    token = _begin_receipt(agent, registry, owner)
+def receipt_scope(agent, registry, owner, *, refusal_origins=None):
+    token = _begin_receipt(agent, registry, owner, refusal_origins)
     try:
         yield
     finally:
@@ -168,5 +177,12 @@ def append_receipt_diagnostics(receipt, decision):
         event = _event(item.get('stage'), item.get('code'), item)
         if event is not None:
             events.append(event)
-    receipt['source_provenance_diagnostics'] = {
-        'events': events, 'overflow': snapshot.get('overflow') is True}
+    diagnostics = {'events': events, 'overflow': snapshot.get('overflow') is True}
+    if decision.allowed is False and len(active) > 2 and callable(active[2]):
+        candidates = _observe_refusal_origins(active[2]) or ()
+        origins = {
+            item for item in candidates
+            if type(item) is str and item in _REFUSAL_ORIGINS
+        } if isinstance(candidates, (list, tuple, set, frozenset)) else set()
+        diagnostics['refusal_origins'] = sorted(origins or {'other'})
+    receipt['source_provenance_diagnostics'] = diagnostics

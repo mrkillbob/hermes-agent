@@ -78,6 +78,10 @@ from agent.llm_egress_terminal import (
     _segment_protected_tool_result,
     _segment_text,
 )
+from agent.llm_egress_refusal_origins import (
+    SourceBoundRefusalSegment,
+    ToolResultRefusalSegment,
+)
 from agent.redact import redact_sensitive_text
 from agent.source_provenance import SourceProvenanceRegistry
 from agent.source_read_results import observed_source_metadata
@@ -435,7 +439,9 @@ def _typed_payload(value: Any, grant_texts: Sequence[tuple[str, SourceGrant]], u
             if digest == value.source_grant_digest:
                 used_grants[digest] = grant
                 return value
-        return UntrustedProvenanceSegment(sha256(b"unbound-source-segment").hexdigest())
+        return SourceBoundRefusalSegment(
+            sha256(b"unbound-source-segment").hexdigest()
+        )
     if isinstance(value, str):
         return _typed_payload_string(value, grant_texts, used_grants, **kwargs)
     if isinstance(value, (list, tuple)):
@@ -876,7 +882,9 @@ def _typed_payload_mapping_item(
         )
         and key in {"content", "output"}
     ):
-        typed[key] = UntrustedProvenanceSegment(_untrusted_content_digest(item))
+        typed[key] = ToolResultRefusalSegment(
+            _untrusted_content_digest(item)
+        )
         return
     value = state['value']
     grant_texts = state['grant_texts']
@@ -1125,7 +1133,7 @@ def _typed_payload_mapping_structured(
             for reason in reasons
         }
         if not violation_reasons:
-            typed[key] = UntrustedProvenanceSegment(
+            typed[key] = ToolResultRefusalSegment(
                 _untrusted_content_digest(item)
             )
             return True
@@ -1659,7 +1667,7 @@ def _typed_payload_mapping_scalar_arguments(
         # sent, even when it contains no shape-based violation.
         typed[key] = OutboundText(
             (
-                UntrustedProvenanceSegment(
+                ToolResultRefusalSegment(
                     sha256(raw.encode("utf-8")).hexdigest()
                 ),
                 _approved_sanitized(raw, cap=sanitized_cap),

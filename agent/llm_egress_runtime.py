@@ -29,7 +29,6 @@ from agent.llm_egress_firewall import (
     SourcePresentationSegment,
     SourceGrant,
     TypedOutboundRequest,
-    UntrustedProvenanceSegment,
     ValidatedToolSyntaxSegment,
     DestinationClass,
     GeneratedContextKey,
@@ -50,6 +49,10 @@ from agent.llm_egress_classifier import (
     _structured_tool_output_text,
     _typed_payload,
     _typed_payload_violation_locations,
+)
+from agent.llm_egress_refusal_origins import (
+    ToolResultRefusalSegment,
+    refusal_receipt_scope,
 )
 from agent.llm_egress_terminal import (
     _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES,
@@ -203,7 +206,7 @@ def _prepare_bound_skill_source_results(
         raw = message.get("content")
         # A content-free marker forces the existing final provenance gate to
         # reject every mismatch without leaking tool bytes or local paths.
-        copied["content"] = UntrustedProvenanceSegment(
+        copied["content"] = ToolResultRefusalSegment(
             sha256(str(raw).encode("utf-8")).hexdigest()
         )
         try:
@@ -1080,8 +1083,7 @@ def authorize_agent_sdk_kwargs(
         exact_secret_values=_exact_provider_secret_values(),
     )
     try:
-        from agent.source_provenance_diagnostics import receipt_scope
-        with receipt_scope(agent, registry, (session_id, turn_id, request_id, policy_digest)):
+        with refusal_receipt_scope(agent, registry, (session_id, turn_id, request_id, policy_digest), typed_body):
             authorization = firewall.authorize(
                 request,
                 resolved_route,
