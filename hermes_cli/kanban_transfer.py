@@ -62,66 +62,90 @@ def _remove_merged_file(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def _remove_source_task_rows(board: str, task_ids: list[str]) -> None:
+def _selected_task_rows(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    """Full selected records, including local subscriptions that pruning intentionally drops."""
     placeholders = _placeholders(task_ids)
-    with kbc.connect_closing(board=board) as conn, kb.write_txn(conn):
-        rows = conn.execute(
-            f"SELECT id, status, claim_lock, current_run_id FROM tasks WHERE id IN ({placeholders})",
-            task_ids,
-        ).fetchall()
-        if len(rows) != len(task_ids):
-            raise RuntimeError("source cards changed during migration")
-        if any(row["status"] == "running" or row["claim_lock"] or row["current_run_id"] for row in rows):
-            raise ValueError("source board gained a live task claim during migration")
+    result = {}
+    for table in (*_COUNTED_TABLES, "kanban_notify_subs"):
+        if table == "task_links":
+            where, values = f"parent_id IN ({placeholders}) OR child_id IN ({placeholders})", [*task_ids, *task_ids]
+            order = "parent_id, child_id"
+        else:
+            where, values = f"{'id' if table == 'tasks' else 'task_id'} IN ({placeholders})", task_ids
+            order = "task_id, platform, chat_id, thread_id" if table == "kanban_notify_subs" else "id"
+        result[table] = [dict(row) for row in conn.execute(f'SELECT * FROM "{table}" WHERE {where} ORDER BY {order}', values)]
+    return result
+
+
+def _history_rows(rows: list[dict[str, Any]], run_ids: dict[int, int] | None = None) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        item = {key: value for key, value in row.items() if key != "id"}
+        if run_ids is not None and item.get("run_id") is not None:
+            if item["run_id"] not in run_ids:
+                raise ValueError("task event history references a missing run")
+            item["run_id"] = run_ids[item["run_id"]]
+        result.append(item)
+    return result
+
+
+def _verify_task_copy(source: str, destination: str, rows, copied, task_ids: list[str]) -> dict[str, int]:
+    if {row["id"] for row in rows["tasks"]} != set(task_ids) or rows["tasks"] != copied["tasks"]:
+        raise ValueError("destination cards do not match source")
+    for task in (*rows["tasks"], *copied["tasks"]):
+        if task["status"] == "running" or task["claim_lock"] or task["current_run_id"]:
+            raise ValueError("source or destination board gained a live task claim during migration")
+    for table in ("task_comments", "task_runs"):
+        if _history_rows(rows[table]) != _history_rows(copied[table]):
+            raise ValueError(f"destination {table} history does not match source")
+    run_maps = [{row["id"]: index for index, row in enumerate(data["task_runs"])} for data in (rows, copied)]
+    events, dest_events = (_history_rows(data["task_events"], mapping) for data, mapping in zip((rows, copied), run_maps))
+    history, transfers = dest_events[:-len(task_ids)], dest_events[-len(task_ids):]
+    if events != history or len(transfers) != len(task_ids) or {row["task_id"] for row in transfers} != set(task_ids):
+        raise ValueError("destination task event history does not match source")
+    for event in transfers:
+        if (event["kind"] != "board_merged" or event["run_id"] is not None
+                or event["payload"] != kb._json_or_null({"source_board": source, "destination_board": destination})):
+            raise ValueError("destination transfer event does not match source")
+    if rows["task_links"] != copied["task_links"]:
+        raise ValueError("destination task links do not match source")
+    _verify_attachment_copy(source, destination, rows["task_attachments"], copied["task_attachments"])
+    return {table: len(rows[table]) for table in _COUNTED_TABLES}
+
+
+def _verify_attachment_copy(source: str, destination: str, rows, copied) -> None:
+    if len(rows) != len(copied):
+        raise ValueError("destination task attachment history does not match source")
+    for row, landed in zip(rows, copied):
+        original = Path(row["stored_path"])
+        source_blob = original if original.is_absolute() else kb.attachments_root(source) / row["task_id"] / original
+        target_blob = kb.task_attachments_dir(row["task_id"], destination) / original.name
+        expected = {**row, "stored_path": str(target_blob.resolve())}
+        if _history_rows([expected]) != _history_rows([landed]):
+            raise ValueError("destination task attachment history does not match source")
+        if not source_blob.is_file() or not target_blob.is_file() or source_blob.read_bytes() != target_blob.read_bytes():
+            raise ValueError("destination attachment content does not match source")
+
+
+def _remove_source_task_rows(board: str, task_ids: list[str], *, destination: str, expected_source=None) -> dict[str, int]:
+    """Verify and prune under the SAME source write transaction; mismatches retain both copies.
+
+    Acquire both boards in stable order so opposite-direction transfers do not invert locks.
+    Recovery has no original snapshot: require full current source/destination equivalence.
+    """
+    placeholders = _placeholders(task_ids)
+    with kbc.connect_closing(board=board) as src, kbc.connect_closing(board=destination) as dst, contextlib.ExitStack() as locks:
+        for _, conn in sorted(((board, src), (destination, dst)), key=lambda pair: pair[0]):
+            locks.enter_context(kb.write_txn(conn))
+        rows = _selected_task_rows(src, task_ids)
+        if expected_source is not None and rows != expected_source:
+            raise ValueError("source cards or history changed during migration; both copies retained")
+        counts = _verify_task_copy(board, destination, rows, _selected_task_rows(dst, task_ids), task_ids)
+        conn = src
         conn.execute(f"DELETE FROM task_links WHERE parent_id IN ({placeholders}) OR child_id IN ({placeholders})", [*task_ids, *task_ids])
         for table in ("kanban_notify_subs", "task_comments", "task_events", "task_runs", "task_attachments", "tasks"):
             conn.execute(f'DELETE FROM "{table}" WHERE task_id IN ({placeholders})' if table != "tasks" else
                          f'DELETE FROM "{table}" WHERE id IN ({placeholders})', task_ids)
-
-
-def _prune_verified_copy(source: str, destination: str, task_ids: list[str]) -> dict[str, int]:
-    """Finish a previously copied migration after verifying both card records."""
-    placeholders = _placeholders(task_ids)
-    counts: dict[str, int] = {"tasks": len(task_ids)}
-    with kbc.connect_closing(board=source) as src, kbc.connect_closing(board=destination) as dst:
-        src.row_factory = dst.row_factory = sqlite3.Row
-        source_tasks = {row["id"]: row for row in src.execute(
-            f"SELECT * FROM tasks WHERE id IN ({placeholders})", task_ids,
-        )}
-        dest_tasks = {row["id"]: row for row in dst.execute(
-            f"SELECT * FROM tasks WHERE id IN ({placeholders})", task_ids,
-        )}
-        if set(source_tasks) != set(task_ids) or set(dest_tasks) != set(task_ids):
-            raise ValueError("cannot remove source cards until every destination card is present")
-        runtime_columns = {"claim_lock", "claim_expires", "worker_pid", "worker_started_at",
-                           "last_heartbeat_at", "current_run_id"}
-        for task_id in task_ids:
-            if any(source_tasks[task_id][key] != dest_tasks[task_id][key]
-                   for key in source_tasks[task_id].keys() if key not in runtime_columns):
-                raise ValueError(f"destination card does not match source: {task_id}")
-        for table in ("task_comments", "task_runs", "task_attachments"):
-            for task_id in task_ids:
-                source_count = int(src.execute(f"SELECT COUNT(*) FROM {table} WHERE task_id=?", (task_id,)).fetchone()[0])
-                dest_count = int(dst.execute(f"SELECT COUNT(*) FROM {table} WHERE task_id=?", (task_id,)).fetchone()[0])
-                if source_count != dest_count:
-                    raise ValueError(f"destination {table} history does not match source for {task_id}")
-                counts[table] = counts.get(table, 0) + source_count
-        for task_id in task_ids:
-            source_links = {tuple(row) for row in src.execute(
-                "SELECT parent_id, child_id FROM task_links WHERE parent_id=? OR child_id=?", (task_id, task_id))}
-            dest_links = {tuple(row) for row in dst.execute(
-                "SELECT parent_id, child_id FROM task_links WHERE parent_id=? OR child_id=?", (task_id, task_id))}
-            if source_links != dest_links:
-                raise ValueError(f"destination task links do not match source for {task_id}")
-        event_counts = []
-        for task_id in task_ids:
-            source_count = int(src.execute("SELECT COUNT(*) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0])
-            dest_count = int(dst.execute("SELECT COUNT(*) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0])
-            if dest_count != source_count + 1:
-                raise ValueError(f"destination task event history does not match source for {task_id}")
-            event_counts.append(source_count)
-        counts["task_events"] = sum(event_counts)
-    _remove_source_task_rows(source, task_ids)
     return counts
 
 
@@ -265,8 +289,8 @@ def export_board_workspaces(board: str, output_path: str) -> dict[str, Any]:
 def merge_board(source: str, destination: str, backup_path: str, *, task_ids: list[str] | None = None) -> dict[str, Any]:
     """Copy every task and its history into an existing board, then verify it.
 
-    The source is retained. Callers may remove it only after checking the
-    returned counts and the independently exported recovery archive.
+    Source rows are pruned only after full verification under both boards' write
+    transactions. A mismatch retains both copies for explicit reconciliation.
     """
     source = kb._normalize_board_slug(source)
     destination = kb._normalize_board_slug(destination)
@@ -305,10 +329,11 @@ def merge_board(source: str, destination: str, backup_path: str, *, task_ids: li
                 overlap_ids = {row["id"] for row in overlap}
                 if overlap_ids != set(ids):
                     raise ValueError(f"task id already exists on destination: {overlap[0]['id']}")
-                counts = _prune_verified_copy(source, destination, ids)
+                counts = _remove_source_task_rows(source, ids, destination=destination)
                 return {"source": source, "destination": destination, "tasks": len(ids),
                         "counts": {**{name: 0 for name in _COUNTED_TABLES}, **counts},
                         "backup": archive["archive"], "already_copied": True}
+            expected_source = _selected_task_rows(src, ids)
             source_tables = {row[0] for row in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             for table in source_tables - {"tasks", "task_links", "task_comments", "task_events", "task_runs",
                                             "task_attachments", "kanban_notify_subs", "sqlite_sequence"}:
@@ -330,7 +355,7 @@ def merge_board(source: str, destination: str, backup_path: str, *, task_ids: li
                             "merge all linked cards together"
                         )
             attachment_rows = src.execute(
-                f"SELECT * FROM task_attachments WHERE task_id IN ({placeholders})", ids
+                f"SELECT * FROM task_attachments WHERE task_id IN ({placeholders}) ORDER BY id", ids
             ).fetchall()
             for row in attachment_rows:
                 original = Path(row["stored_path"])
@@ -419,7 +444,7 @@ def merge_board(source: str, destination: str, backup_path: str, *, task_ids: li
             if migrated_ids != set(ids):
                 raise RuntimeError("post-merge card identity verification failed")
             cleanup.pop_all()
-            _remove_source_task_rows(source, ids)
+            _remove_source_task_rows(source, ids, destination=destination, expected_source=expected_source)
             return {"source": source, "destination": destination, "tasks": len(ids),
                     "counts": result_counts, "backup": archive["archive"]}
 
