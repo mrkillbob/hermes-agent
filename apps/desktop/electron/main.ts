@@ -14197,7 +14197,7 @@ function revalidateSuspectPoolAfterResume() {
 }
 
 ipcMain.handle('hermes:gateway:ws-url', async (_event, profile) => {
-  return gatewayWsUrlIpcResult(() => freshGatewayWsUrl(profile, _event.sender.id))
+  return gatewayWsUrlIpcResult(() => freshGatewayWsUrl(profile, _event.sender.id), rememberLog)
 })
 ipcMain.handle('hermes:window:openSession', async (_event, sessionId, opts) => {
   if (typeof sessionId !== 'string' || !sessionId.trim()) {
@@ -15057,7 +15057,7 @@ ipcMain.handle('hermes:gateway:ws-url-for', async (_event, payload) => {
     }
 
     return registryGatewayWsUrlHandler(payload)
-  })
+  }, rememberLog)
 })
 
 const pluginWsUrl = createPluginWsUrlHandler({ ensureBackend, ensureRegistryBackend, forgetLocalGatewayDescriptor,
