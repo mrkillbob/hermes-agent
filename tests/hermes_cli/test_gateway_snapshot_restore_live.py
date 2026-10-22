@@ -169,8 +169,11 @@ def test_snapshot_restore_rejoins_the_restored_authority(local_gateway, multiple
     default_before = _default_profile_state(home) if multiplex else None
     cli = SimpleNamespace(_session_db=store, _gateway_session_open=True, session_id=sid, config={},
                           conversation_history=[{"role": "user", "content": "AFTER_SNAPSHOT"}],
-                          agent=object(), model="fixture", _active_session_lease=None)
-    for name in ("_claim_active_session", "_release_active_session"):
+                          agent=object(), model="fixture", _active_session_lease=None,
+                          _conversation_root_lease=None, _failed_conversation_root_leases=[])
+    # Session shutdown also releases/retries worktree leases; keep that real method contract.
+    for name in ("_claim_active_session", "_release_active_session",
+                 "_retry_failed_conversation_root_leases", "_release_conversation_root_lease"):
         setattr(cli, name, MethodType(getattr(HermesCLI, name), cli))
     # The interactive CLI holds its real active-session lease for the whole chat.
     assert cli._claim_active_session("cli", stderr=True)

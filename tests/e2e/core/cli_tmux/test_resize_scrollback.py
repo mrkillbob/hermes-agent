@@ -144,8 +144,10 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
     sent = {f"question zq{t}q please" for t in WORDS}
     assert sum(1 for line in final.split("\n")
                if line.lstrip().startswith("❯") and line.strip()[1:].strip() not in sent) == 1, final
-    # Resizes touch only the transcript, so blank runs are judged from the first question on (the
-    # glyph layout's startup spacing under the welcome banner is printed before any resize).
-    turns = final[final.index("\u276f question zq1q"):]
+    # Judge blank runs after the first submitted question, excluding startup spacing.
+    # This fixture selects classic layout: submitted questions use ●, while ❯ is the composer.
+    first_question = "● question zq1q please"
+    assert first_question in final, final
+    turns = final[final.index(first_question):]
     blank_runs = [len(run) for run in re.findall(r"(?:^[ \t]*\n)+", turns, flags=re.MULTILINE)]
     assert max(blank_runs, default=0) <= 2, final  # the reply panel's own spacing, nothing more

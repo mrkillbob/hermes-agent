@@ -460,13 +460,14 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
         self._bump_session_counters(conn, session_id, inserted, tool_calls_total, unit=False)
         return inserted
 
-    _ROW_STATE_KEYS = ("_row_id", DB_ROW_SNAPSHOT, "timestamp")
+    _ROW_STATE_KEYS = ("_row_id", DB_ROW_SNAPSHOT, "timestamp", "_compressed_summary")
 
     def _execute_transcript_write(self, fn, messages: list[dict[str, Any]], **kwargs):
         """``_execute_write(fn)`` for callbacks that stamp row state onto the caller's *messages* (every
         :meth:`_insert_message_rows` caller that passes caller-owned dicts; rewind and import insert fresh copies). Each attempt, and a final failure, restores the caller's
-        ``_row_id`` / digest / timestamp: a rolled-back insert's id is reused by SQLite, so a stale stamp
-        would make a later flush adopt another writer's row and drop this message."""
+        ``_row_id`` / digest / timestamp / inferred summary classification, preserving absent keys and
+        explicit values. A rolled-back insert's id is reused by SQLite, so a stale stamp would make
+        a later flush adopt another writer's row; an inferred marker must be proved anew on retry."""
         _absent = object()
         pre_state = [tuple(m.get(k, _absent) for k in self._ROW_STATE_KEYS) for m in messages]
 
@@ -934,6 +935,34 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
             carried_messages=carried_messages, covered_ids=covered_ids,
             unresolved_held=unresolved_held, held_for_cas=held_for_cas), compacted_messages)
 
+    def _carry_summary_markers(self, conn, session_id: str, messages: list[dict[str, Any]]) -> None:
+        """An unchanged durable carrier stays a carrier when a projection omits its private flag.
+
+        Match the logical identity, timestamp and displayed/API payload: a shared uid alone
+        must never classify a rewritten tool stub or another reply as a summary. Read donors
+        before archiving, on this transaction; another session cannot supply the classification.
+        """
+        def key(message):
+            role = message.get("role")
+            return (message_uid_or_none(message), role, message.get("timestamp"),
+                    self._encode_content(self._loaded_view_content(role, message.get("content"))),
+                    message.get("api_content"), message.get("tool_call_id"), message.get("tool_name"),
+                    json.dumps(_parse_tool_calls(message.get("tool_calls")), sort_keys=True))
+
+        carriers = set()
+        for row in conn.execute(
+                "SELECT role, content, timestamp, message_uid, api_content, tool_call_id, tool_calls, tool_name "
+                "FROM messages WHERE session_id = ? AND active = 1 AND _compressed_summary = 1 "
+                "AND message_uid IS NOT NULL AND message_uid <> ''", (session_id,)):
+            donor = dict(row)
+            donor[MESSAGE_UID] = row["message_uid"]
+            donor["content"] = self._decode_content(row["content"])
+            carriers.add(key(donor))
+        for message in messages:
+            if ("_compressed_summary" not in message and message_uid_or_none(message)
+                    and key(message) in carriers):
+                message["_compressed_summary"] = True
+
     def _archive_and_compact_on_conn(
             self, conn, session_id: str, compacted_messages: list[dict[str, Any]], *,
             model_config_patch: Optional[dict[str, Any]] = None, watermark: Optional[int] = None,
@@ -964,6 +993,7 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
                 from hermes_state_errors import HeldRowRewrittenError
                 raise HeldRowRewrittenError(
                     f"a held row of session {session_id} was rewritten in place before the commit")
+        self._carry_summary_markers(conn, session_id, compacted_messages)
         proved = self._proved_coverage(conn, session_id, covered_ids, unresolved_held, watermark)
         if proved is not None:
             return self._archive_named_rows(

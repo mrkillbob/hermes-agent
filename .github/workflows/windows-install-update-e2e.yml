@@ -56,6 +56,7 @@ jobs:
       matrix:
         test_file:
           - test_fresh_install_update.py
+          - test_damaged_checkout.py
           - test_gateway_across_update.py
           - test_git_and_holders.py
           - test_interpreter.py

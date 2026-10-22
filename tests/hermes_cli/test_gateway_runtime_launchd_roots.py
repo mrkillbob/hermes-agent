@@ -1,4 +1,5 @@
 """A fake HOME must not make Desktop adopt or start the account's installed gateway."""
+import hashlib
 import os
 import plistlib
 import subprocess
@@ -26,11 +27,17 @@ def test_launchd_only_claims_services_bound_to_requested_root(tmp_path, monkeypa
     env = {'HERMES_SUPERVISED_CHILD': '1'}
     if binding != 'missing':
         env['HERMES_HOME'] = str(configured)
-    label = 'ai.hermes.gateway'
+    # A scratch HOME is not the OS account's native root. Its service must
+    # use the path-scoped label, even when HOME points at requested.parent.
+    label = 'ai.hermes.gateway-' + hashlib.sha256(str(requested.resolve()).encode()).hexdigest()[:8]
     definition = {'Label': label, 'EnvironmentVariables': env, 'ProgramArguments': ['/bin/echo', 'untrusted']}
     plist = account_home / 'Library/LaunchAgents' / (label + '.plist')
     plist.parent.mkdir(parents=True)
     original = plistlib.dumps(definition)
+    native_plist = plist.with_name('ai.hermes.gateway.plist')
+    native_definition = plistlib.dumps({'Label': 'ai.hermes.gateway',
+        'EnvironmentVariables': {'HERMES_HOME': str(account_home / '.hermes')}})
+    native_plist.write_bytes(native_definition)
     plist.write_bytes(original)
     output = '\n'.join(['job = {', '\tprogram = /bin/echo', '\targuments = {', '\t\t/bin/echo', '\t\tuntrusted', '\t}',
                         '\tenvironment = {', *['\t\t' + k + ' => ' + v for k, v in env.items()], '\t}', '}'])
@@ -39,6 +46,7 @@ def test_launchd_only_claims_services_bound_to_requested_root(tmp_path, monkeypa
     def query(argv, deadline):
         calls.append(argv)
         assert argv[:2] == ['launchctl', 'print']
+        assert argv[2].split('/', 2)[2] == label
         present = loaded and argv[2].startswith('gui/')
         return subprocess.CompletedProcess(argv, 0 if present else 113, output if present else '', '')
 
@@ -50,6 +58,7 @@ def test_launchd_only_claims_services_bound_to_requested_root(tmp_path, monkeypa
         assert service._launchd(requested, time.monotonic() + 5) is None
     assert len(calls) == 2
     assert plist.read_bytes() == original
+    assert native_plist.read_bytes() == native_definition
     assert not (requested / 'logs').exists()
 
 
@@ -73,9 +82,10 @@ def test_launchd_counts_only_verified_home_bindings(tmp_path, monkeypatch, bindi
     monkeypatch.setenv('HERMES_HOME', str(requested))
     monkeypatch.setattr(pwd, 'getpwuid', lambda uid: SimpleNamespace(pw_dir=str(account), pw_name='owner'))
     # A stale on-disk definition must never override either loaded domain.
-    plist = account / 'Library/LaunchAgents/ai.hermes.gateway.plist'
+    label = 'ai.hermes.gateway-' + hashlib.sha256(str(requested.resolve()).encode()).hexdigest()[:8]
+    plist = account / 'Library/LaunchAgents' / (label + '.plist')
     plist.parent.mkdir(parents=True)
-    plist.write_bytes(plistlib.dumps({'Label': 'ai.hermes.gateway',
+    plist.write_bytes(plistlib.dumps({'Label': label,
         'EnvironmentVariables': {'HERMES_HOME': str(requested), 'HERMES_SUPERVISED_CHILD': '1'},
         'ProgramArguments': ['/bin/echo', 'stale']}))
     calls = []
@@ -83,6 +93,7 @@ def test_launchd_counts_only_verified_home_bindings(tmp_path, monkeypatch, bindi
     def query(argv, deadline):
         calls.append(argv)
         assert argv[:2] == ['launchctl', 'print']
+        assert argv[2].split('/', 2)[2] == label
         binding = bindings[0 if argv[2].startswith('gui/') else 1]
         home = requested if binding == 'requested' else account / '.hermes'
         env = '\t\tHERMES_SUPERVISED_CHILD => 1\n'
@@ -101,6 +112,6 @@ def test_launchd_counts_only_verified_home_bindings(tmp_path, monkeypatch, bindi
         if expected is None:
             assert result is None
         else:
-            assert result.start_argv == ('launchctl', 'kickstart', f'{expected}/{os.getuid()}/ai.hermes.gateway')
+            assert result.start_argv == ('launchctl', 'kickstart', f'{expected}/{os.getuid()}/{label}')
     assert len(calls) == 2
     assert not (requested / 'logs').exists()
