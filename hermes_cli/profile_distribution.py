@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import hermes_yaml as yaml
 
-from hermes_constants import named_profile_is_deleted
+from hermes_constants import clear_named_profile_deleted, named_profile_is_deleted
 from hermes_cli._subprocess_compat import noninteractive_git_env
 from hermes_cli.archive_safe import normalize_archive_parts
 from hermes_cli.profiles_lifecycle import profile_lifecycle_reservation
@@ -601,8 +601,19 @@ def install_distribution(
 
             # Fresh install (or --force): config.yaml comes from the distribution. Roots the
             # payload does not ship are left alone either way, so --force keeps user skills.
-            _bootstrap_user_dirs(plan.target_dir)
-            _copy_dist_payload(plan.staged_dir, plan.target_dir, plan.manifest, preserve_config=False)
+            # A deleted name stays unroutable until publication completes. Build outside its
+            # home so guarded manifest/cron writes do not bypass the tombstone early.
+            destination = (
+                Path(tmp) / "profile"
+                if not plan.existing and named_profile_is_deleted(plan.target_dir)
+                else plan.target_dir
+            )
+            _bootstrap_user_dirs(destination)
+            _copy_dist_payload(plan.staged_dir, destination, plan.manifest, preserve_config=False)
+            if destination != plan.target_dir:
+                plan.target_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(destination), str(plan.target_dir))
+            clear_named_profile_deleted(plan.target_dir)
             if create_alias and check_alias_collision(plan.manifest.name) is None:
                 create_wrapper_script(plan.manifest.name)
             return plan

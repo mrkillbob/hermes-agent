@@ -1763,27 +1763,36 @@ class ProfileIdentitySettlementPending(RuntimeError):
             f"still pending — run: {self.retry_command}")
 
 
-@reserve_profile_operation("name")
 def delete_profile(name: str, yes: bool = False) -> Path:
     """Delete a profile, its wrapper script, and its gateway service (service disabled first
     to prevent auto-restart, gateway stopped if running)."""
-    canon = normalize_profile_name(name)
+    canon = _canon_valid(name)
     if canon == "default":
         raise ValueError("Cannot delete the default profile (~/.hermes).\nTo remove everything, use: hermes uninstall")
-    canon, profile_dir = _existing_profile_dir(canon)
+    expected_identity = None
+    if not yes:
+        from hermes_cli.profiles_remove import confirm_profile_delete
+        canon, profile_dir = _existing_profile_dir(canon)
+        expected_identity = confirm_profile_delete(canon, profile_dir)
+        if expected_identity is None:
+            return profile_dir
+
+    # Human input cannot reserve a name indefinitely. Bind confirmation to the original
+    # directory, then re-read runtime ownership under the normal lifecycle reservation.
+    with profile_lifecycle_reservation(get_profile_dir(canon)):
+        canon, profile_dir = _existing_profile_dir(canon)
+        current = profile_dir.stat()
+        if expected_identity is not None and (current.st_dev, current.st_ino, current.st_ctime_ns) != expected_identity:
+            raise RuntimeError(f"Profile '{canon}' changed while awaiting confirmation; review it before deleting.")
+        return _delete_profile_reserved(canon, profile_dir, show_summary=yes)
+
+
+def _delete_profile_reserved(canon: str, profile_dir: Path, *, show_summary: bool) -> Path:
+    """Run native teardown only while the caller holds this profile's reservation."""
     gw_running = _check_gateway_running(profile_dir)
     wrapper_path = _find_our_wrapper(canon)
-    print_delete_summary(canon, profile_dir, gw_running, wrapper_path)
-    if not yes:
-        print()
-        try:
-            confirm = input(f"Type '{canon}' to confirm: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            confirm = None
-            print()
-        if confirm != canon:
-            print("Cancelled.")
-            return profile_dir
+    if show_summary:
+        print_delete_summary(canon, profile_dir, gw_running, wrapper_path)
 
     # 1. Disable service (prevents auto-restart); drop the s6 slot on container (host no-op).
     _cleanup_gateway_service(canon, profile_dir)
@@ -1849,6 +1858,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
         _rmtree_with_retry(profile_dir, _rmtree_make_writable)
         print(f"✓ Removed {profile_dir}")
     except Exception as e:
+        logger.exception("Profile directory removal failed")
         print(f"⚠ Could not remove {profile_dir}: {e}")
         remove_error = e
 
@@ -1929,14 +1939,14 @@ def _cleanup_gateway_service(name: str, profile_dir: Path) -> bool:
         def _run(*cmd: str) -> None:
             subprocess.run(list(cmd), capture_output=True, check=False, timeout=10)
 
-        from hermes_cli.profiles_service_cleanup import remove_system_systemd_unit, remove_windows_task
+        from hermes_cli.profiles_service_cleanup import owned_by_profile, remove_system_systemd_unit, remove_windows_task
 
         system = _platform.system()
         removed = False
         if system == "Linux":
             svc_name = get_service_name()
             svc_file = user_systemd_unit_dir() / f"{svc_name}.service"
-            if svc_file.exists():
+            if svc_file.exists() and owned_by_profile(svc_file, profile_dir):
                 _run("systemctl", "--user", "disable", svc_name)
                 _run("systemctl", "--user", "stop", svc_name)
                 svc_file.unlink(missing_ok=True)
@@ -1945,10 +1955,10 @@ def _cleanup_gateway_service(name: str, profile_dir: Path) -> bool:
                 removed = True
             # `gateway install --system` writes the same name under /etc; a survivor there
             # restarts the removed profile at boot exactly like the user unit at login.
-            removed = remove_system_systemd_unit() or removed
+            removed = remove_system_systemd_unit(profile_dir) or removed
         elif system == "Darwin":
             plist_path = get_launchd_plist_path()
-            if plist_path.exists():
+            if plist_path.exists() and owned_by_profile(plist_path, profile_dir):
                 _run("launchctl", "unload", str(plist_path))
                 plist_path.unlink(missing_ok=True)
                 print("✓ Launchd service removed")
@@ -2249,6 +2259,7 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
                     else:
                         child.unlink()
             shutil.move(str(final_source), str(profile_dir))
+        clear_named_profile_deleted(profile_dir)
         return profile_dir
 
 

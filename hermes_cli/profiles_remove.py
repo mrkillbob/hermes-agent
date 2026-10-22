@@ -13,6 +13,27 @@ import time
 OWNER_RELEASE_WAIT_SECONDS = 60.0
 
 
+def confirm_profile_delete(canon: str, profile_dir: Path) -> tuple[int, int, int] | None:
+    """Confirm one directory identity without holding its lifecycle reservation."""
+    from hermes_cli import profiles
+
+    original = profile_dir.stat()
+    identity = (original.st_dev, original.st_ino, original.st_ctime_ns)
+    profiles.print_delete_summary(
+        canon, profile_dir, profiles._check_gateway_running(profile_dir), profiles._find_our_wrapper(canon)
+    )
+    print()
+    try:
+        confirm = input(f"Type '{canon}' to confirm: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        confirm = None
+        print()
+    if confirm != canon:
+        print("Cancelled.")
+        return None
+    return identity
+
+
 def wait_profile_unowned(profile_dir: Path, *, timeout: float | None = None) -> bool:
     """True once no gateway runtime holds ``profile_dir``'s ``gateway.lock`` (taken and released
     through ``exclusive_maintenance``); False when it is still held after ``timeout`` seconds."""
