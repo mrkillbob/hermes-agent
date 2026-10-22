@@ -654,7 +654,9 @@ def update_distribution(profile_name: str, force_config: bool = False) -> Instal
             current_identity = current_target.stat()
             if (current_target != target or plan.target_dir != target
                     or (current_identity.st_dev, current_identity.st_ino)
-                    != (original_identity.st_dev, original_identity.st_ino)):
+                    != (original_identity.st_dev, original_identity.st_ino)
+                    # A force install can publish another distribution in the same inode.
+                    or read_manifest(current_target) != existing_manifest):
                 raise DistributionError(f"Profile '{canon}' changed while staging; review and retry the update.")
             plan.preserves_config = not force_config
             _copy_dist_payload(plan.staged_dir, plan.target_dir, plan.manifest, preserve_config=plan.preserves_config)
