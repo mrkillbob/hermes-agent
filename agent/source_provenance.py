@@ -85,8 +85,11 @@ class SourceProvenanceRegistry:
     """In-memory grants keyed solely by their bound request identity."""
 
     def __init__(self) -> None:
+        from agent.source_context_bindings import ContextReadBindings
+
         self._grants: dict[str, list[SourceGrant]] = {}
         self._validated_presentations: dict[str, SourceGrant] = {}
+        self._context_reads = ContextReadBindings()
         self._lock = RLock()
 
     def issue_file_slice(
@@ -239,6 +242,23 @@ class SourceProvenanceRegistry:
             return
         with self._lock:
             self._grants.pop(request_id, None)
+            self._context_reads.clear_request(request_id, self._validated_presentations)
+
+    def remember_context_read(self, grant, working_root, relative_path):
+        """Associate a producer display alias only with an actually issued current grant."""
+        with self._lock:
+            if grant in self._grants.get(grant.request_id, ()):
+                self._context_reads.remember(grant, working_root, relative_path,
+                                             MAX_GRANTS_PER_REQUEST, MAX_SOURCE_SLICE_BYTES)
+
+    def context_read_bindings(self, digest, original_request_id, identity):
+        """Historical aliases require the same already-admitted source identity."""
+        with self._lock:
+            eligible = digest in self._validated_presentations or any(
+                source_grant_digest(grant) == digest
+                for grant in self._grants.get(original_request_id, ())
+            )
+            return self._context_reads.select(digest, original_request_id, identity, eligible)
 
     def clear_turn(self, turn_id: str) -> None:
         """Discard every request grant belonging to one completed turn."""
@@ -246,6 +266,7 @@ class SourceProvenanceRegistry:
         if not isinstance(turn_id, str) or not turn_id:
             return
         with self._lock:
+            self._context_reads.clear_turn(turn_id)
             stale = [
                 request_id
                 for request_id, grants in self._grants.items()

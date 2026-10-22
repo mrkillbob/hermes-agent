@@ -75,7 +75,7 @@ def composite(tmp_path, monkeypatch):
     return produce
 
 
-@pytest.mark.parametrize('case', ['secret', 'private_path', 'symlink', 'denied', 'policy_unavailable'])
+@pytest.mark.parametrize('case', ['secret', 'private_path', 'denied', 'policy_unavailable'])
 def test_guidance_never_bypasses_existing_read_and_remote_policy(composite, case, monkeypatch):
     if case == 'policy_unavailable':
         import agent.source_provenance as provenance
@@ -89,9 +89,16 @@ def test_guidance_never_bypasses_existing_read_and_remote_policy(composite, case
         monkeypatch.setattr(provenance, 'get_read_block_error', unavailable)
     text = {'secret': 'api_key = sk-123456789012345678901234567890\n',
             'private_path': 'Operator workspace /Users/private-person/projects/private-project\n'}.get(case, 'Follow guidance.\n')
-    agent, message, _ = composite(text=text, symlink=case == 'symlink', denied=case == 'denied')
+    agent, message, _ = composite(text=text, denied=case == 'denied')
     with pytest.raises(EgressBlocked):
         authorize_agent_sdk_kwargs(agent, {'model': 'test-model', 'messages': [message]})
+
+
+def test_vetted_in_workspace_alias_uses_its_canonical_target_proof(composite):
+    agent, message, _ = composite(symlink=True)
+    authorized, receipt = authorize_agent_sdk_kwargs(agent, {'model':'test-model', 'messages':[message]})
+    assert receipt.allowed and receipt.decision.source_grant_count == 2
+    assert authorized['messages'][0]['content'] == message['content']
 
 
 @pytest.mark.parametrize('case', ['missing_grant', 'changed_source', 'extra_suffix', 'wrong_path'])

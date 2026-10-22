@@ -10,7 +10,7 @@ import re
 
 from agent.llm_egress_firewall import (
     SanitizedSegment, OutboundText, SourcePresentationSegment, UntrustedProvenanceSegment,
-    source_grant_digest,
+    ValidatedToolSyntaxSegment, source_grant_digest,
 )
 
 READ_WITH_CONTEXT = 'read_file_with_context_v1'
@@ -30,21 +30,37 @@ def presentation_kind(content):
     return 'read_file_json_v1'
 
 
-def issue_context_read(path: Path, raw_bytes: bytes, presented_text: str) -> None:
+def issue_context_read(path: Path, raw_bytes: bytes, presented_text: str, *, working_root=None,
+                       relative_path=None) -> None:
     """Use the existing verified-read policy, never the filename as authorization."""
     from agent.source_provenance import active_source_provenance, SourceProvenanceError
+    from agent.source_context_rendering import render_hint_preview
+    from agent.prompt_builder import _scan_context_content
+    from agent.subdirectory_hints import _resolved_hint_target
 
     context = active_source_provenance()
-    if (context is None or not raw_bytes
-            or context_display_text(raw_bytes.decode('utf-8')) != presented_text):
+    if context is None or not raw_bytes:
+        return
+    normalized = context_display_text(raw_bytes.decode('utf-8'))
+    target = path
+    if working_root is not None and relative_path is not None:
+        target = _resolved_hint_target(path, working_root)
+        expected = render_hint_preview(normalized, relative_path)
+        if target is None or _scan_context_content(normalized, path.name) != normalized:
+            return  # A blocked diagnostic never attests the rejected raw source.
+    else:
+        expected = normalized
+    if expected != presented_text:
         return
     try:
-        context.registry.issue_file_slice(
-            path=path, line_start=1, line_end=raw_bytes.count(b'\n') + int(not raw_bytes.endswith(b'\n')),
+        grant = context.registry.issue_file_slice(
+            path=target, line_start=1, line_end=raw_bytes.count(b'\n') + int(not raw_bytes.endswith(b'\n')),
             content=raw_bytes, session_id=context.session_id,
             turn_id=context.turn_id, request_id=context.request_id,
             policy_digest=context.policy_digest,
         )
+        if working_root is not None and relative_path is not None:
+            context.registry.remember_context_read(grant, working_root, relative_path)
     except (OSError, SourceProvenanceError):
         # No proof is issued if canonical bytes, path policy, or secret checks fail.
         return
@@ -52,6 +68,13 @@ def issue_context_read(path: Path, raw_bytes: bytes, presented_text: str) -> Non
 
 def source_presentation_matches(segment, grant, raw_text):
     """Validate each deterministic rendering against its independently verified slice."""
+    from agent.source_context_rendering import PREVIEW_KIND, render_hint_preview
+
+    if not isinstance(segment.presentation_kind, str):
+        return False
+    if segment.presentation_kind.startswith(PREVIEW_KIND):
+        relative = segment.presentation_kind[len(PREVIEW_KIND):]
+        return grant.line_start == 1 and segment.text == render_hint_preview(raw_text, relative)
     if segment.presentation_kind == CONTEXT_TEXT:
         from agent.subdirectory_hints import _HINT_FILENAMES
 
@@ -122,7 +145,7 @@ def _guidance_grants(metadata, grant_texts, registry, identity):
     return selected
 
 
-def _hint_piece(remaining, grants, seen, source_path):
+def _hint_piece(remaining, grants, seen, source_path, *, registry, metadata, identity):
     """Match the whole displayed hint, not a filename or a source substring."""
     match = _HEADER.match(remaining)
     if match is None:
@@ -134,13 +157,23 @@ def _hint_piece(remaining, grants, seen, source_path):
     header = match[0]
     candidates = []
     for digest, (raw, grant) in grants.items():
+        from agent.source_context_rendering import PREVIEW_KIND, render_hint_preview
+
         parts = relative.parts
-        if (digest in seen or grant.canonical_path.parts[-len(parts):] != parts
-                or not source_path.is_relative_to(grant.canonical_path.parent)):
+        if digest in seen:
             continue
-        body = context_display_text(raw)
+        bindings = (registry.context_read_bindings(digest, metadata.get('request_id'), identity)
+                    if registry is not None else ())
+        bound = any(binding.relative_path == match[1] and binding.matches(grant, source_path)
+                    for binding in bindings)
+        canonical = (grant.canonical_path.parts[-len(parts):] == parts
+                     and source_path.is_relative_to(grant.canonical_path.parent))
+        if not bound and not canonical:
+            continue
+        body = render_hint_preview(raw, match[1]) if bound else context_display_text(raw)
         piece = header + body
-        presentation = SourcePresentationSegment(source_grant_digest(grant), body, CONTEXT_TEXT)
+        kind = PREVIEW_KIND + match[1] if bound else CONTEXT_TEXT
+        presentation = SourcePresentationSegment(source_grant_digest(grant), body, kind)
         tail = remaining[len(piece):]
         if (source_presentation_matches(presentation, grant, raw)
                 and remaining.startswith(piece) and (not tail or _HEADER.match(tail))):
@@ -182,7 +215,17 @@ def segment_read_with_context(text, metadata, grant_texts, used_grants, *, regis
         return denied
     segments, seen = [first], set()
     while remaining:
-        piece = _hint_piece(remaining, grants, seen, collected[first.source_grant_digest].canonical_path)
+        from agent.source_context_diagnostic import NOTICE_KIND, blocked_notice_piece
+
+        header_match = _HEADER.match(remaining)
+        diagnostic = blocked_notice_piece(remaining, header_match) if header_match else None
+        if diagnostic is not None:
+            body, length = diagnostic
+            segments.extend((SanitizedSegment(header_match[0]), ValidatedToolSyntaxSegment(body, NOTICE_KIND)))
+            remaining = remaining[length:]
+            continue
+        piece = _hint_piece(remaining, grants, seen, collected[first.source_grant_digest].canonical_path,
+                            registry=registry, metadata=metadata, identity=identity)
         if piece is None:
             return denied
         digest, grant, header, presentation, length = piece

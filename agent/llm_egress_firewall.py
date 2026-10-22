@@ -34,6 +34,7 @@ from agent.cross_process_file_lock import (
 from agent.redact import redact_sensitive_text
 from agent.source_fixed_literals import _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS
 from agent.egress_encoding_syntax import is_canonical_base64_encoding, is_iso_calendar_week
+from agent.egress_tool_syntax import validate_tool_syntax
 
 
 class DestinationClass(StrEnum):
@@ -805,17 +806,6 @@ def static_literal_sha256(text: str) -> str:
     if not isinstance(text, str):
         raise TypeError("static literal must be text")
     return sha256(text.encode("utf-8")).hexdigest()
-
-
-def validate_tool_syntax(text: str, syntax_kind: str) -> str:
-    """Revalidate one complete protected tool-result syntax atom."""
-
-    grammar = _VALIDATED_TOOL_SYNTAX.get(syntax_kind)
-    if not isinstance(text, str) or grammar is None or grammar.fullmatch(text) is None:
-        raise ValueError("invalid_tool_syntax_segment")
-    if _contains_secret(text) or _contains_private_absolute_path(text):
-        raise ValueError("invalid_tool_syntax_segment")
-    return text
 
 
 def _canonical_base64_candidate(candidate: str) -> bool:
@@ -2228,6 +2218,9 @@ class LLMEgressFirewall:
                     reasons.append("source_segment_grant_mismatch")
                     return ""
                 from agent.source_context_presentation import source_presentation_matches
+                from agent.source_context_rendering import (
+                    presentation_display_path, presentation_secret_text, presentation_path_encoding_inputs,
+                )
 
                 try:
                     raw_text = grant_and_content[1].decode("utf-8")
@@ -2240,6 +2233,9 @@ class LLMEgressFirewall:
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
                 scan_values.append(_source_text_for_secret_scan(raw_text))
+                scan_values.append(_source_text_for_secret_scan(presentation_secret_text(segment)))
+                scan_values.append(presentation_display_path(segment))
+                base64_scan_values.extend(presentation_path_encoding_inputs(segment))
                 base64_scan_values.append(
                     _source_text_for_base64_scan(
                         raw_text, allow_fixed_source_literals=True
