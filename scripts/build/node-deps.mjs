@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
@@ -69,12 +69,84 @@ function completedInstallMatches({ source, receipt, hiddenLock, key, nativeKey }
 // cannot clear (ENOTEMPTY, #75584); only deleting node_modules recovers it. npm's
 // debug log names the code while stdio stays on the terminal, so give each run
 // its own logs dir and retry once only on that code. Other failures keep the tree.
-function runNpmCi(node, npm, args, { source, env }) {
+const NPM_FAILURE_TOKENS = {
+  codes: ['ENOTEMPTY', 'ENOENT', 'EACCES', 'EPERM', 'ENOSPC', 'EBUSY', 'ECONNRESET', 'ECONNREFUSED',
+    'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EINTEGRITY', 'EBADENGINE', 'ERESOLVE', 'ELIFECYCLE', 'E401', 'E403', 'E404', 'E429'],
+  syscalls: ['rmdir', 'unlink', 'rename', 'open', 'mkdir', 'scandir', 'read', 'write', 'connect', 'spawn'],
+  errnos: ['-1', '-2', '-13', '-17', '-28', '-39', '-4048', '-4058', '-4082'],
+}
+const NPM_FAILURE_SIGNALS = ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGSEGV', 'SIGBUS', 'SIGXCPU', 'SIGXFSZ', 'SIGHUP']
+
+function npmLogSnapshot(dir) {
+  try {
+    return new Map(readdirSync(dir).map(name => {
+      const stat = lstatSync(join(dir, name))
+      return [name, `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`]
+    }))
+  } catch {
+    return new Map()
+  }
+}
+
+// npm logs may contain registry credentials, lifecycle output and arbitrary paths.
+// Copy no text: accept only complete, known tokens from numbered npm records.
+function npmFailureLog(dir, before) {
+  const after = npmLogSnapshot(dir)
+  const names = [...after.keys()].filter(name => after.get(name) !== before.get(name)).sort()
+  const found = Object.fromEntries(Object.keys(NPM_FAILURE_TOKENS).map(key => [key, new Set()]))
+  let readable = names.length > 0
+  let truncated = names.length > 16
+  for (const name of names.slice(0, 16)) {
+    let fd
+    try {
+      const path = join(dir, name)
+      const stat = lstatSync(path)
+      if (!stat.isFile()) throw new Error('not a regular npm log')
+      fd = openSync(path, 'r')
+      const opened = fstatSync(fd)
+      if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error('changed npm log')
+      const offset = Math.max(0, opened.size - 65536)
+      const bytes = Buffer.alloc(Math.min(opened.size, 65536))
+      const count = readSync(fd, bytes, 0, bytes.length, offset)
+      truncated ||= offset > 0
+      for (const line of bytes.subarray(0, count).toString('utf8').split(/\r?\n/)) {
+        const match = /^\d+ (?:error|verbose) (code|syscall|errno) (.+)$/.exec(line)
+        if (!match) continue
+        const key = { code: 'codes', syscall: 'syscalls', errno: 'errnos' }[match[1]]
+        found[key].add(NPM_FAILURE_TOKENS[key].includes(match[2]) ? match[2] : 'unknown')
+      }
+    } catch {
+      readable = false
+    } finally {
+      if (fd !== undefined) closeSync(fd)
+    }
+  }
+  return { log_present: names.length > 0, log_readable: readable, log_truncated: truncated,
+    ...Object.fromEntries(Object.entries(found).map(([key, values]) => [key, values.size ? [...values].sort() : ['unknown']])) }
+}
+
+function runNpmCi(node, npm, args, { source, env, npmVersion }) {
   const logsDir = mkdtempSync(join(tmpdir(), 'hermes-npm-logs-'))
+  let attempt = 0
   // Builders set CI=1, which turns npm's spinner off. Ask for it back: npm
   // still shows it only on a terminal. Kept out of `args`, which keys the receipt.
-  const run = () => execFileSync(node, [npm, ...args, '--progress=true', `--logs-dir=${logsDir}`],
-    { cwd: source, env, stdio: 'inherit' })
+  const run = () => {
+    attempt += 1
+    const before = npmLogSnapshot(logsDir)
+    const started = performance.now()
+    try {
+      execFileSync(node, [npm, ...args, '--progress=true', `--logs-dir=${logsDir}`],
+        { cwd: source, env, stdio: 'inherit' })
+    } catch (error) {
+      const version = value => typeof value === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(value) ? value : 'unknown'
+      console.error('HERMES_NPM_FAILURE_V1 ' + JSON.stringify({ schema: 1, phase: 'npm_ci', attempt,
+        status: Number.isInteger(error.status) && error.status >= 0 && error.status <= 2147483647 ? error.status : null,
+        signal: error.signal == null ? null : NPM_FAILURE_SIGNALS.includes(error.signal) ? error.signal : 'unknown',
+        node_version: version(process.versions.node), npm_version: version(npmVersion),
+        elapsed_ms: Math.max(0, Math.round(performance.now() - started)), ...npmFailureLog(logsDir, before) }))
+      throw error
+    }
+  }
   try {
     run()
   } catch (error) {
@@ -228,7 +300,7 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env,
   rmSync(receipt, { force: true })
   rmSync(nativeReceipt, { force: true })
   console.log(`node-deps: installing workspace dependencies with npm ci (${selected.join(', ')})...`)
-  runNpmCi(node, npm, args, { source, env })
+  runNpmCi(node, npm, args, { source, env, npmVersion })
   if (preload) verifyDesktopWindowsBinding(source, { env })
   if (reuse) {
     const completed = `${key}\n${createHash('sha256').update(readFileSync(hiddenLock)).digest('hex')}\n`
