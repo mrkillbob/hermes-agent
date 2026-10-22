@@ -599,6 +599,10 @@ def _restore_source_provenance_sidecar(
     def _restore_input_items(input_items: Any) -> tuple[Any, bool]:
         if not isinstance(input_items, list):
             return input_items, False
+        from agent.responses_source_identity import restore_responses_sources
+        formatted = restore_responses_sources(input_items, sidecar, consumed_entries)
+        if formatted is not None:
+            return formatted, formatted != input_items
         copied_input = list(input_items)
         matches: dict[int, list[int]] = {}
         for entry_index, entry in enumerate(sidecar):
@@ -608,12 +612,7 @@ def _restore_source_provenance_sidecar(
             original_call_id = entry.get("tool_call_id")
             if not isinstance(expected_sha, str) or not isinstance(original_call_id, str):
                 continue
-            try:
-                from agent.codex_responses_adapter import _clamp_responses_call_id
-
-                expected_call_id = _clamp_responses_call_id(original_call_id)
-            except Exception:
-                expected_call_id = original_call_id
+            expected_call_id = original_call_id
             candidates: list[int] = []
             for index, item in enumerate(copied_input):
                 if not isinstance(item, Mapping):

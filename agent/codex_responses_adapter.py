@@ -667,6 +667,7 @@ def _chat_messages_to_responses_input(
     def emit(new_items: list[dict[str, Any]], msg: dict[str, Any]) -> None:
         items.extend(new_items)
         item_sources.extend([msg] * len(new_items))
+    source_positions = {id(message): index for index, message in enumerate(messages)}
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -723,10 +724,13 @@ def _chat_messages_to_responses_input(
     # before the merge rewrote its content. Pruning reads the source message's own up-to-date,
     # provenance-tagged content directly instead of trying to recover it from whatever shape the conversion
     # produced (#90976).
-    if not native_compaction_eligible:
-        return items
-    from agent.native_compaction import prune_pre_checkpoint_items
-    return prune_pre_checkpoint_items(items, item_sources=item_sources)
+    from agent.responses_source_identity import bind_formatted_outputs
+    source_pairs = [(item, source_positions[id(source)], source)
+                    for item, source in zip(items, item_sources) if source is not None]
+    if native_compaction_eligible:
+        from agent.native_compaction import prune_pre_checkpoint_items
+        items = prune_pre_checkpoint_items(items, item_sources=item_sources)
+    return bind_formatted_outputs(items, source_pairs)
 
 
 class ResponsesRouteFlags(NamedTuple):
@@ -951,6 +955,7 @@ def _preflight_codex_input_items(
     sanitize_text = _neutralize_harmony_tokens if sanitize_harmony_tokens else (lambda text: text)
     ctx = _PreflightCtx(sanitize_text, sanitize_harmony_tokens, is_github_responses, set())
     normalized: list[dict[str, Any]] = []
+    positions = {}
     for idx, item in enumerate(raw_items):
         if not isinstance(item, dict):
             raise ValueError(f"Codex Responses input[{idx}] must be an object.")
@@ -958,8 +963,10 @@ def _preflight_codex_input_items(
         handler = _PREFLIGHT_ITEM_HANDLERS.get(item_type) if isinstance(item_type, str) else None
         normalized_item = (handler or _preflight_role_message)(item, idx, ctx)
         if normalized_item is not None:
+            positions[idx] = len(normalized)
             normalized.append(normalized_item)
-    return normalized
+    from agent.responses_source_identity import carry_normalized_outputs
+    return carry_normalized_outputs(raw_items, normalized, positions)
 
 
 def _preflight_tool(tool: Any, idx: int) -> dict[str, Any]:

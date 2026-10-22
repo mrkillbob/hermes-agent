@@ -15,7 +15,7 @@ from tools.budget_config import DEFAULT_BUDGET
 from tools.file_tools import read_file_tool
 
 
-def produce(tmp_path, monkeypatch, *, count=2, same_directory=False, plain=False, duplicate=False, parallel=False, source_equals_guidance=False, guidance_override=None):
+def produce(tmp_path, monkeypatch, *, count=2, same_directory=False, plain=False, duplicate=False, parallel=False, source_equals_guidance=False, guidance_override=None, call_ids=None):
     from agent import tool_executor
 
     monkeypatch.setenv('HERMES_KANBAN_PROTECTED_REMOTE', '1')
@@ -42,7 +42,7 @@ def produce(tmp_path, monkeypatch, *, count=2, same_directory=False, plain=False
         source.write_text('Preserve guidance 0.\n' if source_equals_guidance else 'value = 1\n')
         if not plain:
             (area/'AGENTS.md').write_text(guidance_override if guidance_override is not None else f'Preserve guidance {0 if same_directory else index}.\n')
-        call_id = 'call_duplicate' if duplicate else f'call_producer_{index}'
+        call_id = call_ids[index] if call_ids is not None else 'call_duplicate' if duplicate else f'call_producer_{index}'
         refs.append(tool_executor._ToolCallRef('read_file', {'path':str(source)}, 'producer-fixture', call_id, []))
         paths.append(source)
 

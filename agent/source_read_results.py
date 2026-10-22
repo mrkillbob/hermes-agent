@@ -141,6 +141,8 @@ def observed_source_metadata(value):
         return metadata
     call_id = (value.get('tool_use_id') if value.get('type') == 'tool_result'
                else value.get('tool_call_id') or value.get('call_id'))
+    from agent.responses_source_identity import original_observed_call
+    call_id = original_observed_call(value, metadata, call_id)
     return {**metadata, OBSERVED_CALL_ID: call_id}
 
 
