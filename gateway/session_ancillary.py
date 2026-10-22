@@ -73,6 +73,7 @@ async def show_tools(connection, ref, params):
     authorize(connection, ref, params, 'session:read')
     from gateway.session_authorities import owner_scope
     from gateway.session_policy import policy_for_source
+    from gateway.session_local_mcp import editor_mcp_inventory_scope
     policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
     agent = authority.agent(ref)
 
@@ -80,7 +81,7 @@ async def show_tools(connection, ref, params):
         import model_tools
         from agent.skill_utils import parse_config_string_list
         from toolsets import session_disabled_toolsets
-        with owner_scope(authority):
+        with owner_scope(authority), editor_mcp_inventory_scope(authority, policy, ref.session_id):
             if agent is not None:
                 enabled, disabled = getattr(agent, 'enabled_toolsets', None), getattr(agent, 'disabled_toolsets', None)
             else:
