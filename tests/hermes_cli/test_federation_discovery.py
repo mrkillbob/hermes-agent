@@ -142,7 +142,7 @@ def test_discovery_dispatch_seeds_relative_metadata_without_private_source_probe
         if "list" in argv:
             return tasks
         created.append(argv)
-        return {"id": "t_ffffffff"}
+        return {"id": "t_ffffffff", "project_id": argv[argv.index("--project") + 1]}
 
     monkeypatch.setattr(
         discovery, "__file__", str(root / "scripts/federation_discovery.py")

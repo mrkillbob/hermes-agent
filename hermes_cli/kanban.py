@@ -475,13 +475,17 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if max_retries is not None and max_retries < 1:
         return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "
                     "use 1 to trip on the first failure.", 2)
+    from hermes_cli.kanban_project_create import create_task
+
     with kbc.connect_closing() as conn:
-        task_id = kb.create_task(
+        task_id = create_task(
             conn, title=args.title, body=body,
             assignee=federated_options.get("assignee", args.assignee),
             created_by=federated_options.get("created_by", args.created_by or _profile_author()),
             workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
             project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
+            require_active_project=bool(getattr(args, "require_active_project", False)),
+            board=getattr(args, "board", None),
             parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
             idempotency_key=getattr(args, "idempotency_key", None),
             max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,

@@ -153,3 +153,78 @@ def test_project_recheck_does_not_follow_reused_slug_or_new_board(tmp_path, monk
             projects_db.update_project(conn, original, board_slug='different-board')
     assert department['_project_id'] == original
     assert discovery.current_project_reason(department) == reason
+
+
+def test_legacy_catalog_without_optional_board_binding_is_readonly(tmp_path, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    path = tmp_path / 'projects.db'
+    with sqlite3.connect(path) as conn:
+        conn.execute('CREATE TABLE projects(id TEXT PRIMARY KEY,slug TEXT,archived INTEGER)')
+        conn.execute("INSERT INTO projects VALUES('p_12345678','legacy',0)")
+    before = path.read_bytes()
+    filtered, skipped = discovery.eligible_project_spec({
+        'board': 'default', 'departments': [{'id': 'legacy', 'project': 'legacy', 'title': 'Legacy', 'assignee': 'researcher'}],
+        'max_active': 1, 'max_dispatches': 1,
+    })
+    assert skipped == []
+    department = discovery.plan_discovery(filtered, [], '2026-10-22')[0]
+    assert discovery.current_project_reason(department) is None
+    assert path.read_bytes() == before
+
+
+def test_id_selector_uses_slug_board_mapping_through_planning(tmp_path, monkeypatch):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    with projects_db.connect_closing() as conn:
+        project = projects_db.create_project(conn, name='Luna', slug='lunabot', board_slug='luna-board')
+    filtered, skipped = discovery.eligible_project_spec({
+        'board': 'default', 'project_boards': {'lunabot': 'luna-board'},
+        'departments': [{'id': 'knowledge', 'project': project, 'title': 'Knowledge', 'assignee': 'librarian'}],
+        'max_active': 1, 'max_dispatches': 1,
+    })
+    assert skipped == []
+    assert discovery.plan_discovery(filtered, [], '2026-10-22')[0]['board'] == 'luna-board'
+
+
+def test_retirement_during_evidence_preparation_cannot_create_a_card(tmp_path, monkeypatch):
+    from hermes_cli import kanban_db
+    from hermes_cli.kanban_db_connect import connect_closing
+    from hermes_cli.kanban_project_create import create_task
+
+    home = tmp_path / 'home'
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(home))
+    with projects_db.connect_closing() as registry:
+        project = projects_db.create_project(registry, name='Current', slug='current', board_slug='default')
+    config = tmp_path / 'source/configs/federation'
+    config.mkdir(parents=True)
+    (config / 'discovery.json').write_text(json.dumps({
+        'board': 'default', 'max_active': 1, 'max_dispatches': 1, 'instructions': 'Fixture evidence only',
+        'departments': [{'id': 'current', 'project': 'current', 'title': 'Discovery', 'assignee': 'researcher'}],
+    }))
+    board = tmp_path / 'board.db'
+    with connect_closing(board):
+        pass
+    monkeypatch.setattr(kanban_db, 'kanban_db_path', lambda _: board)
+    monkeypatch.setattr(discovery, '__file__', str(tmp_path / 'source/scripts/federation_discovery.py'))
+    monkeypatch.setattr(discovery.sys, 'argv', ['discovery', '--hermes', 'unused', '--apply'])
+
+    def retire_after_evidence(*_):
+        with projects_db.connect_closing() as registry:
+            projects_db.archive_project(registry, project)
+
+    def command(_hermes, *args):
+        if 'list' in args:
+            return []
+        with connect_closing(board) as conn:
+            task_id = create_task(conn, title='Discovery', project_id=args[args.index('--project') + 1],
+                                  board='default', require_active_project='--require-active-project' in args)
+            return {'id': task_id, 'project_id': kanban_db.get_task(conn, task_id).project_id}
+
+    monkeypatch.setattr(discovery, 'seed_discovery_evidence', retire_after_evidence)
+    monkeypatch.setattr(discovery, 'run', command)
+    with pytest.raises(ValueError, match='current canonical project'):
+        discovery.main()
+    with connect_closing(board) as conn:
+        assert kanban_db.list_tasks(conn) == []

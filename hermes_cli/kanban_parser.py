@@ -189,6 +189,8 @@ _SPECS = [
              help="Link to a project (id or slug). Anchors the task's "
                   "worktree under the project's primary repo with a "
                   "deterministic branch. See `hermes project list`."),
+        _arg("--require-active-project", action="store_true",
+             help="Require a current canonical project ID and hold retirement until creation commits"),
         _TENANT,
         _PRIORITY,
         _arg("--triage", action="store_true",
