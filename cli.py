@@ -64,6 +64,7 @@ from hermes_cli.cli_shutdown import (
     _oneshot_agent_and_session,
     _should_emit_cleanup_session_finalize,
     _shutdown_agent_memory_provider,
+    _shutdown_banner_probes,
     _shutdown_cached_aux_clients,
     _shutdown_mcp_servers,
     _stop_cli_wake_word,

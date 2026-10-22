@@ -54,21 +54,13 @@ def source_git_env() -> dict[str, str]:
     return env
 
 
-_GIT_TEXT_KW = {"text": True, "encoding": "utf-8", "errors": "replace"}
-
-
 def _git_run(args: list[str], *, cwd: Optional[Path] = None, timeout: int = 5, text: bool = True,
              git: str = "git"):
     """Read Git state without prompts, optional index writes, or inherited targeting."""
-    from hermes_cli._subprocess_compat import windows_hide_flags
+    from hermes_cli._subprocess_compat import bounded_probe_run
 
-    kwargs: dict = {"creationflags": windows_hide_flags(), "env": source_git_env(), "stdin": subprocess.DEVNULL}
-    try:
-        return subprocess.run(
-            [git, *args], capture_output=True, timeout=timeout, cwd=str(cwd) if cwd is not None else None,
-            **(_GIT_TEXT_KW if text else {}), **kwargs, check=False)
-    except Exception:
-        return None
+    return bounded_probe_run([git, *args], timeout=timeout, cwd=cwd,
+                             env=source_git_env(), text=text)
 
 
 def _git_stdout(args: list[str], *, cwd: Path, timeout: int = 5, git: str = "git") -> Optional[str]:
