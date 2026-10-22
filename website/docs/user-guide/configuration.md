@@ -1015,6 +1015,24 @@ not integrated. General `hermes worktree prune` also preserves manager-owned
 conversation worktrees. This prevents normal shutdown or generic garbage
 collection from deleting unfinished work.
 
+The canonical gateway's `session.worktree_cleanup` API supports `inspect` and
+explicit `remove` for a verified native operator in the owning profile. It does
+not resume the historical session. A `creation_failed` tree can be removed only
+when both ownership claims and every normal cleanup gate still verify. Missing
+ownership or an uncertain removal outcome requires manual preservation and
+reconciliation; it does not authorize retrying deletion. Ignored files also
+block cleanup because Git's non-force worktree removal can delete them. Retained
+branches, remote refs and the session ledger preserve committed history and
+identity, not ignored or uncommitted file contents.
+
+Before removal, the owning gateway records an epoch-bound cleanup intent in
+the same short transaction that verifies no accepted input, outstanding steer
+transfer, or worker still owns that root. New admissions and worker adoption
+then refuse that root while Git runs outside the transaction. A definite
+pre-removal safety refusal releases the intent; an unknown outcome retains it
+for operator reconciliation, including across gateway restarts. This does not
+cancel accepted work or erase the conversation's history.
+
 Config version 39 automatically moves the legacy
 `desktop.conversation_worktree` block to this top-level location. If both are
 present, the explicit top-level block wins and is preserved unchanged.

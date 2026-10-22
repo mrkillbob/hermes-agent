@@ -796,7 +796,7 @@ class ConversationWorktreeManager:
             source = self._durable_source(record)
             expected_path = Path(record.worktree_path).resolve()
             if (
-                record.state not in {"ready", "retained"}
+                record.state not in {"ready", "retained", "creation_failed"}
                 or not self._exact_owner_claims_present(record)
                 or not expected_path.is_dir()
             ):
@@ -843,16 +843,8 @@ class ConversationWorktreeManager:
             elif root_liveness != "inactive":
                 block("unknown")
 
-            status = self._run_git(
-                expected_path,
-                ["status", "--porcelain", "--untracked-files=all"],
-                self._policy.create_timeout,
-                "cleanup",
-            )
-            if status.returncode != 0:
-                block("unknown")
-            elif status.stdout.strip():
-                block("dirty")
+            for reason in self._cleanup_content_refusals(expected_path):
+                block(reason)
 
             if self._git_operation_in_progress(expected_path):
                 block("in-progress")
@@ -901,6 +893,21 @@ class ConversationWorktreeManager:
             block("unknown")
 
         return CleanupVerdict(not reasons, tuple(reasons))
+
+    def _cleanup_content_refusals(self, path: Path) -> Iterator[str]:
+        # Non-force `git worktree remove` still deletes ignored files. Neither
+        # retained commits nor the binding ledger preserve that unique content.
+        probes = (
+            (["status", "--porcelain", "--untracked-files=all"], "dirty"),
+            (["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+             "ignored content requires preservation"),
+        )
+        for args, reason in probes:
+            result = self._run_git(path, args, self._policy.create_timeout, "cleanup")
+            if result.returncode != 0:
+                yield "unknown"
+            elif result.stdout.strip():
+                yield reason
 
     def _listed_worktree(self, source: Path, expected_path: Path) -> str | None:
         result = self._run_git(

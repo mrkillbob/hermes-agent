@@ -162,6 +162,8 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
             raise RuntimeStoreError('queue_full')
         if _authorize_write is not None:
             _authorize_write(conn)
+        from hermes_state_worktree_cleanup import require_available
+        require_available(db, conn, session_id)
         admission_id = uuid.uuid4().hex
         conn.execute('''INSERT INTO session_admissions(admission_id,request_id,principal_id,
             target_session_id,lineage_json,payload_json,payload_digest,intent,status,owner_epoch)
@@ -384,6 +386,9 @@ def rehome_queued_inputs(db, *, epoch: int, old_session_id: str, new_session_id:
         rows = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' "
                             "AND substr(principal_id,1,?)=? ORDER BY seq",
                             (old_session_id, len(principal_prefix), principal_prefix)).fetchall()
+        if rows:
+            from hermes_state_worktree_cleanup import require_available
+            require_available(db, conn, new_session_id)
         for row in rows:
             digest = admission_fingerprint(canonical_target=new_session_id, payload={
                 'input': json.loads(row['payload_json']), 'intent': row['intent']})
@@ -561,7 +566,7 @@ def _canonical_chain(conn, session_id):
     raise RuntimeStoreError('admission_conflict')
 
 
-def _import_legacy_row(conn, row, epoch, principal_id):
+def _import_legacy_row(db, conn, row, epoch, principal_id):
     for field in ('admission_id', 'target_session_id', 'root'):
         _text(row[field])
     lineage = json.loads(row['lineage'])
@@ -576,6 +581,9 @@ def _import_legacy_row(conn, row, epoch, principal_id):
     chain = _canonical_chain(conn, row['target_session_id'])
     target = chain[-1]
     status = 'unknown' if row['status'] == 'started' else row['status']
+    if status != 'terminal':
+        from hermes_state_worktree_cleanup import require_available
+        require_available(db, conn, target)
     generation = row['generation']
     if generation is None and status == 'unknown':
         generation = _session(conn, target)['runtime_generation'] + 1
@@ -630,7 +638,7 @@ def import_legacy_session_admissions(db, *, epoch: int, source_path, principal_i
                 target = _canonical_chain(conn, _text(execution['root']))[-1]
                 conn.execute('UPDATE sessions SET runtime_generation=MAX(runtime_generation,?) WHERE id=?', (generation, target))
             for row in rows:
-                _import_legacy_row(conn, row, epoch, principal_id)
+                _import_legacy_row(db, conn, row, epoch, principal_id)
             conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)', (_IMPORT_KEY, marker))
             return len(rows)
         return db._execute_write(write)
@@ -723,6 +731,8 @@ def register_worker_execution(db, *, epoch: int, execution_id: str, session_id: 
     def write(conn):
         _epoch(conn, epoch)
         session = _session(conn, session_id)
+        from hermes_state_worktree_cleanup import require_available
+        require_available(db, conn, session_id)
         if type(generation) is not int or session['runtime_generation'] != generation:
             raise RuntimeStoreError('stale_generation')
         old = conn.execute('SELECT * FROM worker_executions WHERE execution_id=?', (execution_id,)).fetchone()
@@ -752,6 +762,8 @@ def adopt_worker_execution(db, *, epoch: int, execution_id: str, session_id: str
     def write(conn):
         _epoch(conn, epoch)
         row = _worker_assignment(conn, execution_id, session_id, generation)
+        from hermes_state_worktree_cleanup import require_available
+        require_available(db, conn, session_id)
         if row['status'] == 'terminal':
             raise RuntimeStoreError('stale_generation')
         if not hmac.compare_digest(row['adoption_digest'], digest):
