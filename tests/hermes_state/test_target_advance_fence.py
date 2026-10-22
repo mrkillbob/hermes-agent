@@ -127,3 +127,26 @@ def test_compress_receipt_retries_do_not_reuse_rolled_back_message_annotations(
         assert stored[0]['content'] == 'original reply and summary'
         assert rt.mutate_runtime_session(db, **args) == result
         assert db.get_messages(sid) == stored
+
+
+@pytest.mark.parametrize(('in_place', 'carried_form'), [
+    (False, 'absent'), (False, 'aliased'), (True, 'aliased')])
+def test_prepared_compression_keeps_optional_carried_shape_and_caller_messages(
+        tmp_path, in_place, carried_form):
+    with closing(SessionDB(tmp_path / 'prepared-shape.db')) as db:
+        epoch = rt.begin_runtime_epoch(db, instance_id='owner')
+        sid = _local_session(db, epoch, tmp_path)
+        db.append_message(sid, 'user', 'durable question')
+        prepared = dict(_mutate(db, epoch, sid, 'compress', _prepare_only=True),
+                        messages=db.get_messages_as_conversation(sid, include_row_ids=True), in_place=in_place)
+        if carried_form == 'aliased':
+            prepared['carried_messages'] = prepared['messages']
+        before = deepcopy(prepared)
+        result = _mutate(db, epoch, sid, 'compress', _prepared=prepared)
+        target = result['target_session_id']
+        assert (target == sid) is in_place
+        assert [m['content'] for m in db.get_messages(target)] == ['durable question']
+        assert prepared == before
+        assert ('carried_messages' in prepared) is (carried_form == 'aliased')
+        if carried_form == 'aliased':
+            assert prepared['carried_messages'] is prepared['messages']
