@@ -43,7 +43,7 @@ async def cleanup(connection, ref, params):
         or not isinstance(ref.session_id, str)
         or not ref.session_id.strip()
         or not isinstance(params.get("action", "inspect"), str)
-        or params.get("action", "inspect") not in {"inspect", "remove"}
+        or params.get("action", "inspect") not in {"inspect", "remove", "quarantine", "restore", "reconcile"}
         or (params.get("profile") is not None and not isinstance(params["profile"], str))
     ):
         raise RuntimeStoreError("invalid_params")
@@ -87,7 +87,8 @@ def _apply(authority, sid, action, live_ids):
                     "WHERE status IN ('queued','started','unknown')"
                 ).fetchall()
             active = active or any(_uses_root(db, row[0], root) for row in pending)
-            if action == "remove":
+            result = None
+            if action in {"remove", "quarantine", "restore", "reconcile"}:
                 from hermes_state_worktree_cleanup import (
                     begin_cleanup,
                     release_refused_cleanup,
@@ -95,13 +96,19 @@ def _apply(authority, sid, action, live_ids):
 
                 record = db.get_conversation_worktree(root)
                 intent = None
-                if not active and record is not None and record.state != "removed":
+                if action == "quarantine" and not active and record is not None and record.state not in {"removed", "retained"}:
                     intent = begin_cleanup(db, epoch=epoch, root=root)
-                result = manager.remove_after_explicit_request(
-                    root, active_session_bound=active
-                )
+                operation = getattr(manager, {
+                    "remove": "remove_after_explicit_request",
+                    "quarantine": "quarantine_after_explicit_request",
+                    "restore": "restore_after_explicit_request",
+                    "reconcile": "reconcile_retention",
+                }[action])
+                result = operation(root, active_session_bound=active,
+                                   **({"cleanup_intent": intent} if action == "quarantine" else {}))
                 if (
                     intent is not None
+                    and result.released_cleanup_intent != intent
                     and not result.removed
                     and not result.verdict.allowed
                     and result.failure_phase is None
@@ -114,6 +121,9 @@ def _apply(authority, sid, action, live_ids):
                     result.failure_message,
                 )
             else:
+                result = manager.inspect_retention(root)
+                if result.outcome == "refused":
+                    result = None
                 verdict = manager.inspect_cleanup(root, active_session_bound=active)
                 removed, failure_phase, failure_message = False, None, None
                 from hermes_state_worktree_cleanup import INTENT_PREFIX
@@ -134,6 +144,9 @@ def _apply(authority, sid, action, live_ids):
             raise RuntimeStoreError(
                 "worktree_cleanup_unavailable", detail=str(exc)
             ) from exc
+    if result is not None and result.outcome in {"retained", "unknown"}:
+        verdict, removed = result.verdict, result.removed
+        failure_phase, failure_message = result.failure_phase, result.failure_message
     record = db.get_conversation_worktree(root)
     if record is None:
         raise RuntimeStoreError("storage_unavailable")
@@ -141,6 +154,9 @@ def _apply(authority, sid, action, live_ids):
         "allowed": verdict.allowed,
         "reasons": list(verdict.reasons),
         "removed": removed,
+        "outcome": result.outcome if result is not None else "inspected",
+        "retained_path": result.retained_path if result is not None else None,
+        "recovery_required": result.recovery_required if result is not None else False,
         "root_session_id": record.root_session_id,
         "path": record.worktree_path,
         "branch": record.branch,

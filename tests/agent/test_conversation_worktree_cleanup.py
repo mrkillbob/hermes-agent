@@ -143,7 +143,7 @@ def test_cleanup_preserves_unique_ignored_content(prepared_binding):
     sentinel.write_text("unique uncommitted content")
     assert not git(binding.path, "status", "--porcelain", "--untracked-files=all")
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert result.removed is False
     assert "ignored content requires preservation" in result.verdict.reasons
@@ -162,11 +162,12 @@ def test_cleanup_can_retire_exact_bootstrap_failed_worktree(prepared_binding):
     assert before.state == "creation_failed"
     assert failed._exact_owner_claims_present(before)
 
-    result = failed.remove_after_explicit_request("failed")
+    result = failed.quarantine_after_explicit_request("failed")
 
-    assert result.removed is True
+    assert result.outcome == "retained"
+    assert result.removed is False
     assert not Path(before.worktree_path).exists()
-    assert db.get_conversation_worktree("failed").state == "removed"
+    assert db.get_conversation_worktree("failed").state == "retained"
     assert git(source, "rev-parse", before.branch) == before.base_commit
 
 
@@ -192,7 +193,7 @@ def test_failed_cleanup_keeps_ownership_and_liveness_safeguards(prepared_binding
         path.joinpath("unique.txt").write_text("keep")
         reason = "dirty"
 
-    result = failed.remove_after_explicit_request("failed")
+    result = failed.quarantine_after_explicit_request("failed")
 
     assert result.removed is False
     assert reason in result.verdict.reasons
@@ -208,10 +209,11 @@ def test_failed_draft_cleanup_keeps_root_identity_retryable(prepared_binding):
         retain_for_retry=True,
     )
 
-    assert result.removed is True
+    assert result.removed is False
+    assert result.outcome == "refused"
     record = db.get_conversation_worktree(binding.root_session_id)
     assert record is not None
-    assert record.state == "creating"
+    assert record.state == "ready"
     branch_check = manager._run_git(
         source,
         ["show-ref", "--verify", "--quiet", f"refs/heads/{record.branch}"],
@@ -443,9 +445,10 @@ def test_explicit_cleanup_removes_only_exact_safe_worktree(prepared_binding):
     claimed = db.get_conversation_worktree(binding.root_session_id)
     assert claimed is not None
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
-    assert result.removed is True
+    assert result.outcome == "retained"
+    assert result.removed is False
     assert result.verdict.allowed is True
     assert not binding.path.exists()
     assert sibling.exists()
@@ -453,20 +456,21 @@ def test_explicit_cleanup_removes_only_exact_safe_worktree(prepared_binding):
     assert git(source, "show-ref", "--verify", f"refs/heads/{binding.branch}")
     removed = db.get_conversation_worktree(binding.root_session_id)
     assert removed is not None
-    assert removed.state == "removed"
+    assert removed.state == "retained"
     assert removed.worktree_path == claimed.worktree_path
     assert removed.branch == claimed.branch
     worktrees = git(source, "worktree", "list", "--porcelain")
     assert str(binding.path) not in worktrees
     assert str(sibling) in worktrees
-    assert not common_claim.exists()
+    assert common_claim.exists()
+    assert Path(result.retained_path).is_dir()
 
 
 def test_blocked_cleanup_never_removes_or_marks_binding(prepared_binding):
     manager, db, _source, _remote, binding, sibling = prepared_binding
     binding.path.joinpath("untracked.txt").write_text("keep\n", encoding="utf-8")
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert result.removed is False
     assert "dirty" in result.verdict.reasons
@@ -485,7 +489,7 @@ def test_remove_failure_returns_bounded_sanitized_evidence_and_keeps_ledger(
     original = manager._run_git
 
     def fail_remove(cwd, args, timeout, phase):
-        if args[:2] == ["worktree", "remove"]:
+        if args[:2] == ["worktree", "move"]:
             return subprocess.CompletedProcess(
                 ["git", *args],
                 1,
@@ -498,15 +502,14 @@ def test_remove_failure_returns_bounded_sanitized_evidence_and_keeps_ledger(
 
     assert git_worktree_is_locked(source, binding.path)
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert result.removed is False
-    assert result.verdict.reasons == ("remove_failed",)
-    assert result.failure_phase == "remove"
-    assert result.failure_message is not None
-    assert "super-secret" not in result.failure_message
-    assert "\x00" not in result.failure_message
-    assert len(result.failure_message) <= 300
+    assert result.verdict.reasons == ("Git move refused",)
+    assert result.outcome == "refused"
+    assert result.failure_phase is None
+    assert "super-secret" not in str(result)
+    assert "\x00" not in str(result)
     assert binding.path.exists()
     assert git_worktree_is_locked(source, binding.path)
     assert sibling.exists()

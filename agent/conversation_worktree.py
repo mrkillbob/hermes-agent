@@ -13,7 +13,6 @@ import re
 import stat
 import subprocess
 import threading
-import tempfile
 import time
 from typing import Iterator
 import uuid
@@ -126,6 +125,10 @@ class CleanupResult:
     verdict: CleanupVerdict
     failure_phase: str | None = None
     failure_message: str | None = None
+    outcome: str = "refused"
+    retained_path: str | None = None
+    recovery_required: bool = False
+    released_cleanup_intent: str | None = None
 
 
 @dataclass
@@ -331,11 +334,15 @@ def _common_owner_claim_path(repo_common_dir: Path, worktree_path: Path) -> Path
 def _require_root_lease_binding(root_session_id: str, path: Path, common: Path) -> None:
     """Recheck the manager's exact durable claim inside the removal fence."""
     try:
+        from agent.conversation_worktree_retention import retention_pending
+        if retention_pending(common, path):
+            raise ConversationWorktreeError("conversation worktree retention is pending", phase="lease")
         claim = json.loads(_common_owner_claim_path(common, path).read_text(encoding="utf-8-sig"))
         valid = (
             path.is_dir()
             and _owner_claim_matches(claim, worktree_path=path, repo_common_dir=common)
             and claim.get("root_session_id") == root_session_id
+            and not claim.get("retention_token")
         )
     except (OSError, ValueError, TypeError):
         valid = False
@@ -734,116 +741,30 @@ class ConversationWorktreeManager:
             return CleanupVerdict(False, ("unknown",))
 
     def remove_after_explicit_request(
-        self,
-        root_session_id: str,
-        *,
-        active_session_bound: bool = False,
+        self, root_session_id: str, *, active_session_bound: bool = False,
         retain_for_retry: bool = False,
     ) -> CleanupResult:
-        """Remove only a re-inspected safe binding after an explicit request.
+        """Legacy removal, including automatic rollback, never deletes late files."""
+        return CleanupResult(
+            False, CleanupVerdict(False, ("explicit quarantine required",)),
+            failure_message="Removal is disabled to preserve late files; request explicit quarantine.",
+        )
 
-        ``retain_for_retry`` is used when cleanup follows a failed draft
-        materialization. The checkout is still removed, but its durable claim
-        returns to ``creating`` so the same draft identity can be retried.
-        Explicit user cleanup keeps the normal terminal ``removed`` state.
-        """
-        record = self._db.get_conversation_worktree(root_session_id)
-        if record is None:
-            verdict = CleanupVerdict(False, ("unknown",))
-            return CleanupResult(False, verdict)
+    def quarantine_after_explicit_request(self, root_session_id, *, active_session_bound=False, cleanup_intent=None):
+        from agent.conversation_worktree_retention import operate
+        return operate(self, root_session_id, action="quarantine", active=active_session_bound, intent=cleanup_intent)
 
-        try:
-            source_common_dir = Path(record.repo_common_dir).resolve()
-            source = self._durable_source(record)
-            if not source.is_dir() or not source_common_dir.is_dir():
-                raise ConversationWorktreeError(
-                    "durable conversation repository identity is unavailable", phase="identity"
-                )
-            # Global nested lock order is root, then repository. Waiting for
-            # this root must not block readiness from acquiring metadata.
-            with self._root_lock(source_common_dir, root_session_id):
-                with self._repository_lock(source_common_dir):
-                    current = self._db.get_conversation_worktree(root_session_id)
-                    if current is None:
-                        verdict = CleanupVerdict(False, ("unknown",))
-                        return CleanupResult(False, verdict)
-                    with self._root_lease_liveness(current) as root_liveness:
-                        verdict = self._inspect_cleanup_record(
-                            current,
-                            active_session_bound=active_session_bound,
-                            root_liveness=root_liveness,
-                        )
-                        if not verdict.allowed:
-                            return CleanupResult(False, verdict)
+    def restore_after_explicit_request(self, root_session_id, *, active_session_bound=False):
+        from agent.conversation_worktree_retention import operate
+        return operate(self, root_session_id, action="restore", active=active_session_bound)
 
-                        path = Path(current.worktree_path).resolve()
-                        unlocked = self._run_git(
-                            source,
-                            ["worktree", "unlock", str(path)],
-                            self._policy.create_timeout,
-                            "cleanup",
-                        )
-                        if unlocked.returncode != 0:
-                            message = self._sanitize_diagnostic(unlocked.stderr)
-                            logger.warning(
-                                "conversation_worktree.remove_failed phase=unlock message=%s",
-                                message,
-                            )
-                            return CleanupResult(
-                                False,
-                                CleanupVerdict(False, ("remove_failed",)),
-                                failure_phase="unlock",
-                                failure_message=message,
-                            )
-                        removed = self._remove_clean_worktree(source, current, path)
-                        if removed.returncode != 0:
-                            try:
-                                self._ensure_git_worktree_locked(source, current)
-                            except ConversationWorktreeError:
-                                logger.warning(
-                                    "conversation_worktree.relock_after_remove_failure_failed",
-                                    exc_info=True,
-                                )
-                            message = self._sanitize_diagnostic(removed.stderr)
-                            logger.warning(
-                                "conversation_worktree.remove_failed phase=remove message=%s",
-                                message,
-                            )
-                            return CleanupResult(
-                                False,
-                                CleanupVerdict(False, ("remove_failed",)),
-                                failure_phase="remove",
-                                failure_message=message,
-                            )
-                        if path.exists() or self._listed_worktree(source, path) is not None:
-                            message = "worktree remained after git removal"
-                            logger.warning(
-                                "conversation_worktree.remove_failed phase=verify message=%s",
-                                message,
-                            )
-                            return CleanupResult(
-                                False,
-                                CleanupVerdict(False, ("remove_failed",)),
-                                failure_phase="verify",
-                                failure_message=message,
-                            )
+    def inspect_retention(self, root_session_id):
+        from agent.conversation_worktree_retention import operate
+        return operate(self, root_session_id, action="inspect")
 
-                        if retain_for_retry:
-                            self._db.reset_conversation_worktree_for_retry(root_session_id)
-                            self._event(
-                                "conversation_worktree.cleanup_retryable",
-                                root_session_id=root_session_id,
-                            )
-                        else:
-                            self._db.mark_conversation_worktree_removed(root_session_id)
-                        self._remove_common_owner_claim(current)
-                        self._event("conversation_worktree.removed", root_session_id=root_session_id)
-                        return CleanupResult(True, verdict)
-        except ConversationWorktreeError:
-            return CleanupResult(False, CleanupVerdict(False, ("unknown",)))
-        except Exception:
-            logger.exception("conversation_worktree.cleanup_failed")
-            return CleanupResult(False, CleanupVerdict(False, ("unknown",)))
+    def reconcile_retention(self, root_session_id, *, active_session_bound=False):
+        from agent.conversation_worktree_retention import operate
+        return operate(self, root_session_id, action="reconcile", active=active_session_bound)
 
     def _inspect_cleanup_record(
         self,
@@ -1028,35 +949,6 @@ class ConversationWorktreeManager:
         if status.stdout == "?? .venv\0" and (
                 identity is None or self._environment_link_identity(record, path) != identity):
             yield "dirty"
-
-    def _remove_clean_worktree(self, source, record, path):
-        args = ["worktree", "remove", str(path)]
-        identity = self._environment_link_identity(record, path)
-        if identity is None:
-            if (path / ".venv").exists() or (path / ".venv").is_symlink():
-                return subprocess.CompletedProcess(args, 1, "", "environment identity changed")
-            return self._run_git(source, args, self._policy.create_timeout, "cleanup")
-        # Git itself refuses an untracked link even after our content probes.
-        # Scope the exact pointer exclusion to this invocation, never --force.
-        # Replacing global excludes can only expose more paths for Git to refuse;
-        # the prior status/ignored probes still use the original ignore policy.
-        try:
-            with tempfile.TemporaryDirectory(
-                prefix="hermes-cleanup-exclude-", ignore_cleanup_errors=True,
-            ) as temporary:
-                ignore = Path(temporary).resolve() / "ignore"
-                if ignore.is_relative_to(path.resolve()):
-                    return subprocess.CompletedProcess(args, 1, "", "temporary exclusion is not isolated")
-                ignore.touch(mode=0o600)
-                ignore.write_text("/.venv\n", encoding="utf-8")
-                if self._environment_link_identity(record, path) != identity:
-                    return subprocess.CompletedProcess(args, 1, "", "environment identity changed")
-                return self._run_git(
-                    source, ["-c", f"core.excludesFile={ignore}", *args],
-                    self._policy.create_timeout, "cleanup",
-                )
-        except OSError:
-            return subprocess.CompletedProcess(args, 1, "", "temporary exclusion is unavailable")
 
     def _listed_worktree(self, source: Path, expected_path: Path) -> str | None:
         result = self._run_git(
@@ -1629,6 +1521,9 @@ class ConversationWorktreeManager:
         expected_path: Path | None = None,
         expected_branch: str | None = None,
     ) -> ConversationWorktreeBinding:
+        from agent.conversation_worktree_retention import retention_pending
+        if retention_pending(Path(record.repo_common_dir), Path(record.worktree_path)):
+            raise ConversationWorktreeError("conversation worktree retention requires reconciliation", phase="recovery")
         if record.state != "ready":
             raise ConversationWorktreeError(
                 f"conversation worktree is not ready (state {record.state!r})",

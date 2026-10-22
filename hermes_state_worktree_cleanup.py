@@ -54,6 +54,12 @@ def roots_in(db, conn, sid):
 def require_available(db, conn, sid):
     for root in roots_in(db, conn, sid):
         binding = db._conversation_worktree_record_on_conn(conn, root)
+        from agent.conversation_worktree_retention import retention_pending
+        from pathlib import Path
+        if retention_pending(Path(binding.repo_common_dir), Path(binding.worktree_path)):
+            raise RuntimeStoreError("worktree_cleanup_pending" if binding.state != "retained" else "worktree_retained")
+        if binding.state == "retained":
+            raise RuntimeStoreError("worktree_retained")
         if binding.state == "removed":
             raise RuntimeStoreError("worktree_removed")
         if conn.execute(
@@ -70,6 +76,10 @@ def begin_cleanup(db, *, epoch, root):
         binding = db._conversation_worktree_record_on_conn(conn, root)
         if binding is None:
             raise RuntimeStoreError("not_found")
+        from agent.conversation_worktree_retention import retention_pending
+        from pathlib import Path
+        if retention_pending(Path(binding.repo_common_dir), Path(binding.worktree_path)):
+            raise RuntimeStoreError("worktree_cleanup_pending")
         if conn.execute(
             "SELECT 1 FROM state_meta WHERE key=?", (INTENT_PREFIX + root,)
         ).fetchone():
@@ -116,3 +126,33 @@ def release_refused_cleanup(db, *, epoch, root, intent):
         conn.execute("DELETE FROM state_meta WHERE key=?", (INTENT_PREFIX + root,))
 
     db._execute_write(write)
+
+
+def reserve_retention(db, expected, *, intent=None):
+    """Reuse the root admission fence for privileged legacy manager callers too."""
+    token = uuid.uuid4().hex
+
+    def write(conn):
+        binding = db._conversation_worktree_record_on_conn(conn, expected.root_session_id)
+        if binding != expected:
+            raise RuntimeStoreError("worktree_cleanup_pending")
+        key = INTENT_PREFIX + expected.root_session_id
+        saved = conn.execute("SELECT value FROM state_meta WHERE key=?", (key,)).fetchone()
+        if saved:
+            if intent is None or saved[0] != intent or json.loads(saved[0]).get("binding") != asdict(expected):
+                raise RuntimeStoreError("worktree_cleanup_pending")
+            return saved[0]
+        if intent is not None:
+            raise RuntimeStoreError("worktree_cleanup_pending")
+        pending = conn.execute(
+            "SELECT target_session_id FROM session_admissions WHERE status IN ('queued','started','unknown') "
+            "OR (status='terminal' AND outcome='steering') UNION "
+            "SELECT session_id FROM worker_executions WHERE status IN ('registered','running','unknown')"
+        ).fetchall()
+        if any(expected.root_session_id in roots_in(db, conn, row[0]) for row in pending):
+            raise RuntimeStoreError("session_busy")
+        created = _json({"token": token, "epoch": None, "binding": asdict(binding), "operation": "retention"})
+        conn.execute("INSERT INTO state_meta(key,value) VALUES(?,?)", (key, created))
+        return created
+
+    return db._execute_write(write)

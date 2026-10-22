@@ -87,9 +87,9 @@ async def test_canonical_operator_inspects_and_removes_without_adoption(
         inspected = await call(connection)
         assert inspected["result"]["allowed"] is True, inspected
         assert binding.path.is_dir()
-        removed = await call(connection, action="remove")
-        assert removed["result"]["removed"] is True, removed
-        assert removed["result"]["state"] == "removed"
+        removed = await call(connection, action="quarantine")
+        assert removed["result"]["outcome"] == "retained", removed
+        assert removed["result"]["state"] == "retained"
         assert authority.db.get_session("root") == before
         assert not authority.sessions
         assert (
@@ -106,7 +106,7 @@ async def test_cleanup_intent_refuses_new_admission_before_git_mutation(
 ):
     authority, identity, binding = owner
     entered, release = threading.Event(), threading.Event()
-    original = ConversationWorktreeManager.remove_after_explicit_request
+    original = ConversationWorktreeManager.quarantine_after_explicit_request
 
     def held(manager, *args, **kwargs):
         entered.set()
@@ -114,10 +114,10 @@ async def test_cleanup_intent_refuses_new_admission_before_git_mutation(
         return original(manager, *args, **kwargs)
 
     monkeypatch.setattr(
-        ConversationWorktreeManager, "remove_after_explicit_request", held
+        ConversationWorktreeManager, "quarantine_after_explicit_request", held
     )
     connection = AuthorityConnection(authority, object(), identity, operator=True)
-    request = asyncio.create_task(call(connection, action="remove"))
+    request = asyncio.create_task(call(connection, action="quarantine"))
     try:
         assert await asyncio.to_thread(entered.wait, 10)
         with pytest.raises(RuntimeStoreError, match="worktree_cleanup_pending"):
@@ -133,7 +133,7 @@ async def test_cleanup_intent_refuses_new_admission_before_git_mutation(
         assert binding.path.is_dir()
         release.set()
         response = await asyncio.wait_for(request, timeout=10)
-        assert response["result"]["removed"] is True
+        assert response["result"]["outcome"] == "retained"
     finally:
         release.set()
         await connection.close()
@@ -162,17 +162,17 @@ async def test_failed_cleanup_preserves_history_and_removed_identity(
     history = db.get_messages("failed")
     connection = AuthorityConnection(authority, object(), identity, operator=True)
     try:
-        response = await call(connection, "failed", action="remove")
-        assert response["result"]["removed"] is True, response
+        response = await call(connection, "failed", action="quarantine")
+        assert response["result"]["outcome"] == "retained", response
         assert db.get_messages("failed") == history
         assert db.get_session("failed") is not None
         removed = db.get_conversation_worktree("failed")
-        assert removed.state == "removed"
+        assert removed.state == "retained"
         assert removed.worktree_path == record.worktree_path
         assert git(source, "rev-parse", record.branch) == record.base_commit
-        again = await call(connection, "failed", action="remove")
+        again = await call(connection, "failed", action="quarantine")
         assert again["result"]["removed"] is False
-        assert again["result"]["reasons"] == ["mismatched identity"]
+        assert again["result"]["outcome"] == "retained"
     finally:
         await connection.close()
 
@@ -216,7 +216,7 @@ async def test_cleanup_keeps_live_and_uncertain_canonical_work(owner, obligation
             recover_session_inputs(db, epoch=authority.epoch)
     connection = AuthorityConnection(authority, object(), identity, operator=True)
     try:
-        response = await call(connection, action="remove")
+        response = await call(connection, action="quarantine")
         assert response["result"]["removed"] is False, response
         assert "active" in response["result"]["reasons"]
         assert binding.path.is_dir()
@@ -256,10 +256,10 @@ async def test_cleanup_cannot_use_another_served_profiles_binding(
         authority.runner.session_authorities = registry
         connection = AuthorityConnection(authority, object(), identity, operator=True)
         try:
-            response = await call(connection, "foreign-only", action="remove")
+            response = await call(connection, "foreign-only", action="quarantine")
             assert response["error"]["data"]["reason"] == "not_found", response
             response = await call(
-                connection, "foreign-only", profile="foreign-profile", action="remove"
+                connection, "foreign-only", profile="foreign-profile", action="quarantine"
             )
             assert response["error"]["data"]["reason"] == "profile_mismatch", response
             assert foreign_db.get_conversation_worktree("foreign-only").state == "ready"
@@ -274,7 +274,7 @@ async def test_transport_cancellation_does_not_abandon_cleanup_worker(
 ):
     authority, identity, binding = owner
     entered, release = threading.Event(), threading.Event()
-    original = ConversationWorktreeManager.remove_after_explicit_request
+    original = ConversationWorktreeManager.quarantine_after_explicit_request
 
     def held(manager, *args, **kwargs):
         entered.set()
@@ -282,10 +282,10 @@ async def test_transport_cancellation_does_not_abandon_cleanup_worker(
         return original(manager, *args, **kwargs)
 
     monkeypatch.setattr(
-        ConversationWorktreeManager, "remove_after_explicit_request", held
+        ConversationWorktreeManager, "quarantine_after_explicit_request", held
     )
     connection = AuthorityConnection(authority, object(), identity, operator=True)
-    request = asyncio.create_task(call(connection, action="remove"))
+    request = asyncio.create_task(call(connection, action="quarantine"))
     try:
         assert await asyncio.to_thread(entered.wait, 10)
         request.cancel()
@@ -295,9 +295,9 @@ async def test_transport_cancellation_does_not_abandon_cleanup_worker(
         assert len(tasks) == 1 and not tasks[0].done()
         release.set()
         result = await asyncio.wait_for(asyncio.shield(tasks[0]), timeout=10)
-        assert result["removed"] is True
+        assert result["outcome"] == "retained"
         assert not binding.path.exists()
-        assert authority.db.get_conversation_worktree("root").state == "removed"
+        assert authority.db.get_conversation_worktree("root").state == "retained"
     finally:
         release.set()
         await connection.close()
@@ -309,18 +309,18 @@ async def test_unknown_native_removal_outcome_is_not_reported_or_replayed_as_suc
 ):
     authority, identity, binding = owner
 
-    def unavailable(*args):
+    def unavailable(*args, **kwargs):
         raise OSError("synthetic ledger write failure")
 
-    monkeypatch.setattr(authority.db, "mark_conversation_worktree_removed", unavailable)
+    monkeypatch.setattr(authority.db, "transition_conversation_retention", unavailable)
     connection = AuthorityConnection(authority, object(), identity, operator=True)
     try:
-        response = await call(connection, action="remove")
+        response = await call(connection, action="quarantine")
         assert response["result"]["removed"] is False, response
         assert response["result"]["reasons"] == ["unknown"]
         assert not binding.path.exists()
         assert authority.db.get_conversation_worktree("root").state == "ready"
-        again = await call(connection, action="remove")
+        again = await call(connection, action="quarantine")
         assert again["error"]["data"]["reason"] == "worktree_cleanup_pending"
         with pytest.raises(RuntimeStoreError, match="worktree_cleanup_pending"):
             admit_session_input(
@@ -360,7 +360,7 @@ async def test_cleanup_refuses_unverified_owner_before_adoption(
         authority, object(), {**identity, **change}, operator=operator
     )
     try:
-        response = await call(connection, action="remove")
+        response = await call(connection, action="quarantine")
         assert response["error"]["data"]["reason"] == reason, response
         assert binding.path.is_dir()
         assert authority.db.get_conversation_worktree("root").state == "ready"
@@ -406,12 +406,101 @@ async def test_cleanup_refuses_foreign_profile_and_unknown_params(owner):
     authority, identity, binding = owner
     connection = AuthorityConnection(authority, object(), identity, operator=True)
     try:
-        response = await call(connection, profile="foreign", action="remove")
+        response = await call(connection, profile="foreign", action="quarantine")
         assert response["error"]["data"]["reason"] == "profile_mismatch"
-        response = await call(connection, action="remove", force=True)
+        response = await call(connection, action="quarantine", force=True)
         assert response["error"]["data"]["reason"] == "invalid_params"
         response = await call(connection, action=[])
         assert response["error"]["data"]["reason"] == "invalid_params"
         assert binding.path.is_dir()
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_operator_native_move_refusal_returns_structured_result_and_releases_exact_intent(owner, monkeypatch):
+    import subprocess
+    from agent.conversation_worktree import _common_owner_claim_path
+    from agent.conversation_worktree_retention import receipt_path
+    from hermes_state_worktree_cleanup import INTENT_PREFIX
+
+    authority, identity, binding = owner
+    native = ConversationWorktreeManager._run_git
+    destinations = []
+
+    def refused(cwd, args, timeout, phase):
+        if args[:2] == ['worktree', 'move']:
+            destinations.append(Path(args[-1]))
+            return subprocess.CompletedProcess(args, 1, '', 'native refusal')
+        return native(cwd, args, timeout, phase)
+
+    monkeypatch.setattr(ConversationWorktreeManager, '_run_git', staticmethod(refused))
+    connection = AuthorityConnection(authority, object(), identity, operator=True)
+    try:
+        response = await call(connection, action='quarantine')
+        assert 'result' in response, response
+        assert response['result']['outcome'] == 'refused', response
+        assert response['result']['reasons'] == ['Git move refused']
+        assert response['result']['state'] == 'ready'
+        record = authority.db.get_conversation_worktree(binding.root_session_id)
+        assert destinations and binding.path.is_dir()
+        assert not _common_owner_claim_path(Path(record.repo_common_dir), destinations[0]).exists()
+        assert not receipt_path(record).exists()
+        assert authority.db._read_one('SELECT value FROM state_meta WHERE key=?', (INTENT_PREFIX + binding.root_session_id,)) is None
+        monkeypatch.setattr(ConversationWorktreeManager, '_run_git', staticmethod(native))
+        retained = await call(connection, action='quarantine')
+        assert retained['result']['outcome'] == 'retained', retained
+        restored = await call(connection, action='restore')
+        assert restored['result']['outcome'] == 'restored', restored
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('terminal', ['restored', 'cancelled'])
+async def test_pending_terminal_receipt_refuses_new_operator_intent_until_reconciliation(owner, monkeypatch, terminal):
+    import subprocess
+    from agent import conversation_worktree_retention as retention
+    from hermes_state_worktree_cleanup import INTENT_PREFIX
+
+    authority, identity, binding = owner
+    connection = AuthorityConnection(authority, object(), identity, operator=True)
+    native = ConversationWorktreeManager._run_git
+    archive = retention._archive
+
+    def refused(cwd, args, timeout, phase):
+        if args[:2] == ['worktree', 'move']:
+            return subprocess.CompletedProcess(args, 1, '', 'native refusal')
+        return native(cwd, args, timeout, phase)
+
+    def archive_failed(*args):
+        raise OSError('terminal receipt archive failed')
+
+    try:
+        if terminal == 'restored':
+            retained = await call(connection, action='quarantine')
+            assert retained['result']['outcome'] == 'retained', retained
+        else:
+            monkeypatch.setattr(ConversationWorktreeManager, '_run_git', staticmethod(refused))
+        monkeypatch.setattr(retention, '_archive', archive_failed)
+        failed = await call(connection, action='restore' if terminal == 'restored' else 'quarantine')
+        assert failed['result']['outcome'] == 'unknown', failed
+        record = authority.db.get_conversation_worktree(binding.root_session_id)
+        receipt = retention.receipt_path(record)
+        before = receipt.read_bytes()
+        key = INTENT_PREFIX + binding.root_session_id
+        assert record.state == 'ready' and authority.db._read_one('SELECT value FROM state_meta WHERE key=?', (key,)) is None
+        retry = await call(connection, action='quarantine')
+        assert retry.get('error', {}).get('data', {}).get('reason') == 'worktree_cleanup_pending', retry
+        assert authority.db._read_one('SELECT value FROM state_meta WHERE key=?', (key,)) is None
+        assert receipt.read_bytes() == before
+        monkeypatch.setattr(retention, '_archive', archive)
+        monkeypatch.setattr(ConversationWorktreeManager, '_run_git', staticmethod(native))
+        recovered = await call(connection, action='reconcile')
+        assert recovered['result']['outcome'] == ('restored' if terminal == 'restored' else 'refused'), recovered
+        assert recovered['result']['recovery_required'] is False
+        assert not receipt.exists()
+        fresh = await call(connection, action='quarantine')
+        assert fresh['result']['outcome'] == 'retained', fresh
     finally:
         await connection.close()

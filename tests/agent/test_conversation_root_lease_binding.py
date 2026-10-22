@@ -54,7 +54,7 @@ def test_retired_or_uncertain_binding_never_publishes_lease(
     assert binding is not None
     claim_path = _common_owner_claim_path(binding.repo_common_dir, binding.path)
     if change in {"removed", "replacement"}:
-        assert manager.remove_after_explicit_request(binding.root_session_id).removed
+        assert manager.quarantine_after_explicit_request(binding.root_session_id).outcome == 'retained'
         if change == "replacement":
             binding.path.mkdir()
             binding.path.joinpath("unique.txt").write_text("Preserve this replacement")
@@ -69,7 +69,7 @@ def test_retired_or_uncertain_binding_never_publishes_lease(
     else:
         claim_path.write_text("{unreadable identity")
 
-    with pytest.raises(ConversationWorktreeError, match="ownership is unavailable"):
+    with pytest.raises(ConversationWorktreeError, match="ownership is unavailable|retention"):
         _acquire(consumer, binding)
 
     state, _lock = _root_lease_paths(binding.repo_common_dir, binding.root_session_id)
@@ -92,11 +92,11 @@ def test_acquired_lease_prevents_cleanup_until_release(
     monkeypatch.setenv("HERMES_HOME", str(db.db_path.parent))
     lease = _acquire(consumer, binding)
     try:
-        result = manager.remove_after_explicit_request(binding.root_session_id)
+        result = manager.quarantine_after_explicit_request(binding.root_session_id)
         assert not result.removed
         assert "active" in result.verdict.reasons
         assert binding.path.is_dir()
         assert db.get_conversation_worktree(binding.root_session_id).state == "ready"
     finally:
         lease.release()
-    assert manager.remove_after_explicit_request(binding.root_session_id).removed
+    assert manager.quarantine_after_explicit_request(binding.root_session_id).outcome == 'retained'

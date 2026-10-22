@@ -55,11 +55,11 @@ def test_cleanup_unlinks_actual_bootstrap_environment_without_removing_source(
 
     verdict = manager.inspect_cleanup(binding.root_session_id)
     assert verdict.allowed, verdict.reasons
-    removed = manager.remove_after_explicit_request(binding.root_session_id)
+    removed = manager.quarantine_after_explicit_request(binding.root_session_id)
 
-    assert removed.removed, removed
+    assert removed.outcome == 'retained', removed
     assert not binding.path.exists()
-    assert db.get_conversation_worktree(binding.root_session_id).state == "removed"
+    assert db.get_conversation_worktree(binding.root_session_id).state == "retained"
     assert (environment.stat().st_dev, environment.stat().st_ino) == identity
     assert environment.joinpath("source-sentinel").read_bytes() == before
     assert git(source, "rev-parse", binding.branch) == binding.base_commit
@@ -91,7 +91,7 @@ def test_cleanup_preserves_equivalent_environment_inside_removal_root(request, l
     assert git(binding.path, "ls-files", "--others", "--ignored", "--exclude-standard") == ".venv"
     before = environment.stat().st_dev, environment.stat().st_ino
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert not result.removed
     assert "ignored content requires preservation" in result.verdict.reasons
@@ -140,7 +140,7 @@ def test_cleanup_preserves_interpreter_lookup_inside_removal_root(request, tmp_p
     paths = environment, interpreter.parent, interpreter
     identities = [(item.stat().st_dev, item.stat().st_ino) for item in paths]
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert not result.removed
     assert "ignored content requires preservation" in result.verdict.reasons
@@ -171,7 +171,7 @@ def test_cleanup_preserves_intermediate_interpreter_lookup_hop(
     assert not python.parent.resolve().is_relative_to(binding.path)
     identities = [(item.stat().st_dev, item.stat().st_ino) for item in (environment, python)]
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert not result.removed
     assert "ignored content requires preservation" in result.verdict.reasons
@@ -245,7 +245,7 @@ def test_cleanup_preserves_non_equivalent_or_unique_ignored_content(
     verdict = manager.inspect_cleanup(binding.root_session_id)
     assert not verdict.allowed
     assert "ignored content requires preservation" in verdict.reasons
-    removed = manager.remove_after_explicit_request(binding.root_session_id)
+    removed = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert not removed.removed
     assert binding.path.is_dir()
@@ -278,7 +278,7 @@ def test_cleanup_refuses_environment_identity_changed_during_content_probe(
         return original_git(cwd, args, timeout, phase)
 
     monkeypatch.setattr(manager, "_run_git", changing_probe)
-    removed = manager.remove_after_explicit_request(binding.root_session_id)
+    removed = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert changed
     assert not removed.removed
@@ -319,9 +319,9 @@ def test_cleanup_observes_external_interpreter_lookup_hops(
         return original_git(cwd, args, timeout, phase)
 
     monkeypatch.setattr(manager, "_run_git", changing_probe)
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
-    assert result.removed is not change_hop
+    assert (result.outcome == 'retained') is not change_hop
     assert changed is change_hop
     assert (python.stat().st_dev, python.stat().st_ino) == before
     assert python.read_text() == "synthetic interpreter; never executed\n"
@@ -348,9 +348,9 @@ def test_cleanup_allows_repeated_outside_alias_without_a_symlink_cycle(
     before = executable.stat().st_dev, executable.stat().st_ino
     assert python.resolve(strict=True) == executable
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
-    assert result.removed, result.verdict.reasons
+    assert result.outcome == 'retained', result.verdict.reasons
     assert python.is_file()
     assert (executable.stat().st_dev, executable.stat().st_ino) == before
 
@@ -373,7 +373,7 @@ def test_cleanup_preserves_interpreter_through_native_case_alias(managed_environ
     before = python.stat().st_dev, python.stat().st_ino
     assert not python.resolve(strict=True).is_relative_to(binding.path)
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert not result.removed
     assert "ignored content requires preservation" in result.verdict.reasons
@@ -408,18 +408,17 @@ def test_cleanup_unlinks_verified_bootstrap_link_without_file_ignore(visible_man
 
     verdict = manager.inspect_cleanup(binding.root_session_id)
     assert verdict.allowed, verdict.reasons
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
-    assert result.removed, result
+    assert result.outcome == 'retained', result
     assert not binding.path.exists()
-    assert db.get_conversation_worktree(binding.root_session_id).state == "removed"
+    assert db.get_conversation_worktree(binding.root_session_id).state == "retained"
     assert (environment.stat().st_dev, environment.stat().st_ino) == before
     assert environment.joinpath("source-sentinel").read_bytes() == sentinel
 
 
 @pytest.mark.parametrize("change", [
     "foreign_link", "untracked", "tracked", "ignored", "global_ignored",
-    "remove_race", "prepare_failure",
 ])
 def test_visible_bootstrap_link_never_exempts_other_content(
     visible_managed_link, tmp_path, monkeypatch, change,
@@ -429,28 +428,7 @@ def test_visible_bootstrap_link_never_exempts_other_content(
         exclude = tmp_path / "original-global-ignore"
         exclude.write_text("*.private\n")
         git(source, "config", "core.excludesFile", str(exclude))
-    late_failure = change in {"remove_race", "prepare_failure"}
-    if change == "remove_race":
-        preserved = binding.path / "late-user.txt"
-        original_git = manager._run_git
-
-        def publish_late_file(cwd, args, timeout, phase):
-            if args[0] == "-c":
-                preserved.write_text("preserve unique user data\n")
-            return original_git(cwd, args, timeout, phase)
-
-        monkeypatch.setattr(manager, "_run_git", publish_late_file)
-        before = b"preserve unique user data\n"
-    elif change == "prepare_failure":
-        import agent.conversation_worktree as worktrees
-
-        def unavailable_temporary_directory(**_kwargs):
-            raise OSError("synthetic private temporary-storage failure")
-
-        monkeypatch.setattr(worktrees.tempfile, "TemporaryDirectory", unavailable_temporary_directory)
-        preserved = environment / "source-sentinel"
-        before = preserved.read_bytes()
-    elif change == "foreign_link":
+    if change == "foreign_link":
         preserved = usable_environment(tmp_path / "foreign-environment") / "source-sentinel"
         link = binding.path / ".venv"
         link.unlink()
@@ -462,12 +440,11 @@ def test_visible_bootstrap_link_never_exempts_other_content(
         }[change]
         preserved = binding.path / name
         preserved.write_text("preserve unique user data\n")
-    if not late_failure:
-        before = preserved.read_bytes()
+    before = preserved.read_bytes()
 
     verdict = manager.inspect_cleanup(binding.root_session_id)
-    assert verdict.allowed is late_failure
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    assert not verdict.allowed
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert not result.removed
     assert binding.path.is_dir()
