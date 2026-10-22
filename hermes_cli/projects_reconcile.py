@@ -411,6 +411,8 @@ def _validate_duplicate_rows(
         raise ValueError("legacy primary folder is not the reviewed canonical root")
     if _active_id_from_snapshot(target_before) != expected_active_id:
         raise ValueError("target active selection differs from the reviewed snapshot")
+    if expected_active_id == expected_project_id:
+        raise ValueError("stale active project pointer would activate adopted binding")
     return project, folder, source_binding
 
 

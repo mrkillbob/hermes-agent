@@ -294,6 +294,28 @@ def test_active_selection_is_preserved_or_repointed_only_for_retired_identity(
         assert projects_db.get_active_id(conn) == expected
 
 
+def test_stale_canonical_active_pointer_refuses_before_receipt_or_mutation(duplicate):
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    with projects_db.connect_closing(args["target_registry"]) as conn:
+        assert projects_db.get_project(conn, args["expected_project_id"]) is None
+        projects_db.set_active(conn, args["expected_project_id"])
+    args["expected_active_id"] = args["expected_project_id"]
+    paths = [args["source_registry"], args["target_registry"]]
+    for board in args["expected_boards"]:
+        paths.extend((kb.kanban_db_path(board), kb.board_metadata_path(board)))
+    before = {path: path.read_bytes() for path in paths}
+
+    with pytest.raises(ValueError, match="stale active project pointer"):
+        reconcile(args)
+
+    assert all(path.read_bytes() == data for path, data in before.items())
+    assert not args["backup_path"].exists()
+    with projects_db.connect_closing(args["target_registry"]) as conn:
+        assert projects_db.get_active_id(conn) == args["expected_project_id"]
+        assert projects_db.get_project(conn, args["expected_project_id"]) is None
+        assert not projects_db.get_project(conn, args["legacy_project_id"]).archived
+
+
 def _seed_nonterminal(duplicate):
     with connect_closing(board="default") as conn, kb.write_txn(conn):
         conn.execute(
