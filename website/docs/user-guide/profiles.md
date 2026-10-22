@@ -473,3 +473,26 @@ hermes profile update research-bot
 ```
 
 Use an export file for a one-time handoff or a move; use a distribution for an agent you'll keep shipping. See **[Profile Distributions: Share a Whole Agent](./profile-distributions.md)** for both — the comparison table, authoring, publishing, update semantics, and the security model.
+
+## Repair an existing canonical project binding
+
+Project registries belong to individual profiles. When a scheduled job moves into
+its assigned profile, an operator can adopt an already registered root project
+without creating a new project ID or rebinding its shared board:
+
+```bash
+hermes -p default project adopt-canonical PROJECT_ID \
+  --target-profile PROFILE \
+  --expected-root /absolute/canonical/repository \
+  --expected-board BOARD_SLUG
+```
+
+The named profile and both registry files must already exist. The command checks
+the exact canonical project, Git root and shared-board owner, preserves unrelated
+projects and active selection, and refuses conflicting registrations. Run it from
+the root profile outside a dispatched task or delegated child. It does not enable
+schedules, change model assignments, create credentials or run the project.
+
+A separate `HERMES_KANBAN_HOME` may hold shared board data. The canonical project
+registry and named profiles remain under the configured root profile home; the
+command validates the board through its configured shared-data location.
