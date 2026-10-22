@@ -11,6 +11,7 @@ import tempfile
 import sqlite3
 import sys
 from collections import defaultdict
+from contextlib import closing
 
 
 def plan_discovery(spec, tasks, day, links=()):
@@ -44,7 +45,7 @@ def plan_discovery(spec, tasks, day, links=()):
             continue
         if len(planned) >= min(capacity, spec['max_dispatches']):
             break
-        board = spec.get('project_boards', {}).get(department.get('project'), spec.get('board'))
+        board = department.get('_project_board', spec.get('project_boards', {}).get(department.get('project'), spec.get('board')))
         planned.append(dict(department, board=board, creator=creator, key=key, task_title=title, active_children=active_children))
     return planned
 
@@ -250,20 +251,79 @@ def new_evidence_workspace(department):
     return tempfile.mkdtemp(prefix='hermes-discovery-' + department['id'] + '-', dir=str(root))
 
 
+def _project_binding_column(connection):
+    """Old registries have no optional board binding; reading must not migrate them."""
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(projects)')}
+    return 'board_slug' if 'board_slug' in columns else 'NULL'
+
+
+def eligible_project_spec(spec):
+    """Exclude retired or misbound projects before they reserve capacity or evidence paths."""
+    from hermes_cli.projects_db import projects_db_path
+
+    with closing(sqlite3.connect(projects_db_path().as_uri() + '?mode=ro', uri=True)) as connection:
+        connection.row_factory = sqlite3.Row
+        binding = _project_binding_column(connection)
+        projects = [dict(row) for row in connection.execute(
+            f'SELECT id,slug,archived,{binding} AS board_slug FROM projects')]
+    by_id = {project['id']: project for project in projects}
+    by_slug = {project['slug']: project for project in projects}
+    eligible, skipped = [], []
+    for department in spec['departments']:
+        selector = department.get('project', '')
+        project = by_id.get(selector) or by_slug.get(selector.lower())
+        mapping = spec.get('project_boards', {})
+        board = mapping.get(selector, mapping.get(project['slug'] if project else '', spec['board']))
+        reason = None
+        if project is None:
+            reason = 'project_missing'
+        elif project['archived']:
+            reason = 'project_archived'
+        elif project['board_slug'] and project['board_slug'] != board:
+            reason = 'project_board_mismatch'
+        if reason:
+            skipped.append({'department': department['id'], 'project': selector, 'reason': reason})
+        else:
+            eligible.append({**department, '_project_id': project['id'], '_project_board': board})
+    return {**spec, 'departments': eligible}, skipped
+
+
+def current_project_reason(department):
+    """Recheck the pinned identity after task-list subprocesses, never a reused slug."""
+    from hermes_cli.projects_db import projects_db_path
+
+    with closing(sqlite3.connect(projects_db_path().as_uri() + '?mode=ro', uri=True)) as connection:
+        binding = _project_binding_column(connection)
+        row = connection.execute(f'SELECT archived,{binding} FROM projects WHERE id=?',
+                                 (department['_project_id'],)).fetchone()
+    if row is None:
+        return 'project_missing'
+    if row[0]:
+        return 'project_archived'
+    if row[1] and row[1] != department['board']:
+        return 'project_board_mismatch'
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--hermes', required=True)
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
     spec = json.loads((root / 'configs/federation/discovery.json').read_text(encoding="utf-8-sig"))
+    try:
+        spec, skipped_projects = eligible_project_spec(spec)
+    except sqlite3.Error:
+        print(json.dumps({'status': 'idle', 'reason': 'project_registry_unavailable'}))
+        return
     tasks = []
     links = []
     boards = dict.fromkeys([spec['board'], *spec.get('project_boards', {}).values()])
     for board in boards:
         tasks.extend({**task, '_discovery_board': board} for task in run(args.hermes, 'kanban', '--board', board, 'list', '--json'))
     day = datetime.now(UTC).date().isoformat()
-    sys.path.insert(0, str(root))
     from hermes_cli.kanban_db import kanban_db_path
     for board in boards:
         connection = sqlite3.connect(kanban_db_path(board).as_uri() + '?mode=ro', uri=True)
@@ -273,10 +333,17 @@ def main():
             connection.close()
     plan = plan_discovery(spec, tasks, day, links)
     if not args.apply:
-        print(json.dumps({'status': 'planned', 'departments': plan}))
+        print(json.dumps({'status': 'planned', 'departments': plan, 'skipped_projects': skipped_projects}))
         return
     receipts = []
     for department in plan:
+        try:
+            reason = current_project_reason(department)
+        except sqlite3.Error:
+            reason = 'project_registry_unavailable'
+        if reason:
+            skipped_projects.append({'department': department['id'], 'project': department['project'], 'reason': reason})
+            continue
         body = discovery_body(spec, department)
         workspace = new_evidence_workspace(department)
         seed_discovery_evidence(root, Path(workspace), department, tasks)
@@ -296,12 +363,15 @@ def main():
         result = run(args.hermes, 'kanban', '--board', department['board'], 'create',
                      department['task_title'],
                      '--body', body, '--assignee', department['assignee'],
-                     '--project', department['project'], '--workspace', 'dir:' + workspace,
+                     '--project', department['_project_id'], '--require-active-project', '--workspace', 'dir:' + workspace,
                      '--idempotency-key', department['key'], '--max-runtime', '15m',
                      '--max-retries', '2', '--created-by', department['creator'], '--json')
+        if not isinstance(result, dict) or result.get('project_id') != department['_project_id']:
+            raise ValueError('discovery task project binding was not confirmed; inspect the original outcome')
         receipts.append({'department': department['id'], 'task': result})
-    if receipts:
-        print(json.dumps({'status': 'dispatched', 'receipts': receipts}))
+    if receipts or skipped_projects:
+        print(json.dumps({'status': 'dispatched' if receipts else 'idle', 'receipts': receipts,
+                          'skipped_projects': skipped_projects}))
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 """Route-derived context policy for a dispatcher-owned task, independent of provider lists."""
 from collections.abc import Mapping
+import re
 from typing import Any
 
 
@@ -113,3 +114,30 @@ def mark_local_task_context(agent: Any, *, route: Any = None) -> None:
     """A local model or ambient producer may add private prose to retained history."""
     if not owned_remote_task(agent, route=route):
         mark_task_history_unverified(agent)
+
+
+def rewrite_prompt_model_identity(agent, model: str, provider: str) -> None:
+    """Rewrite the cached prompt's ``Model:``/``Provider:`` lines after a provider switch.
+
+    Not persisted: the stored row keeps the primary's labels so a restored primary replays a
+    byte-identical prompt (prefix cache intact). Only the LAST occurrence of each line is touched —
+    earlier matches may be user content (memory snapshots, context files)."""
+    sp = getattr(agent, "_cached_system_prompt", None)
+    if not isinstance(sp, str) or not sp:
+        return
+    public_context = (getattr(agent, '_remote_task_context_mode', None) == 'public'
+                      and getattr(agent, '_remote_task_public_prompt', None) == sp
+                      and getattr(agent, '_remote_task_history_unverified', False) is not True
+                      and all(isinstance(value, str) and value and value.isprintable()
+                              and not any(char.isspace() for char in value)
+                              for value in (model, provider)))
+    for label, value in (("Model", model), ("Provider", provider)):
+        if not value:
+            continue
+        matches = list(re.finditer(rf"(?m)^{label}: .*$", sp))
+        if matches:
+            last = matches[-1]
+            sp = f"{sp[:last.start()]}{label}: {value}{sp[last.end():]}"
+    agent._cached_system_prompt = sp
+    if public_context:
+        agent._remote_task_public_prompt = sp

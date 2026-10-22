@@ -73,6 +73,21 @@ assignee ownership and blocked work consume capacity. Workers must deduplicate
 findings, link bounded children, and provide measurable output rather than invent
 work to satisfy a quota.
 
+Before planning, discovery reads the calling profile's project registry without
+changing it. Archived or missing projects and projects bound to another board are
+reported in `skipped_projects`; they reserve no discovery slot and receive no
+evidence workspace or card. An unavailable registry returns an explicit
+`project_registry_unavailable` idle result. Restoring an archived project remains
+an operator decision; discovery never restores it automatically.
+
+Discovery resolves ID selectors through the registered project's slug when looking
+up configured board mappings. Legacy registries without an optional board binding
+remain readable without migration. Its `kanban create --require-active-project`
+request requires the pinned canonical ID in the calling profile and serializes
+project archive, deletion, and rebinding against the task commit. A mismatched
+creation receipt stops the pass for reconciliation; it is never retried as another
+card. Ordinary `kanban create` retains its existing project-link behavior.
+
 Revenue Lab retains its separate guarded cron pipeline. Federation intake routes
 opportunities there; discovery does not grant spending, publication, customer
 contact, trading, or deployment authority. Library summaries remain bounded,

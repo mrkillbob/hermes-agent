@@ -1278,6 +1278,9 @@ function Get-BootstrapPython {
 }
 
 function Invoke-BootstrapPm {
+    # GUI stages are separate processes; prerequisites' PATH did not survive.
+    # uv needs the selected Git for locked VCS dependencies as well as cloning.
+    if (-not (Ensure-Git)) { Fail "no pinned Git artifact for this Windows architecture" unsupported_platform }
     $bootPy = Get-BootstrapPython
     Push-Location $InstallDir
     try {

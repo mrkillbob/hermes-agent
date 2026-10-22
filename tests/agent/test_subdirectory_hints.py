@@ -161,42 +161,37 @@ class TestSubdirectoryHintTracker:
 
 
     def test_timeout_skips_slow_hint_files(self, project, monkeypatch, caplog):
-        """Slow hint reads time out instead of blocking the turn."""
+        """Slow raw hint reads time out instead of blocking the turn."""
+        import threading
+        from agent import prompt_builder
+
         backend = project / "backend"
-        (backend / "AGENTS.md").write_text("Backend-specific instructions", encoding="utf-8")
-        import sys
+        monkeypatch.setattr(prompt_builder, "_get_context_file_read_timeout", lambda: 0.05)
+        original_read_bytes = Path.read_bytes
+        release = threading.Event()
 
-        from agent import subdirectory_hints as sh_mod
-
-        # Patch the module object the hint tracker's helper closes over.
-        pb_mod = sys.modules[sh_mod._read_text_with_timeout.__module__]
-        monkeypatch.setattr(pb_mod, "_get_context_file_read_timeout", lambda: 0.05)
-
-        original_read_text = Path.read_text
-
-        def slow_read_text(self, *args, **kwargs):
+        def slow_read_bytes(self):
             if self.name.lower() == "agents.md" and self.parent == backend:
-                time.sleep(0.6)
-            return original_read_text(self, *args, **kwargs)
+                release.wait(timeout=3)
+            return original_read_bytes(self)
 
-        monkeypatch.setattr(Path, "read_text", slow_read_text)
-
+        monkeypatch.setattr(Path, "read_bytes", slow_read_bytes)
         tracker = SubdirectoryHintTracker(working_dir=str(project))
         start = time.monotonic()
-        with caplog.at_level("WARNING", logger="agent.prompt_builder"):
-            result = tracker.check_tool_call(
-                "read_file", {"path": str(project / "backend" / "src" / "main.py")}
-            )
-        elapsed = time.monotonic() - start
-
-        assert elapsed < 0.4, f"hint load blocked for {elapsed:.2f}s"
-        assert result is None
-        assert "timed out" in caplog.text.lower()
+        try:
+            with caplog.at_level("WARNING", logger="agent.source_context_presentation"):
+                result = tracker.check_tool_call(
+                    "read_file", {"path": str(backend / "src" / "main.py")},
+                )
+            assert time.monotonic() - start < 2
+            assert result is None
+            assert "timed out" in caplog.text.lower()
+        finally:
+            release.set()
 
 
 class TestPermissionErrorHandling:
     """Regression tests for PermissionError in filesystem checks (ref #6214)."""
-
 
     def test_load_hints_permission_error_on_is_file(self, tmp_path):
         """_load_hints_for_directory should skip files when is_file() raises PermissionError."""

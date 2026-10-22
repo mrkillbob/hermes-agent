@@ -44,7 +44,8 @@ def restore_native_source_sidecar(messages: Any, sidecar: list, consumed: set[in
         content = list(message['content'])
         block = dict(content[block_index])
         block['_source_provenance'] = {name: entry[name] for name in (
-            'request_id', 'source_grant_digests', 'content_sha256', 'presentation_kind') if name in entry}
+            'request_id', 'source_grant_digests', 'content_sha256', 'presentation_kind',
+            'read_result_binding_id') if name in entry}
         content[block_index] = block
         message['content'] = content
         restored[message_index] = message

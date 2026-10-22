@@ -316,17 +316,19 @@ def _run_worker_turns(agent, frame, history):
                                           **({'task_id': task_id} if task_id else {}),
                                           **({'turn_author': author} if author is not None else {}))
     from hermes_cli.turn_exit import credential_failure_flags, turn_exit_code
-    code, last_output = 1, ''
+    from hermes_cli.kanban_provider_errors import owner_failure_fields
+    code, last_output, failure = 1, '', {}
     try:
         result = _run_task_turns(agent, frame, history, context)
         code = turn_exit_code(result, kanban_worker=True)
+        failure = owner_failure_fields(result)
         last_output = str(result.get('final_response') or '')[-500:] if isinstance(result, dict) else ''
         return result
     except Exception as exc:
         code = turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc))
         raise
     finally:
-        _record_worker_result(context, code, last_output)
+        _record_worker_result(context, code, last_output, failure=failure)
 
 
 def record_start_failure(frame, exc):
@@ -339,7 +341,7 @@ def record_start_failure(frame, exc):
     _record_worker_result(context, turn_exit_code(None, kanban_worker=True, **credential_failure_flags(exc)), '')
 
 
-def _record_worker_result(context, code, last_output):
+def _record_worker_result(context, code, last_output, *, failure=None):
     _TURNS_DONE.set()
     import os
     from hermes_cli.kanban_db_connect import connect_closing
@@ -350,7 +352,7 @@ def _record_worker_result(context, code, last_output):
             # result in the immutable attempt event stream instead.
             kb._append_event(conn, context['task_id'], 'worker_result',
                 {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
-                 'last_output': last_output}, run_id=context['run_id'])
+                 'last_output': last_output, **(failure or {})}, run_id=context['run_id'])
 
 
 def _bound_worker_matches(conn, context):

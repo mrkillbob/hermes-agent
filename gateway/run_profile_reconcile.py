@@ -59,6 +59,11 @@ def profile_serve_signature(home: Path) -> tuple:
     return tuple(sig)
 
 
+def _profile_signature_snapshot(homes: dict[str, Path]) -> dict[str, tuple]:
+    """Read one reconciliation's metadata off-loop, without caching or reading secrets."""
+    return {name: profile_serve_signature(home) for name, home in homes.items()}
+
+
 class GatewayProfileReconcileMixin:
     """Runtime reconciliation of the multiplexed served-profile set (hot add / unroute / credential-add)."""
 
@@ -89,6 +94,16 @@ class GatewayProfileReconcileMixin:
         sigs = self._served_profile_signatures if isinstance(self._served_profile_signatures, dict) else {}
         self._served_profile_signatures = {name: sigs.get(name) or profile_serve_signature(home)
                                            for name, home in homes.items()}
+
+    async def _record_profiles_with_metadata(self, active, profile_homes):
+        """Prepare missing metadata off-loop; publish runtime bookkeeping on its owner loop."""
+        homes = list(profile_homes)
+        sigs = dict(self._served_profile_signatures or {})
+        missing = {name: home for name, home in homes if not sigs.get(name)}
+        if missing:
+            sigs.update(await self._run_housekeeping_in_executor(_profile_signature_snapshot, missing))
+        self._served_profile_signatures = sigs
+        self._record_served_profiles(active, homes)
 
     # ── watcher ───────────────────────────────────────────────────────────────────────────────────
 
@@ -163,7 +178,9 @@ class GatewayProfileReconcileMixin:
             return {**result, "pending": True, "served_profiles": self.served_profile_names()}
         async with self._reconcile_lock():
             active = getattr(self, "_primary_profile_name", None) or "default"
-            live = {str(name): Path(home) for name, home in profiles_to_serve(multiplex=True)}
+            profile_homes = await self._run_housekeeping_in_executor(
+                partial(profiles_to_serve, multiplex=True))
+            live = {str(name): Path(home) for name, home in profile_homes}
             listed = set(live)  # a probe skip below is not a deletion: it never clears a parked verdict
             known = dict(self._served_profile_homes or {})
             from gateway.status import live_gateway_pid_for_home
@@ -212,8 +229,9 @@ class GatewayProfileReconcileMixin:
             retry_parked = reason == "control-socket"
             added = [n for n in live if n not in known and n != active and (retry_parked or n not in parked)]
             removed = [n for n in known if n not in live and n != active]
-            changed = [n for n in live if n in known and n != active and n not in added
-                       and profile_serve_signature(live[n]) != sigs.get(n)]
+            candidates = {n: live[n] for n in live if n in known and n != active and n not in added}
+            signatures = await self._run_housekeeping_in_executor(_profile_signature_snapshot, candidates)
+            changed = [n for n in candidates if signatures[n] != sigs.get(n)]
             current = {n: h for n, h in live.items() if n in known or n == active}
             return await self._apply_profile_changes(
                 current, added, removed, changed, reason=reason, live=live, result=result)
@@ -252,7 +270,8 @@ class GatewayProfileReconcileMixin:
         for name in added + changed:
             # Only acknowledge the configuration observed before connecting;
             # a setup save during an awaited handshake needs another scan.
-            scan_signature = profile_serve_signature(current[name])
+            scan_signature = await self._run_housekeeping_in_executor(
+                profile_serve_signature, current[name])
             try:
                 connected = await self._start_one_profile_adapters(name, current[name], claimed)
             except MultiplexConfigError as exc:
@@ -285,12 +304,14 @@ class GatewayProfileReconcileMixin:
         self._served_profile_signatures = sigs
         # A profile deleted while an adapter above was still connecting must not be recorded back
         # (the deleter's signal timed out against this lock and rmtree already ran).
-        live_now = {str(name) for name, _home in profiles_to_serve(multiplex=True)}
+        live_homes_now = await self._run_housekeeping_in_executor(
+            partial(profiles_to_serve, multiplex=True))
+        live_now = {str(name) for name, _home in live_homes_now}
         for name in [n for n in current if n not in live_now and n != active]:
             await self._unserve_profile(name, current.pop(name))
             result["removed"].append(name)
             added = [n for n in added if n != name]
-        self._record_served_profiles(active, list(current.items()))
+        await self._record_profiles_with_metadata(active, current.items())
         # ``_note_served_profiles`` fills a missing signature with the current one; that refill
         # would park a transiently-failed profile exactly like the config-error case above.
         for name in transient_failed:
@@ -377,7 +398,7 @@ class GatewayProfileReconcileMixin:
         from gateway.run import _enable_multiplex_log_routing, _profile_runtime_scope
         from contextvars import copy_context
         with _log_suppressed(logging.DEBUG, "log routing refresh failed", exc_info=True):
-            _enable_multiplex_log_routing(self.config)
+            await self._run_housekeeping_in_executor(_enable_multiplex_log_routing, self.config)
         from tools.mcp_oauth import suppress_interactive_oauth
         loop = asyncio.get_running_loop()
         for profile_name, profile_home in profile_homes:
@@ -489,12 +510,14 @@ def _profile_lifecycle_verb(runner, *, serve: bool):
                 if name not in known:
                     return {"error": f"profile '{name}' is not served"}
                 await runner._unserve_profile(name, known.pop(name))
-                runner._record_served_profiles(active, list(known.items()))
+                await runner._record_profiles_with_metadata(active, known.items())
                 return {"unserved": name, "served_profiles": runner.served_profile_names()}
-            installed = dict(profiles_to_serve(True, include_parked=True))
+            installed = dict(await runner._run_housekeeping_in_executor(
+                partial(profiles_to_serve, True, include_parked=True)))
             if name not in installed:
                 return {"error": f"unknown profile '{name}'"}
-            if name != "default" and profile_is_parked(installed[name]):
+            if name != "default" and await runner._run_housekeeping_in_executor(
+                    profile_is_parked, installed[name]):
                 return {"error": f"profile '{name}' is parked (gateway.parked)"}
             if name in known:
                 return {"error": f"profile '{name}' is already served"}
