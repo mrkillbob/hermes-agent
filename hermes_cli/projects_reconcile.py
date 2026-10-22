@@ -31,6 +31,7 @@ from hermes_cli.projects_adoption import (
 _TERMINAL_RUN_STATUSES = frozenset(
     {
         "blocked",
+        "completed",  # complete_task synthesizes this for a never-claimed handoff.
         "crashed",
         "done",
         "failed",

@@ -859,3 +859,45 @@ def test_absent_board_creation_is_fenced_through_target_commit(duplicate, monkey
         assert [row["id"] for row in conn.execute(
             "SELECT id FROM tasks WHERE project_id=?", (args["legacy_project_id"],)
         )] == [task_id]
+
+
+@pytest.mark.parametrize("drift", [None, "unfinished", "unknown"])
+def test_public_completion_run_requires_known_ended_history(duplicate, drift):
+    with connect_closing(board="default") as conn:
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_runs WHERE task_id=?", (duplicate["task_id"],))
+            conn.execute(
+                "UPDATE tasks SET status='ready',workspace_kind='dir',workspace_path=?,branch_name=NULL WHERE id=?",
+                (str(duplicate["expected_root"]), duplicate["task_id"]),
+            )
+        duplicate["expected_references"]["default"][0].update(
+            workspace_kind="dir", workspace_path=str(duplicate["expected_root"]), branch_name=None,
+        )
+        assert kb.complete_task(
+            conn, duplicate["task_id"], result="Synthetic reviewed result",
+            summary="Synthetic handoff", metadata={"fixture": True},
+            fire_lifecycle_hook=False, board="default",
+        )
+        runs = conn.execute("SELECT * FROM task_runs WHERE task_id=?", (duplicate["task_id"],)).fetchall()
+        assert len(runs) == 1 and runs[0]["status"] == "completed" and runs[0]["ended_at"] is not None
+        if drift:
+            with kb.write_txn(conn):
+                if drift == "unfinished":
+                    conn.execute("UPDATE task_runs SET ended_at=NULL WHERE task_id=?", (duplicate["task_id"],))
+                else:
+                    conn.execute("UPDATE task_runs SET status='unknown' WHERE task_id=?", (duplicate["task_id"],))
+        before = kanban_transfer._selected_task_rows(conn, [duplicate["task_id"]])
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    args["expected_references"]["default"][0].update(
+        run_count=len(before["task_runs"]), event_count=len(before["task_events"])
+    )
+    registry_before = args["target_registry"].read_bytes()
+    if drift is None:
+        assert reconcile(args)["status"] == "canonicalized"
+    else:
+        with pytest.raises(ValueError, match="terminal unclaimed"):
+            reconcile(args)
+        assert args["target_registry"].read_bytes() == registry_before
+        assert not args["backup_path"].exists()
+    with connect_closing(board="default") as conn:
+        assert kanban_transfer._selected_task_rows(conn, [duplicate["task_id"]]) == before
