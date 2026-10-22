@@ -4,7 +4,9 @@ A queued follower is what /reset and compression exist to serve: it waits on the
 owner and runs against whatever physical target the mutation publishes.
 """
 from contextlib import closing
+from copy import deepcopy
 from dataclasses import asdict
+import sqlite3
 
 import pytest
 
@@ -66,3 +68,62 @@ def test_target_advance_allows_queued_follower_and_refuses_started_head(tmp_path
         rt.settle_session_input(db, epoch=epoch, admission_id=head['admission_id'],
                                 generation=head['generation'], outcome='completed')
         assert [r['request_id'] for r in rt.list_session_admissions(db, session_id=sid)] == ['follower']
+
+
+@pytest.mark.parametrize('automatic_retry', [False, True])
+def test_compress_receipt_retries_do_not_reuse_rolled_back_message_annotations(
+        tmp_path, monkeypatch, automatic_retry):
+    with closing(SessionDB(tmp_path / 'receipt-retry.db')) as db:
+        epoch = rt.begin_runtime_epoch(db, instance_id='owner')
+        sid = _local_session(db, epoch, tmp_path)
+        db.append_messages_batch(sid, [
+            {'role': 'assistant', 'content': 'original reply and summary', 'timestamp': 2.0,
+             '_compressed_summary': True}])
+        prepared = dict(_mutate(db, epoch, sid, 'compress', _prepare_only=True),
+                        messages=db.get_messages_as_conversation(sid), carried_messages=[], in_place=True)
+        original_prepared = deepcopy(prepared)
+        before_rows = db.get_messages(sid, include_inactive=True)
+        before_session = db.get_session(sid)
+        args = dict(epoch=epoch, principal_id='human', session_id=sid, request_id='compress-retry',
+                    operation='compress', payload={}, expected_revision=before_session['runtime_revision'],
+                    expected_generation=before_session['runtime_generation'], _prepared=prepared)
+        insert = db._insert_message_rows
+        attempts = []
+
+        def fail_first_insert(conn, target, messages, **kwargs):
+            inserted = insert(conn, target, messages, **kwargs)
+            attempts.append(bool(messages[0].get('_compressed_summary')))
+            if len(attempts) == 1:
+                assert attempts == [True], 'the first attempt must infer its live donor classification'
+                error = sqlite3.OperationalError('database is locked') if automatic_retry else RuntimeError('publish failed')
+                raise error
+            return inserted
+
+        def change_donor_after_rollback(*_args):
+            assert db.get_messages(sid, include_inactive=True) == before_rows
+            assert db.get_session(sid) == before_session
+            assert prepared == original_prepared
+            assert not db.list_meta_prefix('gateway.mutation.v1.')
+            # Classification changed while no transaction holds the write lock. Same UID/body
+            # is no longer a marked donor; the next attempt must prove its marker again.
+            db._write_sql('UPDATE messages SET _compressed_summary=0 WHERE session_id=?', (sid,))
+            return True
+
+        monkeypatch.setattr(db, '_insert_message_rows', fail_first_insert)
+        monkeypatch.setattr(db, '_sleep_before_write_retry', change_donor_after_rollback)
+        if automatic_retry:
+            result = rt.mutate_runtime_session(db, **args)
+        else:
+            with pytest.raises(RuntimeError, match='publish failed'):
+                rt.mutate_runtime_session(db, **args)
+            change_donor_after_rollback()
+            result = rt.mutate_runtime_session(db, **args)
+        assert attempts == [True, False]
+        assert prepared == original_prepared
+        assert result['revision'] == before_session['runtime_revision'] + 1
+        assert result['execution_generation'] == before_session['runtime_generation'] + 1
+        stored = db.get_messages(sid)
+        assert len(stored) == 1 and not stored[0].get('_compressed_summary')
+        assert stored[0]['content'] == 'original reply and summary'
+        assert rt.mutate_runtime_session(db, **args) == result
+        assert db.get_messages(sid) == stored
