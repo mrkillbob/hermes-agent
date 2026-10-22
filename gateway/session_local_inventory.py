@@ -175,7 +175,10 @@ def session_inventory(authority, policy, agent, cwd, *, session_id=None):
                 info["skills"] = get_available_skills()
         with contextlib.suppress(Exception):
             from tools.mcp_tool_discovery import get_mcp_status
-            info["mcp_servers"] = get_mcp_status()
+            # Catalogs use the editor overlay; cached server health belongs to
+            # the owning profile, including when a caller has an ambient overlay.
+            with editor_mcp_inventory_scope(authority, None, session_id):
+                info["mcp_servers"] = get_mcp_status()
     with contextlib.suppress(Exception):
         from hermes_cli import __release_date__
         from hermes_cli.version_info import get_version_info

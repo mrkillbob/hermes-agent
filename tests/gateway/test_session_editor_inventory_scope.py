@@ -115,3 +115,69 @@ async def test_observers_refuse_a_frozen_overlay_bound_to_another_owner(catalogs
     with pytest.raises(RuntimeStoreError, match="acp_mcp_policy_conflict"):
         await c.read(surface, c.authority, "first", frozen)
     assert c.current_scope() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["a", "b"])
+@pytest.mark.parametrize("sid", ["first", "second"])
+async def test_inventory_catalog_overlay_does_not_hide_owning_profile_health(catalogs, monkeypatch, tmp_path,
+                                                                          profile, sid):
+    from agent.secret_scope import reset_multiplex_context, set_multiplex_context
+    from gateway.session_contract import SessionRef
+    from gateway.session_local_inventory import snapshot_info
+    from hermes_constants import hermes_home_key, reset_hermes_home_override, set_hermes_home_override
+    from tools import mcp_tool as core, mcp_tool_discovery as discovery
+    from tools.registry import session_tool_scope
+
+    c = catalogs
+    homes = {name: tmp_path / name for name in ("a", "b")}
+    for home in homes.values():
+        home.mkdir()
+    keys = {name: hermes_home_key(home) for name, home in homes.items()}
+    servers = {(keys[name], "profile-server"): SimpleNamespace(
+        session=object(), _registered_tool_names=[f"{name}-{i}" for i in range(count)], _sampling=None)
+        for name, count in (("a", 2), ("b", 3))}
+    monkeypatch.setattr(core, "_servers", servers)
+    monkeypatch.setattr(core, "_server_scope_keys", {key: key[0] for key in servers})
+    for name in ("_server_tool_scopes", "_server_connect_errors", "_lazy_server_tool_names",
+                 "_lazy_server_configs"):
+        monkeypatch.setattr(core, name, {})
+    monkeypatch.setattr(core, "_server_connecting", set())
+    status = discovery.get_mcp_status
+    # Only config loading is synthetic; the production status/visibility code
+    # reads real cached connection ledgers, never discovering or connecting.
+    monkeypatch.setattr(discovery, "get_mcp_status", lambda: status({"profile-server": {"command": "fixture"}}))
+    def forbidden(*args, **kwargs):
+        pytest.fail("inventory attempted MCP discovery or connection")
+    for name in ("_connect_server", "discover_mcp_tools", "register_mcp_servers"):
+        monkeypatch.setattr(discovery, name, forbidden)
+    c.authority.profile_id = str(homes["a"])
+    c.authority.runner.config = SimpleNamespace(multiplex_profiles=True)
+    from gateway.session_local_mcp import session_scope
+    c.scope = session_scope(c.authority, "first")
+    for name in c.names:
+        c.registry.register(name, c.toolset, c.schemas[name], lambda **kw: pytest.fail("observer executed a tool"),
+                            scope=c.scope)
+    owner = c.authority if profile == "a" else SimpleNamespace(
+        profile_id=str(homes["b"]), runner=SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True)),
+        sessions={}, agent=lambda ref: None)
+    frozen = c.policy(owner, sid)
+    owner.sessions[sid] = SimpleNamespace(source=SimpleNamespace(policy=frozen))
+    home_token = set_hermes_home_override(homes[profile])
+    multiplex_token = set_multiplex_context(True)
+    before, generation = dict(c.registry._scoped_tools), c.registry._generation
+    try:
+        # An ambient editor scope is also cleared for health and restored to its caller.
+        with session_tool_scope(c.scope):
+            result = await snapshot_info(owner, SessionRef(owner.profile_id, sid))
+            assert c.current_scope() == c.scope
+        assert result["tool_count"] == (4 if profile == "a" and sid == "first" else 0)
+        assert result["mcp_servers"] == [{"name": "profile-server", "transport": "stdio",
+                "tools": 2 if profile == "a" else 3, "connected": True, "disabled": False,
+                "status": "connected"}]
+        assert frozen.editor_mcp_json == c.policy(owner, sid).editor_mcp_json
+        assert c.registry._scoped_tools == before and c.registry._generation == generation
+        assert not hasattr(owner, "_editor_mcp_held")
+    finally:
+        reset_multiplex_context(multiplex_token)
+        reset_hermes_home_override(home_token)
