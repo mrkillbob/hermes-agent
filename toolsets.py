@@ -340,11 +340,12 @@ def bundle_non_core_tools(toolset_name: str) -> set[str]:
     return to_remove - core
 
 
-# Memo keyed on (name, include_registry, id(registry), registry generation, profile scope);
+# Memo keyed on (name, include_registry, id(registry), registry generation, catalog scope);
 # engages only at the public entry (visited is None). The scope is part of the key because a
 # multiplexed process resolves ``mcp-<server>`` per profile overlay: without it profile B got
-# profile A's tool names for a server B never connected (#106005).
-_resolve_toolset_memo: dict[tuple[str, bool, int, int, str], list[str]] = {}
+# profile A's tool names for a server B never connected (#106005). Session overlays
+# also affect the catalog without changing its profile or registry generation.
+_resolve_toolset_memo: dict[tuple[str, bool, int, int, tuple[str, Optional[str]]], list[str]] = {}
 
 
 def _plugin_platform_bundle(name: str) -> list[str]:
@@ -378,7 +379,7 @@ def resolve_toolset(name: str, visited: set[str] | None = None, *, include_regis
     """
     external_call = visited is None
     if external_call:
-        memo_key = (name, include_registry, *_registry_generation(), _registry_call("current_scope_key", ""))
+        memo_key = (name, include_registry, *_registry_generation(), _registry_call("current_cache_scope_key", ""))
         cached = _resolve_toolset_memo.get(memo_key)
         if cached is not None:
             return list(cached)
