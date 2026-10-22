@@ -648,16 +648,41 @@ export async function mintLocalGatewayTicket(endpoint: GatewayEndpoint, purpose:
   }
 
   return new Promise((resolve, reject) => {
+    const started = performance.now()
     const socket = net.createConnection(socketPath)
     let buffer = ''
-    const deadline = setTimeout(() => socket.destroy(new Error('Gateway ticket deadline')), 5000)
-    socket.on('error', () => reject(new Error('Gateway ticket bootstrap failed')))
+    let connected = false
+    let receivedData = false
+    let localFailure: 'deadline' | 'response_too_large' | undefined
+
+    const deadline = setTimeout(() => {
+      localFailure = 'deadline'
+      socket.destroy(new Error('Gateway ticket deadline'))
+    }, 5000)
+
+    socket.on('error', (error: NodeJS.ErrnoException) => {
+      // Native messages can contain private socket paths. Keep only fixed codes;
+      // the existing main-process stack logger receives bounded phase metadata.
+      const reason = localFailure || (['ECONNREFUSED', 'ECONNRESET', 'ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'EPIPE', 'ETIMEDOUT'].includes(error.code || '') ? error.code : 'socket_error')
+      const failure = Object.assign(new Error('Gateway ticket bootstrap failed'), { reason })
+      const elapsedMs = Math.min(60_000, Math.max(0, Math.round(performance.now() - started)))
+      failure.stack += `\n[gateway-ticket cause=${reason} elapsed_ms=${elapsedMs} connected=${connected} received_data=${receivedData}]`
+      reject(failure)
+    })
     socket.on('close', () => { clearTimeout(deadline); reject(new Error('Gateway ticket connection closed')) })
-    socket.on('connect', () => socket.write(JSON.stringify({ protocol: 1, id: 1, verb: 'session-ticket', params: { profile_id: home, instance_id: endpoint.instance_id, purpose, ...ticketScope(purpose) } }) + '\n'))
+    socket.on('connect', () => {
+      connected = true
+      socket.write(JSON.stringify({ protocol: 1, id: 1, verb: 'session-ticket', params: { profile_id: home, instance_id: endpoint.instance_id, purpose, ...ticketScope(purpose) } }) + '\n')
+    })
     socket.on('data', chunk => {
+      receivedData = true
       buffer += chunk.toString()
 
-      if (buffer.length > 65536) {return socket.destroy(new Error('Oversized gateway ticket response'))}
+      if (buffer.length > 65536) {
+        localFailure = 'response_too_large'
+
+        return socket.destroy(new Error('Oversized gateway ticket response'))
+      }
 
       if (!buffer.includes('\n')) {return}
 
