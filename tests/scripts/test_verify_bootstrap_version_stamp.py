@@ -173,15 +173,9 @@ def test_legacy_mode_never_excuses_required_or_invalid_receipts(tmp_path, case):
                       "timestamp-receipt": ("completedAt", "not-a-time")}[case]
         content[key] = value
         receipt.write_text(json.dumps(content), encoding="utf-8")
-    initial = head
-    if case == "unknown-initial":
-        initial = "c" * 40
-    elif case == "unrelated-initial":
+    initial = {"unknown-initial": "c" * 40, "branch-initial": "main", "abbreviated-initial": head[:12]}.get(case, head)
+    if case == "unrelated-initial":
         initial = _git(repo, "commit-tree", _git(repo, "rev-parse", "HEAD^{tree}"), "-m", "unrelated root")
-    elif case == "branch-initial":
-        initial = "main"
-    elif case == "abbreviated-initial":
-        initial = head[:12]
     result = _verify(repo, receipt,
         "--initial-windows-installer", initial,
         "--expect-commit", head,
