@@ -599,6 +599,7 @@ _BOUNDED_SLASH_WORDS = re.compile(
 )
 _MAX_BASE64_CANDIDATE_CHARS = 262_144
 _VALIDATED_TOOL_SYNTAX = {
+    "builtin_schema_keyword": re.compile(r"(?:YAML|EXISTING|YOUR|TURN|connectors__)"),
     "tool_protocol_identifier": re.compile(
         r"[A-Za-z0-9][A-Za-z0-9_.|:_-]{0,255}"
     ),
@@ -1297,11 +1298,8 @@ def _source_text_for_base64_scan(
             # SQL snippets in source comments/queries likewise use fixed
             # keywords whose short uppercase spelling can decode by chance.
             or source_atom in {"PROVIDER", "TOOLSETS", "OPEN", "LIKE", "YAML"}
-            # Built-in tool descriptions (delegate_task, memory/kanban entry
-            # editing, write_file, MCP tool-call batching) use these fixed
-            # words/prefixes in ordinary English guidance. They are Hermes's
-            # own generated tool schema text, not encoded payloads, even
-            # though their spelling happens to decode canonically.
+            # Fixed builtin schema words can decode canonically by chance;
+            # source/generated context uses them as ordinary prose.
             or source_atom in {"COMPLETE", "EXISTING", "YOUR", "connectors__"}
         )
 

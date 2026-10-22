@@ -79,6 +79,7 @@ from agent.llm_egress_terminal import (
     _scratch_read_file_tool_call_ids,
 )
 from agent.llm_egress_cron import project_cron_list
+from agent.llm_egress_schema import type_builtin_schema_words
 from agent.message_sanitization import tool_result_id_variants
 from agent.redact import redact_sensitive_text
 from agent.source_provenance import DEFAULT_POLICY_DIGEST, SourceProvenanceError, SourceProvenanceRegistry
@@ -1035,7 +1036,7 @@ def authorize_agent_sdk_kwargs(
         request_identity=(session_id, turn_id, request_id, policy_digest),
     )
     request = TypedOutboundRequest(
-        payload=project_cron_list(body, typed_body, protected_kanban_remote),
+        payload=type_builtin_schema_words(body, project_cron_list(body, typed_body, protected_kanban_remote)),
         session_id=session_id,
         turn_id=turn_id,
         request_id=request_id,
