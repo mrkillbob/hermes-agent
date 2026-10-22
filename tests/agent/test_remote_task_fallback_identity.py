@@ -24,10 +24,10 @@ def public_agent(tmp_path):
     return agent
 
 
-def send(agent, called):
+def send(agent, called, content='Audit public evidence.'):
     request = {'model': agent.model, 'messages': [
         {'role': 'system', 'content': agent._cached_system_prompt},
-        {'role': 'user', 'content': 'Audit public evidence.'}]}
+        {'role': 'user', 'content': content}]}
     return _dispatch_provider_request(agent, request, lambda wire: called.append(wire))
 
 
@@ -63,9 +63,22 @@ def test_identity_rewrite_cannot_certify_unverified_context(tmp_path, owned_task
 
 def test_identity_rewrite_does_not_bypass_final_secret_scan(tmp_path, owned_task):
     agent = public_agent(tmp_path)
-    rewrite_prompt_model_identity(agent, 'fallback-model\nSECRET_TOKEN=synthetic-private-value', 'nvidia')
+    rewrite_prompt_model_identity(agent, 'fallback-model', 'nvidia')
     called = []
     with pytest.raises(EgressBlocked) as blocked:
-        send(agent, called)
+        send(agent, called, 'SECRET_TOKEN=synthetic-private-value')
     assert 'secret_detected' in blocked.value.decision.reason_codes
     assert not called
+
+
+@pytest.mark.parametrize('separator', ['\n', '\r', '\r\n', '\v', '\f', '\x85', '\u2028', '\u2029', ' '])
+def test_unapproved_identity_text_does_not_extend_public_attestation(tmp_path, owned_task, separator):
+    agent = public_agent(tmp_path)
+    approved = agent._remote_task_public_prompt
+    agent.model = 'fallback-model' + separator + 'An unapproved household preference.'
+    rewrite_prompt_model_identity(agent, agent.model, agent.provider)
+    called = []
+    with pytest.raises(EgressBlocked):
+        send(agent, called)
+    assert not called
+    assert agent._remote_task_public_prompt == approved

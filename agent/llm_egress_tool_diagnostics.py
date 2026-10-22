@@ -3,6 +3,7 @@
 from collections import Counter
 from collections.abc import Mapping
 import re
+from typing import NamedTuple
 
 from agent.llm_egress_cron import _json_object
 from agent.llm_egress_firewall import (
@@ -34,13 +35,15 @@ def _diagnostic(agent, name, text):
         or len(valid) > 512
         or not all(isinstance(n, str) and _TOOL_NAME.fullmatch(n) for n in valid)
         or name in valid
-        or not _TOOL_NAME.fullmatch(name)
+        or (bool(name.strip()) and not _TOOL_NAME.fullmatch(name))
     ):
         return None
     from agent.conversation_loop import _invalid_tool_name_error_content
 
     if text != _invalid_tool_name_error_content(name, valid):
         return None
+    if not name.strip():
+        return SanitizedSegment(text)
     catalog = _segment_protected_context(
         ", ".join(sorted(valid)), (), {}, sanitized_cap=32768
     )
@@ -70,36 +73,124 @@ def _empty_read(text, available):
     return GeneratedContextSegment(text)
 
 
-def _call_names(messages):
-    counts = Counter()
-    names = {}
-    results = Counter()
-    for message in messages:
+class _Entry(NamedTuple):
+    kind: str
+    call_id: str
+    name: str | None
+    path: tuple
+    value: Mapping
+    native: bool = False
+
+
+def _openai_calls(message, index):
+    calls = message.get("tool_calls")
+    for position, call in enumerate(calls if isinstance(calls, list) else ()):
+        if not isinstance(call, Mapping) or not isinstance(call.get("id"), str):
+            continue
+        function = call.get("function")
+        name = (
+            function.get("name")
+            if call.get("type") == "function" and isinstance(function, Mapping)
+            else None
+        )
+        yield _Entry(
+            "call",
+            call["id"],
+            name if isinstance(name, str) else None,
+            (index, "tool_calls", position, "function"),
+            function,
+        )
+
+
+def _native_entries(message, index):
+    blocks = message.get("content")
+    for position, block in enumerate(blocks if isinstance(blocks, list) else ()):
+        if not isinstance(block, Mapping):
+            continue
+        path = (index, "content", position)
+        if (
+            message.get("role") == "assistant"
+            and block.get("type") == "tool_use"
+            and isinstance(block.get("id"), str)
+        ):
+            name = block.get("name")
+            yield _Entry(
+                "call",
+                block["id"],
+                name if isinstance(name, str) else None,
+                path,
+                block,
+                True,
+            )
+        elif (
+            message.get("role") == "user"
+            and block.get("type") == "tool_result"
+            and isinstance(block.get("tool_use_id"), str)
+        ):
+            yield _Entry("result", block["tool_use_id"], None, path, block, True)
+
+
+def _frame_entries(messages):
+    for index, message in enumerate(messages):
         if not isinstance(message, Mapping):
             continue
-        calls = (
-            message.get("tool_calls") if message.get("role") == "assistant" else None
-        )
-        for call in calls if isinstance(calls, list) else ():
-            if not isinstance(call, Mapping) or not isinstance(call.get("id"), str):
-                continue
-            cid = call["id"]
-            counts[cid] += 1
-            fn = call.get("function")
-            if (
-                call.get("type") == "function"
-                and isinstance(fn, Mapping)
-                and isinstance(fn.get("name"), str)
-            ):
-                names[cid] = fn["name"]
-        cid = message.get("tool_call_id")
-        if message.get("role") == "tool" and isinstance(cid, str):
-            results[cid] += 1
-    return counts, results, names
+        if message.get("role") == "assistant":
+            yield from _openai_calls(message, index)
+        elif message.get("role") == "tool" and isinstance(
+            message.get("tool_call_id"), str
+        ):
+            yield _Entry("result", message["tool_call_id"], None, (index,), message)
+        yield from _native_entries(message, index)
+
+
+def _at_path(value, path):
+    try:
+        for key in path:
+            value = value[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return value
+
+
+def _replace_at(value, path, replacement):
+    if not path:
+        return replacement
+    key, *rest = path
+    copied = dict(value) if isinstance(value, Mapping) else list(value)
+    copied[key] = _replace_at(value[key], rest, replacement)
+    return copied
+
+
+def _project_result(agent, entry, call, typed_result):
+    name, raw = call.name, entry.value
+    if (
+        name is None
+        or call.native != entry.native
+        or (call.native and call.path[0] + 1 != entry.path[0])
+        or any(raw.get(label) not in (None, name) for label in ("name", "tool_name"))
+        or not isinstance(typed_result, Mapping)
+        or not isinstance(typed_result.get("content"), UntrustedProvenanceSegment)
+        or not isinstance(raw.get("content"), str)
+    ):
+        return None
+    content = raw["content"]
+    result = (
+        _empty_read(content, getattr(agent, "valid_tool_names", None))
+        if name == "read_file"
+        else _diagnostic(agent, name, content)
+    )
+    if result is None:
+        return None
+    projected = {**typed_result, "content": result}
+    if not name.strip():
+        for label in ("name", "tool_name"):
+            if raw.get(label) == name:
+                projected[label] = SanitizedSegment(raw[label])
+    return projected
 
 
 def type_tool_diagnostics(agent, body, typed_body, enabled):
-    """Keep exact diagnostic bytes only after unique preceding-call validation."""
+    """Retype only unique preceding call/result pairs across both wire formats."""
     if not enabled:
         return typed_body
     messages, typed = body.get("messages"), typed_body.get("messages")
@@ -109,46 +200,35 @@ def type_tool_diagnostics(agent, body, typed_body, enabled):
         or len(messages) != len(typed)
     ):
         return typed_body
-    counts, results, names = _call_names(messages)
-    seen = set()
+    entries = list(_frame_entries(messages))
+    calls = Counter(e.call_id for e in entries if e.kind == "call")
+    results = Counter(e.call_id for e in entries if e.kind == "result")
+    preceding = {}
     output = list(typed)
-    for index, message in enumerate(messages):
-        if not isinstance(message, Mapping):
+    for entry in entries:
+        if entry.kind == "call":
+            preceding[entry.call_id] = entry
             continue
-        if message.get("role") == "assistant":
-            calls = message.get("tool_calls")
-            if isinstance(calls, list):
-                seen.update(
-                    call.get("id")
-                    for call in calls
-                    if isinstance(call, Mapping) and isinstance(call.get("id"), str)
-                )
-            continue
-        cid = message.get("tool_call_id")
-        name = names.get(cid) if isinstance(cid, str) else None
-        typed_message = typed[index]
+        call = preceding.get(entry.call_id)
         if (
-            message.get("role") != "tool"
-            or not name
-            or not cid
-            or cid not in seen
-            or counts[cid] != 1
-            or results[cid] != 1
-            or any(
-                message.get(label) not in (None, name)
-                for label in ("name", "tool_name")
-            )
-            or not isinstance(typed_message, Mapping)
-            or not isinstance(typed_message.get("content"), UntrustedProvenanceSegment)
-            or not isinstance(message.get("content"), str)
+            not call
+            or not entry.call_id
+            or calls[entry.call_id] != 1
+            or results[entry.call_id] != 1
         ):
             continue
-        content = message["content"]
-        result = (
-            _empty_read(content, getattr(agent, "valid_tool_names", None))
-            if name == "read_file"
-            else _diagnostic(agent, name, content)
-        )
-        if result is not None:
-            output[index] = {**typed_message, "content": result}
+        typed_call = _at_path(output, call.path)
+        if not isinstance(typed_call, Mapping):
+            continue
+        projected = _project_result(agent, entry, call, _at_path(output, entry.path))
+        if projected is not None:
+            output = _replace_at(output, entry.path, projected)
+            if not call.name.strip():
+                # The fixed empty-name correction proves absence, not a new
+                # identifier grammar. Preserve its exact blank bytes only here.
+                output = _replace_at(
+                    output,
+                    call.path,
+                    {**typed_call, "name": SanitizedSegment(call.name)},
+                )
     return {**typed_body, "messages": output}

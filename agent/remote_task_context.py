@@ -127,7 +127,10 @@ def rewrite_prompt_model_identity(agent, model: str, provider: str) -> None:
         return
     public_context = (getattr(agent, '_remote_task_context_mode', None) == 'public'
                       and getattr(agent, '_remote_task_public_prompt', None) == sp
-                      and getattr(agent, '_remote_task_history_unverified', False) is not True)
+                      and getattr(agent, '_remote_task_history_unverified', False) is not True
+                      and all(isinstance(value, str) and value and value.isprintable()
+                              and not any(char.isspace() for char in value)
+                              for value in (model, provider)))
     for label, value in (("Model", model), ("Provider", provider)):
         if not value:
             continue
