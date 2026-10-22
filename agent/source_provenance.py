@@ -100,6 +100,7 @@ class SourceProvenanceRegistry:
         turn_id: str,
         request_id: str,
         policy_digest: str,
+        _reuse_existing: bool = False,
     ) -> SourceGrant:
         """Grant exactly the current canonical bytes, or reject the producer.
 
@@ -197,10 +198,19 @@ class SourceProvenanceRegistry:
             request_id=request_id,
             policy_digest=policy_digest,
         )
+        return self._store_verified_grant(grant, reuse_existing=_reuse_existing)
+
+    def _store_verified_grant(self, grant: SourceGrant, *, reuse_existing: bool) -> SourceGrant:
+        """Only fully reverified replay grants may reuse an exact current proof."""
         with self._lock:
-            if len(self._grants.get(request_id, ())) >= MAX_GRANTS_PER_REQUEST:
+            current = self._grants.get(grant.request_id, ())
+            if reuse_existing:
+                for existing in current:
+                    if existing == grant:
+                        return existing
+            if len(current) >= MAX_GRANTS_PER_REQUEST:
                 raise SourceProvenanceError("grant_limit_exceeded")
-            self._grants.setdefault(request_id, []).append(grant)
+            self._grants.setdefault(grant.request_id, []).append(grant)
         return grant
 
     @contextmanager
@@ -301,6 +311,7 @@ class SourceProvenanceRegistry:
                 turn_id=turn_id,
                 request_id=request_id,
                 policy_digest=policy_digest,
+                _reuse_existing=True,
             )
         except (OSError, SourceProvenanceError):
             return None

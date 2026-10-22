@@ -70,6 +70,35 @@ def source_presentation_matches(segment, grant, raw_text):
     return isinstance(parsed, dict) and parsed.get('content') in expected
 
 
+def _current_presentation_grants(metadata, grant_texts, registry, identity):
+    """Recover exact current identities lost by the generic text-deduplicated view."""
+    from agent.llm_egress_terminal import _read_grant_text
+
+    if metadata.get('request_id') != identity.get('request_id'):
+        return {}
+    owner = tuple(identity.get(key) for key in ('session_id', 'turn_id', 'request_id', 'policy_digest'))
+    allowed = {value for value in metadata['source_grant_digests'] if isinstance(value, str)}
+    texts = {source_grant_digest(grant): raw for raw, grant in grant_texts}
+    issued = (registry.grants_for_request(identity['request_id']) if registry is not None
+              else tuple(grant for _, grant in grant_texts))
+    current = {}
+    for grant in issued:
+        digest = source_grant_digest(grant)
+        if (digest not in allowed or
+                (grant.session_id, grant.turn_id, grant.request_id, grant.policy_digest) != owner):
+            continue
+        raw = texts.get(digest)
+        if raw is None:
+            raw = _read_grant_text(grant)
+        if raw is None:
+            continue
+        encoded = raw.encode('utf-8')
+        if len(encoded) != grant.byte_count or sha256(encoded).hexdigest() != grant.content_sha256:
+            continue
+        current[digest] = (raw, grant)
+    return current
+
+
 def _guidance_grants(metadata, grant_texts, registry, identity):
     """A replay must re-verify an earlier validated grant under the same owner turn."""
     from agent.llm_egress_terminal import _read_grant_text
@@ -77,8 +106,7 @@ def _guidance_grants(metadata, grant_texts, registry, identity):
     allowed = metadata.get('source_grant_digests')
     if not isinstance(allowed, (tuple, list)):
         return {}
-    current = {source_grant_digest(grant): (text, grant) for text, grant in grant_texts
-               if grant.request_id == metadata.get('request_id')}
+    current = _current_presentation_grants(metadata, grant_texts, registry, identity)
     selected = {}
     for digest in allowed:
         if not isinstance(digest, str):
@@ -135,19 +163,23 @@ def segment_read_with_context(text, metadata, grant_texts, used_grants, *, regis
     if not _HEADER.match(text, end):
         return denied
     prefix, remaining = text[:end], text[end:]
-    prefix_metadata = {**metadata, 'presentation_kind': 'read_file_json_v1',
-                       'content_sha256': sha256(prefix.encode('utf-8')).hexdigest()}
     identity = dict(session_id=session_id, turn_id=turn_id, request_id=request_id,
                     policy_digest=policy_digest)
     collected = {}
-    # Duplicate grants for the same canonical read do not create a second source identity.
-    unique = {source_grant_digest(grant): (raw, grant) for raw, grant in grant_texts}
+    # Re-verify each original proof once, then share those current-request
+    # grants between the JSON prefix and guidance parsers.
+    grants = _guidance_grants(metadata, grant_texts, registry, identity)
+    prefix_metadata = {
+        **metadata, 'presentation_kind': 'read_file_json_v1',
+        'content_sha256': sha256(prefix.encode('utf-8')).hexdigest(),
+        'request_id': request_id,
+        'source_grant_digests': tuple(source_grant_digest(grant) for _, grant in grants.values()),
+    }
     first = _segment_read_file_presentation(
-        prefix, prefix_metadata, tuple(unique.values()), collected, registry=registry, **identity,
+        prefix, prefix_metadata, tuple(grants.values()), collected, registry=registry, **identity,
     )
     if not isinstance(first, SourcePresentationSegment):
         return denied
-    grants = _guidance_grants(metadata, tuple(unique.values()), registry, identity)
     segments, seen = [first], set()
     while remaining:
         piece = _hint_piece(remaining, grants, seen, collected[first.source_grant_digest].canonical_path)
