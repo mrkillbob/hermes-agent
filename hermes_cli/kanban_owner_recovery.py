@@ -49,8 +49,8 @@ def bound_interpreter_gone(conn, task_id):
     return not _worker_alive(bound.get('pid'), bound.get('started_at'))
 
 
-def managed_run_exit_code(conn, task_id, worker_pid, claim_lock):
-    """The exit code a managed run's authority recorded for the task's CURRENT run, else None.
+def managed_run_result(conn, task_id, worker_pid, claim_lock):
+    """The result a managed run's authority recorded for the task's CURRENT run, else None.
 
     Managed interpreters are children of the authority, not the dispatcher, so their result is
     read from the run's ``worker_result`` event (it survives a dispatcher restart and cannot be
@@ -70,4 +70,4 @@ def managed_run_exit_code(conn, task_id, worker_pid, claim_lock):
 
     result, bound = latest('worker_result'), latest('worker_bound')
     pids = {worker_pid, *([bound.get('pid')] if bound.get('claim_lock') == claim_lock else [])}
-    return result.get('exit_code') if result.get('claim_lock') == claim_lock and result.get('pid') in pids else None
+    return result if result.get('claim_lock') == claim_lock and result.get('pid') in pids else None

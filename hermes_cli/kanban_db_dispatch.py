@@ -1092,7 +1092,7 @@ class _DeadWorker:
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], exit_code=None, *, task_id: Optional[str] = None,
-    board: Optional[str] = None,
+    board: Optional[str] = None, owner_result: Optional[dict] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
@@ -1100,9 +1100,9 @@ def _classify_dead_worker(
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
-    dead = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board)
+    dead = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, owner_result=owner_result)
     if task_id and not dead.rate_limited:
-        worker_output = _worker_final_output(task_id, board=board)
+        worker_output = owner_result.get('last_output') if owner_result is not None else _worker_final_output(task_id, board=board)
         if worker_output:
             dead.error_text += f" Worker's last output: {worker_output!r}"
             dead.event_payload["worker_output"] = worker_output
@@ -1116,15 +1116,14 @@ def _classify_dead_worker_exit(
     *,
     task_id: Optional[str] = None,
     board: Optional[str] = None,
+    owner_result: Optional[dict] = None,
 ) -> _DeadWorker:
     """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
 
-    ``exit_code`` is the authority's exact-run result for a managed worker (a child of the
-    profile owner, never of this dispatcher, so it cannot be reaped here). Otherwise the reap
-    registry only knows children of THIS process; a per-tick dispatcher reads the exit trailer
-    the worker left in its log instead, so the same death gets the same booking (protocol
-    violation / rate-limit requeue / crash) as under the gateway-embedded dispatcher. A worker
-    that never reached its exit epilogue (killed, OOM) leaves no trailer and stays a plain crash.
+    A managed worker belongs to the profile owner, so its validated exact-run result supplies
+    the exit code and terminal diagnosis. Its own output, never an older append-only log,
+    supplies legacy diagnostics. Unmanaged workers use this dispatcher's reap registry or
+    their logged exit trailer. A killed/OOM worker with neither remains an ordinary crash.
     """
     kind, code = _classify_worker_exit(pid)
     if exit_code is not None:
@@ -1134,8 +1133,8 @@ def _classify_dead_worker_exit(
         if logged is not None:
             kind, code = _exit_code_kind(logged)
     if task_id:
-        from hermes_cli.kanban_provider_errors import _provider_terminal_error_text
-        terminal = _provider_terminal_error_text(task_id)
+        from hermes_cli.kanban_provider_errors import _provider_terminal_error_text, owner_terminal_error
+        terminal = owner_terminal_error(owner_result) if owner_result is not None else _provider_terminal_error_text(task_id)
         if terminal is not None:
             error, failure_class = terminal
             return _DeadWorker(
@@ -1216,7 +1215,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
         host_prefix = _kb._host_prefix()
-        from hermes_cli.kanban_owner_recovery import bound_interpreter_gone, managed_run_exit_code, owner_reclaim_paused
+        from hermes_cli.kanban_owner_recovery import bound_interpreter_gone, managed_run_result, owner_reclaim_paused
         for row in rows:
             lock = row["claim_lock"] or ""
             if not lock.startswith(host_prefix):
@@ -1235,8 +1234,9 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
 
             pid = int(row["worker_pid"])
             # A managed run's authority-recorded exit (its bound interpreter's, under this claim).
-            exit_code = managed_run_exit_code(conn, row["id"], pid, row["claim_lock"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board)
+            owner_result = managed_run_result(conn, row["id"], pid, row["claim_lock"])
+            exit_code = owner_result.get('exit_code') if owner_result is not None else None
+            dead = _classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board, owner_result=owner_result)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(

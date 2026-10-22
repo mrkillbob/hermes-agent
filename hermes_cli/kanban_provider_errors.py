@@ -120,6 +120,36 @@ def _provider_terminal_error_text(task_id: str) -> tuple[str, str] | None:
     tail = _current_worker_log_tail(task_id)
     if tail is None:
         return None
+    return _terminal_error_from_text(tail)
+
+
+def owner_failure_fields(result: object) -> dict:
+    """Persist only the owner's typed policy verdict and bounded public reason codes."""
+    if (not isinstance(result, dict) or result.get('interrupted')
+            or result.get('failure_reason') != 'egress_policy_blocked'
+            or not (result.get('failed') or result.get('partial') or result.get('completed') is False)):
+        return {}
+    codes = result.get('egress_reason_codes')
+    codes = codes if isinstance(codes, (list, tuple)) else ()
+    reasons = list(dict.fromkeys(code for code in codes
+                                if isinstance(code, str) and code in _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS))
+    return {'failure_class': 'provider_egress_blocked', 'egress_reason_codes': reasons}
+
+
+def owner_terminal_error(result: dict) -> tuple[str, str] | None:
+    """An exact-attempt result dominates append-only output from older attempts."""
+    if result.get('failure_class') == 'provider_egress_blocked':
+        codes = result.get('egress_reason_codes')
+        codes = codes if isinstance(codes, (list, tuple)) else ()
+        reasons = tuple(dict.fromkeys(code for code in codes
+                                     if isinstance(code, str) and code in _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS))
+        reason = ','.join(reasons) or 'policy_denied'
+        return f'provider egress blocked: LLM egress blocked: {reason}', 'provider_egress_blocked'
+    output = result.get('last_output')
+    return _terminal_error_from_text(output if isinstance(output, str) else '')
+
+
+def _terminal_error_from_text(tail: str) -> tuple[str, str] | None:
     match = _PROVIDER_EGRESS_BLOCK_RE.search(tail)
     if match is not None:
         reasons = tuple(dict.fromkeys(match.group(1).casefold().split(",")))
