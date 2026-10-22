@@ -4,7 +4,10 @@ from threading import Event, Thread
 
 import pytest
 from hermes_cli import kanban_db
-from hermes_cli.kanban_db_boards import board_ownership_lock
+from hermes_cli.kanban_db_boards import (
+    board_ownership_lock,
+    board_project_ownership_lock,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +27,23 @@ def test_mutation_refusal_precedes_lock_or_directory_creation(tmp_path, monkeypa
     assert not directory.exists()
 
 
+def test_default_metadata_refusal_precedes_catalog_lock_creation(tmp_path, monkeypatch):
+    def refuse(target):
+        raise PermissionError('existing mutation fence')
+
+    monkeypatch.setattr(kanban_db, '_assert_not_delegated_child_mutation', refuse)
+    runtime = tmp_path / 'runtime'
+    with pytest.raises(PermissionError, match='existing mutation fence'):
+        kanban_db.write_board_metadata(None, name='No mutation')
+    assert not runtime.exists()
+
+
+def test_catalog_is_a_valid_board_slug_without_lock_recursion():
+    meta = kanban_db.create_board('catalog', project_id='p_catalog')
+    assert meta['project_id'] == 'p_catalog'
+    assert kanban_db.read_board_metadata('catalog')['project_id'] == 'p_catalog'
+
+
 def test_different_board_writer_remains_independent():
     done = Event()
     errors = []
@@ -41,6 +61,36 @@ def test_different_board_writer_remains_independent():
     worker.join(10)
     assert independent and not errors
     assert kanban_db.read_board_metadata('other')['project_id'] == 'p_other'
+
+
+def test_public_display_metadata_marker_waits_for_catalog_inventory_lock():
+    # A display-only update can publish board.json into a DB-only directory.
+    # That changes list_boards() even though project_id is omitted, so it must
+    # be fenced by the same catalog lock as owner-bearing creation.
+    directory = kanban_db.board_dir('late-marker')
+    directory.mkdir(parents=True)
+    started = Event()
+    done = Event()
+    errors = []
+
+    def publish_marker():
+        started.set()
+        try:
+            kanban_db.write_board_metadata('late-marker', name='Late Marker')
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    with board_project_ownership_lock():
+        worker = Thread(target=publish_marker, daemon=True)
+        worker.start()
+        assert started.wait(5)
+        assert not done.wait(0.1)
+        assert not kanban_db.board_metadata_path('late-marker').exists()
+    worker.join(10)
+    assert done.is_set() and not errors
+    assert kanban_db.read_board_metadata('late-marker')['name'] == 'Late Marker'
 
 
 def test_direct_internal_writer_retains_mutation_fence(monkeypatch):

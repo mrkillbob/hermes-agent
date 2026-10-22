@@ -1,0 +1,633 @@
+"""The one exact same-root legacy registration can be retired without rewriting history."""
+
+import json
+import sqlite3
+import stat
+import subprocess
+import threading
+
+import pytest
+
+from hermes_cli import kanban_db as kb, kanban_transfer, projects_db
+from hermes_cli.kanban_db_connect import connect_closing
+from hermes_cli.sqlite_util import write_txn
+
+
+@pytest.fixture
+def duplicate(tmp_path, monkeypatch):
+    root = tmp_path.resolve() / "root"
+    profile = root / "profiles" / "task-orchestrator"
+    profile.mkdir(parents=True)
+    (profile / "profile.yaml").write_text("name: task-orchestrator\n")
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(root))
+    repo = tmp_path.resolve() / "Hermes-agent"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    with projects_db.connect_closing(root / "projects.db") as conn:
+        canonical_id = projects_db.create_project(
+            conn,
+            name="Hermes Agent",
+            slug="hermes-agent",
+            primary_path=str(repo),
+            board_slug="default",
+        )
+    with projects_db.connect_closing(profile / "projects.db") as conn:
+        legacy_id = projects_db.create_project(
+            conn, name="hermes-agent", slug="hermes-agent"
+        )
+        with projects_db.write_txn(conn):
+            conn.execute(
+                "UPDATE projects SET id=?, primary_path=? WHERE id=?",
+                ("p_7848dc64", str(repo), legacy_id),
+            )
+        projects_db.add_folder(conn, "p_7848dc64", str(repo), is_primary=True)
+        legacy_id = "p_7848dc64"
+        legacy = dict(
+            conn.execute("SELECT * FROM projects WHERE id=?", (legacy_id,)).fetchone()
+        )
+        folder = dict(
+            conn.execute(
+                "SELECT * FROM project_folders WHERE project_id=?", (legacy_id,)
+            ).fetchone()
+        )
+    kb.create_board("default", project_id=canonical_id, default_workdir=str(repo))
+    kb.create_board("tradingbot-burndown")
+
+    # The card is created as the named profile, so project resolution must use
+    # that profile's registry rather than the canonical root registry.
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    task_id = "t_1d9b678d"
+    worktree = "/Users/mikedemott/hermes-agent/.worktrees/t_1d9b678d"
+    branch = "hermes-agent/t_1d9b678d-audit-review-upstream-pr-118213-probe-bo"
+    with connect_closing(board="default") as conn:
+        created = kb.create_task(
+            conn,
+            title="Retained completed audit card",
+            project_id=legacy_id,
+            board="default",
+            workspace_kind="worktree",
+            workspace_path=worktree,
+            branch_name=branch,
+        )
+        if created != task_id:
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET id=? WHERE id=?", (task_id, created))
+                conn.execute(
+                    "UPDATE task_events SET task_id=? WHERE task_id=?",
+                    (task_id, created),
+                )
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (task_id,))
+            conn.execute(
+                "INSERT INTO task_runs (task_id,status,started_at,ended_at,outcome) VALUES (?,?,?,?,?)",
+                (task_id, "done", 1, 2, "completed"),
+            )
+            for index in range(7):
+                conn.execute(
+                    "INSERT INTO task_events (task_id,kind,payload,created_at) VALUES (?,?,?,?)",
+                    (
+                        task_id,
+                        "retained-fixture-event",
+                        json.dumps({"ordinal": index}),
+                        index + 2,
+                    ),
+                )
+
+    expected_refs = {
+        "default": [
+            {
+                "id": task_id,
+                "status": "done",
+                "project_id": legacy_id,
+                "workspace_kind": "worktree",
+                "workspace_path": worktree,
+                "branch_name": branch,
+                "current_run_id": None,
+                "claim_lock": None,
+                "claim_expires": None,
+                "worker_pid": None,
+                "run_count": 1,
+                "event_count": 8,
+            }
+        ],
+        "tradingbot-burndown": [],
+    }
+    return {
+        "source_registry": root / "projects.db",
+        "target_registry": profile / "projects.db",
+        "target_profile": "task-orchestrator",
+        "expected_project_id": canonical_id,
+        "expected_root": repo,
+        "expected_board": "default",
+        "legacy_project_id": legacy_id,
+        "expected_legacy_project": legacy,
+        "expected_legacy_folders": [folder],
+        "expected_active_id": None,
+        "expected_boards": ("default", "tradingbot-burndown"),
+        "expected_references": expected_refs,
+        "backup_path": tmp_path.resolve() / "receipt.json",
+        "task_id": task_id,
+    }
+
+
+def reconcile(args):
+    from hermes_cli.projects_reconcile import retire_exact_duplicate_and_adopt
+
+    return retire_exact_duplicate_and_adopt(**args)
+
+
+def test_root_operator_cli_reconciles_exact_reviewed_duplicate(
+    duplicate, monkeypatch, capsys
+):
+    import argparse
+
+    from hermes_cli.projects_cmd import build_parser, projects_command
+
+    monkeypatch.setenv("HERMES_HOME", str(duplicate["source_registry"].parent))
+    expectation_path = duplicate["backup_path"].with_name("expectations.json")
+    expectations = {
+        key: duplicate[key]
+        for key in (
+            "expected_project_id",
+            "expected_root",
+            "expected_board",
+            "expected_legacy_project",
+            "expected_legacy_folders",
+            "expected_active_id",
+            "expected_boards",
+            "expected_references",
+        )
+    }
+    expectations["expected_root"] = str(expectations["expected_root"])
+    expectations["expected_boards"] = list(expectations["expected_boards"])
+    expectation_path.write_text(json.dumps(expectations))
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(
+        [
+            "project",
+            "canonicalize-duplicate",
+            duplicate["legacy_project_id"],
+            "--target-profile",
+            duplicate["target_profile"],
+            "--expectations",
+            str(expectation_path),
+            "--receipt",
+            str(duplicate["backup_path"]),
+        ]
+    )
+
+    assert projects_command(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "canonicalized"
+    assert result["retired_project_id"] == duplicate["legacy_project_id"]
+    assert duplicate["backup_path"].is_file()
+    with projects_db.connect_closing(duplicate["target_registry"]) as conn:
+        assert (
+            projects_db.get_project(conn, duplicate["expected_project_id"]) is not None
+        )
+
+
+def test_root_operator_cli_refuses_named_profile_context(
+    duplicate, monkeypatch, capsys
+):
+    import argparse
+
+    from hermes_cli.projects_cmd import build_parser, projects_command
+
+    monkeypatch.setenv("HERMES_HOME", str(duplicate["target_registry"].parent))
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(
+        [
+            "project",
+            "canonicalize-duplicate",
+            duplicate["legacy_project_id"],
+            "--target-profile",
+            duplicate["target_profile"],
+            "--expectations",
+            str(duplicate["backup_path"].with_name("missing-expectations.json")),
+            "--receipt",
+            str(duplicate["backup_path"]),
+        ]
+    )
+
+    assert projects_command(args) == 2
+    assert "root-profile operator" in capsys.readouterr().err
+    assert not duplicate["backup_path"].exists()
+
+
+def test_exact_duplicate_is_retired_without_rewriting_history_or_board(duplicate):
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    with projects_db.connect_closing(args["source_registry"]) as conn, write_txn(conn):
+        conn.execute(
+            "UPDATE projects SET description=?, icon=?, color=? WHERE id=?",
+            (
+                "preserve source metadata",
+                "folder",
+                "#123abc",
+                args["expected_project_id"],
+            ),
+        )
+    source_before = args["source_registry"].read_bytes()
+    board_before = kb.board_metadata_path("default").read_bytes()
+    with connect_closing(board="default") as conn:
+        history_before = kanban_transfer._selected_task_rows(
+            conn, [duplicate["task_id"]]
+        )
+
+    result = reconcile(args)
+
+    assert result["status"] == "canonicalized"
+    assert result["project_id"] == args["expected_project_id"]
+    assert result["retired_project_id"] == args["legacy_project_id"]
+    assert args["backup_path"].is_file()
+    assert stat.S_IMODE(args["backup_path"].stat().st_mode) == 0o600
+    receipt = json.loads(args["backup_path"].read_text())
+    assert receipt["target_before"]["projects"] == [args["expected_legacy_project"]]
+    assert (
+        receipt["target_before"]["project_folders"] == args["expected_legacy_folders"]
+    )
+    assert receipt["references"]["default"]["tasks"][0]["id"] == duplicate["task_id"]
+
+    with projects_db.connect_closing(args["target_registry"]) as conn:
+        canonical = projects_db.get_project(conn, args["expected_project_id"])
+        retired = projects_db.get_project(conn, args["legacy_project_id"])
+        assert (
+            canonical
+            and canonical.board_slug == "default"
+            and canonical.primary_path == str(args["expected_root"])
+            and canonical.description == "preserve source metadata"
+            and canonical.icon == "folder"
+            and canonical.color == "#123abc"
+        )
+        assert retired and retired.archived and retired.primary_path is None
+        assert retired.slug == "hermes-agent-retired-p_7848dc64"
+        assert retired.folders == []
+        assert projects_db.get_active_id(conn) is None
+    assert args["source_registry"].read_bytes() == source_before
+    assert kb.board_metadata_path("default").read_bytes() == board_before
+    with connect_closing(board="default") as conn:
+        assert (
+            kanban_transfer._selected_task_rows(conn, [duplicate["task_id"]])
+            == history_before
+        )
+
+
+@pytest.mark.parametrize("active", [None, "p_7848dc64", "unrelated-active"])
+def test_active_selection_is_preserved_or_repointed_only_for_retired_identity(
+    duplicate, active
+):
+    with projects_db.connect_closing(duplicate["target_registry"]) as conn:
+        if active is not None:
+            projects_db.set_active(conn, active)
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    args["expected_active_id"] = active
+    reconcile(args)
+    with projects_db.connect_closing(args["target_registry"]) as conn:
+        expected = (
+            args["expected_project_id"]
+            if active == args["legacy_project_id"]
+            else active
+        )
+        assert projects_db.get_active_id(conn) == expected
+
+
+def _seed_nonterminal(duplicate):
+    with connect_closing(board="default") as conn, kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status='ready' WHERE id=?", (duplicate["task_id"],)
+        )
+
+
+def _seed_residual_claim_expiry(duplicate):
+    with connect_closing(board="default") as conn, kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET claim_expires=123 WHERE id=?",
+            (duplicate["task_id"],),
+        )
+
+
+def _seed_claimed_run(duplicate):
+    _seed_run_status(duplicate, "claimed")
+
+
+def _seed_unknown_run(duplicate):
+    _seed_run_status(duplicate, "unknown")
+
+
+def _seed_run_status(duplicate, status):
+    with connect_closing(board="default") as conn, kb.write_txn(conn):
+        conn.execute(
+            "UPDATE task_runs SET status=? WHERE task_id=?",
+            (status, duplicate["task_id"]),
+        )
+
+
+def _seed_extra_reference(duplicate):
+    with connect_closing(board="default") as conn:
+        kb.create_task(
+            conn,
+            title="Unexpected extra reference",
+            project_id=duplicate["legacy_project_id"],
+            board="default",
+        )
+
+
+def _seed_registry_drift(duplicate):
+    with projects_db.connect_closing(duplicate["target_registry"]) as conn:
+        projects_db.update_project(conn, duplicate["legacy_project_id"], name="changed")
+
+
+def _seed_archived_reference(duplicate):
+    kb.create_board("archived")
+    with connect_closing(board="archived") as conn:
+        kb.create_task(
+            conn,
+            title="Hidden archived task",
+            project_id=duplicate["legacy_project_id"],
+            board="archived",
+            initial_status="todo",
+        )
+    kb.remove_board("archived", archive=True)
+
+
+def _seed_unexpected_board(duplicate):
+    kb.create_board("unexpected")
+
+
+_DRIFT_SEEDERS = {
+    "nonterminal": _seed_nonterminal,
+    "residual_claim_expiry": _seed_residual_claim_expiry,
+    "claimed_run": _seed_claimed_run,
+    "unknown_run": _seed_unknown_run,
+    "extra_reference": _seed_extra_reference,
+    "registry": _seed_registry_drift,
+    "board_inventory": _seed_unexpected_board,
+    "archived_board": _seed_archived_reference,
+}
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "nonterminal",
+        "residual_claim_expiry",
+        "claimed_run",
+        "unknown_run",
+        "extra_reference",
+        "registry",
+        "board_inventory",
+        "archived_board",
+    ],
+)
+def test_unexpected_or_nonterminal_state_refuses_before_receipt(duplicate, drift):
+    _DRIFT_SEEDERS[drift](duplicate)
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    with pytest.raises(ValueError):
+        reconcile(args)
+    assert not args["backup_path"].exists()
+
+
+def test_backup_collision_refuses_without_registry_change(duplicate):
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    args["backup_path"].write_text("occupied")
+    before = args["target_registry"].read_bytes()
+    with pytest.raises(ValueError, match="recovery"):
+        reconcile(args)
+    assert args["target_registry"].read_bytes() == before
+    assert args["backup_path"].read_text() == "occupied"
+
+
+def test_registry_drift_after_receipt_refuses_commit(duplicate, monkeypatch):
+    from hermes_cli import projects_reconcile
+
+    original = projects_reconcile._publish_private_receipt
+
+    def publish_then_drift(path, document):
+        original(path, document)
+        with sqlite3.connect(duplicate["target_registry"]) as conn:
+            conn.execute(
+                "UPDATE projects SET name='raced' WHERE id=?",
+                (duplicate["legacy_project_id"],),
+            )
+
+    monkeypatch.setattr(
+        projects_reconcile, "_publish_private_receipt", publish_then_drift
+    )
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    with pytest.raises(ValueError, match="changed after recovery receipt"):
+        reconcile(args)
+    assert args["backup_path"].is_file()
+    with projects_db.connect_closing(args["target_registry"]) as conn:
+        assert projects_db.get_project(conn, args["expected_project_id"]) is None
+
+
+def test_board_metadata_locks_precede_registry_and_board_writers(
+    duplicate, monkeypatch
+):
+    from contextlib import contextmanager
+
+    from hermes_cli import projects_reconcile
+
+    events = []
+    original_registry_write = projects_reconcile._registry_write
+    original_board_connection = projects_reconcile._board_connection
+    original_board_lock = projects_reconcile.board_ownership_lock
+    receipt_path = duplicate["backup_path"]
+
+    def registry_write(path):
+        events.append("registry")
+        return original_registry_write(path)
+
+    def board_connection(slug, *, readonly):
+        if not readonly and receipt_path.exists():
+            events.append("board-db")
+        return original_board_connection(slug, readonly=readonly)
+
+    @contextmanager
+    def board_lock(slug):
+        if receipt_path.exists():
+            events.append("board-lock")
+        with original_board_lock(slug):
+            yield
+
+    monkeypatch.setattr(projects_reconcile, "_registry_write", registry_write)
+    monkeypatch.setattr(projects_reconcile, "_board_connection", board_connection)
+    monkeypatch.setattr(projects_reconcile, "board_ownership_lock", board_lock)
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+
+    reconcile(args)
+
+    first_board_lock = events.index("board-lock")
+    first_registry = events.index("registry")
+    first_board_writer = events.index("board-db")
+    assert first_board_lock < first_registry < first_board_writer
+
+
+def test_uncertain_target_commit_reports_receipt_and_persisted_state(
+    duplicate, monkeypatch
+):
+    import sqlite3
+
+    from hermes_cli import projects_reconcile
+
+    original = projects_reconcile._registry_write
+
+    class CommitThenRaise(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            result = super().execute(sql, *args, **kwargs)
+            if sql.strip().upper() == "COMMIT":
+                raise OSError("simulated response loss after durable COMMIT")
+            return result
+
+    def registry_write(path):
+        if path != duplicate["target_registry"]:
+            return original(path)
+        conn = sqlite3.connect(
+            path.as_uri() + "?mode=rw", uri=True, timeout=5, factory=CommitThenRaise
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    monkeypatch.setattr(projects_reconcile, "_registry_write", registry_write)
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    with pytest.raises(RuntimeError, match="commit outcome is uncertain"):
+        reconcile(args)
+    assert args["backup_path"].is_file()
+    with projects_db.connect_closing(args["target_registry"]) as conn:
+        assert projects_db.get_project(conn, args["expected_project_id"]) is not None
+
+
+def test_target_commit_and_rollback_failure_preserves_uncertainty(
+    duplicate, monkeypatch
+):
+    import sqlite3
+
+    from hermes_cli import projects_reconcile
+
+    original = projects_reconcile._registry_write
+
+    class CommitAndRollbackFail(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if sql.strip().upper() in {"COMMIT", "ROLLBACK"}:
+                raise OSError("simulated SQLite transaction I/O failure")
+            return super().execute(sql, *args, **kwargs)
+
+    def registry_write(path):
+        if path != duplicate["target_registry"]:
+            return original(path)
+        conn = sqlite3.connect(
+            path.as_uri() + "?mode=rw",
+            uri=True,
+            timeout=5,
+            factory=CommitAndRollbackFail,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    monkeypatch.setattr(projects_reconcile, "_registry_write", registry_write)
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    with pytest.raises(RuntimeError, match="outcomes are uncertain"):
+        reconcile(args)
+    assert args["backup_path"].is_file()
+
+
+@pytest.mark.parametrize("bad_value", [None, [7], [{}]])
+def test_malformed_nested_reference_expectation_is_clean_refusal(duplicate, bad_value):
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    args["expected_references"] = {**args["expected_references"], "default": bad_value}
+
+    with pytest.raises(ValueError, match="reference expectation"):
+        reconcile(args)
+    assert not args["backup_path"].exists()
+
+
+def test_new_board_owner_is_serialized_after_canonicalization_commit(
+    duplicate, monkeypatch, capsys
+):
+    import argparse
+
+    from hermes_cli import projects_reconcile
+    from hermes_cli.projects_cmd import build_parser, projects_command
+
+    monkeypatch.setenv("HERMES_HOME", str(duplicate["source_registry"].parent))
+    expectation_path = duplicate["backup_path"].with_name("expectations.json")
+    expectations = {
+        key: duplicate[key]
+        for key in (
+            "expected_project_id",
+            "expected_root",
+            "expected_board",
+            "expected_legacy_project",
+            "expected_legacy_folders",
+            "expected_active_id",
+            "expected_boards",
+            "expected_references",
+        )
+    }
+    expectations["expected_root"] = str(expectations["expected_root"])
+    expectations["expected_boards"] = list(expectations["expected_boards"])
+    expectation_path.write_text(json.dumps(expectations))
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(
+        [
+            "project",
+            "canonicalize-duplicate",
+            duplicate["legacy_project_id"],
+            "--target-profile",
+            duplicate["target_profile"],
+            "--expectations",
+            str(expectation_path),
+            "--receipt",
+            str(duplicate["backup_path"]),
+        ]
+    )
+
+    started = threading.Event()
+    created = threading.Event()
+    committed = threading.Event()
+    created_before_commit = []
+    errors = []
+    original_commit = projects_reconcile._commit_target_registry
+    thread_holder = []
+
+    def publish_new_owner():
+        from hermes_cli import kanban_db as board_db
+
+        started.set()
+        try:
+            board_db.create_board(
+                "late-owner", project_id=duplicate["legacy_project_id"]
+            )
+            created_before_commit.append(not committed.is_set())
+        except BaseException as exc:  # collected for the parent test thread
+            errors.append(exc)
+        finally:
+            created.set()
+
+    def commit_after_starting_publisher(conn):
+        thread = threading.Thread(target=publish_new_owner)
+        thread_holder.append(thread)
+        thread.start()
+        assert started.wait(2)
+        # The new slug must wait for the catalog reservation while the target
+        # registry is at its commit boundary.
+        assert not created.wait(0.1)
+        original_commit(conn)
+        committed.set()
+
+    monkeypatch.setattr(
+        projects_reconcile, "_commit_target_registry", commit_after_starting_publisher
+    )
+    assert projects_command(args) == 0
+    assert capsys.readouterr().out
+    assert created.wait(3)
+    thread_holder[0].join(3)
+    assert not thread_holder[0].is_alive()
+    assert not errors
+    assert created_before_commit == [False]

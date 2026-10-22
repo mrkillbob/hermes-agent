@@ -473,3 +473,55 @@ hermes profile update research-bot
 ```
 
 Use an export file for a one-time handoff or a move; use a distribution for an agent you'll keep shipping. See **[Profile Distributions: Share a Whole Agent](./profile-distributions.md)** for both — the comparison table, authoring, publishing, update semantics, and the security model.
+
+## Repair an existing canonical project binding
+
+Project registries belong to individual profiles. When a scheduled job moves into
+its assigned profile, an operator can adopt an already registered root project
+without creating a new project ID or rebinding its shared board:
+
+```bash
+hermes -p default project adopt-canonical PROJECT_ID \
+  --target-profile PROFILE \
+  --expected-root /absolute/canonical/repository \
+  --expected-board BOARD_SLUG
+```
+
+The named profile and both registry files must already exist. The command checks
+the exact canonical project, Git root and shared-board owner, preserves unrelated
+projects and active selection, and refuses conflicting registrations. Run it from
+the root profile outside a dispatched task or delegated child. It does not enable
+schedules, change model assignments, create credentials or run the project.
+
+A separate `HERMES_KANBAN_HOME` may hold shared board data. The canonical project
+registry and named profiles remain under the configured root profile home; the
+command validates the board through its configured shared-data location.
+
+For the exceptional case where that profile already has a second project row
+with the same slug and repository root but a different ID, use the narrower
+duplicate-reconciliation command only with an operator-reviewed expectation
+file and a new private receipt path. Set `RECEIPT_DIR` to an existing private
+directory given by its absolute canonical path (no symlink components), then
+choose a receipt filename there that does not already exist. The command
+creates the receipt without overwriting an existing file.
+
+```bash
+RECEIPT_DIR="/absolute/path/to/existing-private-directory"
+hermes -p default project canonicalize-duplicate LEGACY_PROJECT_ID \
+  --target-profile PROFILE \
+  --expectations ./reviewed-project-state.json \
+  --receipt "$RECEIPT_DIR/private-reconciliation-receipt.json"
+```
+
+The JSON file must contain exactly `expected_project_id`, `expected_root`,
+`expected_board`, `expected_legacy_project` (the complete legacy project row),
+`expected_legacy_folders` (the complete folder rows), `expected_active_id`
+(`null` when there is no selection), `expected_boards` (the complete board
+inventory), and `expected_references` (the reviewed terminal task summaries
+for each board). The command refuses active or unknown history, archived-board
+inventories, mismatched rows, and registry or history drift. It retires only
+the specified duplicate, preserves its historical task/run records, and adopts
+the existing canonical ID. It does not grant execution or model/RPC access,
+rewrite cards or shared-board ownership, or create a missing profile. The
+receipt is recovery evidence rather than an automatic rollback. Run it from the
+root profile outside a dispatched task or delegated child.
