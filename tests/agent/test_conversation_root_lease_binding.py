@@ -49,6 +49,7 @@ def test_retired_or_uncertain_binding_never_publishes_lease(
 ):
     manager, db, _source, _remote, original, _sibling = prepared_binding
     monkeypatch.setattr(Path, "home", lambda: db.db_path.parent / "user-home")
+    monkeypatch.setenv("HERMES_HOME", str(db.db_path.parent))
     binding = manager.resolve_existing_session(original.root_session_id)
     assert binding is not None
     claim_path = _common_owner_claim_path(binding.repo_common_dir, binding.path)
@@ -88,6 +89,7 @@ def test_acquired_lease_prevents_cleanup_until_release(
 ):
     manager, db, _source, _remote, binding, _sibling = prepared_binding
     monkeypatch.setattr(Path, "home", lambda: db.db_path.parent / "user-home")
+    monkeypatch.setenv("HERMES_HOME", str(db.db_path.parent))
     lease = _acquire(consumer, binding)
     try:
         result = manager.remove_after_explicit_request(binding.root_session_id)
