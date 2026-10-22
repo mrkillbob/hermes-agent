@@ -181,6 +181,7 @@ def _verify_claims(manager, record, path, data):
 
 def _new_receipt(manager, record, source, intent):
     path = Path(record.worktree_path).resolve()
+    branch_ref = _current_branch_ref(manager, source, path)
     token = uuid.uuid4().hex
     destination = path.parent / ('.hermes-retained-' + token)
     if destination.exists() or destination.is_symlink():
@@ -197,13 +198,20 @@ def _new_receipt(manager, record, source, intent):
         'version': 1, 'token': token, 'binding': _binding(record),
         'database': str(manager._db.db_path.resolve()),
         'database_identity': _file_identity(manager._db.db_path),
-        'destination': str(destination), 'root_identity': root_identity,
+        'destination': str(destination), 'root_identity': root_identity, 'branch_ref': branch_ref,
         'admin': _admin(manager, path), 'admin_identity': _identity(Path(_admin(manager, path))),
         'environment': _environment(manager, record, path), 'original_state': record.state, 'phase': 'prepared',
         'intent': intent,
     }
     _write(receipt_path(record), data, create=True)
     return data
+
+
+def _current_branch_ref(manager, source, path):
+    ref = manager._git_stdout(path, ['symbolic-ref', '--quiet', 'HEAD'], 'retention')
+    if not ref.startswith('refs/heads/') or manager._listed_worktree(source, path) != ref:
+        raise RetentionUnknown('named branch registration unavailable')
+    return ref
 
 
 def _location(manager, record, source, data, *, occupied_original=False, occupied_destination=False):
@@ -219,7 +227,9 @@ def _location(manager, record, source, data, *, occupied_original=False, occupie
     name, path = candidates[0]
     if (_identity(path) != data['root_identity'] or _admin(manager, path) != data['admin']
             or _identity(Path(data['admin'])) != data['admin_identity']
-            or manager._listed_worktree(source, path) != 'refs/heads/' + record.branch):
+            # Legacy receipts prove only the immutable original branch. Never
+            # infer a new snapshot from a later physical state during recovery.
+            or _current_branch_ref(manager, source, path) != data.get('branch_ref', 'refs/heads/' + record.branch)):
         raise RetentionUnknown('Git registration changed')
     return name, path
 

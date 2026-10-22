@@ -40,6 +40,97 @@ def lease(binding):
     )
 
 
+@pytest.mark.parametrize('rename,legacy', [(True, False), (False, False), (False, True)])
+def test_retention_snapshots_verified_renamed_branch_without_rewriting_binding(retained_fixture, rename, legacy):
+    import json
+    from agent import conversation_worktree_retention as retention
+
+    manager, db, source, binding, environment = retained_fixture
+    root = binding.root_session_id
+    original = asdict(db.get_conversation_worktree(root))
+    renamed = 'review/retained-conversation' if rename else original['branch']
+    if rename:
+        git(binding.path, 'branch', '-m', renamed)
+    refs = git(source, 'for-each-ref', '--format=%(refname) %(objectname)')
+    tracked = binding.path.joinpath('tracked.txt').read_bytes()
+    assert manager.inspect_cleanup(root).allowed
+
+    result = manager.quarantine_after_explicit_request(root)
+    assert result.outcome == 'retained' and not result.removed, result
+    retained = Path(result.retained_path)
+    record = db.get_conversation_worktree(root)
+    data = json.loads(retention.receipt_path(record).read_text())
+    assert data['branch_ref'] == 'refs/heads/' + renamed
+    if legacy:
+        del data['branch_ref']
+        retention.receipt_path(record).write_text(json.dumps(data))
+    assert data['binding']['branch'] == original['branch']
+    assert all(getattr(record, key) == value for key, value in original.items()
+               if key not in {'state', 'updated_at', 'failure_phase', 'failure_message'})
+    assert retained.joinpath('tracked.txt').read_bytes() == tracked
+    assert manager.reconcile_retention(root).outcome == 'retained'
+    assert manager.quarantine_after_explicit_request(root).outcome == 'retained'
+    restored = manager.restore_after_explicit_request(root)
+    assert restored.outcome == 'restored' and not restored.removed, restored
+    assert manager.restore_after_explicit_request(root).outcome == 'restored'
+    assert git(binding.path, 'branch', '--show-current') == renamed
+    assert git(source, 'for-each-ref', '--format=%(refname) %(objectname)') == refs
+    assert binding.path.joinpath('tracked.txt').read_bytes() == tracked
+    assert environment.joinpath('source-sentinel').read_text() == 'preserve source environment\n'
+    assert db.get_conversation_worktree(root).branch == original['branch']
+
+
+@pytest.mark.parametrize('change', ['during_move', 'after_retention', 'detached', 'malformed_receipt', 'missing_snapshot'])
+def test_retention_rejects_branch_drift_after_snapshot_and_preserves_bytes(retained_fixture, monkeypatch, change):
+    import json
+    from agent import conversation_worktree_retention as retention
+
+    manager, db, source, binding, environment = retained_fixture
+    root = binding.root_session_id
+    original_branch = db.get_conversation_worktree(root).branch
+    renamed = 'review/accepted-before-retention'
+    git(binding.path, 'branch', '-m', renamed)
+    original_git = manager._run_git
+    moves = []
+
+    def actual_git(cwd, args, timeout, phase):
+        result = original_git(cwd, args, timeout, phase)
+        if args[:2] == ['worktree', 'move']:
+            moves.append(args)
+            if change == 'during_move':
+                git(Path(args[-1]), 'branch', '-m', 'review/changed-after-snapshot')
+        return result
+
+    monkeypatch.setattr(manager, '_run_git', actual_git)
+    result = manager.quarantine_after_explicit_request(root)
+    retained = Path(result.retained_path)
+    if change == 'during_move':
+        assert result.outcome == 'unknown' and result.recovery_required
+    else:
+        assert result.outcome == 'retained', result
+        if change == 'after_retention':
+            git(retained, 'branch', '-m', 'review/changed-after-snapshot')
+        elif change == 'detached':
+            git(retained, 'checkout', '--detach', 'HEAD')
+        else:
+            path = retention.receipt_path(db.get_conversation_worktree(root))
+            data = json.loads(path.read_text())
+            if change == 'missing_snapshot':
+                del data['branch_ref']
+            else:
+                data['branch_ref'] = 42
+            path.write_text(json.dumps(data))
+    before = retained.joinpath('tracked.txt').read_bytes()
+    assert manager.reconcile_retention(root).outcome == 'unknown'
+    assert manager.restore_after_explicit_request(root).outcome == 'unknown'
+    assert len(moves) == 1 and not binding.path.exists()
+    assert retained.joinpath('tracked.txt').read_bytes() == before
+    assert environment.joinpath('source-sentinel').read_text() == 'preserve source environment\n'
+    assert db.get_conversation_worktree(root).branch == original_branch
+    assert git(source, 'show-ref', '--verify', 'refs/heads/' + (
+        'review/changed-after-snapshot' if change in {'during_move', 'after_retention'} else renamed))
+
+
 @pytest.mark.parametrize('late_write', [False, pytest.param(True, marks=pytest.mark.platforms('posix'))])
 def test_explicit_retention_restore_preserves_bytes_identity_and_consumers(retained_fixture, monkeypatch, late_write):
     manager, db, source, binding, environment = retained_fixture
