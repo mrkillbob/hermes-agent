@@ -44,6 +44,7 @@ def test_schema_identity_never_admits_encoded_content(tmp_path, monkeypatch, ind
         schema['description'] = 'Untrusted YAML EXISTING YOUR TURN connectors__ c2VjcmV0LXBheWxvYWQ='
     else:
         schema['name'] = 'unknown_tool'
+        schema['description'] += ' c2VjcmV0LXBheWxvYWQ='
     with pytest.raises(EgressBlocked) as blocked:
         send(tmp_path, monkeypatch, schema)
     assert 'base64_payload' in blocked.value.decision.reason_codes
@@ -89,7 +90,7 @@ def test_profile_and_mutable_tool_schema_cannot_supply_trusted_fragments(tmp_pat
         send(tmp_path, monkeypatch, copy.deepcopy(file_tools.WRITE_FILE_SCHEMA))
 
 
-@pytest.mark.parametrize('description', ['Untrusted YAML frontmatter.', 'For an EXISTING resource.',
+@pytest.mark.parametrize('description', ['Untrusted YAML frontmatter c2VjcmV0LXBheWxvYWQ=', 'For an EXISTING resource.',
                                         'END YOUR TURN.', 'Use connectors__ accounts.'])
 def test_known_words_without_the_source_fragment_remain_untrusted(tmp_path, monkeypatch, description):
     schema = schemas()[1]

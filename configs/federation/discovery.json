@@ -6,7 +6,7 @@
   "departments": [
     {
       "id": "federal_core",
-      "assignee": "intake-router",
+      "assignee": "task-intake-router",
       "project": "hermes-agent",
       "title": "Work discovery and department routing",
       "brief": "Inspect all registered project backlogs and pending deliverables. Route unattended authorized work to department leaders using the role registry. Identify stranded ready cards, missing ownership, blocked dependencies, and absent discovery coverage. Diagnose causes; do not bulk unblock. Existing leaders include arts-director for Lunar City, librarian for knowledge, observatory for research, architecture-steward for engineering. Revenue work must enter the existing HRL guarded pipeline, never bypass it. Inspect durable Bot Mode group requests as well as Kanban; user requests in Arts Studio or other group chats may never have been converted to durable tasks. Cover every configured group, including acceptance, operations, release, data/performance, upstream maintenance, archive/acquisition, editorial and review boards; do not equate a group roster with a work queue. Preserve human approval gates and delegate only already-authorized work."

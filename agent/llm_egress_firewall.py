@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
+from agent.llm_egress_context_atoms import PUBLIC_CONTEXT_ATOMS, canonical_chunked_context_atom
 from agent.file_safety import get_read_block_error
 from agent.egress_source_annotations import mask_builtin_annotations
 from agent.cross_process_file_lock import (
@@ -235,7 +236,6 @@ class AuthorizedEgress:
             )
         return self.payload_bytes
 
-
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:@/-]{0,256}$")
 _LOCAL_PROCESS_MODES = frozenset({"local_process", "in_process"})
 _BASE64_CANDIDATE = re.compile(
@@ -282,7 +282,7 @@ _SAFE_CONTEXT_WORDS = frozenset({
     # exempt; arbitrary uppercase words and hyphenated blobs remain scanned.
     "TOOL", "WINS", "IDLE",
     "Cross-department",  # Ordinary Kanban prose, not arbitrary hyphenated blobs.
-})
+}) | PUBLIC_CONTEXT_ATOMS
 _LINTER_DIAGNOSTIC_CODE = re.compile(r"^[A-Z][0-9]{3,4}$")
 _PYTHON_DUNDER_IDENTIFIER = re.compile(r"^__[a-z][a-z0-9_]{0,62}__$")
 _PYTHON_PRIVATE_IDENTIFIER = re.compile(r"^_[A-Za-z][A-Za-z0-9_]{1,63}$")
@@ -1072,7 +1072,7 @@ def _canonical_chunked_base64_candidate(candidate: str) -> bool:
     )
     if len(chunks) < 8 and not has_encoding_signal:
         return False
-    return _canonical_base64_candidate(joined)
+    return canonical_chunked_context_atom(joined, _canonical_base64_candidate)
 
 
 # GitHub's legacy GraphQL global node id: base64 of a fixed
