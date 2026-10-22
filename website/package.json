@@ -56,7 +56,6 @@
     "proxy-addr": "2.0.8",
     "tinypool": "2.2.0",
     "postcss-selector-parser": "7.1.6",
-    "katex": "0.18.4",
     "braces": "npm:@dieub/braces-depth-guard@3.0.3-pn.3"
   },
   "browserslist": {

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { load } from 'js-yaml'
 import { expect, it } from 'vitest'
 
@@ -15,7 +15,7 @@ const value = (expression, { status = {}, ...context } = {}) => {
     (value, key) => (value !== null && typeof value === 'object' ? value[key] : undefined), context) ?? ''
   const statuses = { always: true, success: true, failure: false, cancelled: false, ...status }
   const body = String(expression).trim().replace(/^\$\{\{/, '').replace(/\}\}$/, '')
-    .replace(/\b(?:inputs|steps|needs|github)(?:\.[\w-]+)+/g, path => JSON.stringify(lookup(path)))
+    .replace(/\b(?:inputs|steps|needs|github|runner|matrix)(?:\.[\w-]+)+/g, path => JSON.stringify(lookup(path)))
     .replace(/\b(always|success|failure|cancelled)\(\)/g, (_, name) => String(statuses[name]))
   return Function(`"use strict"; return (${body})`)()
 }
@@ -181,5 +181,58 @@ it('each selection gate joins exactly one target\'s two trust branches after adm
     expect(evaluate(gate.if, { inputs: dispatches.tag, needs })).toBe(true)
     expect(evaluate(gate.if, { inputs: dispatches.tag,
       needs: { validate: { ...needs.validate, result: 'failure' } } })).toBe(false)
+  }
+})
+
+
+const native = action('../.github/workflows/tests-os.yml')
+const nativeSetup = native.jobs['os-tests'].steps.find(step => step.uses === './.github/actions/setup-pm')
+const inputValue = (input, context) => typeof input === 'string' && input.includes('${{')
+  ? value(input, context) : String(input)
+
+it.each(['ARM64', 'X64'])('native %s setup inherits event-aware restore, save and prune behavior', arch => {
+  expect(nativeSetup).toBeDefined()
+  const step = id => setup.runs.steps.find(candidate => candidate.id === id)
+  const prune = setup.runs.steps.find(candidate => candidate.uses === './.github/actions/setup-pm/prune')
+  for (const [event_name, saves] of [['pull_request', false], ['push', true], ['workflow_dispatch', true]]) {
+    const context = { github: { event_name, ref: 'refs/heads/main' },
+      runner: { os: 'Windows', arch }, matrix: { marker: 'windows' } }
+    // Resolve the caller's real overrides over the composite's real defaults.
+    const inputs = Object.fromEntries(Object.entries(setup.inputs).map(([key, definition]) =>
+      [key, inputValue(nativeSetup.with?.[key] ?? definition.default ?? '', context)]))
+    expect(inputs.packages).toBe('git,ripgrep')
+    expect(inputs['test-environment']).toBe('true')
+    for (const [saving, restoring] of [['tools-cache', 'tools-cache-restore'], ['python-cache', 'python-cache-restore']]) {
+      expect(evaluate(step(saving).if, { ...context, inputs }), `${arch} ${event_name} ${saving}`).toBe(saves)
+      expect(evaluate(step(restoring).if, { ...context, inputs })).toBe(!saves)
+      expect(step(saving).uses.split('@')[0]).toBe('actions/cache')
+      expect(step(restoring).uses.split('@')[0]).toBe('actions/cache/restore')
+      expect(step(restoring).with).toEqual(step(saving).with)
+    }
+    for (const hit of ['false', 'true']) {
+      expect(evaluate(prune.if, { ...context, inputs,
+        steps: { 'python-cache': { outputs: { 'cache-hit': hit } } } })).toBe(saves && hit !== 'true')
+    }
+    expect(setup.runs.steps.indexOf(prune)).toBeGreaterThan(setup.runs.steps.indexOf(step('python-cache')))
+  }
+})
+
+it('every local action called by workflows or composite actions resolves to runnable metadata', () => {
+  const root = new URL('../', import.meta.url)
+  const walk = directory => readdirSync(new URL(directory, root), { withFileTypes: true }).flatMap(entry => {
+    const path = `${directory}/${entry.name}`
+    return entry.isDirectory() ? walk(path) : /\.ya?ml$/.test(path) ? [path] : []
+  })
+  const documents = [...walk('.github/workflows'), ...walk('.github/actions')]
+  for (const path of documents) {
+    const document = load(readFileSync(new URL(path, root), 'utf8'))
+    const steps = [...(document.runs?.steps ?? []), ...Object.values(document.jobs ?? {}).flatMap(job => job.steps ?? [])]
+    for (const step of steps.filter(step => step.uses?.startsWith('./'))) {
+      const metadata = ['action.yml', 'action.yaml'].map(name => new URL(`${step.uses}/${name}`, root))
+        .find(candidate => existsSync(candidate))
+      expect(metadata, `${path}: ${step.uses} must resolve`).toBeDefined()
+      const target = load(readFileSync(metadata, 'utf8'))
+      expect(target.runs?.using, `${step.uses} must be runnable`).toBeTruthy()
+    }
   }
 })
