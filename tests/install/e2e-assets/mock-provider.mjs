@@ -6,6 +6,9 @@
 // Usage: node mock-provider.mjs <url-file> [port]
 //   Writes "<url-file>" with the base URL (http://127.0.0.1:<port>) once
 //   the server is listening, then stays alive until SIGINT or SIGTERM.
+//   <prior-url>: the URL an earlier step's (now dead) mock published. Its port
+//   is rebound when free, so a gateway that outlived that step, and froze the
+//   provider URL at boot, still reaches this mock; otherwise any free port.
 
 // @ts-check
 import fs from 'node:fs';

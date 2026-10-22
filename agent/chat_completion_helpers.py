@@ -45,7 +45,7 @@ from agent.gemini_native_adapter import is_native_gemini_base_url
 # misidentify and, without an api_key, return 401 on every leg (issue #89863).
 from agent.model_metadata import is_local_endpoint
 from agent.message_content import flatten_message_text
-from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS, append_message, stamp_message_timestamp
+from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS, append_message, data_use_requirement, stamp_message_timestamp
 from agent.message_sanitization import (
     _sanitize_messages_surrogates, _sanitize_surrogates, _repair_tool_call_arguments,
     normalize_finish_reason as _normalize_finish_reason, sanitize_outbound_kwargs,
@@ -486,18 +486,17 @@ def _prompt_cache_scope_for_agent(agent) -> str | None:
         return None
 
 
-def _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs: dict) -> dict:
-    """Merge Portal ``tags`` / ``session_id`` onto an Anthropic Messages kwargs dict.
-    The Nous profile is only consulted by the OpenAI-wire transport; ``session_id``
-    only — never ``provider_preferences`` (an OpenAI-wire routing object)."""
+def _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs: dict, api_messages: list) -> dict:
+    """The Nous profile body on the Messages wire, which the profile hook never reaches; never
+    ``provider_preferences`` (OpenAI-wire routing the Portal 400s on)."""
     if getattr(agent, "provider", None) not in {"nous", "nous-portal", "nousresearch"}:
         return anthropic_kwargs
     try:
         from providers import get_provider_profile
         nous_profile = get_provider_profile("nous")
         if nous_profile is not None:
-            anthropic_kwargs.setdefault("extra_body", {}).update(
-                nous_profile.build_extra_body(session_id=getattr(agent, "session_id", None)))
+            anthropic_kwargs.setdefault("extra_body", {}).update(nous_profile.build_extra_body(
+                session_id=getattr(agent, "session_id", None), data_use=data_use_requirement(api_messages)))
     except Exception as exc:
         logger.debug("Nous Portal extra_body merge failed: %s", exc)
     return anthropic_kwargs
@@ -756,15 +755,14 @@ def _high_effort_silence_floor(agent) -> float:
 
 
 def _bedrock_converse_call(api_kwargs: dict, *, stream: bool, on_stream_denied=None):
-    """Pop the Hermes routing keys and call ``converse`` / ``converse_stream`` (boto3
-    directly) with the shared recovery: a cachePoint rejection (Nova: toolConfig.tools,
-    #97281) drops the marker and resends once inside the same attempt; a streaming IAM
-    denial hands off to ``on_stream_denied(client, kwargs, exc)``; a stale connection
-    evicts the cached client so the outer retry builds a fresh pool. Streaming returns the
-    event stream; non-streaming an OpenAI-shaped SimpleNamespace."""
+    """Pop the Hermes routing keys and call ``converse`` / ``converse_stream`` (boto3 directly) with the
+    adapter's shared recovery: a cachePoint rejection (Nova: toolConfig.tools, #97281) or a replayed sealed
+    reasoning rejection resends once without the offending blocks inside the same attempt; a streaming IAM
+    denial hands off to ``on_stream_denied(client, kwargs, exc)``; a stale connection evicts the cached
+    client so the outer retry builds a fresh pool. Streaming returns the event stream; else a SimpleNamespace."""
     from agent.bedrock_adapter import (_get_bedrock_runtime_client, invalidate_runtime_client,
         is_stale_connection_error, is_streaming_access_denied_error, normalize_converse_response,
-        recover_from_cache_point_rejection)
+        recover_from_cache_point_rejection, recover_from_redacted_reasoning_rejection)
     region = api_kwargs.pop("__bedrock_region__", "us-east-1")
     api_kwargs.pop("__bedrock_converse__", None)
     client = _get_bedrock_runtime_client(region)
@@ -773,7 +771,8 @@ def _bedrock_converse_call(api_kwargs: dict, *, stream: bool, on_stream_denied=N
     try:
         raw_response = method(**api_kwargs)
     except Exception as exc:
-        retry_kwargs = recover_from_cache_point_rejection(exc, api_kwargs)
+        retry_kwargs = (recover_from_cache_point_rejection(exc, api_kwargs)
+                        or recover_from_redacted_reasoning_rejection(exc, api_kwargs))
         if retry_kwargs is not None:
             return finish(method(**retry_kwargs))
         if on_stream_denied is not None and is_streaming_access_denied_error(exc):
@@ -1486,7 +1485,7 @@ def _build_anthropic_kwargs(agent, api_messages, tools_for_api, reasoning_config
         drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)))
     # Portal reads ``tags`` / ``session_id`` on its Messages route too, but the profile hook
     # is only consulted by the OpenAI-wire transport — merge here to keep sticky routing.
-    return _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs)
+    return _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs, api_messages)
 
 
 def _build_bedrock_kwargs(agent, api_messages, tools_for_api, reasoning_config):
@@ -2322,99 +2321,6 @@ def _managed_summary_call(agent, api_request_id: str, request, callback, *, retr
     )
 
 
-def _iteration_summary_chat_kwargs(agent, api_messages: list) -> dict:
-    """chat.completions.create kwargs for the summary, mirroring ChatCompletionsTransport.build_kwargs()."""
-    try:
-        from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE as _OMIT_TEMP
-    except Exception:
-        _fixed_temperature_for_model = _OMIT_TEMP = None
-    raw_temp = (
-        _fixed_temperature_for_model(agent.model, getattr(agent, "base_url", None))
-        if _fixed_temperature_for_model is not None else None
-    )
-    temperature = None if raw_temp is _OMIT_TEMP else raw_temp
-    provider_name = (agent.provider or "").strip().lower()
-    # LM Studio uses top-level `reasoning_effort` (not extra_body.reasoning).
-    is_lmstudio = provider_name == "lmstudio" and agent._supports_reasoning_extra_body()
-    lm_reasoning_effort = agent._resolve_lmstudio_summary_reasoning_effort() if is_lmstudio else None
-
-    extra_body = {}
-    provider_profile = None
-    with contextlib.suppress(Exception):
-        from providers import get_provider_profile
-        provider_profile = get_provider_profile(agent.provider)
-    wire_reasoning_config = _reasoning_config_for_wire(agent)
-    profile_owns_reasoning = bool(
-        provider_profile
-        and provider_profile.owns_reasoning_policy(
-            supports_reasoning=agent._supports_reasoning_extra_body(),
-        )
-    )
-    if (
-        not is_lmstudio
-        and not profile_owns_reasoning
-        and agent._supports_reasoning_extra_body()
-        and wire_reasoning_config is not None
-    ):
-        extra_body["reasoning"] = wire_reasoning_config
-    if "nousresearch" in agent._base_url_lower:
-        from agent.portal_tags import nous_portal_tags
-        extra_body["tags"] = nous_portal_tags()
-
-    summary_kwargs = {"model": agent.model, "messages": api_messages}
-    build_api_kwargs = getattr(agent, "_build_api_kwargs", None)
-    if build_api_kwargs is not None:
-        with contextlib.suppress(Exception):
-            tools = build_api_kwargs(api_messages).get("tools")
-            if tools is not None:
-                summary_kwargs["tools"] = tools
-    if temperature is not None:
-        summary_kwargs["temperature"] = temperature
-    if agent.max_tokens is not None:
-        summary_kwargs.update(agent._max_tokens_param(agent.max_tokens))
-    if lm_reasoning_effort is not None:
-        summary_kwargs["reasoning_effort"] = lm_reasoning_effort
-
-    # Merge the profile's canonical body even when routing is unset (e.g. required Portal tags).
-    provider_preferences = _provider_preferences_for_agent(agent)
-    profile_extra_body = {}
-    with contextlib.suppress(Exception):
-        if provider_profile is not None:
-            profile_reasoning_config = wire_reasoning_config
-            if profile_reasoning_config is None:
-                profile_reasoning_config = agent.reasoning_config
-            profile_extra_body = provider_profile.build_extra_body(
-                session_id=getattr(agent, "session_id", None), provider_preferences=provider_preferences or None,
-                model=agent.model, base_url=agent.base_url, reasoning_config=agent.reasoning_config)
-            profile_extra_kwargs = provider_profile.build_api_kwargs_extras(
-                reasoning_config=profile_reasoning_config,
-                supports_reasoning=agent._supports_reasoning_extra_body(),
-                model=agent.model, base_url=agent.base_url,
-                session_id=getattr(agent, "session_id", None),
-            )
-            if profile_extra_kwargs:
-                profile_extra_body = {**profile_extra_body, **(profile_extra_kwargs[0] or {})}
-                summary_kwargs.update(profile_extra_kwargs[1] or {})
-    if profile_extra_body:
-        extra_body.update(profile_extra_body)
-
-    def _is_openrouter() -> bool:
-        return provider_name == "openrouter" or agent._is_openrouter_url()
-
-    if provider_preferences and "provider" not in profile_extra_body and _is_openrouter():
-        extra_body["provider"] = provider_preferences
-    # Pareto Code router plugin — model-gated, same shape as the main-loop emission.
-    _score = agent.openrouter_min_coding_score
-    if agent.model == "openrouter/pareto-code" and _is_openrouter() and _score is not None and _score != "":
-        with contextlib.suppress(TypeError, ValueError):
-            _ps = float(_score)
-            if 0.0 <= _ps <= 1.0:
-                extra_body["plugins"] = [{"id": "pareto-router", "min_coding_score": _ps}]
-    if extra_body:
-        summary_kwargs["extra_body"] = extra_body
-    return summary_kwargs
-
-
 def _summary_text(agent, response, **normalize_kwargs) -> str:
     return (agent._get_transport().normalize_response(response, **normalize_kwargs).content or "").strip()
 
@@ -2441,7 +2347,7 @@ def _anthropic_summary_attempt(agent, api_messages: list, api_request_id: str):
             model=agent.model, messages=api_messages, tools=None, max_tokens=agent.max_tokens,
             reasoning_config=agent.reasoning_config, is_oauth=agent._is_anthropic_oauth,
             preserve_dots=agent._anthropic_preserve_dots(), base_url=getattr(agent, "_anthropic_base_url", None))
-        ant_kw = _merge_nous_portal_messages_extra_body(agent, ant_kw)
+        ant_kw = _merge_nous_portal_messages_extra_body(agent, ant_kw, api_messages)
         response = _managed_summary_call(
             agent, api_request_id, ant_kw,
             lambda request: _dispatch_provider_request(agent, request, agent._interruptible_api_call),
@@ -2452,7 +2358,11 @@ def _anthropic_summary_attempt(agent, api_messages: list, api_request_id: str):
 
 
 def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
-    summary_kwargs = _iteration_summary_chat_kwargs(agent, api_messages)
+    from agent.chat_completion_summary import iteration_summary_chat_kwargs
+    summary_kwargs = iteration_summary_chat_kwargs(agent, api_messages)
+    from agent.conversation_loop import _moa_client_consumes_prepared_request
+    if agent.provider == "moa" and _moa_client_consumes_prepared_request(agent.client):  # transport strips data_use
+        summary_kwargs["_moa_prepared_request"] = agent.client.chat.completions.prepare(api_messages)
 
     def _attempt(retry_count: int) -> str:
         # Use the ordinary request-local lifecycle: a summary can be interrupted
@@ -2477,9 +2387,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     warning = f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary..."
     if getattr(agent, "suppress_status_output", False):
         # Strict machine-readable mode (-Q, oneshot): keep diagnostics off stdout. quiet_mode is
-        # NOT the gate — the interactive CLI runs quiet_mode=True by default and must see this.
-        # Strict machine-readable mode (hermes chat -Q, oneshot, background review): keep diagnostics out of
-        # stdout so wrappers receive only the final assistant content (#93220 class).
+        # NOT the gate — the interactive CLI runs quiet_mode=True by default and must see this (#93220 class).
         logger.warning(warning)
     else:
         agent._safe_print(warning)
