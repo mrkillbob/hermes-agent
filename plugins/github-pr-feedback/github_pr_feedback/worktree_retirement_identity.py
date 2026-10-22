@@ -66,6 +66,7 @@ class RetirementIdentity:
     physical_head: str
     ledger: str | None = None
     slot_id: int | None = None
+    ledger_file: tuple | None = None
 
     def workspace_identity(self):
         return WorkspaceIdentity(self.repository, self.source, self.workspace, self.ledger, self.slot_id).canonical()
@@ -95,11 +96,18 @@ def observe_identity(control_store, repository, source, workspace, *, ledger=Non
     if any(item.startswith("160000 ") for item in _git_run(workspace, "ls-files", "--stage", "-z").split("\0")):
         raise WorktreeRetirementRefused("submodule_worktree_unsupported")
     store = Path(control_store)
+    ledger_path = None
+    ledger_file = None
+    if ledger is not None:
+        ledger_identity = WorkspaceIdentity(repository, str(source), str(workspace), str(Path(ledger).absolute()),
+                                            slot_id).canonical()
+        ledger_path = ledger_identity.ledger
+        ledger_file = _file_identity(ledger_path)
     identity = RetirementIdentity(str(store), _file_identity(store), binding.repository, str(source),
                                   _directory_identity(source), str(common), _directory_identity(common),
                                   str(workspace), physical, str(admin), _directory_identity(admin),
                                   _git_run(workspace, "rev-parse", "--verify", "HEAD^{commit}"),
-                                  str(ledger) if ledger is not None else None, slot_id)
+                                  ledger_path, slot_id, ledger_file)
     workspace_identity = identity.workspace_identity()
     row = PathLifecycle(store).snapshot(workspace_identity)
     if row is not None and row["operation"] != workspace_identity.encoded():

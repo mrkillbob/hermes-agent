@@ -1,7 +1,9 @@
 """Actual retained moves, durable uncertainty and immutable legacy history."""
 from dataclasses import asdict, replace
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import sqlite3
 
@@ -164,6 +166,91 @@ def test_associated_pool_move_preserves_historical_head_and_task_and_blocks_late
         with pytest.raises(WorktreeRetirementRefused):
             pool.bind_task(receipt, "late-task", "other-board")
         assert retirement._lease_snapshot(identity) == expected
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("swap_point", ["before_identity_check", "after_identity_check"])
+def test_retirement_refuses_replaced_pool_ledger_while_original_connection_holds_lease(
+    retirement_linked, tmp_path, monkeypatch, swap_point,
+):
+    from github_pr_feedback import controller, worktree_retirement as retirement
+    from github_pr_feedback.ledger import FeedbackLedger
+    from github_pr_feedback.policy import FeedbackReceipt
+    from github_pr_feedback.worktree_lifecycle import PathLifecycle, canonical_control_store, materialization_for
+    source, _ = retirement_linked
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "control"))
+    monkeypatch.setattr(controller.LocalGitRepository, "_link_governed_venv", lambda *args: None)
+    ledger = FeedbackLedger(tmp_path / "pool-ledger.sqlite3")
+    pool = controller.PooledLocalGitRepository(ledger, tmp_path / "pool", slot_count=1)
+    receipt = FeedbackReceipt("fixture/repo", 17, "review_comment", "120", git(source, "rev-parse", "HEAD"))
+    try:
+        prepared = pool.prepare_receipt_worktree(source, receipt)
+        lease = pool._active_ledger_slots[receipt.key]
+        pool.release(lease)
+        identity = retirement.observe_identity(canonical_control_store(), "fixture/repo", source,
+                                               prepared.path, ledger=ledger.path, slot_id=lease.slot_id)
+        expected = retirement._lease_snapshot(identity)
+        preservation, owner = references(tmp_path, identity)
+        plan = retirement.prepare_retirement(identity, expected, preservation, owner_reference=owner,
+                                             receipt_path=tmp_path / "plan.json")
+
+        replacement = tmp_path / "replacement-ledger.sqlite3"
+        replacement_db = sqlite3.connect(replacement)
+        ledger._connection.backup(replacement_db)
+        replacement_db.close()
+
+        def replace_ledger_path():
+            # Keep the old connection's WAL/SHM pair with its original main-file
+            # inode, so a fresh connection cannot see later lease writes through
+            # same-named sidecars.
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(ledger.path) + suffix)
+                if sidecar.exists():
+                    os.replace(sidecar, Path(str(replacement) + suffix))
+            os.replace(replacement, ledger.path)
+
+        now = datetime.now(UTC)
+        def claim_on_original_connection():
+            with materialization_for(source, prepared.path, "fixture/repo", ledger=ledger.path,
+                                     slot_id=lease.slot_id):
+                original_lease = ledger.claim_worktree_slot(
+                    lease.slot_id, owner_pid=os.getpid(), head_sha=receipt.head_sha,
+                    claimed_at=now, stale_before=now - timedelta(minutes=1),
+                )
+            assert original_lease is not None
+
+        if swap_point == "before_identity_check":
+            replace_ledger_path()
+            claim_on_original_connection()
+        else:
+            claim_on_original_connection()
+            verify = retirement._verify_identity
+
+            def verify_then_replace(candidate):
+                verify(candidate)
+                replace_ledger_path()
+
+            monkeypatch.setattr(retirement, "_verify_identity", verify_then_replace)
+
+        assert ledger._connection.execute(
+            "SELECT status FROM worktree_pool_slots WHERE slot_id=?", (lease.slot_id,)
+        ).fetchone()[0] == "leased"
+
+        with pytest.raises(retirement.WorktreeRetirementRefused) as refusal:
+            retirement.retire_to_quarantine(plan, tmp_path / "retained")
+        expected_reason = ("retirement_identity_changed" if swap_point == "before_identity_check"
+                           else "pool_ledger_identity_changed")
+        assert str(refusal.value) == expected_reason
+        assert prepared.path.is_dir()
+        assert not (tmp_path / "retained").exists()
+        with sqlite3.connect(ledger.path) as replacement_db:
+            assert replacement_db.execute(
+                "SELECT status FROM worktree_pool_slots WHERE slot_id=?", (lease.slot_id,)
+            ).fetchone()[0] == "free"
+        assert PathLifecycle(canonical_control_store()).snapshot(
+            identity.workspace_identity()
+        )["phase"] == "retiring"
     finally:
         ledger.close()
 

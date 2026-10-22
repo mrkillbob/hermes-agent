@@ -31,19 +31,33 @@ class RetirementPlan:
     receipt_digest: str
 
 
+def _verify_ledger_file(identity):
+    if identity.ledger is None:
+        if identity.ledger_file is not None:
+            raise WorktreeRetirementRefused("pool_ledger_identity_incomplete")
+        return
+    if identity.ledger_file is None or _file_identity(identity.ledger) != tuple(identity.ledger_file):
+        raise WorktreeRetirementRefused("pool_ledger_identity_changed")
+
+
 def _lease_snapshot(identity):
     if identity.ledger is None:
-        if identity.slot_id is not None:
+        if identity.slot_id is not None or identity.ledger_file is not None:
             raise WorktreeRetirementRefused("pool_identity_incomplete")
         return None
-    _file_identity(identity.ledger)
+    _verify_ledger_file(identity)
     try:
-        with closing(sqlite3.connect(Path(identity.ledger).as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+        db = sqlite3.connect(Path(identity.ledger).as_uri() + "?mode=ro", uri=True, timeout=2)
+        try:
+            _verify_ledger_file(identity)
             db.row_factory = sqlite3.Row
             row = db.execute("SELECT * FROM worktree_pool_slots WHERE slot_id=?", (identity.slot_id,)).fetchone()
+            _verify_ledger_file(identity)
             if row is None:
                 raise WorktreeRetirementRefused("expected_pool_row_missing")
             return dict(row)
+        finally:
+            db.close()
     except sqlite3.Error:
         raise WorktreeRetirementRefused("pool_ledger_unavailable") from None
 
@@ -51,10 +65,16 @@ def _lease_snapshot(identity):
 def _verify_pool_binding(identity, generation):
     if identity.ledger is None:
         return
+    _verify_ledger_file(identity)
     try:
-        with closing(sqlite3.connect(Path(identity.ledger).as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+        db = sqlite3.connect(Path(identity.ledger).as_uri() + "?mode=ro", uri=True, timeout=2)
+        try:
+            _verify_ledger_file(identity)
             bound = db.execute("SELECT store,workspace,generation,owner FROM worktree_pool_identity WHERE slot_id=?",
                                (identity.slot_id,)).fetchone()
+            _verify_ledger_file(identity)
+        finally:
+            db.close()
     except sqlite3.Error:
         raise WorktreeRetirementRefused("legacy_pool_identity_unestablished") from None
     expected = (identity.control_store, identity.workspace, generation, identity.workspace_identity().encoded())
@@ -143,9 +163,13 @@ def _fence_pool(plan, operation):
     identity = plan.identity
     if identity.ledger is None:
         return
-    with closing(sqlite3.connect(identity.ledger, isolation_level=None, timeout=2)) as db:
+    _verify_ledger_file(identity)
+    ledger_uri = Path(identity.ledger).as_uri() + "?mode=rw"
+    with closing(sqlite3.connect(ledger_uri, uri=True, isolation_level=None, timeout=2)) as db:
         try:
+            _verify_ledger_file(identity)
             db.execute("BEGIN IMMEDIATE")
+            _verify_ledger_file(identity)
             db.row_factory = sqlite3.Row
             row = db.execute("SELECT * FROM worktree_pool_slots WHERE slot_id=?", (identity.slot_id,)).fetchone()
             if row is None or dict(row) != plan.expected_lease or row["status"] != "free":
@@ -160,6 +184,7 @@ def _fence_pool(plan, operation):
                 raise WorktreeRetirementRefused("legacy_pool_identity_unestablished")
             if tuple(bound) != expected:
                 raise WorktreeRetirementRefused("pool_slot_identity_changed")
+            _verify_ledger_file(identity)
             db.commit()
         except BaseException:
             db.rollback()
