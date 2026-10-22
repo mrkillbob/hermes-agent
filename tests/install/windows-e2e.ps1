@@ -1724,12 +1724,21 @@ function Invoke-PhaseVerifyStamp {
     Assert-True ($head -match '^[0-9a-f]{40}$') "installed HEAD readable: '$head'"
     Write-Host "  install HEAD: $($head.Substring(0, 12))"
     $stampPath = Join-Path $InstallDir '.hermes-bootstrap-complete'
+    # Pre-receipt script installers (e.g. e71a2bd / v2026.5.29) never wrote a
+    # bootstrap receipt. hermes update intentionally refreshes existing ones
+    # only. The verifier checks that immutable ancestor's actual capability,
+    # and still requires current HEAD + source identity. An installer rerun
+    # or GUI route must produce its own receipt and gets no legacy allowance.
+    $legacyArgs = @()
+    if ($InstallMethod -eq 'installer-script' -and $Route -eq 'hermes-update') {
+        $legacyArgs = @('--initial-windows-installer', $state.old)
+    }
     # FAIL lines go to stderr; under "Stop", PowerShell 5.1 would throw on the first one.
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
         $verdict = @(& $DriverPython -B (Join-Path $RepoRoot 'scripts\verify-bootstrap-version-stamp.py') `
-            --stamp $stampPath --repo $InstallDir --expect-commit $state.current 2>&1 | ForEach-Object { "$_" })
+            --stamp $stampPath --repo $InstallDir --expect-commit $state.current @legacyArgs 2>&1 | ForEach-Object { "$_" })
         $verifyExit = $LASTEXITCODE
     } finally { $ErrorActionPreference = $prevEap }
     $verdict | ForEach-Object { Write-Host $_ }
