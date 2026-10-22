@@ -781,10 +781,9 @@ def authorize_agent_sdk_kwargs(
     route_provider = _route_field(resolved_route, "provider", "")
     protected_route = provider_uses_egress_firewall(route_provider) or owned_remote_task(agent, route=resolved_route)
     protected_remote_marker = os.environ.get("HERMES_KANBAN_PROTECTED_REMOTE") == "1"
-    # The marker is deliberately process-local, but a fallback/reconstructed
-    # worker still carries its task identity. Re-derive the protected Kanban
-    # boundary from that durable identity plus the exact provider route so a
-    # fallback cannot turn private task context into a repeated egress block.
+    # Re-derive the protected Kanban boundary from durable task identity and
+    # exact provider route when a reconstructed worker loses the local marker.
+    # This preserves private-context handling across fallback.
     protected_kanban_remote = protected_remote_marker or (
         bool(str(os.environ.get("HERMES_KANBAN_TASK") or "").strip())
         and protected_route
@@ -839,14 +838,10 @@ def authorize_agent_sdk_kwargs(
         )
     )
     used_grants = SourceReadSelection()
-    # Protected providers must use the bounded-context path regardless of
-    # whether the worker inherited the dispatcher marker.  The marker is
-    # still required for path redaction and the reduced Kanban toolset, but it
-    # is not a safe prerequisite for transport framing: fallback/provider
-    # resolution can rebuild the agent without preserving that process-global
-    # flag.  Without this route-derived guard, a large protected request raises
-    # ValueError while typing, bypassing the firewall's content-free receipt
-    # and triggering a provider fallback loop.
+    # Protected providers always use bounded context. The local marker still
+    # controls path redaction and the reduced Kanban toolset, but reconstructed
+    # workers may lose it. Route-based framing prevents large requests from
+    # raising during typing, bypassing receipts and triggering fallback loops.
     protected_remote_context = protected_remote_marker or protected_route
     # Generated framing (system/developer messages and tool schema) is
     # application-owned.  It can use the established non-secret path/base64
@@ -1085,11 +1080,13 @@ def authorize_agent_sdk_kwargs(
         exact_secret_values=_exact_provider_secret_values(),
     )
     try:
-        authorization = firewall.authorize(
-            request,
-            resolved_route,
-            grants=tuple(used_grants.values()),
-        )
+        from agent.source_provenance_diagnostics import receipt_scope
+        with receipt_scope(agent, registry, (session_id, turn_id, request_id, policy_digest)):
+            authorization = firewall.authorize(
+                request,
+                resolved_route,
+                grants=tuple(used_grants.values()),
+            )
     except EgressBlocked:
         logger.warning(
             "LLM egress blocked grant counts: input=%d selected=%d",
