@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,7 +45,86 @@ def _sandbox(root: Path) -> I.Sandbox:
     return I.Sandbox(root=Path(facts["sandboxRoot"]), env=facts["env"])
 
 
-def _fail(what: str, cp: subprocess.CompletedProcess) -> None:
+_NPM_TOKENS = {
+    "codes": {"unknown", "ENOTEMPTY", "ENOENT", "EACCES", "EPERM", "ENOSPC", "EBUSY", "ECONNRESET", "ECONNREFUSED",
+              "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND", "EINTEGRITY", "EBADENGINE", "ERESOLVE", "ELIFECYCLE", "E401", "E403", "E404", "E429"},
+    "syscalls": {"unknown", "rmdir", "unlink", "rename", "open", "mkdir", "scandir", "read", "write", "connect", "spawn"},
+    "errnos": {"unknown", "-1", "-2", "-13", "-17", "-28", "-39", "-4048", "-4058", "-4082"},
+}
+_NPM_SIGNALS = {None, "unknown", "SIGTERM", "SIGKILL", "SIGINT", "SIGABRT", "SIGSEGV", "SIGBUS", "SIGXCPU", "SIGXFSZ", "SIGHUP"}
+
+
+def _unique_object(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate diagnostic key")
+    return result
+
+
+def _npm_frame(raw: str) -> dict | None:
+    if len(raw) > 4096:
+        return None
+    try:
+        frame = json.loads(raw, object_pairs_hook=_unique_object)
+    except (ValueError, RecursionError):
+        return None
+    keys = {"schema", "phase", "attempt", "status", "signal", "node_version", "npm_version", "elapsed_ms",
+            "log_present", "log_readable", "log_truncated", *_NPM_TOKENS}
+    if not isinstance(frame, dict) or frame.keys() != keys:
+        return None
+    if type(frame["schema"]) is not int or frame["schema"] != 1 or frame["phase"] != "npm_ci":
+        return None
+    if type(frame["attempt"]) is not int or frame["attempt"] not in (1, 2):
+        return None
+    if frame["status"] is not None and (type(frame["status"]) is not int or not 0 <= frame["status"] <= 2147483647):
+        return None
+    if not isinstance(frame["signal"], (str, type(None))) or frame["signal"] not in _NPM_SIGNALS:
+        return None
+    if type(frame["elapsed_ms"]) is not int or not 0 <= frame["elapsed_ms"] <= 9007199254740991:
+        return None
+    for key in ("node_version", "npm_version"):
+        value = frame[key]
+        if not isinstance(value, str) or (value != "unknown" and not re.fullmatch(r"\d{1,6}\.\d{1,6}\.\d{1,6}", value, re.ASCII)):
+            return None
+    if any(type(frame[key]) is not bool for key in ("log_present", "log_readable", "log_truncated")):
+        return None
+    for key, allowed in _NPM_TOKENS.items():
+        values = frame[key]
+        if not isinstance(values, list) or not 1 <= len(values) <= len(allowed):
+            return None
+        if any(not isinstance(value, str) or value not in allowed for value in values):
+            return None
+    return frame
+
+
+def _save_npm_diagnostics(cp: subprocess.CompletedProcess, directory: Path) -> None:
+    failures = []
+    # Verbose builds inherit stderr; run_source_script's contained failure tail
+    # merges stderr into stdout with its exact two-space + four-space indent.
+    for output in (cp.stderr, cp.stdout):
+        for line in (output or "").splitlines():
+            for prefix in ("HERMES_NPM_FAILURE_V1 ", "      HERMES_NPM_FAILURE_V1 "):
+                if line.startswith(prefix):
+                    frame = _npm_frame(line.removeprefix(prefix))
+                    if frame is not None and frame not in failures and len(failures) < 2:
+                        failures.append(frame)
+    if failures:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "node-dependency-failure.json"
+        # The disposable sandbox owns this path. Never follow a pre-existing file/link.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"schema": 1, "failures": failures}, stream)
+            stream.write("\n")
+
+
+def _fail(what: str, cp: subprocess.CompletedProcess, *, diagnostics_dir: Path | None = None) -> None:
+    if diagnostics_dir is not None:
+        try:
+            _save_npm_diagnostics(cp, diagnostics_dir)
+        except OSError:
+            # A failed evidence write must preserve the original failing build verdict.
+            sys.stderr.write("npm dependency diagnostic retention unavailable\n")
     sys.stderr.write(f"{what} failed:\n{H.describe(cp)}\n")
     raise SystemExit(1)
 
@@ -76,7 +156,7 @@ def install(root: Path) -> None:
     # apps/desktop/release/linux-unpacked, the tree the Desktop updater swaps in place.
     cp = sb.cli("desktop", "--build-only", timeout=1800)
     if cp.returncode != 0:
-        _fail("hermes desktop --build-only", cp)
+        _fail("hermes desktop --build-only", cp, diagnostics_dir=sb.hermes_home / "logs")
     facts = {
         "sandboxRoot": str(sb.root),
         "home": str(sb.home),
