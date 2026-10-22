@@ -33,6 +33,7 @@ from agent.cross_process_file_lock import (
 )
 from agent.redact import redact_sensitive_text
 from agent.source_fixed_literals import _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS
+from agent.egress_encoding_syntax import is_canonical_base64_encoding, is_iso_calendar_week
 
 
 class DestinationClass(StrEnum):
@@ -897,24 +898,12 @@ def _canonical_base64_candidate(candidate: str) -> bool:
         and sum(character.isalpha() for character in candidate) >= 2
     ):
         return False
-    unpadded = candidate.rstrip("=")
-    if "=" in unpadded or len(unpadded) % 4 == 1:
-        return False
-    padded = unpadded + "=" * (-len(unpadded) % 4)
-    encoded = padded.encode("ascii")
-    for altchars in (None, b"-_"):
-        try:
-            decoded = base64.b64decode(encoded, altchars=altchars, validate=True)
-        except (binascii.Error, ValueError):
-            continue
-        canonical_padded = (
-            base64.b64encode(decoded)
-            if altchars is None
-            else base64.urlsafe_b64encode(decoded)
-        ).decode("ascii")
-        if candidate in {canonical_padded, canonical_padded.rstrip("=")} and decoded:
-            return True
-    return False
+    return is_canonical_base64_encoding(candidate)
+
+
+def _canonical_literal_base64_candidate(candidate: str) -> bool:
+    """Exclude literal calendar syntax without exempting reconstructed encodings."""
+    return not is_iso_calendar_week(candidate) and _canonical_base64_candidate(candidate)
 
 
 def _canonical_chunked_base64_candidate(candidate: str) -> bool:
@@ -1068,7 +1057,7 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
             # GitHub's legacy global node id (see helper docstring above).
             if _looks_like_github_legacy_node_id(candidate):
                 continue
-            if _canonical_base64_candidate(candidate):
+            if _canonical_literal_base64_candidate(candidate):
                 return True
         # Providers and source-control tools sometimes wrap an otherwise
         # canonical encoding at a fixed column. Normalize only bounded chunks
@@ -1523,7 +1512,7 @@ def redact_remote_unsafe_text(text: str) -> str:
             "HERMES_PROFILE_HOME",
         }:
             return match.group(0)
-        if _PROMPT_CACHE_KEY.fullmatch(candidate) or _canonical_base64_candidate(candidate):
+        if _PROMPT_CACHE_KEY.fullmatch(candidate) or _canonical_literal_base64_candidate(candidate):
             return "<redacted-base64>"
         return match.group(0)
 
