@@ -77,7 +77,8 @@ exit $LASTEXITCODE
     poison = tmp_path / "poison"
     poison.mkdir()
     (poison / "git.cmd").write_text("@echo unpinned git invoked 1>&2 & exit /b 73\r\n", encoding="utf-8")
-    env["PATH"] = os.pathsep.join([str(poison), str(Path(env["SystemRoot"]) / "System32"), env["SystemRoot"]])
+    system_root = os.environ["SystemRoot"]
+    env["PATH"] = os.pathsep.join([str(poison), str(Path(system_root) / "System32"), system_root])
     env.pop("PYTHONPATH", None)
     env.pop("PROBE_SKIP_BROWSER", None)
     if skip_browser:
