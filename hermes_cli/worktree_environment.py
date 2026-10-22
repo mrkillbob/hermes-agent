@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Iterator
 
 
 logger = logging.getLogger(__name__)
@@ -95,29 +96,19 @@ def _venv_python_path(resolved_source: Path, *, _platform: str | None = None) ->
     return venv_bin_dir(resolved_source, windows=windows) / python_name
 
 
-def bootstrap_worktree_environments(
+def iter_worktree_environment_targets(
     repo_root: Path,
-    target: Path,
     *,
-    environment_names: tuple[str, ...] = (".venv", "venv"),
+    environment_name: str,
     require_python: bool = True,
     allow_venv_fallback: bool = True,
-) -> tuple[str, ...]:
-    """Link usable source environments into a new worktree when absent.
-
-    The destination is never replaced, including a broken symlink.  For the
-    required ``.venv`` destination, ``venv`` can be accepted as a source
-    fallback so Hermes repositories that use the legacy name still expose the
-    stable ``./.venv/bin/python`` entrypoint.  Callers that preserve a legacy
-    directory-only behavior can disable both checks explicitly. The returned
-    tuple contains the names that were linked.
-    """
+) -> Iterator[Path]:
+    """Read-only selection of the usable, repository-scoped bootstrap targets."""
     try:
         source_root = repo_root.expanduser().resolve(strict=True)
-        target_root = target.expanduser().resolve(strict=True)
     except OSError as exc:
         logger.warning("worktree environment bootstrap roots unavailable: %s", exc)
-        return ()
+        return
 
     # Existing linked worktrees commonly have no ignored environment of their
     # own. Resolve the main checkout from Git's common directory so reuse of a
@@ -139,46 +130,66 @@ def bootstrap_worktree_environments(
         # narrower than trusting arbitrary absolute symlink targets.
         governed_roots.append(main_root.parent / "venvs")
 
+    source_names = (
+        (environment_name, "venv")
+        if environment_name == ".venv" and allow_venv_fallback
+        else (environment_name,)
+    )
+    for candidate_root in source_roots:
+        for source_name in source_names:
+            source = candidate_root / source_name
+            try:
+                if not source.exists():
+                    continue
+                resolved_source = source.resolve(strict=True)
+                python = _venv_python_path(resolved_source)
+                if not resolved_source.is_dir() or not _same_repository_environment(
+                    source_root,
+                    resolved_source,
+                    governed_roots=tuple(governed_roots),
+                ):
+                    continue
+                if require_python and (
+                    not python.is_file() or not os.access(python, os.X_OK)
+                ):
+                    continue
+                yield resolved_source
+            except OSError:
+                logger.warning("worktree environment source unavailable: %s", source)
+
+
+def bootstrap_worktree_environments(
+    repo_root: Path,
+    target: Path,
+    *,
+    environment_names: tuple[str, ...] = (".venv", "venv"),
+    require_python: bool = True,
+    allow_venv_fallback: bool = True,
+) -> tuple[str, ...]:
+    """Link usable source environments when absent, including legacy venv fallback.
+
+    Existing destinations, including broken links, are never replaced. Callers
+    preserving legacy directory-only behavior can disable both optional checks.
+    """
+    try:
+        target_root = target.expanduser().resolve(strict=True)
+    except OSError as exc:
+        logger.warning("worktree environment bootstrap roots unavailable: %s", exc)
+        return ()
     linked: list[str] = []
     for environment_name in environment_names:
         destination = target_root / environment_name
         if destination.exists() or destination.is_symlink():
             continue
-
-        source_names = (
-            (environment_name, "venv")
-            if environment_name == ".venv" and allow_venv_fallback
-            else (environment_name,)
-        )
-        for candidate_root in source_roots:
-            for source_name in source_names:
-                source = candidate_root / source_name
-                try:
-                    if not source.exists():
-                        continue
-                    resolved_source = source.resolve(strict=True)
-                    python = _venv_python_path(resolved_source)
-                    if not resolved_source.is_dir() or not _same_repository_environment(
-                        source_root,
-                        resolved_source,
-                        governed_roots=tuple(governed_roots),
-                    ):
-                        continue
-                    if require_python and (
-                        not python.is_file() or not os.access(python, os.X_OK)
-                    ):
-                        continue
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    os.symlink(
-                        str(resolved_source), str(destination), target_is_directory=True
-                    )
-                    linked.append(environment_name)
-                    break
-                except OSError:
-                    logger.warning(
-                        "worktree environment bootstrap could not link %s",
-                        environment_name,
-                    )
-            if linked and linked[-1] == environment_name:
+        for resolved_source in iter_worktree_environment_targets(
+            repo_root, environment_name=environment_name,
+            require_python=require_python, allow_venv_fallback=allow_venv_fallback,
+        ):
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(str(resolved_source), str(destination), target_is_directory=True)
+                linked.append(environment_name)
                 break
+            except OSError:
+                logger.warning("worktree environment bootstrap could not link %s", environment_name)
     return tuple(linked)

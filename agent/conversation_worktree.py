@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -38,6 +39,55 @@ _REPOSITORY_THREAD_LOCKS_GUARD = threading.Lock()
 _OWNER_MARKER = "hermes-conversation-owner-v1"
 _COMMON_OWNER_CLAIMS_DIR = "hermes-conversation-owner-claims-v1"
 _LEASE_MESSAGE_LIMIT = 300
+
+
+def _environment_lookup_identity(path: Path, removal_root: Path):
+    """Observe only the native interpreter lookup, refusing removable hops."""
+    expected = path.resolve(strict=True)
+    root_stat = removal_root.stat()
+    root_identity = root_stat.st_dev, root_stat.st_ino
+    current = Path(path.anchor)
+    pending = list(path.parts[1:])
+    hops = []
+    active_links = set()
+    while pending:
+        name = pending.pop(0)
+        # End markers distinguish a real recursive cycle from a later,
+        # independent traversal through the same outside-directory alias.
+        if isinstance(name, Path):
+            active_links.remove(name)
+            continue
+        if name == "..":
+            current = current.parent
+            continue
+        candidate = current / name
+        if candidate.is_relative_to(removal_root):
+            return None
+        identity = candidate.lstat()
+        # Native case aliases can preserve different spelling after resolve().
+        if (identity.st_dev, identity.st_ino) == root_identity:
+            return None
+        if not stat.S_ISLNK(identity.st_mode):
+            current = candidate
+            continue
+        if candidate in active_links:
+            return None
+        active_links.add(candidate)
+        raw = os.readlink(candidate)
+        after = candidate.lstat()
+        before_key = identity.st_dev, identity.st_ino, identity.st_ctime_ns
+        if before_key != (after.st_dev, after.st_ino, after.st_ctime_ns):
+            return None
+        hops.append((candidate, before_key, raw))
+        target = Path(raw)
+        if target.is_absolute():
+            current = Path(target.anchor)
+            pending = list(target.parts[1:]) + [candidate] + pending
+        else:
+            pending = list(target.parts) + [candidate] + pending
+    if current != expected:
+        return None
+    return tuple(hops)
 
 
 class ConversationWorktreeError(RuntimeError):
@@ -843,7 +893,7 @@ class ConversationWorktreeManager:
             elif root_liveness != "inactive":
                 block("unknown")
 
-            for reason in self._cleanup_content_refusals(expected_path):
+            for reason in self._cleanup_content_refusals(record, expected_path):
                 block(reason)
 
             if self._git_operation_in_progress(expected_path):
@@ -894,20 +944,70 @@ class ConversationWorktreeManager:
 
         return CleanupVerdict(not reasons, tuple(reasons))
 
-    def _cleanup_content_refusals(self, path: Path) -> Iterator[str]:
+    def _environment_link_identity(self, record, path):
+        """Prove current bootstrap equivalence, never invent historical origin."""
+        from hermes_cli.worktree_environment import (
+            _venv_python_path, iter_worktree_environment_targets,
+        )
+
+        link = path / ".venv"
+        if not link.is_symlink():
+            return None
+        try:
+            before = link.lstat()
+            target = link.resolve(strict=True)
+            python = _venv_python_path(target)
+            # Canonical endpoints alone can hide removable intermediary links.
+            lookup = _environment_lookup_identity(python, path.resolve(strict=True))
+            if lookup is None:
+                return None
+            source = self._durable_source(record)
+            if not any(target == candidate for candidate in iter_worktree_environment_targets(
+                source, environment_name=".venv",
+            )):
+                return None
+            target_stat = target.stat()
+            parent_stat = python.parent.stat()
+            python_stat = python.stat()
+            after = link.lstat()
+            if (before.st_dev, before.st_ino, before.st_ctime_ns) != (
+                after.st_dev, after.st_ino, after.st_ctime_ns,
+            ):
+                return None
+            return (
+                after.st_dev, after.st_ino, after.st_ctime_ns, os.readlink(link),
+                target, target_stat.st_dev, target_stat.st_ino,
+                parent_stat.st_dev, parent_stat.st_ino,
+                python_stat.st_dev, python_stat.st_ino, lookup,
+            )
+        except (OSError, RuntimeError, ValueError, ConversationWorktreeError):
+            return None
+
+    def _cleanup_content_refusals(self, record, path: Path) -> Iterator[str]:
         # Non-force `git worktree remove` still deletes ignored files. Neither
         # retained commits nor the binding ledger preserve that unique content.
-        probes = (
-            (["status", "--porcelain", "--untracked-files=all"], "dirty"),
-            (["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
-             "ignored content requires preservation"),
+        status = self._run_git(
+            path, ["status", "--porcelain", "--untracked-files=all"],
+            self._policy.create_timeout, "cleanup",
         )
-        for args, reason in probes:
-            result = self._run_git(path, args, self._policy.create_timeout, "cleanup")
-            if result.returncode != 0:
-                yield "unknown"
-            elif result.stdout.strip():
-                yield reason
+        if status.returncode != 0:
+            yield "unknown"
+        elif status.stdout.strip():
+            yield "dirty"
+        identity = self._environment_link_identity(record, path)
+        ignored = self._run_git(
+            path, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+            self._policy.create_timeout, "cleanup",
+        )
+        if ignored.returncode != 0:
+            yield "unknown"
+        elif ignored.stdout:
+            entries = ignored.stdout.rstrip("\0").split("\0")
+            # Unlinking this equivalent pointer cannot remove its source target.
+            # Every other ignored path (including real env directories) stays held.
+            if (entries != [".venv"] or identity is None
+                    or self._environment_link_identity(record, path) != identity):
+                yield "ignored content requires preservation"
 
     def _listed_worktree(self, source: Path, expected_path: Path) -> str | None:
         result = self._run_git(
