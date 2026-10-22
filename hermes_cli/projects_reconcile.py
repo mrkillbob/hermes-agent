@@ -8,6 +8,8 @@ from pathlib import Path
 import sqlite3
 import tempfile
 
+from hermes_platform.host.facts import os_family
+
 from hermes_cli import kanban_db as kb, projects_db
 from hermes_cli.kanban_db_boards import (
     board_ownership_lock,
@@ -306,11 +308,14 @@ def _publish_private_receipt(path, document):
                 stream.flush()
                 os.fsync(stream.fileno())
             os.link(temporary, path)
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            # Windows cannot open directories with os.open; retain file fsync and
+            # no-overwrite publication there, without suppressing POSIX sync errors.
+            if os_family() != "win32":
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         except BaseException:
             raise
     return hashlib.sha256(payload).hexdigest()

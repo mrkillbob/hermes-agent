@@ -631,3 +631,62 @@ def test_new_board_owner_is_serialized_after_canonicalization_commit(
     assert not thread_holder[0].is_alive()
     assert not errors
     assert created_before_commit == [False]
+
+
+@pytest.mark.platforms("windows")
+def test_windows_receipt_publication_allows_registry_reconciliation(duplicate):
+    """Windows cannot open directories with os.open; file fsync still precedes publication."""
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    result = reconcile(args)
+    assert result["status"] == "canonicalized"
+    receipt = json.loads(args["backup_path"].read_text())
+    assert receipt["target_before"]["projects"] == [args["expected_legacy_project"]]
+    with projects_db.connect_closing(args["target_registry"]) as conn:
+        assert projects_db.get_project(conn, args["expected_project_id"]) is not None
+        assert projects_db.get_project(conn, args["legacy_project_id"]).archived
+
+
+@pytest.mark.parametrize("failure", ["file-sync", "link"])
+def test_receipt_failure_before_publication_leaves_registries_unchanged(
+    duplicate, monkeypatch, failure
+):
+    from hermes_cli import projects_reconcile
+
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    before = {key: args[key].read_bytes() for key in ("source_registry", "target_registry")}
+
+    def fail(*_args, **_kwargs):
+        raise OSError("injected receipt publication failure")
+
+    monkeypatch.setattr(projects_reconcile.os, "fsync" if failure == "file-sync" else "link", fail)
+    with pytest.raises(OSError, match="receipt publication failure"):
+        reconcile(args)
+    assert not args["backup_path"].exists()
+    assert all(args[key].read_bytes() == value for key, value in before.items())
+
+
+@pytest.mark.platforms("posix")
+def test_directory_sync_failure_preserves_receipt_and_refuses_registry_mutation(
+    duplicate, monkeypatch
+):
+    from hermes_cli import projects_reconcile
+
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    before = {key: args[key].read_bytes() for key in ("source_registry", "target_registry")}
+    original_open = projects_reconcile.os.open
+
+    def directory_open_fails(path, flags, *rest, **kwargs):
+        if path == args["backup_path"].parent:
+            raise PermissionError("injected directory-open refusal")
+        return original_open(path, flags, *rest, **kwargs)
+
+    monkeypatch.setattr(projects_reconcile.os, "open", directory_open_fails)
+    with pytest.raises(PermissionError, match="directory-open refusal"):
+        reconcile(args)
+    receipt_bytes = args["backup_path"].read_bytes()
+    receipt = json.loads(receipt_bytes)
+    assert receipt["target_before"]["projects"] == [args["expected_legacy_project"]]
+    assert all(args[key].read_bytes() == value for key, value in before.items())
+    with pytest.raises(ValueError, match="recovery receipt"):
+        reconcile(args)
+    assert args["backup_path"].read_bytes() == receipt_bytes

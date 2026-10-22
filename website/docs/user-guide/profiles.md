@@ -523,5 +523,9 @@ inventories, mismatched rows, and registry or history drift. It retires only
 the specified duplicate, preserves its historical task/run records, and adopts
 the existing canonical ID. It does not grant execution or model/RPC access,
 rewrite cards or shared-board ownership, or create a missing profile. The
-receipt is recovery evidence rather than an automatic rollback. Run it from the
-root profile outside a dispatched task or delegated child.
+receipt is recovery evidence rather than an automatic rollback. A receipt-publication
+error occurs before registry commit; if the receipt was already linked, it is
+retained and its path must not be reused. A later uncertain-commit error requires
+inspecting the recorded registry outcome before retrying. Windows flushes the
+receipt file before linking it but does not attempt POSIX directory fsync. Run it
+from the root profile outside a dispatched task or delegated child.
