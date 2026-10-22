@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -97,3 +98,101 @@ def test_unknown_legacy_pool_row_cannot_be_assigned_or_released_by_guess(tmp_pat
         assert ledger._connection.execute("SELECT * FROM worktree_pool_slots").fetchall() == before
     finally:
         ledger.close()
+
+
+@pytest.mark.parametrize("failure", ["fetch", "object_verification"])
+def test_receipt_branch_verification_failure_leaves_reservation_retryable(
+    tmp_path, retirement_linked, failure
+):
+    from github_pr_feedback.controller import LocalGitRepository
+    from github_pr_feedback.git_commands import GitCommandResult, SubprocessGitRunner
+    from github_pr_feedback.policy import FeedbackReceipt
+    from github_pr_feedback.worktree_lifecycle import PathLifecycle, WorkspaceIdentity, canonical_control_store
+    from retirement_fixtures import git
+
+    source, _ = retirement_linked
+    head = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    receipt = FeedbackReceipt("fixture/repo", 17, "review_comment", "pre-mutation-retry", head)
+    root = tmp_path / "worktrees"
+    repository = LocalGitRepository(root)
+    branch = _receipt_branch_for_test(receipt)
+
+    class FailingVerificationRunner:
+        def __init__(self):
+            self.cat_file_calls = 0
+
+        def run(self, argv):
+            if argv[3:5] == ["cat-file", "-e"]:
+                self.cat_file_calls += 1
+                if failure == "fetch" or self.cat_file_calls == 1:
+                    return GitCommandResult(1, "", "missing object")
+                return GitCommandResult(1, "", "object verification failed")
+            if "fetch" in argv:
+                if failure == "fetch":
+                    return GitCommandResult(1, "", "offline fixture failure")
+                return GitCommandResult(0, "")
+            if argv[3:6] == ["rev-parse", "--verify", "--quiet"] and argv[-1] == "FETCH_HEAD^{commit}":
+                return GitCommandResult(0, f"{head}\n")
+            return SubprocessGitRunner().run(argv)
+
+    repository._runner = FailingVerificationRunner()
+    with pytest.raises(RuntimeError, match="exact head is unavailable"):
+        repository.prepare_receipt_branch(source, receipt)
+
+    identity = WorkspaceIdentity("fixture/repo", str(source), str(root / _local_key(receipt)))
+    row = PathLifecycle(canonical_control_store()).snapshot(identity)
+    assert row["phase"] == "ready"
+    assert git(source, "show-ref", "--verify", f"refs/heads/{branch}", check=False) == ""
+
+    repository._runner = SubprocessGitRunner()
+    assert repository.prepare_receipt_branch(source, receipt) == branch
+    assert git(source, "rev-parse", f"refs/heads/{branch}") == head
+
+
+def test_receipt_branch_ref_created_before_runner_failure_remains_uncertain(
+    tmp_path, retirement_linked
+):
+    from github_pr_feedback.controller import LocalGitRepository
+    from github_pr_feedback.git_commands import SubprocessGitRunner
+    from github_pr_feedback.policy import FeedbackReceipt
+    from github_pr_feedback.worktree_lifecycle import PathLifecycle, WorkspaceIdentity, canonical_control_store
+    from retirement_fixtures import git
+
+    source, _ = retirement_linked
+    head = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    receipt = FeedbackReceipt("fixture/repo", 17, "review_comment", "post-mutation-uncertain", head)
+    root = tmp_path / "worktrees"
+    repository = LocalGitRepository(root)
+    branch = _receipt_branch_for_test(receipt)
+    delegate = SubprocessGitRunner()
+
+    class CreateThenFailRunner:
+        def run(self, argv):
+            result = delegate.run(argv)
+            if "branch" in argv and result.returncode == 0:
+                raise RuntimeError("branch command response was lost")
+            return result
+
+    repository._runner = CreateThenFailRunner()
+    with pytest.raises(RuntimeError, match="branch command response was lost"):
+        repository.prepare_receipt_branch(source, receipt)
+
+    identity = WorkspaceIdentity("fixture/repo", str(source), str(root / _local_key(receipt)))
+    row = PathLifecycle(canonical_control_store()).snapshot(identity)
+    assert row["phase"] == "uncertain"
+    assert git(source, "rev-parse", f"refs/heads/{branch}") == head
+
+
+def _receipt_branch_for_test(receipt):
+    from github_pr_feedback.controller import _receipt_branch
+    return _receipt_branch(receipt)
+
+
+def _local_key(receipt):
+    return sha256("\0".join(map(str, receipt.key)).encode("utf-8")).hexdigest()

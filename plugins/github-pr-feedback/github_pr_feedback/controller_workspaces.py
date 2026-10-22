@@ -106,45 +106,57 @@ def prepare_pool(self, path, receipt):
 
 
 def prepare_branch(self, path, receipt, *, object_already_verified=False):
-    with scoped_materialization(path, _local_workspace(self, receipt), receipt.repository):
-        if not _SHA.fullmatch(receipt.head_sha):
-            raise ValueError("head SHA is not a full Git object ID")
-        branch = _receipt_branch(receipt)
-        if not object_already_verified:
-            self._ensure_exact_head(path, receipt)
-        current = self._run(
-            [
-                "git",
-                "-C",
-                str(path),
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                f"refs/heads/{branch}^{{commit}}",
-            ],
-            missing_ok=True,
-        ).strip()
-        if current:
-            if current.casefold() != receipt.head_sha.casefold():
-                raise RuntimeError(
-                    "deterministic receipt branch collides with another commit"
-                )
+    scope, owns_operation = scoped_materialization(
+        path, _local_workspace(self, receipt), receipt.repository
+    )
+    with scope as operation:
+        branch_mutation_started = False
+        try:
+            if not _SHA.fullmatch(receipt.head_sha):
+                raise ValueError("head SHA is not a full Git object ID")
+            branch = _receipt_branch(receipt)
+            if not object_already_verified:
+                self._ensure_exact_head(path, receipt)
+            current = self._run(
+                [
+                    "git",
+                    "-C",
+                    str(path),
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    f"refs/heads/{branch}^{{commit}}",
+                ],
+                missing_ok=True,
+            ).strip()
+            if current:
+                if current.casefold() != receipt.head_sha.casefold():
+                    raise RuntimeError(
+                        "deterministic receipt branch collides with another commit"
+                    )
+                return branch
+            # A failed Git response may still have created the ref; from this
+            # point the lifecycle row must remain uncertain until reconciliation.
+            branch_mutation_started = True
+            self._run(["git", "-C", str(path), "branch", branch, receipt.head_sha])
+            verified = self._run(
+                [
+                    "git",
+                    "-C",
+                    str(path),
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    f"refs/heads/{branch}^{{commit}}",
+                ]
+            ).strip()
+            if verified.casefold() != receipt.head_sha.casefold():
+                raise RuntimeError("receipt branch does not point at the required head")
             return branch
-        self._run(["git", "-C", str(path), "branch", branch, receipt.head_sha])
-        verified = self._run(
-            [
-                "git",
-                "-C",
-                str(path),
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                f"refs/heads/{branch}^{{commit}}",
-            ]
-        ).strip()
-        if verified.casefold() != receipt.head_sha.casefold():
-            raise RuntimeError("receipt branch does not point at the required head")
-        return branch
+        except BaseException:
+            if owns_operation and not branch_mutation_started:
+                operation.cancel_before_mutation()
+            raise
 
 
 def _local_workspace(self, receipt):

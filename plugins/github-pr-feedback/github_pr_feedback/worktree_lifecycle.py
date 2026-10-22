@@ -273,5 +273,5 @@ def scoped_materialization(source, workspace, repository):
     active = existing_operation(lifecycle, identity)
     if active is not None:
         active.verify()
-        return nullcontext(active)
-    return materialization_for(source, workspace, repository)
+        return nullcontext(active), False
+    return materialization_for(source, workspace, repository), True
