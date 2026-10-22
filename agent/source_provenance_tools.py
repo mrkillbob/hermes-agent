@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from agent.source_provenance import active_source_provenance
+from agent import source_provenance_diagnostics as diagnostics
 
 _TRUSTED_READ_TOOL_NAMES = {"read_file", "read"}
 
@@ -22,6 +23,8 @@ def source_provenance_activation(agent: Any, function_name: str, *, tool_call_id
 
     if function_name not in _TRUSTED_READ_TOOL_NAMES:
         return nullcontext()
+    owner = ("", "", "", "")
+    registry = None
     try:
         from agent.source_provenance import (
             DEFAULT_POLICY_DIGEST,
@@ -41,12 +44,13 @@ def source_provenance_activation(agent: Any, function_name: str, *, tool_call_id
             or getattr(agent, "llm_egress_policy_digest", "")
             or DEFAULT_POLICY_DIGEST
         )
-        if not all((session_id, turn_id, request_id, policy_digest)):
-            return nullcontext()
+        owner = (session_id, turn_id, request_id, policy_digest)
+        if not all(owner):
+            return diagnostics.activation(agent, owner, registry, nullcontext(), "missing_identity")
         registry = source_provenance_registry_for_agent(agent)
         if not isinstance(registry, SourceProvenanceRegistry):
-            return nullcontext()
-        return activate_source_provenance(
+            return diagnostics.activation(agent, owner, registry, nullcontext(), "no_registry")
+        context = activate_source_provenance(
             registry,
             session_id=session_id,
             turn_id=turn_id,
@@ -54,8 +58,9 @@ def source_provenance_activation(agent: Any, function_name: str, *, tool_call_id
             policy_digest=policy_digest,
             tool_call_id=tool_call_id,
         )
+        return diagnostics.activation(agent, owner, registry, context, "active")
     except Exception:
-        return nullcontext()
+        return diagnostics.activation(agent, owner, registry, nullcontext(), "unexpected_error")
 
 
 def execute_with_source_provenance(agent, function_name, tool_call_id, execute, arguments):
@@ -80,6 +85,8 @@ def attach_trusted_source_provenance_metadata(
 
     if function_name not in _TRUSTED_READ_TOOL_NAMES:
         return None
+    owner = ("", "", "", "")
+    registry = None
     try:
         from agent.llm_egress_firewall import source_grant_digest
         from agent.source_provenance import (
@@ -93,13 +100,19 @@ def attach_trusted_source_provenance_metadata(
         request_id = following_api_request_id(
             str(getattr(agent, "_current_api_request_id", "") or ""), turn_id
         )
+        owner = (str(getattr(agent, "session_id", "") or ""), turn_id, request_id,
+                 str(getattr(agent, "_llm_egress_policy_digest", "")
+                     or getattr(agent, "llm_egress_policy_digest", "") or DEFAULT_POLICY_DIGEST))
         if not isinstance(registry, SourceProvenanceRegistry) or not request_id:
+            diagnostics.record(agent, owner, registry, "commit", "no_registry" if not isinstance(
+                registry, SourceProvenanceRegistry) else "no_request")
             return None
         digests = tuple(
             source_grant_digest(grant)
             for grant in registry.grants_for_request(request_id)
         )
         if not digests:
+            diagnostics.record(agent, owner, registry, "commit", "no_grants")
             return None
         metadata = getattr(agent, "_source_provenance_metadata", None)
         if not isinstance(metadata, dict):
@@ -122,8 +135,14 @@ def attach_trusted_source_provenance_metadata(
                          or getattr(agent, 'llm_egress_policy_digest', '') or DEFAULT_POLICY_DIGEST))
             envelope[READ_RESULT_ID] = registry.commit_read_result(owner, tool_call_id, content)
         metadata[request_id] = envelope
+        binding_present = bool(envelope.get("read_result_binding_id"))
+        diagnostics.record(agent, owner, registry, "commit", "metadata_committed",
+                           binding_present=binding_present)
+        if tool_call_id is not None and not binding_present:
+            diagnostics.record(agent, owner, registry, "commit", "binding_rejected")
         return envelope
     except Exception:
+        diagnostics.record(agent, owner, registry, "commit", "unexpected_error")
         return None
 
 
@@ -170,12 +189,15 @@ def issue_active_read_provenance(
 
     context = active_source_provenance()
     if context is None or not isinstance(resolved, Path) or source_path is None:
+        diagnostics.producer("no_context" if context is None else "ineligible_backend")
         return
     if result_dict.get("error") or result_dict.get("truncated_by") or not returned_content:
+        diagnostics.producer("result_ineligible")
         return
     try:
         canonical = resolved.resolve(strict=True)
         if resolved.is_symlink() or not canonical.is_file():
+            diagnostics.producer("source_unavailable")
             return
         selected: list[bytes] = []
         with canonical.open("rb") as handle:
@@ -186,14 +208,17 @@ def issue_active_read_provenance(
                     break
                 selected.append(raw_line)
         if not selected:
+            diagnostics.producer("empty_slice")
             return
         raw = b"".join(selected)
         decoded = raw.decode("utf-8")
         from tools.tool_output_limits import get_max_line_length
 
         if any(len(line) > get_max_line_length() for line in decoded.split("\n")):
+            diagnostics.producer("line_limit")
             return
         if returned_content != file_ops._add_line_numbers(decoded, offset):
+            diagnostics.producer("presentation_mismatch")
             return
         grant = context.registry.issue_file_slice(
             path=source_path,
@@ -205,13 +230,16 @@ def issue_active_read_provenance(
             request_id=context.request_id,
             policy_digest=context.policy_digest,
         )
+        diagnostics.producer("grant_issued")
         if context.tool_call_id:
             context.registry.remember_producer_read(
                 grant, context.tool_call_id,
                 sha256(json.dumps(result_dict, ensure_ascii=False).encode('utf-8')).hexdigest(),
             )
-    except Exception:
-        return
+    except UnicodeDecodeError:
+        diagnostics.producer("non_utf8")
+    except Exception as exc:  # health: allow BLE001 -- Preserve existing fail-closed producer behavior without logging private exception text.
+        diagnostics.producer_exception(exc)
 
 
 __all__ = [

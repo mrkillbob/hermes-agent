@@ -1777,11 +1777,9 @@ class LLMEgressFirewall:
         grants: Sequence[SourceGrant] = (),
     ) -> AuthorizedEgress:
         """Construct and authorize immutable provider bytes or fail closed.
-
-        Remote and unknown destinations accept only ``TypedOutboundRequest``.
-        Source text is loaded from verified grants while constructing the
-        logical request, so no independent raw source-bearing payload exists
-        for a caller to send after preflight.
+        Remote and unknown destinations require ``TypedOutboundRequest``. Verified
+        grants supply source bytes during construction, leaving no independent
+        raw source payload for a caller to send after preflight.
         """
 
         provider = str(_route_value(route, "provider", ""))
@@ -2321,6 +2319,8 @@ class LLMEgressFirewall:
             receipt[field] = _receipt_identifier(receipt[field])
         from agent.source_grant_verification import grant_receipt_fields
         receipt['source_grants'] = [grant_receipt_fields(grant) for grant in grants]
+        from agent.source_provenance_diagnostics import append_receipt_diagnostics
+        append_receipt_diagnostics(receipt, decision)
         flags = os.O_APPEND | os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
