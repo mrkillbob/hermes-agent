@@ -3752,7 +3752,7 @@
     },
     {
       "name": "session.worktree_cleanup",
-      "summary": "Inspect or explicitly remove one managed conversation worktree.",
+      "summary": "Inspect, explicitly retain or restore one managed conversation worktree; removal is disabled.",
       "params": [
         {
           "name": "params",
@@ -39835,6 +39835,28 @@
       "SessionWorktreeCleanupResult": {
         "additionalProperties": false,
         "properties": {
+          "outcome": {
+            "default": "inspected",
+            "title": "Outcome",
+            "type": "string"
+          },
+          "retained_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Retained Path"
+          },
+          "recovery_required": {
+            "default": false,
+            "title": "Recovery Required",
+            "type": "boolean"
+          },
           "allowed": {
             "title": "Allowed",
             "type": "boolean"

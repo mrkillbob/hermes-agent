@@ -3701,6 +3701,9 @@ export interface SessionWorktreeCleanupParams {
   profile?: string | null
 }
 export interface SessionWorktreeCleanupResult {
+  outcome?: string
+  retained_path?: string | null
+  recovery_required?: boolean
   allowed: boolean
   reasons: string[]
   removed: boolean
@@ -6474,7 +6477,7 @@ export interface RpcMethods {
   'session.usage': { params: SessionUsageParams; result: SessionUsageResult }
   /** Re-home a stored session's workspace; git identity is replaced and a live agent follows. */
   'session.workspace.move': { params: SessionWorkspaceMoveParams; result: SessionWorkspaceMoveResult }
-  /** Inspect or explicitly remove one managed conversation worktree. */
+  /** Inspect, explicitly retain or restore one managed conversation worktree; removal is disabled. */
   'session.worktree_cleanup': { params: SessionWorktreeCleanupParams; result: SessionWorktreeCleanupResult }
   /** Strict provider check through the same runtime resolution the agent uses on session creation. */
   'setup.runtime_check': { params: SetupRuntimeCheckParams; result: SetupRuntimeCheckResult }
