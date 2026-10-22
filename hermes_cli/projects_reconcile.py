@@ -40,6 +40,8 @@ _TERMINAL_RUN_STATUSES = frozenset(
         "reclaimed",
         "released",
         "review",
+        "routed",
+        "routed_to_repair_profile",
         "scheduled",
         "stale",
         "timed_out",
@@ -772,15 +774,14 @@ def _commit_reconciliation(
                 registry_identities,
                 root_identity,
             )
-            # Keep board writer transactions and ownership locks through the
-            # linearization point. A history writer can proceed only afterward.
-            registries[source].execute("COMMIT")
+            # Keep source and board writer reservations through target commit.
+            # Ordinary registry/history writers can proceed only afterward.
             _commit_target_registry(registries[target])
             target_committed = True
     except BaseException as exc:
         if target_committed:
             raise RuntimeError(
-                "canonicalization committed but history-fence release failed; inspect the private receipt before retry"
+                "canonicalization committed but source/history-fence release failed; inspect the private receipt before retry"
             ) from exc
         raise
 

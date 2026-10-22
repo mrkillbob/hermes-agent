@@ -901,3 +901,106 @@ def test_public_completion_run_requires_known_ended_history(duplicate, drift):
         assert not args["backup_path"].exists()
     with connect_closing(board="default") as conn:
         assert kanban_transfer._selected_task_rows(conn, [duplicate["task_id"]]) == before
+
+
+def test_canonical_source_writer_is_reserved_through_target_commit(duplicate, monkeypatch):
+    from hermes_cli import projects_reconcile
+
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    outcomes = []
+    original = projects_reconcile._commit_target_registry
+
+    def commit(conn):
+        def archive_source():
+            try:
+                with sqlite3.connect(args["source_registry"], isolation_level=None, timeout=0) as writer:
+                    outcomes.append(projects_db.archive_project(writer, args["expected_project_id"]))
+            except sqlite3.OperationalError as exc:
+                outcomes.append(exc)
+        writer = threading.Thread(target=archive_source)
+        writer.start()
+        writer.join(5)
+        assert not writer.is_alive()
+        original(conn)
+    monkeypatch.setattr(projects_reconcile, "_commit_target_registry", commit)
+    assert reconcile(args)["status"] == "canonicalized"
+    assert len(outcomes) == 1 and isinstance(outcomes[0], sqlite3.OperationalError)
+    assert "locked" in str(outcomes[0]).lower()
+    with projects_db.connect_closing(args["source_registry"]) as conn:
+        assert not projects_db.get_project(conn, args["expected_project_id"]).archived
+        assert projects_db.archive_project(conn, args["expected_project_id"])
+
+
+@pytest.mark.parametrize("after_commit", [False, True])
+def test_source_reservation_cleanup_failure_reports_committed_target(duplicate, monkeypatch, after_commit):
+    from hermes_cli import projects_reconcile
+
+    original = projects_reconcile._registry_write
+    class FailingSourceCommit(sqlite3.Connection):
+        def execute(self, sql, *a, **kw):
+            if sql.strip().upper() == "COMMIT":
+                if after_commit:
+                    super().execute(sql, *a, **kw)
+                raise OSError("synthetic source reservation release failure")
+            return super().execute(sql, *a, **kw)
+    def source_writer(path):
+        if path != duplicate["source_registry"]:
+            return original(path)
+        conn = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, factory=FailingSourceCommit)
+        conn.row_factory = sqlite3.Row
+        return conn
+    monkeypatch.setattr(projects_reconcile, "_registry_write", source_writer)
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    with pytest.raises(RuntimeError, match="canonicalization committed but .*fence release failed"):
+        reconcile(args)
+    assert args["backup_path"].is_file()
+    with projects_db.connect_closing(args["target_registry"]) as conn:
+        assert projects_db.get_project(conn, args["expected_project_id"]) is not None
+        assert projects_db.get_project(conn, args["legacy_project_id"]).archived
+
+
+@pytest.mark.parametrize("active_run", [False, True], ids=["synthesized", "claimed"])
+@pytest.mark.parametrize("drift", [None, "unfinished", "current", "unknown"])
+def test_public_repair_route_history_requires_ended_unclaimed_runs(duplicate, monkeypatch, active_run, drift):
+    monkeypatch.setattr(kb, "_fire_task_hook", lambda *a, **kw: None)
+    with connect_closing(board="default") as conn:
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_runs WHERE task_id=?", (duplicate["task_id"],))
+            conn.execute(
+                "UPDATE tasks SET status='ready',workspace_kind='dir',workspace_path=?,branch_name=NULL WHERE id=?",
+                (str(duplicate["expected_root"]), duplicate["task_id"]),
+            )
+        claimed = kb.claim_task(conn, duplicate["task_id"], claimer="synthetic-owner", board="default") if active_run else None
+        if active_run:
+            assert claimed is not None
+        routed, _, _ = kb.route_worker_block_to_orchestrator(conn, duplicate["task_id"], reason="Synthetic unresolved handoff")
+        assert routed
+        run = conn.execute("SELECT * FROM task_runs WHERE task_id=?", (duplicate["task_id"],)).fetchone()
+        assert run["status"] == ("routed" if active_run else "routed_to_repair_profile")
+        assert run["ended_at"] is not None
+        assert kb.complete_task(conn, duplicate["task_id"], result="Synthetic final result", fire_lifecycle_hook=False, board="default")
+        if drift:
+            with kb.write_txn(conn):
+                if drift == "unfinished":
+                    conn.execute("UPDATE task_runs SET ended_at=NULL WHERE id=?", (run["id"],))
+                elif drift == "current":
+                    conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (run["id"], duplicate["task_id"]))
+                else:
+                    conn.execute("UPDATE task_runs SET status='unknown' WHERE id=?", (run["id"],))
+        before = kanban_transfer._selected_task_rows(conn, [duplicate["task_id"]])
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    summary = args["expected_references"]["default"][0]
+    summary.update({key: before["tasks"][0][key] for key in summary if key in before["tasks"][0]})
+    summary.update(run_count=len(before["task_runs"]), event_count=len(before["task_events"]))
+    if drift == "current":
+        # The reviewed snapshot must be unclaimed; an actual current run drift
+        # is refused rather than authorizing a live run through expectations.
+        summary["current_run_id"] = None
+    if drift is None:
+        assert reconcile(args)["status"] == "canonicalized"
+    else:
+        with pytest.raises(ValueError, match="terminal unclaimed"):
+            reconcile(args)
+        assert not args["backup_path"].exists()
+    with connect_closing(board="default") as conn:
+        assert kanban_transfer._selected_task_rows(conn, [duplicate["task_id"]]) == before
