@@ -6,7 +6,9 @@ import pytest
 
 from agent.conversation_worktree import ConversationWorktreeManager
 from hermes_cli.worktree_environment import _venv_python_path
-from tests.agent.test_conversation_worktree_cleanup import git, prepared_binding
+from tests.agent.test_conversation_worktree_cleanup import (
+    git, git_worktree_is_locked, prepared_binding,
+)
 
 
 def usable_environment(path):
@@ -377,3 +379,99 @@ def test_cleanup_preserves_interpreter_through_native_case_alias(managed_environ
     assert "ignored content requires preservation" in result.verdict.reasons
     assert (python.stat().st_dev, python.stat().st_ino) == before
     assert executable.read_text() == "synthetic interpreter; never executed\n"
+
+
+@pytest.fixture(params=["directory_only", "none"])
+def visible_managed_link(request):
+    manager, db, source, _remote, _original, _sibling = request.getfixturevalue(
+        "prepared_binding"
+    )
+    if request.param == "directory_only":
+        source.joinpath(".gitignore").write_text("/.venv/\n*.private\n")
+        git(source, "add", ".gitignore")
+        git(source, "commit", "-m", "Ignore environment directories only")
+        git(source, "push", "origin", "stable")
+    environment = usable_environment(source.parent / "venvs" / "visible-managed")
+    source.joinpath(".venv").symlink_to(environment, target_is_directory=True)
+    binding = manager.bind_new_root_session(
+        "visible-managed-environment", conversation_kind="interactive"
+    )
+    assert binding.path.joinpath(".venv").is_symlink()
+    assert git(binding.path, "status", "--porcelain", "--untracked-files=all") == "?? .venv"
+    return manager, db, source, binding, environment
+
+
+def test_cleanup_unlinks_verified_bootstrap_link_without_file_ignore(visible_managed_link):
+    manager, db, _source, binding, environment = visible_managed_link
+    before = environment.stat().st_dev, environment.stat().st_ino
+    sentinel = environment.joinpath("source-sentinel").read_bytes()
+
+    verdict = manager.inspect_cleanup(binding.root_session_id)
+    assert verdict.allowed, verdict.reasons
+    result = manager.remove_after_explicit_request(binding.root_session_id)
+
+    assert result.removed, result
+    assert not binding.path.exists()
+    assert db.get_conversation_worktree(binding.root_session_id).state == "removed"
+    assert (environment.stat().st_dev, environment.stat().st_ino) == before
+    assert environment.joinpath("source-sentinel").read_bytes() == sentinel
+
+
+@pytest.mark.parametrize("change", [
+    "foreign_link", "untracked", "tracked", "ignored", "global_ignored",
+    "remove_race", "prepare_failure",
+])
+def test_visible_bootstrap_link_never_exempts_other_content(
+    visible_managed_link, tmp_path, monkeypatch, change,
+):
+    manager, db, source, binding, environment = visible_managed_link
+    if change == "global_ignored":
+        exclude = tmp_path / "original-global-ignore"
+        exclude.write_text("*.private\n")
+        git(source, "config", "core.excludesFile", str(exclude))
+    late_failure = change in {"remove_race", "prepare_failure"}
+    if change == "remove_race":
+        preserved = binding.path / "late-user.txt"
+        original_git = manager._run_git
+
+        def publish_late_file(cwd, args, timeout, phase):
+            if args[0] == "-c":
+                preserved.write_text("preserve unique user data\n")
+            return original_git(cwd, args, timeout, phase)
+
+        monkeypatch.setattr(manager, "_run_git", publish_late_file)
+        before = b"preserve unique user data\n"
+    elif change == "prepare_failure":
+        import agent.conversation_worktree as worktrees
+
+        def unavailable_temporary_directory(**_kwargs):
+            raise OSError("synthetic private temporary-storage failure")
+
+        monkeypatch.setattr(worktrees.tempfile, "TemporaryDirectory", unavailable_temporary_directory)
+        preserved = environment / "source-sentinel"
+        before = preserved.read_bytes()
+    elif change == "foreign_link":
+        preserved = usable_environment(tmp_path / "foreign-environment") / "source-sentinel"
+        link = binding.path / ".venv"
+        link.unlink()
+        link.symlink_to(preserved.parent, target_is_directory=True)
+    else:
+        name = {
+            "untracked": "user.txt", "tracked": "tracked.txt",
+            "ignored": "user.private", "global_ignored": "user.private",
+        }[change]
+        preserved = binding.path / name
+        preserved.write_text("preserve unique user data\n")
+    if not late_failure:
+        before = preserved.read_bytes()
+
+    verdict = manager.inspect_cleanup(binding.root_session_id)
+    assert verdict.allowed is late_failure
+    result = manager.remove_after_explicit_request(binding.root_session_id)
+
+    assert not result.removed
+    assert binding.path.is_dir()
+    assert db.get_conversation_worktree(binding.root_session_id).state == "ready"
+    assert preserved.read_bytes() == before
+    assert environment.joinpath("source-sentinel").read_text() == "preserve source environment\n"
+    assert git_worktree_is_locked(source, binding.path)

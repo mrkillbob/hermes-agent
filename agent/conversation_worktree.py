@@ -13,6 +13,7 @@ import re
 import stat
 import subprocess
 import threading
+import tempfile
 import time
 from typing import Iterator
 import uuid
@@ -794,12 +795,7 @@ class ConversationWorktreeManager:
                                 failure_phase="unlock",
                                 failure_message=message,
                             )
-                        removed = self._run_git(
-                            source,
-                            ["worktree", "remove", str(path)],
-                            self._policy.create_timeout,
-                            "cleanup",
-                        )
+                        removed = self._remove_clean_worktree(source, current, path)
                         if removed.returncode != 0:
                             try:
                                 self._ensure_git_worktree_locked(source, current)
@@ -1007,15 +1003,15 @@ class ConversationWorktreeManager:
     def _cleanup_content_refusals(self, record, path: Path) -> Iterator[str]:
         # Non-force `git worktree remove` still deletes ignored files. Neither
         # retained commits nor the binding ledger preserve that unique content.
+        identity = self._environment_link_identity(record, path)
         status = self._run_git(
-            path, ["status", "--porcelain", "--untracked-files=all"],
+            path, ["status", "--porcelain", "--untracked-files=all", "-z"],
             self._policy.create_timeout, "cleanup",
         )
         if status.returncode != 0:
             yield "unknown"
-        elif status.stdout.strip():
+        elif status.stdout and (status.stdout != "?? .venv\0" or identity is None):
             yield "dirty"
-        identity = self._environment_link_identity(record, path)
         ignored = self._run_git(
             path, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
             self._policy.create_timeout, "cleanup",
@@ -1029,6 +1025,38 @@ class ConversationWorktreeManager:
             if (entries != [".venv"] or identity is None
                     or self._environment_link_identity(record, path) != identity):
                 yield "ignored content requires preservation"
+        if status.stdout == "?? .venv\0" and (
+                identity is None or self._environment_link_identity(record, path) != identity):
+            yield "dirty"
+
+    def _remove_clean_worktree(self, source, record, path):
+        args = ["worktree", "remove", str(path)]
+        identity = self._environment_link_identity(record, path)
+        if identity is None:
+            if (path / ".venv").exists() or (path / ".venv").is_symlink():
+                return subprocess.CompletedProcess(args, 1, "", "environment identity changed")
+            return self._run_git(source, args, self._policy.create_timeout, "cleanup")
+        # Git itself refuses an untracked link even after our content probes.
+        # Scope the exact pointer exclusion to this invocation, never --force.
+        # Replacing global excludes can only expose more paths for Git to refuse;
+        # the prior status/ignored probes still use the original ignore policy.
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="hermes-cleanup-exclude-", ignore_cleanup_errors=True,
+            ) as temporary:
+                ignore = Path(temporary).resolve() / "ignore"
+                if ignore.is_relative_to(path.resolve()):
+                    return subprocess.CompletedProcess(args, 1, "", "temporary exclusion is not isolated")
+                ignore.touch(mode=0o600)
+                ignore.write_text("/.venv\n", encoding="utf-8")
+                if self._environment_link_identity(record, path) != identity:
+                    return subprocess.CompletedProcess(args, 1, "", "environment identity changed")
+                return self._run_git(
+                    source, ["-c", f"core.excludesFile={ignore}", *args],
+                    self._policy.create_timeout, "cleanup",
+                )
+        except OSError:
+            return subprocess.CompletedProcess(args, 1, "", "temporary exclusion is unavailable")
 
     def _listed_worktree(self, source: Path, expected_path: Path) -> str | None:
         result = self._run_git(
