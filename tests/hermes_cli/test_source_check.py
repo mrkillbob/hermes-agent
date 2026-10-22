@@ -115,6 +115,7 @@ def installation(tmp_path, monkeypatch):
 
 def test_target_worktree_owns_admission_and_fork_comparison(installation, monkeypatch):
     from hermes_cli.source_check import check_for_updates
+    from hermes_cli import _subprocess_compat
 
     root, linked, home, _base, head, responses, requests, git = installation
     (root / "install-stamp.json").write_text(json.dumps({"updateMechanism": "external"}))
@@ -124,14 +125,14 @@ def test_target_worktree_owns_admission_and_fork_comparison(installation, monkey
     responses["/repos/fixture/fork/commits/feature%2Fgui"] = (200, target)
     responses[f"/repos/fixture/fork/compare/{head}...{target}"] = (200, {"ahead_by": 3, "commits": []})
     commands = []
-    original = subprocess.run
+    original = _subprocess_compat.bounded_probe_run
 
     def record(args, **kwargs):
         commands.append(args)
         return original(args, **kwargs)
 
     before = {str(p.relative_to(root)): p.read_bytes() for p in (root / ".git").rglob("*") if p.is_file()}
-    monkeypatch.setattr(subprocess, "run", record)
+    monkeypatch.setattr(_subprocess_compat, "bounded_probe_run", record)
     status = check_for_updates(install_root=linked, home=home, cache_path=cache)
     assert status["supported"] is True
     assert status["branch"] == "feature/gui"
@@ -473,12 +474,13 @@ def test_source_admission_is_stamp_owned_not_path_owned(installation, mechanism)
 
 def test_embedded_revision_keeps_https_ref_advertisement_recovery(installation, monkeypatch):
     from hermes_cli.source_check import check_for_updates
+    from hermes_cli import _subprocess_compat
     _root, _linked, home, _base, head, responses, _requests, _git = installation
     monkeypatch.setenv("HERMES_REVISION", head)
     monkeypatch.setattr("hermes_cli.config.get_project_root", lambda: home)
     monkeypatch.setattr("hermes_cli.config.detect_install_method", lambda root: "nix")
     responses[MAIN_CHANNEL] = (200, source_channel("main", "NousResearch/hermes-agent"))
-    original = subprocess.run
+    original = _subprocess_compat.bounded_probe_run
     probes = []
 
     def advertise(args, **kwargs):
@@ -487,11 +489,11 @@ def test_embedded_revision_keeps_https_ref_advertisement_recovery(installation, 
             return subprocess.CompletedProcess(args, 0, head + "\trefs/heads/main\n", "")
         return original(args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", advertise)
+    monkeypatch.setattr(_subprocess_compat, "bounded_probe_run", advertise)
     assert check_for_updates(home=home)["behind"] == 0
     assert len(probes) == 1
     assert "https://github.com/NousResearch/hermes-agent.git" in probes[0][0]
-    assert probes[0][1]["stdin"] == subprocess.DEVNULL
+    assert probes[0][1]["timeout"] == 10
     assert probes[0][1]["env"]["GIT_TERMINAL_PROMPT"] == "0"
 
 

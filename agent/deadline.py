@@ -419,7 +419,7 @@ def _process_tree_snapshot(pid: int, *, hard_kill: bool):
                 logger.debug("kill_process_tree: target already gone or resume refused", exc_info=True)
 
 
-def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
+def kill_process_tree(pid: int, *, sig: Optional[int] = None, signal_group: bool = True) -> bool:
     """Terminate ``pid`` and all its descendants, portably; True when anything was signalled.
 
     Windows: ``taskkill /F /T`` (``sig`` ignored). POSIX: snapshot descendants via
@@ -427,7 +427,9 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
     escape a stale snapshot. Signal identity-checked descendants before their
     parent, then its group when ``pid`` leads one. Stopping is best-effort with a
     bounded wait; unavailable psutil still leaves process-group cleanup. Other
-    signals do not suspend recipients. ``sig`` defaults to ``SIGKILL``."""
+    signals do not suspend recipients. ``sig`` defaults to ``SIGKILL``.
+    ``signal_group=False`` leaves group closure to a caller-owned once-only lifecycle;
+    the identity-checked descendant sweep and direct parent signal still run."""
     if sys.platform == "win32":
         try:
             from hermes_cli._subprocess_compat import windows_hide_flags
@@ -463,7 +465,7 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
         try:
             # getpgid→killpg has an inherent TOCTOU shared by every killpg site; the psutil
             # sweep below is identity-aware (PID + create time) and does not.
-            pgid = os.getpgid(pid)
+            pgid = os.getpgid(pid) if signal_group else None
         except (ProcessLookupError, PermissionError, OSError):
             pgid = None
         try:
