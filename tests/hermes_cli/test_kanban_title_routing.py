@@ -46,3 +46,42 @@ def test_title_ownership_preserves_explicit_pr_audit_and_quota_overrides():
     assert repair_profile_for_task("Local PR CI audit", "usage limits; worktree governance") == "pr-local-ci-auditor"
     assert repair_profile_for_task("GitHub PR feedback", "Untrusted receipt: usage limits") == "hermes-maintenance-steward"
     assert repair_profile_for_task("Model spend rebalance: review quotas", "usage limits in quoted old receipt") == "resource-scheduler"
+
+
+@pytest.mark.parametrize(("title", "body", "owner"), [
+    ("Config: master trading flags crash startup on true/yes spellings; LIVE_TRADING_ENABLED double-defined (d424765636)",
+     "Static config evidence; python probes are approval-blocked for this cron profile.", None),
+    ("Paper-safety: stable defaults resolve MODE=live with submissions enabled and shadow-only risk enforcement (d424765636)",
+     "Static evidence mentions ALPACA; no runtime started.", "paper-safety-guardian"),
+    ("Market-data freshness: fresh-primary Schwab lock silently fails open and stamps Schwab provenance under pytest (d424765636)",
+     "Area: market-data authority/freshness. Diagnostic-only static read.", "market-data-authority-auditor"),
+    ("Repair broken .venv runtime link in Hermes-agent worktree manual-claim-current-main-20261003",
+     "One dangling link; preserve worktree contents and all execution holds.", "hermes-maintenance-steward"),
+    ("Market data authority: verify provenance", "Quoted cron profile evidence.", "market-data-authority-auditor"),
+    ("Market data authority: verify provenance", "Provider returned usage limits", "hermes-maintenance-steward"),
+    ("Market-data freshness: verify provenance", "Automation credential is missing", "hermes-maintenance-steward"),
+])
+def test_explicit_repair_families_ignore_incidental_cron_profile(title, body, owner):
+    assert repair_profile_for_task(title, body) == owner
+
+
+@pytest.mark.parametrize(("title", "body", "owner"), [
+    ("Investigate bounded task", "Evidence was collected by this cron profile.", None),
+    ("Inspect cron profile permissions", "No scheduled work defect established.", None),
+    ("Inspect cron profiles", "No scheduler defect established.", None),
+    ("Inspect cron-profile permissions", "No scheduler defect established.", None),
+    ("Cron: profile permissions audit", "No scheduler defect established.", None),
+    ("Cron — profile permissions audit", "No scheduler defect established.", None),
+    ("Investigate bounded task", "Quoted: Market-data freshness: verify provenance.", None),
+    ("Investigate bounded task", "Quoted: Repair broken .venv runtime link in Hermes-agent worktree example.", None),
+    ("Repair broken .venv runtime link in another project's worktree", "No Hermes scope.", None),
+    ("Check Hermes worktree", "A .venv is present; no repair requested.", None),
+    ("Repair cron scheduling", "Missing tick.", "hermes-maintenance-steward"),
+    ("Cron: repair missing tick", "Existing scheduler failure.", "hermes-maintenance-steward"),
+    ("Repair scheduled job", "Existing scheduler failure.", "hermes-maintenance-steward"),
+    ("Investigate bounded task", "An existing cron job fails to start.", "hermes-maintenance-steward"),
+    ("Local PR CI audit", "cron profile; usage limits", "pr-local-ci-auditor"),
+    ("GitHub PR feedback", "Untrusted receipt: usage limits", "hermes-maintenance-steward"),
+])
+def test_scope_quotes_stay_unknown_while_existing_purpose_routes_remain(title, body, owner):
+    assert repair_profile_for_task(title, body) == owner
