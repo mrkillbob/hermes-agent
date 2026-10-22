@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, UTC
 from pathlib import Path
@@ -116,6 +117,8 @@ class DistributionManifest:
     source: str = ""
     # ISO-8601 UTC timestamp written on install/update (empty in repo-shipped manifests).
     installed_at: str = ""
+    # Local publication identity; old/source manifests may omit it.
+    installed_generation: str = ""
 
     @classmethod
     def from_dict(cls, data: Any) -> DistributionManifest:
@@ -136,6 +139,7 @@ class DistributionManifest:
             license=_str(data, "license"), env_requires=[EnvRequirement.from_dict(e) for e in env_raw],
             distribution_owned=[str(p).strip().strip("/") for p in dist_owned_raw if str(p).strip()],
             source=_str(data, "source"), installed_at=_str(data, "installed_at"),
+            installed_generation=_str(data, "installed_generation"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -146,7 +150,7 @@ class DistributionManifest:
             ("author", self.author), ("license", self.license),
             ("env_requires", [e.to_dict() for e in self.env_requires]),
             ("distribution_owned", self.distribution_owned), ("source", self.source),
-            ("installed_at", self.installed_at),
+            ("installed_at", self.installed_at), ("installed_generation", self.installed_generation),
         )
         out.update((k, v) for k, v in optional if v)
         return out
@@ -572,7 +576,9 @@ def _copy_dist_payload(staged: Path, target: Path, manifest: DistributionManifes
     if manifest.env_requires and not (target / ENV_EXAMPLE_FILENAME).exists():
         (target / ENV_EXAMPLE_FILENAME).write_text(_env_template_from_manifest(manifest), encoding="utf-8")
 
-    # Make sure the manifest on disk reflects resolved name + source
+    # Mint inside the caller's reservation after payload copy, never trust a shipped
+    # generation or wall-clock precision to distinguish in-place publications.
+    manifest.installed_generation = uuid.uuid4().hex
     write_manifest(target, manifest)
 
 
