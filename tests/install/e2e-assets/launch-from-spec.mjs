@@ -36,6 +36,7 @@ import { observeSourceUpdate } from './source-update-observer.mjs';
 import { runUpdateWindowChat } from './update-window-chat.mjs';
 import { isolateUpdateWindowEnvironment, isolatedElectronArgs, updateWindowEnvironment } from './smoke-env.mjs';
 import { sourceRuntimeSettleCommand } from './source-runtime-settle.mjs';
+import { observeElectronLaunch } from './electron-launch-diagnostics.mjs';
 
 /**
  * @typedef {{argv: string[], cwd: string, env: Record<string, string>,
@@ -162,7 +163,13 @@ async function main() {
     cwd: launch.cwd,
     env: launchEnv,
   });
-  if (!values['no-update']) await installSourceBranchProbe(app);
+  const launchSnapshot = observeElectronLaunch(app, log);
+  try {
+    if (!values['no-update']) await installSourceBranchProbe(app);
+  } catch (error) {
+    log(`source probe failed: ${JSON.stringify(launchSnapshot())}`);
+    throw error;
+  }
   const window = await pickAppWindow(app, log);
   await runUpdateWindowChat(app, window, {
     mockUrl: values['mock-url'], outDir: values['chat-out'],
