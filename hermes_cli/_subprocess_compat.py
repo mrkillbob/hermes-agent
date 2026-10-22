@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Mapping, NoReturn, Sequence
+from typing import Callable, Mapping, NoReturn, Sequence
 
 __all__ = [
     "FILTER_DISCOVERY_FAILED",
@@ -765,7 +765,7 @@ def pid_is_hermes(pid: int, *, expected_start_time: int | None = None) -> bool:
         return False
 
 
-def kill_process_tree(proc: subprocess.Popen) -> None:
+def kill_process_tree(proc: subprocess.Popen, *, signal_group: bool = True) -> None:
     """Best-effort terminate *proc* and its descendants on both platforms; never raises.
 
     ``proc.kill()`` alone only terminates the direct child. This is cleanup on an already-failing
@@ -786,9 +786,9 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
     try:
         from agent.deadline import kill_process_tree as _deadline_kill_tree
 
-        _deadline_kill_tree(proc.pid)
+        _deadline_kill_tree(proc.pid, **({"signal_group": False} if not signal_group else {}))
     except Exception:
-        _legacy_kill_process_tree(proc)
+        _legacy_kill_process_tree(proc, signal_group=signal_group)
         return
     # Ensure Popen's own bookkeeping sees the exit so communicate()/wait() cannot hang.
     try:
@@ -797,9 +797,9 @@ def kill_process_tree(proc: subprocess.Popen) -> None:
         pass
 
 
-def _legacy_kill_process_tree(proc: subprocess.Popen) -> None:
+def _legacy_kill_process_tree(proc: subprocess.Popen, *, signal_group: bool = True) -> None:
     """Local tree-kill fallback when agent.deadline is unavailable (partial install, cycle)."""
-    if not IS_WINDOWS:
+    if not IS_WINDOWS and signal_group:
         # Verify the child leads its own process group before signalling, never a shared group.
         try:
             import signal as _signal
@@ -828,11 +828,13 @@ def _legacy_kill_process_tree(proc: subprocess.Popen) -> None:
 def bounded_probe_run(
     argv: Sequence[str], *, timeout: float, errors: str = "replace",
     env: Mapping[str, str] | None = None, cwd: str | os.PathLike[str] | None = None,
-    raise_on_spawn_failure: bool = False, input: str | None = None,
-) -> subprocess.CompletedProcess[str] | None:
+    raise_on_spawn_failure: bool = False, input: str | bytes | None = None, text: bool = True,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes] | None:
     """Deadlock-safe ``subprocess.run(argv, capture_output=True, timeout=…)`` for fail-open probes.
 
     ``input`` is written to the child's stdin (closed afterwards); without it stdin is ``DEVNULL``.
+    ``text=False`` preserves raw captured bytes. A bound ``ProbeScope`` owns active children,
+    stops them on caller shutdown, and refuses subsequent spawns under that scope.
 
     Returns a ``CompletedProcess`` when the child finished within *timeout* (any exit code), or
     ``None`` on spawn failure or timeout. With ``raise_on_spawn_failure=True`` the ``Popen``
@@ -847,7 +849,9 @@ def bounded_probe_run(
     machines (#87134); the git probes hit it first (#68609 / #66037).
     """
     _popen_kwargs: dict = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {"process_group": 0}
-    job = None
+    from hermes_cli.probe_lifecycle import OwnedProbe, current_probe_scope
+
+    scope = current_probe_scope()
     try:
         # Windows: contain the probe in a Job Object. `taskkill /T` walks LIVE parent pids, and a
         # Cygwin/MSYS `exec` lets the forked stub exit once the new image runs, so a Git Bash grandchild
@@ -855,34 +859,67 @@ def bounded_probe_run(
         # on windows-latest). KILL_ON_JOB_CLOSE reaches it regardless of ancestry.
         from hermes_cli.local_runtime.processes import spawn_server
 
-        proc, job = spawn_server(
-            list(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
-            text=True, encoding="utf-8", errors=errors,
-            env=dict(env) if env is not None else None, cwd=cwd, **_popen_kwargs)
+        def start():
+            return spawn_server(
+                list(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
+                **({"text": True, "encoding": "utf-8", "errors": errors} if text else {}),
+                env=dict(env) if env is not None else None, cwd=cwd, **_popen_kwargs)
+
+        owned = scope.spawn(start) if scope is not None else OwnedProbe(*start())
+        if owned is None:
+            return None
+        proc = owned.proc
     except Exception:
         if raise_on_spawn_failure:
             raise
         return None
     try:
-        stdout, stderr = proc.communicate(input=input, timeout=timeout)
-    except Exception:
-        # Timeout OR any other communicate() failure (torn-down pipe, decode error): tree-kill and
-        # drain bounded — leaving it running would leak the suspended-descendant class this guards.
-        _close_job(job)
-        kill_and_drain(proc, 1)
-        return None
-    # The probe exited on its own; anything it left behind (`&` jobs) goes with the job.
-    _close_job(job)
-    return subprocess.CompletedProcess(list(argv), proc.returncode, stdout, stderr)
+        try:
+            stdout, stderr = proc.communicate(input=input, timeout=timeout)
+        except Exception:
+            # Timeout OR any other communicate() failure: tree-kill and drain bounded.
+            kill_and_drain(proc, 1, terminate=owned.close)
+            return None
+        return subprocess.CompletedProcess(list(argv), proc.returncode, stdout, stderr)
+    finally:
+        # Keep containment until after communication, including successful exits:
+        # helpers with closed pipes do not delay communicate() or retain a live parent.
+        owned.close()
+        if scope is not None:
+            scope.release(proc)
 
 
-def kill_and_drain(proc: subprocess.Popen, seconds: float) -> tuple | None:
+def _close_probe_group(proc: subprocess.Popen) -> None:
+    """Close the POSIX group created by bounded_probe_run's process_group=0.
+
+    Live members retain their original group after its leader is reaped, so use
+    the spawn-time PGID rather than looking up the now-absent leader. POSIX has
+    no retained group handle: if the entire group exits and its numeric PGID is
+    recycled before this first signal, native killpg has a reuse window. This is
+    the same OS limitation as the existing process-group timeout helper; it is
+    not equivalent to a Windows job handle. OwnedProbe permits only one attempt.
+    """
+    if IS_WINDOWS:
+        return
+    import signal
+
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)  # windows-footgun: ok — POSIX owned probe group only
+    except ProcessLookupError:
+        pass  # The entire group has already exited.
+
+
+def kill_and_drain(proc: subprocess.Popen, seconds: float, *,
+                   terminate: Callable[[], None] | None = None) -> tuple | None:
     """Tree-kill *proc* (:func:`kill_process_tree`), then read what its pipes still hold for at
     most *seconds*: ``(stdout, stderr)``, or ``None`` when a descendant the kill missed still
     holds them. Those pipes are left to ``communicate()``'s reader threads, never closed
     (closing a pipe a thread is reading blocks; a ``with Popen`` exit would close them)."""
-    kill_process_tree(proc)
+    if terminate is None:
+        kill_process_tree(proc)
+    else:
+        terminate()
     try:
         return proc.communicate(timeout=seconds)
     except (OSError, ValueError, subprocess.SubprocessError):

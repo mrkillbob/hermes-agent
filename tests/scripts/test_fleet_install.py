@@ -58,3 +58,30 @@ def test_bundle_executes_with_no_third_party_site_packages(tmp_path):
                           env={**__import__('os').environ, 'PYTHONIOENCODING':'utf-8'})
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout) == {'rc':0,'text':'Public fixture π'}
+
+
+def test_bundle_probe_scope_executes_and_closes_without_site_packages(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    bundle = build_runner_bundle(tmp_path / 'runner.pyz')
+    code = '''import sys,json
+sys.path.insert(0,sys.argv[1])
+from hermes_cli.probe_lifecycle import ProbeScope, bind_probe_scope
+from hermes_cli._subprocess_compat import bounded_probe_run
+scope = ProbeScope()
+with bind_probe_scope(scope):
+    result = bounded_probe_run([sys.executable, '-c',
+        "import sys; print(sys.stdin.read()); sys.exit(3)"], timeout=10, input='Public fixture π')
+scope.close()
+with bind_probe_scope(scope):
+    refused = bounded_probe_run([sys.executable, '-c', "raise AssertionError('closed probe ran')"], timeout=10)
+print(json.dumps({'rc': result.returncode, 'text': result.stdout.strip(), 'refused': refused is None}))
+'''
+    done = subprocess.run([sys.executable, '-I', '-S', '-c', code, str(bundle)],
+                          cwd=tmp_path, capture_output=True, text=True,
+                          encoding='utf-8', errors='replace', timeout=30, check=False,
+                          env={**__import__('os').environ, 'PYTHONIOENCODING': 'utf-8'})
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == {'rc': 3, 'text': 'Public fixture π', 'refused': True}

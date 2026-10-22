@@ -14,6 +14,7 @@ _BUNDLE_MODULES = (
     "fleet_execution.py",
     "urllib_security.py",
     "_subprocess_compat.py",
+    "probe_lifecycle.py",
     "local_runtime/__init__.py",
     "local_runtime/processes.py",
 )
