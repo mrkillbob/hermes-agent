@@ -6,6 +6,7 @@ import path from 'node:path'
 
 import { afterEach, expect, test, vi } from 'vitest'
 
+import { gatewayWsUrlIpcResult } from './connection-config'
 import { isStaleLocalGatewayError, mintLocalGatewayTicket } from './local-gateway'
 import { shortSocketTmpDir } from './local-gateway.test-helpers'
 
@@ -124,3 +125,42 @@ test.skipIf(process.platform === 'win32').each(['ECONNRESET', 'UNTRUSTED /privat
     }
   }
 )
+
+
+test.skipIf(process.platform === 'win32')('WS IPC reports only the bounded diagnostic from an actual native ticket failure', async () => {
+  const home = await fixture(socket => socket.write('x'.repeat(65537)))
+  const reported: string[] = []
+  const result = await gatewayWsUrlIpcResult(() => mintLocalGatewayTicket(endpoint(home)), line => reported.push(line))
+
+  expect(result).toEqual({ ok: false, error: 'Gateway ticket bootstrap failed' })
+  expect(reported).toHaveLength(1)
+  expect(reported[0]).toMatch(/^\[gateway-ticket cause=response_too_large elapsed_ms=\d{1,5} connected=true received_data=true\]$/)
+})
+
+test('WS IPC diagnostic reporting refuses unbounded or untrusted error content', async () => {
+  const safe = '[gateway-ticket cause=ECONNRESET elapsed_ms=12 connected=true received_data=false]'
+  const reported: string[] = []
+
+  for (const [message, reason, line] of [
+    ['secret ticket=private', 'ECONNRESET', safe],
+    ['Gateway ticket bootstrap failed', 'secret', safe],
+    ['Gateway ticket bootstrap failed', 'ECONNRESET', safe + ' ticket=private'],
+    ['Gateway ticket bootstrap failed', 'ECONNRESET', safe.replace('12', '60001')],
+    ['Gateway ticket bootstrap failed', 'ECONNRESET', safe.replace('ECONNRESET', 'secret')],
+    ['Gateway ticket bootstrap failed', undefined, safe]
+  ]) {
+    const error = Object.assign(new Error(message), { reason })
+
+    error.stack = `private path /secret?ticket=private\n${line}`
+    await gatewayWsUrlIpcResult(() => Promise.reject(error), line => reported.push(line))
+  }
+
+  expect(reported).toEqual([])
+
+  const error = Object.assign(new Error('Gateway ticket bootstrap failed'), { reason: 'ECONNRESET' })
+
+  error.stack = `private path /secret?ticket=private\n${safe}`
+  expect(await gatewayWsUrlIpcResult(() => Promise.reject(error), line => reported.push(line))).toEqual({ ok: false, error: error.message })
+  expect(reported).toEqual([safe])
+  expect(await gatewayWsUrlIpcResult(() => Promise.reject(error), () => { throw new Error('logger failed') })).toEqual({ ok: false, error: error.message })
+})
