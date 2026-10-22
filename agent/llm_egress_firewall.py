@@ -31,6 +31,7 @@ from agent.cross_process_file_lock import (
     secure_file_descriptor_permissions,
 )
 from agent.redact import redact_sensitive_text
+from agent.source_fixed_literals import _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS
 
 
 class DestinationClass(StrEnum):
@@ -315,117 +316,6 @@ _BOUNDED_SOURCE_VERSIONED_IDENTIFIER = re.compile(
 )
 _BOUNDED_SOURCE_CAMEL_CASE_IDENTIFIER = re.compile(
     r"^[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+){1,7}$"
-)
-# These are fixed Python source literals used by the paper-runtime boundary.
-# Keep them source-presentation-only: the same words in generated or
-# untrusted provider context must still go through the ordinary fail-closed
-# Base64 detector.
-_BOUNDED_SOURCE_FIXED_LITERAL_ATOMS = frozenset(
-    {
-        "-128",
-        "-200",
-        "-tf_priority",
-        "1day",
-        "1e-3",
-        "1e-6",
-        "1e-9",
-        "1min",
-        "128_000_000",
-        "250_000",
-        "3min",
-        "40310000",
-        "42210000",
-        "5GB+",
-        "5min",
-        "ACCT",
-        "ANOMALY",
-        "ASSET_CLASS_",
-        "BASE",
-        "BEAR",
-        "BOOT",
-        "BULL",
-        "DATA",
-        "DAYTRADE",
-        "DEFERRED",
-        "DTBP",
-        "ENFORCE",
-        "EXIT",
-        "EXTENDED",
-        "EXTO",
-        "FIRE",
-        "GATE",
-        "HOST",
-        "INIT",
-        "INTRADAY",
-        "KEYS",
-        "LIVE",
-        "MPLCONFIGDIR",
-        "NAME",
-        "NEXT",
-        "hrl-",
-        "NONE",
-        "NULL",
-        "PERF",
-        "POST",
-        "PIPE",
-        "PROFILE",
-        "READONLY",
-        "REVERSAL",
-        "RUNTIME",
-        "SEAM",
-        "SELL",
-        # Fixed GitHub Actions workflow literals. These occur in exact
-        # source-granted YAML presentations; they are syntax/metadata, not
-        # encoded content. Keep the exception source-presentation-only.
-        "SECURITY",
-        "TEMPORARILY",
-        "DISABLED",
-        "REAL",
-        "installer-tests-",
-        "-ExecutionPolicy",
-        "addopts",
-        "ci-timings-baseline-",
-        "SOUL",
-        "SIM-",
-        "TRUE",
-        "USDC",
-        "USDT",
-        "asset_class_",
-        "columns",
-        "cycle_id-derived",
-        "ema_",
-        "emitted_",
-        "lineage_",
-        "log_",
-        "options",
-        "options_",
-        "position_guard_only_",
-        "reasons",
-        "rsi_",
-        "runtime_",
-        "sha1",
-        "shared-prebuild-",
-        "sma_",
-        "sources",
-        "targets",
-        "three_layer_",
-        "top5",
-        "top_slowest_",
-        "atr_",
-        "adx_",
-        # Exact atoms observed in authorized PR repair source presentations.
-        # Keep these source-presentation-only; untrusted/generated context
-        # still goes through the ordinary fail-closed Base64 detector.
-        "400+",
-        "262_144",
-        "SAME",
-        "DOES",
-        "DISABLE",
-        "LOOPBACK",
-        "compression-SUMMARY",
-        "WITH",
-        "READ",
-    }
 )
 # Source-granted PR diffs contain bounded command filters, issue keys, and
 # unified-diff marker lines. Their URL-safe alphabet can resemble encoded
@@ -1346,6 +1236,9 @@ def _source_text_for_base64_scan(
     # token, but the Base64 candidate regex sees its uppercase suffix after
     # the underscore as a standalone candidate. Mask the whole path-shaped
     # token before that scan; an opaque payload cannot contain a dot.
+    if allow_fixed_source_literals:
+        # Exact documented package filename glob, only after source verification.
+        masked = re.sub(r"(?<![\w./-])run_\*\.py(?![\w./-])", "<source-file>", masked)
     masked = _BOUNDED_SOURCE_FILE_TOKEN.sub("<source-file>", masked)
     masked = _BOUNDED_ISO_DURATION.sub("<source-duration>", masked)
     masked = _BOUNDED_SOURCE_NUMERIC_CONSTANT_ASSIGNMENT.sub(
