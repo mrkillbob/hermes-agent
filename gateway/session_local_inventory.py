@@ -130,15 +130,16 @@ def _cli_skills():
     return grouped
 
 
-def session_inventory(authority, policy, agent, cwd):
+def session_inventory(authority, policy, agent, cwd, *, session_id=None):
     """Main's banner/status fields for one session. Each section degrades to main's empty value on
     its own, so one failing builder never blanks the others (main wrapped each in ``suppress``)."""
     from gateway.session_authorities import owner_scope
+    from gateway.session_local_mcp import editor_mcp_inventory_scope
     from tui_gateway import git_probe
     info: dict = {"tools": {}, "skills": {}, "mcp_servers": [], "version": "", "release_date": "",
                   "update_behind": None, "update_command": "",
                   "branch": git_probe.branch(cwd) if cwd else "", "project": _project(cwd)}
-    with owner_scope(authority):
+    with owner_scope(authority), editor_mcp_inventory_scope(authority, policy, session_id):
         config = policy.config(authority, secrets=False) if policy is not None else {}
         if agent is not None:
             from agent.voice_turn_route import session_runtime_view
@@ -174,7 +175,10 @@ def session_inventory(authority, policy, agent, cwd):
                 info["skills"] = get_available_skills()
         with contextlib.suppress(Exception):
             from tools.mcp_tool_discovery import get_mcp_status
-            info["mcp_servers"] = get_mcp_status()
+            # Catalogs use the editor overlay; cached server health belongs to
+            # the owning profile, including when a caller has an ambient overlay.
+            with editor_mcp_inventory_scope(authority, None, session_id):
+                info["mcp_servers"] = get_mcp_status()
     with contextlib.suppress(Exception):
         from hermes_cli import __release_date__
         from hermes_cli.version_info import get_version_info
@@ -196,7 +200,8 @@ async def snapshot_info(authority, ref):
     info = local_session_info(authority, ref)
     policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
     agent = authority.agent(ref)
-    inventory = await asyncio.to_thread(session_inventory, authority, policy, agent, info.get("cwd"))
+    inventory = await asyncio.to_thread(
+        session_inventory, authority, policy, agent, info.get("cwd"), session_id=ref.session_id)
     if info.get('tool_count') is None:
         # A lazy session: the tools its first turn loads (the banner's own count).
         info['tool_count'] = sum(len(names) for names in (inventory.get('tools') or {}).values())
