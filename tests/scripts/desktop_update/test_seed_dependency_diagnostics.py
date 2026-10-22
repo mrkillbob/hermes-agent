@@ -8,7 +8,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 
@@ -64,30 +63,22 @@ process.exitCode = step.status;
     return source, env
 
 
-@pytest.mark.parametrize("transport", ["direct", "contained"])
-@pytest.mark.parametrize("steps,expected_codes", [
-    ([{"status": 152, "log": KNOWN_LOG}], [["ENOSPC"]]),
-    ([{"status": 152, "log": None}], [["unknown"]]),
-    ([{"status": 152, "log": "discarded detail\n" * 5000 + "9999 error code ENOSPC\n"}], [["ENOSPC"]]),
+@pytest.mark.parametrize("steps,expected_frames", [
+    ([{"status": 152, "log": KNOWN_LOG}], 1),
+    ([{"status": 152, "log": None}], 1),
+    ([{"status": 152, "log": "discarded detail\n" * 5000 + "9999 error code ENOSPC\n"}], 1),
     ([{"status": 152, "log": f"0 error code ENOSPC {SECRET}\n1 error syscall write/{SECRET}\n"
       f"2 error errno -28 {SECRET}\n3 verbose argv https://user:{SECRET}@registry.invalid\n"
-      f"4 error code {SECRET}\n"}], [["unknown"]]),
+      f"4 error code {SECRET}\n"}], 1),
     ([{"status": 1, "log": "0 error code ENOTEMPTY\n"},
-      {"status": 152, "log": "0 error code ECONNRESET\n"}], [["ENOTEMPTY"], ["ECONNRESET"]]),
+      {"status": 152, "log": "0 error code ECONNRESET\n"}], 2),
     ([{"status": 1, "log": "0 error code ENOTEMPTY\n"},
-      {"status": 0, "log": None}], [["ENOTEMPTY"]]),
+      {"status": 0, "log": None}], 0),
 ])
-def test_npm_failure_projects_only_safe_evidence_without_changing_retry_cleanup(tmp_path, steps, expected_codes, transport):
+def test_source_builder_transports_failure_frames_to_seed_without_clipping(tmp_path, steps, expected_frames):
     source, env = synthetic_npm(tmp_path, steps)
-    script = "import {prepareNodeDependencies} from " + json.dumps(
-        (ROOT / "scripts/build/node-deps.mjs").as_uri()) + ";\n" + """
-try { prepareNodeDependencies({source:process.argv[1],workspaces:['web']}) }
-catch (error) { process.exitCode = error.status ?? 1 }
-"""
-    command = [shutil.which("node"), "--input-type=module", "-e", script, str(source)]
-    if transport == "contained":
-        env["HERMES_VERBOSE"] = "0"
-        command = [sys.executable, "-c", """
+    env["HERMES_VERBOSE"] = "0"
+    command = [sys.executable, "-c", """
 import os,sys,subprocess
 from pathlib import Path
 from hermes_cli.source_build import run_source_script
@@ -97,38 +88,20 @@ try:
 except subprocess.CalledProcessError as error:
     sys.exit(error.returncode)
 """, str(ROOT), str(source)]
-    cp = subprocess.run(command,
-                        env=env, text=True, capture_output=True, timeout=30, check=False)
-    expected_status = steps[-1]["status"] if transport == "direct" else int(steps[-1]["status"] != 0)
-    assert cp.returncode == expected_status, cp.stderr
-    assert int((tmp_path / "calls").read_text()) == len(steps)
-    assert not Path((tmp_path / "logdir").read_text()).exists()
-    assert (source / "node_modules/preserved-before-ci").exists() == (len(steps) == 1)
-    output = cp.stderr if transport == "direct" else cp.stdout
-    prefix = MARKER if transport == "direct" else "      " + MARKER
-    frames = [json.loads(line.removeprefix(prefix)) for line in output.splitlines() if line.startswith(prefix)]
-    if transport == "contained" and not cp.returncode:
-        expected_codes = []  # Successful containment intentionally emits no child transcript.
-    assert [frame["codes"] for frame in frames] == expected_codes, output
-    for index, frame in enumerate(frames):
-        assert set(frame) == {"schema", "phase", "attempt", "status", "signal", "node_version", "npm_version",
-                              "elapsed_ms", "log_present", "log_readable", "log_truncated", "codes", "syscalls", "errnos"}
-        assert frame["schema"] == 1 and frame["phase"] == "npm_ci" and frame["attempt"] == index + 1
-        assert frame["status"] == steps[index]["status"] and frame["signal"] is None
-        assert frame["node_version"] == subprocess.check_output([shutil.which("node"), "-p", "process.versions.node"], text=True).strip()
-        assert frame["npm_version"] == "12.0.2"
-        assert type(frame["elapsed_ms"]) is int and frame["elapsed_ms"] >= 0
-        assert frame["log_present"] == (steps[index]["log"] is not None)
-        assert frame["log_readable"] == frame["log_present"]
-        assert frame["log_truncated"] == (len(steps[index]["log"] or "") > 65536)
-        if steps[index]["log"] == KNOWN_LOG:
-            assert frame["syscalls"] == ["write"] and frame["errnos"] == ["-28"]
-        assert SECRET not in json.dumps(frame) and "registry.invalid" not in json.dumps(frame)
+    cp = subprocess.run(command, env=env, text=True, capture_output=True, timeout=30, check=False)
+    assert cp.returncode == int(steps[-1]["status"] != 0), cp.stderr
+    # Production Node semantics are covered in Vitest; here the real Python
+    # containment and seed consumer must preserve each admitted failure frame.
+    prefix = "      " + MARKER
+    frames = [json.loads(line.removeprefix(prefix)) for line in cp.stdout.splitlines() if line.startswith(prefix)]
+    assert len(frames) == expected_frames, cp.stdout
     if cp.returncode:
         logs = tmp_path / "seed-logs"
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as stopped:
             load_seed()._fail("synthetic dependency build", cp, diagnostics_dir=logs)
+        assert stopped.value.code == 1
         assert json.loads((logs / "node-dependency-failure.json").read_text())["failures"] == frames
+        assert SECRET not in json.dumps(frames) and "registry.invalid" not in json.dumps(frames)
 
 
 @pytest.mark.parametrize("mutation,accepted", [
