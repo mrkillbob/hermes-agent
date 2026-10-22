@@ -65,7 +65,7 @@ def _resolve_busy_timeout_ms() -> int:
     return _env_int("HERMES_KANBAN_BUSY_TIMEOUT_MS", DEFAULT_BUSY_TIMEOUT_MS, minimum=1)
 
 
-def _sqlite_connect(path: Path) -> sqlite3.Connection:
+def _sqlite_connect(path: Path, *, existing_only: bool = False) -> sqlite3.Connection:
     """Open a Kanban SQLite connection via ``connect_tracked``: while registered,
     byte-level probes of the file are refused because an ``open()``/``close()``
     would cancel this process's POSIX advisory locks (see ``sqlite_safe_read``)."""
@@ -73,8 +73,9 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
 
     busy_timeout_ms = _resolve_busy_timeout_ms()
     conn = connect_tracked(
-        path,
+        path.resolve().as_uri() + "?mode=rw" if existing_only else path,
         connect_fn=sqlite3.connect,
+        uri=existing_only,
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
     )
@@ -686,13 +687,13 @@ def _schema_is_present(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
-def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
+def _open_configured(path: Path, under_lock, *, existing_only: bool = False) -> tuple[sqlite3.Connection, Any]:
     """Open ``path`` with the kanban PRAGMA set, then run ``under_lock(conn)``.
     WAL activation and ``under_lock`` share the ``_INIT_LOCK`` critical section:
     WAL setup can take an exclusive lock while SQLite creates sidecars for a
     fresh DB, and concurrent gateway startup threads must not race before
     ``_INITIALIZED_PATHS`` is populated. Closed if anything raises."""
-    conn = _sqlite_connect(path)
+    conn = _sqlite_connect(path, existing_only=True) if existing_only else _sqlite_connect(path)
     try:
         conn.row_factory = sqlite3.Row
         conn.text_factory = _kb._lossy_text
@@ -800,15 +801,18 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     if not path.exists():
         with _INIT_LOCK:
             _INITIALIZED_PATHS.discard(resolved)
+    schema_repair = False
     if resolved in _INITIALIZED_PATHS and path.exists():
-        conn, schema_present = _open_configured(path, _schema_is_present)
+        # An existence check cannot authorize creation: removal may occur
+        # before SQLite opens. Refuse that open; a retry takes the init lock.
+        conn, schema_present = _open_configured(path, _schema_is_present, existing_only=True)
         if schema_present:
             return conn
-        # Cache says "initialized", file says otherwise: it was deleted or
-        # replaced under a live process and the open silently recreated an empty
-        # DB. Left alone, every query fails with "no such table: tasks" for the
+        # Cache says "initialized", file says otherwise: it was replaced by an
+        # empty DB under a live process. Left alone, queries fail with "no such table: tasks" for the
         # rest of the process's life. Drop the stale entry and re-init.
         conn.close()
+        schema_repair = True
         with _INIT_LOCK:
             # Drop the stale cache entry and fall through to the full init path, which re-runs the header
             # and integrity probes and the schema script under the cross-process lock. See #83445.
@@ -819,7 +823,8 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             path,
         )
 
-    with _cross_process_init_lock(path):
+    reservation = _cross_process_init_lock(path, strict=True) if schema_repair else _cross_process_init_lock(path)
+    with reservation:
         # Read-only file/sidecar preflight first, so a stray read-only kanban.db
         # fails actionably instead of "attempt to write a readonly database".
         # See #12508.
