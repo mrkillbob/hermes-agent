@@ -667,7 +667,6 @@ def _chat_messages_to_responses_input(
     def emit(new_items: list[dict[str, Any]], msg: dict[str, Any]) -> None:
         items.extend(new_items)
         item_sources.extend([msg] * len(new_items))
-    source_positions = {id(message): index for index, message in enumerate(messages)}
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -725,7 +724,7 @@ def _chat_messages_to_responses_input(
     # provenance-tagged content directly instead of trying to recover it from whatever shape the conversion
     # produced (#90976).
     from agent.responses_source_identity import bind_formatted_outputs
-    source_pairs = [(item, source_positions[id(source)], source)
+    source_pairs = [(item, source)
                     for item, source in zip(items, item_sources) if source is not None]
     if native_compaction_eligible:
         from agent.native_compaction import prune_pre_checkpoint_items

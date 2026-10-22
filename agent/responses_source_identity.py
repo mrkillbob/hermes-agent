@@ -27,7 +27,6 @@ def _metadata_hash(metadata):
 
 @dataclass(frozen=True)
 class _Occurrence:
-    source_index: int
     original_call_id: str
     wire_call_id: str
     content_sha256: str
@@ -50,7 +49,7 @@ class _FormattedInput(list):
 
 def bind_formatted_outputs(items, source_pairs):
     """Called by the formatter after pruning, using actual emitted item identities."""
-    sources = {id(item): (index, message) for item, index, message in source_pairs}
+    sources = {id(item): message for item, message in source_pairs}
     counts = Counter(item.get('call_id') for item in items
                      if isinstance(item, dict) and item.get('type') == 'function_call_output')
     bindings = []
@@ -58,7 +57,7 @@ def bind_formatted_outputs(items, source_pairs):
         source = sources.get(id(item))
         if source is None or item.get('type') != 'function_call_output':
             continue
-        index, message = source
+        message = source
         metadata = message.get('_source_provenance')
         content = message.get('content')
         original = message.get('tool_call_id')
@@ -67,7 +66,7 @@ def bind_formatted_outputs(items, source_pairs):
                 or metadata.get('content_sha256') != _hash(content)
                 or counts[item.get('call_id')] != 1):
             continue
-        occurrence = _Occurrence(index, original, item['call_id'], _hash(content),
+        occurrence = _Occurrence(original, item['call_id'], _hash(content),
                                  _metadata_hash(metadata), _SEAL)
         bindings.append((position, occurrence))
     return _FormattedInput(items, bindings) if bindings else items
@@ -87,7 +86,13 @@ def carry_normalized_outputs(original, normalized, positions):
 
 
 def restore_responses_sources(items, sidecar, consumed):
-    """Restore only formatter-sealed exact occurrence/sidecar correspondences."""
+    """Restore only unique exact envelopes, independent of transport message filtering.
+
+    The sidecar is captured before system extraction and provider message
+    normalization. Its chat index cannot be compared with a formatter input
+    index. Full envelope identity and actual dispatcher label must match once;
+    the sealed final output position, wire label and bytes remain exact.
+    """
     if not isinstance(items, _FormattedInput):
         return None
     result = list(items)
@@ -101,7 +106,6 @@ def restore_responses_sources(items, sidecar, consumed):
             continue
         matches = [(index, entry) for index, entry in enumerate(sidecar)
                    if index not in consumed and isinstance(entry, Mapping)
-                   and entry.get('message_index') == occurrence.source_index
                    and entry.get('tool_call_id') == occurrence.original_call_id
                    and _metadata_hash(entry) == occurrence.metadata_sha256]
         if len(matches) != 1:
