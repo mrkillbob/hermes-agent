@@ -91,6 +91,27 @@ def _squat_proof_fallback(bind_path: Path) -> Path:
     return path
 
 
+def _publish_pointer(pointer_file: Path, bind_path: Path) -> None:
+    """Replace ``pointer_file`` with one naming ``bind_path``, atomically: the listener is already
+    accepting, so a client polling for it may read the pointer at any instant, and an empty or
+    partial pointer is ``invalid_control_pointer`` to it, a refusal rather than "still starting".
+    The fresh mkstemp inode is 0600 and the rename never follows a pointer symlink;
+    pre-existing symlinks are refused. Replacement also heals an older 0644 pointer."""
+    if pointer_file.is_symlink():
+        raise PermissionError("control pointer cannot be a symlink")
+    fd, tmp = tempfile.mkstemp(prefix=f".{pointer_file.name}.", dir=pointer_file.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as pointer:
+            pointer.write(str(bind_path))
+            pointer.flush()
+            os.fsync(pointer.fileno())
+        os.replace(tmp, pointer_file)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def resolve_server_socket_path(home: Path) -> tuple[Path, Optional[Path]]:
     """Return ``(bind_path, pointer_file)``; pointer_file is set only for the temp-dir fallback."""
     direct = Path(home) / _SOCKET_FILENAME
@@ -240,20 +261,7 @@ class GatewayControlServer:
         info = bind_path.lstat()
         self._file_identities[bind_path] = (info.st_dev, info.st_ino)
         if pointer_file is not None:
-            if pointer_file.is_symlink():
-                raise PermissionError("control pointer cannot be a symlink")
-            # Discovery polls during startup: never publish an empty/truncated pointer between
-            # open and flush. A private sibling also heals an older 0644 pointer on replacement.
-            fd, temporary = tempfile.mkstemp(prefix=".gateway-pointer-", dir=pointer_file.parent)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as pointer:
-                    pointer.write(str(bind_path))
-                    pointer.flush()
-                    os.fsync(pointer.fileno())
-                os.replace(temporary, pointer_file)
-            finally:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(temporary)
+            _publish_pointer(pointer_file, bind_path)
             self._pointer_file = pointer_file
         for path in filter(None, (self._bind_path, self._pointer_file)):
             info = path.lstat()

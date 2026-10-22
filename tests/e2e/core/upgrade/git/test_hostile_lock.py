@@ -120,7 +120,7 @@ if mode == "owner":
     result["rc"], result["out"] = update("home-a")
     result["marker_kept"] = marker.exists() and marker.read_text(encoding="utf-8") == body
     owner.kill()
-elif mode == "kill-mid-completion":
+elif mode in ("kill-mid-completion", "orphan-reader"):
     first = subprocess.Popen(ARGV, env=envs["home-a"], cwd=checkout, stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     child = None

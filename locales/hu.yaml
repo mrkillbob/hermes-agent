@@ -701,6 +701,7 @@ gateway:
     generic_failed_with_hint: "⚠️ Hiba történt, és nem tudtam befejezni ezt a választ.{hint}\nPróbáld újra a /retry paranccsal, vagy kezdj új beszélgetést a /new paranccsal. A technikai részletek az átjáró naplójában vannak (`hermes logs`)."
     history_unavailable: "⚠️ Ennek a munkamenetnek az előzményei átmenetileg nem érhetők el, ezért ez az üzenet nem lett feldolgozva. Kérd meg az üzemeltetőt, hogy nézze meg a state.db fájlt, majd küldd el újra, amikor rendben van. A /reset parancsot csak akkor használd, ha szándékosan új beszélgetést akarsz kezdeni."
     no_credentials: "⚠️ Nem tudtam kapcsolódni az AI-modellszolgáltatáshoz, ezért ez az üzenet nem lett feldolgozva. Jelentkezz be újra a /login paranccsal, vagy válassz másik modellt a /model paranccsal. Ha továbbra is hibázik, futtasd a `hermes doctor` parancsot a gépen."
+    cron_session_read_only: "⚠️ Ez a csevegés egy ütemezett feladathoz tartozik, és csak azt futtatja, ezért az üzeneted nem futott le. Indíts új csevegést az elküldéséhez."
   skills:
     disabled: "A(z) **{name}** skill telepítve van, de ki van kapcsolva.\nBekapcsolás: `hermes skills config`"
     not_installed: "A(z) **{name}** skill elérhető, de nincs telepítve.\nTelepítés: `hermes skills install {install_name}`"
@@ -2403,6 +2404,14 @@ cli:
     move_out_of_range: "A mozgatás kívül esik a soron. Jelenlegi méret: {size}"
     moved: "A(z) {source}. sorelem áthelyezve ide: {destination}."
     usage_add: "Használat: /queue add <prompt>"
+    gateway_refused: "Az átjáró nem állította sorba: {error}. Semmi sem került sorba; küldd újra, amikor a kör véget ér."
+    submit_unknown: "Az átjáró nem válaszolt ({error}), így lehet, hogy a prompt már sorban van. Nézd meg a /queue list kimenetét, mielőtt újra elküldöd."
+    move_gateway_fifo: "Az átjáró a sorban álló promptokat küldési sorrendben futtatja; inkább szerkessz vagy távolíts el egyet."
+    remove_refused: "Nem sikerült eltávolítani a(z) {index}. sorelemet: {error}"
+    edit_refused: "Nem sikerült szerkeszteni a(z) {index}. sorelemet: {error}"
+    already_started: "A(z) {index}. sorelem már elindult; úgy fut, ahogy elküldték."
+    started_stopped: "A(z) {index}. sorelem már elindult; az átjáró leállította."
+    change_unknown: "Az átjáró nem válaszolt a(z) {index}. sorelemről ({error}); nézd meg a /queue list kimenetét, mielőtt újra próbálod."
   reload:
     env_reloaded: ".env újratöltve ({count} változó frissült)"
   steer:
@@ -3612,7 +3621,7 @@ tips:
   t069: "A hermes skills tap add myorg/skills-repo egyedi GitHub skill-forrást ad hozzá."
   t070: "A hermes skills snapshot export setup.json exportálja a skill-konfigurációdat biztonsági mentéshez vagy megosztáshoz."
   t071: "A hermes mcp add github --command npx parancssorból ad hozzá MCP-szervereket."
-  t072: "A hermes mcp serve magát a Hermest futtatja MCP-szerverként más ügynökök számára."
+  t072: "A hermes mcp-serve magát a Hermest futtatja MCP-szerverként más ügynökök számára."
   t073: "A hermes auth add több API-kulcsot is felvehet a hitelesítőadat-készlet rotálásához."
   t074: "A hermes completion bash >> ~/.bashrc bekapcsolja a Tab-kiegészítést minden parancshoz és profilhoz."
   t075: "A hermes logs -f valós időben követi az agent.log fájlt. A --level WARNING --since 1h szűri a kimenetet."
