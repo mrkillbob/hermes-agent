@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent import chat_completion_helpers as cch
+from agent.chat_completion_summary import iteration_summary_chat_kwargs
 from agent.transports.chat_completions import ChatCompletionsTransport
 
 
@@ -77,5 +78,5 @@ def test_per_model_fallback_preference_reaches_request_kwargs(
     if request_kind == "chat":
         kwargs = cch._build_chat_completions_kwargs(agent, messages, None, None, {}, None)
     else:
-        kwargs = cch._iteration_summary_chat_kwargs(agent, messages)
+        kwargs = iteration_summary_chat_kwargs(agent, messages)
     assert kwargs["extra_body"]["provider"] == {"sort": "price", **entry}

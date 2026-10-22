@@ -14,7 +14,6 @@ import fcntl  # windows-footgun: ok — POSIX-only module by design (see docstri
 import logging
 import math
 import os
-import select
 import signal
 import struct
 import sys
@@ -101,6 +100,8 @@ class PtyBridge:
     WebSocket task, never the dashboard event loop.
     """
 
+    _waiter = None  # FdWaiter for the master; None until __init__ registers it
+
     def __init__(self, proc: ptyprocess.PtyProcess):  # type: ignore[name-defined]
         self._proc = proc
         self._fd: int = proc.fd
@@ -112,6 +113,11 @@ class PtyBridge:
         except OSError:
             self._pgid = None
         os.set_blocking(self._fd, False)
+        # A selector, never select.select() (ValueError at fd >= FD_SETSIZE, #94928) or poll()
+        # (macOS poll() reports a PTY master as POLLNVAL, so read() would spin).
+        from tools.environments.fd_wait import open_fd_waiter
+
+        self._waiter = open_fd_waiter(self._fd)
 
     @classmethod
     def is_available(cls) -> bool:
@@ -142,7 +148,11 @@ class PtyBridge:
         # every OS app-switch).
         spawn_env[PTY_HOST_ENV] = PTY_HOST_DASHBOARD
         proc = ptyprocess.PtyProcess.spawn(list(argv), cwd=cwd, env=spawn_env, dimensions=(rows, cols))  # type: ignore[union-attr]
-        return cls(proc)
+        try:
+            return cls(proc)
+        except OSError:  # no safe readiness wait for the master (fd_wait): don't leak the child
+            proc.close(force=True)
+            raise
 
     @property
     def pid(self) -> int:
@@ -159,11 +169,11 @@ class PtyBridge:
 
         ``b""`` = nothing yet; ``None`` = EOF / closed (also after :meth:`close`).
         """
-        if self._closed:
+        if self._closed or self._waiter is None:
             return None
         try:
-            readable, _, _ = select.select([self._fd], [], [], timeout)
-        except (OSError, ValueError):
+            readable = self._waiter.wait(timeout)
+        except (OSError, ValueError):  # close() raced this read
             return None
         if not readable:
             return b""
@@ -174,7 +184,7 @@ class PtyBridge:
             if exc.errno in {errno.EIO, errno.EBADF}:
                 return None
             # The fd is deliberately non-blocking. Readiness can disappear
-            # between select() and os.read() when close/output races occur.
+            # between the readiness check and os.read() when close/output races occur.
             if exc.errno in {errno.EAGAIN, errno.EWOULDBLOCK}:
                 return b""
             raise
@@ -264,8 +274,7 @@ class PtyBridge:
         # exit (and a SIGHUP save outlasts the grace) until someone drains the master. The drain
         # task no longer consumes the output, so read and drop while waiting.
         try:
-            readable, _, _ = select.select([self._fd], [], [], timeout)
-            if readable and os.read(self._fd, 65536):
+            if self._waiter is not None and self._waiter.wait(timeout) and os.read(self._fd, 65536):
                 return
         except (OSError, ValueError):
             pass
@@ -350,6 +359,11 @@ class PtyBridge:
             self._proc.close(force=True)
         except Exception:
             _log.debug("PTY handle close failed", exc_info=True)
+        self._close_waiter()
+
+    def _close_waiter(self) -> None:
+        if self._waiter is not None:
+            self._waiter.close()
 
     def __enter__(self) -> PtyBridge:
         return self
