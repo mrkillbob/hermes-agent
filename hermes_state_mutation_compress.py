@@ -1,4 +1,5 @@
 """Commit a prepared summary, physical target, generation and receipt atomically."""
+from copy import deepcopy
 import uuid
 from hermes_state_mutation_prepared import validate_prepared
 
@@ -31,6 +32,15 @@ def _bind_carried_uids(db, conn, target, prepared):
 
 def compress_in_transaction(db, conn, session_id, payload, prepared):
     snapshot = validate_prepared(db, conn, session_id, prepared)
+    # The receipt owner may retry this transaction with the same prepared summary. UID
+    # binding, marker inference and insertion annotate messages, so keep those annotations
+    # local to this attempt; the snapshot and its validation/provenance stay untouched.
+    message_data = {'messages': prepared['messages']}
+    # Rotation needs no carried-original bindings; legacy prepared rotations omit this key.
+    # Copy present lists together so aliases survive without inventing an optional field.
+    if 'carried_messages' in prepared:
+        message_data['carried_messages'] = prepared['carried_messages']
+    prepared = dict(prepared, **deepcopy(message_data))
     policy = snapshot['receipt']['policy']
     target = snapshot['target']
     from hermes_state_worker_compression import archive_on_connection, publish_on_connection

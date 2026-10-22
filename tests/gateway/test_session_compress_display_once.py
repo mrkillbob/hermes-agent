@@ -91,6 +91,12 @@ async def test_compress_and_resume_keep_each_original_reply_once(
                 text = '\n'.join(str(m.get('content', '')) for m in displayed)
                 assert text.index('s6w199') < text.index('SYSTEMMARK') < text.index('s7w000')
         for generation in range(2):
+            # Check the donor before portability: export/import must not be blamed for a
+            # duplicate already introduced by the unchanged archive/reinsert boundary.
+            for reader in ('get_messages_as_conversation', 'get_messages'):
+                displayed = getattr(db, reader)(ref.session_id, include_compacted=True)
+                text = '\n'.join(str(m.get('content', '')) for m in displayed)
+                assert Counter(re.findall(r'\bs\dw\d{3}\b', text)) == expected, (generation, reader)
             backup = json.loads(json.dumps(db.export_session(ref.session_id, include_inactive=True)))
             restored = SessionDB(db_path=tmp_path / f'restored-{generation}.db')
             try:
@@ -108,7 +114,14 @@ async def test_compress_and_resume_keep_each_original_reply_once(
                 restored.close()
             if generation == 0:
                 # An unchanged later generation must retain an earlier carrier's chronology.
-                db.archive_and_compact(ref.session_id, db.get_messages_as_conversation(ref.session_id))
+                live_before = db.get_messages(ref.session_id)
+                summary_uids = {m['message_uid'] for m in live_before if m.get('_compressed_summary')}
+                replay = db.get_messages_as_conversation(ref.session_id)
+                db.archive_and_compact(ref.session_id, replay)
+                live_after = db.get_messages(ref.session_id)
+                assert [(m['role'], m.get('content')) for m in live_after] == [
+                    (m['role'], m.get('content')) for m in live_before]
+                assert {m['message_uid'] for m in live_after if m.get('_compressed_summary')} == summary_uids
     finally:
         await owner.close()
         store.close_all_db_handles()
@@ -165,3 +178,75 @@ async def test_canonical_compress_retains_full_tool_result(tmp_path, monkeypatch
     finally:
         await owner.close()
         store.close_all_db_handles()
+
+
+@pytest.mark.parametrize('copy_kind', [
+    'unchanged', 'changed', 'foreign', 'changed_tools', 'changed_api', 'explicit_false', 'explicit_zero'])
+def test_unchanged_compaction_copy_keeps_only_its_own_summary_classification(tmp_path, copy_kind):
+    with SessionDB(db_path=tmp_path / 'carrier.db') as db:
+        db.create_session('source', source='cli')
+        db.create_session('other', source='cli')
+        db.append_messages_batch('source', [
+            {'role': 'assistant', 'content': 'original reply and summary', 'timestamp': 2.0,
+             '_compressed_summary': True}])
+        projected = db.get_messages_as_conversation('source')
+        assert not projected[0].get('_compressed_summary')  # the ordinary replay projection
+        mutations = {
+            'unchanged': {},
+            'foreign': {},
+            'changed': {'content': 'replacement reply'},
+            'changed_tools': {'tool_calls': [{'id': 'new-call', 'type': 'function',
+                'function': {'name': 'read_file', 'arguments': '{}'}}]},
+            'changed_api': {'api_content': 'different provider payload'},
+            'explicit_false': {'_compressed_summary': False},
+            'explicit_zero': {'_compressed_summary': 0},
+        }
+        projected[0].update(mutations[copy_kind])
+        target = 'other' if copy_kind == 'foreign' else 'source'
+        db.archive_and_compact(target, projected)
+        stored = db.get_messages(target)
+        assert len(stored) == 1
+        assert bool(stored[0].get('_compressed_summary')) == (copy_kind == 'unchanged')
+        assert stored[0]['content'] == projected[0]['content']
+
+
+@pytest.mark.parametrize('marker', ['omitted', False, 0, True], ids=['omitted', 'false', 'zero', 'true'])
+def test_failed_compaction_restores_summary_annotation_before_retry(tmp_path, monkeypatch, marker):
+    with SessionDB(db_path=tmp_path / 'carrier-rollback.db') as db:
+        db.create_session('source', source='cli')
+        db.append_messages_batch('source', [
+            {'role': 'assistant', 'content': 'original reply and summary', 'timestamp': 2.0,
+             '_compressed_summary': True}])
+        projected = db.get_messages_as_conversation('source')
+        if marker != 'omitted':
+            projected[0]['_compressed_summary'] = marker
+        before_input = dict(projected[0])
+        before_rows = db.get_messages('source', include_inactive=True)
+        before_session = db.get_session('source')
+        insert = db._insert_message_rows
+
+        def fail_after_insert(conn, session_id, messages, **kwargs):
+            insert(conn, session_id, messages, **kwargs)
+            assert messages[0]['_compressed_summary'] is (True if marker == 'omitted' else marker)
+            raise RuntimeError('compaction publication failed')
+
+        with monkeypatch.context() as attempt:
+            attempt.setattr(db, '_insert_message_rows', fail_after_insert)
+            with pytest.raises(RuntimeError, match='compaction publication failed'):
+                db.archive_and_compact('source', projected)
+        assert db.get_messages('source', include_inactive=True) == before_rows
+        assert db.get_session('source') == before_session
+        assert projected[0] == before_input
+        if marker != 'omitted':
+            assert projected[0]['_compressed_summary'] is marker
+        else:
+            assert '_compressed_summary' not in projected[0]
+
+        # A subsequent attempt no longer has a marked donor. It must not reuse a
+        # classification inferred in the rolled-back attempt; explicit values survive.
+        db._write_sql('UPDATE messages SET _compressed_summary=0 WHERE session_id=?', ('source',))
+        db.archive_and_compact('source', projected)
+        stored = db.get_messages('source')
+        assert len(stored) == 1
+        assert bool(stored[0].get('_compressed_summary')) is (marker is True)
+        assert stored[0]['content'] == 'original reply and summary'

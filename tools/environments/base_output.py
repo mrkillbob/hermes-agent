@@ -7,7 +7,6 @@ stdout drain thread used by ``BaseEnvironment._wait_for_process``.
 
 import codecs
 import os
-import selectors
 import subprocess
 import threading
 import time
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import IO, Callable, Protocol
 
 from hermes_constants import get_hermes_home
+from tools.environments.fd_wait import open_fd_waiter
 from tools.tool_output_truncate import head_tail_split, truncation_notice
 from hermes_cli._subprocess_compat import windows_hide_flags
 
@@ -395,37 +395,38 @@ def _drain_stdout(proc: ProcessHandle, output: _BoundedOutputCollector, stop: th
 
 
 def _drain_fd_select(proc, fd: int, output: _BoundedOutputCollector, decoder, stop=None) -> None:
-    """POSIX drain with native readiness polling, including descriptors above FD_SETSIZE.
+    """POSIX drain: selector readiness (no FD_SETSIZE ceiling, #94928), stopping ~300ms after
+    bash exits with the pipe idle, or when *stop* is set (the pipe is being handed to another
+    reader — yield-to-background)."""
+    waiter = open_fd_waiter(fd)
+    if waiter is None:
+        return  # fd already closed
+    try:
+        _drain_fd_waiter(proc, fd, waiter, output, decoder, stop)
+    finally:
+        waiter.close()
 
-    A busy gateway can exceed select()'s fixed descriptor ceiling while still below its
-    open-file limit. DefaultSelector uses kqueue/epoll/poll where available so capture
-    does not silently stop for those pipes. Preserve the post-exit idle bound and handoff.
-    """
+
+def _drain_fd_waiter(proc, fd: int, waiter, output: _BoundedOutputCollector, decoder, stop) -> None:
     idle_after_exit = 0
-    with selectors.DefaultSelector() as selector:
-        selector.register(fd, selectors.EVENT_READ)
-        while True:
-            if stop is not None and stop.is_set():
-                return
+    while True:
+        if stop is not None and stop.is_set():
+            return
+        if waiter.wait(0.1):
             try:
-                ready = selector.select(timeout=0.1)
+                chunk = os.read(fd, 4096)
             except (ValueError, OSError):
-                return  # fd already closed
-            if ready:
-                try:
-                    chunk = os.read(fd, 4096)
-                except (ValueError, OSError):
-                    return
-                if not chunk:
-                    return  # true EOF — all writers closed
-                output.append(decoder.decode(chunk))
-                idle_after_exit = 0
-            elif proc.poll() is not None:
-                # bash is gone and the pipe was idle ~100ms; allow two more cycles
-                # for a buffered tail, then stop (a grandchild may hold the pipe).
-                idle_after_exit += 1
-                if idle_after_exit >= 3:
-                    return
+                return
+            if not chunk:
+                return  # true EOF — all writers closed
+            output.append(decoder.decode(chunk))
+            idle_after_exit = 0
+        elif proc.poll() is not None:
+            # bash is gone and the pipe was idle ~100ms; allow two more cycles
+            # for a buffered tail, then stop (a grandchild may hold the pipe).
+            idle_after_exit += 1
+            if idle_after_exit >= 3:
+                return
 
 
 def _drain_fd_windows(proc, fd: int, output: _BoundedOutputCollector, decoder, stop=None) -> None:

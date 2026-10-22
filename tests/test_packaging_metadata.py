@@ -53,6 +53,7 @@ def test_starlette_server_pins_and_lock_exclude_cve_2026_48710():
     assert versions and all(version >= floor for version in versions)
 
 
+
 def test_every_dependency_is_held_to_one_three_day_release_age():
     """Keep the global age rule and bound the owner's temporary certifi exception.
 
