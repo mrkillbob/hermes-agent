@@ -690,3 +690,112 @@ def test_directory_sync_failure_preserves_receipt_and_refuses_registry_mutation(
     with pytest.raises(ValueError, match="recovery receipt"):
         reconcile(args)
     assert args["backup_path"].read_bytes() == receipt_bytes
+
+
+@pytest.mark.parametrize("status", ["archived", "failed", "cancelled"])
+def test_reviewed_terminal_cards_preserve_all_history(duplicate, status):
+    with connect_closing(board="default") as conn, kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, duplicate["task_id"]))
+        before = kanban_transfer._selected_task_rows(conn, [duplicate["task_id"]])
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    args["expected_references"]["default"][0]["status"] = status
+    assert reconcile(args)["status"] == "canonicalized"
+    with connect_closing(board="default") as conn:
+        assert kanban_transfer._selected_task_rows(conn, [duplicate["task_id"]]) == before
+
+
+@pytest.mark.parametrize("status", ["ready", "in_progress", "unknown"])
+def test_reviewed_active_or_unknown_cards_still_refuse(duplicate, status):
+    with connect_closing(board="default") as conn, kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, duplicate["task_id"]))
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    args["expected_references"]["default"][0]["status"] = status
+    before = args["target_registry"].read_bytes()
+    with pytest.raises(ValueError, match="terminal unclaimed"):
+        reconcile(args)
+    assert args["target_registry"].read_bytes() == before
+    assert not args["backup_path"].exists()
+
+
+def _leave_default_uninitialized(duplicate):
+    from contextlib import closing
+    from hermes_cli.kanban_db_boards import write_board_metadata
+
+    named = "tradingbot-burndown"
+    with closing(sqlite3.connect(kb.kanban_db_path("default"))) as source:
+        with closing(sqlite3.connect(kb.kanban_db_path(named))) as target:
+            source.backup(target)
+    kb.kanban_db_path("default").unlink()
+    kb.board_metadata_path("default").unlink()
+    write_board_metadata(named, project_id=duplicate["expected_project_id"])
+    with projects_db.connect_closing(duplicate["source_registry"]) as conn, write_txn(conn):
+        conn.execute("UPDATE projects SET board_slug=? WHERE id=?", (named, duplicate["expected_project_id"]))
+    duplicate["expected_board"] = named
+    duplicate["expected_references"][named] = duplicate["expected_references"]["default"]
+    duplicate["expected_references"]["default"] = []
+
+
+def test_synthesized_default_board_remains_absent_after_reconciliation(duplicate):
+    _leave_default_uninitialized(duplicate)
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    assert "default" in {row["slug"] for row in kb.list_boards()}
+    assert reconcile(args)["status"] == "canonicalized"
+    assert not kb.kanban_db_path("default").exists()
+    assert not kb.board_metadata_path("default").exists()
+    receipt = json.loads(args["backup_path"].read_text())
+    assert receipt["references"]["default"]["summaries"] == []
+
+
+def test_absent_board_cannot_satisfy_nonempty_reviewed_references(duplicate):
+    _leave_default_uninitialized(duplicate)
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    args["expected_references"]["default"] = list(args["expected_references"]["tradingbot-burndown"])
+    before = args["target_registry"].read_bytes()
+    with pytest.raises(ValueError):
+        reconcile(args)
+    assert args["target_registry"].read_bytes() == before
+    assert not args["backup_path"].exists()
+    assert not kb.kanban_db_path("default").exists()
+
+
+def test_metadata_only_board_with_empty_expectation_stays_uninitialized(duplicate):
+    path = kb.kanban_db_path("tradingbot-burndown")
+    path.unlink()
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    assert reconcile(args)["status"] == "canonicalized"
+    assert not path.exists()
+    assert kb.board_metadata_path("tradingbot-burndown").exists()
+
+
+@pytest.mark.parametrize("drift", ["database-appears", "orphaned-wal", "stat-error"])
+def test_absent_board_identity_or_recovery_drift_refuses_commit(duplicate, monkeypatch, drift):
+    from pathlib import Path
+    from hermes_cli import projects_reconcile
+
+    _leave_default_uninitialized(duplicate)
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    before = args["target_registry"].read_bytes()
+    original = projects_reconcile._publish_private_receipt
+    missing = kb.kanban_db_path("default")
+    original_lstat = Path.lstat
+
+    def publish_then_drift(path, document):
+        result = original(path, document)
+        if drift == "database-appears":
+            with connect_closing(board="default"):
+                pass
+        elif drift == "orphaned-wal":
+            Path(str(missing) + "-wal").write_bytes(b"unreviewed recovery state")
+        else:
+            def refuse_stat(candidate, *a, **kw):
+                if candidate == missing:
+                    raise PermissionError("injected missing-board stat failure")
+                return original_lstat(candidate, *a, **kw)
+            monkeypatch.setattr(Path, "lstat", refuse_stat)
+        return result
+
+    monkeypatch.setattr(projects_reconcile, "_publish_private_receipt", publish_then_drift)
+    with pytest.raises((ValueError, PermissionError)):
+        reconcile(args)
+    assert args["target_registry"].read_bytes() == before
+    assert args["backup_path"].exists()

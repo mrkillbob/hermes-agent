@@ -1,6 +1,6 @@
 """Operator-only reconciliation for one exact same-root legacy project duplicate."""
 
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -15,7 +15,7 @@ from hermes_cli.kanban_db_boards import (
     board_ownership_lock,
     board_project_ownership_lock,
 )
-from hermes_cli.kanban_db_workspace import _path_key
+from hermes_cli.kanban_db_workspace import _is_terminal_task, _path_key
 from hermes_cli.profiles_lifecycle import profile_lifecycle_reservation
 from hermes_cli.projects_adoption import (
     _FOLDER_COLUMNS,
@@ -187,8 +187,28 @@ def _registry_write(path):
     return conn
 
 
+def _board_database_absent(slug):
+    """Accept proved absence only, never orphaned SQLite recovery state or aliases."""
+    path = kb.kanban_db_path(slug)
+    if path.resolve() != path:
+        raise ValueError("board database path is not canonical")
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        for suffix in ("-wal", "-shm", "-journal"):
+            try:
+                Path(str(path) + suffix).lstat()
+            except FileNotFoundError:
+                continue
+            raise ValueError("missing board database has SQLite recovery state")
+        return True
+    return False
+
+
 def _board_connection(slug, *, readonly):
     path = kb.kanban_db_path(slug)
+    if _board_database_absent(slug):
+        return None
     if path.is_symlink() or not path.is_file() or path.resolve() != path:
         raise ValueError(f"board {slug!r} has no canonical existing database")
     mode = "ro" if readonly else "rw"
@@ -202,6 +222,10 @@ def _board_connection(slug, *, readonly):
 def _reference_snapshot(conn, legacy_id, expected, board):
     from hermes_cli import kanban_transfer
 
+    if conn is None:
+        if expected[board] or not _board_database_absent(board):
+            raise ValueError("absent board differs from reviewed empty references")
+        return {"tasks": [], "related": {}, "summaries": [], "database_absent": True}
     task_ids = [
         row["id"]
         for row in conn.execute(
@@ -220,7 +244,7 @@ def _reference_snapshot(conn, legacy_id, expected, board):
         runs = [row for row in selected["task_runs"] if row["task_id"] == task_id]
         events = [row for row in selected["task_events"] if row["task_id"] == task_id]
         if (
-            task["status"] != "done"
+            not _is_terminal_task(conn, task_id)
             or task["current_run_id"] is not None
             or task["claim_lock"] is not None
             or task["claim_expires"] is not None
@@ -406,7 +430,8 @@ def _capture_board_state(
         if board != expected_board and metadata.get("project_id") == legacy_project_id:
             raise ValueError("legacy project is still claimed by another board")
         metadata_before[board] = metadata
-        with closing(_board_connection(board, readonly=True)) as conn:
+        connection = _board_connection(board, readonly=True)
+        with closing(connection) if connection is not None else nullcontext() as conn:
             reference_before[board] = _reference_snapshot(
                 conn, legacy_project_id, expected_references, board
             )
@@ -559,10 +584,12 @@ def _reconciliation_transactions(source, target, expected_boards):
             registries[path] = conn
         boards = {}
         for board in sorted(expected_boards):
+            connection = _board_connection(board, readonly=False)
             conn = stack.enter_context(
-                closing(_board_connection(board, readonly=False))
+                closing(connection) if connection is not None else nullcontext()
             )
-            stack.enter_context(_manual_write_txn(conn))
+            if conn is not None:
+                stack.enter_context(_manual_write_txn(conn))
             boards[board] = conn
         yield registries, boards
 
