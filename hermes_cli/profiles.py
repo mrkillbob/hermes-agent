@@ -2249,6 +2249,7 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
                     else:
                         child.unlink()
             shutil.move(str(final_source), str(profile_dir))
+        clear_named_profile_deleted(profile_dir)
         return profile_dir
 
 

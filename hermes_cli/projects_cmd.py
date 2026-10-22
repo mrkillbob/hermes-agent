@@ -54,6 +54,11 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     project_sub("bind-board", "Bind a kanban board to a project").add_argument(
         "board", nargs="?", default="", help="Board slug (omit to unbind)"
     )
+    adoption = sub.add_parser("adopt-canonical", help="Adopt an existing root project into a named profile")
+    adoption.add_argument("project_id", help="Exact existing canonical project ID")
+    adoption.add_argument("--target-profile", required=True, help="Existing named profile to repair")
+    adoption.add_argument("--expected-root", required=True, help="Expected canonical Git root")
+    adoption.add_argument("--expected-board", required=True, help="Expected shared board slug")
     parser.set_defaults(_project_parser=parser)
     return parser
 
@@ -239,7 +244,36 @@ def _cmd_bind_board(args, conn, proj) -> str:
     return f"Bound {proj.slug} -> board {args.board}"
 
 
+def _cmd_adopt_canonical(args) -> int:
+    """Explicit root-operator repair, never an automatic profile/cron migration."""
+    import json
+    import sqlite3
+    from agent.delegation_context import explicit_board_intent_is_pinned
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.profiles import get_profile_dir
+    from hermes_cli.projects_adoption import adopt_canonical_project
+    from hermes_constants import get_hermes_home
+
+    try:
+        if explicit_board_intent_is_pinned() or get_hermes_home().resolve() != kb.kanban_home().resolve():
+            raise ValueError("canonical adoption requires a root-profile operator outside task/child execution")
+        result = adopt_canonical_project(
+            source_registry=kb.kanban_home().resolve() / "projects.db",
+            target_registry=get_profile_dir(args.target_profile).resolve() / "projects.db",
+            target_profile=args.target_profile,
+            expected_project_id=args.project_id,
+            expected_root=args.expected_root,
+            expected_board=args.expected_board,
+        )
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        print(f"project: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 _HANDLERS = {
+    "adopt-canonical": _cmd_adopt_canonical,
     "create": _cmd_create,
     "list": _cmd_list,
     "ls": _cmd_list,

@@ -312,3 +312,77 @@ def test_target_registry_matches_profile_crud_root(adoption, tmp_path, monkeypat
         with pytest.raises(ValueError, match="configured profile"):
             adopt(adoption)
         assert {path: path.read_bytes() for path in watched} == before
+
+
+def _adoption_cli(args, extra=()):
+    import argparse
+    from hermes_cli.projects_cmd import build_parser, projects_command
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    command = ["project", "adopt-canonical", args["expected_project_id"],
+               "--target-profile", args["target_profile"],
+               "--expected-root", str(args["expected_root"]),
+               "--expected-board", args["expected_board"], *extra]
+    return projects_command(parser.parse_args(command))
+
+
+def test_operator_cli_adopts_exact_registered_project(adoption, capsys):
+    import json
+    before = adoption["source_registry"].read_bytes()
+    with projects_db.connect_closing(adoption["target_registry"]) as conn:
+        active = projects_db.get_active_id(conn)
+    assert _adoption_cli(adoption) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "adopted"
+    assert result["project_id"] == adoption["expected_project_id"]
+    with projects_db.connect_closing(adoption["target_registry"]) as conn:
+        assert projects_db.get_project(conn, result["project_id"]).board_slug == "alpha"
+        assert projects_db.get_active_id(conn) == active
+    assert adoption["source_registry"].read_bytes() == before
+    assert _adoption_cli(adoption) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "already_adopted"
+
+
+@pytest.mark.parametrize("context", ["named", "worker", "delegated"])
+def test_operator_cli_refuses_foreign_profile_and_worker_context(adoption, monkeypatch, context):
+    from contextlib import nullcontext
+    from agent.delegation_context import delegated_child_context
+    if context == "named":
+        monkeypatch.setenv("HERMES_HOME", str(adoption["target_registry"].parent))
+    elif context == "worker":
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_owned")
+    before = adoption["target_registry"].read_bytes()
+    with delegated_child_context() if context == "delegated" else nullcontext():
+        assert _adoption_cli(adoption) == 2
+    assert adoption["target_registry"].read_bytes() == before
+
+
+def test_operator_cli_refuses_stale_expected_board(adoption):
+    before = adoption["target_registry"].read_bytes()
+    assert _adoption_cli(adoption, ["--expected-board", "stale"]) == 2
+    assert adoption["target_registry"].read_bytes() == before
+
+
+@pytest.mark.parametrize("alias_env", ["home", "kanban", "both"])
+def test_operator_cli_accepts_physical_root_alias(adoption, monkeypatch, alias_env):
+    root = adoption["source_registry"].parent
+    alias = root.parent / "root-alias"
+    alias.symlink_to(root, target_is_directory=True)
+    if alias_env in {"home", "both"}:
+        monkeypatch.setenv("HERMES_HOME", str(alias))
+    if alias_env in {"kanban", "both"}:
+        monkeypatch.setenv("HERMES_KANBAN_HOME", str(alias))
+    assert _adoption_cli(adoption) == 0
+    with projects_db.connect_closing(adoption["target_registry"]) as conn:
+        assert projects_db.get_project(conn, adoption["expected_project_id"]).board_slug == "alpha"
+
+
+@pytest.mark.parametrize("registry", ["source_registry", "target_registry"])
+def test_operator_cli_still_refuses_symlinked_registry_file(adoption, registry):
+    path = adoption[registry]
+    original = path.with_suffix(".original")
+    path.rename(original)
+    path.symlink_to(original)
+    before = original.read_bytes()
+    assert _adoption_cli(adoption) == 2
+    assert original.read_bytes() == before
