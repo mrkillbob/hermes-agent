@@ -1,4 +1,4 @@
-"""A retained native resume cannot publish a workspace removed before its lease."""
+"""A retained native resume cannot publish a workspace quarantined before its lease."""
 
 import asyncio
 from pathlib import Path
@@ -91,17 +91,19 @@ async def test_retained_resume_rejects_cleanup_winning_before_lease(
             {
                 "id": "cleanup",
                 "method": "session.worktree_cleanup",
-                "params": {"session_id": "root", "action": "remove"},
+                "params": {"session_id": "root", "action": "quarantine"},
             }
         )
-        assert removed["result"]["removed"] is True, removed
+        assert removed["result"]["outcome"] == "retained", removed
+        assert removed["result"]["removed"] is False
+        assert Path(removed["result"]["retained_path"]).is_dir()
         assert not binding.path.exists()
         continue_resume.set()
         reply = await asyncio.wait_for(resume, 10)
 
-        assert "error" in reply, "resume must not publish a removed workspace"
+        assert "error" in reply, "resume must not publish a quarantined workspace"
         assert not server._sessions
-        assert db.get_conversation_worktree("root").state == "removed"
+        assert db.get_conversation_worktree("root").state == "retained"
         assert db.get_messages("root")[0]["content"] == "Retained fixture history"
     finally:
         continue_resume.set()
