@@ -20,6 +20,11 @@ checkout it describes:
   whose ``commit`` matches the installed checkout HEAD (``baseVersion`` is
   null when no release tag is reachable)
 
+The Windows E2E driver can supply ``--initial-windows-installer <sha>`` for a
+historical script install updated through ``hermes update``. An absent receipt
+is then allowed only if that immutable ancestor's installer predates receipts;
+the final checkout and source identity still have to match the expected commit.
+
 Usage:
 
     python3 scripts/verify-bootstrap-version-stamp.py \
@@ -90,12 +95,16 @@ def _git(repo: Path, *args: str) -> str | None:
 
 
 def verify_stamp(stamp_path: Path, repo: Path, expect_commit: str | None, expect_branch: str | None,
-                 *, source_stamp: bool = True) -> list[str]:
+                 *, source_stamp: bool = True, initial_windows_installer: str | None = None) -> list[str]:
     errors: list[str] = []
 
     try:
         stamp = json.loads(stamp_path.read_text(encoding="utf-8-sig"))
     except OSError as e:
+        legacy = (_pre_receipt_source_errors(repo, initial_windows_installer, expect_commit, expect_branch)
+                  if isinstance(e, FileNotFoundError) and source_stamp else None)
+        if legacy is not None:
+            return legacy
         _fail(errors, f"cannot read stamp {stamp_path}: {e}")
         return errors
     except ValueError as e:
@@ -152,15 +161,45 @@ def verify_stamp(stamp_path: Path, repo: Path, expect_commit: str | None, expect
     # commit == HEAD. baseVersion is null when no release tag is reachable
     # (a PR checkout), exactly as the runtime reports it.
     if source_stamp:
-        present, canonical_commit = _read_install_stamp(repo)
-        if not present:
-            _fail(errors, f"no {repo}/install-stamp.json — the install carries no source identity stamp")
-        elif not canonical_commit:
-            _fail(errors, f"{repo}/install-stamp.json names no commit")
-        elif head and canonical_commit != head:
-            _fail(errors, f"canonical stamp commit {canonical_commit[:12]} != installed HEAD {head[:12]}")
-
+        _verify_source_stamp(repo, head, errors)
     return errors
+
+
+def _pre_receipt_source_errors(repo: Path, initial: str | None, expect_commit: str | None,
+                               expect_branch: str | None) -> list[str] | None:
+    """Recognize an immutable ancestor whose Windows installer had no receipt.
+
+    The E2E driver supplies this only for script installs followed by hermes-update.
+    Current installer reruns and GUI receipts retain their strict receipt contract.
+    Unknown history or an unreadable installer never grants the legacy capability.
+    """
+    if not initial or not SHA_RE.fullmatch(initial):
+        return None
+    if _git(repo, "merge-base", initial, "HEAD") != initial:
+        return None
+    installer = _git(repo, "show", f"{initial}:scripts/install.ps1")
+    if installer is None or ".hermes-bootstrap-complete" in installer:
+        return None
+    errors: list[str] = []
+    head = _git(repo, "rev-parse", "HEAD")
+    if head is None:
+        _fail(errors, f"could not read HEAD of {repo}")
+    elif expect_commit and head != expect_commit:
+        _fail(errors, f"installed HEAD {head[:12]} != expected {expect_commit[:12]}")
+    if expect_branch and _git(repo, "rev-parse", "--abbrev-ref", "HEAD") != expect_branch:
+        _fail(errors, f"checked-out branch != expected {expect_branch!r}")
+    _verify_source_stamp(repo, head, errors)
+    return errors
+
+
+def _verify_source_stamp(repo: Path, head: str | None, errors: list[str]) -> None:
+    present, canonical_commit = _read_install_stamp(repo)
+    if not present:
+        _fail(errors, f"no {repo}/install-stamp.json — the install carries no source identity stamp")
+    elif not canonical_commit:
+        _fail(errors, f"{repo}/install-stamp.json names no commit")
+    elif head and canonical_commit != head:
+        _fail(errors, f"canonical stamp commit {canonical_commit[:12]} != installed HEAD {head[:12]}")
 
 
 def _read_install_stamp(repo: Path) -> tuple[bool, str | None]:
@@ -184,11 +223,14 @@ def main() -> int:
     parser.add_argument("--expect-branch", default=None, help="Fail unless pinnedBranch equals this branch")
     parser.add_argument("--no-source-stamp", action="store_true",
                         help="The run skipped the products stage, which writes install-stamp.json")
+    parser.add_argument("--initial-windows-installer", default=None,
+                        help="E2E: immutable initial script-install commit; permits an absent receipt only if that ancestor's installer predates receipts")
     args = parser.parse_args()
 
     errors = verify_stamp(
         Path(args.stamp), Path(args.repo), args.expect_commit, args.expect_branch,
         source_stamp=not args.no_source_stamp,
+        initial_windows_installer=args.initial_windows_installer,
     )
     if errors:
         for e in errors:
