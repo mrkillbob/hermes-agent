@@ -141,15 +141,6 @@ jobs:
           extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web"]'
           test-environment: 'true'
           prune-python-cache: true
-          save-python-cache: ${{ runner.arch == 'ARM64' && 'false' || 'true' }}
-
-      - name: Save verified ARM64 Python dependency cache
-        if: ${{ runner.arch == 'ARM64' && steps.setup_pm.outcome == 'success' }}
-        uses: ./.github/actions/save-pm-cache
-        with:
-          python: ${{ steps.setup_pm.outputs.python-path }}
-          path: ${{ steps.setup_pm.outputs.uv-cache-path }}
-          key: ${{ steps.setup_pm.outputs.python-cache-key }}
 
       - name: Run ${{ matrix.marker }} tests
         # scripts/run_tests.sh — the canonical runner, same as every other

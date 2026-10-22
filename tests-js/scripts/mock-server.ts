@@ -58,6 +58,7 @@ verificationWritePath?: string
  * handle's `path` to let the test decide when the process exits.
  */
 backgroundReleasePath?: string
+
 }
 
 export interface MockServer {

@@ -20,6 +20,47 @@ const REVIEW_FILE_CAP = 2_000
 const UNTRACKED_LINE_COUNT_CONCURRENCY = 16
 const UNTRACKED_LINE_COUNT_MAX_BYTES = 1024 * 1024
 
+// simple-git 4 strips every guarded variable (any `GIT_*`, plus EDITOR, VISUAL,
+// PAGER, PREFIX, SSH_ASKPASS) from the environment git runs with, and rejects
+// the task when one is passed explicitly through `.env()`. These are the ones
+// the Review pane keeps forwarding from Electron main's process.env only: the SSH
+// transport and askpass helpers `git push` authenticates with, and
+// GIT_TERMINAL_PROMPT, which stops a credential prompt from blocking a git
+// process that has no terminal.
+export const SIMPLE_GIT_ALLOWED_ENV = ['GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'SSH_ASKPASS', 'GIT_TERMINAL_PROMPT']
+
+// simple-git's vulnerability check additionally rejects GIT_SSH/GIT_SSH_COMMAND
+// and GIT_ASKPASS/SSH_ASKPASS in an explicit `.env()` (the Windows host path
+// below) unless these categories are enabled. The values come from the user's
+// Electron main process environment, never IPC arguments or repository data.
+const SIMPLE_GIT_ALLOWED_ENV_UNSAFE = { allowUnsafeAskPass: true, allowUnsafeSshCommand: true }
+
+const ALLOWED_ENV_KEYS = new Set(SIMPLE_GIT_ALLOWED_ENV.map(key => key.toLowerCase()))
+
+// Same test simple-git's environment guard applies, so the explicit env never
+// carries a key the guard would reject.
+function isGuardedGitEnvKey(key: string): boolean {
+  const lower = key.toLowerCase().trim()
+
+  return lower.startsWith('git_') || isGitEnvKey(lower)
+}
+
+// Explicit env for the Windows no-console host tuple: the host script needs
+// HERMES_GIT_ARGV0, and simple-git replaces the inherited env with whatever
+// `.env()` receives, so the rest of the environment is forwarded minus the
+// guarded keys that are not allow-listed.
+export function simpleGitHostEnv(base: NodeJS.ProcessEnv | undefined, gitBin: string): NodeJS.ProcessEnv {
+  const env = noConsoleGitEnv(base, gitBin)
+
+  for (const key of Object.keys(env)) {
+    if (isGuardedGitEnvKey(key) && !ALLOWED_ENV_KEYS.has(key.toLowerCase().trim())) {
+      delete env[key]
+    }
+  }
+
+  return env
+}
+
 // GUI-launched Electron apps on macOS inherit only a minimal PATH (no
 // /opt/homebrew/bin or /usr/local/bin), so `gh` — and the `git` gh shells out
 // to — aren't found. Augment PATH with the resolved gh dir + the common
@@ -64,35 +105,18 @@ function gitFor(cwd, gitBin) {
   // forwards argv unchanged.
   const host = windowsGitHost()
   const binary = simpleGitBinary(gitBin, host)
-  const unsafe = Boolean(gitBin) || Array.isArray(binary)
-
-  const hosted = Array.isArray(binary)
+  const unsafeBinary = Boolean(gitBin) || Array.isArray(binary)
 
   const git = simpleGit({
+    allowEnvironment: SIMPLE_GIT_ALLOWED_ENV,
     baseDir: cwd,
     binary,
     maxConcurrentProcesses: 4,
     trimmed: false,
-    ...(unsafe ? { unsafe: { allowUnsafeCustomBinary: true } } : {}),
-    ...(hosted ? { allowEnvironment: ['GIT_TERMINAL_PROMPT'] } : {})
+    unsafe: { ...SIMPLE_GIT_ALLOWED_ENV_UNSAFE, ...(unsafeBinary ? { allowUnsafeCustomBinary: true } : {}) }
   })
 
-  if (!hosted) {
-    return git
-  }
-
-  // Explicit .env() replaces inheritance. Retain the Windows host's OS/runtime
-  // environment while removing the same guarded keys as simple-git's ambient
-  // filter; permit only the non-interactive prompt setting added by our host.
-  const env = Object.fromEntries(
-    Object.entries(noConsoleGitEnv(process.env, gitBin || 'git')).filter(([key]) => {
-      const normalized = key.toLowerCase().trim()
-
-      return normalized === 'git_terminal_prompt' || (!normalized.startsWith('git_') && !isGitEnvKey(normalized))
-    })
-  )
-
-  return git.env(env)
+  return Array.isArray(binary) ? git.env(simpleGitHostEnv(process.env, gitBin || 'git')) : git
 }
 
 // simple-git reports renames as `old => new` (and `dir/{old => new}/f`); resolve

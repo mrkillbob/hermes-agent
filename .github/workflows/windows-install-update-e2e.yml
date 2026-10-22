@@ -56,6 +56,7 @@ jobs:
       matrix:
         test_file:
           - test_fresh_install_update.py
+          - test_damaged_checkout.py
           - test_gateway_across_update.py
           - test_git_and_holders.py
           - test_interpreter.py
@@ -67,6 +68,7 @@ jobs:
           - test_update_spares_other_installs.py
           - test_elevated_gateway_attach.py
           - test_upgrade_over_old_gateway.py
+          - test_upgrade_over_old_gateway_standard_user.py
     # Each file provisions a cold install that takes about 17-22 minutes. Isolate files on
     # separate hosted runners so the fork does not serialize those installs into a single serial job.
     timeout-minutes: 75
@@ -126,6 +128,31 @@ jobs:
             throw "test_crash_cells.py ran no crash cells: $manifest is missing"
           }
           Get-Content -LiteralPath $manifest
+
+      - name: Preserve machine transcripts after interrupted tests
+        if: always()
+        shell: pwsh
+        env:
+          HERMES_E2E_MACHINE_ROOT: ${{ runner.temp }}\wm
+          HERMES_E2E_ARTIFACTS: ${{ runner.temp }}\win-update-e2e
+        run: |
+          # File-timeout SIGKILL bypasses module-fixture teardown. Copy only flat
+          # synthetic command transcripts/status, never profiles, DBs, source or environments.
+          $root = $env:HERMES_E2E_MACHINE_ROOT
+          if (-not (Test-Path -LiteralPath $root -PathType Container)) { exit 0 }
+          foreach ($machine in Get-ChildItem -LiteralPath $root -Directory) {
+            if ($machine.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            $source = Join-Path $machine.FullName 'transcripts'
+            if (-not (Test-Path -LiteralPath $source -PathType Container)) { continue }
+            if ((Get-Item -LiteralPath $source).Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            $dest = Join-Path (Join-Path $env:HERMES_E2E_ARTIFACTS $machine.Name) 'transcripts'
+            foreach ($file in Get-ChildItem -LiteralPath $source -File) {
+              if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+              if ($file.Extension -ne '.log' -and -not $file.Name.EndsWith('.status.json')) { continue }
+              New-Item -ItemType Directory -Path $dest -Force | Out-Null
+              Copy-Item -LiteralPath $file.FullName -Destination $dest -Force
+            }
+          }
 
       - name: Upload transcripts, logs and receipts
         if: always()
