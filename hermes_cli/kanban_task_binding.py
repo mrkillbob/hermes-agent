@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from dataclasses import dataclass
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 
@@ -17,6 +18,15 @@ from hermes_cli.kanban_db_boards import board_ownership_lock
 from hermes_cli import kanban_db_workspace as workspace
 from hermes_cli.kanban_worktree_policy import project_worktree_path
 from hermes_cli.sqlite_util import write_txn
+
+# A correction proves physical repository/ref ownership, never a caller-selected
+# Git namespace. Refuse explicit overrides rather than silently changing the
+# operator's intended context; authentication and ordinary discovery stay intact.
+_GIT_NAMESPACE_OVERRIDES = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE",
+    "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE",
+)
 
 _BINDING_FIELDS = ("project_id", "workspace_kind", "workspace_path", "branch_name",
                    "workspace_base_ref", "workspace_base_sha")
@@ -45,7 +55,7 @@ class BindingProjection:
     original: dict
     project_id: str
     workspace_path: str
-    branch_name: str
+    branch_name: str | None
     payload: dict
     target_project: projects_db.Project
 
@@ -77,6 +87,151 @@ class BindingProjection:
         for db_file in workspace._sibling_board_db_files(src):
             if db_file.resolve() != destination_file and workspace._other_board_uses_path(db_file, task_id, key):
                 raise ValueError("destination workspace belongs to another board's card")
+
+
+@dataclass(frozen=True)
+class DirectoryBindingProjection(BindingProjection):
+    """Fixed-kind local-only correction; old Git bindings remain in recovery evidence."""
+
+    directory_identity: tuple[int, int]
+
+    def apply(self, task):
+        return {**super().apply(task), "workspace_kind": "dir"}
+
+    def verify_destination(self):
+        path = _directory_destination(
+            self.original, self.target_project, self.workspace_path
+        )
+        if (path.stat().st_dev, path.stat().st_ino) != self.directory_identity:
+            raise ValueError("destination directory identity changed")
+
+
+def _branch_exists(repo_root, branch_name):
+    """Only a successful local probe can establish presence or absence."""
+    try:
+        result = workspace._git(repo_root, "show-ref", "--verify", "--quiet",
+                                f"refs/heads/{branch_name}", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError("branch absence could not be established") from None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1 and not result.stdout and not result.stderr:
+        return False
+    raise ValueError("branch absence could not be established")
+
+
+def _outside_repository(path):
+    """Prove physical repository isolation, independent of inherited discovery bindings."""
+    from hermes_cli._subprocess_compat import bounded_probe_run, noninteractive_repo_git_env
+
+    base = dict(os.environ)
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES", "GIT_OBJECT_DIRECTORY"):
+        base.pop(key, None)
+    base.update(GIT_DISCOVERY_ACROSS_FILESYSTEM="1", LC_ALL="C")
+    try:
+        env = noninteractive_repo_git_env(path, base=base)
+        result = None if env is None else bounded_probe_run(
+            ["git", "-C", str(path), "rev-parse", "--absolute-git-dir"],
+            timeout=20, errors="replace", env=env)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise ValueError("directory repository isolation could not be established") from None
+    if result is not None:
+        if result.returncode == 0:
+            return False  # Includes bare repositories, unlike --show-toplevel.
+        if (result.returncode == 128 and not result.stdout and result.stderr.strip()
+                == "fatal: not a git repository (or any of the parent directories): .git"):
+            return True
+    raise ValueError("directory repository isolation could not be established")
+
+
+def _directory_destination(task, project, directory):
+    path = Path(directory).expanduser()
+    root = Path(project.primary_path).resolve()
+    if (
+        not path.is_absolute()
+        or not path.is_dir()
+        or path.resolve() != path
+        or path.is_relative_to(root)
+        or root.is_relative_to(path)
+        or not _outside_repository(path)
+    ):
+        raise ValueError(
+            "destination directory must be existing, isolated, canonical and outside repositories"
+        )
+    old = Path(task["workspace_path"]) if task.get("workspace_path") else None
+    if (
+        task.get("workspace_kind") != "worktree"
+        or old is None
+        or not old.is_absolute()
+        or not task.get("branch_name")
+    ):
+        raise ValueError("directory correction requires an exact old worktree binding")
+    if (
+        old.exists()
+        or old.is_symlink()
+        or _branch_exists(Path(project.primary_path), task["branch_name"])
+    ):
+        raise ValueError(
+            "materialized old workspace/branch must remain under its existing ownership"
+        )
+    return path
+
+
+def _correction_scope(old, target, source_board, destination, expected, directory):
+    if directory is not None:
+        if (
+            old.id != target.id
+            or source_board != destination
+            or old.board_slug != destination
+            or expected.board_project_id != target.id
+        ):
+            raise ValueError(
+                "directory correction requires the same canonical project and board"
+            )
+    elif old.id == target.id or workspace._path_key(
+        Path(old.primary_path).resolve()
+    ) == workspace._path_key(Path(target.primary_path).resolve()):
+        raise ValueError("correction requires distinct registered repositories")
+
+
+def _binding_projection(
+    conn, task, old, target, source_board, destination, reason, directory
+):
+    if directory is not None:
+        if task.get("claim_expires") is not None:
+            raise ValueError("directory correction refuses incomplete claim identity")
+        from hermes_cli.kanban_pr_acceptance import validate_contract
+
+        if validate_contract(task.get("completion_contract")) != "local-only":
+            raise ValueError(
+                "directory correction requires a local-only completion contract"
+            )
+        if conn.execute(
+            "SELECT 1 FROM task_runs WHERE task_id=? AND status IN ('claimed','unknown')",
+            (task["id"],),
+        ).fetchone():
+            raise ValueError("directory correction refuses unsettled runs")
+        path, branch = _directory_destination(task, target, directory), None
+    else:
+        path, branch = _destination(task, target)
+    payload = {
+        "reason": reason,
+        "source_board": source_board,
+        "destination_board": destination,
+        "old_binding": {key: task[key] for key in _BINDING_FIELDS},
+        "old_project_root": old.primary_path,
+        "new_project_root": target.primary_path,
+        "new_project_id": target.id,
+        "new_workspace_path": str(path),
+        "new_branch_name": branch,
+    }
+    args = (task, target.id, str(path), branch, payload, target)
+    if directory is not None:
+        payload["new_workspace_kind"] = "dir"
+        return DirectoryBindingProjection(
+            *args, (path.stat().st_dev, path.stat().st_ino)
+        )
+    return BindingProjection(*args)
 
 
 def _verify_workspace_availability(source, destination, snapshot, projection):
@@ -153,19 +308,25 @@ def _destination(task, project):
                 or workspace._git_current_branch(target) != branch):
             raise ValueError("destination is not the owned task worktree")
     elif (task["workspace_path"] and (Path(task["workspace_path"]).exists()
-                                     or Path(task["workspace_path"]).is_symlink())) or workspace._git_branch_exists(root, branch):
+                                     or Path(task["workspace_path"]).is_symlink())) or _branch_exists(root, branch):
         raise ValueError("materialized old workspace/branch requires an owned destination first")
     return target, branch
 
 
 def correct_task_binding(*, source_board, task_id, target_project_id, expected: BindingExpectation,
-                         target_root, reason, backup_path):
+                         target_root, reason, backup_path, target_directory=None):
     """Preserve a card and its holds; never claim, promote, materialize, or clean it.
 
     Metadata ownership locks precede the registry writer reservation, matching audit
     enqueue. Board DB writers follow in sorted order through verified transfer.
     The backup and old-binding event are durable evidence, not a workspace GC lease.
+    ``target_directory`` is an operator-only same-project local-only correction to
+    an existing isolated directory; it never releases a card or changes creation policy.
+    Explicit Git namespace overrides must be unset before either correction mode.
     """
+    # Presence matters: Git also interprets explicitly empty namespace values.
+    if any(key in os.environ for key in _GIT_NAMESPACE_OVERRIDES):
+        raise ValueError("binding correction refuses inherited Git namespace")
     from hermes_cli import kanban_transfer as transfer
 
     if not reason.strip() or not backup_path or not expected.values[0]:
@@ -193,19 +354,15 @@ def correct_task_binding(*, source_board, task_id, target_project_id, expected: 
         metadata = kb.read_board_metadata(source_board)
         if metadata.get("archived") or metadata.get("project_id") != expected.board_project_id:
             raise ValueError("expected source board ownership changed")
-        if old.id == target.id or workspace._path_key(Path(old.primary_path).resolve()) == workspace._path_key(Path(target.primary_path).resolve()):
-            raise ValueError("correction requires distinct registered repositories")
+        _correction_scope(old, target, source_board, destination, expected, target_directory)
         with kbc.connect_closing(board=source_board) as conn:
             task = _safe_task(conn, task_id, expected)
-            path, branch = _destination(task, target)
+            projection = _binding_projection(
+                conn, task, old, target, source_board, destination, reason, target_directory)
+            path = Path(projection.workspace_path)
             if source_board == destination and workspace._workspace_in_use_by_other(conn, task_id, path):
                 raise ValueError("destination workspace belongs to another card")
             snapshot = transfer._selected_task_rows(conn, [task_id])
-        payload = {"reason": reason, "source_board": source_board, "destination_board": destination,
-                   "old_binding": {key: task[key] for key in _BINDING_FIELDS},
-                   "old_project_root": old.primary_path, "new_project_root": target.primary_path,
-                   "new_project_id": target.id, "new_workspace_path": str(path), "new_branch_name": branch}
-        projection = BindingProjection(task, target.id, str(path), branch, payload, target)
         if source_board != destination:
             _verify_workspace_availability(source_board, destination, snapshot, projection)
         # Portable board export intentionally scrubs machine-local bindings. Keep
