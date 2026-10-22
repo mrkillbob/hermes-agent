@@ -49,76 +49,115 @@ function diagnostic(error: any, reason: string) {
   expect(isStaleLocalGatewayError(error)).toBe(true)
 }
 
-test.skipIf(process.platform === 'win32')('a real socket deadline remains five seconds and is distinguished from native errors', async () => {
-  const home = await fixture()
-  const before = performance.now()
-  const error = await mintLocalGatewayTicket(endpoint(home)).catch(error => error)
+type NativeSocketResult = {
+  error: any
+  reason: string
+  connected: boolean
+  receivedData: boolean
+  elapsed?: number
+  excludes?: string[]
+}
 
-  diagnostic(error, 'deadline')
-  expect(performance.now() - before).toBeGreaterThanOrEqual(4900)
-  expect(error.stack).toContain('connected=true received_data=false')
-})
+type NativeSocketCase = {
+  name: string
+  run: () => Promise<NativeSocketResult>
+}
 
-test.skipIf(process.platform === 'win32')('a native refused socket is distinguished without exposing its path', async () => {
-  const home = await shortSocketTmpDir('ticket-refused-')
-  homes.push(home)
-  const socketPath = path.join(home, 'gateway.sock')
-  // A closed AF_UNIX socket keeps its filesystem node; no application/runtime is launched.
-  execFileSync(process.env.HERMES_PYTHON || 'python3', ['-c', 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()', socketPath])
-  await fs.chmod(socketPath, 0o600)
-  const error = await mintLocalGatewayTicket(endpoint(home)).catch(error => error)
+const nativeSocketCases: NativeSocketCase[] = [
+  {
+    name: 'deadline',
+    run: async () => {
+      const home = await fixture()
+      const before = performance.now()
+      const error = await mintLocalGatewayTicket(endpoint(home)).catch(error => error)
 
-  diagnostic(error, 'ECONNREFUSED')
-  expect(error.stack).toContain('connected=false received_data=false')
-  expect(error.stack).not.toContain(home)
-})
+      return { error, reason: 'deadline', connected: true, receivedData: false, elapsed: performance.now() - before }
+    }
+  },
+  {
+    name: 'refused connection',
+    run: async () => {
+      const home = await shortSocketTmpDir('ticket-refused-')
+      homes.push(home)
+      const socketPath = path.join(home, 'gateway.sock')
+      // A closed AF_UNIX socket keeps its filesystem node; no application/runtime is launched.
+      execFileSync(process.env.HERMES_PYTHON || 'python3', ['-c', 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()', socketPath])
+      await fs.chmod(socketPath, 0o600)
 
-test.skipIf(process.platform === 'win32')('oversized native response stays bounded and receives its own fixed cause', async () => {
-  const home = await fixture(socket => socket.once('data', () => socket.write('x'.repeat(65537))))
-  const error = await mintLocalGatewayTicket(endpoint(home)).catch(error => error)
+      return {
+        error: await mintLocalGatewayTicket(endpoint(home)).catch(error => error),
+        reason: 'ECONNREFUSED', connected: false, receivedData: false, excludes: [home]
+      }
+    }
+  },
+  {
+    name: 'oversized response',
+    run: async () => {
+      const home = await fixture(socket => socket.once('data', () => socket.write('x'.repeat(65537))))
 
-  diagnostic(error, 'response_too_large')
-  expect(error.stack).toContain('connected=true received_data=true')
-  expect(error.stack).not.toContain('x'.repeat(64))
-})
+      return {
+        error: await mintLocalGatewayTicket(endpoint(home)).catch(error => error),
+        reason: 'response_too_large', connected: true, receivedData: true, excludes: ['x'.repeat(64)]
+      }
+    }
+  },
+  {
+    name: 'socket disappears after path validation',
+    run: async () => {
+      const home = await fixture()
+      const original = net.createConnection
+      vi.spyOn(net, 'createConnection').mockImplementation(((...args: any[]) => {
+        // Fault at the native boundary, after production's actual path/ACL validation.
+        unlinkSync(path.join(home, 'gateway.sock'))
 
-test.skipIf(process.platform === 'win32')('a socket disappearing after path validation retains the native missing code', async () => {
-  const home = await fixture()
-  const original = net.createConnection
-  vi.spyOn(net, 'createConnection').mockImplementation(((...args: any[]) => {
-    // Fault at the native boundary, after production's actual path/ACL validation.
-    unlinkSync(path.join(home, 'gateway.sock'))
+        return original.apply(net, args)
+      }) as typeof net.createConnection)
 
-    return original.apply(net, args)
-  }) as typeof net.createConnection)
-  const error = await mintLocalGatewayTicket(endpoint(home)).catch(error => error)
+      return {
+        error: await mintLocalGatewayTicket(endpoint(home)).catch(error => error),
+        reason: 'ENOENT', connected: false, receivedData: false, excludes: [home]
+      }
+    }
+  },
+  ...['ECONNRESET', 'UNTRUSTED /private/path?ticket=secret', undefined].map(code => ({
+    name: `socket error ${String(code)}`,
+    run: async () => {
+      const home = await fixture()
+      const socket = new net.Socket()
+      let acknowledge!: () => void
+      const created = new Promise<void>(resolve => {acknowledge = resolve})
+      vi.spyOn(net, 'createConnection').mockImplementation((() => {
+        acknowledge()
 
-  diagnostic(error, 'ENOENT')
-  expect(error.stack).not.toContain(home)
-})
+        return socket
+      }) as typeof net.createConnection)
+      const pending = mintLocalGatewayTicket(endpoint(home)).catch(error => error)
+      await created
+      // Some native transport failures are not portable to induce on AF_UNIX (reset vs EOF).
+      // Inject only that OS event; the production listener/classifier remains real.
+      socket.emit('error', Object.assign(new Error('secret raw error /private/path https://example.invalid/?ticket=secret'), { code, errno: 'secret', syscall: 'private syscall' }))
+      socket.emit('close')
 
-test.skipIf(process.platform === 'win32').each(['ECONNRESET', 'UNTRUSTED /private/path?ticket=secret', undefined])(
-  'native error %s records only an allowlisted cause, never arbitrary diagnostic input', async code => {
-    const home = await fixture()
-    const socket = new net.Socket()
-    let acknowledge!: () => void
-    const created = new Promise<void>(resolve => {acknowledge = resolve})
-    vi.spyOn(net, 'createConnection').mockImplementation((() => {
-      acknowledge()
+      return {
+        error: await pending,
+        reason: code === 'ECONNRESET' ? 'ECONNRESET' : 'socket_error',
+        connected: false, receivedData: false,
+        excludes: ['secret', '/private/path', 'example.invalid', 'private syscall', 'UNTRUSTED']
+      }
+    }
+  }))
+]
 
-      return socket
-    }) as typeof net.createConnection)
-    const pending = mintLocalGatewayTicket(endpoint(home)).catch(error => error)
-    await created
-    // Some native transport failures are not portable to induce on AF_UNIX (reset vs EOF).
-    // Inject only that OS event; the production listener/classifier remains real.
-    socket.emit('error', Object.assign(new Error('secret raw error /private/path https://example.invalid/?ticket=secret'), { code, errno: 'secret', syscall: 'private syscall' }))
-    socket.emit('close')
-    const error = await pending
+test.skipIf(process.platform === 'win32').each(nativeSocketCases)(
+  'native socket boundary classifies $name failures without leaking raw details', async ({ run }) => {
+    const { error, reason, connected, receivedData, elapsed, excludes = [] } = await run()
 
-    diagnostic(error, code === 'ECONNRESET' ? 'ECONNRESET' : 'socket_error')
+    diagnostic(error, reason)
+    expect(error.stack).toContain(`connected=${connected} received_data=${receivedData}`)
 
-    for (const secret of ['secret', '/private/path', 'example.invalid', 'private syscall', 'UNTRUSTED']) {
+    if (elapsed !== undefined) {expect(elapsed).toBeGreaterThanOrEqual(4900)}
+
+    for (const secret of excludes) {
       expect(error.message).not.toContain(secret)
       expect(error.stack).not.toContain(secret)
       expect(JSON.stringify(error)).not.toContain(secret)
