@@ -31,7 +31,7 @@ def presentation_kind(content):
 
 
 def issue_context_read(path: Path, raw_bytes: bytes, presented_text: str, *, working_root=None,
-                       relative_path=None) -> None:
+                       relative_path=None, read_target=None) -> str | None:
     """Use the existing verified-read policy, never the filename as authorization."""
     from agent.source_provenance import active_source_provenance, SourceProvenanceError
     from agent.source_context_rendering import render_hint_preview
@@ -52,6 +52,14 @@ def issue_context_read(path: Path, raw_bytes: bytes, presented_text: str, *, wor
         expected = normalized
     if expected != presented_text:
         return
+    if (working_root is not None and relative_path is not None
+            and context.capacity_notice_on_source_limit):
+        from agent.source_context_capacity import unavailable_capacity_notice
+
+        notice = unavailable_capacity_notice(path, target, raw_bytes, working_root=working_root,
+                                             read_target=read_target)
+        if notice is not None:
+            return notice
     try:
         grant = context.registry.issue_file_slice(
             path=target, line_start=1, line_end=raw_bytes.count(b'\n') + int(not raw_bytes.endswith(b'\n')),
@@ -222,13 +230,13 @@ def segment_read_with_context(text, metadata, grant_texts, used_grants, *, regis
         return denied
     segments, seen = [first], set()
     while remaining:
-        from agent.source_context_diagnostic import NOTICE_KIND, blocked_notice_piece
+        from agent.source_context_diagnostic import context_notice_piece
 
         header_match = _HEADER.match(remaining)
-        diagnostic = blocked_notice_piece(remaining, header_match) if header_match else None
+        diagnostic = context_notice_piece(remaining, header_match) if header_match else None
         if diagnostic is not None:
-            body, length = diagnostic
-            segments.extend((SanitizedSegment(header_match[0]), ValidatedToolSyntaxSegment(body, NOTICE_KIND)))
+            body, length, notice_kind = diagnostic
+            segments.extend((SanitizedSegment(header_match[0]), ValidatedToolSyntaxSegment(body, notice_kind)))
             remaining = remaining[length:]
             continue
         piece = _hint_piece(remaining, grants, seen, collected[first.source_grant_digest].canonical_path,

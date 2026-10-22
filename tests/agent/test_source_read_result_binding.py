@@ -15,7 +15,7 @@ from tools.budget_config import DEFAULT_BUDGET
 from tools.file_tools import read_file_tool
 
 
-def produce(tmp_path, monkeypatch, *, count=2, same_directory=False, plain=False, duplicate=False, parallel=False, source_equals_guidance=False):
+def produce(tmp_path, monkeypatch, *, count=2, same_directory=False, plain=False, duplicate=False, parallel=False, source_equals_guidance=False, guidance_override=None):
     from agent import tool_executor
 
     monkeypatch.setenv('HERMES_KANBAN_PROTECTED_REMOTE', '1')
@@ -41,7 +41,7 @@ def produce(tmp_path, monkeypatch, *, count=2, same_directory=False, plain=False
         source = area / f'module-{index}.py'
         source.write_text('Preserve guidance 0.\n' if source_equals_guidance else 'value = 1\n')
         if not plain:
-            (area/'AGENTS.md').write_text(f'Preserve guidance {0 if same_directory else index}.\n')
+            (area/'AGENTS.md').write_text(guidance_override if guidance_override is not None else f'Preserve guidance {0 if same_directory else index}.\n')
         call_id = 'call_duplicate' if duplicate else f'call_producer_{index}'
         refs.append(tool_executor._ToolCallRef('read_file', {'path':str(source)}, 'producer-fixture', call_id, []))
         paths.append(source)
@@ -200,6 +200,8 @@ def test_exact_binding_survives_real_sidecar_wire_roundtrip(tmp_path, monkeypatc
     from agent.codex_responses_adapter import _chat_messages_to_responses_input
     requests = {'chat':{'messages':chat_wire}, 'responses':{'input':_chat_messages_to_responses_input(chat)},
                 'native':{'messages':native}}
+    if wire == 'chat':
+        agent.provider = 'nous'
     if wire.startswith('native_'):
         agent.provider = wire.removeprefix('native_')
     if wire == 'responses':
@@ -217,6 +219,19 @@ def test_exact_binding_survives_real_sidecar_wire_roundtrip(tmp_path, monkeypatc
     assert all(json.dumps(message['content'])[1:-1] in encoded for message in messages)
     assert receipt.decision.source_grant_count == 4
     assert READ_RESULT_ID not in encoded and '_source_provenance' not in encoded
+
+
+def test_custom_chat_does_not_export_private_call_arguments(tmp_path, monkeypatch):
+    agent, messages, _ = produce(tmp_path, monkeypatch, plain=True)
+    private_path = '/var/tmp/private-project-source.py'
+    calls = [{'id': message['tool_call_id'], 'type': 'function',
+              'function': {'name': 'read_file', 'arguments': json.dumps({'path': private_path})}}
+             for message in messages]
+    chat = [{'role': 'assistant', 'tool_calls': calls}, *messages]
+    # Path text is test data only: no file at this private path is opened.
+    with pytest.raises(EgressBlocked) as refused:
+        authorize(agent, chat)
+    assert 'private_absolute_path' in refused.value.decision.reason_codes
 
 
 @pytest.mark.parametrize('count', [17, 32])

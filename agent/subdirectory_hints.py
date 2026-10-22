@@ -311,8 +311,10 @@ class SubdirectoryHintTracker:
                 )
                 from agent.source_context_presentation import issue_context_read
 
-                issue_context_read(hint_path, raw_bytes, content,
-                                   working_root=self.working_dir, relative_path=rel_path)
+                replacement = issue_context_read(hint_path, raw_bytes, content,
+                                   working_root=self.working_dir, relative_path=rel_path, read_target=target)
+                if replacement is not None:
+                    content = replacement
                 logger.debug("Loaded subdirectory hints from %s: %s", directory, [rel_path])
                 return f"[Subdirectory context discovered: {rel_path}]\n{content}"  # first match wins per directory
             except Exception as exc:

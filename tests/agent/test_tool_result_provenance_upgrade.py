@@ -36,9 +36,15 @@ def test_commit_retains_provenance_with_cached_builder(
     monkeypatch.setattr(tool_executor, "get_active_env", lambda _task: None)
     monkeypatch.setattr(tool_executor, "maybe_persist_tool_result", lambda **kwargs: kwargs["content"])
     monkeypatch.setattr(tool_executor, "note_tool_result", lambda *_args: None)
+    producer_calls = []
+
+    def attach_provenance(_agent, _name, *, content, tool_call_id):
+        producer_calls.append(tool_call_id)
+        return envelope
+
     monkeypatch.setattr(
         source_provenance_tools, "attach_trusted_source_provenance_metadata",
-        lambda _agent, _name, *, content: envelope,
+        attach_provenance,
     )
     stages = []
 
@@ -69,6 +75,7 @@ def test_commit_retains_provenance_with_cached_builder(
 
     assert result is not None
     assert stages == ["persisted", "completed"]
+    assert producer_calls == ["call-read"]
     assert len(messages) == 1
     message = messages[0]
     assert message["content"] == content

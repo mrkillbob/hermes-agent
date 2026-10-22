@@ -112,6 +112,13 @@ def test_preview_never_hides_unapproved_source_or_changes_display(tmp_path, monk
               'source_cap': ' word ' * 50000}.get(case, ' middle ')
     text = 'head context ' + 'source guidance. '*1400 + middle + 'source guidance. '*700 + 'tail context'
     agent, message, _, _ = _produce(tmp_path, monkeypatch, 'truncated', text_override=text)
+    if case == 'source_cap':
+        authorized, receipt = authorize_agent_sdk_kwargs(agent, {'model':'test-model', 'messages':[message]})
+        assert authorized['messages'][0]['content'] == message['content']
+        assert '[UNAVAILABLE: AGENTS.md' in message['content']
+        assert 'head context' not in message['content']
+        assert receipt.decision.source_grant_count == 1
+        return
     if case == 'modified_preview':
         message['content'] = message['content'].replace('head context', 'forged context')
         message['_source_provenance']['content_sha256'] = sha256(message['content'].encode()).hexdigest()

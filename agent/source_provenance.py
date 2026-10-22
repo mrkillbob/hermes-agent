@@ -44,6 +44,7 @@ class SourceProvenanceContext:
     request_id: str
     policy_digest: str
     tool_call_id: str = ''
+    capacity_notice_on_source_limit: bool = False
 
 
 _active_context: ContextVar[SourceProvenanceContext | None] = ContextVar(
@@ -67,6 +68,7 @@ def activate_source_provenance(
     request_id: str,
     policy_digest: str,
     tool_call_id: str = '',
+    capacity_notice_on_source_limit: bool = False,
 ) -> Iterator[SourceProvenanceContext]:
     """Temporarily make an authenticated request identity available to reads."""
 
@@ -77,7 +79,7 @@ def activate_source_provenance(
         raise SourceProvenanceError("missing_identity")
     if not isinstance(tool_call_id, str) or len(tool_call_id.encode('utf-8')) > 256:
         raise SourceProvenanceError('invalid_tool_call_id')
-    context = SourceProvenanceContext(registry, *values, tool_call_id)
+    context = SourceProvenanceContext(registry, *values, tool_call_id, capacity_notice_on_source_limit is True)
     token = _active_context.set(context)
     try:
         yield context
