@@ -115,9 +115,9 @@ def test_preview_never_hides_unapproved_source_or_changes_display(tmp_path, monk
     if case == 'source_cap':
         authorized, receipt = authorize_agent_sdk_kwargs(agent, {'model':'test-model', 'messages':[message]})
         assert authorized['messages'][0]['content'] == message['content']
-        assert '[UNAVAILABLE: AGENTS.md' in message['content']
-        assert 'head context' not in message['content']
-        assert receipt.decision.source_grant_count == 1
+        assert 'truncated AGENTS.md' in message['content']
+        assert 'head context' in message['content']
+        assert receipt.decision.source_grant_count == 2
         return
     if case == 'modified_preview':
         message['content'] = message['content'].replace('head context', 'forged context')

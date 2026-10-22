@@ -8,11 +8,15 @@ PREVIEW_KIND = 'context_hint_preview_v1:'
 def presentation_display_path(segment):
     """The display alias is ordinary scanned text, never source-authorized bytes."""
     kind = segment.presentation_kind
-    return kind[len(PREVIEW_KIND):] if kind.startswith(PREVIEW_KIND) else ''
+    from agent.source_context_preview import PREVIEW_PROOF_KIND
+    for prefix in (PREVIEW_KIND, PREVIEW_PROOF_KIND):
+        if kind.startswith(prefix):
+            return kind[len(prefix):]
+    return ''
 
 
 def presentation_secret_text(segment):
-    return segment.text if segment.presentation_kind.startswith(PREVIEW_KIND) else ''
+    return segment.text if presentation_display_path(segment) else ''
 
 
 def presentation_path_encoding_inputs(segment):

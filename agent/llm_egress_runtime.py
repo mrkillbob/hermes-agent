@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 
+from agent.source_grant_text import _read_grant_text
 from agent.remote_task_context import owned_remote_task, require_public_task_context, mark_local_task_context
 from agent.llm_egress_firewall import (
     AuthorizedEgress,
@@ -71,7 +72,6 @@ from agent.llm_egress_terminal import (
     _kanban_assignees_terminal_call_ids,
     _plain_github_list_terminal_call_ids,
     _pytest_terminal_call_ids,
-    _read_grant_text,
     _recognized_syntax_tool_call_ids,
     _recognized_tool_call_ids,
     _rejected_terminal_call_ids,
@@ -379,9 +379,10 @@ def _exact_provider_secret_values() -> tuple[str, ...]:
 
 
 def _grant_texts(grants: Sequence[SourceGrant]) -> tuple[tuple[str, SourceGrant], ...]:
+    from agent.source_context_preview import ContextPreviewGrant
     unique: dict[str, SourceGrant] = {}
     for grant in grants:
-        if not isinstance(grant, SourceGrant):
+        if not isinstance(grant, (SourceGrant, ContextPreviewGrant)):
             continue
         text = _read_grant_text(grant)
         if text:

@@ -46,8 +46,6 @@ def source_provenance_activation(agent: Any, function_name: str, *, tool_call_id
         registry = source_provenance_registry_for_agent(agent)
         if not isinstance(registry, SourceProvenanceRegistry):
             return nullcontext()
-        from agent.source_context_capacity import protected_capacity_context
-
         return activate_source_provenance(
             registry,
             session_id=session_id,
@@ -55,7 +53,6 @@ def source_provenance_activation(agent: Any, function_name: str, *, tool_call_id
             request_id=request_id,
             policy_digest=policy_digest,
             tool_call_id=tool_call_id,
-            capacity_notice_on_source_limit=protected_capacity_context(agent),
         )
     except Exception:
         return nullcontext()

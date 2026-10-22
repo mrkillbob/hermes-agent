@@ -31,7 +31,7 @@ def presentation_kind(content):
 
 
 def issue_context_read(path: Path, raw_bytes: bytes, presented_text: str, *, working_root=None,
-                       relative_path=None, read_target=None) -> str | None:
+                       relative_path=None, read_target=None) -> None:
     """Use the existing verified-read policy, never the filename as authorization."""
     from agent.source_provenance import active_source_provenance, SourceProvenanceError
     from agent.source_context_rendering import render_hint_preview
@@ -52,16 +52,18 @@ def issue_context_read(path: Path, raw_bytes: bytes, presented_text: str, *, wor
         expected = normalized
     if expected != presented_text:
         return
-    if (working_root is not None and relative_path is not None
-            and context.capacity_notice_on_source_limit):
-        from agent.source_context_capacity import unavailable_capacity_notice
-
-        notice = unavailable_capacity_notice(path, target, raw_bytes, working_root=working_root,
-                                             read_target=read_target)
-        if notice is not None:
-            return notice
     try:
-        grant = context.registry.issue_file_slice(
+        from agent.source_provenance import MAX_SOURCE_SLICE_BYTES, MAX_SOURCE_SLICE_LINES
+        lines = raw_bytes.count(b'\n') + int(not raw_bytes.endswith(b'\n'))
+        if working_root is not None and (len(raw_bytes) > MAX_SOURCE_SLICE_BYTES or lines > MAX_SOURCE_SLICE_LINES):
+            if read_target != target:
+                return
+            grant = context.registry.issue_context_preview(path=target, raw_bytes=raw_bytes,
+                working_root=working_root, relative_path=relative_path,
+                identity=dict(session_id=context.session_id, turn_id=context.turn_id,
+                              request_id=context.request_id, policy_digest=context.policy_digest))
+        else:
+            grant = context.registry.issue_file_slice(
             path=target, line_start=1, line_end=raw_bytes.count(b'\n') + int(not raw_bytes.endswith(b'\n')),
             content=raw_bytes, session_id=context.session_id,
             turn_id=context.turn_id, request_id=context.request_id,
@@ -78,6 +80,10 @@ def source_presentation_matches(segment, grant, raw_text):
     """Validate each deterministic rendering against its independently verified slice."""
     from agent.source_context_rendering import PREVIEW_KIND, render_hint_preview
 
+    from agent.source_context_preview import ContextPreviewGrant, PREVIEW_PROOF_KIND
+    if isinstance(grant, ContextPreviewGrant):
+        return (segment.presentation_kind == PREVIEW_PROOF_KIND + grant.relative_alias
+                and segment.text == raw_text)
     if not isinstance(segment.presentation_kind, str):
         return False
     if segment.presentation_kind.startswith(PREVIEW_KIND):
@@ -103,7 +109,7 @@ def source_presentation_matches(segment, grant, raw_text):
 
 def _current_presentation_grants(metadata, grant_texts, registry, identity):
     """Recover exact current identities lost by the generic text-deduplicated view."""
-    from agent.llm_egress_terminal import _read_grant_text
+    from agent.source_grant_text import _read_grant_text
 
     if metadata.get('request_id') != identity.get('request_id'):
         return {}
@@ -124,7 +130,10 @@ def _current_presentation_grants(metadata, grant_texts, registry, identity):
         if raw is None:
             continue
         encoded = raw.encode('utf-8')
-        if len(encoded) != grant.byte_count or sha256(encoded).hexdigest() != grant.content_sha256:
+        from agent.source_context_preview import ContextPreviewGrant
+        size, content_digest = ((grant.preview_bytes, grant.preview_sha256) if isinstance(grant, ContextPreviewGrant)
+                        else (grant.byte_count, grant.content_sha256))
+        if len(encoded) != size or sha256(encoded).hexdigest() != content_digest:
             continue
         current[digest] = (raw, grant)
     return current
@@ -132,7 +141,7 @@ def _current_presentation_grants(metadata, grant_texts, registry, identity):
 
 def _guidance_grants(metadata, grant_texts, registry, identity):
     """A replay must re-verify an earlier validated grant under the same owner turn."""
-    from agent.llm_egress_terminal import _read_grant_text
+    from agent.source_grant_text import _read_grant_text
 
     allowed = metadata.get('source_grant_digests')
     if not isinstance(allowed, (tuple, list)):
@@ -178,9 +187,13 @@ def _hint_piece(remaining, grants, seen, source_path, *, registry, metadata, ide
                      and source_path.is_relative_to(grant.canonical_path.parent))
         if not bound and not canonical:
             continue
-        body = render_hint_preview(raw, match[1]) if bound else context_display_text(raw)
+        from agent.source_context_preview import ContextPreviewGrant, PREVIEW_PROOF_KIND
+        if isinstance(grant, ContextPreviewGrant) and not bound:
+            continue
+        body = raw if isinstance(grant, ContextPreviewGrant) else render_hint_preview(raw, match[1]) if bound else context_display_text(raw)
         piece = header + body
-        kind = PREVIEW_KIND + match[1] if bound else CONTEXT_TEXT
+        kind = ((PREVIEW_PROOF_KIND if isinstance(grant, ContextPreviewGrant) else PREVIEW_KIND) + match[1]
+                if bound else CONTEXT_TEXT)
         presentation = SourcePresentationSegment(source_grant_digest(grant), body, kind)
         tail = remaining[len(piece):]
         if (source_presentation_matches(presentation, grant, raw)
@@ -230,13 +243,13 @@ def segment_read_with_context(text, metadata, grant_texts, used_grants, *, regis
         return denied
     segments, seen = [first], set()
     while remaining:
-        from agent.source_context_diagnostic import context_notice_piece
+        from agent.source_context_diagnostic import NOTICE_KIND, blocked_notice_piece
 
         header_match = _HEADER.match(remaining)
-        diagnostic = context_notice_piece(remaining, header_match) if header_match else None
+        diagnostic = blocked_notice_piece(remaining, header_match) if header_match else None
         if diagnostic is not None:
-            body, length, notice_kind = diagnostic
-            segments.extend((SanitizedSegment(header_match[0]), ValidatedToolSyntaxSegment(body, notice_kind)))
+            body, length = diagnostic
+            segments.extend((SanitizedSegment(header_match[0]), ValidatedToolSyntaxSegment(body, NOTICE_KIND)))
             remaining = remaining[length:]
             continue
         piece = _hint_piece(remaining, grants, seen, collected[first.source_grant_digest].canonical_path,
@@ -265,6 +278,9 @@ def matching_read_grants(text, metadata, grant_texts):
     allowed = {value for value in metadata['source_grant_digests'] if isinstance(value, str)}
     candidates = []
     for raw_text, grant in grant_texts:
+        from agent.source_context_preview import ContextPreviewGrant
+        if isinstance(grant, ContextPreviewGrant):
+            continue
         digest = source_grant_digest(grant)
         if digest not in allowed or metadata.get('request_id') != grant.request_id:
             continue
@@ -280,7 +296,7 @@ def context_display_text(text: str) -> str:
     return text.removeprefix('\ufeff').replace('\r\n', '\n').replace('\r', '\n').strip()
 
 
-def read_context_bytes(path: Path) -> bytes | None:
+def read_context_bytes(path: Path, *, reader=None) -> bytes | None:
     """Keep the existing hint read deadline while retaining the bytes actually read."""
     from agent.prompt_builder import _get_context_file_read_timeout
     from agent.memory_provider import spawn_context_thread
@@ -290,8 +306,8 @@ def read_context_bytes(path: Path) -> bytes | None:
 
     def read():
         try:
-            result.put((True, path.read_bytes()))
-        except OSError as exc:
+            result.put((True, reader(path) if reader is not None else path.read_bytes()))
+        except (OSError, ValueError, RuntimeError) as exc:
             result.put((False, exc))
 
     spawn_context_thread(read, name=f'context-read:{path.name}').start()

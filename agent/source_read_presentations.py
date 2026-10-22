@@ -59,7 +59,7 @@ def _segment_read_file_presentation(
 ) -> SourcePresentationSegment | OutboundText | UntrustedProvenanceSegment:
     """Bind the real JSON/line-number presentation to one exact read grant."""
 
-    from agent.llm_egress_terminal import _read_grant_text
+    from agent.source_grant_text import _read_grant_text
     from agent.source_context_presentation import (
         READ_WITH_CONTEXT, segment_read_with_context, matching_read_grants,
     )
@@ -98,7 +98,8 @@ def _segment_read_file_presentation(
                     request_id=request_id,
                     policy_digest=policy_digest,
                 )
-                if rebound is None:
+                from agent.source_context_preview import ContextPreviewGrant
+                if rebound is None or isinstance(rebound, ContextPreviewGrant):
                     continue
                 raw_text = _read_grant_text(rebound)
                 if raw_text is None:
