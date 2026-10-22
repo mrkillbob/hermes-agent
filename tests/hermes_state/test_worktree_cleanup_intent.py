@@ -212,3 +212,44 @@ def test_worker_registration_refuses_intent_and_removed_binding(store):
         rt.register_worker_execution(db, **args)
     with pytest.raises(rt.RuntimeStoreError, match="worktree_removed"):
         admit(db, epoch)
+
+
+@pytest.mark.parametrize("cleanup_state", ["pending", "removed"])
+def test_terminal_worker_registration_replay_preserves_receipt_during_cleanup(store, cleanup_state):
+    db, epoch = store
+    args = dict(
+        epoch=epoch, execution_id="finished-worker", session_id="root", generation=0,
+        kind="compute", adoption_secret="fixture", require_idle=True,
+    )
+    rt.register_worker_execution(db, **args)
+    terminal = rt.mutate_worker_execution(
+        db, epoch=epoch, execution_id=args["execution_id"], session_id="root", generation=0,
+        sequence=1, operation="execution.finish", payload={},
+    )
+    assert terminal["status"] == "terminal"
+    intent = begin_cleanup(db, epoch=epoch, root="root")
+    if cleanup_state == "removed":
+        release_refused_cleanup(db, epoch=epoch, root="root", intent=intent)
+        db.mark_conversation_worktree_removed("root")
+    before = dict(db._read_one("SELECT * FROM worker_executions WHERE execution_id=?", (args["execution_id"],)))
+    receipt_count = db._read_one("SELECT COUNT(*) FROM worker_receipts")[0]
+
+    replay = rt.register_worker_execution(db, **args)
+
+    assert replay["status"] == "terminal"
+    assert "adoption_digest" not in replay
+    assert replay == {key: value for key, value in before.items() if key != "adoption_digest"}
+    assert dict(db._read_one("SELECT * FROM worker_executions WHERE execution_id=?", (args["execution_id"],))) == before
+    assert db._read_one("SELECT COUNT(*) FROM worker_receipts")[0] == receipt_count
+    with pytest.raises(rt.RuntimeStoreError, match="worktree_cleanup_pending" if cleanup_state == "pending" else "worktree_removed"):
+        rt.register_worker_execution(db, **(args | {"execution_id": "new-worker"}))
+    assert db._read_one("SELECT COUNT(*) FROM worker_executions")[0] == 1
+    with pytest.raises(rt.RuntimeStoreError, match="worktree_cleanup_pending" if cleanup_state == "pending" else "worktree_removed"):
+        rt.adopt_worker_execution(db, **{key: value for key, value in args.items() if key not in {"kind", "require_idle"}})
+    for changed in ({"adoption_secret": "different"}, {"kind": "cron"}):
+        with pytest.raises(rt.RuntimeStoreError, match="admission_conflict"):
+            rt.register_worker_execution(db, **(args | changed))
+    with pytest.raises(rt.RuntimeStoreError, match="stale_generation"):
+        rt.register_worker_execution(db, **(args | {"generation": 1}))
+    with pytest.raises(rt.RuntimeStoreError, match="stale_epoch"):
+        rt.register_worker_execution(db, **(args | {"epoch": epoch + 1}))

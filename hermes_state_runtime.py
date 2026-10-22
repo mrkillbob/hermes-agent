@@ -743,14 +743,19 @@ def register_worker_execution(db, *, epoch: int, execution_id: str, session_id: 
     def write(conn):
         _epoch(conn, epoch)
         session = _session(conn, session_id)
-        from hermes_state_worktree_cleanup import require_available
-        require_available(db, conn, session_id)
         if type(generation) is not int or session['runtime_generation'] != generation:
             raise RuntimeStoreError('stale_generation')
         old = conn.execute('SELECT * FROM worker_executions WHERE execution_id=?', (execution_id,)).fetchone()
         if old is not None:
             if (old['session_id'], old['generation'], old['kind'], old['owner_epoch'], old['adoption_digest']) != (session_id, generation, kind, epoch, digest):
                 raise RuntimeStoreError('admission_conflict')
+            if old['status'] == 'terminal':
+                # Exact terminal registration replay only returns its receipt;
+                # it cannot admit, adopt or restart work in a retired root.
+                return _worker_public(old)
+        from hermes_state_worktree_cleanup import require_available
+        require_available(db, conn, session_id)
+        if old is not None:
             return _worker_public(old)
         from hermes_state_runtime_workers import runtime_lineage, worker_states
         targets = runtime_lineage(conn, session_id)
