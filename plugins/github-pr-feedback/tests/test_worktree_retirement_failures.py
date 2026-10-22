@@ -80,8 +80,13 @@ def test_retirement_failure_retains_intent_and_both_paths_are_protected(retireme
 def test_path_only_legacy_move_preserves_unknown_pool_history_verbatim(retirement_linked, tmp_path, monkeypatch):
     from github_pr_feedback import worktree_retirement as retirement
     from github_pr_feedback.ledger import FeedbackLedger
+    from github_pr_feedback.worktree_lifecycle import PathLifecycle, WorkspaceIdentity, canonical_control_store
 
     source, workspace = retirement_linked
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "control"))
+    with PathLifecycle(canonical_control_store()).reserve_materialization(WorkspaceIdentity(
+            "fixture/repo", str(source), str(workspace))):
+        pass
     ledger = FeedbackLedger(tmp_path / "legacy.sqlite3")
     try:
         ledger._connection.execute("INSERT INTO worktree_pool_slots "
@@ -161,3 +166,134 @@ def test_associated_pool_move_preserves_historical_head_and_task_and_blocks_late
         assert retirement._lease_snapshot(identity) == expected
     finally:
         ledger.close()
+
+
+def test_path_only_retirement_refuses_existing_pool_association(retirement_linked, tmp_path, monkeypatch):
+    from github_pr_feedback import controller, worktree_retirement as retirement
+    from github_pr_feedback.ledger import FeedbackLedger
+    from github_pr_feedback.policy import FeedbackReceipt
+    from github_pr_feedback.worktree_lifecycle import canonical_control_store, WorktreeRetirementRefused
+
+    source, _ = retirement_linked
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "control"))
+    monkeypatch.setattr(controller.LocalGitRepository, "_link_governed_venv", lambda *args: None)
+    ledger = FeedbackLedger(tmp_path / "pool-ledger.sqlite3")
+    pool = controller.PooledLocalGitRepository(ledger, tmp_path / "pool", slot_count=1)
+    receipt = FeedbackReceipt("fixture/repo", 17, "review_comment", "120", git(source, "rev-parse", "HEAD"))
+    try:
+        prepared = pool.prepare_receipt_worktree(source, receipt)
+        assert receipt.key in pool._active_ledger_slots
+        # A path-only operator plan must not erase the encoded ledger/slot
+        # association and thereby skip the active-lease retirement fence.
+        with pytest.raises(WorktreeRetirementRefused):
+            retirement.observe_identity(canonical_control_store(), "fixture/repo", source, prepared.path)
+    finally:
+        ledger.close()
+
+
+def test_path_only_retirement_reservation_rechecks_full_operation_identity(retirement_linked, tmp_path, monkeypatch):
+    from github_pr_feedback import controller, worktree_retirement as retirement
+    from github_pr_feedback.ledger import FeedbackLedger
+    from github_pr_feedback.policy import FeedbackReceipt
+    from github_pr_feedback.worktree_lifecycle import (PathLifecycle, WorkspaceIdentity,
+                                                       canonical_control_store, WorktreeRetirementRefused)
+
+    source, _ = retirement_linked
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "control"))
+    monkeypatch.setattr(controller.LocalGitRepository, "_link_governed_venv", lambda *args: None)
+    ledger = FeedbackLedger(tmp_path / "pool-ledger.sqlite3")
+    pool = controller.PooledLocalGitRepository(ledger, tmp_path / "pool", slot_count=1)
+    receipt = FeedbackReceipt("fixture/repo", 17, "review_comment", "120", git(source, "rev-parse", "HEAD"))
+    try:
+        prepared = pool.prepare_receipt_worktree(source, receipt)
+        lease = pool._active_ledger_slots[receipt.key]
+        lifecycle = PathLifecycle(canonical_control_store())
+        path_only = WorkspaceIdentity("fixture/repo", str(source), str(prepared.path))
+
+        # Model a legacy path-only plan prepared before a pooled producer
+        # republishes the row's full identity. Retirement must compare the
+        # stored operation again inside its writer transaction.
+        with lifecycle.reserve_materialization(path_only):
+            pass
+        identity = retirement.observe_identity(canonical_control_store(), "fixture/repo", source, prepared.path)
+        preservation, owner = references(tmp_path, identity)
+        plan = retirement.prepare_retirement(identity, None, preservation, owner_reference=owner,
+                                              receipt_path=tmp_path / "plan.json")
+        pooled_identity = WorkspaceIdentity("fixture/repo", str(source), str(prepared.path),
+                                            str(ledger.path), lease.slot_id)
+        with lifecycle.reserve_materialization(pooled_identity):
+            pass
+
+        with pytest.raises(WorktreeRetirementRefused):
+            retirement.retire_to_quarantine(plan, tmp_path / "retained")
+        assert prepared.path.is_dir()
+        assert ledger._connection.execute(
+            "SELECT status FROM worktree_pool_slots WHERE slot_id=?", (lease.slot_id,)
+        ).fetchone()[0] == "leased"
+        assert not (tmp_path / "retained").exists()
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("failure", ["capacity", "exact_head"])
+def test_local_pre_mutation_failure_cancels_before_workspace_mutation(retirement_linked, tmp_path, monkeypatch, failure):
+    from github_pr_feedback.controller import ExactHeadUnavailable, LocalGitRepository
+    from github_pr_feedback.policy import FeedbackReceipt
+    from github_pr_feedback.worktree_lifecycle import PathLifecycle, WorkspaceIdentity, canonical_control_store
+    from github_pr_feedback.worktree_capacity import WorktreeCapacityRejected
+
+    source, _ = retirement_linked
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "control"))
+    head = git(source, "rev-parse", "HEAD")
+    receipt = FeedbackReceipt("fixture/repo", 17, "review_comment", "120", head)
+    root = tmp_path / "local-worktrees"
+    workspace = root / sha256("\x00".join(map(str, receipt.key)).encode("utf-8")).hexdigest()
+    if failure == "capacity":
+        class RefusingCapacity:
+            def reserve(self, _workspace):
+                raise WorktreeCapacityRejected("fixture capacity refusal")
+
+        materializer = LocalGitRepository(root, capacity=RefusingCapacity())
+        expected_error = WorktreeCapacityRejected
+        expected_message = "fixture capacity refusal"
+    else:
+        materializer = LocalGitRepository(root)
+        expected_error = ExactHeadUnavailable
+        expected_message = "fixture exact head unavailable"
+
+    def unavailable(*args):
+        raise ExactHeadUnavailable("fixture exact head unavailable")
+
+    monkeypatch.setattr(materializer, "_ensure_exact_head", unavailable)
+    with pytest.raises(expected_error, match=expected_message):
+        materializer.prepare_receipt_worktree(source, receipt)
+
+    lifecycle = PathLifecycle(canonical_control_store())
+    row = lifecycle.snapshot(WorkspaceIdentity("fixture/repo", str(source), str(workspace)))
+    assert row["phase"] == "ready"
+    assert not workspace.exists()
+
+
+def test_maintenance_exact_head_failure_cancels_before_workspace_mutation(retirement_linked, tmp_path, monkeypatch):
+    from github_pr_feedback.controller import LocalGitRepository
+    from github_pr_feedback.worktree_lifecycle import PathLifecycle, WorkspaceIdentity, canonical_control_store
+
+    source, _ = retirement_linked
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "control"))
+    head = git(source, "rev-parse", "HEAD")
+    materializer = LocalGitRepository(tmp_path / "maintenance-worktrees")
+    digest = sha256(f"fixture/repo\0{head}\0release".encode()).hexdigest()
+    workspace = materializer._worktree_root / f"maintenance-{digest}"
+
+    def missing_object(argv):
+        assert argv[3] == "cat-file"
+        raise RuntimeError("fixture exact maintenance head unavailable")
+
+    monkeypatch.setattr(materializer, "_run", missing_object)
+    with pytest.raises(RuntimeError, match="fixture exact maintenance head unavailable"):
+        materializer.prepare_maintenance_worktree(source, "fixture/repo", head, "release")
+
+    lifecycle = PathLifecycle(canonical_control_store())
+    row = lifecycle.snapshot(WorkspaceIdentity("fixture/repo", str(source), str(workspace)))
+    assert row["phase"] == "ready"
+    assert not workspace.exists()

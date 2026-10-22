@@ -184,8 +184,10 @@ class PathLifecycle:
                         raise WorktreeRetirementRefused("retained_destination_protected")
                     if path != identity.workspace and unicodedata.normalize("NFC", path).casefold() == alias:
                         raise WorktreeRetirementRefused("workspace_alias_protected")
-                row = db.execute("SELECT owner,generation,phase FROM workspace_lifecycle WHERE path=?",
+                row = db.execute("SELECT owner,generation,phase,operation FROM workspace_lifecycle WHERE path=?",
                                  (identity.workspace,)).fetchone()
+                if row and phase == "retiring" and row[3] != identity.encoded():
+                    raise WorktreeRetirementRefused("exact_lifecycle_identity_required")
                 if row and row[0] == identity.path_owner() and row[2] == "materializing" and phase == "materializing":
                     raise WorktreeMaterializationBusy("workspace_materialization_busy")
                 if row and (row[0] != identity.path_owner() or row[2] != "ready"):

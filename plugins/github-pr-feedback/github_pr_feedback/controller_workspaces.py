@@ -18,39 +18,48 @@ def prepare_local(self, path, receipt):
         self._worktree_root
         / sha256("\x00".join(map(str, receipt.key)).encode("utf-8")).hexdigest()
     )
-    with materialization_for(path, workspace, receipt.repository, capacity=self._capacity):
-        admission = self._capacity.reserve(workspace) if self._capacity else nullcontext()
-        with admission:
-            self._ensure_exact_head(path, receipt)
+    with materialization_for(path, workspace, receipt.repository, capacity=self._capacity) as operation:
+        physical = False
+        try:
+            admission = self._capacity.reserve(workspace) if self._capacity else nullcontext()
+            with admission:
+                self._ensure_exact_head(path, receipt)
 
-            branch = self.prepare_receipt_branch(
-                path, receipt, object_already_verified=True
-            )
-            self._worktree_root.mkdir(parents=True, exist_ok=True)
-            if workspace.is_symlink():
-                raise RuntimeError(
-                    "deterministic receipt worktree path must not be a symlink"
+                # Branch preparation may publish a ref; from this call onward,
+                # failures are conservatively uncertain rather than retryable.
+                physical = True
+                branch = self.prepare_receipt_branch(
+                    path, receipt, object_already_verified=True
                 )
-            if workspace.exists():
-                if self._binding is not None:
-                    self._binding.verify_workspace(workspace, receipt.repository)
-                self._verify_worktree(workspace, receipt.head_sha)
-            else:
-                self._run(
-                    [
-                        "git",
-                        "-C",
-                        str(path),
-                        "worktree",
-                        "add",
-                        "--quiet",
-                        str(workspace),
-                        branch,
-                    ]
-                )
-                self._verify_worktree(workspace, receipt.head_sha)
-            self._link_governed_venv(path, workspace)
-            return PreparedWorktree(workspace.resolve(), branch, receipt.head_sha)
+                self._worktree_root.mkdir(parents=True, exist_ok=True)
+                if workspace.is_symlink():
+                    raise RuntimeError(
+                        "deterministic receipt worktree path must not be a symlink"
+                    )
+                if workspace.exists():
+                    if self._binding is not None:
+                        self._binding.verify_workspace(workspace, receipt.repository)
+                    self._verify_worktree(workspace, receipt.head_sha)
+                else:
+                    self._run(
+                        [
+                            "git",
+                            "-C",
+                            str(path),
+                            "worktree",
+                            "add",
+                            "--quiet",
+                            str(workspace),
+                            branch,
+                        ]
+                    )
+                    self._verify_worktree(workspace, receipt.head_sha)
+                self._link_governed_venv(path, workspace)
+                return PreparedWorktree(workspace.resolve(), branch, receipt.head_sha)
+        except BaseException:
+            if not physical:
+                operation.cancel_before_mutation()
+            raise
 
 
 def prepare_pool(self, path, receipt):
@@ -159,61 +168,71 @@ def prepare_maintenance(
         raise ValueError("maintenance workspace identity is invalid")
     digest = sha256(f"{repository}\0{head_sha}\0{lane}".encode()).hexdigest()
     workspace = self._worktree_root / f"maintenance-{digest}"
-    with materialization_for(repository_path, workspace, repository, capacity=self._capacity):
-        if self._binding is not None and workspace.exists():
-            self._binding.verify_workspace(workspace, repository)
-        admission = self._capacity.reserve(workspace) if self._capacity else nullcontext()
-        with admission:
-            self._run(
-                [
-                    "git",
-                    "-C",
-                    str(repository_path),
-                    "cat-file",
-                    "-e",
-                    f"{head_sha}^{{commit}}",
-                ]
-            )
-            branch = f"hermes/release-maintenance/{digest[:20]}"
-            current = self._run(
-                [
-                    "git",
-                    "-C",
-                    str(repository_path),
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    f"refs/heads/{branch}^{{commit}}",
-                ],
-                missing_ok=True,
-            ).strip()
-            if current and current.casefold() != head_sha.casefold():
-                raise RuntimeError("maintenance branch collides with another commit")
-            if not current:
-                self._run(["git", "-C", str(repository_path), "branch", branch, head_sha])
-            self._worktree_root.mkdir(parents=True, exist_ok=True)
-            if workspace.is_symlink():
-                raise RuntimeError("maintenance worktree path must not be a symlink")
-            created = False
-            if not workspace.exists():
+    with materialization_for(repository_path, workspace, repository, capacity=self._capacity) as operation:
+        physical = False
+        try:
+            if self._binding is not None and workspace.exists():
+                self._binding.verify_workspace(workspace, repository)
+            admission = self._capacity.reserve(workspace) if self._capacity else nullcontext()
+            with admission:
                 self._run(
                     [
                         "git",
                         "-C",
                         str(repository_path),
-                        "worktree",
-                        "add",
-                        "--quiet",
-                        str(workspace),
-                        branch,
+                        "cat-file",
+                        "-e",
+                        f"{head_sha}^{{commit}}",
                     ]
                 )
-                created = True
-            if created:
-                from hermes_cli.worktree_environment import bootstrap_worktree_environments
+                branch = f"hermes/release-maintenance/{digest[:20]}"
+                current = self._run(
+                    [
+                        "git",
+                        "-C",
+                        str(repository_path),
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        f"refs/heads/{branch}^{{commit}}",
+                    ],
+                    missing_ok=True,
+                ).strip()
+                if current and current.casefold() != head_sha.casefold():
+                    raise RuntimeError("maintenance branch collides with another commit")
+                if not current:
+                    physical = True
+                    self._run(["git", "-C", str(repository_path), "branch", branch, head_sha])
+                # This can create the worktree parent, so later failures keep
+                # the lifecycle row uncertain even if Git add has not run.
+                physical = True
+                self._worktree_root.mkdir(parents=True, exist_ok=True)
+                if workspace.is_symlink():
+                    raise RuntimeError("maintenance worktree path must not be a symlink")
+                created = False
+                if not workspace.exists():
+                    self._run(
+                        [
+                            "git",
+                            "-C",
+                            str(repository_path),
+                            "worktree",
+                            "add",
+                            "--quiet",
+                            str(workspace),
+                            branch,
+                        ]
+                    )
+                    created = True
+                if created:
+                    from hermes_cli.worktree_environment import bootstrap_worktree_environments
 
-                bootstrap_worktree_environments(
-                    Path(repository_path), workspace, environment_names=(".venv",)
-                )
-            self._verify_worktree(workspace, head_sha)
-            return workspace.resolve()
+                    bootstrap_worktree_environments(
+                        Path(repository_path), workspace, environment_names=(".venv",)
+                    )
+                self._verify_worktree(workspace, head_sha)
+                return workspace.resolve()
+        except BaseException:
+            if not physical:
+                operation.cancel_before_mutation()
+            raise

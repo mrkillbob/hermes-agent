@@ -9,7 +9,8 @@ import subprocess
 
 from .caller_repository import CallerRepository, reject_git_overrides
 from .worktree_capacity import _target
-from .worktree_lifecycle import WorkspaceIdentity, WorktreeRetirementRefused, canonical_control_store
+from .worktree_lifecycle import (PathLifecycle, WorkspaceIdentity, WorktreeRetirementRefused,
+                                 canonical_control_store)
 
 
 def _git_run(root, *args):
@@ -99,7 +100,10 @@ def observe_identity(control_store, repository, source, workspace, *, ledger=Non
                                   str(workspace), physical, str(admin), _directory_identity(admin),
                                   _git_run(workspace, "rev-parse", "--verify", "HEAD^{commit}"),
                                   str(ledger) if ledger is not None else None, slot_id)
-    identity.workspace_identity()
+    workspace_identity = identity.workspace_identity()
+    row = PathLifecycle(store).snapshot(workspace_identity)
+    if row is not None and row["operation"] != workspace_identity.encoded():
+        raise WorktreeRetirementRefused("exact_lifecycle_identity_required")
     return identity
 
 
