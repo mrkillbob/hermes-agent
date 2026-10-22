@@ -228,7 +228,8 @@ export function LeaderDialogue({
 
   return (
     <>
-      {cameraControls ? <div className="lunar-city-dialogue-camera-controls">{cameraControls}</div> : null}
+      {/* Camera controls own their styling; this sibling wrapper only groups optional content. */}
+      {cameraControls ? <div>{cameraControls}</div> : null}
       <section
         aria-labelledby="lunar-city-leader-dialogue-title"
         aria-modal="false"
