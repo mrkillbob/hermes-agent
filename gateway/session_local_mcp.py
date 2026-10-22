@@ -497,6 +497,26 @@ async def prepare_branch_editor(authority, ref, servers, gate):
 
 
 @contextmanager
+def editor_mcp_inventory_scope(authority, policy, session_id):
+    """Observe only the owning session's registered overlay, without transport I/O.
+
+    Even an ordinary session clears an ambient execution overlay. A frozen
+    manifest cannot select another profile/session's ledger for an observer.
+    """
+    from tools.registry import session_tool_scope
+
+    scope = None
+    if policy is not None and policy.editor_mcp_json:
+        data = json.loads(policy.editor_mcp_json)
+        scope = data.get('scope')
+        if (not isinstance(session_id, str) or not session_id or not isinstance(scope, str)
+                or not hmac.compare_digest(scope, session_scope(authority, session_id))):
+            raise RuntimeStoreError('acp_mcp_policy_conflict')
+    with session_tool_scope(scope):
+        yield
+
+
+@contextmanager
 def editor_mcp_scope(authority, policy):
     if not policy.editor_mcp_json:
         yield
