@@ -492,3 +492,7 @@ the exact canonical project, Git root and shared-board owner, preserves unrelate
 projects and active selection, and refuses conflicting registrations. Run it from
 the root profile outside a dispatched task or delegated child. It does not enable
 schedules, change model assignments, create credentials or run the project.
+
+A separate `HERMES_KANBAN_HOME` may hold shared board data. The canonical project
+registry and named profiles remain under the configured root profile home; the
+command validates the board through its configured shared-data location.

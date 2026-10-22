@@ -386,3 +386,21 @@ def test_operator_cli_still_refuses_symlinked_registry_file(adoption, registry):
     before = original.read_bytes()
     assert _adoption_cli(adoption) == 2
     assert original.read_bytes() == before
+
+
+@pytest.mark.parametrize("consumer", ["api", "cli"])
+def test_canonical_registry_can_use_separate_shared_board_home(adoption, monkeypatch, tmp_path, consumer):
+    shared = tmp_path.resolve() / "shared-board-data"
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(shared))
+    kb.create_board("alpha", project_id=adoption["expected_project_id"])
+    metadata = kb.board_metadata_path("alpha")
+    before = metadata.read_bytes()
+    if consumer == "api":
+        assert adopt(adoption)["status"] == "adopted"
+    else:
+        assert _adoption_cli(adoption) == 0
+    with projects_db.connect_closing(adoption["target_registry"]) as conn:
+        assert projects_db.get_project(conn, adoption["expected_project_id"]).board_slug == "alpha"
+    assert metadata.read_bytes() == before
+    assert not (shared / "projects.db").exists()
+    assert not (shared / "profiles").exists()

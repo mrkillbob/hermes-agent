@@ -10,7 +10,7 @@ import sqlite3
 from hermes_cli import kanban_db as kb, projects_db
 from hermes_cli.kanban_db_boards import board_ownership_lock
 from hermes_cli.kanban_db_workspace import _git_toplevel, _git_common_dir, _path_key
-from hermes_cli.profiles import get_profile_dir, validate_profile_name
+from hermes_cli.profiles import _get_default_hermes_home, get_profile_dir, validate_profile_name
 from hermes_cli.profiles_lifecycle import profile_lifecycle_reservation
 from hermes_cli.sqlite_util import write_txn
 from hermes_constants import named_profile_is_live
@@ -37,8 +37,8 @@ def _identity(path):
 def _paths(source_registry, target_registry, target_profile):
     source, target = map(_existing_path, (source_registry, target_registry))
     validate_profile_name(target_profile)
-    if target_profile == "default" or source.parent.resolve() != kb.kanban_home().resolve():
-        raise ValueError("adoption requires canonical root/shared-board context and a named profile")
+    if target_profile == "default" or source.parent.resolve() != _get_default_hermes_home().resolve():
+        raise ValueError("adoption requires the configured profile root registry and a named profile")
     if source.parent.parent.name == "profiles":
         raise ValueError("source must be the root registry")
     if target != source.parent / "profiles" / target_profile / "projects.db":

@@ -249,16 +249,15 @@ def _cmd_adopt_canonical(args) -> int:
     import json
     import sqlite3
     from agent.delegation_context import explicit_board_intent_is_pinned
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.profiles import get_profile_dir
+    from hermes_cli.profiles import _get_default_hermes_home, get_profile_dir
     from hermes_cli.projects_adoption import adopt_canonical_project
     from hermes_constants import get_hermes_home
 
     try:
-        if explicit_board_intent_is_pinned() or get_hermes_home().resolve() != kb.kanban_home().resolve():
+        if explicit_board_intent_is_pinned() or get_hermes_home().resolve() != _get_default_hermes_home().resolve():
             raise ValueError("canonical adoption requires a root-profile operator outside task/child execution")
         result = adopt_canonical_project(
-            source_registry=kb.kanban_home().resolve() / "projects.db",
+            source_registry=pdb.projects_db_path().parent.resolve() / "projects.db",
             target_registry=get_profile_dir(args.target_profile).resolve() / "projects.db",
             target_profile=args.target_profile,
             expected_project_id=args.project_id,
