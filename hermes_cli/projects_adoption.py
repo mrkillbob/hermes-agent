@@ -10,7 +10,7 @@ import sqlite3
 from hermes_cli import kanban_db as kb, projects_db
 from hermes_cli.kanban_db_boards import board_ownership_lock
 from hermes_cli.kanban_db_workspace import _git_toplevel, _git_common_dir, _path_key
-from hermes_cli.profiles import validate_profile_name
+from hermes_cli.profiles import get_profile_dir, validate_profile_name
 from hermes_cli.profiles_lifecycle import profile_lifecycle_reservation
 from hermes_cli.sqlite_util import write_txn
 from hermes_constants import named_profile_is_live
@@ -43,6 +43,8 @@ def _paths(source_registry, target_registry, target_profile):
         raise ValueError("source must be the root registry")
     if target != source.parent / "profiles" / target_profile / "projects.db":
         raise ValueError("target registry does not match the explicit named profile")
+    if target.parent != get_profile_dir(target_profile).resolve():
+        raise ValueError("target registry does not match the configured profile lifecycle root")
     if not named_profile_is_live(target.parent) or _identity(source) == _identity(target):
         raise ValueError("target must be a distinct live profile registry")
     return source, target

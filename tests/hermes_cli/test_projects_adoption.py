@@ -275,3 +275,40 @@ def test_lifecycle_reservation_covers_actual_target_commit(adoption, monkeypatch
     monkeypatch.setattr(projects_adoption, "write_txn", checked_commit)
     assert adopt(adoption)["status"] == "adopted"
     assert observed == [True]
+
+
+@pytest.mark.parametrize("layout", ["normal", "alias", "split"])
+def test_target_registry_matches_profile_crud_root(adoption, tmp_path, monkeypatch, layout):
+    from hermes_cli import profiles
+    source = adoption["source_registry"]
+    target = adoption["target_registry"]
+    if layout == "split":
+        actual_root = tmp_path.resolve() / "configured-home"
+        actual_home = actual_root / "profiles" / adoption["target_profile"]
+        actual_home.mkdir(parents=True)
+        (actual_home / "profile.yaml").write_text("name: task-orchestrator\n")
+        with projects_db.connect_closing(actual_home / "projects.db") as conn:
+            projects_db.create_project(conn, name="Actual profile binding")
+        monkeypatch.setenv("HERMES_HOME", str(actual_root))
+    if layout == "alias":
+        alias_root = tmp_path.resolve() / "alias-home"
+        try:
+            alias_root.symlink_to(source.parent, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"directory aliases unavailable: {exc}")
+        monkeypatch.setenv("HERMES_HOME", str(alias_root))
+    configured_registry = profiles.get_profile_dir(adoption["target_profile"]) / "projects.db"
+    watched = {source, target, configured_registry, kb.board_metadata_path("alpha")}
+    before = {path: path.read_bytes() for path in watched}
+    if layout != "split":
+        from hermes_cli.profiles_lifecycle import _lock_path
+        assert target == configured_registry.resolve()
+        assert _lock_path(target.parent) == _lock_path(configured_registry.parent)
+        if layout == "alias":
+            assert target != configured_registry
+        assert adopt(adoption)["status"] == "adopted"
+    else:
+        assert target != configured_registry
+        with pytest.raises(ValueError, match="configured profile"):
+            adopt(adoption)
+        assert {path: path.read_bytes() for path in watched} == before
