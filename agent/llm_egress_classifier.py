@@ -28,6 +28,7 @@ from agent.llm_egress_firewall import (
     source_grant_digest,
     static_literal_sha256,
     validate_sanitized_text,
+    validate_tool_syntax,
 )
 from agent.llm_egress_terminal import (
     _FILE_MUTATION_ARGUMENT_REPLAY,
@@ -1930,6 +1931,15 @@ def _typed_payload_violation_locations(
             reasons = {
                 reason for _, found in content_free_violation_locations(text) for reason in found
             }
+            if isinstance(item, ValidatedToolSyntaxSegment) and "base64_payload" in reasons:
+                # Final construction revalidates this grammar and excludes the
+                # atom from encoding scans (secret/path scans still apply).
+                try:
+                    validate_tool_syntax(text, item.syntax_kind)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    reasons.remove("base64_payload")
             if isinstance(item, GeneratedContextSegment) and "base64_payload" in reasons:
                 # Match final authorization's bounded metadata mask; raw diagnostics
                 # otherwise blame generated identifiers that the firewall allows.
