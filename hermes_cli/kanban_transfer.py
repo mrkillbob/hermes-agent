@@ -89,7 +89,9 @@ def _history_rows(rows: list[dict[str, Any]], run_ids: dict[int, int] | None = N
     return result
 
 
-def _verify_task_copy(source: str, destination: str, rows, copied, task_ids: list[str]) -> dict[str, int]:
+def _verify_task_copy(source: str, destination: str, rows, copied, task_ids: list[str], *, binding=None) -> dict[str, int]:
+    if binding is not None:
+        copied = _verify_binding_projection(binding, rows, copied, task_ids)
     if {row["id"] for row in rows["tasks"]} != set(task_ids) or rows["tasks"] != copied["tasks"]:
         raise ValueError("destination cards do not match source")
     for task in (*rows["tasks"], *copied["tasks"]):
@@ -113,6 +115,24 @@ def _verify_task_copy(source: str, destination: str, rows, copied, task_ids: lis
     return {table: len(rows[table]) for table in _COUNTED_TABLES}
 
 
+def _verify_binding_projection(binding, rows, copied, task_ids):
+    from hermes_cli.kanban_task_binding import BindingProjection
+
+    if not isinstance(binding, BindingProjection) or task_ids != [binding.original["id"]]:
+        raise ValueError("transfer requires a single typed binding projection")
+    binding.verify_destination()
+    projected = binding.apply(rows["tasks"][0])
+    if copied["tasks"] != [projected]:
+        raise ValueError("destination task binding projection does not match source")
+    events = copied["task_events"]
+    correction = events[-2] if len(events) >= 2 else None
+    if (not correction or correction["kind"] != "project_binding_corrected"
+            or correction["task_id"] != task_ids[0] or correction["run_id"] is not None
+            or correction["payload"] != kb._json_or_null(binding.payload)):
+        raise ValueError("destination binding correction evidence does not match source")
+    return {**copied, "tasks": rows["tasks"], "task_events": events[:-2] + events[-1:]}
+
+
 def _verify_attachment_copy(source: str, destination: str, rows, copied) -> None:
     if len(rows) != len(copied):
         raise ValueError("destination task attachment history does not match source")
@@ -127,7 +147,7 @@ def _verify_attachment_copy(source: str, destination: str, rows, copied) -> None
             raise ValueError("destination attachment content does not match source")
 
 
-def _remove_source_task_rows(board: str, task_ids: list[str], *, destination: str, expected_source=None) -> dict[str, int]:
+def _remove_source_task_rows(board: str, task_ids: list[str], *, destination: str, expected_source=None, binding=None) -> dict[str, int]:
     """Verify and prune under the SAME source write transaction; mismatches retain both copies.
 
     Acquire both boards in stable order so opposite-direction transfers do not invert locks.
@@ -140,7 +160,9 @@ def _remove_source_task_rows(board: str, task_ids: list[str], *, destination: st
         rows = _selected_task_rows(src, task_ids)
         if expected_source is not None and rows != expected_source:
             raise ValueError("source cards or history changed during migration; both copies retained")
-        counts = _verify_task_copy(board, destination, rows, _selected_task_rows(dst, task_ids), task_ids)
+        counts = _verify_task_copy(board, destination, rows, _selected_task_rows(dst, task_ids), task_ids, binding=binding)
+        if binding is not None:
+            binding.verify_workspace_users(src, dst, retained_copy=True)
         conn = src
         conn.execute(f"DELETE FROM task_links WHERE parent_id IN ({placeholders}) OR child_id IN ({placeholders})", [*task_ids, *task_ids])
         for table in ("kanban_notify_subs", "task_comments", "task_events", "task_runs", "task_attachments", "tasks"):
@@ -286,12 +308,37 @@ def export_board_workspaces(board: str, output_path: str) -> dict[str, Any]:
     return {"archive": archive, "files": files, "size": Path(archive).stat().st_size}
 
 
-def merge_board(source: str, destination: str, backup_path: str, *, task_ids: list[str] | None = None) -> dict[str, Any]:
+def _validate_binding_transfer(binding, task_ids, binding_source):
+    if binding is None:
+        return
+    from hermes_cli.kanban_task_binding import BindingProjection
+    if not isinstance(binding, BindingProjection) or task_ids != [binding.original["id"]] or binding_source is None:
+        raise ValueError("transfer requires an exact typed binding correction")
+
+
+def _project_binding_tasks(binding, tasks, source_rows, expected_rows):
+    if binding is None:
+        return tasks
+    if source_rows != expected_rows:
+        raise ValueError("source card or history changed before binding transfer")
+    return [binding.apply(dict(task)) for task in tasks]
+
+
+def _append_transfer_events(conn, task_ids, source, destination, binding):
+    for task_id in task_ids:
+        if binding is not None:
+            binding.append_event(conn, task_id)
+        kb._append_event(conn, task_id, "board_merged", {"source_board": source, "destination_board": destination})
+
+
+def merge_board(source: str, destination: str, backup_path: str, *, task_ids: list[str] | None = None,
+                binding=None, binding_source=None) -> dict[str, Any]:
     """Copy every task and its history into an existing board, then verify it.
 
     Source rows are pruned only after full verification under both boards' write
     transactions. A mismatch retains both copies for explicit reconciliation.
     """
+    _validate_binding_transfer(binding, task_ids, binding_source)
     source = kb._normalize_board_slug(source)
     destination = kb._normalize_board_slug(destination)
     if not source or not destination or source == destination:
@@ -329,11 +376,12 @@ def merge_board(source: str, destination: str, backup_path: str, *, task_ids: li
                 overlap_ids = {row["id"] for row in overlap}
                 if overlap_ids != set(ids):
                     raise ValueError(f"task id already exists on destination: {overlap[0]['id']}")
-                counts = _remove_source_task_rows(source, ids, destination=destination)
+                counts = _remove_source_task_rows(source, ids, destination=destination, expected_source=binding_source, binding=binding)
                 return {"source": source, "destination": destination, "tasks": len(ids),
                         "counts": {**{name: 0 for name in _COUNTED_TABLES}, **counts},
                         "backup": archive["archive"], "already_copied": True}
             expected_source = _selected_task_rows(src, ids)
+            tasks = _project_binding_tasks(binding, tasks, expected_source, binding_source)
             source_tables = {row[0] for row in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             for table in source_tables - {"tasks", "task_links", "task_comments", "task_events", "task_runs",
                                             "task_attachments", "kanban_notify_subs", "sqlite_sequence"}:
@@ -437,14 +485,13 @@ def merge_board(source: str, destination: str, backup_path: str, *, task_ids: li
                 table_counts["task_attachments"] = len(attachment_rows)
                 # Notification endpoints are machine-local delivery state.
                 table_counts["kanban_notify_subs"] = 0
-                for task_id in ids:
-                    kb._append_event(dst, task_id, "board_merged", {"source_board": source, "destination_board": destination})
+                _append_transfer_events(dst, ids, source, destination, binding)
             result_counts = {table: table_counts.get(table, 0) for table in _COUNTED_TABLES}
             migrated_ids = {row[0] for row in dst.execute(f"SELECT id FROM tasks WHERE id IN ({placeholders})", ids)}
             if migrated_ids != set(ids):
                 raise RuntimeError("post-merge card identity verification failed")
             cleanup.pop_all()
-            _remove_source_task_rows(source, ids, destination=destination, expected_source=expected_source)
+            _remove_source_task_rows(source, ids, destination=destination, expected_source=expected_source, binding=binding)
             return {"source": source, "destination": destination, "tasks": len(ids),
                     "counts": result_counts, "backup": archive["archive"]}
 
