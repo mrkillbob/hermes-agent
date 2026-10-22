@@ -791,12 +791,11 @@ class PooledLocalGitRepository:
     def reconcile_leases(self, kanban: KanbanClient) -> int:
         """Release any leased slot whose bound Kanban task has gone terminal.
 
-        Best-effort proactive reclaim, meant to be called once per scan tick
-        before acquiring new slots. Any slot this can't confidently resolve
-        (task_status errors, or no binding recorded yet -- still mid-dispatch)
-        is left alone; it remains protected by its lease timeout regardless.
+        Called once per scan tick before acquiring new slots. Unresolved task
+        or ownership evidence is left untouched, never guessed or re-associated.
         Returns the number of slots released.
         """
+        from .worktree_lifecycle import WorktreeRetirementRefused
 
         if self._binding is not None:
             # Legacy slots encode source, not repository. Never infer repo
@@ -811,13 +810,8 @@ class PooledLocalGitRepository:
                 status = task_status(slot["board"], slot["task_id"])
             except RuntimeError:
                 continue
-            # A task the board no longer knows about provides no positive
-            # evidence anything is still using this slot -- same "missing is
-            # not active" interpretation _has_active_base_refresh_binding
-            # already uses elsewhere in this codebase. Anything OTHER than
-            # an explicit terminal status is treated as still active and
-            # left alone; this only ever short-circuits the lease timeout
-            # early, never overrides it.
+            # Preserve existing missing-task/terminal-task reclaim semantics;
+            # every other status remains active regardless of lease age.
             if status is not None and status not in _WORKTREE_POOL_TERMINAL_TASK_STATUSES:
                 continue
             task_details = getattr(kanban, "task_details", None)
@@ -832,9 +826,14 @@ class PooledLocalGitRepository:
                         continue
                 except RuntimeError:
                     continue
-            self._ledger.finish_worktree_slot(
-                WorktreeSlotLease(slot["slot_id"], slot["lease_version"], slot["owner_pid"])
-            )
+            try:
+                self._ledger.finish_worktree_slot(
+                    WorktreeSlotLease(slot["slot_id"], slot["lease_version"], slot["owner_pid"])
+                )
+            except WorktreeRetirementRefused:
+                # Unknown or excluded ownership stays protected, not a barrier
+                # to reclaiming independently established later leases.
+                continue
             released += 1
         return released
 

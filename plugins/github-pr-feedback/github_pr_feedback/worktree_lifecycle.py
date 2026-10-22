@@ -77,6 +77,7 @@ class PathOperation:
     token: str
     phase: str
     _context_token: object = None
+    mutation_started: bool = False
 
     def __enter__(self):
         if self._context_token is not None:
@@ -96,7 +97,7 @@ class PathOperation:
 
     def cancel_before_mutation(self):
         """Trusted producer's definite pre-workspace-mutation failure only."""
-        if self.phase != "materializing":
+        if self.phase != "materializing" or self.mutation_started:
             raise WorktreeRetirementRefused("materialization_operation_required")
         self.lifecycle._transition(self, "ready")
         self.phase = "cancelled"

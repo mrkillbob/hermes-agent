@@ -19,18 +19,17 @@ def prepare_local(self, path, receipt):
         / sha256("\x00".join(map(str, receipt.key)).encode("utf-8")).hexdigest()
     )
     with materialization_for(path, workspace, receipt.repository, capacity=self._capacity) as operation:
-        physical = False
         try:
             admission = self._capacity.reserve(workspace) if self._capacity else nullcontext()
             with admission:
                 self._ensure_exact_head(path, receipt)
 
-                # Branch preparation may publish a ref; from this call onward,
-                # failures are conservatively uncertain rather than retryable.
-                physical = True
                 branch = self.prepare_receipt_branch(
                     path, receipt, object_already_verified=True
                 )
+                # The nested branch helper marks this same owner at its Git
+                # mutation boundary; even an existing ref precedes mkdir here.
+                operation.mutation_started = True
                 self._worktree_root.mkdir(parents=True, exist_ok=True)
                 if workspace.is_symlink():
                     raise RuntimeError(
@@ -57,7 +56,7 @@ def prepare_local(self, path, receipt):
                 self._link_governed_venv(path, workspace)
                 return PreparedWorktree(workspace.resolve(), branch, receipt.head_sha)
         except BaseException:
-            if not physical:
+            if not operation.mutation_started:
                 operation.cancel_before_mutation()
             raise
 
@@ -110,7 +109,6 @@ def prepare_branch(self, path, receipt, *, object_already_verified=False):
         path, _local_workspace(self, receipt), receipt.repository
     )
     with scope as operation:
-        branch_mutation_started = False
         try:
             if not _SHA.fullmatch(receipt.head_sha):
                 raise ValueError("head SHA is not a full Git object ID")
@@ -137,7 +135,7 @@ def prepare_branch(self, path, receipt, *, object_already_verified=False):
                 return branch
             # A failed Git response may still have created the ref; from this
             # point the lifecycle row must remain uncertain until reconciliation.
-            branch_mutation_started = True
+            operation.mutation_started = True
             self._run(["git", "-C", str(path), "branch", branch, receipt.head_sha])
             verified = self._run(
                 [
@@ -154,7 +152,7 @@ def prepare_branch(self, path, receipt, *, object_already_verified=False):
                 raise RuntimeError("receipt branch does not point at the required head")
             return branch
         except BaseException:
-            if owns_operation and not branch_mutation_started:
+            if owns_operation and not operation.mutation_started:
                 operation.cancel_before_mutation()
             raise
 
