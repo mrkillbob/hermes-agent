@@ -799,3 +799,63 @@ def test_absent_board_identity_or_recovery_drift_refuses_commit(duplicate, monke
         reconcile(args)
     assert args["target_registry"].read_bytes() == before
     assert args["backup_path"].exists()
+
+
+def test_absent_board_creation_is_fenced_through_target_commit(duplicate, monkeypatch):
+    from hermes_cli import kanban_db_connect as kbc, projects_reconcile
+
+    _leave_default_uninitialized(duplicate)
+    args = {key: value for key, value in duplicate.items() if key != "task_id"}
+    observed = threading.Event()
+    finished = threading.Event()
+    committed = threading.Event()
+    outcomes = []
+    producer = None
+    original_try = kbc._try_lock_nb
+    original_commit = projects_reconcile._commit_target_registry
+
+    def try_lock(handle):
+        acquired = original_try(handle)
+        if threading.current_thread() is producer and not acquired:
+            observed.set()
+        return acquired
+
+    def produce():
+        try:
+            with connect_closing(board="default") as conn:
+                task_id = kb.create_task(conn, title="Concurrent legacy card", board="default",
+                    project_id=args["legacy_project_id"], workspace_kind="scratch")
+                outcomes.append((task_id, committed.is_set()))
+        except Exception as exc:
+            outcomes.append(exc)
+        finally:
+            finished.set()
+            observed.set()
+
+    def commit(conn):
+        nonlocal producer
+        producer = threading.Thread(target=produce, name="ordinary-board-creator")
+        producer.start()
+        assert observed.wait(5), "producer neither contended nor completed"
+        assert not finished.is_set(), f"ordinary producer escaped before commit: {outcomes!r}"
+        assert not kb.kanban_db_path("default").exists(), "cached connect recreated the absent DB"
+        original_commit(conn)
+        committed.set()
+
+    monkeypatch.setattr(kbc, "_try_lock_nb", try_lock)
+    monkeypatch.setattr(projects_reconcile, "_commit_target_registry", commit)
+    try:
+        assert reconcile(args)["status"] == "canonicalized"
+    finally:
+        if producer is not None:
+            producer.join(8)
+    assert finished.is_set()
+    assert len(outcomes) == 1 and isinstance(outcomes[0], tuple)
+    task_id, created_after_commit = outcomes[0]
+    assert created_after_commit
+    # Explicit historical IDs remain permitted by the existing task API after
+    # reconciliation. The reservation orders that later write after commit.
+    with connect_closing(board="default") as conn:
+        assert [row["id"] for row in conn.execute(
+            "SELECT id FROM tasks WHERE project_id=?", (args["legacy_project_id"],)
+        )] == [task_id]

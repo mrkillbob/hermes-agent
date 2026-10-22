@@ -41,7 +41,7 @@ _CORRUPT_BACKUP_RETENTION = 10
 
 # Bounded init-lock acquire: a bare blocking flock let a wedged holder block the
 # dispatcher's next-tick connect forever. Poll non-blocking until the deadline,
-# then proceed without the lock (in-process _INIT_LOCK + idempotent init backstop).
+# Existing DBs then proceed unlocked; missing-DB creation must retain reservation.
 _INIT_LOCK_TIMEOUT_SECONDS = 10.0
 _INIT_LOCK_POLL_SECONDS = 0.05
 
@@ -124,7 +124,7 @@ def _unlock(handle) -> None:
 
 
 @contextlib.contextmanager
-def _cross_process_init_lock(path: Path):
+def _cross_process_init_lock(path: Path, *, strict: bool = False):
     """Serialize first-connect WAL/schema/integrity setup across processes.
 
     ``_INIT_LOCK`` only covers one process's threads; a dispatcher burst has
@@ -133,10 +133,14 @@ def _cross_process_init_lock(path: Path):
 
     **Bounded** acquire: a blocking ``flock`` let one stalled/stale holder hang
     every ``connect()`` (the gateway dispatcher's next tick included) with no
-    traceback. After the deadline we WARN and proceed WITHOUT the lock — safe
-    because ``_INIT_LOCK`` still serializes same-process threads and init is
-    idempotent: two racing first-inits mean redundant work, not corruption.
+    traceback. Existing databases retain the bounded warning/fallback behavior.
+    Missing databases and strict operator reservations refuse after the same
+    deadline: creation must not bypass a reservation for reviewed absence.
+    Retry after the holder releases; no database is opened by a refused call.
     """
+    # A missing database is also an absence reservation: opening SQLite after
+    # a failed acquire would invalidate an operator's reviewed empty snapshot.
+    must_acquire = strict or not path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(path.name + ".init.lock")
     handle = lock_path.open("a+b")
@@ -151,6 +155,8 @@ def _cross_process_init_lock(path: Path):
             if acquired or time.monotonic() >= deadline:
                 break
             time.sleep(_INIT_LOCK_POLL_SECONDS)
+        if not acquired and must_acquire:
+            raise TimeoutError("kanban database initialization reservation timed out")
         if not acquired:
             _kb._log.warning(
                 "kanban init lock for %s not acquired within %.0fs — proceeding "
@@ -791,7 +797,10 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     # the gateway dispatcher's next-tick connect() forever, and steady-state has
     # nothing for it to protect (no schema/migration writes).
     resolved = str(path.resolve())
-    if resolved in _INITIALIZED_PATHS:
+    if not path.exists():
+        with _INIT_LOCK:
+            _INITIALIZED_PATHS.discard(resolved)
+    if resolved in _INITIALIZED_PATHS and path.exists():
         conn, schema_present = _open_configured(path, _schema_is_present)
         if schema_present:
             return conn

@@ -573,10 +573,17 @@ def _commit_target_registry(conn):
 
 @contextmanager
 def _reconciliation_transactions(source, target, expected_boards):
-    """Acquire metadata locks, registries, then board DBs in producer order."""
+    """Acquire metadata, absent-DB init reservations, registries, then board DBs."""
+    from hermes_cli.kanban_db_connect import _cross_process_init_lock
+
     with ExitStack() as stack:
         for board in sorted(expected_boards):
             stack.enter_context(board_ownership_lock(board))
+        # connect() holds this same reservation before opening a missing DB.
+        # Acquire before registry writers: initialization may read project state.
+        for board in sorted(expected_boards):
+            if _board_database_absent(board):
+                stack.enter_context(_cross_process_init_lock(kb.kanban_db_path(board), strict=True))
         registries = {}
         for path in sorted((source, target), key=_path_key):
             conn = stack.enter_context(closing(_registry_write(path)))

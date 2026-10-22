@@ -529,3 +529,10 @@ retained and its path must not be reused. A later uncertain-commit error require
 inspecting the recorded registry outcome before retrying. Windows flushes the
 receipt file before linking it but does not attempt POSIX directory fsync. Run it
 from the root profile outside a dispatched task or delegated child.
+
+An uninitialized board with reviewed empty references remains uninitialized.
+Reconciliation reserves its existing database-initialization lock through registry
+commit. A concurrent missing-board `connect()` waits up to the existing init-lock
+deadline, then refuses without creating a database if the reservation is still
+held; retry after the holder releases. Existing-database connections keep their
+normal fast path and bounded initialization fallback.
