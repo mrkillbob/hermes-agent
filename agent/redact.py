@@ -610,7 +610,17 @@ _TOKEN_BODY_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw
 
 
 def _compile_prefix_matcher(patterns: list) -> re.Pattern[str]:
-    return re.compile(r"(?<![A-Za-z0-9_-])(" + "|".join(patterns) + r")(?![A-Za-z0-9_-])")
+    alternatives = []
+    for pattern in patterns:
+        boundary = r"[A-Za-z0-9_-]"
+        # Built-in variable-length families declare their final body alphabet.
+        # A separator outside that alphabet must not hide the preceding token.
+        # Keep fixed-length/compound patterns and plugin contracts unchanged.
+        tail = re.search(r"(\[[^]]+\])\{\d+,\}$", pattern)
+        if pattern in _PREFIX_PATTERNS and tail is not None:
+            boundary = tail.group(1)
+        alternatives.append("(?:" + pattern + ")(?!" + boundary + ")")
+    return re.compile(r"(?<![A-Za-z0-9_-])(" + "|".join(alternatives) + ")")
 
 
 _PREFIX_RE = _compile_prefix_matcher(_PREFIX_PATTERNS)

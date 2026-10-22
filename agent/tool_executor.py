@@ -752,17 +752,14 @@ def _dispatch_authorized_once(
     prepare_current_terminal(ref)
     _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
 
-    def _execute_with_source_provenance(args):
-        from agent.source_provenance_tools import source_provenance_activation
-
-        with source_provenance_activation(agent, ref.name):
-            return execute(args)
+    from agent.source_provenance_tools import execute_with_source_provenance
 
     from agent.tool_progress_relay import bound_tool_progress
     from tools.connectors.data_use import collect_data_use
     with bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use:
         try:
-            return _run_with_activity_heartbeat(agent, ref.name, lambda: _execute_with_source_provenance(ref.args))
+            return _run_with_activity_heartbeat(agent, ref.name, lambda: execute_with_source_provenance(
+                agent, ref.name, ref.call_id, execute, ref.args))
         finally:
             state.data_use = frozenset(data_use)
 
@@ -1148,7 +1145,10 @@ def _commit_tool_result(
     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
     note_tool_result(agent, function_name, tool_call_id, function_result, persisted_result)
 
-    subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
+    from agent.source_provenance_tools import source_provenance_activation
+
+    with source_provenance_activation(agent, function_name):
+        subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
     if subdir_hints:
         if _is_multimodal_tool_result(persisted_result):
             # Hint goes on the text summary part so the model still sees it; image blocks untouched.
@@ -1162,7 +1162,7 @@ def _commit_tool_result(
     from agent.source_provenance_tools import attach_trusted_source_provenance_metadata
 
     _source_provenance = attach_trusted_source_provenance_metadata(
-        agent, function_name, content=persisted_result
+        agent, function_name, content=persisted_result, tool_call_id=tool_call_id
     )
     tool_message = make_tool_result_message(
         function_name, _tool_content, tool_call_id, effect_disposition=effect_disposition,

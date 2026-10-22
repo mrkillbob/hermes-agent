@@ -32,6 +32,9 @@ from agent.cross_process_file_lock import (
     secure_file_descriptor_permissions,
 )
 from agent.redact import redact_sensitive_text
+from agent.source_fixed_literals import _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS
+from agent.egress_encoding_syntax import is_canonical_base64_encoding, is_iso_calendar_week
+from agent.egress_tool_syntax import validate_tool_syntax
 
 
 class DestinationClass(StrEnum):
@@ -315,117 +318,6 @@ _BOUNDED_SOURCE_VERSIONED_IDENTIFIER = re.compile(
 )
 _BOUNDED_SOURCE_CAMEL_CASE_IDENTIFIER = re.compile(
     r"^[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+){1,7}$"
-)
-# These are fixed Python source literals used by the paper-runtime boundary.
-# Keep them source-presentation-only: the same words in generated or
-# untrusted provider context must still go through the ordinary fail-closed
-# Base64 detector.
-_BOUNDED_SOURCE_FIXED_LITERAL_ATOMS = frozenset(
-    {
-        "-128",
-        "-200",
-        "-tf_priority",
-        "1day",
-        "1e-3",
-        "1e-6",
-        "1e-9",
-        "1min",
-        "128_000_000",
-        "250_000",
-        "3min",
-        "40310000",
-        "42210000",
-        "5GB+",
-        "5min",
-        "ACCT",
-        "ANOMALY",
-        "ASSET_CLASS_",
-        "BASE",
-        "BEAR",
-        "BOOT",
-        "BULL",
-        "DATA",
-        "DAYTRADE",
-        "DEFERRED",
-        "DTBP",
-        "ENFORCE",
-        "EXIT",
-        "EXTENDED",
-        "EXTO",
-        "FIRE",
-        "GATE",
-        "HOST",
-        "INIT",
-        "INTRADAY",
-        "KEYS",
-        "LIVE",
-        "MPLCONFIGDIR",
-        "NAME",
-        "NEXT",
-        "hrl-",
-        "NONE",
-        "NULL",
-        "PERF",
-        "POST",
-        "PIPE",
-        "PROFILE",
-        "READONLY",
-        "REVERSAL",
-        "RUNTIME",
-        "SEAM",
-        "SELL",
-        # Fixed GitHub Actions workflow literals. These occur in exact
-        # source-granted YAML presentations; they are syntax/metadata, not
-        # encoded content. Keep the exception source-presentation-only.
-        "SECURITY",
-        "TEMPORARILY",
-        "DISABLED",
-        "REAL",
-        "installer-tests-",
-        "-ExecutionPolicy",
-        "addopts",
-        "ci-timings-baseline-",
-        "SOUL",
-        "SIM-",
-        "TRUE",
-        "USDC",
-        "USDT",
-        "asset_class_",
-        "columns",
-        "cycle_id-derived",
-        "ema_",
-        "emitted_",
-        "lineage_",
-        "log_",
-        "options",
-        "options_",
-        "position_guard_only_",
-        "reasons",
-        "rsi_",
-        "runtime_",
-        "sha1",
-        "shared-prebuild-",
-        "sma_",
-        "sources",
-        "targets",
-        "three_layer_",
-        "top5",
-        "top_slowest_",
-        "atr_",
-        "adx_",
-        # Exact atoms observed in authorized PR repair source presentations.
-        # Keep these source-presentation-only; untrusted/generated context
-        # still goes through the ordinary fail-closed Base64 detector.
-        "400+",
-        "262_144",
-        "SAME",
-        "DOES",
-        "DISABLE",
-        "LOOPBACK",
-        "compression-SUMMARY",
-        "WITH",
-        "READ",
-    }
 )
 # Source-granted PR diffs contain bounded command filters, issue keys, and
 # unified-diff marker lines. Their URL-safe alphabet can resemble encoded
@@ -892,6 +784,10 @@ def _receipt_identifier(value: str) -> str:
 def source_grant_digest(grant: SourceGrant) -> str:
     """Return the opaque identity used by a source-segment manifest."""
 
+    from agent.source_context_preview import ContextPreviewGrant, preview_digest_fields
+    if isinstance(grant, ContextPreviewGrant):
+        encoded = json.dumps(preview_digest_fields(grant), separators=(',', ':'), sort_keys=True).encode('utf-8')
+        return sha256(encoded).hexdigest()
     bound_fields = {
         "canonical_path": str(grant.canonical_path),
         "display_path": grant.display_path,
@@ -914,17 +810,6 @@ def static_literal_sha256(text: str) -> str:
     if not isinstance(text, str):
         raise TypeError("static literal must be text")
     return sha256(text.encode("utf-8")).hexdigest()
-
-
-def validate_tool_syntax(text: str, syntax_kind: str) -> str:
-    """Revalidate one complete protected tool-result syntax atom."""
-
-    grammar = _VALIDATED_TOOL_SYNTAX.get(syntax_kind)
-    if not isinstance(text, str) or grammar is None or grammar.fullmatch(text) is None:
-        raise ValueError("invalid_tool_syntax_segment")
-    if _contains_secret(text) or _contains_private_absolute_path(text):
-        raise ValueError("invalid_tool_syntax_segment")
-    return text
 
 
 def _canonical_base64_candidate(candidate: str) -> bool:
@@ -1007,24 +892,12 @@ def _canonical_base64_candidate(candidate: str) -> bool:
         and sum(character.isalpha() for character in candidate) >= 2
     ):
         return False
-    unpadded = candidate.rstrip("=")
-    if "=" in unpadded or len(unpadded) % 4 == 1:
-        return False
-    padded = unpadded + "=" * (-len(unpadded) % 4)
-    encoded = padded.encode("ascii")
-    for altchars in (None, b"-_"):
-        try:
-            decoded = base64.b64decode(encoded, altchars=altchars, validate=True)
-        except (binascii.Error, ValueError):
-            continue
-        canonical_padded = (
-            base64.b64encode(decoded)
-            if altchars is None
-            else base64.urlsafe_b64encode(decoded)
-        ).decode("ascii")
-        if candidate in {canonical_padded, canonical_padded.rstrip("=")} and decoded:
-            return True
-    return False
+    return is_canonical_base64_encoding(candidate)
+
+
+def _canonical_literal_base64_candidate(candidate: str) -> bool:
+    """Exclude literal calendar syntax without exempting reconstructed encodings."""
+    return not is_iso_calendar_week(candidate) and _canonical_base64_candidate(candidate)
 
 
 def _canonical_chunked_base64_candidate(candidate: str) -> bool:
@@ -1178,7 +1051,7 @@ def _contains_canonical_base64(value: Any, *, seen: set[int] | None = None) -> b
             # GitHub's legacy global node id (see helper docstring above).
             if _looks_like_github_legacy_node_id(candidate):
                 continue
-            if _canonical_base64_candidate(candidate):
+            if _canonical_literal_base64_candidate(candidate):
                 return True
         # Providers and source-control tools sometimes wrap an otherwise
         # canonical encoding at a fixed column. Normalize only bounded chunks
@@ -1229,15 +1102,11 @@ def _source_text_for_base64_scan(
         source_control_window = source_text[
             max(0, match.start() - 256) : min(len(source_text), match.end() + 32)
         ]
-        line_start = source_text.rfind("\n", 0, match.start()) + 1
-        line_end = source_text.find("\n", match.end())
-        if line_end < 0:
-            line_end = len(source_text)
-        source_line = source_text[line_start:line_end]
+        line_start, line_end = lexical.line_bounds(match.start(), match.end())
         is_numbered_receipt_sha = (
             allow_fixed_source_literals
             and _BOUNDED_SOURCE_RECEIPT_SHA.fullmatch(source_atom) is not None
-            and re.fullmatch(r"\s*\d+\|[0-9a-f]{40}\s*", source_line) is not None
+            and re.compile(r"\s*\d+\|[0-9a-f]{40}\s*").fullmatch(source_text, line_start, line_end) is not None
         )
         is_source_control_identity = (
             re.fullmatch(
@@ -1310,30 +1179,7 @@ def _source_text_for_base64_scan(
         source_atom = candidate.removesuffix("=")
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{2,191}", source_atom) is None:
             return False
-        line_start = source_text.rfind("\n", 0, match.start()) + 1
-        line_end = source_text.find("\n", match.end())
-        if line_end < 0:
-            line_end = len(source_text)
-        line = source_text[line_start:line_end]
-        offset = match.start() - line_start
-        before = line[:offset]
-        after = line[match.end() - line_start :]
-        if before.rstrip().endswith(("'", '"')):
-            return False
-        if re.search(r"\b(?:def|class)\s+$", before):
-            return True
-        at_line_assignment = not before and re.match(r"\s*=", after) is not None
-        return (
-            not before.rstrip().endswith((".", "'", '"'))
-            and (
-                at_line_assignment
-                or (
-                    bool(before)
-                    and before[-1] in " \t([{,:;"
-                )
-            )
-            and re.match(r"\s*(?:[=,.;:)(\]}])", after) is not None
-        )
+        return lexical.identifier_context(match)
 
     # Explicit credential placeholders in checked-in examples are source
     # grammar, not credential material. Keep the exception exact and scoped
@@ -1346,6 +1192,9 @@ def _source_text_for_base64_scan(
     # token, but the Base64 candidate regex sees its uppercase suffix after
     # the underscore as a standalone candidate. Mask the whole path-shaped
     # token before that scan; an opaque payload cannot contain a dot.
+    if allow_fixed_source_literals:
+        # Exact documented package filename glob, only after source verification.
+        masked = re.sub(r"(?<![\w./-])run_\*\.py(?![\w./-])", "<source-file>", masked)
     masked = _BOUNDED_SOURCE_FILE_TOKEN.sub("<source-file>", masked)
     masked = _BOUNDED_ISO_DURATION.sub("<source-duration>", masked)
     masked = _BOUNDED_SOURCE_NUMERIC_CONSTANT_ASSIGNMENT.sub(
@@ -1360,6 +1209,8 @@ def _source_text_for_base64_scan(
     masked = _BOUNDED_SOURCE_DIFF_STAT_COUNT.sub(
         "<source stat count>", masked
     )
+    from agent.source_lexical_context import SourceLexicalContext
+    lexical = SourceLexicalContext(masked)
     masked = _BASE64_CANDIDATE.sub(
         lambda match: (
             "<src>"
@@ -1630,7 +1481,7 @@ def redact_remote_unsafe_text(text: str) -> str:
             "HERMES_PROFILE_HOME",
         }:
             return match.group(0)
-        if _PROMPT_CACHE_KEY.fullmatch(candidate) or _canonical_base64_candidate(candidate):
+        if _PROMPT_CACHE_KEY.fullmatch(candidate) or _canonical_literal_base64_candidate(candidate):
             return "<redacted-base64>"
         return match.group(0)
 
@@ -1958,6 +1809,7 @@ class LLMEgressFirewall:
         valid_grants: list[SourceGrant] = []
         grant_contents: dict[str, tuple[SourceGrant, bytes]] = {}
         grant_reasons: list[str] = []
+        snapshot_scans = []
         source_segment_count = 0
         sanitized_only = False
         if typed_request is not None:
@@ -1982,7 +1834,8 @@ class LLMEgressFirewall:
             # Passing even one purported grant opts back into exact source
             # validation so malformed or unbound authority cannot be ignored.
             if grants or not sanitized_only:
-                grant_reasons, valid_grants, grant_contents = self._validate_grants(
+                from agent.source_grant_verification import validate_source_grants
+                grant_reasons, valid_grants, grant_contents, snapshot_scans = validate_source_grants(
                     grants,
                     session_id=session_id,
                     turn_id=turn_id,
@@ -2006,6 +1859,9 @@ class LLMEgressFirewall:
                 )
             )
             reasons.extend(construction_reasons)
+            scan_values.extend(_source_text_for_secret_scan(text) for text in snapshot_scans)
+            base64_scan_values.extend(_source_text_for_base64_scan(text, allow_fixed_source_literals=True)
+                                      for text in snapshot_scans)
         else:
             logical_request = request
             scan_values = request
@@ -2117,82 +1973,6 @@ class LLMEgressFirewall:
                 replace(decision, allowed=False, reason_codes=("receipt_unavailable",))
             ) from None
         return AuthorizedEgress(decision=decision, payload_bytes=serialized)
-
-    def _validate_grants(
-        self,
-        grants: Sequence[SourceGrant],
-        *,
-        session_id: str,
-        turn_id: str,
-        request_id: str,
-        policy_digest: str,
-    ) -> tuple[list[str], list[SourceGrant], dict[str, tuple[SourceGrant, bytes]]]:
-        reasons: list[str] = []
-        valid: list[SourceGrant] = []
-        contents: dict[str, tuple[SourceGrant, bytes]] = {}
-        if not grants:
-            return ["untrusted_provenance"], valid, contents
-
-        for candidate in grants:
-            if not isinstance(candidate, SourceGrant):
-                reasons.append("untrusted_provenance")
-                continue
-            grant = candidate
-            if (
-                grant.session_id != session_id
-                or grant.turn_id != turn_id
-                or grant.request_id != request_id
-                or grant.policy_digest != policy_digest
-            ):
-                reasons.append("grant_binding_mismatch")
-                continue
-            if (
-                grant.line_start < 1
-                or grant.line_end < grant.line_start
-                or grant.byte_count < 0
-                or not re.fullmatch(r"[0-9a-f]{64}", grant.content_sha256)
-            ):
-                reasons.append("invalid_source_grant")
-                continue
-            display = Path(grant.display_path)
-            if display.is_absolute() or ".." in display.parts:
-                reasons.append("invalid_display_path")
-                continue
-            try:
-                canonical = Path(grant.canonical_path)
-                resolved = canonical.resolve(strict=True)
-            except (OSError, RuntimeError, ValueError, TypeError):
-                reasons.append("source_unavailable")
-                continue
-            if not canonical.is_absolute() or canonical != resolved:
-                reasons.append("source_path_not_canonical")
-                continue
-            try:
-                blocked = get_read_block_error(str(resolved))
-            except Exception:
-                reasons.append("source_policy_unavailable")
-                continue
-            if blocked is not None:
-                reasons.append("sensitive_path")
-                continue
-            try:
-                lines = resolved.read_bytes().splitlines(keepends=True)
-            except OSError:
-                reasons.append("source_unavailable")
-                continue
-            if grant.line_end > len(lines):
-                reasons.append("source_range_mismatch")
-                continue
-            content = b"".join(lines[grant.line_start - 1 : grant.line_end])
-            if len(content) != grant.byte_count or sha256(content).hexdigest() != grant.content_sha256:
-                reasons.append("source_hash_mismatch")
-                continue
-            valid.append(grant)
-            contents[source_grant_digest(grant)] = (grant, content)
-
-        if not valid and "untrusted_provenance" not in reasons:
-            reasons.append("untrusted_provenance")
-        return reasons, valid, contents
 
     def _construct_typed_request(
         self,
@@ -2326,10 +2106,14 @@ class LLMEgressFirewall:
                 scan_values.append(text)
                 return text
             if isinstance(segment, SourceBoundSegment):
+                from agent.source_context_preview import ContextPreviewGrant
                 grant_and_content = grant_contents.get(segment.source_grant_digest)
                 if grant_and_content is None:
                     reasons.append("source_segment_grant_mismatch")
                     return ""
+                if isinstance(grant_and_content[0], ContextPreviewGrant):
+                    reasons.append('invalid_preview_presentation')
+                    return ''
                 try:
                     text = grant_and_content[1].decode("utf-8")
                 except UnicodeDecodeError:
@@ -2345,33 +2129,16 @@ class LLMEgressFirewall:
                 if grant_and_content is None:
                     reasons.append("source_segment_grant_mismatch")
                     return ""
-                if segment.presentation_kind != "read_file_json_v1":
-                    reasons.append("invalid_source_presentation")
-                    return ""
+                from agent.source_presentation_rendering import render_source_presentation
                 try:
-                    raw_text = grant_and_content[1].decode("utf-8")
-                    expected_contents = {
-                        "\n".join(
-                            f"{line_number}|{line}"
-                            for line_number, line in enumerate(lines, start=grant_and_content[0].line_start)
-                        )
-                        for lines in (raw_text.splitlines(), raw_text.split("\n"))
-                    }
-                    parsed = json.loads(segment.text)
-                except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
-                    reasons.append("invalid_source_presentation")
-                    return ""
-                if not isinstance(parsed, dict) or parsed.get("content") not in expected_contents:
-                    reasons.append("invalid_source_presentation")
-                    return ""
+                    source_scans, source_encodings = render_source_presentation(segment, grant_and_content)
+                except (UnicodeDecodeError, ValueError, TypeError):
+                    reasons.append('invalid_source_presentation')
+                    return ''
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(_source_text_for_secret_scan(raw_text))
-                base64_scan_values.append(
-                    _source_text_for_base64_scan(
-                        raw_text, allow_fixed_source_literals=True
-                    )
-                )
+                scan_values.extend(source_scans)
+                base64_scan_values.extend(source_encodings)
                 return segment.text
             if isinstance(segment, UntrustedProvenanceSegment):
                 reasons.append("untrusted_provenance")
@@ -2552,15 +2319,8 @@ class LLMEgressFirewall:
             "policy_digest",
         ):
             receipt[field] = _receipt_identifier(receipt[field])
-        receipt["source_grants"] = [
-            {
-                "line_start": grant.line_start,
-                "line_end": grant.line_end,
-                "content_sha256": grant.content_sha256,
-                "byte_count": grant.byte_count,
-            }
-            for grant in grants
-        ]
+        from agent.source_grant_verification import grant_receipt_fields
+        receipt['source_grants'] = [grant_receipt_fields(grant) for grant in grants]
         flags = os.O_APPEND | os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW

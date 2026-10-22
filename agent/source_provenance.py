@@ -22,6 +22,7 @@ import uuid
 from agent.file_safety import get_read_block_error
 from agent.llm_egress_firewall import SourceGrant, source_grant_digest
 from agent.redact import redact_sensitive_text
+from agent.source_context_preview import ContextPreviewGrant
 
 
 MAX_SOURCE_SLICE_LINES = 2_000
@@ -43,6 +44,7 @@ class SourceProvenanceContext:
     turn_id: str
     request_id: str
     policy_digest: str
+    tool_call_id: str = ''
 
 
 _active_context: ContextVar[SourceProvenanceContext | None] = ContextVar(
@@ -65,6 +67,7 @@ def activate_source_provenance(
     turn_id: str,
     request_id: str,
     policy_digest: str,
+    tool_call_id: str = '',
 ) -> Iterator[SourceProvenanceContext]:
     """Temporarily make an authenticated request identity available to reads."""
 
@@ -73,7 +76,9 @@ def activate_source_provenance(
         isinstance(value, str) and value for value in values
     ):
         raise SourceProvenanceError("missing_identity")
-    context = SourceProvenanceContext(registry, *values)
+    if not isinstance(tool_call_id, str) or len(tool_call_id.encode('utf-8')) > 256:
+        raise SourceProvenanceError('invalid_tool_call_id')
+    context = SourceProvenanceContext(registry, *values, tool_call_id)
     token = _active_context.set(context)
     try:
         yield context
@@ -85,8 +90,13 @@ class SourceProvenanceRegistry:
     """In-memory grants keyed solely by their bound request identity."""
 
     def __init__(self) -> None:
-        self._grants: dict[str, list[SourceGrant]] = {}
-        self._validated_presentations: dict[str, SourceGrant] = {}
+        from agent.source_context_bindings import ContextReadBindings
+        from agent.source_read_results import ReadResultBindings
+
+        self._grants: dict[str, list[SourceGrant | ContextPreviewGrant]] = {}
+        self._validated_presentations: dict[str, SourceGrant | ContextPreviewGrant] = {}
+        self._context_reads = ContextReadBindings()
+        self._read_results = ReadResultBindings()
         self._lock = RLock()
 
     def issue_file_slice(
@@ -100,6 +110,7 @@ class SourceProvenanceRegistry:
         turn_id: str,
         request_id: str,
         policy_digest: str,
+        _reuse_existing: bool = False,
     ) -> SourceGrant:
         """Grant exactly the current canonical bytes, or reject the producer.
 
@@ -197,10 +208,23 @@ class SourceProvenanceRegistry:
             request_id=request_id,
             policy_digest=policy_digest,
         )
+        return self._store_verified_grant(grant, reuse_existing=_reuse_existing)
+
+    def issue_context_preview(self, **kwargs):
+        from agent.source_context_preview import issue_preview
+        return issue_preview(self, **kwargs)
+
+    def _store_verified_grant(self, grant: SourceGrant | ContextPreviewGrant, *, reuse_existing: bool) -> SourceGrant | ContextPreviewGrant:
+        """Only fully reverified replay grants may reuse an exact current proof."""
         with self._lock:
-            if len(self._grants.get(request_id, ())) >= MAX_GRANTS_PER_REQUEST:
+            current = self._grants.get(grant.request_id, ())
+            if reuse_existing:
+                for existing in current:
+                    if existing == grant:
+                        return existing
+            if len(current) >= MAX_GRANTS_PER_REQUEST:
                 raise SourceProvenanceError("grant_limit_exceeded")
-            self._grants.setdefault(request_id, []).append(grant)
+            self._grants.setdefault(grant.request_id, []).append(grant)
         return grant
 
     @contextmanager
@@ -214,7 +238,7 @@ class SourceProvenanceRegistry:
         finally:
             self.clear_request(request_id)
 
-    def grants_for_request(self, request_id: str) -> tuple[SourceGrant, ...]:
+    def grants_for_request(self, request_id: str) -> tuple[SourceGrant | ContextPreviewGrant, ...]:
         """Return an immutable snapshot of grants bound to ``request_id``."""
 
         if not isinstance(request_id, str) or not request_id:
@@ -229,6 +253,44 @@ class SourceProvenanceRegistry:
             return
         with self._lock:
             self._grants.pop(request_id, None)
+            self._context_reads.clear_request(request_id, self._validated_presentations)
+            self._read_results.clear_request(request_id)
+
+    def remember_producer_read(self, grant, call_id, prefix_sha256):
+        """Only a real issued grant may acquire a bounded producer result identity."""
+        with self._lock:
+            if isinstance(grant, SourceGrant) and grant in self._grants.get(grant.request_id, ()):
+                self._read_results.issue(grant, call_id, prefix_sha256,
+                                         MAX_GRANTS_PER_REQUEST, MAX_SOURCE_SLICE_BYTES)
+
+    def commit_read_result(self, owner, call_id, content):
+        with self._lock:
+            return self._read_results.commit(owner, call_id, content)
+
+    def read_result_binding(self, record_id, original_request_id, call_id, content, identity):
+        with self._lock:
+            return self._read_results.lookup(record_id, original_request_id, call_id, content, identity,
+                                             self._grants.get(identity['request_id'], ()))
+
+    def remember_validated_read_results(self, selections, used_grants):
+        with self._lock:
+            self._read_results.remember_validated(selections, used_grants)
+
+    def remember_context_read(self, grant, working_root, relative_path):
+        """Associate a producer display alias only with an actually issued current grant."""
+        with self._lock:
+            if grant in self._grants.get(grant.request_id, ()):
+                self._context_reads.remember(grant, working_root, relative_path,
+                                             MAX_GRANTS_PER_REQUEST, MAX_SOURCE_SLICE_BYTES)
+
+    def context_read_bindings(self, digest, original_request_id, identity):
+        """Historical aliases require the same already-admitted source identity."""
+        with self._lock:
+            eligible = digest in self._validated_presentations or any(
+                source_grant_digest(grant) == digest
+                for grant in self._grants.get(original_request_id, ())
+            )
+            return self._context_reads.select(digest, original_request_id, identity, eligible)
 
     def clear_turn(self, turn_id: str) -> None:
         """Discard every request grant belonging to one completed turn."""
@@ -236,6 +298,8 @@ class SourceProvenanceRegistry:
         if not isinstance(turn_id, str) or not turn_id:
             return
         with self._lock:
+            self._context_reads.clear_turn(turn_id)
+            self._read_results.clear_turn(turn_id)
             stale = [
                 request_id
                 for request_id, grants in self._grants.items()
@@ -258,7 +322,8 @@ class SourceProvenanceRegistry:
 
         with self._lock:
             for grant in grants:
-                if isinstance(grant, SourceGrant):
+                from agent.source_context_preview import ContextPreviewGrant
+                if isinstance(grant, (SourceGrant, ContextPreviewGrant)):
                     self._validated_presentations[source_grant_digest(grant)] = grant
 
     def rebind_validated_presentation(
@@ -286,7 +351,17 @@ class SourceProvenanceRegistry:
             or not _is_later_request(original.request_id, request_id, turn_id)
         ):
             return None
+        from agent.source_context_preview import ContextPreviewGrant, verify_preview
         try:
+            if isinstance(original, ContextPreviewGrant):
+                _, text = verify_preview(original)
+                raw = text.encode('utf-8')
+                return self.issue_context_preview(path=original.canonical_path, raw_bytes=raw,
+                    working_root=original.working_root, relative_path=original.relative_alias,
+                    identity=dict(session_id=session_id, turn_id=turn_id, request_id=request_id,
+                                  policy_digest=policy_digest), reuse=True,
+                    expected_snapshot=(original.full_source_sha256, original.full_source_bytes,
+                                       original.source_device, original.source_inode))
             content = _read_bounded_slice(
                 original.canonical_path,
                 original.line_start,
@@ -301,6 +376,7 @@ class SourceProvenanceRegistry:
                 turn_id=turn_id,
                 request_id=request_id,
                 policy_digest=policy_digest,
+                _reuse_existing=True,
             )
         except (OSError, SourceProvenanceError):
             return None

@@ -7,12 +7,17 @@ never acquire provenance from a catalog bridge or a tool's claimed label.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
+from hashlib import sha256
 from typing import Any, Mapping
 
 from agent.llm_egress_firewall import (
     GeneratedContextSegment,
+    OutboundText,
+    SanitizedSegment,
     UntrustedProvenanceSegment,
+    validate_sanitized_text,
 )
 
 
@@ -35,6 +40,27 @@ def _json_object(value: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _inventory_arguments(args: Any) -> bool:
+    if not isinstance(args, dict) or args.get("action") != "list":
+        return False
+    if set(args) - {"action", "limit", "job"}:
+        return False
+    # The model handler ignores these legacy keys for list. Preserve the
+    # original argument bytes and their scans; they confer no result authority.
+    if "limit" in args and (type(args["limit"]) is not int or args["limit"] < 1):
+        return False
+    if "job" in args:
+        if not isinstance(args["job"], str) or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_-]{0,63}", args["job"]
+        ):
+            return False
+        try:
+            validate_sanitized_text(args["job"], max_bytes=256)
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def _is_inventory_call(call: Mapping[str, Any]) -> bool:
     function = call.get("function")
     if call.get("type") != "function" or not isinstance(function, Mapping):
@@ -43,7 +69,7 @@ def _is_inventory_call(call: Mapping[str, Any]) -> bool:
         return False
     args = _json_object(function.get("arguments"))
     if function.get("name") == "cronjob_manage":
-        return args == {"action": "list"}
+        return _inventory_arguments(args)
     if function.get("name") != "tool_call" or not isinstance(args, dict):
         return False
     calls = args.get("calls")
@@ -54,7 +80,26 @@ def _is_inventory_call(call: Mapping[str, Any]) -> bool:
         isinstance(nested, dict)
         and set(nested) == {"name", "arguments"}
         and nested.get("name") == "cronjob_manage"
-        and nested.get("arguments") == {"action": "list"}
+        and _inventory_arguments(nested.get("arguments"))
+    )
+
+
+def _bound_untrusted_result(typed: Any, content: Any) -> bool:
+    if not isinstance(content, str):
+        return False
+    digest = sha256(content.encode("utf-8")).hexdigest()
+    if isinstance(typed, UntrustedProvenanceSegment):
+        return typed.content_sha256 == digest
+    if not isinstance(typed, OutboundText) or len(typed.segments) != 2:
+        return False
+    marker, raw = typed.segments
+    # Only the classifier's exact diagnostic wrapper is replaceable, never
+    # adjacent source/private bytes or an arbitrary typed composition.
+    return (
+        isinstance(marker, UntrustedProvenanceSegment)
+        and marker.content_sha256 == digest
+        and isinstance(raw, SanitizedSegment)
+        and raw.text == content
     )
 
 
@@ -147,7 +192,9 @@ def project_cron_list(
                 for label in ("name", "tool_name")
             )
             or not isinstance(typed_message, Mapping)
-            or not isinstance(typed_message.get("content"), UntrustedProvenanceSegment)
+            or not _bound_untrusted_result(
+                typed_message.get("content"), message.get("content")
+            )
         ):
             continue
         projection = _inventory_projection(message.get("content"))
