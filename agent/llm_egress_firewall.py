@@ -2345,23 +2345,14 @@ class LLMEgressFirewall:
                 if grant_and_content is None:
                     reasons.append("source_segment_grant_mismatch")
                     return ""
-                if segment.presentation_kind != "read_file_json_v1":
-                    reasons.append("invalid_source_presentation")
-                    return ""
+                from agent.source_context_presentation import source_presentation_matches
+
                 try:
                     raw_text = grant_and_content[1].decode("utf-8")
-                    expected_contents = {
-                        "\n".join(
-                            f"{line_number}|{line}"
-                            for line_number, line in enumerate(lines, start=grant_and_content[0].line_start)
-                        )
-                        for lines in (raw_text.splitlines(), raw_text.split("\n"))
-                    }
-                    parsed = json.loads(segment.text)
-                except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+                except UnicodeDecodeError:
                     reasons.append("invalid_source_presentation")
                     return ""
-                if not isinstance(parsed, dict) or parsed.get("content") not in expected_contents:
+                if not source_presentation_matches(segment, grant_and_content[0], raw_text):
                     reasons.append("invalid_source_presentation")
                     return ""
                 referenced_grants.add(segment.source_grant_digest)

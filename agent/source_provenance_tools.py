@@ -101,7 +101,9 @@ def attach_trusted_source_provenance_metadata(
         }
         if isinstance(content, str):
             envelope["content_sha256"] = sha256(content.encode("utf-8")).hexdigest()
-            envelope["presentation_kind"] = "read_file_json_v1"
+            from agent.source_context_presentation import presentation_kind
+
+            envelope["presentation_kind"] = presentation_kind(content)
         metadata[request_id] = envelope
         return envelope
     except Exception:

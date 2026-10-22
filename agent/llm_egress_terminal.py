@@ -1437,9 +1437,18 @@ def _segment_read_file_presentation(
     turn_id: str = "",
     request_id: str = "",
     policy_digest: str = "",
-) -> SourcePresentationSegment | UntrustedProvenanceSegment:
+) -> SourcePresentationSegment | OutboundText | UntrustedProvenanceSegment:
     """Bind the real JSON/line-number presentation to one exact read grant."""
 
+    from agent.source_context_presentation import (
+        READ_WITH_CONTEXT, segment_read_with_context, matching_read_grants,
+    )
+
+    if isinstance(metadata, Mapping) and metadata.get("presentation_kind") == READ_WITH_CONTEXT:
+        return segment_read_with_context(
+            text, metadata, grant_texts, used_grants, registry=registry, session_id=session_id,
+            turn_id=turn_id, request_id=request_id, policy_digest=policy_digest,
+        )
     denied = UntrustedProvenanceSegment(sha256(text.encode("utf-8")).hexdigest())
     if not isinstance(metadata, Mapping):
         return denied
@@ -1450,26 +1459,9 @@ def _segment_read_file_presentation(
     digests = metadata.get("source_grant_digests")
     if not isinstance(digests, (list, tuple)) or not digests:
         return denied
-    try:
-        parsed = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    content, allowed_digests, candidates = matching_read_grants(text, metadata, grant_texts)
+    if content is None:
         return denied
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("content"), str):
-        return denied
-    allowed_digests = {value for value in digests if isinstance(value, str)}
-    candidates: list[tuple[str, SourceGrant]] = []
-    for raw_text, grant in grant_texts:
-        digest = source_grant_digest(grant)
-        if digest not in allowed_digests or metadata.get("request_id") != grant.request_id:
-            continue
-        expected = "\n".join(
-            f"{line_number}|{line}"
-            for line_number, line in enumerate(
-                raw_text.splitlines(), start=grant.line_start
-            )
-        )
-        if parsed["content"] == expected:
-            candidates.append((digest, grant))
     if not candidates and registry is not None:
         original_request_id = metadata.get("request_id")
         if isinstance(original_request_id, str):
@@ -1493,7 +1485,7 @@ def _segment_read_file_presentation(
                         raw_text.splitlines(), start=rebound.line_start
                     )
                 )
-                if parsed["content"] == expected:
+                if content == expected:
                     candidates.append((source_grant_digest(rebound), rebound))
     if len(candidates) != 1:
         return denied
