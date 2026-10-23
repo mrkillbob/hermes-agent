@@ -140,6 +140,37 @@ test('storage RPC logging keeps allowlisted diagnostics and excludes raw gateway
   }
 })
 
+test.each([4001, 5001])('storage RPC diagnostics recognize canonical wire reason with code %s', code => {
+  const logLine = vi.fn()
+
+  const previous = (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+
+  ;(window as unknown as { hermesDesktop: { logLine: typeof logLine } }).hermesDesktop = { logLine }
+
+  try {
+    notifyError(
+      new JsonRpcGatewayError('storage_unavailable', {
+        code,
+        data: { reason: 'storage_unavailable', cause: 'locked', detail: 'C:\\private\\state.db token=secret' }
+      }),
+      'Session unavailable'
+    )
+
+    const line = logLine.mock.calls[0]?.[0] as string
+    expect(line).toContain(`rpc_code=${code}`)
+    expect(line).toContain('storage_category=storage_unavailable')
+    expect(line).toContain('storage_cause=locked')
+    expect(line).not.toContain('state.db')
+    expect(line).not.toContain('secret')
+  } finally {
+    if (previous === undefined) {
+      delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    } else {
+      ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = previous
+    }
+  }
+})
+
 test('storage RPC logging rejects unrecognized codes and redacts invalid causes', () => {
   const logLine = vi.fn()
 
@@ -164,7 +195,7 @@ test('storage RPC logging rejects unrecognized codes and redacts invalid causes'
     notifyError(
       new JsonRpcGatewayError('Session storage is unavailable', {
         code: 4001,
-        data: { code: 'storage_unavailable', cause: 'unknown' }
+        data: { code: 'invalid_params', cause: 'unknown' }
       }),
       'Session unavailable'
     )

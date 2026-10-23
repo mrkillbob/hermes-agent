@@ -9,7 +9,7 @@ from gateway.session_authority import LiveSession, SessionAuthority
 from gateway.session_contract import CANONICAL_GATEWAY_PROTOCOL
 from gateway.session_controls import AuthorityConnection
 from hermes_state import SessionDB
-from hermes_state_runtime import begin_runtime_epoch
+from hermes_state_runtime import RuntimeStoreError, begin_runtime_epoch
 
 
 @pytest.mark.asyncio
@@ -193,10 +193,38 @@ async def test_a_sqlite_failure_keeps_the_wire_error_and_logs_its_cause(tmp_path
             reply = await connection.dispatch({'id': 9, 'method': 'session.storage_probe', 'params': {
                 'session_id': 'session-9'}})
         assert reply['error'] == {
-            'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}
+            'code': 5001, 'message': 'storage_unavailable',
+            'data': {'reason': 'storage_unavailable', 'cause': 'locked'}}
+        assert 'database is locked' not in str(reply)
         assert any('session.storage_probe storage failure for profile=test session_id=' in record.getMessage()
                    and 'database is locked' in record.getMessage() for record in caplog.records)
         assert 'sqlite3.OperationalError: database is locked' in caplog.text
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_storage_refusal_exposes_only_the_allowlisted_cause(tmp_path):
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    try:
+        epoch = begin_runtime_epoch(db, instance_id='test')
+        authority = SessionAuthority(SimpleNamespace(), profile_id='test', instance_id='test',
+                                     db=db, epoch=epoch)
+
+        class Connection(AuthorityConnection):
+            def handlers(self):
+                async def probe(ref, params):
+                    try:
+                        raise sqlite3.OperationalError('database is locked at C:\\private\\state.db token=secret')
+                    except sqlite3.Error as cause:
+                        raise RuntimeStoreError('storage_unavailable') from cause
+                return {'session.storage_probe': probe}
+
+        connection = Connection(authority, object(), {'user_id': 'human'})
+        reply = await connection.dispatch({'id': 9, 'method': 'session.storage_probe', 'params': {}})
+        assert reply['error']['data'] == {'reason': 'storage_unavailable', 'cause': 'locked'}
+        assert 'state.db' not in str(reply)
+        assert 'secret' not in str(reply)
     finally:
         db.close()
 

@@ -12,6 +12,7 @@ from gateway.config import Platform
 from gateway.session_contract import CANONICAL_GATEWAY_PROTOCOL, Principal, SessionRef, Submission
 from gateway.session_llm_oneshot import DeferredReply
 from hermes_constants import profile_name_for_home
+from hermes_state_errors import PERSISTENCE_ERROR_CAUSES, classify_persistence_error
 from hermes_state_runtime import RuntimeStoreError
 
 logger = logging.getLogger(__name__)
@@ -30,9 +31,20 @@ def _refusal_data(exc: RuntimeStoreError) -> dict:
     for key in ('revision', 'execution_generation'):
         if isinstance(getattr(exc, key, None), int):
             data[key] = getattr(exc, key)
+    if exc.reason == 'storage_unavailable':
+        data['cause'] = _storage_cause(exc)
     if getattr(exc, 'admitted', None) is False:
         data['admitted'] = False  # nothing admitted yet: the sender may finalize with ``bot_relay.settle``
     return data
+
+
+def _storage_cause(exc: BaseException) -> str:
+    """Expose only the persistence classifier's stable cause bucket on storage refusals."""
+    cause = exc.__cause__
+    while isinstance(cause, RuntimeStoreError):
+        cause = cause.__cause__
+    bucket = classify_persistence_error(cause if cause is not None else exc)
+    return bucket if bucket in PERSISTENCE_ERROR_CAUSES else 'unknown'
 
 
 def _profile_label(profile_id) -> str:
@@ -329,7 +341,8 @@ class AuthorityConnection:
             _log_storage_failure(getattr(self.actor, 'profile_id', None), method,
                                  params.get('session_id'), exc)
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
-                'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}}
+                'code': 5001, 'message': 'storage_unavailable',
+                'data': {'reason': 'storage_unavailable', 'cause': _storage_cause(exc)}}}
 
     async def a2a_event(self, ref, params):
         from gateway.session_a2a_events import rpc
