@@ -22,18 +22,24 @@ _TITLE_INTAKE_RULES = (
     (r"^diagnostic experiment:\s+.*\blunabot replay\b", "research-experiment-runner"),
 )
 
-# These are operational blockers, rather than references in an inventory. Keep
-# them ahead of title-only intake ownership so a specialist title cannot mask
-# an actionable credential, quota, or LunaBot diagnostic failure.
+# These direct operational blockers apply only inside matched intake-title
+# families, where they precede title-only ownership.
 _OPERATIONAL_BLOCKER_RULES = (
-    (r"(?:^|[\n.!?]\s*)(?:the )?automation credential is missing\b", "hermes-maintenance-steward"),
-    (r"\b(?:quota (?:is|was|has been) (?:exhausted|exceeded)|"
-     r"quota failures? (?:are )?(?:blocking|blocked|preventing|prevented|failing)|"
-     r"(?:^|[.!?]\s*)quota failures?\b|"
+    (r"(?:^|[\n.!?]\s*)\s*(?:the )?automation credential is missing\b",
+     "hermes-maintenance-steward"),
+    (r"(?:^|[\n.!?]\s*)\s*(?:the )?gh auth failure\b",
+     "hermes-maintenance-steward"),
+    (r"(?:^|[\n.!?]\s*)\s*(?:the )?provider returned usage limits\b",
+     "hermes-maintenance-steward"),
+    (r"(?:^|[\n.!?]\s*)\s*(?:the )?(?:(?:workflow|provider|account|automation) )?(?:"
+     r"quota (?:is|was|has been) (?:exhausted|exceeded)|"
+     r"quota failures? (?:are|were|is|was)? ?(?:blocking|blocked|preventing|prevented|failing)|"
      r"usage limits (?:are|were|have been) (?:exceeded|exhausted)|"
      r"(?:quota|usage limits) (?:blocked|prevented|failed))\b",
      "hermes-maintenance-steward"),
-    (r"\blunabot diagnostics?\b[^.\n]{0,48}\b(?:failed|failure|error|blocked|unavailable)\b",
+    (r"(?:^|[\n.!?]\s*)\s*(?:the )?lunabot diagnostics? (?:"
+     r"failed|(?:has|have) failed|(?:is|are|was|were) (?:blocked|unavailable)|"
+     r"(?:returned|reported|encountered) (?:an )?error)\b",
      "hermes-maintenance-steward"),
 )
 
@@ -94,11 +100,11 @@ def repair_profile_for_task(title: Optional[str], body: Optional[str]) -> Option
     # stewardship jobs or their old quota failures. It grants no execution rights.
     if re.match(r"^model spend rebalance(?:\s*[:—–-]|\s*$)", title):
         return "resource-scheduler"
-    for pattern, profile in _OPERATIONAL_BLOCKER_RULES:
-        if re.search(pattern, text):
-            return profile
     for pattern, profile in _TITLE_INTAKE_RULES:
         if re.match(pattern, title):
+            for blocker_pattern, blocker_profile in _OPERATIONAL_BLOCKER_RULES:
+                if re.search(blocker_pattern, text):
+                    return blocker_profile
             return profile
     # A cron profile describes the evidence producer, not a scheduler defect.
     cron_title = re.search(r"\bcron\b(?!\W+profiles?\b)", title)

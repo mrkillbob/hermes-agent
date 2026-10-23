@@ -96,3 +96,39 @@ def test_explicit_profile_is_preserved_for_new_title_family(intake_board):
         assert route_orchestrator_task(conn, row, dry_run=False, result=result, board="intake") == "coding-expert"
         assert kb.get_task(conn, task_id).assignee == "coding-expert"
         assert result.routed_to_specialist == []
+
+
+def test_explicit_profile_bypasses_operational_blocker_routing(intake_board):
+    with kbc.connect(board="intake") as conn:
+        task_id = kb.create_task(conn, title="GitHub Actions pin drift: inspect", body="Usage limits were exceeded.",
+                                 assignee="coding-expert", board="intake")
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        result = kbd.DispatchResult()
+        assert route_orchestrator_task(conn, row, dry_run=False, result=result, board="intake") == "coding-expert"
+        assert kb.get_task(conn, task_id).assignee == "coding-expert"
+
+
+@pytest.mark.parametrize("workspace", ["scratch", "explicit-project", "board-project"])
+def test_blocker_routing_preserves_authoritative_workspace(intake_board, workspace):
+    board_repo, task_repo, task_project = intake_board
+    options = {"workspace_kind": "scratch"} if workspace == "scratch" else {}
+    if workspace == "explicit-project":
+        options["project_id"] = task_project
+    with kbc.connect(board="intake") as conn:
+        task_id = kb.create_task(
+            conn,
+            title="GitHub Actions pin drift: inspect",
+            body=f"Usage limits were exceeded.\nQuoted inventory: {board_repo}/notes.md and {task_repo}/notes.md",
+            assignee="task-intake-router",
+            board="intake",
+            **options,
+        )
+        before = kb.get_task(conn, task_id)
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        result = kbd.DispatchResult()
+        assert route_orchestrator_task(conn, row, dry_run=False, result=result, board="intake") == "hermes-maintenance-steward"
+        after = kb.get_task(conn, task_id)
+        assert after.assignee == "hermes-maintenance-steward"
+        assert (after.project_id, after.workspace_kind, after.workspace_path, after.branch_name) == (
+            before.project_id, before.workspace_kind, before.workspace_path, before.branch_name,
+        )
