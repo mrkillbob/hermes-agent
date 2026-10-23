@@ -33,6 +33,7 @@ _ROOT_ORIGINS = {
     "system": "system_or_schema",
     "instructions": "system_or_schema",
     "input": "user_task",
+    "response_format": "system_or_schema",
 }
 _ROOT_COLLECTIONS = {"messages": "messages", "input": "input"}
 
@@ -359,8 +360,18 @@ def _mapping_child_state(
         child_collection = _ROOT_COLLECTIONS.get(key)
         if key == "input" and effective_input_in_extra_body:
             child_collection = None
-        elif key == "extra_body" and effective_input_in_extra_body:
-            child_collection = "effective_responses_extra_body"
+        elif key == "extra_body":
+            child_collection = (
+                "effective_responses_extra_body"
+                if effective_input_in_extra_body
+                else "sdk_extra_body"
+            )
+    elif (
+        collection in {"effective_responses_extra_body", "sdk_extra_body"}
+        and key in _ROOT_ORIGINS
+        and _ROOT_ORIGINS[key] == "system_or_schema"
+    ):
+        origin = _ROOT_ORIGINS[key]
     elif collection == "effective_responses_extra_body" and key == "input":
         origin = "user_task"
         child_collection = "input"

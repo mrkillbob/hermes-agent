@@ -483,6 +483,70 @@ def test_mapping_key_attribution_matches_final_renderer_scan_inputs(
 
 
 @pytest.mark.parametrize(
+    ("placement", "content", "expected_reason", "expected_origin"),
+    [
+        pytest.param(placement, content, reason, "system_or_schema",
+                     id=f"{placement}-{label}")
+        for placement in ("top-level", "extra-body")
+        for label, content, reason in (
+            ("secret", "API_KEY=synthetic-schema-secret-3817", "secret_detected"),
+            ("private-path", "/Users/synthetic/.ssh/id_rsa", "private_absolute_path"),
+            ("base64", _ENCODED, "base64_payload"),
+        )
+    ]
+    + [
+        pytest.param("extra-body-tools", _ENCODED, "base64_payload", "system_or_schema",
+                     id="sdk-moved-tools-keep-schema-origin"),
+        pytest.param("extra-body-functions", _ENCODED, "base64_payload", "system_or_schema",
+                     id="sdk-extra-functions-keep-schema-origin"),
+        pytest.param("nested-user", "API_KEY=synthetic-nested-secret-3817",
+                     "secret_detected", "user_task", id="nested-user-content-is-not-schema"),
+        pytest.param("nested-tool", "API_KEY=synthetic-nested-tool-secret-3817",
+                     "secret_detected", "tool_result", id="nested-tool-content-is-not-schema"),
+    ],
+)
+def test_response_format_origin_tracks_only_schema_positions(
+    tmp_path, placement, content, expected_reason, expected_origin
+):
+    scanned_content = SanitizedSegment(content)
+    response_format = {"type": "json_schema", "json_schema": {
+        "name": "synthetic_schema", "schema": {"value": scanned_content}, "strict": False,
+    }}
+    payload = {
+        "top-level": {"response_format": response_format},
+        "extra-body": {"extra_body": {"response_format": response_format}},
+        "extra-body-tools": {"extra_body": {"tools": [{"type": "function", "function": {
+            "name": "synthetic_tool", "parameters": {"schema": scanned_content},
+        }}]}},
+        "extra-body-functions": {"extra_body": {"functions": [{
+            "name": "synthetic_tool", "parameters": {"schema": scanned_content},
+        }]}},
+        "nested-user": {"messages": [{"role": "user", "content": {
+            "response_format": {"json_schema": {"schema": {"value": scanned_content}}},
+        }}]},
+        "nested-tool": {"messages": [
+            {"role": "assistant", "tool_calls": [{"id": "schema-test-call", "type": "function",
+                "function": {"name": "synthetic_tool", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "schema-test-call", "content": {
+                "response_format": {"json_schema": {"schema": {"value": scanned_content}}},
+            }},
+        ]},
+    }[placement]
+
+    decision, receipt, authorization = _typed_firewall_result(
+        _agent(tmp_path), payload,
+        exact_secret_values=(_EXACT_SECRET,) if content == _EXACT_SECRET else (),
+    )
+
+    assert decision.allowed is False
+    assert expected_reason in decision.reason_codes
+    assert receipt["source_provenance_diagnostics"]["refusal_origins"] == [expected_origin]
+    assert authorization is None
+    diagnostics = json.dumps(receipt["source_provenance_diagnostics"], sort_keys=True)
+    assert content not in diagnostics
+
+
+@pytest.mark.parametrize(
     ("case", "segment_kind", "content", "expected_reason", "expected_origin"),
     [
         pytest.param(segment_kind + "-" + case, segment_kind, content, reason, origin,
