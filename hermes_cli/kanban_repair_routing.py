@@ -43,6 +43,86 @@ _OPERATIONAL_BLOCKER_RULES = (
      "hermes-maintenance-steward"),
 )
 
+_INVENTORY_LABEL = re.compile(
+    r"(?:^|(?<=[.!?]))\s*(?:inventory|quoted(?:\s+inventory)?)\s*:", re.IGNORECASE,
+)
+_FENCE_OPEN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_FENCE_CLOSE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
+_BLOCKQUOTE = re.compile(r"^\s{0,3}>")
+_BLOCKQUOTE_EMPTY = re.compile(r"^\s{0,3}>\s*$")
+
+
+def _fence_closes(line: str, marker: tuple[str, int]) -> bool:
+    """Whether a Markdown fence line closes the active fence."""
+    match = _FENCE_CLOSE.match(line)
+    return bool(match and match.group(1)[0] == marker[0] and len(match.group(1)) >= marker[1])
+
+
+def _retained_operational_segments(value: str) -> list[str]:
+    """Remove labeled inventory, Markdown quotes, and fenced examples."""
+    retained: list[str] = []
+    inventory = False
+    inventory_has_content = False
+    quoted_paragraph = False
+    fence: tuple[str, int] | None = None
+
+    for line in value.splitlines():
+        if fence:
+            if inventory and line.strip():
+                inventory_has_content = True
+            if _fence_closes(line, fence):
+                fence = None
+            continue
+
+        opening = _FENCE_OPEN.match(line)
+        if opening:
+            marker = opening.group(1)
+            fence = (marker[0], len(marker))
+            if inventory:
+                inventory_has_content = True
+            continue
+
+        if inventory:
+            if line.strip():
+                inventory_has_content = True
+            elif inventory_has_content:
+                inventory = False
+                inventory_has_content = False
+            continue
+
+        if _BLOCKQUOTE_EMPTY.match(line):
+            quoted_paragraph = False
+            continue
+        if quoted_paragraph:
+            if not line.strip():
+                quoted_paragraph = False
+            continue
+        if _BLOCKQUOTE.match(line):
+            quoted_paragraph = True
+            continue
+
+        label = _INVENTORY_LABEL.search(line)
+        if label:
+            prefix = line[:label.start()].strip()
+            if prefix:
+                retained.append(prefix)
+            inventory = True
+            inventory_has_content = bool(line[label.end():].strip())
+            continue
+
+        if line.strip():
+            retained.append(line)
+    return retained
+
+
+def _has_operational_blocker(segments: list[str]) -> bool:
+    """Check retained source segments independently for direct blockers."""
+    return any(
+        re.search(pattern, segment.casefold())
+        for segment in segments
+        for pattern, _profile in _OPERATIONAL_BLOCKER_RULES
+    )
+
 
 # Ordered from narrowest scope to broadest so a PR audit is not swallowed by
 # the generic cron or maintenance rules.
@@ -102,9 +182,12 @@ def repair_profile_for_task(title: Optional[str], body: Optional[str]) -> Option
         return "resource-scheduler"
     for pattern, profile in _TITLE_INTAKE_RULES:
         if re.match(pattern, title):
-            for blocker_pattern, blocker_profile in _OPERATIONAL_BLOCKER_RULES:
-                if re.search(blocker_pattern, text):
-                    return blocker_profile
+            delimiter = re.search(r":|[—–]|[ \t]+-[ \t]+", title)
+            title_clause = title[delimiter.end():] if delimiter else title
+            title_clause = re.sub(r"[—–]|[ \t]+-[ \t]+", "\n", title_clause)
+            if (_has_operational_blocker(_retained_operational_segments(title_clause))
+                    or _has_operational_blocker(_retained_operational_segments(body or ""))):
+                return "hermes-maintenance-steward"
             return profile
     # A cron profile describes the evidence producer, not a scheduler defect.
     cron_title = re.search(r"\bcron\b(?!\W+profiles?\b)", title)
