@@ -14,6 +14,14 @@ _TITLE_REPAIR_RULES = {
     "hermes-maintenance-steward": r"^repair broken \.venv runtime link in hermes-agent worktree\s+",
 }
 
+# These titles name assessment/diagnostic work directly. Body inventories can
+# quote unrelated jobs or repository paths, so they cannot establish this intent.
+_TITLE_INTAKE_RULES = (
+    (r"^(?:vite lock stale|regenerate python lock|local tooling refresh|github actions pin drift)"
+     r"(?:\s*[:—–]|\s+-\s+|\s*$)", "dependency-tooling-health-sentinel"),
+    (r"^diagnostic experiment:\s+.*\blunabot replay\b", "research-experiment-runner"),
+)
+
 
 # Ordered from narrowest scope to broadest so a PR audit is not swallowed by
 # the generic cron or maintenance rules.
@@ -71,6 +79,9 @@ def repair_profile_for_task(title: Optional[str], body: Optional[str]) -> Option
     # stewardship jobs or their old quota failures. It grants no execution rights.
     if re.match(r"^model spend rebalance(?:\s*[:—–-]|\s*$)", title):
         return "resource-scheduler"
+    for pattern, profile in _TITLE_INTAKE_RULES:
+        if re.match(pattern, title):
+            return profile
     # A cron profile describes the evidence producer, not a scheduler defect.
     cron_title = re.search(r"\bcron\b(?!\W+profiles?\b)", title)
     for needles, profile in _REPAIR_RULES:

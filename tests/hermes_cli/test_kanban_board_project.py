@@ -122,8 +122,8 @@ def _scratch_intake_task(conn, repo, board, body):
     return tid, row
 
 
-def test_routing_anchors_scratch_task_that_names_the_project_repo(fresh_home, tmp_path):
-    """A routed specialist must be able to read the repo path its card names."""
+def test_routing_preserves_scratch_task_that_quotes_the_project_repo(fresh_home, tmp_path):
+    """A body path is evidence, not authority to adopt the board's project."""
     from hermes_cli.kanban_worker_routing import route_orchestrator_task
 
     repo = tmp_path / "repo"
@@ -139,8 +139,8 @@ def test_routing_anchors_scratch_task_that_names_the_project_repo(fresh_home, tm
             "market-data-authority-auditor"
         )
         task = kb.get_task(conn, tid)
-        assert (task.project_id, task.workspace_kind) == (proj_id, "worktree")
-        assert task.workspace_path and task.branch_name
+        assert (task.project_id, task.workspace_kind) == (None, "scratch")
+        assert not task.workspace_path and not task.branch_name
 
         tid2, row2 = _scratch_intake_task(conn, repo, "scoped", "Stale market data authority freshness, no paths")
         route_orchestrator_task(conn, row2, dry_run=False, result=_Routed(), board="scoped")

@@ -6,24 +6,24 @@ from hermes_cli.kanban_repair_routing import repair_profile_for_task
 
 
 @pytest.mark.parametrize(("title", "body", "owner"), [
-    ("Vite lock stale: 3 fixed GHSAs pending (8.2.1 -> >=8.2.4) + routine npm refresh",
-     "frontend/package-lock.json; preserve the project and paid execution holds.",
-     None),
-    ("Regenerate Python lock: vulnerable locked deps lag security floors",
-     "requirements.txt, requirements.lock.txt, requirements-security-optional.txt on origin/stable.",
-     None),
+    ("Vite lock stale: inspect patched dependency floors",
+     "Assess package-lock.json drift within the existing project.",
+     "dependency-tooling-health-sentinel"),
+    ("Regenerate Python lock: assess a security floor mismatch",
+     "Inspect the project lock and report the bounded repair handoff.",
+     "dependency-tooling-health-sentinel"),
     ("Model spend rebalance: reclaim dead-model + disabled-job allocations, cap top-2 profiles, fix 429 contention",
      "Inventory includes LunaBot worktree governance, federation, cron, and state.db. Privacy hold remains.",
      "resource-scheduler"),
-    ("Local tooling refresh: pip-audit + serena first, then routine uv/brew minors",
-     "Separate repository pins from operator-owned installations; no execution grant.",
-     None),
-    ("GitHub Actions pin drift: setup-uv v7->v9, setup-python/node/upload-artifact minors",
-     "Resolve the repository before changing .github/workflows/ci.yml.",
-     None),
-    ("Diagnostic experiment: fee restatement + execution-policy attribution gap in LunaBot replay artifacts",
-     "Use offline replay evidence only; execution and paid experiment holds remain.",
-     None),
+    ("Local tooling refresh: inspect formatter version drift",
+     "Assess host and repository ownership before proposing changes.",
+     "dependency-tooling-health-sentinel"),
+    ("GitHub Actions pin drift: inspect a build action revision",
+     "Assess manifest drift and report compatibility evidence.",
+     "dependency-tooling-health-sentinel"),
+    ("Diagnostic experiment: compare timestamp normalization in LunaBot replay samples",
+     "Measure one offline hypothesis using repository-owned diagnostics.",
+     "research-experiment-runner"),
     ("Lunar City: undefined CSS class lunar-city-dialogue-camera-controls",
      "Existing wrapper fix needs evidence reconciliation before any new source task.", None),
     ("PR 348: preserve oversized guidance previews",
@@ -36,7 +36,7 @@ def test_intake_title_families_have_conservative_owners(title, body, owner):
 @pytest.mark.parametrize("family", [
     "Vite lock stale", "Regenerate Python lock",
     "Local tooling refresh", "GitHub Actions pin drift",
-    "Diagnostic experiment: fee restatement + execution-policy attribution gap",
+    "Diagnostic experiment: compare timestamp normalization in LunaBot replay samples",
 ])
 def test_new_families_in_quoted_body_do_not_claim_unknown_work(family):
     assert repair_profile_for_task("Investigate bounded task", f"Quoted source comment: {family}") is None
