@@ -10,14 +10,20 @@ class PoolClaimBindingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.ledger = FeedbackLedger(Path(self.temp.name) / "ledger.sqlite3")
+        self.ledger = FeedbackLedger(Path(self.temp.name).resolve() / "ledger.sqlite3")
         self.addCleanup(self.ledger._connection.close)
         self.now = datetime.now(UTC)
 
     def claim(self, *, now=None, owner=22):
-        return self.ledger.claim_worktree_slot(1, owner_pid=owner, head_sha="a" * 40,
-                                              claimed_at=now or self.now,
-                                              stale_before=self.now - timedelta(hours=1))
+        from github_pr_feedback.worktree_lifecycle import materialization_for
+        root = Path(self.temp.name).resolve()
+        with materialization_for(root, root / "slot", "fixture/repo", ledger=self.ledger.path, slot_id=1):
+            lease = self.ledger.claim_worktree_slot(1, owner_pid=owner, head_sha="a" * 40,
+                                                  claimed_at=now or self.now,
+                                                  stale_before=self.now - timedelta(hours=1))
+        if lease is not None:
+            self.current_lease = lease
+        return lease
 
     def row(self):
         return self.ledger._connection.execute(
@@ -26,7 +32,7 @@ class PoolClaimBindingTests(unittest.TestCase):
 
     def old_free_binding(self):
         old = self.claim()
-        self.ledger.bind_worktree_slot_task("a" * 40, "old-terminal-task", "default", slot_id=1)
+        self.ledger.bind_worktree_slot_task("a" * 40, "old-terminal-task", "default", slot_id=1, lease=self.current_lease)
         self.ledger.finish_worktree_slot(old)
         return old
 
@@ -42,7 +48,7 @@ class PoolClaimBindingTests(unittest.TestCase):
 
     def test_live_bound_lease_refuses_reclaim_even_when_time_is_stale(self):
         old = self.claim(now=self.now - timedelta(days=2))
-        self.ledger.bind_worktree_slot_task("a" * 40, "active-task", "default", slot_id=1)
+        self.ledger.bind_worktree_slot_task("a" * 40, "active-task", "default", slot_id=1, lease=self.current_lease)
         before = self.row()
         self.assertIsNone(self.claim(owner=33))
         self.assertEqual(self.row(), before)
@@ -59,7 +65,7 @@ class PoolClaimBindingTests(unittest.TestCase):
     def test_new_binding_records_only_new_task_and_board(self):
         self.old_free_binding()
         new = self.claim(owner=33)
-        self.ledger.bind_worktree_slot_task("a" * 40, "new-task", "tradingbot-burndown", slot_id=1)
+        self.ledger.bind_worktree_slot_task("a" * 40, "new-task", "tradingbot-burndown", slot_id=1, lease=self.current_lease)
         slots = self.ledger.leased_worktree_slots()
         self.assertEqual(len(slots), 1)
         self.assertEqual(slots[0]["task_id"], "new-task")

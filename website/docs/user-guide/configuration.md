@@ -1015,6 +1015,31 @@ not integrated. General `hermes worktree prune` also preserves manager-owned
 conversation worktrees. This prevents normal shutdown or generic garbage
 collection from deleting unfinished work.
 
+The owning native operator can use `session.worktree_cleanup` with `inspect`,
+`quarantine`, `restore`, or `reconcile`. Legacy `remove` refuses with an actionable
+preservation message: Git's ordinary non-force removal can silently delete late
+ignored files. No cleanup request implicitly resumes or dispatches a session.
+
+Explicit quarantine moves the exact idle owned worktree to a unique sibling on
+the same filesystem using supported Git. Its registration, branch, contents and
+owner evidence remain retained. Results say `removed: false`, `outcome: retained`
+and include `retained_path`; this does not reclaim disk space. Existing active,
+unknown, dirty, unpushed and identity guards remain conservative. Automatic
+failed-draft rollback preserves the draft in place rather than deleting or
+resetting it for recreation.
+
+A private durable receipt and the existing per-root cleanup intent fence new
+admissions and leases. The original binding and session history stay unchanged.
+Explicit restore moves only the verified retained tree back to an absent original
+path; it never overwrites replacements or bootstraps an environment. A later
+explicit resume can then use the original binding. Repeated requests report the
+verified prior outcome. `reconcile` only completes known bookkeeping after a
+recorded completed Git move; partial Git metadata, corrupt receipts, or uncertain
+native outcomes stay fenced with `outcome: unknown`. No automatic Git repair,
+recursive quarantine deletion, force removal or prune is performed. Ordinary late
+writes through open handles survive in the retained tree; arbitrary same-user
+filesystem interference is not a confinement guarantee.
+
 Config version 39 automatically moves the legacy
 `desktop.conversation_worktree` block to this top-level location. If both are
 present, the explicit top-level block wins and is preserved unchanged.

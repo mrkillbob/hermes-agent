@@ -263,6 +263,7 @@ def _tool_defs_cache_key(
     registry generation, config.yaml stat signature (dynamic schemas), kanban
     context, profile scope. check_fn results are TTL-cached in the registry.
     """
+    from tools.tool_presentation import current_frozen_editor_tool_names
     profile_scope = check_fn_cache_scope()
     if profile_scope == CHECK_FN_CACHE_BYPASS:
         return None
@@ -273,10 +274,11 @@ def _tool_defs_cache_key(
     except (FileNotFoundError, OSError, ImportError):
         cfg_fp = None
     return (
-        registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
+        registry.current_cache_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
         frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
         bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
         _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope,
+        current_frozen_editor_tool_names(),
     )
 
 
@@ -534,8 +536,14 @@ def _compute_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disa
     # Must be the LAST step (after sanitization); idempotent if called twice.
     try:
         from tools.tool_search import assemble_tool_defs, load_config as _load_ts_config
+        from tools.tool_presentation import current_frozen_editor_tool_names
         ts_cfg = _load_ts_config()
-        if not skip_tool_search_assembly and ts_cfg.enabled != "off":
+        # A frozen editor-only policy promises these exact schemas to the model.
+        # A narrowed or expanded catalog still follows ordinary progressive disclosure.
+        direct_names = current_frozen_editor_tool_names()
+        frozen_editor_catalog = direct_names is not None and direct_names == tuple(sorted(
+            tool['function']['name'] for tool in filtered_tools))
+        if not skip_tool_search_assembly and not frozen_editor_catalog and ts_cfg.enabled != "off":
             assembly = assemble_tool_defs(filtered_tools, context_length=_resolve_active_context_length(), config=ts_cfg)
             if assembly.activated and not quiet_mode:
                 print(f"🔎 Tool Search (tier {assembly.tier}): {assembly.deferred_count} "
