@@ -104,6 +104,81 @@ test('notifyError posts the full error to desktop.log, not the summary', () => {
   }
 })
 
+test('storage RPC logging keeps allowlisted diagnostics and excludes raw gateway details', () => {
+  const logLine = vi.fn()
+  const previous = (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+
+  const error = new JsonRpcGatewayError('Session storage is unavailable', {
+    code: 5000,
+    data: {
+      code: 'storage_unavailable',
+      cause: 'unknown',
+      details: 'C:\\private\\state.db prompt=private prompt session_id=private-session token=secret'
+    }
+  })
+
+  ;(window as unknown as { hermesDesktop: { logLine: typeof logLine } }).hermesDesktop = { logLine }
+
+  try {
+    notifyError(error, 'Session unavailable')
+
+    const line = logLine.mock.calls[0]?.[0] as string
+    expect(line).toContain('rpc_code=5000')
+    expect(line).toContain('storage_category=storage_unavailable')
+    expect(line).toContain('storage_cause=unknown')
+    expect(line).not.toContain('state.db')
+    expect(line).not.toContain('private prompt')
+    expect(line).not.toContain('private-session')
+    expect(line).not.toContain('secret')
+    expect(lastMessage()).toBe('Session storage is unavailable')
+  } finally {
+    if (previous === undefined) {
+      delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    } else {
+      ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = previous
+    }
+  }
+})
+
+test('storage RPC logging rejects unrecognized codes and redacts invalid causes', () => {
+  const logLine = vi.fn()
+
+  const previous = (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+
+  ;(window as unknown as { hermesDesktop: { logLine: typeof logLine } }).hermesDesktop = { logLine }
+
+  try {
+    notifyError(
+      new JsonRpcGatewayError('Session storage is unavailable', {
+        code: 5000,
+        data: { code: 'storage_unavailable', cause: 'C:\\private\\state.db token=secret' }
+      }),
+      'Session unavailable'
+    )
+
+    const storageLine = logLine.mock.calls[0]?.[0] as string
+    expect(storageLine).toContain('storage_cause=unclassified')
+    expect(storageLine).not.toContain('state.db')
+    expect(storageLine).not.toContain('secret')
+
+    notifyError(
+      new JsonRpcGatewayError('Session storage is unavailable', {
+        code: 4001,
+        data: { code: 'storage_unavailable', cause: 'unknown' }
+      }),
+      'Session unavailable'
+    )
+
+    expect(logLine.mock.calls[1]?.[0]).not.toContain('storage_rpc')
+  } finally {
+    if (previous === undefined) {
+      delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    } else {
+      ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = previous
+    }
+  }
+})
+
 test.each(['missing', 'closed'] as const)(
   'notifyError still shows a toast when the log bridge is %s',
   (state: 'missing' | 'closed'): void => {
