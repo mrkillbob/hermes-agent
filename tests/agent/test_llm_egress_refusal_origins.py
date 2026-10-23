@@ -98,6 +98,31 @@ def _request(case):
             {"role": "tool", "tool_call_id": "synthetic-call", "content": _ENCODED},
             {"role": "tool", "tool_call_id": "synthetic-call", "content": _ENCODED},
         ]},
+        "openai_composite_call_alias_result": {"messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call_synthetic|fc_synthetic", "type": "function",
+                "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call_synthetic", "content": _ENCODED},
+        ]},
+        "openai_ambiguous_call_alias": {"messages": [
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_synthetic|fc_first", "type": "function",
+                    "function": {"name": "terminal", "arguments": "{}"}},
+                {"id": "call_synthetic|fc_second", "type": "function",
+                    "function": {"name": "terminal", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "call_synthetic", "content": _ENCODED},
+        ]},
+        "openai_ambiguous_result_alias": {"messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call_synthetic|fc_synthetic", "type": "function",
+                "function": {"name": "terminal", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call_synthetic", "content": _ENCODED},
+            {"role": "tool", "tool_call_id": "fc_synthetic", "content": _ENCODED},
+        ]},
+        "openai_alias_result_before_call": {"messages": [
+            {"role": "tool", "tool_call_id": "call_synthetic", "content": _ENCODED},
+            {"role": "assistant", "tool_calls": [{"id": "call_synthetic|fc_synthetic", "type": "function",
+                "function": {"name": "terminal", "arguments": "{}"}}]},
+        ]},
         "openai_missing_function": {"messages": [
             {"role": "assistant", "tool_calls": [{"id": "synthetic-call", "type": "function"}]},
             {"role": "tool", "tool_call_id": "synthetic-call", "content": _ENCODED},
@@ -126,6 +151,10 @@ def _request(case):
             {"type": "function_call", "call_id": "synthetic-response-call", "name": "terminal",
                 "arguments": "{}"},
             {"type": "function_call_output", "call_id": "synthetic-response-call", "output": _ENCODED},
+        ]},
+        "responses_assistant_history_call": {"input": [
+            {"type": "function_call", "call_id": "synthetic-response-call",
+                "name": "terminal", "arguments": _ENCODED},
         ]},
         "responses_unpaired_tool_result": {"input": [
             {"type": "function_call_output", "call_id": "synthetic-response-call", "output": _ENCODED},
@@ -584,12 +613,17 @@ def test_verified_source_scan_attribution_is_request_scoped_and_non_disclosing(
         ("openai_non_string_call_id", "other"),
         ("openai_duplicate_tool_call_id", "other"),
         ("openai_duplicate_tool_result_id", "other"),
+        ("openai_composite_call_alias_result", "tool_result"),
+        ("openai_ambiguous_call_alias", "other"),
+        ("openai_ambiguous_result_alias", "other"),
+        ("openai_alias_result_before_call", "other"),
         ("openai_missing_function", "other"),
         ("openai_illtyped_function", "other"),
         ("openai_missing_function_name", "other"),
         ("openai_illtyped_arguments", "other"),
         ("openai_missing_arguments", "other"),
         ("responses_tool_result", "tool_result"),
+        ("responses_assistant_history_call", "assistant_history"),
         ("responses_unpaired_tool_result", "user_task"),
         ("responses_wrong_tool_result_id", "user_task"),
         ("responses_result_before_call", "user_task"),
@@ -661,6 +695,15 @@ def test_blocked_request_receipt_has_only_fixed_structural_origin(
     if case in {"spoofed_nested_role", "spoofed_nested_tool"}:
         assert "assistant" not in json.dumps(diagnostics)
         assert diagnostics["refusal_origins"] == ["user_task"]
+    if case in {
+        "openai_composite_call_alias_result", "openai_ambiguous_call_alias",
+        "openai_ambiguous_result_alias", "openai_alias_result_before_call",
+        "responses_assistant_history_call",
+    }:
+        assert decision.reason_codes == ("base64_payload",)
+        encoded_diagnostics = json.dumps(diagnostics, sort_keys=True)
+        for private_identifier in ("call_synthetic", "fc_synthetic", "synthetic-response-call"):
+            assert private_identifier not in encoded_diagnostics
 
 
 def test_origin_attribution_is_request_bound_non_disclosing_and_does_not_change_verdict(

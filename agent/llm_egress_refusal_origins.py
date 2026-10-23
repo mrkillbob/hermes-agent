@@ -154,26 +154,56 @@ def _literal(value: Any) -> str | None:
     return value if type(value) is str else None
 
 
+def _responses_function_call_is_well_formed(item: Mapping[str, Any]) -> bool:
+    """Recognize only the fixed Responses replay shape as assistant history."""
+    if _literal(item.get("type")) != "function_call":
+        return False
+    if not _literal(item.get("name")) or _literal(item.get("arguments")) is None:
+        return False
+    identifier = _literal(item.get("call_id"))
+    if not identifier:
+        return False
+    from agent.message_sanitization import tool_call_id_variants
+
+    return bool(tool_call_id_variants({"call_id": identifier}))
+
+
 def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
     """Return result objects with one preceding call and one matching result."""
     if not isinstance(value, Mapping):
         return frozenset()
-    calls: dict[tuple[str, str], list[int]] = {}
-    results: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    from agent.message_sanitization import tool_call_id_variants, tool_result_id_variants
+
+    calls: dict[str, list[tuple[frozenset[str], int]]] = {}
+    results: dict[str, list[tuple[frozenset[str], int, int]]] = {}
     position = 0
 
-    def add_call(kind: str, call_id: Any) -> None:
+    def add_call(kind: str, call_id: Any, call_entry: Any = None) -> None:
         nonlocal position
         identifier = _literal(call_id)
         if identifier:
-            calls.setdefault((kind, identifier), []).append(position)
+            aliases = {}
+            if isinstance(call_entry, Mapping):
+                aliases = {
+                    key: value
+                    for key in ("call_id", "id", "response_item_id")
+                    if (value := _literal(call_entry.get(key))) is not None
+                }
+            if not aliases:
+                key = "call_id" if kind == "responses_input" else "id"
+                aliases = {key: identifier}
+            variants = tool_call_id_variants(aliases)
+            if variants:
+                calls.setdefault(kind, []).append((variants, position))
         position += 1
 
     def add_result(kind: str, call_id: Any, item: Any) -> None:
         nonlocal position
         identifier = _literal(call_id)
         if identifier:
-            results.setdefault((kind, identifier), []).append((position, id(item)))
+            variants = tool_result_id_variants(identifier)
+            if variants:
+                results.setdefault(kind, []).append((variants, position, id(item)))
         position += 1
 
     def scan_messages(messages: Any) -> None:
@@ -197,7 +227,7 @@ def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
                                 and _literal(function.get("name"))
                                 and _literal(function.get("arguments")) is not None
                             ):
-                                add_call("chat", call.get("id"))
+                                add_call("chat", call.get("id"), call)
                 content = message.get("content")
                 if isinstance(content, (list, tuple)):
                     for block in content:
@@ -207,7 +237,7 @@ def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
                             and _literal(block.get("name"))
                             and isinstance(block.get("input"), Mapping)
                         ):
-                            add_call("anthropic", block.get("id"))
+                            add_call("anthropic", block.get("id"), {"id": block.get("id")})
             elif role == "tool":
                 add_result("chat", message.get("tool_call_id"), message)
             elif role == "user":
@@ -224,24 +254,29 @@ def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
             if not isinstance(item, Mapping):
                 continue
             item_type = _literal(item.get("type"))
-            if item_type == "function_call":
-                if (
-                    _literal(item.get("name"))
-                    and _literal(item.get("arguments")) is not None
-                ):
-                    add_call("responses_input", item.get("call_id"))
+            if _responses_function_call_is_well_formed(item):
+                add_call("responses_input", item.get("call_id"), item)
             elif item_type == "function_call_output":
                 add_result("responses_input", item.get("call_id"), item)
 
     valid_refs = set()
-    for key, result_entries in results.items():
-        call_entries = calls.get(key, ())
-        if (
-            len(call_entries) == 1
-            and len(result_entries) == 1
-            and call_entries[0] < result_entries[0][0]
-        ):
-            valid_refs.add((key[0], result_entries[0][1]))
+    for kind, result_entries in results.items():
+        call_entries = calls.get(kind, ())
+        for result_variants, result_position, result_object_id in result_entries:
+            matching_calls = [
+                (call_variants, call_position)
+                for call_variants, call_position in call_entries
+                if call_variants & result_variants
+            ]
+            if len(matching_calls) != 1:
+                continue
+            call_variants, call_position = matching_calls[0]
+            matching_results = [
+                result for result in result_entries
+                if result[0] & call_variants
+            ]
+            if len(matching_results) == 1 and call_position < result_position:
+                valid_refs.add((kind, result_object_id))
     return frozenset(valid_refs)
 
 
@@ -295,6 +330,8 @@ def _sequence_child_state(
                 else inherited
             )
             return origin, True
+        if collection == "input" and _responses_function_call_is_well_formed(child):
+            return "assistant_history", True
         return _message_origin(child, valid_tool_result_refs), True
     if collection == "anthropic_user_content":
         return _anthropic_content_origin(child, inherited, valid_tool_result_refs), False
