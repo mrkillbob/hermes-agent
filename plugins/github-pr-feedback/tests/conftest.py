@@ -28,9 +28,16 @@ def pytest_configure(config):
     patch.setenv("HERMES_TEST_ISOLATION", str(Path(sandbox.name) / ".hermes"))
     config.add_cleanup(sandbox.cleanup)
     config.add_cleanup(patch.undo)
+    config.addinivalue_line("markers", "platforms(*specs, arch=None, arch_negate=False): native platform gating")
 
 
 def pytest_collection_modifyitems(config, items):
+    from tests._fixtures.platform_gating import _platforms_gate_reason, _reject_contradictory_platform_marks
+    _reject_contradictory_platform_marks(items)
+    for item in items:
+        reason = _platforms_gate_reason(item)
+        if reason is not None:
+            item.add_marker(pytest.mark.skip(reason=reason))
     host = sys.platform
     os_marks = {
         "windows_only": (host == "win32", "native Windows"),
@@ -46,3 +53,22 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if item.get_closest_marker(mark_name) is not None:
                 item.add_marker(skip)
+
+
+@pytest.fixture
+def retirement_linked(tmp_path):
+    import os
+    from retirement_fixtures import git
+    source, workspace = tmp_path / "source", tmp_path / "slot"
+    source.mkdir()
+    git(source, "init", "--quiet")
+    git(source, "config", "user.name", "Fixture")
+    git(source, "config", "user.email", "fixture@example.invalid")
+    git(source, "config", "core.hooksPath", os.devnull)
+    git(source, "remote", "add", "origin", "https://github.com/fixture/repo.git")
+    (source / "tracked").write_text("base\n", encoding="utf-8")
+    (source / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
+    git(source, "add", ".")
+    git(source, "commit", "--quiet", "-m", "fixture")
+    git(source, "worktree", "add", "--quiet", "-b", "occupant", str(workspace))
+    return source, workspace

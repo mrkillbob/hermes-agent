@@ -17,6 +17,7 @@ from pathlib import Path
 import psutil
 
 from .policy import FeedbackReceipt
+from .ledger_pool import PoolLedgerMixin
 
 _SQLITE_BUSY_TIMEOUT_MS = 5_000
 _SQLITE_WAL_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
@@ -301,7 +302,7 @@ def _connect_ledger(path: Path) -> sqlite3.Connection:
     raise AssertionError("unreachable ledger startup retry state")
 
 
-class FeedbackLedger:
+class FeedbackLedger(PoolLedgerMixin):
     """SQLite-backed state for one profile; all receipt transitions are atomic."""
 
     def __init__(self, path: Path) -> None:
@@ -1825,131 +1826,6 @@ class FeedbackLedger:
             )
             if result.rowcount != 1:
                 raise LedgerStateError("CI run lease is not held")
-
-    def claim_worktree_slot(
-        self,
-        slot_id: int,
-        *,
-        owner_pid: int,
-        head_sha: str | None,
-        claimed_at: datetime,
-        stale_before: datetime,
-    ) -> WorktreeSlotLease | None:
-        """Claim one worktree-pool slot, fencing a not-yet-stale lease.
-
-        Deliberately time-only, unlike claim_ci_run's PID-liveness check: a
-        worktree-pool slot is handed off to a *dispatched Kanban agent task*
-        that outlives the short-lived dispatcher process making this call, so
-        the dispatcher's own PID going away is not evidence the slot is
-        free -- only elapsed time against stale_before is. Callers must pass
-        a stale_before comfortably longer than the longest task
-        max_runtime_seconds that can hold a slot.
-        """
-
-        if owner_pid < 2:
-            raise ValueError("worktree slot owner PID must identify a real process")
-        claimed = _aware_utc(claimed_at, "claimed_at")
-        stale = _aware_utc(stale_before, "stale_before")
-        with self._transaction():
-            row = self._connection.execute(
-                "SELECT status, owner_pid, updated_at, lease_version, task_id "
-                "FROM worktree_pool_slots WHERE slot_id = ?",
-                (slot_id,),
-            ).fetchone()
-            version = 1
-            if row is not None:
-                version = int(row[3]) + 1
-                if row[0] == "leased":
-                    # A bound Kanban task owns this checkout until the board
-                    # positively reports that task terminal and
-                    # reconcile_leases releases it.  Time-based reclamation is
-                    # only safe for an unbound lease stranded mid-dispatch;
-                    # retryable blocked/triage cards may legitimately outlive
-                    # the timeout and must retain their exact-head workspace.
-                    if row[4] is not None:
-                        return None
-                    updated_at = datetime.fromisoformat(str(row[2]))
-                    if updated_at >= stale:
-                        return None
-                self._connection.execute(
-                    "UPDATE worktree_pool_slots SET status = 'leased', owner_pid = ?, "
-                    "head_sha = ?, claimed_at = ?, updated_at = ?, lease_version = ?, "
-                    "task_id = NULL, board = NULL WHERE slot_id = ?",
-                    (owner_pid, head_sha, claimed.isoformat(), claimed.isoformat(), version, slot_id),
-                )
-            else:
-                self._connection.execute(
-                    "INSERT INTO worktree_pool_slots (slot_id, status, owner_pid, head_sha, "
-                    "claimed_at, updated_at, lease_version) VALUES (?, 'leased', ?, ?, ?, ?, ?)",
-                    (slot_id, owner_pid, head_sha, claimed.isoformat(), claimed.isoformat(), version),
-                )
-        return WorktreeSlotLease(slot_id, version, owner_pid)
-
-    def finish_worktree_slot(self, lease: WorktreeSlotLease) -> None:
-        """Release a held slot back to the free pool. Idempotent no-op if the
-
-        lease was already reclaimed by orphan recovery (never raises --
-        releasing a slot you no longer hold is not an error, unlike failing a
-        CI run you no longer hold).
-        """
-
-        with self._transaction():
-            self._connection.execute(
-                "UPDATE worktree_pool_slots SET status = 'free', updated_at = ? "
-                "WHERE slot_id = ? AND lease_version = ? AND owner_pid = ? AND status = 'leased'",
-                (
-                    _aware_utc(datetime.now(UTC), "updated_at").isoformat(),
-                    lease.slot_id,
-                    lease.version,
-                    lease.owner_pid,
-                ),
-            )
-
-    def bind_worktree_slot_task(
-        self,
-        head_sha: str,
-        task_id: str,
-        board: str,
-        *,
-        slot_id: int | None = None,
-    ) -> None:
-        """Record which dispatched Kanban task now owns a leased slot.
-
-        Best-effort by design: if the slot was already reconciled away (or a
-        non-pooled LocalGit is in use and no such slot exists), this is a
-        silent no-op rather than an error -- proactive release is an
-        optimization over the lease timeout, not a correctness requirement.
-        """
-
-        with self._transaction():
-            where = "head_sha = ? AND status = 'leased'"
-            parameters: tuple[object, ...] = (task_id, board, head_sha)
-            if slot_id is not None:
-                where += " AND slot_id = ?"
-                parameters += (slot_id,)
-            self._connection.execute(
-                f"UPDATE worktree_pool_slots SET task_id = ?, board = ? WHERE {where}",
-                parameters,
-            )
-
-    def leased_worktree_slots(self) -> tuple[dict[str, object], ...]:
-        """List every currently-leased slot with an attached task binding."""
-
-        rows = self._connection.execute(
-            "SELECT slot_id, lease_version, owner_pid, task_id, board "
-            "FROM worktree_pool_slots WHERE status = 'leased' AND task_id IS NOT NULL "
-            "AND board IS NOT NULL"
-        ).fetchall()
-        return tuple(
-            {
-                "slot_id": int(row[0]),
-                "lease_version": int(row[1]),
-                "owner_pid": int(row[2]),
-                "task_id": row[3],
-                "board": row[4],
-            }
-            for row in rows
-        )
 
     def latest_ci_run(
         self, repository: str, pr_number: int, head_sha: str
