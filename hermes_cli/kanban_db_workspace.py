@@ -7,17 +7,19 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import time
 import unicodedata
 from pathlib import Path
-from typing import Optional
-from typing import TYPE_CHECKING
-import contextlib
+from typing import TYPE_CHECKING, Optional
 
 from hermes_cli.worktree_ops import release_lsp_clients
 
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
 _REMOVABLE_KINDS = ("scratch", "worktree")
+_ARCHIVED_BOARD_MARKER_READ_CHUNK = 8 * 1024
 
 
 def _path_key(path: Path | str | None) -> str:
@@ -137,7 +140,9 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     root = _kb.boards_root()
     if root.is_dir():
         for child in root.iterdir():
-            if child.is_dir():
+            if child.name == "_archived":
+                candidates.extend(_archived_board_db_files(child))
+            elif child.is_dir():
                 candidates.append(child / "kanban.db")
     found: list[Path] = []
     seen: set[Path] = set()
@@ -152,6 +157,79 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
         seen.add(resolved)
         found.append(resolved)
     return found
+
+
+def _archived_board_db_files(archive_root: Path) -> list[Path]:
+    """Return concrete archived board DBs; the container itself is not a board.
+
+    Archiving moves a complete board directory beneath ``_archived``. Require
+    its durable board marker and database rather than silently dropping legacy
+    or malformed history from the workspace-ownership scan.
+    """
+    if not archive_root.is_dir():
+        raise OSError("archived boards container is not a directory")
+    container_db = archive_root / "kanban.db"
+    if container_db.exists() and container_db.stat().st_size:
+        raise OSError("unexpected database at archived boards container root")
+
+    archived: list[Path] = []
+    for directory in archive_root.iterdir():
+        if not directory.is_dir():
+            continue
+        marker = directory / "board.json"
+        database = directory / "kanban.db"
+        if not marker.is_file() or not database.is_file():
+            raise OSError("archived board entry is missing its marker or database")
+        try:
+            slug = _kb._require_slug(_read_archived_board_marker(marker))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
+            raise OSError("archived board marker is invalid") from None
+        if not slug or not re.fullmatch(rf"{re.escape(slug)}-\d{{10}}(?:-[1-9]\d*)?", directory.name):
+            raise OSError("archived board marker does not match its directory")
+        archived.append(database)
+    return archived
+
+
+def _read_archived_board_marker(path: Path) -> object:
+    """Read only the board identity while streaming and checking marker stability."""
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("archived board marker is not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+    except OSError:
+        raise OSError("archived board marker cannot be safely opened") from None
+    try:
+        opened = os.fstat(fd)
+        if not _same_archive_marker_file(before, opened):
+            raise OSError("archived board marker changed while opening")
+        raw_file = os.fdopen(fd, "rb", closefd=False)
+        text_file = io.TextIOWrapper(raw_file, encoding="utf-8-sig")
+        try:
+            from hermes_cli.kanban_archive_marker import read_board_slug
+
+            slug = read_board_slug(text_file, chunk_size=_ARCHIVED_BOARD_MARKER_READ_CHUNK)
+        finally:
+            text_file.detach()
+            raw_file.close()
+        after = os.fstat(fd)
+        path_after = path.lstat()
+        if (not _same_archive_marker_file(opened, after)
+                or not _same_archive_marker_file(opened, path_after)):
+            raise OSError("archived board marker changed while reading")
+        return slug
+    finally:
+        os.close(fd)
+
+
+def _same_archive_marker_file(left, right) -> bool:
+    return (
+        stat.S_ISREG(left.st_mode)
+        and stat.S_ISREG(right.st_mode)
+        and (left.st_dev, left.st_ino, left.st_size, left.st_mtime_ns, left.st_ctime_ns)
+        == (right.st_dev, right.st_ino, right.st_size, right.st_mtime_ns, right.st_ctime_ns)
+    )
 
 
 def _other_board_uses_path(db_file: Path, task_id: str, key: str) -> bool:

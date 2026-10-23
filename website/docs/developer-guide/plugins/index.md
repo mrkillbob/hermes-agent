@@ -976,7 +976,7 @@ Config and state have different owners: settings are user-visible behavior in
 
 ### Passive Kanban snapshots
 
-`ctx.kanban_readonly_snapshot(board, *, idempotency_key=None, idempotency_prefix=None)`
+`ctx.kanban_readonly_snapshot(board, *, idempotency_key=None, idempotency_prefix=None, row_projector=None)`
 is an additive in-process capability for unfenced control-plane plugins. It binds
 an explicit existing board to the registered owning home and refuses conflicting
 active/native roots, worker/delegation identity or path pins (including empty
@@ -992,10 +992,28 @@ archived rows. The selectors are mutually exclusive, nonempty text of at most
 512 characters; prefixes have no wildcard semantics. Plugins own the meaning of
 their keys and any domain-specific parsing or reconciliation.
 
+An optional trusted in-process `row_projector` callable can qualify each original
+row and return a compact dictionary, without retaining or returning unrelated
+body prose. It requires a selector and is not a serialized API, authorization
+capability, or permission to skip malformed rows. Exceptions refuse the complete
+snapshot. The original per-row byte, row-count and deadline bounds still apply;
+the aggregate returned-byte bound applies to the projected representation. For
+avoidance of doubt, original input processed can exceed 8 MiB. Projection changes
+the former all-column aggregate accounting to retained/returned encoded result
+size; it does not preserve an 8 MiB aggregate raw-processing cap. Every original
+row still must qualify within the per-row, row-count and deadline bounds. For
+example, the feedback plugin validates every legacy key and receipt hash before
+projecting identity proofs, including archived tasks. It does not cache or grant
+trust to those proofs. Database changes during enumeration and changes to the
+owner root, board marker or database identity fail closed at final revalidation.
+Board markers must be regular files of at most 64 KiB; bounded reads verify
+path/descriptor identity and unchanged size/timestamps within the same deadline.
+
 Reads use one existing canonical SQLite file in `mode=ro`, with query-only and
 trusted-schema restrictions. No initialization, migration, readiness update,
 current-board change or fallback occurs. A snapshot either completes within
-10,000 rows, 8 MiB of encoded task rows, 1 MiB per row and one second, or raises
+10,000 rows, 8 MiB of encoded returned rows, 1 MiB per original/returned row
+and one second, or raises
 `ValueError` without partial data. Returned values are JSON-safe dictionaries,
 strings and scalar values, never live database objects. Missing schema or
 unavailable/unsupported contexts fail closed. Normal SQLite coordination may

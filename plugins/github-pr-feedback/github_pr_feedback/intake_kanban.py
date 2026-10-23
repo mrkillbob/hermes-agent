@@ -126,8 +126,9 @@ class IntakeKanban:
             raise IntakeError("legacy identity exceeds host request bound")
         deadline = intake_history._monotonic() + intake_history._LEGACY_INDEX_SECONDS
         rows = read_snapshot(self._context, board, expected_root=self._expected_root,
-                             idempotency_prefix="github-pr-feedback:")["tasks"]
-        return intake_history.legacy_matches(rows, identity, deadline=deadline)
+                             idempotency_prefix="github-pr-feedback:",
+                             row_projector=intake_history.project_legacy_receipt)["tasks"]
+        return intake_history.legacy_matches(rows, identity, deadline=deadline, projected=True)
 
     def create(self, card):
         self.prepare_create(card)
