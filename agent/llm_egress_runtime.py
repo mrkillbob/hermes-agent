@@ -857,10 +857,18 @@ def _recognized_native_nonterminal_bindings(
             admitted_ids.update(ids)
             admitted_objects.update(objects)
 
-    input_items = body.get("input", [])
+    extra_body = body.get("extra_body")
+    if isinstance(extra_body, Mapping) and "input" in extra_body:
+        # The OpenAI SDK merges extra_body after its typed JSON body, with the
+        # extra mapping winning duplicate keys. Bind native Responses results
+        # against that exact effective wire field; scanning both copies could
+        # let an aliased result object borrow a call from the overwritten input.
+        input_items = extra_body.get("input")
+    else:
+        input_items = body.get("input", [])
     if isinstance(input_items, (list, tuple)):
-        # Responses API has explicit top-level function_call and
-        # function_call_output items. No nested/body-global shape inference.
+        # Responses API has explicit function_call and function_call_output
+        # items. No nested/body-global shape inference.
         ids, objects = scan_frames(
             input_items, call_frame=responses_call, result_frame=responses_result
         )

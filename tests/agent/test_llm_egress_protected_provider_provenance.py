@@ -373,6 +373,61 @@ def test_registered_session_native_results_are_admitted_by_explicit_protocol(
     callback.assert_not_called()
 
 
+def test_registered_session_responses_frames_are_admitted_after_sdk_bypass(
+    tmp_path, monkeypatch, _native_provider_dispatch_context
+):
+    """The exact Responses wire input moved to extra_body keeps its call binding."""
+    from tools.registry import session_tool_scope
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    body, _, _ = _native_protocol_frames("responses", "bounded synthetic output")
+    request = {"extra_body": {"input": body.pop("input")}}
+    callback = MagicMock(return_value="allowed")
+    with session_tool_scope(_NATIVE_PARITY_SCOPE):
+        assert _dispatch_provider_request(
+            _agent(tmp_path, provider="nous", api_mode="responses"), request, callback
+        ) == "allowed"
+    callback.assert_called_once()
+
+    for rejected in ("token=synthetic-secret-value", "c2VjcmV0LXBheWxvYWQ="):
+        unsafe, _, _ = _native_protocol_frames("responses", rejected)
+        callback.reset_mock()
+        with session_tool_scope(_NATIVE_PARITY_SCOPE), pytest.raises(EgressBlocked):
+            _dispatch_provider_request(
+                _agent(tmp_path, provider="nous", api_mode="responses"),
+                {"extra_body": {"input": unsafe.pop("input")}},
+                callback,
+            )
+        callback.assert_not_called()
+
+
+def test_responses_extra_body_override_cannot_borrow_top_level_call_id(
+    tmp_path, monkeypatch, _native_provider_dispatch_context
+):
+    """Only the effective SDK-merged input may bind a direct native result."""
+    from tools.registry import session_tool_scope
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    top_level, _, result = _native_protocol_frames(
+        "responses", "bounded synthetic output"
+    )
+    # The SDK merges extra_body after the typed JSON, so this output replaces
+    # the valid top-level call/output pair. Reusing the same object also checks
+    # that identity-based result admission cannot borrow across the collision.
+    request = {
+        "input": top_level["input"],
+        "extra_body": {"input": [result]},
+    }
+    callback = MagicMock(return_value="allowed")
+    with session_tool_scope(_NATIVE_PARITY_SCOPE), pytest.raises(EgressBlocked):
+        _dispatch_provider_request(
+            _agent(tmp_path, provider="nous", api_mode="responses"), request, callback
+        )
+    callback.assert_not_called()
+
+
 @pytest.mark.parametrize("protocol", ["chat", "anthropic", "responses"])
 @pytest.mark.parametrize(
     "invalid_case",
