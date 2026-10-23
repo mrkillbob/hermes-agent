@@ -51,6 +51,8 @@ def _fire_pre_api_request_hook(
     try:
         from hermes_cli.lifecycle import has_hook, invoke_hook as _invoke_hook
         if has_hook("pre_api_request"):
+            from agent.llm_egress_lineage import barrier
+            barrier()
             request_messages = api_kwargs.get("messages")
             if not isinstance(request_messages, list):
                 request_messages = api_kwargs.get("input")
@@ -141,6 +143,10 @@ def build_api_request(
         agent._is_user_initiated_turn = False
     try:
         from hermes_cli.middleware import apply_llm_request_middleware
+        from hermes_cli.plugins import has_middleware
+        if has_middleware("llm_request"):
+            from agent.llm_egress_lineage import barrier
+            barrier()
 
         _llm_request_mw = apply_llm_request_middleware(
             api_kwargs, task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,

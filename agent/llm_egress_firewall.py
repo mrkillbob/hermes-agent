@@ -1853,7 +1853,7 @@ class LLMEgressFirewall:
                 api_mode=api_mode,
                 grant_digests=tuple(source_grant_digest(grant) for grant in valid_grants),
             )
-            self._block(decision, valid_grants)
+            self._block(decision, valid_grants, request)
 
         serialized_bytes = len(serialized)
         estimated_tokens = (
@@ -1922,10 +1922,10 @@ class LLMEgressFirewall:
             grant_digests=tuple(source_grant_digest(grant) for grant in valid_grants),
         )
         if not decision.allowed:
-            self._block(decision, valid_grants)
+            self._block(decision, valid_grants, request)
 
         try:
-            self._append_receipt(decision, valid_grants)
+            self._append_receipt(decision, valid_grants, request)
         except OSError:
             raise EgressBlocked(
                 replace(decision, allowed=False, reason_codes=("receipt_unavailable",))
@@ -2256,10 +2256,10 @@ class LLMEgressFirewall:
     def _block(
         self,
         decision: EgressDecision,
-        grants: Sequence[SourceGrant] = (),
+        grants: Sequence[SourceGrant] = (), request: Mapping[str, Any] | TypedOutboundRequest | None = None,
     ) -> None:
         try:
-            self._append_receipt(decision, grants)
+            self._append_receipt(decision, grants, request)
         except OSError:
             decision = replace(
                 decision,
@@ -2270,7 +2270,7 @@ class LLMEgressFirewall:
     def _append_receipt(
         self,
         decision: EgressDecision,
-        grants: Sequence[SourceGrant],
+        grants: Sequence[SourceGrant], request: Mapping[str, Any] | TypedOutboundRequest | None = None,
     ) -> None:
         try:
             if self._state_dir.is_symlink():
@@ -2294,8 +2294,8 @@ class LLMEgressFirewall:
             receipt[field] = _receipt_identifier(receipt[field])
         from agent.source_grant_verification import grant_receipt_fields
         receipt['source_grants'] = [grant_receipt_fields(grant) for grant in grants]
-        from agent.source_provenance_diagnostics import append_receipt_diagnostics
-        append_receipt_diagnostics(receipt, decision)
+        from agent.llm_egress_request_diagnostics import append_private_receipt_diagnostics
+        append_private_receipt_diagnostics(receipt, decision, request=request)
         flags = os.O_APPEND | os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW

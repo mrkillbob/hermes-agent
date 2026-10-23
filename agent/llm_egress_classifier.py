@@ -448,7 +448,8 @@ def _typed_payload(value: Any, grant_texts: Sequence[tuple[str, SourceGrant]], u
         return _typed_payload_string(value, grant_texts, used_grants, **kwargs)
     if isinstance(value, (list, tuple)):
         return _typed_payload_sequence(value, grant_texts, used_grants, **kwargs)
-    return _typed_payload_mapping(value, grant_texts, used_grants, **kwargs)
+    from agent.llm_egress_lineage import transfer
+    return transfer(_typed_payload_mapping(value, grant_texts, used_grants, **kwargs), value)
 
 
 def _is_native_nonterminal_result(

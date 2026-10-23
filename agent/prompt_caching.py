@@ -85,6 +85,11 @@ def _scaffold_parts(msg: dict, cache_marker: dict | None = None) -> list | None:
     return None if prefix is None else [_text_part(prefix, cache_marker), _text_part(content[len(prefix):])]
 
 
+def _lineage_copy(message):
+    from agent.llm_egress_lineage import transfer
+    return transfer(copy.deepcopy(message), message)
+
+
 def _split_unmarked_scaffolds(messages: list[dict[str, Any]]) -> None:
     """Send every registered scaffold message as [scaffold, tail] parts, marked or not (in place).
 
@@ -96,7 +101,8 @@ def _split_unmarked_scaffolds(messages: list[dict[str, Any]]) -> None:
     """
     for i, msg in enumerate(messages):
         if isinstance(msg, dict) and (parts := _scaffold_parts(msg)):
-            messages[i] = {**msg, "content": parts}
+            from agent.llm_egress_lineage import transfer
+            messages[i] = transfer({**msg, "content": parts}, msg)
 
 
 def _can_carry_marker(msg: dict, native_anthropic: bool, tool_part_markers: bool = True) -> bool:
@@ -254,7 +260,8 @@ def _strip_prior_decoration(messages: list[dict[str, Any]]) -> list[dict[str, An
     """
     for i, msg in enumerate(messages):
         if isinstance(msg, dict) and ("cache_control" in msg or isinstance(msg.get("content"), list)):
-            messages[i] = strip_anthropic_cache_control([dict(msg)])[0]
+            from agent.llm_egress_lineage import transfer
+            messages[i] = transfer(strip_anthropic_cache_control([dict(msg)])[0], msg)
     return messages
 
 
@@ -330,12 +337,12 @@ def build_prompt_cache_plan(
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
         # Tool-cache layout: only the static prefix carries a system-side marker; the
         # volatile suffix's budget is spent on the tools array.
-        messages[0] = copy.deepcopy(messages[0])
+        messages[0] = _lineage_copy(messages[0])
         _apply_system_cache_markers(messages[0], marker, static_system_prefix,
                                     native_anthropic=True, mark_suffix=False, fallback_to_whole=False)
     planned_tools[-1]["cache_control"] = dict(marker)
     for endpoint in _completed_transaction_endpoint_indexes(messages, native_anthropic=True)[-2:]:
-        messages[endpoint] = copy.deepcopy(messages[endpoint])
+        messages[endpoint] = _lineage_copy(messages[endpoint])
         _apply_cache_marker(messages[endpoint], marker, native_anthropic=True)
     _split_unmarked_scaffolds(messages)
 
@@ -363,14 +370,14 @@ def apply_anthropic_cache_control(
 
     breakpoints_used = 0
     if messages[0].get("role") == "system":
-        messages[0] = copy.deepcopy(messages[0])
+        messages[0] = _lineage_copy(messages[0])
         breakpoints_used = _apply_system_cache_markers(messages[0], marker, static_system_prefix,
                                                        native_anthropic=native_anthropic)
 
     non_sys = [i for i, m in enumerate(messages) if m.get("role") != "system"
                and _can_carry_marker(m, native_anthropic=native_anthropic, tool_part_markers=tool_part_markers)]
     for idx in non_sys[-(4 - breakpoints_used):]:
-        messages[idx] = copy.deepcopy(messages[idx])
+        messages[idx] = _lineage_copy(messages[idx])
         _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic, tool_part_markers=tool_part_markers)
     _split_unmarked_scaffolds(messages)
 

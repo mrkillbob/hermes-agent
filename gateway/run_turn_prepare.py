@@ -351,6 +351,14 @@ class GatewayTurnPrepareMixin:
                 if captured is not None:
                     captured['result'] = {'final_response': '', 'messages': [], 'interrupted': True}
                 return
+        diagnostic_claim = getattr(event, "_diagnostic_claim", None)
+        if isinstance(diagnostic_claim, tuple) and len(diagnostic_claim) == 4:
+            from agent.llm_egress_request_diagnostics import verify_current_claimed_turn
+            claim_authority, claim_owner, claim_generation, claim_scope = diagnostic_claim
+            verify_current_claimed_turn(
+                claim_authority, claim_owner, claim_generation, source,
+                session_entry.session_id, expected_scope=claim_scope,
+            )
         if not strict_session and pinned_session_id:
             resolved_entry = await self._resolve_async_delegation_session(session_entry, pinned_session_id, event_metadata.get("gateway_proven_session_id") or "", event_metadata.get("gateway_completion_ids") or ())
             if resolved_entry is None:

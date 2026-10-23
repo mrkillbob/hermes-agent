@@ -383,9 +383,10 @@ def admission(agent, route, body, typed, admitted_calls, admitted_results, *, en
 
     def project(original, classified):
         if isinstance(original, dict) and isinstance(classified, dict):
-            return {key: replacements.get((id(original), getattr(key, "text", key)),
+            from agent.llm_egress_lineage import transfer
+            return transfer({key: replacements.get((id(original), getattr(key, "text", key)),
                 project(original.get(getattr(key, "text", key)), value))
-                for key, value in classified.items()}
+                for key, value in classified.items()}, classified)
         if isinstance(original, (list, tuple)) and isinstance(classified, (list, tuple)):
             return [project(a, b) for a, b in zip(original, classified)] if len(original) == len(classified) else classified
         return classified

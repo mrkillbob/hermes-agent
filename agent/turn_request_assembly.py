@@ -36,6 +36,7 @@ class AssembledRequest:
     approx_tokens: Any
     request_pressure_tokens: Any
     total_chars: Any
+    _diagnostic_assembly: Any = None
 
 
 def _append_moa_context(agent: Any, api_messages: Any, moa_config: Any, original_user_message: Any) -> None:
@@ -109,6 +110,31 @@ def assemble_api_request(
     _plugin_user_context: Any, moa_config: Any, active_system_prompt: Any,
     original_user_message: Any, pending_moa_prepared_request: Any, request_logger: Any,
 ) -> AssembledRequest:
+    from agent.llm_egress_lineage import assembly_context, begin_assembly
+    assembly = begin_assembly(agent, messages, current_turn_user_idx)
+    try:
+        with assembly_context(assembly):
+            result = _assemble_api_request(
+                agent, messages=messages, current_turn_user_idx=current_turn_user_idx,
+                _ext_prefetch_cache=_ext_prefetch_cache, _plugin_user_context=_plugin_user_context,
+                moa_config=moa_config, active_system_prompt=active_system_prompt,
+                original_user_message=original_user_message,
+                pending_moa_prepared_request=pending_moa_prepared_request, request_logger=request_logger,
+            )
+        result._diagnostic_assembly = assembly
+        return result
+    except BaseException:
+        if assembly is not None:
+            with assembly.scope._lock:
+                assembly.close()
+        raise
+
+
+def _assemble_api_request(
+    agent: Any, *, messages: Any, current_turn_user_idx: Any, _ext_prefetch_cache: Any,
+    _plugin_user_context: Any, moa_config: Any, active_system_prompt: Any,
+    original_user_message: Any, pending_moa_prepared_request: Any, request_logger: Any,
+) -> AssembledRequest:
     """Assemble the request in the original order. ORDER IS LOAD-BEARING: cache breakpoints
     are injected only after whitespace normalization, the orphan sweep, thinking-only drop /
     user merge and surrogate stripping, so the same row's bytes never vary across turns."""
@@ -128,6 +154,8 @@ def assemble_api_request(
     )
 
     if moa_config:
+        from agent.llm_egress_lineage import barrier
+        barrier()
         _append_moa_context(agent, api_messages, moa_config, original_user_message)
 
     # Ephemeral prefill messages go right after the system prompt, API-call-time only.
@@ -137,7 +165,8 @@ def assemble_api_request(
         for idx, pfm in enumerate(prefills):
             # Structural clone: the in-place sanitizers below must not write
             # through into agent.prefill_messages' nested containers.
-            api_messages.insert(sys_offset + idx, _clone_message_for_send(pfm))
+            from agent.llm_egress_lineage import generated
+            api_messages.insert(sys_offset + idx, generated(_clone_message_for_send(pfm)))
 
     # Per-turn context selection hook: an engine may select/replace context for THIS
     # call only — request-only, fail-open, and independent of should_compress().
@@ -237,6 +266,8 @@ def assemble_api_request(
     # prepared request instead of running the advisors again.
     _moa_prepared_request = None
     if agent.provider == "moa":
+        from agent.llm_egress_lineage import barrier
+        barrier()
         _moa_prepared_request, api_messages, pending_moa_prepared_request = _prepare_moa_request(
             agent, api_messages, pending_moa_prepared_request
         )

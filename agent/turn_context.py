@@ -1172,6 +1172,8 @@ def build_turn_context(
     # Append the user message now that close persistence is safe.
     append_message(messages, user_msg)
     current_turn_user_idx = len(messages) - 1
+    from agent.llm_egress_lineage import record_constructed_turn
+    record_constructed_turn(agent, user_msg)
     agent._persist_user_message_idx = current_turn_user_idx
 
     agent._user_turn_count += 1
@@ -1416,5 +1418,6 @@ def build_api_messages(
     # prompt is built ONCE per session and replayed verbatim (stable cache prefix).
     effective_system = compose_task_system_prompt(agent, active_system_prompt)
     if effective_system:
-        api_messages = [{"role": "system", "content": effective_system}] + api_messages
+        from agent.llm_egress_lineage import generated
+        api_messages = [generated({"role": "system", "content": effective_system})] + api_messages
     return api_messages, effective_system

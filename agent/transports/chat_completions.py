@@ -362,7 +362,8 @@ def _swap_developer_role(sanitized: list, model_lower: str) -> list:
         sanitized and isinstance(sanitized[0], dict) and sanitized[0].get("role") == "system"
         and any(p in model_lower for p in DEVELOPER_ROLE_MODELS)
     ):
-        return [{**sanitized[0], "role": "developer"}, *sanitized[1:]]
+        from agent.llm_egress_lineage import transfer
+        return [transfer({**sanitized[0], "role": "developer"}, sanitized[0]), *sanitized[1:]]
     return sanitized
 
 
@@ -549,7 +550,8 @@ class ChatCompletionsTransport(ProviderTransport):
                            for m in messages]
         if all(s is None for _, s in sanitized_pairs):
             return messages
-        return [m if s is None else s for m, s in sanitized_pairs]
+        from agent.llm_egress_lineage import transfer
+        return [m if s is None else transfer(s, m) for m, s in sanitized_pairs]
 
     def convert_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Tools are already in OpenAI format — identity."""
