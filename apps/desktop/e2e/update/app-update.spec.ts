@@ -113,8 +113,10 @@ test('clicking Update now moves the backend to the new commit, relaunches the ap
         'the updated checkout is clean'
       ).toBe('')
 
-      // Hand the machine back to Playwright: quit the relaunched app the way the OS asks it to.
-      process.kill(relaunched.pid, 'SIGTERM')
+      // posix.sh launches the relaunched Electron app with setsid, so its main
+      // process owns a process group containing the Chromium children too. Signal
+      // that sandbox-owned group; the detached gateway is outside it and survives.
+      process.kill(-relaunched.pid, 'SIGTERM')
       await expect
         .poll(() => nonGatewayProcesses(facts).map(p => `${p.pid} ${p.cmdline.slice(0, 160)}`), {
           timeout: 60_000,
