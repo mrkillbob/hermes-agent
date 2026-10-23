@@ -152,7 +152,7 @@ def _snapshot(agent, registry, owner):
 @_observe
 def _begin_receipt(agent, registry, owner, refusal_origins=None):
     snapshot = _snapshot(agent, registry, owner)
-    return _receipt.set((owner, snapshot, refusal_origins))
+    return _receipt.set((owner, snapshot, refusal_origins, {'verified_source_scan': False}))
 
 
 @contextmanager
@@ -162,6 +162,36 @@ def receipt_scope(agent, registry, owner, *, refusal_origins=None):
         yield
     finally:
         _reset(_receipt, token)
+
+
+@_observe
+def record_verified_source_scan(owner, secret_scan_inputs, encoding_scan_inputs,
+                                exact_secret_values=()):
+    """Remember only a fixed match from already-rendered, request-bound scan inputs."""
+    active = _receipt.get()
+    if (
+        active is None or len(active) < 4 or active[0] != owner
+        or not isinstance(owner, tuple) or len(owner) != 4
+    ):
+        return
+    if not all(type(value) is str for value in (*secret_scan_inputs, *encoding_scan_inputs)):
+        return
+    if not all(type(value) is str for value in exact_secret_values):
+        return
+    from agent.llm_egress_firewall import (
+        _contains_canonical_base64,
+        _contains_exact_secret,
+        _contains_private_absolute_path,
+        _contains_secret,
+    )
+
+    if (
+        _contains_secret(secret_scan_inputs)
+        or _contains_exact_secret(secret_scan_inputs, exact_secret_values)
+        or _contains_private_absolute_path(secret_scan_inputs)
+        or _contains_canonical_base64(encoding_scan_inputs)
+    ):
+        active[3]['verified_source_scan'] = True
 
 
 @_observe
@@ -179,10 +209,26 @@ def append_receipt_diagnostics(receipt, decision):
             events.append(event)
     diagnostics = {'events': events, 'overflow': snapshot.get('overflow') is True}
     if decision.allowed is False and len(active) > 2 and callable(active[2]):
-        candidates = _observe_refusal_origins(active[2]) or ()
-        origins = {
-            item for item in candidates
-            if type(item) is str and item in _REFUSAL_ORIGINS
-        } if isinstance(candidates, (list, tuple, set, frozenset)) else set()
+        evidence = _observe_refusal_origins(active[2])
+        origins = set()
+        has_typed_evidence = False
+        if (
+            isinstance(evidence, tuple) and len(evidence) == 2
+            and type(evidence[1]) is bool
+            and isinstance(evidence[0], (list, tuple, set, frozenset))
+        ):
+            candidates, has_typed_evidence = evidence
+            origins = {
+                item for item in candidates
+                if type(item) is str and item in _REFUSAL_ORIGINS
+            }
+            if has_typed_evidence and not origins:
+                origins.add('other')
+        else:
+            origins.add('other')
+        if active[3].get('verified_source_scan') is True:
+            origins.add('source_bound')
+        if not has_typed_evidence and active[3].get('verified_source_scan') is not True:
+            origins.add('other')
         diagnostics['refusal_origins'] = sorted(origins or {'other'})
     receipt['source_provenance_diagnostics'] = diagnostics

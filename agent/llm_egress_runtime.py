@@ -37,10 +37,10 @@ from agent.llm_egress_firewall import (
     source_grant_digest,
     static_literal_sha256,
     validate_sanitized_text,
-    content_free_violation_locations,
     redact_remote_unsafe_text,
     validate_tool_syntax,
 )
+from agent.llm_egress_content_diagnostics import content_free_violation_locations
 from agent.llm_egress_classifier import (
     _REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES,
     _REMOTE_KANBAN_LIFECYCLE_TOOL_NAMES,

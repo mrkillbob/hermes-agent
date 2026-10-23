@@ -23,13 +23,16 @@ from agent.llm_egress_firewall import (
     UntrustedProvenanceSegment,
     ValidatedToolSyntaxSegment,
     _contains_exact_secret,
-    content_free_violation_locations,
     _generated_context_text_for_base64_scan,
     redact_remote_unsafe_text,
     source_grant_digest,
     static_literal_sha256,
     validate_sanitized_text,
     validate_tool_syntax,
+)
+from agent.llm_egress_content_diagnostics import (
+    content_free_violation_locations,
+    typed_mapping_key_violation_location,
 )
 from agent.llm_egress_terminal import (
     _FILE_MUTATION_ARGUMENT_REPLAY,
@@ -1981,7 +1984,12 @@ def _typed_payload_violation_locations(
                 locations.append((path, type(item).__name__, len(text.encode("utf-8")), reasons))
             return
         if isinstance(item, Mapping):
-            for index, (_, child) in enumerate(item.items()):
+            for index, (key, child) in enumerate(item.items()):
+                key_location = typed_mapping_key_violation_location(
+                    key, path, index, exact_secret_values
+                )
+                if key_location is not None:
+                    locations.append(key_location)
                 visit(child, f"{path}.map[{index}].value")
             return
         if isinstance(item, (list, tuple)):

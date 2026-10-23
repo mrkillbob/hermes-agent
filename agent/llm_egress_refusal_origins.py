@@ -20,8 +20,8 @@ from agent.llm_egress_firewall import (
     _contains_exact_secret,
     _contains_private_absolute_path,
     _contains_secret,
-    content_free_violation_locations,
 )
+from agent.llm_egress_content_diagnostics import content_free_violation_locations
 
 _ORIGINS = frozenset({
     "tool_result", "source_bound", "assistant_history", "user_task",
@@ -301,17 +301,17 @@ def _sequence_child_state(
     return inherited, False
 
 
-def typed_payload_refusal_origins(
+def _typed_payload_refusal_origin_evidence(
     value: Any, *, exact_secret_values: tuple[str, ...] = ()
-) -> tuple[str, ...]:
-    """Map rejected typed segments to fixed categories at protocol positions."""
+) -> tuple[tuple[str, ...], bool]:
+    """Return fixed origins and whether the typed payload supplied evidence."""
     from agent.llm_egress_classifier import _typed_payload_violation_locations
 
     violations = _typed_payload_violation_locations(
         value, exact_secret_values=exact_secret_values
     )
     if not violations:
-        return ("other",)
+        return (), False
     valid_tool_result_refs = _validated_tool_result_refs(value)
     opaque_replay_types = {"CodexReasoningReplaySegment", "AnthropicThinkingReplaySegment"}
     violating_paths = {
@@ -360,6 +360,9 @@ def typed_payload_refusal_origins(
                 origin = inherited
                 child_collection = None
                 child_protocol_message = False
+                key_path = f"{path}.map[{index}].key"
+                if key_path in violating_paths:
+                    origins.add(inherited if inherited in _ORIGINS else "other")
                 if path == "$":
                     origin = _ROOT_ORIGINS.get(key, origin)
                     child_collection = _ROOT_COLLECTIONS.get(key)
@@ -388,7 +391,21 @@ def typed_payload_refusal_origins(
                 )
 
     visit(value, "$", "other")
-    return tuple(sorted(origins or {"other"}))
+    return tuple(sorted(origins or {"other"})), True
+
+
+def typed_payload_refusal_origins(
+    value: Any, *, exact_secret_values: tuple[str, ...] = (),
+    _include_evidence: bool = False,
+) -> tuple[str, ...] | tuple[tuple[str, ...], bool]:
+    """Map rejected typed segments to fixed categories at protocol positions."""
+    evidence = _typed_payload_refusal_origin_evidence(
+        value, exact_secret_values=exact_secret_values
+    )
+    if _include_evidence:
+        return evidence
+    origins, _ = evidence
+    return origins or ("other",)
 
 
 def refusal_receipt_scope(
@@ -400,6 +417,8 @@ def refusal_receipt_scope(
     return receipt_scope(
         agent, registry, owner,
         refusal_origins=lambda: typed_payload_refusal_origins(
-            typed_payload, exact_secret_values=exact_secret_values
+            typed_payload,
+            exact_secret_values=exact_secret_values,
+            _include_evidence=True,
         ),
     )

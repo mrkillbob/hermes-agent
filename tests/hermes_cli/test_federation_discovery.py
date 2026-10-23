@@ -79,7 +79,7 @@ def test_discovery_dispatch_seeds_relative_metadata_without_private_source_probe
     import scripts.federation_discovery as discovery
     from hermes_cli import kanban_db
     from hermes_cli import projects_db
-    from agent.llm_egress_firewall import content_free_violation_locations
+    from agent.llm_egress_content_diagnostics import content_free_violation_locations
 
     root = tmp_path / "source"
     config = root / "configs/federation"

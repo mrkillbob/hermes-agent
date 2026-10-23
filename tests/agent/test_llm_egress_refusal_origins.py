@@ -11,14 +11,20 @@ import pytest
 from agent.llm_egress_firewall import (
     AnthropicThinkingReplaySegment,
     CodexReasoningReplaySegment,
+    GeneratedContextKey,
     EgressBlocked,
     GeneratedContextSegment,
+    LLMEgressFirewall,
     LiteralSegment,
     OutboundText,
     SanitizedSegment,
+    SourceGrant,
     SourceBoundSegment,
     SourcePresentationSegment,
+    TypedOutboundRequest,
     ValidatedToolSyntaxSegment,
+    source_grant_digest,
+    static_literal_sha256,
 )
 from agent.llm_egress_runtime import authorize_agent_sdk_kwargs
 from agent.source_provenance import SourceProvenanceRegistry
@@ -310,6 +316,257 @@ def _blocked_receipt(agent, request):
     assert digest == sha256(previous.encode("ascii") + material.encode()).hexdigest()
     receipt["receipt_sha256"] = digest
     return blocked.value.decision, receipt
+
+
+def _typed_firewall_result(agent, payload, *, grants=(), exact_secret_values=()):
+    """Run the real renderer with explicit typed payloads and a scoped receipt."""
+    from agent.llm_egress_classifier import _structural_literal_hashes
+    from agent.llm_egress_refusal_origins import refusal_receipt_scope
+
+    def generated_key_hashes(value, found=None):
+        if found is None:
+            found = set()
+        if isinstance(value, LiteralSegment):
+            found.add(static_literal_sha256(value.text))
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if isinstance(key, str):
+                    found.add(static_literal_sha256(key))
+                if isinstance(key, GeneratedContextKey):
+                    found.add(static_literal_sha256(key.text))
+                generated_key_hashes(child, found)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                generated_key_hashes(child, found)
+        return found
+
+    request = TypedOutboundRequest(
+        payload=payload,
+        session_id=agent.session_id,
+        turn_id=agent._current_turn_id,
+        request_id=agent._current_api_request_id,
+        policy_digest=agent._llm_egress_policy_digest,
+    )
+    policy = request.policy_digest
+    static_hashes = set(_structural_literal_hashes(payload)) | generated_key_hashes(payload)
+    firewall = LLMEgressFirewall(
+        agent._llm_egress_state_dir,
+        policy_digest=policy,
+        static_literal_hashes_by_policy={policy: static_hashes},
+        exact_secret_values=exact_secret_values,
+    )
+    registry = agent._source_provenance_registry
+    owner = (request.session_id, request.turn_id, request.request_id, policy)
+    route = SimpleNamespace(
+        provider="custom", model="synthetic-model",
+        base_url="https://llm.example.test/v1", api_mode="chat_completions",
+    )
+    with refusal_receipt_scope(
+        agent, registry, owner, payload, exact_secret_values=exact_secret_values
+    ):
+        try:
+            authorization = firewall.authorize(request, route, grants=grants)
+        except EgressBlocked as blocked:
+            path = agent._llm_egress_state_dir / "llm-egress-receipts.jsonl"
+            lines = path.read_bytes().splitlines()
+            receipt = json.loads(lines[-1])
+            digest = receipt.pop("receipt_sha256")
+            previous = receipt["receipt_prev_sha256"]
+            assert previous == (sha256(lines[-2]).hexdigest() if len(lines) > 1 else "")
+            material = json.dumps(receipt, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+            assert digest == sha256(previous.encode("ascii") + material.encode()).hexdigest()
+            receipt["receipt_sha256"] = digest
+            return blocked.decision, receipt, None
+    return authorization.decision, None, authorization
+
+
+def _synthetic_grant(agent, tmp_path, content):
+    path = tmp_path / "synthetic-source.txt"
+    path.write_bytes(content)
+    return SourceGrant(
+        canonical_path=path.resolve(),
+        display_path="synthetic-source.txt",
+        line_start=1,
+        line_end=len(content.splitlines(keepends=True)),
+        content_sha256=sha256(content).hexdigest(),
+        byte_count=len(content),
+        session_id=agent.session_id,
+        turn_id=agent._current_turn_id,
+        request_id=agent._current_api_request_id,
+        policy_digest=agent._llm_egress_policy_digest,
+    )
+
+
+@pytest.mark.parametrize(
+    ("lane", "key_kind", "key_text", "value_text", "expected_reason", "expected_origin"),
+    [
+        pytest.param(lane, key_kind, key_text, "ordinary synthetic value", reason, origin,
+                     id=f"{lane}-{key_kind}-{case}")
+        for lane, origin in (("input", "user_task"), ("tools", "system_or_schema"))
+        for key_kind in ("raw", "generated")
+        for case, key_text, reason in (
+            ("secret", "API_KEY=synthetic-key-value-3817", "secret_detected"),
+            ("private-path", "/Users/synthetic/.ssh/id_rsa", "private_absolute_path"),
+            ("exact-secret", _EXACT_SECRET, "exact_secret_detected"),
+        )
+    ]
+    + [
+        pytest.param("input", "raw", "API_KEY=synthetic-key-value-3817",
+                     "API_KEY=synthetic-value-in-map-3817", "secret_detected", "user_task",
+                     id="input-key-and-value-findings-merge")
+    ]
+    + [
+        pytest.param(lane, key_kind, _ENCODED, "ordinary synthetic value", None, None,
+                     id=f"{lane}-{key_kind}-base64-key-excluded")
+        for lane in ("input", "tools")
+        for key_kind in ("raw", "generated")
+    ],
+)
+def test_mapping_key_attribution_matches_final_renderer_scan_inputs(
+    tmp_path, lane, key_kind, key_text, value_text, expected_reason, expected_origin
+):
+    key = GeneratedContextKey(key_text) if key_kind == "generated" else key_text
+    payload = {lane: {key: SanitizedSegment(value_text)}}
+
+    exact_values = (_EXACT_SECRET,) if key_text == _EXACT_SECRET else ()
+    decision, receipt, authorization = _typed_firewall_result(
+        _agent(tmp_path), payload, exact_secret_values=exact_values
+    )
+
+    if expected_reason is None:
+        assert decision.allowed is True
+        assert authorization is not None
+        assert receipt is None
+        assert decision.reason_codes == ()
+    else:
+        assert decision.allowed is False
+        assert expected_reason in decision.reason_codes
+        assert receipt["source_provenance_diagnostics"]["refusal_origins"] == [expected_origin]
+        diagnostics = json.dumps(receipt["source_provenance_diagnostics"], sort_keys=True)
+        assert key_text not in diagnostics
+        assert "base64_payload" not in decision.reason_codes
+        if value_text.startswith("API_KEY="):
+            from agent.llm_egress_classifier import _typed_payload_violation_locations
+
+            paths = {path for path, *_ in _typed_payload_violation_locations(payload)}
+            assert "$.map[0].value.map[0].key" in paths
+            assert "$.map[0].value.map[0].value" in paths
+
+
+@pytest.mark.parametrize(
+    ("case", "segment_kind", "content", "expected_reason", "expected_origin"),
+    [
+        pytest.param(segment_kind + "-" + case, segment_kind, content, reason, origin,
+                     id=f"{segment_kind}-{case}")
+        for segment_kind in ("bound", "presentation")
+        for case, content, reason in (
+            ("secret", b"API_KEY=synthetic-source-secret-3817\n", "secret_detected"),
+            ("private-path", b"/Users/synthetic/.ssh/id_rsa\n", "private_absolute_path"),
+            ("exact-secret", (_EXACT_SECRET + "\n").encode(), "exact_secret_detected"),
+            ("base64", (_ENCODED + "\n").encode(), "base64_payload"),
+        )
+        for origin in ("source_bound",)
+    ]
+    + [
+        pytest.param("presentation-mismatch", "presentation", b"ordinary source\n", None, "other",
+                     id="presentation-mismatch-remains-unknown"),
+        pytest.param("unbound", "bound", b"ordinary source\n", None, "other",
+                     id="unbound-source-remains-unknown"),
+        pytest.param("clean-source", "bound", b"ordinary source\n", None, "allowed",
+                     id="clean-verified-source-remains-allowed"),
+        pytest.param("mixed-source-user", "bound", b"API_KEY=synthetic-source-secret-3817\n",
+                     "secret_detected", "mixed", id="mixed-source-and-user-origins-merge"),
+    ],
+)
+def test_verified_source_scan_attribution_is_request_scoped_and_non_disclosing(
+    tmp_path, case, segment_kind, content, expected_reason, expected_origin
+):
+    agent = _agent(tmp_path)
+    grant = _synthetic_grant(agent, tmp_path, content)
+    digest = source_grant_digest(grant)
+    if segment_kind == "bound":
+        segment = SourceBoundSegment(digest)
+    else:
+        text = json.dumps({"content": "\n".join(
+            f"{number}|{line}"
+            for number, line in enumerate(content.decode("utf-8").splitlines(), start=1)
+        )})
+        if case == "presentation-mismatch":
+            text = json.dumps({"content": "1|different synthetic source"})
+        segment = SourcePresentationSegment(digest, text, "read_file_json_v1")
+    payload = {"messages": [{
+        "role": LiteralSegment("user"), "content": OutboundText((segment,)),
+    }]}
+    if case == "mixed-source-user":
+        payload["messages"].append({
+            "role": LiteralSegment("user"), "content": LiteralSegment(_ENCODED),
+        })
+    grants = () if case == "unbound" else (grant,)
+    exact_values = (_EXACT_SECRET,) if case.endswith("-exact-secret") else ()
+
+    decision, receipt, authorization = _typed_firewall_result(
+        agent, payload, grants=grants, exact_secret_values=exact_values
+    )
+
+    if expected_origin == "allowed":
+        assert decision.allowed is True
+        assert authorization is not None
+        assert receipt is None
+    else:
+        assert decision.allowed is False
+        expected_origins = (
+            ["source_bound", "user_task"] if expected_origin == "mixed" else [expected_origin]
+        )
+        assert receipt["source_provenance_diagnostics"]["refusal_origins"] == expected_origins
+        if expected_reason is not None:
+            assert expected_reason in decision.reason_codes
+        diagnostics = json.dumps(receipt["source_provenance_diagnostics"], sort_keys=True)
+        assert content.decode("utf-8").strip() not in diagnostics
+        assert str(grant.canonical_path) not in diagnostics
+
+    if case == "bound-secret":
+        # A later owner/request gets only its own typed origin, never the source
+        # observation from the preceding verified rendering.
+        agent._current_api_request_id = "synthetic-turn:api:2"
+        next_payload = {"messages": [{
+            "role": LiteralSegment("user"), "content": LiteralSegment(_ENCODED),
+        }]}
+        next_decision, next_receipt, _ = _typed_firewall_result(agent, next_payload)
+        assert "base64_payload" in next_decision.reason_codes
+        assert next_receipt["source_provenance_diagnostics"]["refusal_origins"] == ["user_task"]
+
+        from agent.source_provenance_diagnostics import append_receipt_diagnostics
+        from agent.llm_egress_refusal_origins import refusal_receipt_scope
+
+        outer_owner = (agent.session_id, agent._current_turn_id,
+                       "synthetic-turn:api:3", agent._llm_egress_policy_digest)
+        inner_owner = (agent.session_id, agent._current_turn_id,
+                       "synthetic-turn:api:4", agent._llm_egress_policy_digest)
+        empty_payload = {"messages": []}
+
+        def denied_decision(owner):
+            return SimpleNamespace(
+                session_id=owner[0], turn_id=owner[1], request_id=owner[2],
+                policy_digest=owner[3], allowed=False,
+            )
+
+        with refusal_receipt_scope(
+            agent, agent._source_provenance_registry, outer_owner, empty_payload
+        ):
+            with refusal_receipt_scope(
+                agent, agent._source_provenance_registry, inner_owner, empty_payload
+            ):
+                from agent.source_provenance_diagnostics import record_verified_source_scan
+
+                record_verified_source_scan(
+                    outer_owner, ("API_KEY=synthetic-nested-value-3817",), (), ()
+                )
+                inner_receipt = {}
+                append_receipt_diagnostics(inner_receipt, denied_decision(inner_owner))
+                assert inner_receipt["source_provenance_diagnostics"]["refusal_origins"] == ["other"]
+            outer_receipt = {}
+            append_receipt_diagnostics(outer_receipt, denied_decision(outer_owner))
+            assert outer_receipt["source_provenance_diagnostics"]["refusal_origins"] == ["other"]
 
 
 @pytest.mark.parametrize(
