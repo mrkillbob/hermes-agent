@@ -34,6 +34,7 @@ _ROOT_ORIGINS = {
     "instructions": "system_or_schema",
     "input": "user_task",
     "response_format": "system_or_schema",
+    "text": "system_or_schema",
 }
 _ROOT_COLLECTIONS = {"messages": "messages", "input": "input"}
 
@@ -167,6 +168,22 @@ def _responses_function_call_is_well_formed(item: Mapping[str, Any]) -> bool:
     from agent.message_sanitization import tool_call_id_variants
 
     return bool(tool_call_id_variants({"call_id": identifier}))
+
+
+def _responses_reasoning_item_is_well_formed(item: Mapping[str, Any]) -> bool:
+    """Recognize role-free Responses reasoning summaries as prior assistant output."""
+    if "role" in item or _literal(item.get("type")) != "reasoning":
+        return False
+    encrypted_content = _literal(item.get("encrypted_content"))
+    summary = item.get("summary")
+    if not encrypted_content or not isinstance(summary, (list, tuple)) or not summary:
+        return False
+    return all(
+        isinstance(part, Mapping)
+        and _literal(part.get("type")) == "summary_text"
+        and _literal(part.get("text")) is not None
+        for part in summary
+    )
 
 
 def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
@@ -342,6 +359,8 @@ def _sequence_child_state(
             return origin, True
         if collection == "input" and _responses_function_call_is_well_formed(child):
             return "assistant_history", True
+        if collection == "input" and _responses_reasoning_item_is_well_formed(child):
+            return "assistant_history", True
         return _message_origin(child, valid_tool_result_refs), True
     if collection == "anthropic_user_content":
         return _anthropic_content_origin(child, inherited, valid_tool_result_refs), False
@@ -452,10 +471,15 @@ def _typed_payload_refusal_origin_evidence(
                 visit(segment, f"{path}.segments[{index}]", inherited, ancestors=ancestors)
         elif isinstance(item, Mapping):
             for index, (key, child) in enumerate(item.items()):
-                if path == "$" and key == "messages" and isinstance(extra_body, Mapping) and "messages" in extra_body:
+                if (
+                    path == "$"
+                    and key in {"messages", "text"}
+                    and isinstance(extra_body, Mapping)
+                    and key in extra_body
+                ):
                     # The SDK's explicit extra_body key wins even when null or
-                    # malformed. Shadowed content remains firewall-scanned,
-                    # but cannot supply protocol attribution or call pairing.
+                    # malformed. Shadowed controls remain firewall-scanned, but
+                    # cannot supply specialized attribution or pairing evidence.
                     continue
                 key_path = f"{path}.map[{index}].key"
                 if key_path in violating_paths:

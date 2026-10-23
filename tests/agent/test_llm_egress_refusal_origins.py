@@ -1138,3 +1138,209 @@ def test_shape_origin_uses_final_rendered_typed_text(
     assert bool(locations) is expected_shape_violation
     assert typed_payload_refusal_origins(payload) == (expected_origin,)
 
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_origin"),
+    [
+        pytest.param(
+            {
+                "input": [{
+                    "type": "reasoning",
+                    "encrypted_content": "synthetic-encrypted-reasoning",
+                    "summary": [{"type": "summary_text", "text": _ENCODED}],
+                }],
+            },
+            "assistant_history",
+            id="role-free-responses-reasoning-summary",
+        ),
+        pytest.param(
+            {
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "synthetic_schema",
+                        "schema": {"value": _ENCODED},
+                    },
+                },
+            },
+            "system_or_schema",
+            id="responses-text-format-schema",
+        ),
+    ],
+)
+def test_responses_reasoning_summary_and_text_schema_have_protocol_origins(
+    tmp_path, kwargs, expected_origin
+):
+    decision, receipt = _blocked_receipt(
+        _agent(tmp_path), {"model": "synthetic-model", **kwargs}
+    )
+
+    assert decision.allowed is False
+    assert "base64_payload" in decision.reason_codes
+    diagnostics = receipt["source_provenance_diagnostics"]
+    assert diagnostics["refusal_origins"] == [expected_origin]
+    assert _ENCODED not in json.dumps(diagnostics, sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_origin"),
+    [
+        pytest.param(
+            {
+                "input": [{
+                    "type": "reasoning",
+                    "role": "user",
+                    "encrypted_content": "synthetic-encrypted-reasoning",
+                    "summary": [{"type": "summary_text", "text": _ENCODED}],
+                }],
+            },
+            "user_task",
+            id="reasoning-item-with-user-role-is-not-assistant-history",
+        ),
+        pytest.param(
+            {
+                "input": [{
+                    "type": "reasoning",
+                    "role": "tool",
+                    "encrypted_content": "synthetic-encrypted-reasoning",
+                    "summary": [{"type": "summary_text", "text": _ENCODED}],
+                }],
+            },
+            "other",
+            id="reasoning-item-with-unpaired-tool-role-is-other",
+        ),
+        pytest.param(
+            {
+                "input": [{
+                    "type": "reasoning",
+                    "role": 7,
+                    "encrypted_content": "synthetic-encrypted-reasoning",
+                    "summary": [{"type": "summary_text", "text": _ENCODED}],
+                }],
+            },
+            "other",
+            id="reasoning-item-with-malformed-role-is-other",
+        ),
+        pytest.param(
+            {
+                "input": [{
+                    "type": "reasoning",
+                    "encrypted_content": "synthetic-encrypted-reasoning",
+                    "summary": [
+                        {"type": "summary_text", "text": "bounded safe summary"},
+                        {"type": "unexpected", "text": _ENCODED},
+                    ],
+                }],
+            },
+            "other",
+            id="malformed-summary-sibling-does-not-promote-reasoning-item",
+        ),
+        pytest.param(
+            {
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "reasoning",
+                        "encrypted_content": "synthetic-encrypted-reasoning",
+                        "summary": [{"type": "summary_text", "text": _ENCODED}],
+                        "text": {"format": {"type": "json_schema", "schema": {"value": _ENCODED}}},
+                    },
+                }],
+            },
+            "user_task",
+            id="nested-responses-shapes-stay-user-content",
+        ),
+        pytest.param(
+            {
+                "input": [{
+                    "type": "reasoning",
+                    "encrypted_content": "synthetic-encrypted-reasoning",
+                    "summary": [{"type": "summary_text", "text": _ENCODED}],
+                }],
+                "extra_body": {"input": []},
+            },
+            "user_task",
+            id="shadowed-root-input-cannot-contribute-assistant-history",
+        ),
+        pytest.param(
+            {
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "synthetic_schema",
+                        "schema": {"value": _ENCODED},
+                    },
+                },
+                "extra_body": {"text": None},
+            },
+            "other",
+            id="null-extra-body-text-shadows-root-schema",
+        ),
+    ],
+)
+def test_responses_nested_malformed_and_shadowed_shapes_do_not_gain_origins(
+    tmp_path, kwargs, expected_origin
+):
+    decision, receipt = _blocked_receipt(
+        _agent(tmp_path), {"model": "synthetic-model", **kwargs}
+    )
+
+    assert decision.allowed is False
+    assert "base64_payload" in decision.reason_codes
+    diagnostics = receipt["source_provenance_diagnostics"]
+    assert diagnostics["refusal_origins"] == [expected_origin]
+    assert _ENCODED not in json.dumps(diagnostics, sort_keys=True)
+
+
+def test_responses_adapter_replayed_reasoning_summary_is_assistant_history(tmp_path):
+    from agent.codex_responses_adapter import _chat_messages_to_responses_input
+
+    stored_item = {
+        "type": "reasoning",
+        "encrypted_content": "synthetic-encrypted-reasoning",
+        "summary": [{"type": "summary_text", "text": _ENCODED}],
+    }
+    input_items = _chat_messages_to_responses_input([{
+        "role": "assistant",
+        "content": "",
+        "codex_reasoning_items": [stored_item],
+    }])
+    assert input_items[0] == stored_item
+
+    decision, receipt = _blocked_receipt(
+        _agent(tmp_path), {"model": "synthetic-model", "input": input_items}
+    )
+
+    assert decision.allowed is False
+    assert "base64_payload" in decision.reason_codes
+    diagnostics = receipt["source_provenance_diagnostics"]
+    assert diagnostics["refusal_origins"] == ["assistant_history"]
+    assert _ENCODED not in json.dumps(diagnostics, sort_keys=True)
+
+
+def test_responses_preflight_text_schema_keeps_schema_origin(tmp_path):
+    from agent.codex_responses_adapter import _preflight_codex_api_kwargs
+
+    text = {
+        "format": {
+            "type": "json_schema",
+            "name": "synthetic_schema",
+            "schema": {"value": _ENCODED},
+        },
+    }
+    preflighted = _preflight_codex_api_kwargs({
+        "model": "synthetic-model",
+        "instructions": "synthetic instructions",
+        "input": [],
+        "text": text,
+    })
+    assert preflighted["text"] == text
+
+    decision, receipt = _blocked_receipt(_agent(tmp_path), preflighted)
+
+    assert decision.allowed is False
+    assert "base64_payload" in decision.reason_codes
+    diagnostics = receipt["source_provenance_diagnostics"]
+    assert diagnostics["refusal_origins"] == ["system_or_schema"]
+    assert _ENCODED not in json.dumps(diagnostics, sort_keys=True)
+
