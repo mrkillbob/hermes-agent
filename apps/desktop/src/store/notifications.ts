@@ -88,7 +88,7 @@ function cleanErrorText(value: string) {
 }
 
 // These are the gateway's storage-unavailable and storage-write refusal codes.
-const STORAGE_RPC_CODES = new Set([-32000, 5000, 5007, 5008, 5017, 5036, 5070, 5071, 5072])
+const STORAGE_RPC_CODES = new Set([-32000, 4001, 5000, 5001, 5007, 5008, 5017, 5036, 5070, 5071, 5072])
 
 // Keep in sync with the stable `code` and `cause` values in hermes_state_user_copy.py.
 const STORAGE_ERROR_CATEGORIES = new Set([
@@ -127,15 +127,24 @@ function storageRpcDiagnostic(error: unknown): string {
     return ''
   }
 
-  const data = error.data as { cause?: unknown; code?: unknown }
+  const data = error.data as { cause?: unknown; code?: unknown; reason?: unknown }
 
-  if (typeof data.code !== 'string' || !STORAGE_ERROR_CATEGORIES.has(data.code)) {
+  // The gateway's canonical control wire uses data.reason; older storage RPCs use data.code.
+  // Both values are allowlisted before they reach the log.
+  const category =
+    typeof data.code === 'string' && STORAGE_ERROR_CATEGORIES.has(data.code)
+      ? data.code
+      : typeof data.reason === 'string' && STORAGE_ERROR_CATEGORIES.has(data.reason)
+        ? data.reason
+        : null
+
+  if (!category) {
     return ''
   }
 
   const cause = typeof data.cause === 'string' && STORAGE_ERROR_CAUSES.has(data.cause) ? data.cause : 'unclassified'
 
-  return ` [storage_rpc rpc_code=${error.code} storage_category=${data.code} storage_cause=${cause}]`
+  return ` [storage_rpc rpc_code=${error.code} storage_category=${category} storage_cause=${cause}]`
 }
 
 /** True when an error string is a disk-full / ENOSPC / SQLITE_FULL failure. */
