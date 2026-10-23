@@ -1026,7 +1026,7 @@ def test_cleanup_waiting_for_bootstrap_does_not_block_readiness(repo, db, tmp_pa
 
     def cleanup():
         try:
-            results.append(owner.remove_after_explicit_request("race", active_session_bound=True))
+            results.append(owner.quarantine_after_explicit_request("race", active_session_bound=True))
         except BaseException as exc:
             errors.append(exc)
 

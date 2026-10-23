@@ -209,3 +209,31 @@ class SessionWorktreesMixin:
             failure_phase=None,
             failure_message=None,
         )
+
+
+    def transition_conversation_retention(self, expected, *, state, intent, retain_intent=False):
+        """CAS lifecycle only; never rebind an identity or clear another intent."""
+        from dataclasses import asdict
+        from hermes_state_worktree_cleanup import INTENT_PREFIX
+
+        if state not in {"ready", "creation_failed", "retained"}:
+            raise ConversationWorktreeConflict("invalid retention transition")
+
+        def write(conn):
+            current = self._conversation_worktree_record_on_conn(conn, expected.root_session_id)
+            keys = ("root_session_id", "worktree_path", "branch", "base_commit", "repo_common_dir", "source_worktree", "created_at")
+            if current is None or any(asdict(current)[key] != asdict(expected)[key] for key in keys):
+                raise ConversationWorktreeConflict("retention binding changed")
+            if current.state not in {"ready", "creation_failed", "retained"}:
+                raise ConversationWorktreeConflict("retention lifecycle changed")
+            key = INTENT_PREFIX + expected.root_session_id
+            saved = conn.execute("SELECT value FROM state_meta WHERE key=?", (key,)).fetchone()
+            if (saved[0] if saved else None) != intent:
+                raise ConversationWorktreeConflict("retention intent changed")
+            conn.execute("UPDATE conversation_worktree_bindings SET state=?, updated_at=? WHERE root_session_id=?",
+                         (state, time.time(), expected.root_session_id))
+            if state != "retained" and intent is not None and not retain_intent:
+                conn.execute("DELETE FROM state_meta WHERE key=? AND value=?", (key, intent))
+            return self._conversation_worktree_record_on_conn(conn, expected.root_session_id)
+
+        return self._execute_write(write)

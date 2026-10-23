@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 import multiprocessing
 import subprocess
+import sys
 
 import pytest
 
@@ -129,6 +131,76 @@ def test_cleanup_reports_dirty_unintegrated_and_unpushed_together(prepared_bindi
     assert binding.path.exists()
 
 
+def test_cleanup_preserves_unique_ignored_content(prepared_binding):
+    manager, db, source, _remote, binding, _sibling = prepared_binding
+    certify_safe(source, binding)
+    exclude = Path(git(binding.path, "rev-parse", "--git-path", "info/exclude"))
+    with exclude.open("a") as stream:
+        stream.write("\nprivate-output/\n")
+    private = binding.path / "private-output"
+    private.mkdir()
+    sentinel = private / "unique.txt"
+    sentinel.write_text("unique uncommitted content")
+    assert not git(binding.path, "status", "--porcelain", "--untracked-files=all")
+
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
+
+    assert result.removed is False
+    assert "ignored content requires preservation" in result.verdict.reasons
+    assert sentinel.read_text() == "unique uncommitted content"
+    assert db.get_conversation_worktree(binding.root_session_id).state == "ready"
+
+
+def test_cleanup_can_retire_exact_bootstrap_failed_worktree(prepared_binding):
+    manager, db, source, _remote, _binding, _sibling = prepared_binding
+    failed = ConversationWorktreeManager(replace(
+        manager._policy, bootstrap=True,
+        bootstrap_command=(sys.executable, "-c", "raise SystemExit(17)")), db)
+    with pytest.raises(ConversationWorktreeError, match="status 17"):
+        failed.bind_new_root_session("failed", conversation_kind="interactive")
+    before = db.get_conversation_worktree("failed")
+    assert before.state == "creation_failed"
+    assert failed._exact_owner_claims_present(before)
+
+    result = failed.quarantine_after_explicit_request("failed")
+
+    assert result.outcome == "retained"
+    assert result.removed is False
+    assert not Path(before.worktree_path).exists()
+    assert db.get_conversation_worktree("failed").state == "retained"
+    assert git(source, "rev-parse", before.branch) == before.base_commit
+
+
+@pytest.mark.parametrize("obstacle", ["missing_claim", "unknown_lease", "dirty"])
+def test_failed_cleanup_keeps_ownership_and_liveness_safeguards(prepared_binding, obstacle):
+    from agent.conversation_worktree import _OWNER_MARKER, _root_lease_paths
+    manager, db, _source, _remote, _binding, _sibling = prepared_binding
+    failed = ConversationWorktreeManager(replace(
+        manager._policy, bootstrap=True,
+        bootstrap_command=(sys.executable, "-c", "raise SystemExit(17)")), db)
+    with pytest.raises(ConversationWorktreeError):
+        failed.bind_new_root_session("failed", conversation_kind="interactive")
+    record = db.get_conversation_worktree("failed")
+    path = Path(record.worktree_path)
+    if obstacle == "missing_claim":
+        Path(git(path, "rev-parse", "--git-path", _OWNER_MARKER)).unlink()
+        reason = "mismatched identity"
+    elif obstacle == "unknown_lease":
+        state, _lock = _root_lease_paths(Path(record.repo_common_dir), record.root_session_id)
+        state.write_text("{corrupt", encoding="utf-8")
+        reason = "unknown"
+    else:
+        path.joinpath("unique.txt").write_text("keep")
+        reason = "dirty"
+
+    result = failed.quarantine_after_explicit_request("failed")
+
+    assert result.removed is False
+    assert reason in result.verdict.reasons
+    assert path.is_dir()
+    assert db.get_conversation_worktree("failed").state == "creation_failed"
+
+
 def test_failed_draft_cleanup_keeps_root_identity_retryable(prepared_binding):
     manager, db, source, _remote, binding, _sibling = prepared_binding
 
@@ -137,10 +209,11 @@ def test_failed_draft_cleanup_keeps_root_identity_retryable(prepared_binding):
         retain_for_retry=True,
     )
 
-    assert result.removed is True
+    assert result.removed is False
+    assert result.outcome == "refused"
     record = db.get_conversation_worktree(binding.root_session_id)
     assert record is not None
-    assert record.state == "creating"
+    assert record.state == "ready"
     branch_check = manager._run_git(
         source,
         ["show-ref", "--verify", "--quiet", f"refs/heads/{record.branch}"],
@@ -372,9 +445,10 @@ def test_explicit_cleanup_removes_only_exact_safe_worktree(prepared_binding):
     claimed = db.get_conversation_worktree(binding.root_session_id)
     assert claimed is not None
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
-    assert result.removed is True
+    assert result.outcome == "retained"
+    assert result.removed is False
     assert result.verdict.allowed is True
     assert not binding.path.exists()
     assert sibling.exists()
@@ -382,20 +456,21 @@ def test_explicit_cleanup_removes_only_exact_safe_worktree(prepared_binding):
     assert git(source, "show-ref", "--verify", f"refs/heads/{binding.branch}")
     removed = db.get_conversation_worktree(binding.root_session_id)
     assert removed is not None
-    assert removed.state == "removed"
+    assert removed.state == "retained"
     assert removed.worktree_path == claimed.worktree_path
     assert removed.branch == claimed.branch
     worktrees = git(source, "worktree", "list", "--porcelain")
     assert str(binding.path) not in worktrees
     assert str(sibling) in worktrees
-    assert not common_claim.exists()
+    assert common_claim.exists()
+    assert Path(result.retained_path).is_dir()
 
 
 def test_blocked_cleanup_never_removes_or_marks_binding(prepared_binding):
     manager, db, _source, _remote, binding, sibling = prepared_binding
     binding.path.joinpath("untracked.txt").write_text("keep\n", encoding="utf-8")
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert result.removed is False
     assert "dirty" in result.verdict.reasons
@@ -414,7 +489,7 @@ def test_remove_failure_returns_bounded_sanitized_evidence_and_keeps_ledger(
     original = manager._run_git
 
     def fail_remove(cwd, args, timeout, phase):
-        if args[:2] == ["worktree", "remove"]:
+        if args[:2] == ["worktree", "move"]:
             return subprocess.CompletedProcess(
                 ["git", *args],
                 1,
@@ -427,15 +502,14 @@ def test_remove_failure_returns_bounded_sanitized_evidence_and_keeps_ledger(
 
     assert git_worktree_is_locked(source, binding.path)
 
-    result = manager.remove_after_explicit_request(binding.root_session_id)
+    result = manager.quarantine_after_explicit_request(binding.root_session_id)
 
     assert result.removed is False
-    assert result.verdict.reasons == ("remove_failed",)
-    assert result.failure_phase == "remove"
-    assert result.failure_message is not None
-    assert "super-secret" not in result.failure_message
-    assert "\x00" not in result.failure_message
-    assert len(result.failure_message) <= 300
+    assert result.verdict.reasons == ("Git move refused",)
+    assert result.outcome == "refused"
+    assert result.failure_phase is None
+    assert "super-secret" not in str(result)
+    assert "\x00" not in str(result)
     assert binding.path.exists()
     assert git_worktree_is_locked(source, binding.path)
     assert sibling.exists()

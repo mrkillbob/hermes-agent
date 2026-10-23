@@ -59,10 +59,13 @@ class _Manager:
         self.inspect_calls.append((root_session_id, active_session_bound))
         return self.verdict
 
-    def remove_after_explicit_request(self, root_session_id, *, active_session_bound=False):
+    def inspect_retention(self, _root):
+        return CleanupResult(False, self.verdict)
+
+    def quarantine_after_explicit_request(self, root_session_id, *, active_session_bound=False):
         self.remove_calls.append((root_session_id, active_session_bound))
         return self.result or CleanupResult(
-            removed=self.verdict.allowed, verdict=self.verdict
+            removed=False, verdict=self.verdict, outcome="retained" if self.verdict.allowed else "refused", retained_path="/retained/root" if self.verdict.allowed else None
         )
 
 
@@ -110,6 +113,9 @@ def test_inspect_returns_every_blocking_reason_and_resolves_root(monkeypatch):
         "allowed": False,
         "reasons": ["dirty", "unintegrated", "unpushed"],
         "removed": False,
+        "outcome": "inspected",
+        "retained_path": None,
+        "recovery_required": False,
         "root_session_id": "root",
         "path": "/repo/worktrees/root",
         "branch": "hermes/session/root",
@@ -157,10 +163,11 @@ def test_remove_requires_explicit_action_and_returns_verified_result(monkeypatch
     install(monkeypatch, manager, db)
 
     inspected = call({"session_id": "root", "action": "inspect"})
-    removed = call({"session_id": "root", "action": "remove"})
+    removed = call({"session_id": "root", "action": "quarantine"})
 
     assert inspected["result"]["removed"] is False
-    assert removed["result"]["removed"] is True
+    assert removed["result"]["removed"] is False
+    assert removed["result"]["outcome"] == "retained"
     assert manager.inspect_calls == [("root", False)]
     assert manager.remove_calls == [("root", False)]
 
@@ -171,7 +178,7 @@ def test_explicit_fork_child_cannot_cleanup_ancestor_worktree(monkeypatch):
     db.explicit_fork_children.add("tip")
     install(monkeypatch, manager, db)
 
-    response = call({"session_id": "tip", "action": "remove"})
+    response = call({"session_id": "tip", "action": "quarantine"})
 
     assert response["error"] == {
         "code": 4007,
@@ -195,7 +202,7 @@ def test_remove_failure_returns_stable_reason_phase_and_safe_message(monkeypatch
     db = _DB()
     install(monkeypatch, manager, db)
 
-    response = call({"session_id": "root", "action": "remove"})
+    response = call({"session_id": "root", "action": "quarantine"})
 
     assert response["result"]["removed"] is False
     assert response["result"]["reasons"] == ["remove_failed"]
@@ -215,7 +222,7 @@ def test_unknown_cleanup_action_fails_without_inspection_or_removal(monkeypatch)
     assert manager.remove_calls == []
 
 
-@pytest.mark.parametrize("action", ["inspect", "remove"])
+@pytest.mark.parametrize("action", ["inspect", "quarantine"])
 def test_cleanup_manager_runs_after_releasing_sessions_lock(monkeypatch, action):
     verdict = CleanupVerdict(allowed=True, reasons=())
     manager = _Manager(verdict)
@@ -240,11 +247,11 @@ def test_cleanup_manager_runs_after_releasing_sessions_lock(monkeypatch, action)
 
     def assert_unlocked_remove(*args, **kwargs):
         assert not lock.held
-        return _Manager.remove_after_explicit_request(manager, *args, **kwargs)
+        return _Manager.quarantine_after_explicit_request(manager, *args, **kwargs)
 
     monkeypatch.setattr(server, "_sessions_lock", lock)
     monkeypatch.setattr(manager, "inspect_cleanup", assert_unlocked)
-    monkeypatch.setattr(manager, "remove_after_explicit_request", assert_unlocked_remove)
+    monkeypatch.setattr(manager, "quarantine_after_explicit_request", assert_unlocked_remove)
     install(monkeypatch, manager, db)
 
     response = call({"session_id": "root", "action": action})
