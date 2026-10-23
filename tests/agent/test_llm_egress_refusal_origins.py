@@ -9,12 +9,16 @@ from types import SimpleNamespace
 import pytest
 
 from agent.llm_egress_firewall import (
+    AnthropicThinkingReplaySegment,
     CodexReasoningReplaySegment,
     EgressBlocked,
+    GeneratedContextSegment,
+    LiteralSegment,
     OutboundText,
     SanitizedSegment,
     SourceBoundSegment,
     SourcePresentationSegment,
+    ValidatedToolSyntaxSegment,
 )
 from agent.llm_egress_runtime import authorize_agent_sdk_kwargs
 from agent.source_provenance import SourceProvenanceRegistry
@@ -225,8 +229,8 @@ def test_origin_attribution_is_request_bound_non_disclosing_and_does_not_change_
                 json.dumps({"content": _EXACT_SECRET}),
                 "context_hint_preview_v1:gateway/AGENTS.md",
             ),
-            "source_bound",
-            id="visible-presentation-match",
+            "other",
+            id="unverified-presentation-match-remains-unknown",
         ),
         pytest.param(
             SourcePresentationSegment(
@@ -264,4 +268,158 @@ def test_exact_secret_origin_uses_only_visible_presentation_text(segment, expect
         payload, exact_secret_values=(_EXACT_SECRET,)
     ) == (expected_origin,)
     assert _EXACT_SECRET not in json.dumps(locations)
+
+
+@pytest.mark.parametrize(
+    ("segments", "exact_secret", "expected_reason", "expected_origin"),
+    [
+        pytest.param(
+            (ValidatedToolSyntaxSegment("bad!", "tool_protocol_identifier"),),
+            "bad!",
+            "invalid_tool_syntax_segment",
+            "other",
+            id="invalid-tool-syntax-single-segment-is-not-scanned",
+        ),
+        pytest.param(
+            (
+                GeneratedContextSegment("left"),
+                ValidatedToolSyntaxSegment("bad!", "tool_protocol_identifier"),
+                GeneratedContextSegment("right"),
+            ),
+            "leftbad!right",
+            "invalid_tool_syntax_segment",
+            "other",
+            id="invalid-tool-syntax-joined-value-is-not-scanned",
+        ),
+        pytest.param(
+            (
+                GeneratedContextSegment("left"),
+                CodexReasoningReplaySegment("bad!"),
+                GeneratedContextSegment("right"),
+            ),
+            "leftbad!right",
+            "invalid_codex_reasoning_replay",
+            "other",
+            id="invalid-codex-replay-joined-value-is-not-scanned",
+        ),
+        pytest.param(
+            (
+                GeneratedContextSegment("left"),
+                AnthropicThinkingReplaySegment("bad!"),
+                GeneratedContextSegment("right"),
+            ),
+            "leftbad!right",
+            "invalid_anthropic_thinking_replay",
+            "other",
+            id="invalid-anthropic-replay-joined-value-is-not-scanned",
+        ),
+        pytest.param(
+            (
+                GeneratedContextSegment("left"),
+                CodexReasoningReplaySegment("gAAAA" + "A" * 20),
+                GeneratedContextSegment("right"),
+            ),
+            "left" + "gAAAA" + "A" * 20 + "right",
+            "exact_secret_detected",
+            "user_task",
+            id="valid-codex-replay-remains-in-joined-scan",
+        ),
+        pytest.param(
+            (
+                GeneratedContextSegment("left"),
+                AnthropicThinkingReplaySegment("A" * 24),
+                GeneratedContextSegment("right"),
+            ),
+            "left" + "A" * 24 + "right",
+            "exact_secret_detected",
+            "user_task",
+            id="valid-anthropic-replay-remains-in-joined-scan",
+        ),
+        pytest.param(
+            (ValidatedToolSyntaxSegment("synthetic-tool", "tool_protocol_identifier"),),
+            "synthetic-tool",
+            "exact_secret_detected",
+            "user_task",
+            id="valid-tool-syntax-remains-in-single-segment-scan",
+        ),
+    ],
+)
+def test_exact_secret_attribution_uses_final_rendered_segment_text(
+    tmp_path, monkeypatch, segments, exact_secret, expected_reason, expected_origin
+):
+    from agent import llm_egress_runtime as runtime
+
+    monkeypatch.setattr(runtime, "_exact_provider_secret_values", lambda: (exact_secret,))
+    request = {
+        "model": "synthetic-model",
+        "messages": [{"role": "user", "content": OutboundText(segments)}],
+    }
+    decision, receipt = _blocked_receipt(_agent(tmp_path), request)
+
+    assert decision.allowed is False
+    assert expected_reason in decision.reason_codes
+    assert ("exact_secret_detected" in decision.reason_codes) is (expected_origin == "user_task")
+    diagnostics = receipt["source_provenance_diagnostics"]
+    assert diagnostics["refusal_origins"] == [expected_origin]
+    assert exact_secret not in json.dumps(diagnostics)
+
+
+@pytest.mark.parametrize(
+    ("segment", "expected_origin", "expected_shape_violation"),
+    [
+        pytest.param(
+            ValidatedToolSyntaxSegment("/tmp/x", "tool_protocol_identifier"),
+            "other",
+            False,
+            id="invalid-typed-path-is-not-attributed-to-user",
+        ),
+        pytest.param(
+            ValidatedToolSyntaxSegment("bad!", "tool_protocol_identifier"),
+            "other",
+            False,
+            id="invalid-benign-syntax-remains-unknown",
+        ),
+        pytest.param(
+            CodexReasoningReplaySegment("A" * 32),
+            "other",
+            False,
+            id="invalid-codex-replay-is-not-shape-scanned",
+        ),
+        pytest.param(
+            CodexReasoningReplaySegment("gAAAA" + "A" * 20),
+            "other",
+            False,
+            id="valid-codex-replay-remains-opaque-to-shape-scans",
+        ),
+        pytest.param(
+            AnthropicThinkingReplaySegment("A" * 24),
+            "other",
+            False,
+            id="valid-anthropic-replay-remains-opaque-to-shape-scans",
+        ),
+        pytest.param(
+            LiteralSegment("/tmp/x"),
+            "user_task",
+            True,
+            id="scanned-literal-path-remains-attributed",
+        ),
+        pytest.param(
+            SourcePresentationSegment("opaque-synthetic-grant", "/tmp/x", "bad-kind"),
+            "other",
+            False,
+            id="rejected-source-presentation-text-is-not-shape-scanned",
+        ),
+    ],
+)
+def test_shape_origin_uses_final_rendered_typed_text(
+    segment, expected_origin, expected_shape_violation
+):
+    from agent.llm_egress_classifier import _typed_payload_violation_locations
+    from agent.llm_egress_refusal_origins import typed_payload_refusal_origins
+
+    payload = {"messages": [{"role": "user", "content": OutboundText((segment,))}]}
+
+    locations = _typed_payload_violation_locations(payload)
+    assert bool(locations) is expected_shape_violation
+    assert typed_payload_refusal_origins(payload) == (expected_origin,)
 

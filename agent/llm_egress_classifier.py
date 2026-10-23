@@ -1922,8 +1922,13 @@ def _typed_payload_violation_locations(
         SourceBoundSegment,
         UntrustedProvenanceSegment,
     )
+    from agent.llm_egress_refusal_origins import _typed_payload_shape_reasons
+
     if exact_secret_values:
-        from agent.llm_egress_refusal_origins import _joined_exact_secret_segment_indexes
+        from agent.llm_egress_refusal_origins import (
+            _joined_exact_secret_segment_indexes,
+            _typed_payload_exact_secret_match,
+        )
 
     def visit(item: Any, path: str, joined_secret=False) -> None:
         if isinstance(item, UntrustedProvenanceSegment):
@@ -1947,23 +1952,10 @@ def _typed_payload_violation_locations(
             text = getattr(item, "text", None)
             if not isinstance(text, str):
                 return
-            reasons = {
-                reason for _, found in content_free_violation_locations(text) for reason in found
-            }
-            exact_secret_match = (
-                isinstance(item, (SanitizedSegment, GeneratedContextSegment, LiteralSegment,
-                                  ValidatedToolSyntaxSegment))
-                and exact_secret_values
-                and _contains_exact_secret(text, exact_secret_values)
+            reasons = set(_typed_payload_shape_reasons(item, text))
+            exact_secret_match = exact_secret_values and _typed_payload_exact_secret_match(
+                item, text, exact_secret_values
             )
-            if isinstance(item, SourcePresentationSegment) and exact_secret_values:
-                from agent.llm_egress_refusal_origins import (
-                    _source_presentation_exact_secret_match,
-                )
-
-                exact_secret_match = _source_presentation_exact_secret_match(
-                    item, exact_secret_values
-                )
             if joined_secret or exact_secret_match:
                 reasons.add("exact_secret_detected")
             if isinstance(item, ValidatedToolSyntaxSegment) and "base64_payload" in reasons:

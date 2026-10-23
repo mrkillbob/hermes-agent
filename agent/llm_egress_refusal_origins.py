@@ -14,7 +14,10 @@ from agent.llm_egress_firewall import (
     SourcePresentationSegment,
     UntrustedProvenanceSegment,
     ValidatedToolSyntaxSegment,
+    _ANTHROPIC_THINKING_SIGNATURE_REPLAY,
+    _CODEX_ENCRYPTED_REASONING_REPLAY,
     _contains_exact_secret,
+    content_free_violation_locations,
 )
 
 _ORIGINS = frozenset({
@@ -31,19 +34,49 @@ _ROOT_ORIGINS = {
 _ROOT_COLLECTIONS = {"messages": "messages", "input": "input"}
 
 
-def _source_presentation_exact_secret_match(segment, exact_secret_values):
-    """Match only presentation fields also scanned by final authorization."""
-    if not exact_secret_values:
-        return False
-    from agent.llm_egress_firewall import _source_text_for_secret_scan
-    from agent.source_context_rendering import presentation_display_path, presentation_secret_text
+def _rendered_non_source_text(segment, text):
+    if isinstance(segment, CodexReasoningReplaySegment):
+        return text if _CODEX_ENCRYPTED_REASONING_REPLAY.fullmatch(text) else ""
+    if isinstance(segment, AnthropicThinkingReplaySegment):
+        return text if _ANTHROPIC_THINKING_SIGNATURE_REPLAY.fullmatch(text) else ""
+    if isinstance(segment, ValidatedToolSyntaxSegment):
+        from agent.egress_tool_syntax import validate_tool_syntax
 
+        try:
+            return validate_tool_syntax(text, segment.syntax_kind)
+        except (TypeError, ValueError):
+            return ""
+    return text
+
+
+def _typed_payload_exact_secret_match(segment, text, exact_secret_values):
+    if not isinstance(segment, (
+        SanitizedSegment, GeneratedContextSegment, LiteralSegment,
+        ValidatedToolSyntaxSegment,
+    )):
+        return False
     return _contains_exact_secret(
-        (
-            _source_text_for_secret_scan(presentation_secret_text(segment)),
-            presentation_display_path(segment),
-        ),
-        exact_secret_values,
+        _rendered_non_source_text(segment, text), exact_secret_values
+    )
+
+
+def _typed_payload_shape_reasons(segment, text):
+    if isinstance(segment, (
+        CodexReasoningReplaySegment,
+        AnthropicThinkingReplaySegment,
+        SourcePresentationSegment,
+    )):
+        # Final source scans depend on a request-bound grant and rendered fields;
+        # this diagnostic helper must not treat the raw presentation as visible.
+        return frozenset()
+    scanned = (
+        _rendered_non_source_text(segment, text)
+        if isinstance(segment, ValidatedToolSyntaxSegment) else text
+    )
+    return frozenset(
+        reason
+        for _, reasons in content_free_violation_locations(scanned)
+        for reason in reasons
     )
 
 
@@ -53,13 +86,14 @@ def _joined_exact_secret_segment_indexes(segments, exact_secret_values):
     joined_kinds = ((SanitizedSegment,), (LiteralSegment, SanitizedSegment,
         GeneratedContextSegment, CodexReasoningReplaySegment,
         AnthropicThinkingReplaySegment, ValidatedToolSyntaxSegment))
+
     for kinds in joined_kinds:
         indexes, texts = [], []
         for index, segment in enumerate(segments):
             text = getattr(segment, "text", None)
             if isinstance(segment, kinds) and isinstance(text, str):
                 indexes.append(index)
-                texts.append(text)
+                texts.append(_rendered_non_source_text(segment, text))
             else:
                 if len(indexes) > 1 and _contains_exact_secret("".join(texts), exact_secret_values):
                     matched.add(indexes[0])
