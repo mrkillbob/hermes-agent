@@ -240,7 +240,7 @@ def bind_cli(ctx, handler):
             binding = scoped.binding
             for name in ("worktree", "repository_path"):
                 path = getattr(args, name, None)
-                if path is not None:
+                if path is not None and not (name == "worktree" and path is False):
                     binding.verify_workspace(path, binding.repository)
             bound_args = copy(args)
             if getattr(args, "repository", None) is not None:
