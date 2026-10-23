@@ -37,6 +37,13 @@ _OPERATIONAL_BLOCKER_RULES = (
      r"usage limits (?:are|were|have been) (?:exceeded|exhausted)|"
      r"(?:quota|usage limits) (?:blocked|prevented|failed))\b",
      "hermes-maintenance-steward"),
+    (r"\b(?:the )?(?:provider|workflow|automation|account) "
+     r"(?:(?:has|have|had) )?(?:hit|encountered|reached|returned|exceeded|exhausted) usage limits\b",
+     "hermes-maintenance-steward"),
+    (r"\b(?:the )?(?:provider|workflow|automation|account) "
+     r"(?:(?:has|have|had) )?(?:failed|cannot run|can not run|can't run|(?:is|are|was|were) blocked) "
+     r"(?:due to|because of|from) (?:the )?usage limits\b",
+     "hermes-maintenance-steward"),
     (r"\b(?:the )?lunabot diagnostics? (?:"
      r"failed|(?:has|have) failed|(?:is|are|was|were) (?:blocked|unavailable)|"
      r"(?:returned|reported|encountered) (?:an )?error)\b",

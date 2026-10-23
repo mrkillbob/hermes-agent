@@ -47,6 +47,21 @@ CLAUSE_PREDICATES = [
     "lunabot diagnostics were blocked",
 ]
 
+USAGE_LIMIT_FAILURES = [
+    "The provider hit usage limits, so the workflow cannot run.",
+    "Provider has exceeded usage limits.",
+    "Provider has exhausted usage limits.",
+    "The workflow encountered usage limits during the run.",
+    "The workflow failed due to usage limits.",
+    "Workflow has failed due to usage limits.",
+    "The account has hit usage limits.",
+    "Automation had encountered usage limits.",
+    "Workflow returned usage limits.",
+    "The provider cannot run because of usage limits.",
+    "Workflow was blocked due to usage limits.",
+    "Automation failed from usage limits.",
+]
+
 INLINE_QUOTED_CAUSAL_BLOCKERS = [
     "The workflow cannot run because `automation credential is missing`.",
     "The workflow cannot run because 'quota is exhausted'.",
@@ -85,6 +100,49 @@ def test_causal_blocker_with_comma_semicolon_or_midclause_wording_routes_mainten
 def test_causal_when_clause_with_quota_failure_routes_maintenance():
     body = "The deployment failed when provider quota was exceeded."
     assert repair_profile_for_task(INTAKE_TITLES[0][0], body) == "hermes-maintenance-steward"
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("body", USAGE_LIMIT_FAILURES)
+def test_usage_limit_failure_clause_routes_maintenance(title, owner, body):
+    assert repair_profile_for_task(title, body) == "hermes-maintenance-steward"
+
+
+@pytest.mark.parametrize("body", [
+    "Inventory:\nThe provider hit usage limits, so the workflow cannot run.",
+    "Quoted: The workflow encountered usage limits during the run.",
+    "Quoted inventory:\n\nThe workflow failed due to usage limits.",
+    "Example text: `Provider has exceeded usage limits.`",
+    "Example text: `Provider has exhausted usage limits.`",
+    "Example text: `Workflow has failed due to usage limits.`",
+    "Example text: `The provider hit usage limits, so the workflow cannot run.`",
+    "‘The workflow failed due to usage limits’ is an example sentence.",
+])
+def test_usage_limit_failure_examples_do_not_route(body):
+    assert repair_profile_for_task(INTAKE_TITLES[0][0], body) == INTAKE_TITLES[0][1]
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("body", [
+    "Assess provider usage limits before updating action pins.",
+    "Usage limits documentation is attached for the dependency review.",
+    "The provider remains within its usage limits; inspect lock drift.",
+    "Check whether provider hit usage limits before deciding on action pins.",
+    "The provider might hit usage limits during the next run.",
+    "The provider did not hit usage limits in this run.",
+    "The workflow failed, but not due to usage limits.",
+    "Check whether provider has exceeded usage limits before updating action pins.",
+    "Check whether provider has exhausted usage limits before updating action pins.",
+    "Check whether workflow has failed due to usage limits before assessing lock drift.",
+])
+def test_usage_limit_mentions_without_a_direct_failure_keep_title_owner(title, owner, body):
+    assert repair_profile_for_task(title, body) == owner
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+def test_actual_usage_limit_failure_after_conditional_mention_routes(title, owner):
+    body = "Check whether provider hit usage limits. The provider hit usage limits, so the workflow cannot run."
+    assert repair_profile_for_task(title, body) == "hermes-maintenance-steward"
 
 
 @pytest.mark.parametrize("body", [
