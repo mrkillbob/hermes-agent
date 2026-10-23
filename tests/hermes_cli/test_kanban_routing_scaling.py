@@ -40,6 +40,12 @@ def test_many_conditional_blocker_mentions_finish_promptly():
     _assert_child_routes_long_input("'Check whether the automation credential is missing. ' * 200_000")
 
 
+def test_many_no_evidence_mentions_finish_promptly():
+    _assert_child_routes_long_input(
+        "'There is no evidence that the automation credential is missing. ' * 200_000",
+    )
+
+
 def test_long_unmatched_suffix_whitespace_finishes_promptly():
     _assert_child_routes_long_input("'“x”' + ' ' * 200_000 + ' ordinary review'")
 

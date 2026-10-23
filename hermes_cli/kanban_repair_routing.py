@@ -58,7 +58,9 @@ _FENCE_OPEN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _FENCE_CLOSE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
 _BLOCKQUOTE = re.compile(r"^\s{0,3}>")
 _BLOCKQUOTE_EMPTY = re.compile(r"^\s{0,3}>\s*$")
-_BLOCKER_NEGATION = re.compile(r"\b(?:no|if|whether|unless)\b", re.IGNORECASE)
+_BLOCKER_NEGATION = re.compile(
+    r"\b(?:no(?:\s+(?:evidence|indication)\s+that)?|if|whether|unless)\b", re.IGNORECASE,
+)
 _WHEN_INQUIRY = re.compile(r"\bwhen\b", re.IGNORECASE)
 _INQUIRY_VERB = re.compile(r"\b(?:check|review|record|inspect|determine|verify)\s*", re.IGNORECASE)
 _INLINE_QUOTES = {"'": "'", '"': '"', "‘": "’", "“": "”"}

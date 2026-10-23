@@ -229,6 +229,41 @@ def test_negative_or_conditional_credential_wording_keeps_title_owner(title, own
 
 @pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
 @pytest.mark.parametrize("body", [
+    "There is no evidence that the automation credential is missing.",
+    "We found no indication that LunaBot diagnostics failed.",
+    "THERE IS NO EVIDENCE THAT THE AUTOMATION CREDENTIAL IS MISSING.",
+    "We found no   indication \t that ‘LunaBot diagnostics failed’. ",
+])
+def test_explicit_no_evidence_or_indication_keeps_title_owner(title, owner, body):
+    assert repair_profile_for_task(title, body) == owner
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("body", [
+    "There is evidence that the automation credential is missing.",
+    "We found an indication that LunaBot diagnostics failed.",
+])
+def test_affirmative_evidence_or_indication_routes_maintenance(title, owner, body):
+    assert repair_profile_for_task(title, body) == "hermes-maintenance-steward"
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("body", [
+    "There is no evidence that the automation credential is missing. The automation credential is missing.",
+    "We found no indication that LunaBot diagnostics failed. LunaBot diagnostics failed.",
+])
+def test_later_actual_blocker_after_no_evidence_phrase_still_routes(title, owner, body):
+    assert repair_profile_for_task(title, body) == "hermes-maintenance-steward"
+
+
+def test_local_pr_ci_legacy_owner_survives_no_evidence_blocker_prose():
+    title = "Local PR CI audit for the current patch"
+    body = "There is no evidence that the automation credential is missing."
+    assert repair_profile_for_task(title, body) == "pr-local-ci-auditor"
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("body", [
     "Example: `Automation credential is missing`.",
     "Example text: `automation credential is missing`.",
     "For example, “LunaBot diagnostics failed”.",
