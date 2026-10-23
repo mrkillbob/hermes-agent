@@ -139,7 +139,16 @@ def _validate_task(task: dict, pattern: re.Pattern) -> None:
             raise ValueError("invalid task field")
 
 
-def legacy_matches(rows, identity, *, deadline=None):
+def project_legacy_receipt(task: dict) -> dict:
+    """Qualify every original receipt before discarding unrelated body prose."""
+    _validate_task(task, re.compile(r"github-pr-feedback:.*", re.DOTALL))
+    identity = _qualified_legacy_identity(task)
+    return {"id": task["id"], "status": task["status"],
+            "idempotency_key": task["idempotency_key"], "identity": list(identity),
+            "body_sha256": sha256(task["body"].encode("utf-8")).hexdigest()}
+
+
+def legacy_matches(rows, identity, *, deadline=None, projected=False):
     """Qualify every prefix row before proving absence; never expose unrelated data."""
     try:
         identity = _parse_identity(json.dumps(identity, sort_keys=True, separators=(",", ":")))
@@ -149,13 +158,23 @@ def legacy_matches(rows, identity, *, deadline=None):
         pattern = re.compile(r"github-pr-feedback:.*", re.DOTALL)
         result, scanned, output = [], 0, 3
         for task in rows:
-            _validate_task(task, pattern)
+            if projected:
+                if (not isinstance(task, dict) or set(task) != {
+                        "id", "status", "idempotency_key", "identity", "body_sha256"}
+                        or not isinstance(task["identity"], list) or len(task["identity"]) != 4
+                        or not all(isinstance(task[name], str) and task[name]
+                                   for name in ("id", "status", "idempotency_key", "body_sha256"))
+                        or re.fullmatch(r"[0-9a-f]{64}", task["body_sha256"]) is None):
+                    raise ValueError("unqualified receipt projection")
+                qualified = tuple(task["identity"])
+            else:
+                _validate_task(task, pattern)
+                qualified = _qualified_legacy_identity(task)
             encoded = json.dumps(task, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             length = len(encoded.encode("utf-8"))
             scanned += length
             if length > _MAX_OUTPUT_BYTES or scanned > _MAX_LEGACY_SCAN_BYTES or _monotonic() >= deadline:
                 raise ValueError("legacy scan bound")
-            qualified = _qualified_legacy_identity(task)
             if _monotonic() >= deadline:
                 raise ValueError("legacy qualification deadline")
             if qualified != _identity_tuple(identity):
