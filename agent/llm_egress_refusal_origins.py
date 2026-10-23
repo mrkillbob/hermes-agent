@@ -248,8 +248,13 @@ def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
                         if isinstance(block, Mapping) and _literal(block.get("type")) == "tool_result":
                             add_result("anthropic", block.get("tool_use_id"), block)
 
-    scan_messages(value.get("messages"))
     extra_body = value.get("extra_body")
+    messages = (
+        extra_body.get("messages")
+        if isinstance(extra_body, Mapping) and "messages" in extra_body
+        else value.get("messages")
+    )
+    scan_messages(messages)
     if isinstance(extra_body, Mapping) and "input" in extra_body:
         input_items = extra_body.get("input")
     else:
@@ -375,6 +380,8 @@ def _mapping_child_state(
     elif collection == "effective_responses_extra_body" and key == "input":
         origin = "user_task"
         child_collection = "input"
+    elif collection in {"effective_responses_extra_body", "sdk_extra_body"} and key == "messages":
+        child_collection = "messages"
     elif (
         protocol_message
         and inherited == "user_task"
@@ -445,6 +452,11 @@ def _typed_payload_refusal_origin_evidence(
                 visit(segment, f"{path}.segments[{index}]", inherited, ancestors=ancestors)
         elif isinstance(item, Mapping):
             for index, (key, child) in enumerate(item.items()):
+                if path == "$" and key == "messages" and isinstance(extra_body, Mapping) and "messages" in extra_body:
+                    # The SDK's explicit extra_body key wins even when null or
+                    # malformed. Shadowed content remains firewall-scanned,
+                    # but cannot supply protocol attribution or call pairing.
+                    continue
                 key_path = f"{path}.map[{index}].key"
                 if key_path in violating_paths:
                     origins.add(inherited if inherited in _ORIGINS else "other")
