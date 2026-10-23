@@ -139,8 +139,8 @@ def test_projection_refuses_incomplete_or_changed_history(tmp_path, monkeypatch,
                 '{"slug":"tradingbot-burndown","project_id":"changed"}'),
             "changed-history": change_history,
             "replaced-database": replace_database,
-            "changed-root": lambda: monkeypatch.setenv(
-                "HERMES_KANBAN_HOME", str(tmp_path / "different-root")),
+            "changed-root": lambda: monkeypatch.setattr(
+                adapter._context._manager, "home_path", tmp_path / "different-root"),
         }
 
         def project(task):

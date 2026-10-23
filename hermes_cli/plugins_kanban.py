@@ -30,12 +30,26 @@ def _canonical(path):
     return value.resolve()
 
 
-def _context_root(manager):
-    from hermes_constants import get_default_hermes_root, get_hermes_home
+def _owner_binding(manager):
+    from hermes_constants import get_hermes_home_override
+
+    override = get_hermes_home_override()
+    return (_canonical(manager.home_path), _canonical(manager.scope_key),
+            _canonical(override) if override is not None else None)
+
+
+def _assert_unfenced():
     from hermes_cli import kanban_db as kb
 
     if _PROTECTED.intersection(os.environ) or kb._explicit_board_intent_pinned():
         raise ValueError("native worker or path context is fenced")
+
+
+def _context_root(manager):
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+    from hermes_cli import kanban_db as kb
+
+    _assert_unfenced()
     home = _canonical(manager.home_path)
     if home != _canonical(manager.scope_key) or home != _canonical(get_hermes_home()):
         raise ValueError("active plugin owner differs")
@@ -134,9 +148,15 @@ def _marker_identity(marker, deadline):
 
 def _board_identity(root, slug, path, deadline):
     """Pin the existing file and ownership marker without exporting metadata."""
+    from hermes_cli import kanban_db as kb
+
     marker = root / "kanban" / "boards" / slug / "board.json"
     database_stat = path.stat()
-    return (database_stat.st_dev, database_stat.st_ino), _marker_identity(marker, deadline)
+    marker_identity = _marker_identity(marker, deadline)
+    # Directory slug is authoritative; nondefault DB-only stubs are not boards.
+    if slug != kb.DEFAULT_BOARD and marker_identity is None:
+        raise ValueError("captured-root board registration required")
+    return (database_stat.st_dev, database_stat.st_ino), marker_identity
 
 
 def readonly_snapshot(manager, board, *, idempotency_key=None, idempotency_prefix=None,
@@ -150,9 +170,10 @@ def readonly_snapshot(manager, board, *, idempotency_key=None, idempotency_prefi
         if row_projector is not None and (not callable(row_projector)
                 or (idempotency_key is None and idempotency_prefix is None)):
             raise ValueError("in-process selected row projection required")
+        owner = _owner_binding(manager)
         root = _context_root(manager)
         slug = kb._normalize_board_slug(board)
-        if not slug or not kb.board_exists(slug):
+        if not slug:
             raise ValueError("explicit existing board required")
         # Pin the file to the registered owner, not a later process-global read.
         directory = root if slug == kb.DEFAULT_BOARD else root / "kanban" / "boards" / slug
@@ -164,7 +185,11 @@ def readonly_snapshot(manager, board, *, idempotency_key=None, idempotency_prefi
         if idempotency_key is not None or idempotency_prefix is not None:
             tasks = _rows(path, idempotency_key, idempotency_prefix, row_projector,
                           deadline=deadline)
-        if (_context_root(manager) != root or not kb.board_exists(slug)
+        # Ambient process selectors are admission inputs, not a replacement
+        # owner for an already pinned read. Context-local profile and manager
+        # identities, native fences, and the original physical files stay binding.
+        _assert_unfenced()
+        if (_owner_binding(manager) != owner
                 or path != (directory / "kanban.db").resolve(strict=True)
                 or _board_identity(root, slug, path, deadline) != identity):
             raise ValueError("board ownership or database changed during snapshot")
