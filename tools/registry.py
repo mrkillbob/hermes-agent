@@ -483,6 +483,11 @@ class ToolRegistry:
         return hermes_home_key()
 
     @staticmethod
+    def current_cache_scope_key() -> tuple[str, Optional[str]]:
+        """Read-side catalog identity; registration ownership remains profile-only."""
+        return hermes_home_key(), _session_slot_key()
+
+    @staticmethod
     def _grouped(entries: list[ToolEntry]) -> dict[str, list[ToolEntry]]:
         """``{toolset: entries}`` in first-appearance order."""
         groups: dict[str, list[ToolEntry]] = {}
