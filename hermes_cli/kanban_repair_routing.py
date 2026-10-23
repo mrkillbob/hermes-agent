@@ -322,6 +322,12 @@ _CAUSAL_FRAME = (
     r"(?:failed|cannot run|can't run|can’t run|didn't run|didn’t run|did not run) ?,? "
     r"(?:because of|because|due to|when) "
 )
+_QUOTED_REPORT_PREFIXES = (
+    "the workflow report says ", "workflow report says ",
+    "an operator reported that ", "there is evidence that ",
+    "we found an indication that ",
+)
+_QUOTED_CAUSAL_PREFIXES = ("the workflow ", "workflow ", "the deployment ", "deployment ")
 
 
 def _paired_quote_ranges(line: str) -> list[tuple[int, int]]:
@@ -415,12 +421,15 @@ def _is_single_positive(value: str) -> bool:
         return True
     if re.fullmatch(_BULLET_PREFIX + _STATUS_FRAME + _P_WITH_TAIL, value, re.IGNORECASE):
         return True
-    if re.fullmatch(_BULLET_PREFIX + _REPORT_FRAME + _QUOTED_P_WITH_TAIL, value, re.IGNORECASE):
-        return True
+    candidate = value[2:] if value.startswith(("- ", "* ", "+ ")) else value
+    if candidate.startswith(_QUOTED_REPORT_PREFIXES):
+        if re.fullmatch(_BULLET_PREFIX + _REPORT_FRAME + _QUOTED_P_WITH_TAIL, value, re.IGNORECASE):
+            return True
     if re.fullmatch(_BULLET_PREFIX + _REPORT_FRAME + _P_WITH_TAIL, value, re.IGNORECASE):
         return True
-    if re.fullmatch(_BULLET_PREFIX + _CAUSAL_FRAME + _QUOTED_P_WITH_TAIL, value, re.IGNORECASE):
-        return True
+    if candidate.startswith(_QUOTED_CAUSAL_PREFIXES):
+        if re.fullmatch(_BULLET_PREFIX + _CAUSAL_FRAME + _QUOTED_P_WITH_TAIL, value, re.IGNORECASE):
+            return True
     return re.fullmatch(_BULLET_PREFIX + _CAUSAL_FRAME + _P_WITH_TAIL, value, re.IGNORECASE) is not None
 
 
