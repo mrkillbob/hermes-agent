@@ -31,6 +31,15 @@ MAX_GRANTS_PER_REQUEST = 64
 DEFAULT_POLICY_DIGEST = sha256(b"hermes-llm-egress-policy-v1").hexdigest()
 
 
+def effective_policy_digest(agent: object) -> str:
+    """Resolve the existing private/legacy/default policy without changing agent state."""
+    return str(
+        getattr(agent, "_llm_egress_policy_digest", "")
+        or getattr(agent, "llm_egress_policy_digest", "")
+        or DEFAULT_POLICY_DIGEST
+    )
+
+
 class SourceProvenanceError(ValueError):
     """A trusted producer could not establish file-slice provenance."""
 
@@ -436,11 +445,7 @@ def provenance_kwargs_for_agent(
         or getattr(agent, "_current_api_request_id", "")
         or (f"{turn_id}:context" if turn_id else "")
     )
-    policy_digest = str(
-        getattr(agent, "_llm_egress_policy_digest", "")
-        or getattr(agent, "llm_egress_policy_digest", "")
-        or DEFAULT_POLICY_DIGEST
-    )
+    policy_digest = effective_policy_digest(agent)
     if not all((session_id, turn_id, resolved_request_id, policy_digest)):
         return {}
     return {

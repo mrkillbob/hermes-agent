@@ -92,8 +92,9 @@ def native_metadata_argument_digest(agent, name, arguments):
 
 
 def _request_identity(agent):
+    from agent.source_provenance import effective_policy_digest
     return tuple(str(getattr(agent, key, "") or "") for key in (
-        "_current_turn_id", "_current_api_request_id", "_llm_egress_policy_digest"))
+        "_current_turn_id", "_current_api_request_id")) + (effective_policy_digest(agent),)
 
 
 def _owner_for_execution(authority, policy, source, durable_session_id):

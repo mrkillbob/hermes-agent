@@ -83,7 +83,7 @@ from agent.llm_egress_tool_diagnostics import type_tool_diagnostics
 from agent.llm_egress_schema import type_builtin_schema_words
 from agent.message_sanitization import tool_result_id_variants
 from agent.redact import redact_sensitive_text
-from agent.source_provenance import DEFAULT_POLICY_DIGEST, SourceProvenanceError, SourceProvenanceRegistry
+from agent.source_provenance import SourceProvenanceError, SourceProvenanceRegistry, effective_policy_digest
 from agent.source_read_results import SourceReadSelection, remember_validated_sources
 
 
@@ -912,11 +912,7 @@ def authorize_agent_sdk_kwargs(
     session_id = str(getattr(agent, "session_id", "") or "")
     turn_id = str(getattr(agent, "_current_turn_id", "") or "")
     request_id = str(getattr(agent, "_current_api_request_id", "") or "")
-    policy_digest = str(
-        getattr(agent, "_llm_egress_policy_digest", "")
-        or getattr(agent, "llm_egress_policy_digest", "")
-        or DEFAULT_POLICY_DIGEST
-    )
+    policy_digest = effective_policy_digest(agent)
     registry = getattr(agent, "_source_provenance_registry", None)
     if protected_kanban_remote and isinstance(registry, SourceProvenanceRegistry):
         classification_body = _prepare_bound_skill_source_results(
