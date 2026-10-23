@@ -156,6 +156,48 @@ def test_plain_budget_trip_still_auto_recovers(kanban_home):
         assert kb.get_task(conn, tids[1]).status == "ready"
 
 
+def test_dispatcher_failure_limit_reaches_crash_reclaim(kanban_home):
+    """Ordinary worker crashes use the same configured breaker threshold as other dispatch failures."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="crash limit", assignee="a")
+        _dead_worker_with_log(conn, tid, 72001, 1)
+        result = kbd.DispatchResult()
+
+        kbd._run_reclaim_phase(
+            conn,
+            result,
+            stale_timeout_seconds=0,
+            failure_limit=1,
+            reconcile_orphans=False,
+        )
+
+        task = kb.get_task(conn, tid)
+        assert result.crashed == [tid]
+        assert task.status == "blocked"
+        assert task.consecutive_failures == 1
+
+
+def test_systemic_crashes_still_trip_at_one_with_high_dispatcher_limit(kanban_home):
+    """Three same-fingerprint crashes in one reclaim sweep stay an immediate terminal hold."""
+    with kbc.connect() as conn:
+        tids = [kb.create_task(conn, title=f"systemic {i}", assignee="a") for i in range(3)]
+        for i, tid in enumerate(tids):
+            _dead_worker_with_log(conn, tid, 72100 + i, 1)
+        result = kbd.DispatchResult()
+
+        kbd._run_reclaim_phase(
+            conn,
+            result,
+            stale_timeout_seconds=0,
+            failure_limit=100,
+            reconcile_orphans=False,
+        )
+
+        assert set(result.auto_blocked) == set(tids)
+        assert all(kb.get_task(conn, tid).status == "blocked" for tid in tids)
+        assert all(kb.get_task(conn, tid).consecutive_failures == 1 for tid in tids)
+
+
 def test_exit_single_query_writes_trailer_only_for_kanban_workers(monkeypatch, capsys):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     with pytest.raises(SystemExit) as exc:
