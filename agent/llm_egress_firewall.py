@@ -46,6 +46,8 @@ class DestinationClass(StrEnum):
     UNKNOWN = "unknown"
 
 
+from agent.native_metadata_egress import NativeMetadataSegment
+
 @dataclass(frozen=True, slots=True)
 class SourceGrant:
     """Immutable authorization for one exact, already-read file slice."""
@@ -1601,6 +1603,31 @@ def validate_sanitized_text(text: str, *, max_bytes: int = 32_768) -> str:
     return text
 
 
+def _render_bounded_sanitized(segment, request, grants, allowed, total, segment_cap, aggregate_cap):
+    """Common original sanitizer budgets/scans, with request-bound metadata projection."""
+    reasons = []
+    if not allowed:
+        reasons.append("sanitized_segment_forbidden")
+    if not isinstance(segment.text, str):
+        return "", "", total, [*reasons, "invalid_literal_segment"]
+    projection = segment.text
+    if isinstance(segment, NativeMetadataSegment):
+        from agent.native_metadata_egress import validate_segment
+        try:
+            projection = validate_segment(segment, request)
+        except (ValueError, TypeError):
+            return "", "", total, [*reasons, "invalid_native_metadata_reference"]
+    encoded = segment.text.encode("utf-8")
+    if len(encoded) > segment_cap:
+        reasons.append("sanitized_segment_bytes_exceeded")
+    total += len(encoded)
+    if total > aggregate_cap:
+        reasons.append("sanitized_bytes_exceeded")
+    if any(_contains_grant_substring(content, encoded) for _, content in grants.values()):
+        reasons.append("source_bytes_in_sanitized_segment")
+    return segment.text, projection, total, reasons
+
+
 def _is_strict_sanitized_only_payload(
     value: Any,
     *,
@@ -1614,7 +1641,7 @@ def _is_strict_sanitized_only_payload(
     an empty structural request from acquiring grantless status.
     """
 
-    if isinstance(value, SanitizedSegment):
+    if isinstance(value, (SanitizedSegment, NativeMetadataSegment)):
         return isinstance(value.text, str), 1 if isinstance(value.text, str) else 0
     if isinstance(value, GeneratedContextSegment):
         return isinstance(value.text, str), 1 if isinstance(value.text, str) else 0
@@ -1987,6 +2014,7 @@ class LLMEgressFirewall:
         sanitized_bytes = 0
         scan_values: list[str] = []
         base64_scan_values: list[str] = []
+        encoding_projections: dict[int, str] = {}
         allowed_static_hashes = self._static_literal_hashes_by_policy.get(
             request.policy_digest,
             frozenset(),
@@ -2017,6 +2045,7 @@ class LLMEgressFirewall:
                 | CodexReasoningReplaySegment
                 | AnthropicThinkingReplaySegment
                 | ValidatedToolSyntaxSegment
+                | NativeMetadataSegment
                 | SourceBoundSegment
                 | SourcePresentationSegment
                 | UntrustedProvenanceSegment
@@ -2032,26 +2061,15 @@ class LLMEgressFirewall:
                 if any(content and content in encoded_literal for _, content in grant_contents.values()):
                     reasons.append("source_bytes_in_literal")
                 return segment.text
-            if isinstance(segment, SanitizedSegment):
-                if not allow_sanitized_segments:
-                    reasons.append("sanitized_segment_forbidden")
-                if isinstance(segment.text, str):
-                    encoded = segment.text.encode("utf-8")
-                    if len(encoded) > self._max_sanitized_segment_bytes:
-                        reasons.append("sanitized_segment_bytes_exceeded")
-                    sanitized_bytes += len(encoded)
-                    if sanitized_bytes > self._max_sanitized_bytes:
-                        reasons.append("sanitized_bytes_exceeded")
-                    if any(
-                        _contains_grant_substring(content, encoded)
-                        for _, content in grant_contents.values()
-                    ):
-                        reasons.append("source_bytes_in_sanitized_segment")
-                    scan_values.append(segment.text)
-                    base64_scan_values.append(segment.text)
-                    return segment.text
-                reasons.append("invalid_literal_segment")
-                return ""
+            if isinstance(segment, (SanitizedSegment, NativeMetadataSegment)):
+                text, projection, sanitized_bytes, segment_reasons = _render_bounded_sanitized(
+                    segment, request, grant_contents, allow_sanitized_segments,
+                    sanitized_bytes, self._max_sanitized_segment_bytes, self._max_sanitized_bytes)
+                reasons.extend(segment_reasons)
+                encoding_projections[id(segment)] = projection
+                scan_values.append(text)
+                base64_scan_values.append(projection)
+                return text
             if isinstance(segment, GeneratedContextSegment):
                 if not isinstance(segment.text, str):
                     reasons.append("invalid_generated_context_segment")
@@ -2154,6 +2172,7 @@ class LLMEgressFirewall:
                     CodexReasoningReplaySegment,
                     AnthropicThinkingReplaySegment,
                     ValidatedToolSyntaxSegment,
+                    NativeMetadataSegment,
                     SourceBoundSegment,
                     SourcePresentationSegment,
                     UntrustedProvenanceSegment,
@@ -2163,6 +2182,7 @@ class LLMEgressFirewall:
             if isinstance(value, OutboundText):
                 rendered_parts: list[str] = []
                 adjacent_sanitized: list[str] = []
+                adjacent_original: list[str] = []
                 adjacent_non_source: list[str] = []
 
                 def flush_adjacent_sanitized() -> None:
@@ -2172,9 +2192,14 @@ class LLMEgressFirewall:
                         # boundaries. Re-scan each reconstructed contiguous
                         # sanitized span so splitting cannot conceal a secret,
                         # private path, or encoding across adjacent pieces.
-                        scan_values.append(combined)
+                        original = "".join(adjacent_original)
+                        scan_values.append(original)
                         base64_scan_values.append(combined)
+                        if any(_contains_grant_substring(content, original.encode("utf-8"))
+                               for _, content in grant_contents.values()):
+                            reasons.append("source_bytes_in_sanitized_segment")
                     adjacent_sanitized.clear()
+                    adjacent_original.clear()
 
                 def flush_adjacent_non_source() -> None:
                     if len(adjacent_non_source) > 1:
@@ -2187,8 +2212,9 @@ class LLMEgressFirewall:
                 for segment in value.segments:
                     rendered = render_text_segment(segment)
                     rendered_parts.append(rendered)
-                    if isinstance(segment, SanitizedSegment):
-                        adjacent_sanitized.append(rendered)
+                    if isinstance(segment, (SanitizedSegment, NativeMetadataSegment)):
+                        adjacent_sanitized.append(encoding_projections.get(id(segment), rendered))
+                        adjacent_original.append(rendered)
                     else:
                         flush_adjacent_sanitized()
                     if isinstance(
@@ -2200,6 +2226,7 @@ class LLMEgressFirewall:
                             CodexReasoningReplaySegment,
                             AnthropicThinkingReplaySegment,
                             ValidatedToolSyntaxSegment,
+                            NativeMetadataSegment,
                         ),
                     ):
                         adjacent_non_source.append(rendered)

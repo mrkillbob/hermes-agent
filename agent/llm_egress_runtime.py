@@ -99,6 +99,8 @@ _PROTECTED_REMOTE_PROVIDERS = frozenset({
     "nous-portal",
     "nousresearch",
 })
+from agent.native_metadata_egress import authorize_with_native_metadata, remember_authorized_recipient
+
 logger = logging.getLogger(__name__)
 
 # Local action results are safe to replay only as bounded outcomes, and only
@@ -1190,11 +1192,10 @@ def authorize_agent_sdk_kwargs(
     try:
         from agent.source_provenance_diagnostics import receipt_scope
         with receipt_scope(agent, registry, (session_id, turn_id, request_id, policy_digest)):
-            authorization = firewall.authorize(
-                request,
-                resolved_route,
-                grants=tuple(used_grants.values()),
-            )
+            authorization = authorize_with_native_metadata(
+                agent, resolved_route, body, request, native_nonterminal_call_ids,
+                native_nonterminal_result_ids, firewall, tuple(used_grants.values()),
+                enabled=not protected_kanban_remote)
     except EgressBlocked:
         logger.warning(
             "LLM egress blocked grant counts: input=%d selected=%d",
@@ -1209,6 +1210,7 @@ def authorize_agent_sdk_kwargs(
         if locations:
             logger.warning("LLM egress blocked structural locations: %s", locations)
         raise
+    remember_authorized_recipient(agent, resolved_route)
     remember_validated_sources(registry, used_grants)
     rebuilt = json.loads(authorization.payload_bytes)
     if not isinstance(rebuilt, dict):

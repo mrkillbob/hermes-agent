@@ -786,6 +786,15 @@ def _run_agent_tool_execution_middleware(
     )
 
     trace = middleware_trace if middleware_trace is not None else []
+    from agent.native_metadata_capture import native_metadata_argument_digest, execute_with_native_metadata_capture
+
+    original_digest = native_metadata_argument_digest(agent, function_name, function_args)
+
+    def capture_execute(arguments):
+        return execute_with_native_metadata_capture(
+            agent, function_name, tool_call_id, original_digest, execute, arguments,
+        )
+
     state = _ManagedToolResult(result=None, args=function_args, middleware_trace=trace, blocked=False, dispatched=False)
     dispatch_lock = threading.Lock()
 
@@ -800,7 +809,7 @@ def _run_agent_tool_execution_middleware(
             agent,
             state,
             _ToolCallRef(function_name, final_args, effective_task_id, tool_call_id, trace),
-            execute=execute,
+            execute=capture_execute,
             scope_block=scope_block,
             display_index=display_index,
             begin_execution=begin_execution,
@@ -841,6 +850,9 @@ def _run_agent_tool_execution_middleware(
             "tool_call_id": tool_call_id or "",
         },
     )
+    from agent.native_metadata_capture import settle_native_metadata_execution
+    settle_native_metadata_execution(agent, tool_call_id, state.result,
+                                    blocked=state.blocked, dispatched=state.dispatched)
     return state
 
 
@@ -1188,7 +1200,11 @@ def _commit_tool_result(
             logging.debug("Tool result metadata callback error: %s", callback_error)
     stamp_data_use(tool_message, sorted(data_use))
     messages.append(tool_message)
-    if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
+    committed = _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}")
+    from agent.native_metadata_capture import commit_native_metadata_presentation
+    commit_native_metadata_presentation(agent, tool_call_id, function_result, tool_message.get("content"),
+                                       blocked=blocked, is_error=is_error, committed=committed)
+    if not committed:
         return None
 
     if not blocked:
