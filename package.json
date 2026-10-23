@@ -83,8 +83,8 @@
     "@simple-git/args-pathspec": "1.0.4",
     "source-map-js": "1.2.2",
     "yaml": "2.9.1",
-    "vitest": "4.1.11",
-    "@vitest/mocker": "4.1.11"
+    "vitest": "4.1.12",
+    "@vitest/mocker": "4.1.12"
   },
   "engines": {
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0",
