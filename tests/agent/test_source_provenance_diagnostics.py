@@ -2,6 +2,7 @@
 import json
 from hashlib import sha256
 from types import SimpleNamespace
+from contextvars import copy_context
 
 import pytest
 
@@ -13,6 +14,27 @@ from agent.source_provenance_tools import (
     issue_active_read_provenance,
 )
 from tools.file_operations import ShellFileOperations
+
+
+def test_detached_receipt_context_releases_callback_and_native_scan_buffers(tmp_path):
+    from agent import source_provenance_diagnostics as diagnostics
+    agent = _agent(tmp_path)
+    owner = (agent.session_id, agent._current_turn_id, agent._current_api_request_id,
+             agent._llm_egress_policy_digest)
+    segment = object()
+    with diagnostics.receipt_scope(agent, agent._source_provenance_registry, owner,
+                                   refusal_origins=lambda: ("other",)):
+        diagnostics.record_native_metadata_scan(owner, segment, "synthetic-sensitive-canary", "safe")
+        copied = copy_context()
+        observation = diagnostics._receipt.get()
+        assert diagnostics.native_metadata_scan_inputs(segment) is not None
+    assert not observation
+    assert copied.run(diagnostics.native_metadata_scan_inputs, segment) is None
+    receipt = {}
+    decision = SimpleNamespace(session_id=owner[0], turn_id=owner[1], request_id=owner[2],
+                               policy_digest=owner[3], allowed=False)
+    copied.run(diagnostics.append_receipt_diagnostics, receipt, decision)
+    assert receipt == {}
 
 
 def _agent(tmp_path):

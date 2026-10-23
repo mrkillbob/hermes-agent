@@ -224,20 +224,25 @@ def row_turn_author(policy, row):
 
 
 async def execute_admission(authority, ref, row):
-    from gateway.session_completion_notes import note_if_unviewed
-    noted = await note_if_unviewed(authority, ref, row)  # #134889 LC-7: no viewer, no turn
-    if noted is not None:
-        return noted
-    from gateway.session_policy import policy_for_source
-    policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
-    if policy is not None and policy.source == 'cron':
-        from gateway.session_cron import execute
-        return await execute(authority, ref, row, policy)
-    local_policy = policy
-    from gateway.session_managed_worker import managed_policy, execute_managed
-    policy = managed_policy(authority, ref)
-    if policy is not None:
-        return await execute_managed(authority, ref, row, policy)
+    from agent.llm_egress_request_diagnostics import restore_suspended, suspend
+    inherited_diagnostics = suspend()
+    try:
+        from gateway.session_completion_notes import note_if_unviewed
+        noted = await note_if_unviewed(authority, ref, row)  # #134889 LC-7: no viewer, no turn
+        if noted is not None:
+            return noted
+        from gateway.session_policy import policy_for_source
+        policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
+        if policy is not None and policy.source == 'cron':
+            from gateway.session_cron import execute
+            return await execute(authority, ref, row, policy)
+        local_policy = policy
+        from gateway.session_managed_worker import managed_policy, execute_managed
+        policy = managed_policy(authority, ref)
+        if policy is not None:
+            return await execute_managed(authority, ref, row, policy)
+    finally:
+        restore_suspended(inherited_diagnostics)
     live = authority.sessions[ref.session_id]
     native = row['admission_id'] in authority.native_waiters
     authority.native_waiters.discard(row['admission_id'])
@@ -275,6 +280,12 @@ async def execute_admission(authority, ref, row):
     api_token = api_execution.set(None)
     captured = {}
     result_token = execution_result.set(captured)
+    from agent.llm_egress_request_diagnostics import begin_admission as begin_egress_diagnostics
+    diagnostic_scope, diagnostic_token = begin_egress_diagnostics(authority, ref, row, event.source)
+    if diagnostic_scope is not None:
+        event._diagnostic_claim = (
+            authority, ref.session_id, row.get('generation'), diagnostic_scope
+        )
     token = executing_admission.set(True)
     # This drain, not the handler's unwind, releases the turn's crash marker (see below).
     event._turn_marker_handoff = True
@@ -326,6 +337,10 @@ async def execute_admission(authority, ref, row):
             await _hand_over_turn_marker(authority, row['admission_id'], event)
             return response
     finally:
+        from agent.llm_egress_request_diagnostics import end_admission as end_egress_diagnostics
+        if getattr(event, '_diagnostic_claim', None) is not None:
+            event.__dict__.pop('_diagnostic_claim', None)
+        end_egress_diagnostics(diagnostic_scope, diagnostic_token)
         if not handed:
             await _release_turn_marker(authority, event)
         executing_admission.reset(token)

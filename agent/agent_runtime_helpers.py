@@ -7,6 +7,7 @@ Each function takes the parent ``AIAgent`` as ``agent`` except the stateless mes
 from __future__ import annotations
 import contextlib
 import copy
+from agent.llm_egress_lineage import transfer as _lineage_transfer
 import json
 import logging
 import re
@@ -1247,9 +1248,8 @@ def drop_thinking_only_and_merge_users(
     messages: list[dict[str, Any]], *, drop_codex_reasoning_items: bool = True,
     drop_nudge_marker: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Drop thinking-only assistant turns and merge adjacent user messages left behind, on the
-    per-call ``api_messages`` copy only (``agent.messages`` is never mutated). Drop-and-merge
-    (not stub text) keeps history honest and preserves role alternation.
+    """Drop thinking-only assistant turns and merge adjacent users on the per-call API copy.
+    Canonical history stays untouched and role alternation is preserved.
 
     ``drop_nudge_marker`` (#67321): user rows equal to the marker — the synthetic Codex
     continuation nudge — are dropped too once the turn has crossed to a non-Codex provider;
@@ -1275,7 +1275,7 @@ def drop_thinking_only_and_merge_users(
             # alternation, but is safer than raising in a hot path).
             merged.append(m)
         else:
-            merged[-1] = {**prev, "content": content}  # copy so caller dicts are never mutated
+            merged[-1] = _lineage_transfer({**prev, "content": content}, prev, m)
             merges += 1
     if dropped == 0 and merges == 0:
         return messages
@@ -3131,7 +3131,7 @@ def _realign_tool_result_names(messages: list[dict[str, Any]]) -> list[dict[str,
             current = msg.get("name")
             # Only rewrite a present, disagreeing name; clean transcripts must stay byte-identical for prompt caching.
             if expected and current and current != expected:
-                msg = {**msg, "name": expected}
+                msg = _lineage_transfer({**msg, "name": expected}, msg)
                 realigned.append((current, expected))
         aligned.append(msg)
     if not realigned:

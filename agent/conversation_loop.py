@@ -1033,7 +1033,8 @@ def _clone_message_for_send(msg):
     message for the per-call API copy, so send-path rewrites never reach the persisted
     transcript (#80498). Cheaper than deepcopy: messages are JSON-shaped and acyclic."""
     if isinstance(msg, dict):
-        return {k: _clone_message_for_send(v) if isinstance(v, (dict, list)) else v for k, v in msg.items()}
+        from agent.llm_egress_lineage import transfer
+        return transfer({k: _clone_message_for_send(v) if isinstance(v, (dict, list)) else v for k, v in msg.items()}, msg)
     if isinstance(msg, list):
         return [_clone_message_for_send(v) if isinstance(v, (dict, list)) else v for v in msg]
     return msg
@@ -1226,7 +1227,8 @@ def _redecorate_prompt_cache_for_provider(
 ) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]], list[dict[str, Any]]]:
     """Strip and re-apply cache_control for the *current* provider policy — failover
     ``continue`` paths reuse ``api_messages`` (#72626). MoA guidance is peeled and rebased."""
-    messages: list[dict[str, Any]] = [dict(m) if isinstance(m, dict) else m for m in (api_messages or [])]
+    from agent.llm_egress_lineage import transfer
+    messages: list[dict[str, Any]] = [transfer(dict(m), m) if isinstance(m, dict) else m for m in (api_messages or [])]
     prepared = moa_prepared
     guidance = prepared.get("guidance") if isinstance(prepared, dict) else None
     if guidance:
@@ -1299,6 +1301,8 @@ def _apply_context_engine_selection(
         return api_messages
 
     session_label = getattr(agent, "session_id", None) or "-"
+    from agent.llm_egress_lineage import barrier
+    barrier()
     # Structural clones: the engine must not be able to write through nested
     # containers into persisted history; only the request list is acted on (#80498).
     try:
@@ -1431,6 +1435,7 @@ class _LoopState:
     # a consecutive-ineffective-attempt backstop, rearmed only after a provider response
     # reports a prompt below threshold.
     max_compression_attempts: Any
+    _diagnostic_assembly: Any = None
     api_call_count: int = 0
     final_response: Any = None
     interrupted: bool = False
@@ -1676,20 +1681,22 @@ def _run_conversation_turn(
             break
         _run_phase(prepare_iteration, agent, s)
         _run_phase(assemble_api_request, agent, s)
-        _pg = _run_phase(run_preflight_gate, agent, s)
-        if _pg.action == "return":
-            return _pg.result
-        if _pg.action == "break":
-            break
-        if _pg.action == "continue":
-            continue
-        _run_phase(announce_api_call, agent, s)
+        from agent.llm_egress_lineage import assembly_context
+        with assembly_context(s._diagnostic_assembly, close=True):
+            _pg = _run_phase(run_preflight_gate, agent, s)
+            if _pg.action == "return":
+                return _pg.result
+            if _pg.action == "break":
+                break
+            if _pg.action == "continue":
+                continue
+            _run_phase(announce_api_call, agent, s)
 
-        s.api_start_time, s.retry_count, s.max_retries = time.time(), 0, agent._api_max_retries
-        s._retry, s.finish_reason, s.response, s.api_kwargs = TurnRetryState(), "stop", None, None
-        s.api_request_id = agent._current_api_request_id = f"{s.turn_id}:api:{s.api_call_count}"
+            s.api_start_time, s.retry_count, s.max_retries = time.time(), 0, agent._api_max_retries
+            s._retry, s.finish_reason, s.response, s.api_kwargs = TurnRetryState(), "stop", None, None
+            s.api_request_id = agent._current_api_request_id = f"{s.turn_id}:api:{s.api_call_count}"
 
-        early_result = _run_api_retry_loop(agent, s)
+            early_result = _run_api_retry_loop(agent, s)
         if early_result is not None:
             return early_result
 
@@ -1782,6 +1789,8 @@ def run_conversation(
                 prelude=prelude,
             )
         finally:
+            from agent.llm_egress_lineage import close_turn
+            close_turn(agent)
             end_voice_turn_route(agent)
     result = export_current_turn_boundary(agent, result, user_message)
     if isinstance(result, dict):

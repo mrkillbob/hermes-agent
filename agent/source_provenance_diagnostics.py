@@ -34,6 +34,34 @@ _active = ContextVar('source_diagnostic_producer', default=None)
 _receipt = ContextVar('source_diagnostic_receipt', default=None)
 
 
+class _ReceiptObservation(list):
+    """Shared revocation survives copied ContextVars; close drops borrowed inputs."""
+    def __init__(self, values):
+        super().__init__(values)
+        self.lock = RLock()
+        self.closed = False
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            self.clear()
+
+
+def _live_receipt(function):
+    @wraps(function)
+    def observe(*args, **kwargs):
+        active = _receipt.get()
+        if not isinstance(active, _ReceiptObservation):
+            return None
+        with active.lock:
+            return None if active.closed else function(*args, **kwargs)
+    return observe
+
+
+def current_receipt_observation():
+    return _receipt.get()
+
+
 class _Trace:
     def __init__(self, registry):
         self.registry = registry
@@ -152,19 +180,29 @@ def _snapshot(agent, registry, owner):
 @_observe
 def _begin_receipt(agent, registry, owner, refusal_origins=None):
     snapshot = _snapshot(agent, registry, owner)
-    return _receipt.set((owner, snapshot, refusal_origins, {'verified_source_scan': False}))
+    observation = _ReceiptObservation((owner, snapshot, refusal_origins, {'verified_source_scan': False}))
+    return _receipt.set(observation), observation
+
+
+@_observe
+def _mask_receipt():
+    return _receipt.set(None)
 
 
 @contextmanager
 def receipt_scope(agent, registry, owner, *, refusal_origins=None):
-    token = _begin_receipt(agent, registry, owner, refusal_origins)
+    begun = _begin_receipt(agent, registry, owner, refusal_origins)
+    token, observation = begun if begun is not None else (_mask_receipt(), None)
     try:
         yield
     finally:
+        if isinstance(observation, _ReceiptObservation):
+            observation.close()
         _reset(_receipt, token)
 
 
 @_observe
+@_live_receipt
 def record_native_metadata_scan(owner, segment, text, encoding_projection):
     """Borrow only the current renderer's validated native scan inputs, in memory."""
     active = _receipt.get()
@@ -176,6 +214,7 @@ def record_native_metadata_scan(owner, segment, text, encoding_projection):
 
 
 @_observe
+@_live_receipt
 def native_metadata_scan_inputs(segment):
     """Unobserved or invalid references supply no diagnostic content or authority."""
     active = _receipt.get()
@@ -186,6 +225,7 @@ def native_metadata_scan_inputs(segment):
 
 
 @_observe
+@_live_receipt
 def record_verified_source_scan(owner, secret_scan_inputs, encoding_scan_inputs,
                                 exact_secret_values=()):
     """Remember only a fixed match from already-rendered, request-bound scan inputs."""
@@ -216,6 +256,7 @@ def record_verified_source_scan(owner, secret_scan_inputs, encoding_scan_inputs,
 
 
 @_observe
+@_live_receipt
 def append_receipt_diagnostics(receipt, decision):
     """Only the matching decision can persist an independently filtered snapshot."""
     active = _receipt.get()

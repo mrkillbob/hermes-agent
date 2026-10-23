@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 
+from agent.llm_egress_request_diagnostics import private_receipt_scope
 from agent.source_grant_text import _read_grant_text
 from agent.remote_task_context import owned_remote_task, require_public_task_context, mark_local_task_context
 from agent.llm_egress_firewall import (
@@ -1193,8 +1194,8 @@ def authorize_agent_sdk_kwargs(
         authorization = authorize_with_native_metadata(
             agent, resolved_route, body, request, native_nonterminal_call_ids,
             native_nonterminal_result_ids, firewall, tuple(used_grants.values()), enabled=not protected_kanban_remote,
-            request_scope=lambda actual: refusal_receipt_scope(agent, registry,
-                (session_id, turn_id, request_id, policy_digest), actual.payload, exact_secret_values=exact_secret_values))
+            request_scope=lambda actual: private_receipt_scope(agent, registry,
+                (session_id, turn_id, request_id, policy_digest), actual, resolved_route, exact_secret_values))
     except EgressBlocked:
         logger.warning(
             "LLM egress blocked grant counts: input=%d selected=%d",
