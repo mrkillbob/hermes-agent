@@ -48,6 +48,39 @@ def test_title_ownership_preserves_explicit_pr_audit_and_quota_overrides():
     assert repair_profile_for_task("Model spend rebalance: review quotas", "usage limits in quoted old receipt") == "resource-scheduler"
 
 
+@pytest.mark.parametrize("body", [
+    "Automation credential is missing",
+    "The automation credential is missing, so the workflow can't run.",
+    "Workflow quota is exhausted; retry is blocked",
+    "Quota failure blocked the workflow retry.",
+    "Usage limits were exceeded for the automation account",
+    "LunaBot diagnostics failed while collecting replay data",
+])
+def test_operational_blockers_precede_title_only_intake_owners(body):
+    assert repair_profile_for_task(
+        "GitHub Actions pin drift: assess workflow", body,
+    ) == "hermes-maintenance-steward"
+
+
+def test_failed_lunabot_diagnostic_precedes_diagnostic_experiment_title():
+    assert repair_profile_for_task(
+        "Diagnostic experiment: compare timestamps in LunaBot replay samples",
+        "LunaBot diagnostics failed while collecting replay data.",
+    ) == "hermes-maintenance-steward"
+
+
+@pytest.mark.parametrize(("title", "body", "owner"), [
+    ("GitHub Actions pin drift: assess workflow", "Inventory lists quota failure examples and LunaBot diagnostics.",
+     "dependency-tooling-health-sentinel"),
+    ("GitHub Actions pin drift: assess workflow", "Inventory: Automation credential is missing in the example card.",
+     "dependency-tooling-health-sentinel"),
+    ("Diagnostic experiment: compare timestamps in LunaBot replay samples",
+     "Inventory includes old credential and quota failure reports.", "research-experiment-runner"),
+])
+def test_incidental_blocker_inventory_does_not_override_title_ownership(title, body, owner):
+    assert repair_profile_for_task(title, body) == owner
+
+
 @pytest.mark.parametrize(("title", "body", "owner"), [
     ("Config: master trading flags crash startup on true/yes spellings; LIVE_TRADING_ENABLED double-defined (d424765636)",
      "Static config evidence; python probes are approval-blocked for this cron profile.", None),

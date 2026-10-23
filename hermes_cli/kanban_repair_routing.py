@@ -22,6 +22,21 @@ _TITLE_INTAKE_RULES = (
     (r"^diagnostic experiment:\s+.*\blunabot replay\b", "research-experiment-runner"),
 )
 
+# These are operational blockers, rather than references in an inventory. Keep
+# them ahead of title-only intake ownership so a specialist title cannot mask
+# an actionable credential, quota, or LunaBot diagnostic failure.
+_OPERATIONAL_BLOCKER_RULES = (
+    (r"(?:^|[\n.!?]\s*)(?:the )?automation credential is missing\b", "hermes-maintenance-steward"),
+    (r"\b(?:quota (?:is|was|has been) (?:exhausted|exceeded)|"
+     r"quota failures? (?:are )?(?:blocking|blocked|preventing|prevented|failing)|"
+     r"(?:^|[.!?]\s*)quota failures?\b|"
+     r"usage limits (?:are|were|have been) (?:exceeded|exhausted)|"
+     r"(?:quota|usage limits) (?:blocked|prevented|failed))\b",
+     "hermes-maintenance-steward"),
+    (r"\blunabot diagnostics?\b[^.\n]{0,48}\b(?:failed|failure|error|blocked|unavailable)\b",
+     "hermes-maintenance-steward"),
+)
+
 
 # Ordered from narrowest scope to broadest so a PR audit is not swallowed by
 # the generic cron or maintenance rules.
@@ -79,6 +94,9 @@ def repair_profile_for_task(title: Optional[str], body: Optional[str]) -> Option
     # stewardship jobs or their old quota failures. It grants no execution rights.
     if re.match(r"^model spend rebalance(?:\s*[:—–-]|\s*$)", title):
         return "resource-scheduler"
+    for pattern, profile in _OPERATIONAL_BLOCKER_RULES:
+        if re.search(pattern, text):
+            return profile
     for pattern, profile in _TITLE_INTAKE_RULES:
         if re.match(pattern, title):
             return profile
