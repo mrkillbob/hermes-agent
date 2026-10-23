@@ -704,68 +704,169 @@ def _is_codex_responses_replay_body(body: Any) -> bool:
     return False
 
 
-def _recognized_native_nonterminal_call_ids(body: Mapping[str, Any]) -> frozenset[str]:
-    """Bind native result admission to unique preceding registered nonterminal calls."""
+def _recognized_native_nonterminal_bindings(
+    body: Mapping[str, Any],
+) -> tuple[frozenset[str], frozenset[int]]:
+    """Bind native result admission to exact, unique preceding registered calls.
+
+    Return both the admitted call IDs and the identities of their direct native
+    result frames.  The latter prevents a nested mapping from borrowing an ID
+    merely because a valid result with that ID exists elsewhere in the body.
+    """
     from agent.transports.anthropic import _unprefix_oauth_tool_name
     from tools.registry import registry as tool_registry
 
-    calls: dict[str, str | None] = {}
-    duplicates: set[str] = set()
-    admitted: set[str] = set()
-    results: set[str] = set()
-    invalid: set[str] = set()
-    messages = body.get("messages", [])
-    if not isinstance(messages, (list, tuple)):
-        return frozenset()
-    for message in messages:
-        if not isinstance(message, Mapping):
-            continue
-        content = message.get("content", [])
-        if not isinstance(content, (list, tuple)):
-            continue
-        for block in content:
-            if not isinstance(block, Mapping):
-                continue
-            if message.get("role") == "assistant" and block.get("type") == "tool_use":
-                call_id, name = block.get("id"), block.get("name")
+    def registered_name(name: Any, *, anthropic: bool = False) -> str | None:
+        canonical = (
+            _unprefix_oauth_tool_name(name)
+            if anthropic and isinstance(name, str) and name.startswith("mcp__")
+            else name
+        )
+        # Catalog bridges are handled outside the registry. Only these
+        # read-only bridges earn admission, never tool_call.
+        if (
+            canonical == name
+            and isinstance(name, str)
+            and name.startswith("mcp__")
+            and name[5:] in _REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES
+        ):
+            canonical = name[5:]
+        if (
+            not isinstance(canonical, str)
+            or canonical in {"terminal", "tool_call"}
+        ):
+            return None
+        if canonical in _REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES:
+            return canonical
+        return canonical if tool_registry.get_entry(canonical) is not None else None
+
+    def scan_frames(
+        frames: Any,
+        *,
+        call_frame: Any,
+        result_frame: Any,
+        anthropic: bool = False,
+    ) -> tuple[set[str], set[int]]:
+        if not isinstance(frames, (list, tuple)):
+            return set(), set()
+        calls: dict[str, str | None] = {}
+        duplicates: set[str] = set()
+        results: set[str] = set()
+        invalid: set[str] = set()
+        admitted: set[str] = set()
+        admitted_result_objects: dict[str, int] = {}
+        for frame in frames:
+            parsed_call = call_frame(frame)
+            if parsed_call is not None:
+                call_id, name = parsed_call
                 if not isinstance(call_id, str) or not call_id:
                     continue
                 if call_id in calls:
                     duplicates.add(call_id)
-                canonical = (
-                    _unprefix_oauth_tool_name(name)
-                    if isinstance(name, str) and name.startswith("mcp__")
-                    else name
-                )
-                # Catalog bridges are handled outside the registry. Only
-                # these read-only bridges earn admission, never tool_call.
-                if (
-                    canonical == name
-                    and isinstance(name, str)
-                    and name.startswith("mcp__")
-                    and name[5:] in _REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES
-                ):
-                    canonical = name[5:]
-                calls[call_id] = (
-                    canonical
-                    if isinstance(canonical, str)
-                    and canonical not in {"terminal", "tool_call"}
-                    and (
-                        canonical in _REMOTE_KANBAN_TOOL_SEARCH_PROJECTION_TOOL_NAMES
-                        or tool_registry.get_entry(canonical) is not None
-                    )
-                    else None
-                )
-            elif block.get("type") == "tool_result":
-                call_id = block.get("tool_use_id")
-                if not isinstance(call_id, str) or not call_id:
+                calls[call_id] = registered_name(name, anthropic=anthropic)
+                continue
+            parsed_result = result_frame(frame)
+            if parsed_result is None:
+                continue
+            call_id = parsed_result
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            if call_id in results or calls.get(call_id) is None:
+                invalid.add(call_id)
+            results.add(call_id)
+            if calls.get(call_id) is not None:
+                admitted.add(call_id)
+                admitted_result_objects[call_id] = id(frame)
+        accepted = admitted - duplicates - invalid
+        return accepted, {
+            admitted_result_objects[call_id] for call_id in accepted
+        }
+
+    def anthropic_call(frame: Any) -> tuple[Any, Any] | None:
+        if not isinstance(frame, Mapping) or frame.get("type") != "tool_use":
+            return None
+        return frame.get("id"), frame.get("name")
+
+    def anthropic_result(frame: Any) -> Any:
+        return frame.get("tool_use_id") if isinstance(frame, Mapping) and frame.get("type") == "tool_result" else None
+
+    def chat_call(frame: Any) -> tuple[Any, Any] | None:
+        if not isinstance(frame, Mapping) or frame.get("type") != "function":
+            return None
+        function = frame.get("function")
+        if not isinstance(function, Mapping):
+            return None
+        return frame.get("id"), function.get("name")
+
+    def chat_result(frame: Any) -> Any:
+        return frame.get("tool_call_id") if isinstance(frame, Mapping) and frame.get("role") == "tool" else None
+
+    def responses_call(frame: Any) -> tuple[Any, Any] | None:
+        if not isinstance(frame, Mapping) or frame.get("type") != "function_call":
+            return None
+        return frame.get("call_id"), frame.get("name")
+
+    def responses_result(frame: Any) -> Any:
+        return frame.get("call_id") if isinstance(frame, Mapping) and frame.get("type") == "function_call_output" else None
+
+    admitted_ids: set[str] = set()
+    admitted_objects: set[int] = set()
+    messages = body.get("messages", [])
+    if isinstance(messages, (list, tuple)):
+        # Chat Completions frames are direct messages; Anthropic frames are
+        # direct content blocks. Do not recursively search nested user data.
+        anthropic_shape = any(
+            isinstance(message, Mapping)
+            and isinstance(message.get("content"), (list, tuple))
+            and any(
+                isinstance(block, Mapping)
+                and block.get("type") in {"tool_use", "tool_result"}
+                for block in message["content"]
+            )
+            for message in messages
+        )
+        if anthropic_shape:
+            frames: list[Any] = []
+            for message in messages:
+                if not isinstance(message, Mapping) or not isinstance(message.get("content"), (list, tuple)):
                     continue
-                if call_id in results or message.get("role") != "user" or calls.get(call_id) is None:
-                    invalid.add(call_id)
-                results.add(call_id)
-                if calls.get(call_id) is not None:
-                    admitted.add(call_id)
-    return frozenset(admitted - duplicates - invalid)
+                for block in message["content"]:
+                    if isinstance(block, Mapping) and (
+                        (message.get("role") == "assistant" and block.get("type") == "tool_use")
+                        or (message.get("role") == "user" and block.get("type") == "tool_result")
+                    ):
+                        frames.append(block)
+            ids, objects = scan_frames(
+                frames, call_frame=anthropic_call, result_frame=anthropic_result,
+                anthropic=True,
+            )
+            admitted_ids.update(ids)
+            admitted_objects.update(objects)
+        else:
+            frames = []
+            for message in messages:
+                if not isinstance(message, Mapping):
+                    continue
+                if message.get("role") == "assistant":
+                    calls = message.get("tool_calls")
+                    if isinstance(calls, (list, tuple)):
+                        frames.extend(call for call in calls if isinstance(call, Mapping))
+                elif message.get("role") == "tool":
+                    frames.append(message)
+            ids, objects = scan_frames(frames, call_frame=chat_call, result_frame=chat_result)
+            admitted_ids.update(ids)
+            admitted_objects.update(objects)
+
+    input_items = body.get("input", [])
+    if isinstance(input_items, (list, tuple)):
+        # Responses API has explicit top-level function_call and
+        # function_call_output items. No nested/body-global shape inference.
+        ids, objects = scan_frames(
+            input_items, call_frame=responses_call, result_frame=responses_result
+        )
+        admitted_ids.update(ids)
+        admitted_objects.update(objects)
+    return frozenset(admitted_ids), frozenset(admitted_objects)
 
 
 def authorize_agent_sdk_kwargs(
@@ -843,14 +944,16 @@ def authorize_agent_sdk_kwargs(
     # workers may lose it. Route-based framing prevents large requests from
     # raising during typing, bypassing receipts and triggering fallback loops.
     protected_remote_context = protected_remote_marker or protected_route
-    # Generated framing (system/developer messages and tool schema) is
-    # application-owned.  It can use the established non-secret path/base64
-    # redaction on every protected cloud route, including ordinary chat and
-    # goal-judge calls.  User content and unbound tool results do not become
-    # generated context and remain fail-closed.
+    # Only application-owned framing gets path/Base64 redaction; user content
+    # and unbound tool results remain fail-closed.
     redact_protected_generated_context = (
         str(route_provider or "").strip().lower() == "openai-codex"
         or protected_route
+    )
+    native_nonterminal_call_ids, native_nonterminal_result_ids = (
+        _recognized_native_nonterminal_bindings(body)
+        if protected_route and not protected_kanban_remote
+        else (frozenset(), frozenset())
     )
     typed_body = _typed_payload(
         body,
@@ -1006,11 +1109,8 @@ def authorize_agent_sdk_kwargs(
         redact_terminal_arguments=(
             protected_kanban_remote and protected_route
         ),
-        native_nonterminal_call_ids=(
-            _recognized_native_nonterminal_call_ids(body)
-            if protected_route and not protected_kanban_remote
-            else frozenset()
-        ),
+        native_nonterminal_call_ids=native_nonterminal_call_ids,
+        native_nonterminal_result_ids=native_nonterminal_result_ids,
         require_terminal_provenance=(
             protected_route and not protected_kanban_remote
         ),
