@@ -1343,4 +1343,3 @@ def test_responses_preflight_text_schema_keeps_schema_origin(tmp_path):
     diagnostics = receipt["source_provenance_diagnostics"]
     assert diagnostics["refusal_origins"] == ["system_or_schema"]
     assert _ENCODED not in json.dumps(diagnostics, sort_keys=True)
-
