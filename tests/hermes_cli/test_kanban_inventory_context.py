@@ -70,6 +70,14 @@ LEGACY_MAINTENANCE_MARKERS = [
     "untrusted receipt",
 ]
 
+BLOCKER_QUESTIONS = [
+    "Were quota failures blocking the workflow?",
+    "Did the provider hit usage limits?",
+    "Have usage limits blocked the workflow?",
+    "Have LunaBot diagnostics failed?",
+    "Is audit-pr unavailable?",
+]
+
 INLINE_QUOTED_CAUSAL_BLOCKERS = [
     "The workflow cannot run because `automation credential is missing`.",
     "The workflow cannot run because 'quota is exhausted'.",
@@ -159,6 +167,7 @@ def test_actual_usage_limit_failure_after_conditional_mention_routes(title, owne
     "> Workflow failure:\n> The workflow cannot run because LunaBot diagnostics have failed.\n  It is an example.",
     "```text\nThe workflow cannot run because the automation credential is missing.\n```",
     "`Automation credential is missing` is an example sentence.",
+    "`automation credential is missing`is an example sentence.",
     "Example text" + " " * 100_000 + ": " + "`automation credential is missing`.",
     "`automation credential is missing`" + " " * 100_000 + "is an example sentence.",
     "Check whether" + " " * 100_000 + "` automation credential is missing ` before remediation.",
@@ -189,7 +198,6 @@ def test_inline_quoted_title_example_before_later_dash_keeps_title_owner():
 @pytest.mark.parametrize("body", [
     "Usage limits were exceeded. Example: `automation credential is missing`.",
     "Example: ‘automation credential is missing’. Usage limits were exceeded.",
-    "`automation credential is missing`is an example sentence.",
 ])
 def test_actual_blocker_before_or_after_inline_quote_stays_visible(body):
     assert repair_profile_for_task(INTAKE_TITLES[0][0], body) == "hermes-maintenance-steward"
@@ -317,12 +325,31 @@ def test_local_pr_ci_legacy_priority_survives_direct_maintenance_marker(marker):
 
 
 @pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("body", BLOCKER_QUESTIONS)
+def test_auxiliary_led_blocker_questions_keep_title_owner(title, owner, body):
+    assert repair_profile_for_task(title, body) == owner
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+def test_affirmative_quota_question_still_routes_maintenance(title, owner):
+    body = "Quota failures were blocking the workflow; why?"
+    assert repair_profile_for_task(title, body) == "hermes-maintenance-steward"
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+def test_question_followed_by_actual_quota_failure_routes_maintenance(title, owner):
+    body = "Were quota failures blocking the workflow? The workflow quota is exhausted."
+    assert repair_profile_for_task(title, body) == "hermes-maintenance-steward"
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
 @pytest.mark.parametrize("body", [
     "Example: `Automation credential is missing`.",
     "Example text: `automation credential is missing`.",
     "For example, “LunaBot diagnostics failed”.",
     "Compare the phrase 'usage limits were exceeded' with the current report.",
     "‘Automation credential is missing’ is an example sentence.",
+    "Compare the phrase `LunaBot diagnostics failed`; current LunaBot diagnostics have failed.",
 ])
 def test_explicit_example_cues_keep_quoted_blockers_in_inventory(title, owner, body):
     assert repair_profile_for_task(title, body) == owner
@@ -330,7 +357,7 @@ def test_explicit_example_cues_keep_quoted_blockers_in_inventory(title, owner, b
 
 @pytest.mark.parametrize("body", [
     "For example, “Automation credential is missing”. The workflow cannot run because the automation credential is missing.",
-    "Compare the phrase `LunaBot diagnostics failed`; current LunaBot diagnostics have failed.",
+    "Compare the phrase `LunaBot diagnostics failed`. Current LunaBot diagnostics have failed.",
     "For example, ‘Automation credential is missing’. The workflow cannot run because ‘LunaBot diagnostics returned an error’.",
 ])
 def test_later_actual_blocker_survives_an_example_span(body):

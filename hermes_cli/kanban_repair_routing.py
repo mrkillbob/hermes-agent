@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from array import array
-from typing import Optional
+from typing import Iterator, Optional
 
 
 _CRON_PURPOSE_TERMS = ("scheduled job", "cron job")
@@ -23,36 +23,6 @@ _TITLE_INTAKE_RULES = (
     (r"^diagnostic experiment:\s+.*\blunabot replay\b", "research-experiment-runner"),
 )
 
-# These direct operational blockers apply only inside matched intake-title
-# families, where they precede title-only ownership.
-_OPERATIONAL_BLOCKER_RULES = (
-    (r"\b(?:the )?automation credential is missing\b",
-     "hermes-maintenance-steward"),
-    (r"\b(?:the )?gh auth failure\b",
-     "hermes-maintenance-steward"),
-    (r"\b(?:missing hermes_cli|audit-pr unavailable|inspect-pr unavailable|audit_deferred|untrusted receipt)\b",
-     "hermes-maintenance-steward"),
-    (r"\b(?:the )?provider returned usage limits\b",
-     "hermes-maintenance-steward"),
-    (r"\b(?:the )?(?:(?:workflow|provider|account|automation) )?(?:"
-     r"quota (?:is|was|has been) (?:exhausted|exceeded)|"
-     r"quota failures? (?:are|were|is|was)? ?(?:blocking|blocked|preventing|prevented|failing)|"
-     r"usage limits (?:are|were|have been) (?:exceeded|exhausted)|"
-     r"(?:quota|usage limits) (?:blocked|prevented|failed))\b",
-     "hermes-maintenance-steward"),
-    (r"\b(?:the )?(?:provider|workflow|automation|account) "
-     r"(?:(?:has|have|had) )?(?:hit|encountered|reached|returned|exceeded|exhausted) usage limits\b",
-     "hermes-maintenance-steward"),
-    (r"\b(?:the )?(?:provider|workflow|automation|account) "
-     r"(?:(?:has|have|had) )?(?:failed|cannot run|can not run|can't run|(?:is|are|was|were) blocked) "
-     r"(?:due to|because of|from) (?:the )?usage limits\b",
-     "hermes-maintenance-steward"),
-    (r"\b(?:the )?lunabot diagnostics? (?:"
-     r"failed|(?:has|have) failed|(?:is|are|was|were) (?:blocked|unavailable)|"
-     r"(?:returned|reported|encountered) (?:an )?error)\b",
-     "hermes-maintenance-steward"),
-)
-
 _INVENTORY_LABEL = re.compile(
     r"(?:^|(?<=[.!?]))\s*(?:inventory|quoted(?:\s+inventory)?)\s*:", re.IGNORECASE,
 )
@@ -60,11 +30,6 @@ _FENCE_OPEN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _FENCE_CLOSE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
 _BLOCKQUOTE = re.compile(r"^\s{0,3}>")
 _BLOCKQUOTE_EMPTY = re.compile(r"^\s{0,3}>\s*$")
-_BLOCKER_NEGATION = re.compile(
-    r"\b(?:no(?:\s+(?:evidence|indication)\s+that)?|if|whether|unless)\b", re.IGNORECASE,
-)
-_WHEN_INQUIRY = re.compile(r"\bwhen\b", re.IGNORECASE)
-_INQUIRY_VERB = re.compile(r"\b(?:check|review|record|inspect|determine|verify)\s*", re.IGNORECASE)
 _INLINE_QUOTES = {"'": "'", '"': '"', "‘": "’", "“": "”"}
 _INLINE_BARRIER = "\ue000"
 _EXAMPLE_CUE = re.compile(
@@ -80,54 +45,8 @@ def _fence_closes(line: str, marker: tuple[str, int]) -> bool:
     return bool(match and match.group(1)[0] == marker[0] and len(match.group(1)) >= marker[1])
 
 
-def _title_delimiter_end(title: str) -> int | None:
-    """Find the first title clause delimiter with a single forward scan."""
-    index = 0
-    while index < len(title):
-        if title[index] in ":—–":
-            return index + 1
-        if title[index] not in " \t":
-            index += 1
-            continue
-        while index < len(title) and title[index] in " \t":
-            index += 1
-        if index < len(title) and title[index] == "-" and index + 1 < len(title) and title[index + 1] in " \t":
-            index += 1
-            while index < len(title) and title[index] in " \t":
-                index += 1
-            return index
-    return None
-
-
-def _normalize_title_dash_clauses(value: str) -> str:
-    """Replace title-only dash clause separators without regex rescans."""
-    parts: list[str] = []
-    chunk_start = 0
-    index = 0
-    while index < len(value):
-        if value[index] in "—–":
-            parts.extend((value[chunk_start:index], "\n"))
-            index += 1
-            chunk_start = index
-            continue
-        if value[index] not in " \t":
-            index += 1
-            continue
-        separator_start = index
-        while index < len(value) and value[index] in " \t":
-            index += 1
-        if index < len(value) and value[index] == "-" and index + 1 < len(value) and value[index + 1] in " \t":
-            index += 1
-            while index < len(value) and value[index] in " \t":
-                index += 1
-            parts.extend((value[chunk_start:separator_start], "\n"))
-            chunk_start = index
-    parts.append(value[chunk_start:])
-    return "".join(parts)
-
-
 def _inline_markers(line: str) -> tuple[dict[str, list[int]], dict[int, list[int]]]:
-    """Index eligible quote closers and code runs once per line."""
+    """Index quote closers and code runs once per line."""
     quote_closers = {quote: [] for quote in set(_INLINE_QUOTES.values())}
     index = 0
     while index < len(line):
@@ -156,7 +75,7 @@ def _inline_markers(line: str) -> tuple[dict[str, list[int]], dict[int, list[int
 
 
 def _example_context(line: str) -> tuple[list[int], list[int], array]:
-    """Index cues and next-content positions for constant-time span checks."""
+    """Index cues and next-content positions for linear span checks."""
     cue_ends = [match.end() for match in _EXAMPLE_CUE.finditer(line)]
     suffix_starts = [match.start() for match in _EXAMPLE_SUFFIX.finditer(line)]
     next_content = array("I", [len(line)]) * (len(line) + 1)
@@ -169,7 +88,7 @@ def _span_is_example(
     start: int, end: int, cue_ends: list[int], suffix_starts: list[int], next_content: list[int],
     cue_cursor: int, suffix_cursor: int,
 ) -> tuple[bool, int, int]:
-    """Check adjacent example cues without copying or rescanning line prefixes."""
+    """Check adjacent example cues without growing-prefix or suffix scans."""
     while cue_cursor < len(cue_ends) and cue_ends[cue_cursor] <= start:
         cue_cursor += 1
     if cue_cursor and next_content[cue_ends[cue_cursor - 1]] >= start:
@@ -183,7 +102,7 @@ def _span_is_example(
 
 
 def _mask_inline_line(line: str) -> str:
-    """Mask only explicitly example-cued spans on one line."""
+    """Mask only explicitly example-cued paired spans on one line."""
     quote_closers, code_runs = _inline_markers(line)
     cue_ends, suffix_starts, next_content = _example_context(line)
     quote_cursors = dict.fromkeys(quote_closers, 0)
@@ -240,7 +159,7 @@ def _mask_inline_line(line: str) -> str:
 
 
 def _mask_inline_examples(value: str) -> str:
-    """Mask only explicitly example-cued inline spans, retaining line breaks."""
+    """Mask explicitly example-cued paired spans while preserving line breaks."""
     masked: list[str] = []
     for chunk in value.splitlines(keepends=True):
         line = chunk.rstrip("\r\n")
@@ -250,27 +169,34 @@ def _mask_inline_examples(value: str) -> str:
 
 
 def _retained_operational_segments(value: str) -> list[str]:
-    """Remove labeled inventory, Markdown quotes, and fenced examples."""
-    retained: list[str] = []
+    """Return hard-separated retained paragraphs with their soft newlines."""
+    paragraphs: list[str] = []
+    current: list[str] = []
     inventory = False
     inventory_has_content = False
     quoted_paragraph = False
     fence: tuple[str, int] | None = None
+    pending_label = False
+
+    def flush() -> None:
+        if current:
+            paragraphs.append("\n".join(current))
+            current.clear()
 
     for line in value.splitlines():
         if fence:
-            if inventory and line.strip():
-                inventory_has_content = True
             if _fence_closes(line, fence):
                 fence = None
+                flush()
             continue
-
         opening = _FENCE_OPEN.match(line)
         if opening:
-            marker = opening.group(1)
-            fence = (marker[0], len(marker))
+            flush()
+            pending_label = False
             if inventory:
                 inventory_has_content = True
+            marker = opening.group(1)
+            fence = (marker[0], len(marker))
             continue
 
         if inventory:
@@ -279,16 +205,23 @@ def _retained_operational_segments(value: str) -> list[str]:
             elif inventory_has_content:
                 inventory = False
                 inventory_has_content = False
+                flush()
             continue
 
         if _BLOCKQUOTE_EMPTY.match(line):
             quoted_paragraph = False
+            pending_label = False
+            flush()
             continue
         if quoted_paragraph:
             if not line.strip():
                 quoted_paragraph = False
+                pending_label = False
+                flush()
             continue
         if _BLOCKQUOTE.match(line):
+            flush()
+            pending_label = False
             quoted_paragraph = True
             continue
 
@@ -296,68 +229,264 @@ def _retained_operational_segments(value: str) -> list[str]:
         if label:
             prefix = line[:label.start()].strip()
             if prefix:
-                retained.append(prefix)
+                current.append(prefix)
+                flush()
+            pending_label = False
             inventory = True
             inventory_has_content = bool(line[label.end():].strip())
             continue
 
         if line.strip():
-            retained.append(line)
-    return retained
+            current.append(line)
+            pending_label = line.rstrip().endswith(":")
+        elif pending_label and current:
+            current.append("")
+        else:
+            pending_label = False
+            flush()
+    flush()
+    return paragraphs
 
 
-def _context_prefixes(value: str, trigger_pattern: re.Pattern[str]) -> dict[int, int]:
-    """Index accepted trigger endpoints, including optional article/quote paths."""
-    endpoints: dict[int, int] = {}
-    for trigger in trigger_pattern.finditer(value):
-        word_end = trigger.end()
-        cursor = word_end
-        while cursor < len(value) and value[cursor].isspace():
-            cursor += 1
-        if cursor == word_end:
-            continue
-        endpoints[cursor] = trigger.start()
-        paths = [cursor]
-        if (value.startswith("the", cursor)
-                and (cursor + 3 == len(value) or not value[cursor + 3].isalnum())):
-            article_end = cursor + 3
-            if article_end < len(value) and value[article_end].isspace():
-                cursor = article_end
-                while cursor < len(value) and value[cursor].isspace():
-                    cursor += 1
-                endpoints[cursor] = trigger.start()
-                paths.append(cursor)
-        for path in paths:
-            cursor = path
-            while cursor < len(value) and value[cursor] in "`'\"‘“":
+_CREDENTIAL = r"(?:the )?automation credential is missing"
+_GH_AUTH = (
+    r"(?:the )?gh auth failure"
+    r"(?: (?:stopped|blocked|prevented) the workflow(?: retry)?(?: from running)?)?"
+)
+_LEGACY_MARKER = (
+    r"(?:the )?(?:missing hermes_cli|audit-pr unavailable|inspect-pr unavailable|"
+    r"audit_deferred|untrusted receipt)"
+)
+_QUOTA = (
+    r"(?:the )?(?:(?:workflow|provider|account|automation) )?quota "
+    r"(?:is|was|has been) (?:exhausted|exceeded)"
+)
+_USAGE = (
+    r"(?:the )?(?:(?:workflow|provider|account|automation) )?usage limits "
+    r"(?:are|were|have been) (?:exceeded|exhausted)"
+)
+_QUOTA_IMPACT = (
+    r"(?:the )?(?:(?:workflow|provider|account|automation) )?(?:"
+    r"quota failures? (?:are|were|is|was)? ?(?:blocking|blocked|preventing|prevented|failing) "
+    r"(?:the )?workflow(?: retry)?(?: from running)?|"
+    r"quota (?:stopped|blocked|prevented) the workflow(?: retry)?(?: from running)?|"
+    r"quota failed|"
+    r"usage limits failed|usage limits (?:blocked|prevented) "
+    r"the workflow(?: retry)?(?: from running)?)"
+)
+_PROVIDER_RETURN = r"(?:the )?provider returned usage limits"
+_USAGE_EVENT = (
+    r"(?:the )?(?:provider|workflow|automation|account) (?:(?:has|have|had) )?"
+    r"(?:hit|encountered|reached|returned|exceeded|exhausted) usage limits"
+)
+_USAGE_CAUSE = (
+    r"(?:the )?(?:provider|workflow|automation|account) (?:(?:has|have|had) )?"
+    r"(?:failed|cannot run|can not run|can't run|can’t run|(?:is|are|was|were) blocked) "
+    r"(?:due to|because of|from) (?:the )?usage limits"
+)
+_DIAGNOSTIC = (
+    r"(?:the )?lunabot diagnostics? (?:failed|(?:has|have) failed|"
+    r"(?:is|are|was|were) (?:blocked|unavailable)|"
+    r"(?:returned|reported|encountered) (?:an )?error)"
+)
+_P = "(?:" + "|".join((
+    _CREDENTIAL, _GH_AUTH, _LEGACY_MARKER, _PROVIDER_RETURN, _QUOTA,
+    _USAGE, _QUOTA_IMPACT, _USAGE_EVENT, _USAGE_CAUSE, _DIAGNOSTIC,
+)) + ")"
+_QUOTED_P = (
+    r"(?:'" + _P + r"'|\"" + _P + r"\"|‘" + _P + r"’|“" + _P + r"”|"
+    r"(?P<code_ticks>`+)" + _P + r"(?P=code_ticks))"
+)
+_ALLOWED_TAIL = (
+    r"(?: (?:for this account|for the automation account|during the run|"
+    r"while collecting replay data|before LunaBot replay|"
+    r"before comparing LunaBot replay ordering)|"
+    r", so the workflow (?:cannot|can't) run)?"
+)
+_P_WITH_TAIL = _P + _ALLOWED_TAIL
+_QUOTED_P_WITH_TAIL = _QUOTED_P + _ALLOWED_TAIL
+_DIRECT_PREFIX = r"(?:current |later, )?"
+_BULLET_PREFIX = r"(?:[-*+] )?"
+_STATUS_FRAME = r"(?:status|error|failure|report|operational blocker|later report): "
+_REPORT_FRAME = (
+    r"(?:(?:the )?workflow report says|an operator reported that|"
+    r"there is evidence that|we found an indication that) "
+)
+_CAUSAL_FRAME = (
+    r"(?:the )?(?:workflow|deployment) "
+    r"(?:failed|cannot run|can't run|can’t run|didn't run|didn’t run|did not run) ?,? "
+    r"(?:because of|because|due to|when) "
+)
+
+
+def _paired_quote_ranges(line: str) -> list[tuple[int, int]]:
+    """Return balanced same-line quote spans using the shared marker indexes."""
+    quote_closers, code_runs = _inline_markers(line)
+    ranges: list[tuple[int, int]] = []
+    used: dict[str, int] = dict.fromkeys(quote_closers, 0)
+    code_used: dict[int, int] = dict.fromkeys(code_runs, 0)
+    index = 0
+    while index < len(line):
+        if line[index] == "`":
+            end = index + 1
+            while end < len(line) and line[end] == "`":
+                end += 1
+            length = end - index
+            runs = code_runs.get(length, [])
+            cursor = code_used[length]
+            while cursor < len(runs) and runs[cursor] <= index:
                 cursor += 1
-                while cursor < len(value) and value[cursor].isspace():
-                    cursor += 1
-                endpoints[cursor] = trigger.start()
-    return endpoints
+            code_used[length] = cursor
+            if cursor < len(runs):
+                close = runs[cursor]
+                ranges.append((index, close + length - 1))
+                index = close + length
+                continue
+            index = end
+            continue
+        closing = _INLINE_QUOTES.get(line[index])
+        is_open = closing is not None
+        if line[index] == "'" and index > 0 and (line[index - 1].isalnum() or line[index - 1] == "_"):
+            is_open = False
+        if is_open:
+            closers = quote_closers[closing]
+            cursor = used[closing]
+            while cursor < len(closers) and closers[cursor] <= index:
+                cursor += 1
+            used[closing] = cursor
+            if cursor < len(closers):
+                close = closers[cursor]
+                ranges.append((index, close))
+                index = close + 1
+                continue
+        index += 1
+    return ranges
+
+
+def _assertion_units(value: str) -> Iterator[str]:
+    """Split complete sentence records outside balanced same-line spans."""
+    pending: list[str] = []
+    for line in value.split("\n"):
+        ranges = _paired_quote_ranges(line)
+        range_index = 0
+        start = 0
+        index = 0
+        while index < len(line):
+            if range_index < len(ranges) and index == ranges[range_index][0]:
+                index = ranges[range_index][1] + 1
+                range_index += 1
+                continue
+            if line[index] in ".!?" and (index + 1 == len(line) or line[index + 1].isspace()):
+                pending.append(line[start:index + 1])
+                unit = " ".join(part for part in pending if part.strip())
+                if unit.strip():
+                    yield unit
+                pending.clear()
+                index += 1
+                while index < len(line) and line[index].isspace():
+                    index += 1
+                start = index
+                continue
+            index += 1
+        pending.append(line[start:])
+    if pending:
+        unit = " ".join(part for part in pending if part.strip())
+        if unit.strip():
+            yield unit
+
+
+def _normalize_record(value: str) -> str:
+    """Normalize soft whitespace without removing opaque example barriers."""
+    return " ".join(value.casefold().split())
+
+
+def _is_single_positive(value: str) -> bool:
+    """Match one direct, field, report, or causal positive record."""
+    value = _normalize_record(value)
+    if value.endswith("?") or _INLINE_BARRIER in value:
+        return False
+    value = value.rstrip(".!")
+    if re.fullmatch(_BULLET_PREFIX + _DIRECT_PREFIX + _P_WITH_TAIL, value, re.IGNORECASE):
+        return True
+    if re.fullmatch(_BULLET_PREFIX + _STATUS_FRAME + _P_WITH_TAIL, value, re.IGNORECASE):
+        return True
+    if re.fullmatch(_BULLET_PREFIX + _REPORT_FRAME + _QUOTED_P_WITH_TAIL, value, re.IGNORECASE):
+        return True
+    if re.fullmatch(_BULLET_PREFIX + _REPORT_FRAME + _P_WITH_TAIL, value, re.IGNORECASE):
+        return True
+    if re.fullmatch(_BULLET_PREFIX + _CAUSAL_FRAME + _QUOTED_P_WITH_TAIL, value, re.IGNORECASE):
+        return True
+    return re.fullmatch(_BULLET_PREFIX + _CAUSAL_FRAME + _P_WITH_TAIL, value, re.IGNORECASE) is not None
+
+
+def _is_positive_operational_record(value: str) -> bool:
+    """Require full affirmative consumption of a record or approved compound."""
+    normalized = _normalize_record(value)
+    pieces = [piece.strip() for piece in normalized.split(";")]
+    if len(pieces) == 1:
+        return _is_single_positive(pieces[0])
+    if len(pieces) == 2 and re.fullmatch(
+        r"(?:the )?(?:workflow|deployment) "
+        r"(?:failed|cannot run|can't run|can’t run|didn't run|didn’t run|did not run)",
+        pieces[0].rstrip(".!"), re.IGNORECASE,
+    ):
+        return _is_single_positive(pieces[1])
+    if len(pieces) > 1:
+        if not all(_is_single_positive(piece) for piece in pieces[:-1]):
+            return False
+        final = pieces[-1].strip()
+        if final == "why?":
+            return True
+        if final.endswith("?"):
+            return False
+        final = final.rstrip(".! ")
+        return _is_single_positive(final) or final == "retry is blocked"
+    return False
 
 
 def _has_operational_blocker(segments: list[str]) -> bool:
-    """Find concrete blockers while skipping immediate negative conditions."""
+    """Accept any complete positive record in independently retained paragraphs."""
     for segment in segments:
-        normalized = segment.casefold()
-        negation_ends = _context_prefixes(normalized, _BLOCKER_NEGATION)
-        when_starts = _context_prefixes(normalized, _WHEN_INQUIRY)
-        inquiry_ends = {match.end() for match in _INQUIRY_VERB.finditer(normalized)}
-        first_content = next(
-            (index for index, char in enumerate(normalized) if not char.isspace()), len(normalized),
-        )
-        for pattern, _profile in _OPERATIONAL_BLOCKER_RULES:
-            for match in re.finditer(pattern, normalized):
-                if match.start() in negation_ends:
-                    continue
-                when_start = when_starts.get(match.start())
-                if (when_start is not None
-                        and (when_start <= first_content or when_start in inquiry_ends)):
-                    continue
+        for unit in _assertion_units(_mask_inline_examples(segment)):
+            if _is_positive_operational_record(unit):
                 return True
     return False
 
+
+def _title_has_operational_blocker(title: str, pattern: str) -> bool:
+    """Recognize only title evidence following the family’s defined frame."""
+    normalized = title.casefold()
+    if normalized.startswith("diagnostic experiment:"):
+        rest = normalized[len("diagnostic experiment:"):].lstrip()
+        suffix = _diagnostic_title_suffix(rest)
+    else:
+        match = re.match(pattern, normalized)
+        if not match:
+            return False
+        suffix = normalized[match.end():]
+    return _has_operational_blocker(_retained_operational_segments(suffix))
+
+
+def _diagnostic_title_suffix(value: str) -> str:
+    """Slice the explicit compare/replay dash clause in one forward pass."""
+    prefix = "compare lunabot replay"
+    if not value.startswith(prefix):
+        return value
+    index = len(prefix)
+    if index == len(value) or not value[index].isspace():
+        return value
+    while index < len(value) and value[index].isspace():
+        index += 1
+    for word in ("ordering", "order"):
+        end = index + len(word)
+        if value.startswith(word, index) and (end == len(value) or value[end].isspace()):
+            index = end
+            while index < len(value) and value[index].isspace():
+                index += 1
+            break
+    if index < len(value) and value[index] in "—–-":
+        return value[index + 1:].lstrip()
+    return value
 
 # Ordered from narrowest scope to broadest so a PR audit is not swallowed by
 # the generic cron or maintenance rules.
@@ -417,14 +546,8 @@ def repair_profile_for_task(title: Optional[str], body: Optional[str]) -> Option
         return "resource-scheduler"
     for pattern, profile in _TITLE_INTAKE_RULES:
         if re.match(pattern, title):
-            masked_title = _mask_inline_examples(title)
-            delimiter_end = _title_delimiter_end(masked_title)
-            title_clause = masked_title[delimiter_end:] if delimiter_end is not None else masked_title
-            title_clause = _normalize_title_dash_clauses(title_clause)
-            if (_has_operational_blocker(_retained_operational_segments(title_clause))
-                    or _has_operational_blocker(
-                        _retained_operational_segments(_mask_inline_examples(body or ""))
-                    )):
+            if (_title_has_operational_blocker(title, pattern)
+                    or _has_operational_blocker(_retained_operational_segments(body or ""))):
                 return "hermes-maintenance-steward"
             return profile
     # A cron profile describes the evidence producer, not a scheduler defect.
