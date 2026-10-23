@@ -200,7 +200,10 @@ def _literal(value: Any) -> str | None:
 
 def _responses_function_call_is_well_formed(item: Mapping[str, Any]) -> bool:
     """Recognize only the fixed Responses replay shape as assistant history."""
-    if _literal(_protocol_value(item, "type")) != "function_call":
+    if (
+        _protocol_value(item, "role", _MISSING_PROTOCOL_VALUE) is not _MISSING_PROTOCOL_VALUE
+        or _literal(_protocol_value(item, "type")) != "function_call"
+    ):
         return False
     if not _literal(_protocol_value(item, "name")) or _literal(_protocol_value(item, "arguments")) is None:
         return False

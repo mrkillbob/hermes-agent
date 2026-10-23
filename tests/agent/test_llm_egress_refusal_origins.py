@@ -1319,6 +1319,64 @@ def test_responses_reasoning_requires_absent_role_key(tmp_path, key_kind, role_p
     assert _ENCODED not in json.dumps(diagnostics, sort_keys=True)
 
 
+@pytest.mark.parametrize(
+    ("role", "expected_origin"),
+    [("user", "user_task"), ("tool", "other"), (None, "other"), (7, "other")],
+)
+def test_extra_body_function_call_with_role_keeps_explicit_origin(tmp_path, role, expected_origin):
+    decision, receipt = _blocked_receipt(_agent(tmp_path), {
+        "model": "synthetic-model",
+        "input": [],
+        "extra_body": {"input": [{
+            "type": "function_call", "role": role, "call_id": "call_synthetic",
+            "name": "terminal", "arguments": _ENCODED,
+        }]},
+    })
+
+    assert decision.allowed is False
+    assert "base64_payload" in decision.reason_codes
+    diagnostics = receipt["source_provenance_diagnostics"]
+    assert diagnostics["refusal_origins"] == [expected_origin]
+    assert _ENCODED not in json.dumps(diagnostics, sort_keys=True)
+
+
+@pytest.mark.parametrize("key_kind", ["raw", "generated"])
+@pytest.mark.parametrize("role_present", [False, True], ids=["absent-role", "null-role"])
+@pytest.mark.parametrize("refused_field", ["arguments", "output"])
+def test_responses_function_call_requires_absent_role_key(
+    tmp_path, key_kind, role_present, refused_field
+):
+    key = GeneratedContextKey if key_kind == "generated" else str
+    item = {
+        key("type"): LiteralSegment("function_call"),
+        key("call_id"): LiteralSegment("call_synthetic"),
+        key("name"): LiteralSegment("terminal"),
+        key("arguments"): SanitizedSegment(_ENCODED),
+    }
+    if role_present:
+        item[key("role")] = None
+
+    payload = {"input": [item]}
+    expected_origin = "other" if role_present else "assistant_history"
+    if refused_field == "output":
+        item[key("arguments")] = LiteralSegment("{}")
+        payload["input"].append({
+            key("type"): LiteralSegment("function_call_output"),
+            key("call_id"): LiteralSegment("call_synthetic"),
+            key("output"): SanitizedSegment(_ENCODED),
+        })
+        expected_origin = "user_task" if role_present else "tool_result"
+
+    decision, receipt, authorization = _typed_firewall_result(_agent(tmp_path), payload)
+
+    assert decision.allowed is False
+    assert "base64_payload" in decision.reason_codes
+    assert authorization is None
+    diagnostics = receipt["source_provenance_diagnostics"]
+    assert diagnostics["refusal_origins"] == [expected_origin]
+    assert _ENCODED not in json.dumps(diagnostics, sort_keys=True)
+
+
 def test_responses_adapter_replayed_reasoning_summary_is_assistant_history(tmp_path):
     from agent.codex_responses_adapter import _chat_messages_to_responses_input
 
