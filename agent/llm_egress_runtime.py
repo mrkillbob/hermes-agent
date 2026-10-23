@@ -86,7 +86,7 @@ from agent.llm_egress_tool_diagnostics import type_tool_diagnostics
 from agent.llm_egress_schema import type_builtin_schema_words
 from agent.message_sanitization import tool_result_id_variants
 from agent.redact import redact_sensitive_text
-from agent.source_provenance import DEFAULT_POLICY_DIGEST, SourceProvenanceError, SourceProvenanceRegistry
+from agent.source_provenance import SourceProvenanceError, SourceProvenanceRegistry, effective_policy_digest
 from agent.source_read_results import SourceReadSelection, remember_validated_sources
 
 
@@ -102,6 +102,8 @@ _PROTECTED_REMOTE_PROVIDERS = frozenset({
     "nous-portal",
     "nousresearch",
 })
+from agent.native_metadata_egress import authorize_with_native_metadata, remember_authorized_recipient
+
 logger = logging.getLogger(__name__)
 
 # Local action results are safe to replay only as bounded outcomes, and only
@@ -913,11 +915,7 @@ def authorize_agent_sdk_kwargs(
     session_id = str(getattr(agent, "session_id", "") or "")
     turn_id = str(getattr(agent, "_current_turn_id", "") or "")
     request_id = str(getattr(agent, "_current_api_request_id", "") or "")
-    policy_digest = str(
-        getattr(agent, "_llm_egress_policy_digest", "")
-        or getattr(agent, "llm_egress_policy_digest", "")
-        or DEFAULT_POLICY_DIGEST
-    )
+    policy_digest = effective_policy_digest(agent)
     registry = getattr(agent, "_source_provenance_registry", None)
     if protected_kanban_remote and isinstance(registry, SourceProvenanceRegistry):
         classification_body = _prepare_bound_skill_source_results(
@@ -1193,11 +1191,10 @@ def authorize_agent_sdk_kwargs(
     )
     try:
         with refusal_receipt_scope(agent, registry, (session_id, turn_id, request_id, policy_digest), request.payload, exact_secret_values=exact_secret_values):
-            authorization = firewall.authorize(
-                request,
-                resolved_route,
-                grants=tuple(used_grants.values()),
-            )
+            authorization = authorize_with_native_metadata(
+                agent, resolved_route, body, request, native_nonterminal_call_ids,
+                native_nonterminal_result_ids, firewall, tuple(used_grants.values()),
+                enabled=not protected_kanban_remote)
     except EgressBlocked:
         logger.warning(
             "LLM egress blocked grant counts: input=%d selected=%d",
@@ -1212,6 +1209,7 @@ def authorize_agent_sdk_kwargs(
         if locations:
             logger.warning("LLM egress blocked structural locations: %s", locations)
         raise
+    remember_authorized_recipient(agent, resolved_route)
     remember_validated_sources(registry, used_grants)
     rebuilt = json.loads(authorization.payload_bytes)
     if not isinstance(rebuilt, dict):
