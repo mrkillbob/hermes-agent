@@ -234,7 +234,9 @@ def test_complete_legacy_identity_lookup_is_exact_and_head_independent():
     adapter = IntakeKanban(lambda _: pytest.fail("CLI history reached"),
                            expected_root=get_default_hermes_root(), context=ctx)
     assert adapter.legacy_feedback_lookup("tradingbot-burndown", identity) == []
-    assert calls == [("tradingbot-burndown", {"idempotency_prefix": "github-pr-feedback:"})]
+    from github_pr_feedback.intake_history import project_legacy_receipt
+    assert calls == [("tradingbot-burndown", {
+        "idempotency_prefix": "github-pr-feedback:", "row_projector": project_legacy_receipt})]
     assert "head_sha" not in identity
 
 
