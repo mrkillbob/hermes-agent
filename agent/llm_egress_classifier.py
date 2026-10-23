@@ -1924,13 +1924,12 @@ def _typed_payload_violation_locations(
     )
     from agent.llm_egress_refusal_origins import _typed_payload_shape_reasons
 
-    if exact_secret_values:
-        from agent.llm_egress_refusal_origins import (
-            _joined_exact_secret_segment_indexes,
-            _typed_payload_exact_secret_match,
-        )
+    from agent.llm_egress_refusal_origins import _joined_scan_segment_reasons
 
-    def visit(item: Any, path: str, joined_secret=False) -> None:
+    if exact_secret_values:
+        from agent.llm_egress_refusal_origins import _typed_payload_exact_secret_match
+
+    def visit(item: Any, path: str, joined_reasons=frozenset()) -> None:
         if isinstance(item, UntrustedProvenanceSegment):
             # This marker has a hash, not text. Never log that hash; report only
             # the structural origin boundary that final authorization rejected.
@@ -1941,12 +1940,15 @@ def _typed_payload_violation_locations(
                 return
             seen.add(id(item))
         if isinstance(item, OutboundText):
-            joined_secrets = (
-                _joined_exact_secret_segment_indexes(item.segments, exact_secret_values)
-                if exact_secret_values else frozenset()
+            joined_reasons_by_index = _joined_scan_segment_reasons(
+                item.segments, exact_secret_values
             )
             for index, segment in enumerate(item.segments):
-                visit(segment, f"{path}.segments[{index}]", index in joined_secrets)
+                visit(
+                    segment,
+                    f"{path}.segments[{index}]",
+                    joined_reasons_by_index.get(index, frozenset()),
+                )
             return
         if isinstance(item, text_segments):
             text = getattr(item, "text", None)
@@ -1956,7 +1958,8 @@ def _typed_payload_violation_locations(
             exact_secret_match = exact_secret_values and _typed_payload_exact_secret_match(
                 item, text, exact_secret_values
             )
-            if joined_secret or exact_secret_match:
+            reasons.update(joined_reasons)
+            if exact_secret_match:
                 reasons.add("exact_secret_detected")
             if isinstance(item, ValidatedToolSyntaxSegment) and "base64_payload" in reasons:
                 # Final construction revalidates this grammar and excludes the

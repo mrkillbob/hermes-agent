@@ -16,7 +16,10 @@ from agent.llm_egress_firewall import (
     ValidatedToolSyntaxSegment,
     _ANTHROPIC_THINKING_SIGNATURE_REPLAY,
     _CODEX_ENCRYPTED_REASONING_REPLAY,
+    _contains_canonical_base64,
     _contains_exact_secret,
+    _contains_private_absolute_path,
+    _contains_secret,
     content_free_violation_locations,
 )
 
@@ -80,28 +83,50 @@ def _typed_payload_shape_reasons(segment, text):
     )
 
 
-def _joined_exact_secret_segment_indexes(segments, exact_secret_values):
-    """Identify pieces covered by final construction's joined secret scans."""
-    matched = set()
-    joined_kinds = ((SanitizedSegment,), (LiteralSegment, SanitizedSegment,
-        GeneratedContextSegment, CodexReasoningReplaySegment,
-        AnthropicThinkingReplaySegment, ValidatedToolSyntaxSegment))
+def _joined_scan_segment_reasons(segments, exact_secret_values=()):
+    """Mirror final contiguous scan groups and attribute only their fixed findings."""
+    matched = {}
+    joined_kinds = (
+        ((SanitizedSegment,), True),
+        ((LiteralSegment, SanitizedSegment, GeneratedContextSegment,
+          CodexReasoningReplaySegment, AnthropicThinkingReplaySegment,
+          ValidatedToolSyntaxSegment), False),
+    )
 
-    for kinds in joined_kinds:
+    for kinds, scan_base64 in joined_kinds:
         indexes, texts = [], []
         for index, segment in enumerate(segments):
             text = getattr(segment, "text", None)
             if isinstance(segment, kinds) and isinstance(text, str):
                 indexes.append(index)
                 texts.append(_rendered_non_source_text(segment, text))
-            else:
-                if len(indexes) > 1 and _contains_exact_secret("".join(texts), exact_secret_values):
-                    matched.add(indexes[0])
-                indexes.clear()
-                texts.clear()
-        if len(indexes) > 1 and _contains_exact_secret("".join(texts), exact_secret_values):
-            matched.add(indexes[0])
-    return frozenset(matched)
+                continue
+            if len(indexes) > 1:
+                _record_joined_scan_reasons(
+                    matched, indexes, texts, scan_base64, exact_secret_values
+                )
+            indexes.clear()
+            texts.clear()
+        if len(indexes) > 1:
+            _record_joined_scan_reasons(
+                matched, indexes, texts, scan_base64, exact_secret_values
+            )
+    return {index: frozenset(reasons) for index, reasons in matched.items()}
+
+
+def _record_joined_scan_reasons(matched, indexes, texts, scan_base64, exact_secret_values):
+    combined = "".join(texts)
+    reasons = set()
+    if _contains_secret(combined):
+        reasons.add("secret_detected")
+    if _contains_private_absolute_path(combined):
+        reasons.add("private_absolute_path")
+    if scan_base64 and _contains_canonical_base64(combined):
+        reasons.add("base64_payload")
+    if exact_secret_values and _contains_exact_secret(combined, exact_secret_values):
+        reasons.add("exact_secret_detected")
+    if reasons:
+        matched.setdefault(indexes[0], set()).update(reasons)
 
 
 class SourceBoundRefusalSegment(UntrustedProvenanceSegment):
@@ -121,42 +146,158 @@ def _literal(value: Any) -> str | None:
 
     if isinstance(value, LiteralSegment):
         return value.text
+    if isinstance(value, SanitizedSegment):
+        return value.text
+    if isinstance(value, ValidatedToolSyntaxSegment):
+        rendered = _rendered_non_source_text(value, value.text)
+        return rendered if rendered == value.text else None
     return value if type(value) is str else None
 
 
-def _message_origin(message: Mapping[str, Any]) -> str:
+def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
+    """Return result objects with one preceding call and one matching result."""
+    if not isinstance(value, Mapping):
+        return frozenset()
+    calls: dict[tuple[str, str], list[int]] = {}
+    results: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    position = 0
+
+    def add_call(kind: str, call_id: Any) -> None:
+        nonlocal position
+        identifier = _literal(call_id)
+        if identifier:
+            calls.setdefault((kind, identifier), []).append(position)
+        position += 1
+
+    def add_result(kind: str, call_id: Any, item: Any) -> None:
+        nonlocal position
+        identifier = _literal(call_id)
+        if identifier:
+            results.setdefault((kind, identifier), []).append((position, id(item)))
+        position += 1
+
+    def scan_messages(messages: Any) -> None:
+        if not isinstance(messages, (list, tuple)):
+            return
+        for message in messages:
+            if not isinstance(message, Mapping):
+                continue
+            role = _literal(message.get("role"))
+            if role == "assistant":
+                tool_calls = message.get("tool_calls")
+                if isinstance(tool_calls, (list, tuple)):
+                    for call in tool_calls:
+                        if (
+                            isinstance(call, Mapping)
+                            and _literal(call.get("type")) == "function"
+                        ):
+                            function = call.get("function")
+                            if (
+                                isinstance(function, Mapping)
+                                and _literal(function.get("name"))
+                                and _literal(function.get("arguments")) is not None
+                            ):
+                                add_call("chat", call.get("id"))
+                content = message.get("content")
+                if isinstance(content, (list, tuple)):
+                    for block in content:
+                        if (
+                            isinstance(block, Mapping)
+                            and _literal(block.get("type")) == "tool_use"
+                            and _literal(block.get("name"))
+                            and isinstance(block.get("input"), Mapping)
+                        ):
+                            add_call("anthropic", block.get("id"))
+            elif role == "tool":
+                add_result("chat", message.get("tool_call_id"), message)
+            elif role == "user":
+                content = message.get("content")
+                if isinstance(content, (list, tuple)):
+                    for block in content:
+                        if isinstance(block, Mapping) and _literal(block.get("type")) == "tool_result":
+                            add_result("anthropic", block.get("tool_use_id"), block)
+
+    scan_messages(value.get("messages"))
+    input_items = value.get("input")
+    if isinstance(input_items, (list, tuple)):
+        for item in input_items:
+            if not isinstance(item, Mapping):
+                continue
+            item_type = _literal(item.get("type"))
+            if item_type == "function_call":
+                if (
+                    _literal(item.get("name"))
+                    and _literal(item.get("arguments")) is not None
+                ):
+                    add_call("responses_input", item.get("call_id"))
+            elif item_type == "function_call_output":
+                add_result("responses_input", item.get("call_id"), item)
+
+    valid_refs = set()
+    for key, result_entries in results.items():
+        call_entries = calls.get(key, ())
+        if (
+            len(call_entries) == 1
+            and len(result_entries) == 1
+            and call_entries[0] < result_entries[0][0]
+        ):
+            valid_refs.add((key[0], result_entries[0][1]))
+    return frozenset(valid_refs)
+
+
+def _message_origin(
+    message: Mapping[str, Any], valid_tool_result_refs: frozenset[tuple[str, int]]
+) -> str:
     role = _literal(message.get("role"))
-    item_type = _literal(message.get("type"))
     if role in {"system", "developer"}:
         return "system_or_schema"
     if role == "assistant":
         return "assistant_history"
-    if role == "tool" or item_type in {"tool_result", "function_call_output"}:
-        return "tool_result"
+    if role == "tool":
+        return "tool_result" if ("chat", id(message)) in valid_tool_result_refs else "other"
     if role == "user":
         return "user_task"
     return "other"
 
 
-def _anthropic_content_origin(value: Mapping[str, Any], inherited: str) -> str:
+def _anthropic_content_origin(
+    value: Mapping[str, Any],
+    inherited: str,
+    valid_tool_result_refs: frozenset[tuple[str, int]],
+) -> str:
     block_type = value.get("type")
     protocol_type = _literal(block_type)
     if protocol_type is not None:
         block_type = protocol_type
     elif isinstance(block_type, SanitizedSegment):
         block_type = block_type.text
-    if block_type == "tool_result" and "tool_use_id" in value:
+    if (
+        block_type == "tool_result"
+        and ("anthropic", id(value)) in valid_tool_result_refs
+    ):
         return "tool_result"
     return inherited
 
 
-def _sequence_child_state(child: Any, inherited: str, collection: str | None):
+def _sequence_child_state(
+    child: Any,
+    inherited: str,
+    collection: str | None,
+    valid_tool_result_refs: frozenset[tuple[str, int]],
+):
     if not isinstance(child, Mapping):
         return inherited, False
     if collection in {"messages", "input"}:
-        return _message_origin(child), True
+        if collection == "input" and _literal(child.get("type")) == "function_call_output":
+            origin = (
+                "tool_result"
+                if ("responses_input", id(child)) in valid_tool_result_refs
+                else inherited
+            )
+            return origin, True
+        return _message_origin(child, valid_tool_result_refs), True
     if collection == "anthropic_user_content":
-        return _anthropic_content_origin(child, inherited), False
+        return _anthropic_content_origin(child, inherited, valid_tool_result_refs), False
     return inherited, False
 
 
@@ -171,10 +312,12 @@ def typed_payload_refusal_origins(
     )
     if not violations:
         return ("other",)
+    valid_tool_result_refs = _validated_tool_result_refs(value)
     opaque_replay_types = {"CodexReasoningReplaySegment", "AnthropicThinkingReplaySegment"}
     violating_paths = {
         path for path, segment_type, _, reasons in violations
-        if segment_type not in opaque_replay_types or "exact_secret_detected" in reasons
+        if segment_type not in opaque_replay_types
+        or {"exact_secret_detected", "secret_detected", "private_absolute_path"}.intersection(reasons)
     }
     origins: set[str] = set()
 
@@ -234,7 +377,7 @@ def typed_payload_refusal_origins(
         elif isinstance(item, (list, tuple)):
             for index, child in enumerate(item):
                 origin, is_protocol_message = _sequence_child_state(
-                    child, inherited, collection
+                    child, inherited, collection, valid_tool_result_refs
                 )
                 visit(
                     child,
