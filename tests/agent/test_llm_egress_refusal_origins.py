@@ -756,6 +756,70 @@ def test_origin_attribution_is_request_bound_non_disclosing_and_does_not_change_
 
 
 @pytest.mark.parametrize(
+    ("effective_mode", "expected_origin"),
+    [
+        ("unpaired", "user_task"),
+        ("paired", "tool_result"),
+        ("null_override", "user_task"),
+        ("malformed_override", "user_task"),
+    ],
+)
+def test_responses_refusal_receipt_uses_only_effective_extra_body_input(
+    tmp_path, effective_mode, expected_origin
+):
+    """Receipt origin follows the SDK-effective input and its unique call binding."""
+    agent = _agent(tmp_path)
+    agent.api_mode = "responses"
+    call_id = "synthetic-shadowed-call"
+    shadowed_input = [
+        {
+            "type": "function_call",
+            "call_id": call_id,
+            "name": "synthetic_tool",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": "bounded synthetic output",
+        },
+    ]
+    unsafe_call = {
+        "type": "function_call",
+        "call_id": call_id,
+        "name": "synthetic_tool",
+        "arguments": "{}",
+    }
+    unsafe_result = {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": _ENCODED,
+    }
+    if effective_mode in {"null_override", "malformed_override"}:
+        shadowed_input = [unsafe_call, unsafe_result]
+        effective_input = None if effective_mode == "null_override" else "malformed"
+    elif effective_mode == "paired":
+        effective_input = [unsafe_call, unsafe_result]
+    else:
+        effective_input = [unsafe_result]
+    request = {
+        "model": "synthetic-model",
+        "input": shadowed_input,
+        "extra_body": {"input": effective_input},
+    }
+
+    decision, receipt = _blocked_receipt(agent, request)
+
+    assert decision.allowed is False
+    assert "base64_payload" in decision.reason_codes
+    diagnostics = receipt["source_provenance_diagnostics"]
+    assert diagnostics["refusal_origins"] == [expected_origin]
+    encoded_diagnostics = json.dumps(diagnostics, sort_keys=True)
+    assert call_id not in encoded_diagnostics
+    assert _ENCODED not in encoded_diagnostics
+
+
+@pytest.mark.parametrize(
     ("case", "reason"),
     [
         ("joined_sanitized_secret", "secret_detected"),

@@ -1,13 +1,25 @@
 """Content-free egress findings using the final firewall predicates."""
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Sequence
 
 from agent.llm_egress_firewall import (
+    AnthropicThinkingReplaySegment,
+    CodexReasoningReplaySegment,
+    GeneratedContextSegment,
     GeneratedContextKey,
+    LiteralSegment,
+    OutboundText,
+    SanitizedSegment,
+    SourceBoundSegment,
+    SourcePresentationSegment,
+    UntrustedProvenanceSegment,
+    ValidatedToolSyntaxSegment,
     _contains_exact_secret,
     _contains_private_absolute_path,
+    _generated_context_text_for_base64_scan,
     _contains_secret,
+    validate_tool_syntax,
 )
 
 
@@ -64,6 +76,91 @@ def content_free_violation_locations(value: Any) -> tuple[tuple[str, tuple[str, 
                 locations.append((path, ("cyclic_container",)))
                 return
             seen.add(identity)
+            for index, child in enumerate(item):
+                visit(child, f"{path}.sequence[{index}]")
+
+    visit(value, "$")
+    return tuple(locations)
+
+
+def typed_payload_violation_locations(
+    value: Any,
+    *,
+    exact_secret_values: Sequence[str] = (),
+) -> tuple[tuple[str, str, int, tuple[str, ...]], ...]:
+    """Summarize unsafe typed segments without recording their text."""
+    from agent.llm_egress_refusal_origins import (
+        _joined_scan_segment_reasons,
+        _typed_payload_exact_secret_match,
+        _typed_payload_shape_reasons,
+    )
+
+    locations: list[tuple[str, str, int, tuple[str, ...]]] = []
+    seen: set[int] = set()
+    text_segments = (
+        SanitizedSegment,
+        GeneratedContextSegment,
+        LiteralSegment,
+        ValidatedToolSyntaxSegment,
+        CodexReasoningReplaySegment,
+        AnthropicThinkingReplaySegment,
+        SourcePresentationSegment,
+        SourceBoundSegment,
+        UntrustedProvenanceSegment,
+    )
+
+    def visit(item: Any, path: str, joined_reasons=frozenset()) -> None:
+        if isinstance(item, UntrustedProvenanceSegment):
+            # Never expose the marker hash; retain only its structural reason.
+            locations.append((path, "UntrustedProvenanceSegment", 0, ("untrusted_provenance",)))
+            return
+        if isinstance(item, (OutboundText, Mapping, list, tuple)):
+            if id(item) in seen:
+                return
+            seen.add(id(item))
+        if isinstance(item, OutboundText):
+            joined = _joined_scan_segment_reasons(item.segments, exact_secret_values)
+            for index, segment in enumerate(item.segments):
+                visit(segment, f"{path}.segments[{index}]", joined.get(index, frozenset()))
+            return
+        if isinstance(item, text_segments):
+            text = getattr(item, "text", None)
+            if not isinstance(text, str):
+                return
+            reasons = set(_typed_payload_shape_reasons(item, text))
+            if exact_secret_values and _typed_payload_exact_secret_match(
+                item, text, exact_secret_values
+            ):
+                reasons.add("exact_secret_detected")
+            reasons.update(joined_reasons)
+            if isinstance(item, ValidatedToolSyntaxSegment) and "base64_payload" in reasons:
+                try:
+                    validate_tool_syntax(text, item.syntax_kind)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    reasons.remove("base64_payload")
+            if isinstance(item, GeneratedContextSegment) and "base64_payload" in reasons:
+                scanned = _generated_context_text_for_base64_scan(text)
+                if not any(
+                    "base64_payload" in found
+                    for _, found in content_free_violation_locations(scanned)
+                ):
+                    reasons.remove("base64_payload")
+            fixed_reasons = tuple(sorted(reasons))
+            if fixed_reasons:
+                locations.append((path, type(item).__name__, len(text.encode("utf-8")), fixed_reasons))
+            return
+        if isinstance(item, Mapping):
+            for index, (key, child) in enumerate(item.items()):
+                key_location = typed_mapping_key_violation_location(
+                    key, path, index, exact_secret_values
+                )
+                if key_location is not None:
+                    locations.append(key_location)
+                visit(child, f"{path}.map[{index}].value")
+            return
+        if isinstance(item, (list, tuple)):
             for index, child in enumerate(item):
                 visit(child, f"{path}.sequence[{index}]")
 

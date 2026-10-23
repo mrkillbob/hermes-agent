@@ -248,7 +248,11 @@ def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
                             add_result("anthropic", block.get("tool_use_id"), block)
 
     scan_messages(value.get("messages"))
-    input_items = value.get("input")
+    extra_body = value.get("extra_body")
+    if isinstance(extra_body, Mapping) and "input" in extra_body:
+        input_items = extra_body.get("input")
+    else:
+        input_items = value.get("input")
     if isinstance(input_items, (list, tuple)):
         for item in input_items:
             if not isinstance(item, Mapping):
@@ -338,6 +342,38 @@ def _sequence_child_state(
     return inherited, False
 
 
+def _mapping_child_state(
+    path,
+    key,
+    child,
+    inherited,
+    collection,
+    protocol_message,
+    effective_input_in_extra_body,
+):
+    origin = inherited
+    child_collection = None
+    child_protocol_message = False
+    if path == "$":
+        origin = _ROOT_ORIGINS.get(key, origin)
+        child_collection = _ROOT_COLLECTIONS.get(key)
+        if key == "input" and effective_input_in_extra_body:
+            child_collection = None
+        elif key == "extra_body" and effective_input_in_extra_body:
+            child_collection = "effective_responses_extra_body"
+    elif collection == "effective_responses_extra_body" and key == "input":
+        origin = "user_task"
+        child_collection = "input"
+    elif (
+        protocol_message
+        and inherited == "user_task"
+        and key == "content"
+        and isinstance(child, (list, tuple))
+    ):
+        child_collection = "anthropic_user_content"
+    return origin, child_collection, child_protocol_message
+
+
 def _typed_payload_refusal_origin_evidence(
     value: Any, *, exact_secret_values: tuple[str, ...] = ()
 ) -> tuple[tuple[str, ...], bool]:
@@ -350,6 +386,10 @@ def _typed_payload_refusal_origin_evidence(
     if not violations:
         return (), False
     valid_tool_result_refs = _validated_tool_result_refs(value)
+    extra_body = value.get("extra_body") if isinstance(value, Mapping) else None
+    effective_input_in_extra_body = (
+        isinstance(extra_body, Mapping) and "input" in extra_body
+    )
     opaque_replay_types = {"CodexReasoningReplaySegment", "AnthropicThinkingReplaySegment"}
     violating_paths = {
         path for path, segment_type, _, reasons in violations
@@ -394,22 +434,18 @@ def _typed_payload_refusal_origin_evidence(
                 visit(segment, f"{path}.segments[{index}]", inherited, ancestors=ancestors)
         elif isinstance(item, Mapping):
             for index, (key, child) in enumerate(item.items()):
-                origin = inherited
-                child_collection = None
-                child_protocol_message = False
                 key_path = f"{path}.map[{index}].key"
                 if key_path in violating_paths:
                     origins.add(inherited if inherited in _ORIGINS else "other")
-                if path == "$":
-                    origin = _ROOT_ORIGINS.get(key, origin)
-                    child_collection = _ROOT_COLLECTIONS.get(key)
-                elif (
-                    protocol_message
-                    and inherited == "user_task"
-                    and key == "content"
-                    and isinstance(child, (list, tuple))
-                ):
-                    child_collection = "anthropic_user_content"
+                origin, child_collection, child_protocol_message = _mapping_child_state(
+                    path,
+                    key,
+                    child,
+                    inherited,
+                    collection,
+                    protocol_message,
+                    effective_input_in_extra_body,
+                )
                 visit(child, f"{path}.map[{index}].value", origin,
                       collection=child_collection,
                       protocol_message=child_protocol_message,
