@@ -6,7 +6,7 @@ External content and all secret/path checks remain independent.
 """
 from collections import Counter
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from hashlib import sha256
@@ -415,9 +415,12 @@ def remember_authorized_recipient(agent, route):
         return
 
 
-def authorize_with_native_metadata(agent, route, body, request, calls, results, firewall, grants, *, enabled):
+def authorize_with_native_metadata(agent, route, body, request, calls, results, firewall, grants, *, enabled,
+                                   request_scope=None):
     with admission(agent, route, body, request.payload, calls, results, enabled=enabled) as (payload, accepted):
-        authorization = firewall.authorize(replace(request, payload=payload), route, grants=grants)
+        actual_request = replace(request, payload=payload)
+        with request_scope(actual_request) if request_scope is not None else nullcontext():
+            authorization = firewall.authorize(actual_request, route, grants=grants)
         accepted()
         return authorization
 
@@ -438,6 +441,10 @@ def _render_bounded_sanitized(segment, request, grants, allowed, total, segment_
             projection = validate_segment(segment, request)
         except (ValueError, TypeError):
             return "", "", total, [*reasons, "invalid_native_metadata_reference"]
+        from agent.source_provenance_diagnostics import record_native_metadata_scan
+        record_native_metadata_scan(
+            (request.session_id, request.turn_id, request.request_id, request.policy_digest),
+            segment, segment.text, projection)
     encoded = segment.text.encode("utf-8")
     if len(encoded) > segment_cap:
         reasons.append("sanitized_segment_bytes_exceeded")

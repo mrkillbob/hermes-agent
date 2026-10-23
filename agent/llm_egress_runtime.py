@@ -29,7 +29,6 @@ from agent.llm_egress_firewall import (
     SourcePresentationSegment,
     SourceGrant,
     TypedOutboundRequest,
-    UntrustedProvenanceSegment,
     ValidatedToolSyntaxSegment,
     DestinationClass,
     GeneratedContextKey,
@@ -38,10 +37,10 @@ from agent.llm_egress_firewall import (
     source_grant_digest,
     static_literal_sha256,
     validate_sanitized_text,
-    content_free_violation_locations,
     redact_remote_unsafe_text,
     validate_tool_syntax,
 )
+from agent.llm_egress_content_diagnostics import content_free_violation_locations
 from agent.llm_egress_classifier import (
     _REMOTE_KANBAN_ATTACHMENT_TOOL_NAMES,
     _REMOTE_KANBAN_LIFECYCLE_TOOL_NAMES,
@@ -50,6 +49,10 @@ from agent.llm_egress_classifier import (
     _structured_tool_output_text,
     _typed_payload,
     _typed_payload_violation_locations,
+)
+from agent.llm_egress_refusal_origins import (
+    ToolResultRefusalSegment,
+    refusal_receipt_scope,
 )
 from agent.llm_egress_terminal import (
     _REMOTE_KANBAN_FILE_MUTATION_REPLAY_TOOL_NAMES,
@@ -205,7 +208,7 @@ def _prepare_bound_skill_source_results(
         raw = message.get("content")
         # A content-free marker forces the existing final provenance gate to
         # reject every mismatch without leaking tool bytes or local paths.
-        copied["content"] = UntrustedProvenanceSegment(
+        copied["content"] = ToolResultRefusalSegment(
             sha256(str(raw).encode("utf-8")).hexdigest()
         )
         try:
@@ -1147,6 +1150,7 @@ def authorize_agent_sdk_kwargs(
         request_id=request_id,
         policy_digest=policy_digest,
     )
+    exact_secret_values = _exact_provider_secret_values()
     from hermes_constants import get_hermes_home
 
     _configured_state_dir = getattr(agent, "_llm_egress_state_dir", "")
@@ -1183,15 +1187,14 @@ def authorize_agent_sdk_kwargs(
         static_literal_hashes_by_policy={
             policy_digest: _structural_literal_hashes(body)
         },
-        exact_secret_values=_exact_provider_secret_values(),
+        exact_secret_values=exact_secret_values,
     )
     try:
-        from agent.source_provenance_diagnostics import receipt_scope
-        with receipt_scope(agent, registry, (session_id, turn_id, request_id, policy_digest)):
-            authorization = authorize_with_native_metadata(
-                agent, resolved_route, body, request, native_nonterminal_call_ids,
-                native_nonterminal_result_ids, firewall, tuple(used_grants.values()),
-                enabled=not protected_kanban_remote)
+        authorization = authorize_with_native_metadata(
+            agent, resolved_route, body, request, native_nonterminal_call_ids,
+            native_nonterminal_result_ids, firewall, tuple(used_grants.values()), enabled=not protected_kanban_remote,
+            request_scope=lambda actual: refusal_receipt_scope(agent, registry,
+                (session_id, turn_id, request_id, policy_digest), actual.payload, exact_secret_values=exact_secret_values))
     except EgressBlocked:
         logger.warning(
             "LLM egress blocked grant counts: input=%d selected=%d",

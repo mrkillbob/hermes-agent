@@ -1495,47 +1495,6 @@ def redact_remote_unsafe_text(text: str) -> str:
     )
 
 
-def content_free_violation_locations(value: Any) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Return structural indexes and reasons without returning request text."""
-
-    locations: list[tuple[str, tuple[str, ...]]] = []
-    seen: set[int] = set()
-
-    def visit(item: Any, path: str) -> None:
-        if isinstance(item, str):
-            reasons: list[str] = []
-            if _contains_secret(item):
-                reasons.append("secret_detected")
-            if _contains_canonical_base64(item):
-                reasons.append("base64_payload")
-            if _contains_private_absolute_path(item):
-                reasons.append("private_absolute_path")
-            if reasons:
-                locations.append((path, tuple(reasons)))
-            return
-        if isinstance(item, Mapping):
-            identity = id(item)
-            if identity in seen:
-                locations.append((path, ("cyclic_container",)))
-                return
-            seen.add(identity)
-            for index, (key, child) in enumerate(item.items()):
-                visit(key, f"{path}.map[{index}].key")
-                visit(child, f"{path}.map[{index}].value")
-            return
-        if isinstance(item, (list, tuple, set, frozenset)):
-            identity = id(item)
-            if identity in seen:
-                locations.append((path, ("cyclic_container",)))
-                return
-            seen.add(identity)
-            for index, child in enumerate(item):
-                visit(child, f"{path}.sequence[{index}]")
-
-    visit(value, "$")
-    return tuple(locations)
-
-
 def _contains_grant_substring(grant_content: bytes, candidate: bytes) -> bool:
     """Reject source-derived proper substrings in sanitized text.
 
@@ -1988,6 +1947,8 @@ class LLMEgressFirewall:
         sanitized_bytes = 0
         scan_values: list[str] = []
         base64_scan_values: list[str] = []
+        verified_source_scan_values: list[str] = []
+        verified_source_encoding_values: list[str] = []
         encoding_projections: dict[int, str] = {}
         allowed_static_hashes = self._static_literal_hashes_by_policy.get(
             request.policy_digest,
@@ -2110,8 +2071,12 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(_source_text_for_secret_scan(text))
-                base64_scan_values.append(_source_text_for_base64_scan(text))
+                secret_scan = _source_text_for_secret_scan(text)
+                encoding_scan = _source_text_for_base64_scan(text)
+                scan_values.append(secret_scan)
+                base64_scan_values.append(encoding_scan)
+                verified_source_scan_values.append(secret_scan)
+                verified_source_encoding_values.append(encoding_scan)
                 return text
             if isinstance(segment, SourcePresentationSegment):
                 grant_and_content = grant_contents.get(segment.source_grant_digest)
@@ -2128,6 +2093,8 @@ class LLMEgressFirewall:
                 source_segment_count += 1
                 scan_values.extend(source_scans)
                 base64_scan_values.extend(source_encodings)
+                verified_source_scan_values.extend(source_scans)
+                verified_source_encoding_values.extend(source_encodings)
                 return segment.text
             if isinstance(segment, UntrustedProvenanceSegment):
                 reasons.append("untrusted_provenance")
@@ -2253,6 +2220,14 @@ class LLMEgressFirewall:
             return None
 
         rendered_payload = render(request.payload)
+        from agent.source_provenance_diagnostics import record_verified_source_scan
+        record_verified_source_scan(
+            (request.session_id, request.turn_id, request.request_id,
+             request.policy_digest),
+            tuple(verified_source_scan_values),
+            tuple(verified_source_encoding_values),
+            self._exact_secret_values,
+        )
         if not isinstance(rendered_payload, Mapping):
             reasons.append("invalid_typed_request_root")
             rendered_payload = {}

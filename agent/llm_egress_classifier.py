@@ -22,13 +22,15 @@ from agent.llm_egress_firewall import (
     SourcePresentationSegment,
     UntrustedProvenanceSegment,
     ValidatedToolSyntaxSegment,
-    content_free_violation_locations,
-    _generated_context_text_for_base64_scan,
+    _contains_exact_secret,
     redact_remote_unsafe_text,
     source_grant_digest,
     static_literal_sha256,
     validate_sanitized_text,
-    validate_tool_syntax,
+)
+from agent.llm_egress_content_diagnostics import (
+    content_free_violation_locations,
+    typed_payload_violation_locations as _typed_payload_violation_locations,
 )
 from agent.llm_egress_terminal import (
     _FILE_MUTATION_ARGUMENT_REPLAY,
@@ -77,6 +79,10 @@ from agent.llm_egress_terminal import (
     _segment_protected_context,
     _segment_protected_tool_result,
     _segment_text,
+)
+from agent.llm_egress_refusal_origins import (
+    SourceBoundRefusalSegment,
+    ToolResultRefusalSegment,
 )
 from agent.redact import redact_sensitive_text
 from agent.source_provenance import SourceProvenanceRegistry
@@ -435,7 +441,9 @@ def _typed_payload(value: Any, grant_texts: Sequence[tuple[str, SourceGrant]], u
             if digest == value.source_grant_digest:
                 used_grants[digest] = grant
                 return value
-        return UntrustedProvenanceSegment(sha256(b"unbound-source-segment").hexdigest())
+        return SourceBoundRefusalSegment(
+            sha256(b"unbound-source-segment").hexdigest()
+        )
     if isinstance(value, str):
         return _typed_payload_string(value, grant_texts, used_grants, **kwargs)
     if isinstance(value, (list, tuple)):
@@ -900,7 +908,9 @@ def _typed_payload_mapping_item(
         )
         and key in {"content", "output"}
     ):
-        typed[key] = UntrustedProvenanceSegment(_untrusted_content_digest(item))
+        typed[key] = ToolResultRefusalSegment(
+            _untrusted_content_digest(item)
+        )
         return
     value = state['value']
     grant_texts = state['grant_texts']
@@ -1151,7 +1161,7 @@ def _typed_payload_mapping_structured(
             for reason in reasons
         }
         if not violation_reasons:
-            typed[key] = UntrustedProvenanceSegment(
+            typed[key] = ToolResultRefusalSegment(
                 _untrusted_content_digest(item)
             )
             return True
@@ -1685,7 +1695,7 @@ def _typed_payload_mapping_scalar_arguments(
         # sent, even when it contains no shape-based violation.
         typed[key] = OutboundText(
             (
-                UntrustedProvenanceSegment(
+                ToolResultRefusalSegment(
                     sha256(raw.encode("utf-8")).hexdigest()
                 ),
                 _approved_sanitized(raw, cap=sanitized_cap),
@@ -1912,78 +1922,3 @@ def _structural_literal_hashes(value: Any) -> frozenset[str]:
 
     visit(value)
     return frozenset(static_literal_sha256(literal) for literal in literals)
-
-def _typed_payload_violation_locations(
-    value: Any,
-) -> tuple[tuple[str, str, int, tuple[str, ...]], ...]:
-    """Summarize unsafe typed segments without recording their text.
-
-    This is diagnostic-only evidence for a failed final authorization.  It
-    deliberately retains neither raw values nor hashes that could be used to
-    correlate secret material across requests.
-    """
-
-    locations: list[tuple[str, str, int, tuple[str, ...]]] = []
-    seen: set[int] = set()
-    text_segments = (
-        SanitizedSegment,
-        GeneratedContextSegment,
-        LiteralSegment,
-        ValidatedToolSyntaxSegment,
-        CodexReasoningReplaySegment,
-        AnthropicThinkingReplaySegment,
-        SourcePresentationSegment,
-        SourceBoundSegment,
-        UntrustedProvenanceSegment,
-    )
-
-    def visit(item: Any, path: str) -> None:
-        if isinstance(item, UntrustedProvenanceSegment):
-            # This marker has a hash, not text. Never log that hash; report only
-            # the structural origin boundary that final authorization rejected.
-            locations.append((path, "UntrustedProvenanceSegment", 0, ("untrusted_provenance",)))
-            return
-        if isinstance(item, (OutboundText, Mapping, list, tuple)):
-            if id(item) in seen:
-                return
-            seen.add(id(item))
-        if isinstance(item, OutboundText):
-            for index, segment in enumerate(item.segments):
-                visit(segment, f"{path}.segments[{index}]")
-            return
-        if isinstance(item, text_segments):
-            text = getattr(item, "text", None)
-            if not isinstance(text, str):
-                return
-            reasons = {
-                reason for _, found in content_free_violation_locations(text) for reason in found
-            }
-            if isinstance(item, ValidatedToolSyntaxSegment) and "base64_payload" in reasons:
-                # Final construction revalidates this grammar and excludes the
-                # atom from encoding scans (secret/path scans still apply).
-                try:
-                    validate_tool_syntax(text, item.syntax_kind)
-                except (TypeError, ValueError):
-                    pass
-                else:
-                    reasons.remove("base64_payload")
-            if isinstance(item, GeneratedContextSegment) and "base64_payload" in reasons:
-                # Match final authorization's bounded metadata mask; raw diagnostics
-                # otherwise blame generated identifiers that the firewall allows.
-                scanned = _generated_context_text_for_base64_scan(text)
-                if not any("base64_payload" in found for _, found in content_free_violation_locations(scanned)):
-                    reasons.remove("base64_payload")
-            reasons = tuple(sorted(reasons))
-            if reasons:
-                locations.append((path, type(item).__name__, len(text.encode("utf-8")), reasons))
-            return
-        if isinstance(item, Mapping):
-            for index, (_, child) in enumerate(item.items()):
-                visit(child, f"{path}.map[{index}].value")
-            return
-        if isinstance(item, (list, tuple)):
-            for index, child in enumerate(item):
-                visit(child, f"{path}.sequence[{index}]")
-
-    visit(value, "$")
-    return tuple(locations)

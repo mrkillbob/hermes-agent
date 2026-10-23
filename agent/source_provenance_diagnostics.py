@@ -25,6 +25,10 @@ _STAGES = {
     'consumer': frozenset({'bound', 'no_trace'}),
 }
 _BOOL_FIELDS = frozenset({'same_registry', 'request_matches', 'owner_matches', 'binding_present'})
+_REFUSAL_ORIGINS = frozenset({
+    'tool_result', 'source_bound', 'assistant_history', 'user_task',
+    'system_or_schema', 'other',
+})
 _install_lock = RLock()
 _active = ContextVar('source_diagnostic_producer', default=None)
 _receipt = ContextVar('source_diagnostic_receipt', default=None)
@@ -68,6 +72,11 @@ def _observe(function):
         except Exception:  # health: allow BLE001 -- Private exception data must not escape optional diagnostics or affect admission.
             return None
     return observed
+
+
+@_observe
+def _observe_refusal_origins(callback):
+    return callback()
 
 
 @_observe
@@ -141,18 +150,69 @@ def _snapshot(agent, registry, owner):
 
 
 @_observe
-def _begin_receipt(agent, registry, owner):
+def _begin_receipt(agent, registry, owner, refusal_origins=None):
     snapshot = _snapshot(agent, registry, owner)
-    return _receipt.set((owner, snapshot))
+    return _receipt.set((owner, snapshot, refusal_origins, {'verified_source_scan': False}))
 
 
 @contextmanager
-def receipt_scope(agent, registry, owner):
-    token = _begin_receipt(agent, registry, owner)
+def receipt_scope(agent, registry, owner, *, refusal_origins=None):
+    token = _begin_receipt(agent, registry, owner, refusal_origins)
     try:
         yield
     finally:
         _reset(_receipt, token)
+
+
+@_observe
+def record_native_metadata_scan(owner, segment, text, encoding_projection):
+    """Borrow only the current renderer's validated native scan inputs, in memory."""
+    active = _receipt.get()
+    if active is None or active[0] != owner or len(active) < 4:
+        return
+    if type(text) is str and type(encoding_projection) is str:
+        active[3].setdefault('native_metadata_scans', {})[id(segment)] = (
+            segment, text, encoding_projection)
+
+
+@_observe
+def native_metadata_scan_inputs(segment):
+    """Unobserved or invalid references supply no diagnostic content or authority."""
+    active = _receipt.get()
+    if active is None or len(active) < 4:
+        return None
+    observed = active[3].get('native_metadata_scans', {}).get(id(segment))
+    return observed[1:] if observed is not None and observed[0] is segment else None
+
+
+@_observe
+def record_verified_source_scan(owner, secret_scan_inputs, encoding_scan_inputs,
+                                exact_secret_values=()):
+    """Remember only a fixed match from already-rendered, request-bound scan inputs."""
+    active = _receipt.get()
+    if (
+        active is None or len(active) < 4 or active[0] != owner
+        or not isinstance(owner, tuple) or len(owner) != 4
+    ):
+        return
+    if not all(type(value) is str for value in (*secret_scan_inputs, *encoding_scan_inputs)):
+        return
+    if not all(type(value) is str for value in exact_secret_values):
+        return
+    from agent.llm_egress_firewall import (
+        _contains_canonical_base64,
+        _contains_exact_secret,
+        _contains_private_absolute_path,
+        _contains_secret,
+    )
+
+    if (
+        _contains_secret(secret_scan_inputs)
+        or _contains_exact_secret(secret_scan_inputs, exact_secret_values)
+        or _contains_private_absolute_path(secret_scan_inputs)
+        or _contains_canonical_base64(encoding_scan_inputs)
+    ):
+        active[3]['verified_source_scan'] = True
 
 
 @_observe
@@ -168,5 +228,28 @@ def append_receipt_diagnostics(receipt, decision):
         event = _event(item.get('stage'), item.get('code'), item)
         if event is not None:
             events.append(event)
-    receipt['source_provenance_diagnostics'] = {
-        'events': events, 'overflow': snapshot.get('overflow') is True}
+    diagnostics = {'events': events, 'overflow': snapshot.get('overflow') is True}
+    if decision.allowed is False and len(active) > 2 and callable(active[2]):
+        evidence = _observe_refusal_origins(active[2])
+        origins = set()
+        has_typed_evidence = False
+        if (
+            isinstance(evidence, tuple) and len(evidence) == 2
+            and type(evidence[1]) is bool
+            and isinstance(evidence[0], (list, tuple, set, frozenset))
+        ):
+            candidates, has_typed_evidence = evidence
+            origins = {
+                item for item in candidates
+                if type(item) is str and item in _REFUSAL_ORIGINS
+            }
+            if has_typed_evidence and not origins:
+                origins.add('other')
+        else:
+            origins.add('other')
+        if active[3].get('verified_source_scan') is True:
+            origins.add('source_bound')
+        if not has_typed_evidence and active[3].get('verified_source_scan') is not True:
+            origins.add('other')
+        diagnostics['refusal_origins'] = sorted(origins or {'other'})
+    receipt['source_provenance_diagnostics'] = diagnostics

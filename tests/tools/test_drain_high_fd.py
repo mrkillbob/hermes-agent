@@ -103,11 +103,16 @@ def test_pty_bridge_reads_and_waits_above_fd_setsize(high_fds, monkeypatch):
         assert bridge._fd >= 1024
         buf = bytearray()
         deadline = time.monotonic() + 5
-        while b"pty-high-fd" not in buf and time.monotonic() < deadline:
+        # A PTY may make the command's text readable before the line-ending bytes
+        # from the same terminal write are visible. Drain the complete line before
+        # asserting that the bridge is idle; otherwise the idle read can consume a
+        # delayed CRLF and look like a readiness-wait failure.
+        while (b"pty-high-fd" not in buf or b"\n" not in buf) and time.monotonic() < deadline:
             chunk = bridge.read(timeout=0.2)
             assert chunk is not None, f"PTY reported EOF before output (got {bytes(buf)!r})"
             buf.extend(chunk)
         assert b"pty-high-fd" in buf
+        assert b"\n" in buf, f"PTY output line was incomplete (got {bytes(buf)!r})"
         _assert_idle_read_waits(bridge)
     finally:
         bridge.close()
