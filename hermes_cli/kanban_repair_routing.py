@@ -24,7 +24,7 @@ _TITLE_INTAKE_RULES = (
 )
 
 _INVENTORY_LABEL = re.compile(
-    r"(?:^|(?<=[.!?]))\s*(?:inventory|quoted(?:\s+inventory)?)\s*:", re.IGNORECASE,
+    r"(?:^|(?<=[.!?]))\s*(?:[-*+] )?(?:inventory|quoted(?:\s+inventory)?)\s*:", re.IGNORECASE,
 )
 _FENCE_OPEN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _FENCE_CLOSE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
@@ -377,7 +377,21 @@ def _paired_quote_ranges(line: str) -> list[tuple[int, int]]:
 def _assertion_units(value: str) -> Iterator[str]:
     """Split complete sentence records outside balanced same-line spans."""
     pending: list[str] = []
+    pending_is_list_item = False
     for line in value.split("\n"):
+        bullet_prefix = line[:5].lstrip(" ")
+        is_list_item = (
+            len(line[:5]) - len(bullet_prefix) <= 3
+            and bullet_prefix.startswith(("- ", "* ", "+ "))
+        )
+        if is_list_item and pending_is_list_item:
+            unit = " ".join(part for part in pending if part.strip())
+            if unit.strip():
+                yield unit
+            pending.clear()
+            pending_is_list_item = False
+        if is_list_item and not any(part.strip() for part in pending):
+            pending_is_list_item = True
         ranges = _paired_quote_ranges(line)
         range_index = 0
         start = 0

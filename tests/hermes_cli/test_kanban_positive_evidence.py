@@ -186,6 +186,12 @@ def test_questions_and_unsupported_records_keep_title_owner(title, owner, record
     "The report quotes ‘LunaBot diagnostics failed. Automation credential is missing.’",
     "The workflow failed because “automation credential is missing — perhaps”.",
     "Example: `automation credential is missing` Current LunaBot diagnostics have failed",
+    "Documentation says:\n- Automation credential is missing",
+    "Documentation says:\n\n- Automation credential is missing",
+    "Check whether:\n- Automation credential is missing",
+    "Check whether:\n\n- Automation credential is missing",
+    "Documentation says:\n- Automation credential is missing\n- LunaBot diagnostics failed",
+    "- Inventory:\n- Automation credential is missing",
 ])
 def test_unknown_records_and_opaque_quotes_keep_title_owner(title, owner, record):
     assert repair_profile_for_task(title, record) == owner
@@ -203,6 +209,17 @@ def test_unknown_records_and_opaque_quotes_keep_title_owner(title, owner, record
 ])
 def test_soft_lines_and_accepted_compounds_route_maintenance(title, owner, record):
     assert repair_profile_for_task(title, record) == "hermes-maintenance-steward"
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("body", [
+    "- Automation credential is missing\n- LunaBot diagnostics failed",
+    "- The workflow failed because\n  automation credential is missing\n- Current LunaBot diagnostics failed",
+    "  - Automation credential is missing\n   - LunaBot diagnostics failed",
+    "- Check status. More context\n- Automation credential is missing",
+])
+def test_markdown_list_items_are_independent_operational_records(title, owner, body):
+    assert repair_profile_for_task(title, body) == "hermes-maintenance-steward"
 
 
 @pytest.mark.parametrize("record", [
