@@ -4,10 +4,17 @@ from collections.abc import Mapping
 from typing import Any
 
 from agent.llm_egress_firewall import (
+    AnthropicThinkingReplaySegment,
+    CodexReasoningReplaySegment,
+    GeneratedContextSegment,
+    LiteralSegment,
     OutboundText,
+    SanitizedSegment,
     SourceBoundSegment,
     SourcePresentationSegment,
     UntrustedProvenanceSegment,
+    ValidatedToolSyntaxSegment,
+    _contains_exact_secret,
 )
 
 _ORIGINS = frozenset({
@@ -22,6 +29,45 @@ _ROOT_ORIGINS = {
     "input": "user_task",
 }
 _ROOT_COLLECTIONS = {"messages": "messages", "input": "input"}
+
+
+def _source_presentation_exact_secret_match(segment, exact_secret_values):
+    """Match only presentation fields also scanned by final authorization."""
+    if not exact_secret_values:
+        return False
+    from agent.llm_egress_firewall import _source_text_for_secret_scan
+    from agent.source_context_rendering import presentation_display_path, presentation_secret_text
+
+    return _contains_exact_secret(
+        (
+            _source_text_for_secret_scan(presentation_secret_text(segment)),
+            presentation_display_path(segment),
+        ),
+        exact_secret_values,
+    )
+
+
+def _joined_exact_secret_segment_indexes(segments, exact_secret_values):
+    """Identify pieces covered by final construction's joined secret scans."""
+    matched = set()
+    joined_kinds = ((SanitizedSegment,), (LiteralSegment, SanitizedSegment,
+        GeneratedContextSegment, CodexReasoningReplaySegment,
+        AnthropicThinkingReplaySegment, ValidatedToolSyntaxSegment))
+    for kinds in joined_kinds:
+        indexes, texts = [], []
+        for index, segment in enumerate(segments):
+            text = getattr(segment, "text", None)
+            if isinstance(segment, kinds) and isinstance(text, str):
+                indexes.append(index)
+                texts.append(text)
+            else:
+                if len(indexes) > 1 and _contains_exact_secret("".join(texts), exact_secret_values):
+                    matched.add(indexes[0])
+                indexes.clear()
+                texts.clear()
+        if len(indexes) > 1 and _contains_exact_secret("".join(texts), exact_secret_values):
+            matched.add(indexes[0])
+    return frozenset(matched)
 
 
 class SourceBoundRefusalSegment(UntrustedProvenanceSegment):
@@ -58,17 +104,55 @@ def _message_origin(message: Mapping[str, Any]) -> str:
     return "other"
 
 
-def typed_payload_refusal_origins(value: Any) -> tuple[str, ...]:
+def _anthropic_content_origin(value: Mapping[str, Any], inherited: str) -> str:
+    block_type = value.get("type")
+    protocol_type = _literal(block_type)
+    if protocol_type is not None:
+        block_type = protocol_type
+    elif isinstance(block_type, SanitizedSegment):
+        block_type = block_type.text
+    if block_type == "tool_result" and "tool_use_id" in value:
+        return "tool_result"
+    return inherited
+
+
+def _sequence_child_state(child: Any, inherited: str, collection: str | None):
+    if not isinstance(child, Mapping):
+        return inherited, False
+    if collection in {"messages", "input"}:
+        return _message_origin(child), True
+    if collection == "anthropic_user_content":
+        return _anthropic_content_origin(child, inherited), False
+    return inherited, False
+
+
+def typed_payload_refusal_origins(
+    value: Any, *, exact_secret_values: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     """Map rejected typed segments to fixed categories at protocol positions."""
     from agent.llm_egress_classifier import _typed_payload_violation_locations
 
-    violations = _typed_payload_violation_locations(value)
+    violations = _typed_payload_violation_locations(
+        value, exact_secret_values=exact_secret_values
+    )
     if not violations:
         return ("other",)
-    violating_paths = {item[0] for item in violations}
+    opaque_replay_types = {"CodexReasoningReplaySegment", "AnthropicThinkingReplaySegment"}
+    violating_paths = {
+        path for path, segment_type, _, reasons in violations
+        if segment_type not in opaque_replay_types or "exact_secret_detected" in reasons
+    }
     origins: set[str] = set()
 
-    def visit(item: Any, path: str, inherited: str, *, collection=None, ancestors=frozenset()):
+    def visit(
+        item: Any,
+        path: str,
+        inherited: str,
+        *,
+        collection=None,
+        protocol_message=False,
+        ancestors=frozenset(),
+    ):
         if isinstance(item, (OutboundText, Mapping, list, tuple)):
             if id(item) in ancestors:
                 if path in violating_paths:
@@ -98,25 +182,47 @@ def typed_payload_refusal_origins(value: Any) -> tuple[str, ...]:
             for index, (key, child) in enumerate(item.items()):
                 origin = inherited
                 child_collection = None
+                child_protocol_message = False
                 if path == "$":
                     origin = _ROOT_ORIGINS.get(key, origin)
                     child_collection = _ROOT_COLLECTIONS.get(key)
+                elif (
+                    protocol_message
+                    and inherited == "user_task"
+                    and key == "content"
+                    and isinstance(child, (list, tuple))
+                ):
+                    child_collection = "anthropic_user_content"
                 visit(child, f"{path}.map[{index}].value", origin,
-                      collection=child_collection, ancestors=ancestors)
+                      collection=child_collection,
+                      protocol_message=child_protocol_message,
+                      ancestors=ancestors)
         elif isinstance(item, (list, tuple)):
             for index, child in enumerate(item):
-                origin = _message_origin(child) if collection is not None and isinstance(child, Mapping) else inherited
-                visit(child, f"{path}.sequence[{index}]", origin, ancestors=ancestors)
+                origin, is_protocol_message = _sequence_child_state(
+                    child, inherited, collection
+                )
+                visit(
+                    child,
+                    f"{path}.sequence[{index}]",
+                    origin,
+                    protocol_message=is_protocol_message,
+                    ancestors=ancestors,
+                )
 
     visit(value, "$", "other")
     return tuple(sorted(origins or {"other"}))
 
 
-def refusal_receipt_scope(agent, registry, owner, typed_body):
+def refusal_receipt_scope(
+    agent, registry, owner, typed_payload, *, exact_secret_values=()
+):
     """Bind a lazy, content-free attribution callback to an existing receipt."""
     from agent.source_provenance_diagnostics import receipt_scope
 
     return receipt_scope(
         agent, registry, owner,
-        refusal_origins=lambda: typed_payload_refusal_origins(typed_body),
+        refusal_origins=lambda: typed_payload_refusal_origins(
+            typed_payload, exact_secret_values=exact_secret_values
+        ),
     )

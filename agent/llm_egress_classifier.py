@@ -22,6 +22,7 @@ from agent.llm_egress_firewall import (
     SourcePresentationSegment,
     UntrustedProvenanceSegment,
     ValidatedToolSyntaxSegment,
+    _contains_exact_secret,
     content_free_violation_locations,
     _generated_context_text_for_base64_scan,
     redact_remote_unsafe_text,
@@ -1895,8 +1896,11 @@ def _structural_literal_hashes(value: Any) -> frozenset[str]:
     visit(value)
     return frozenset(static_literal_sha256(literal) for literal in literals)
 
+
 def _typed_payload_violation_locations(
     value: Any,
+    *,
+    exact_secret_values: Sequence[str] = (),
 ) -> tuple[tuple[str, str, int, tuple[str, ...]], ...]:
     """Summarize unsafe typed segments without recording their text.
 
@@ -1918,8 +1922,10 @@ def _typed_payload_violation_locations(
         SourceBoundSegment,
         UntrustedProvenanceSegment,
     )
+    if exact_secret_values:
+        from agent.llm_egress_refusal_origins import _joined_exact_secret_segment_indexes
 
-    def visit(item: Any, path: str) -> None:
+    def visit(item: Any, path: str, joined_secret=False) -> None:
         if isinstance(item, UntrustedProvenanceSegment):
             # This marker has a hash, not text. Never log that hash; report only
             # the structural origin boundary that final authorization rejected.
@@ -1930,8 +1936,12 @@ def _typed_payload_violation_locations(
                 return
             seen.add(id(item))
         if isinstance(item, OutboundText):
+            joined_secrets = (
+                _joined_exact_secret_segment_indexes(item.segments, exact_secret_values)
+                if exact_secret_values else frozenset()
+            )
             for index, segment in enumerate(item.segments):
-                visit(segment, f"{path}.segments[{index}]")
+                visit(segment, f"{path}.segments[{index}]", index in joined_secrets)
             return
         if isinstance(item, text_segments):
             text = getattr(item, "text", None)
@@ -1940,6 +1950,22 @@ def _typed_payload_violation_locations(
             reasons = {
                 reason for _, found in content_free_violation_locations(text) for reason in found
             }
+            exact_secret_match = (
+                isinstance(item, (SanitizedSegment, GeneratedContextSegment, LiteralSegment,
+                                  ValidatedToolSyntaxSegment))
+                and exact_secret_values
+                and _contains_exact_secret(text, exact_secret_values)
+            )
+            if isinstance(item, SourcePresentationSegment) and exact_secret_values:
+                from agent.llm_egress_refusal_origins import (
+                    _source_presentation_exact_secret_match,
+                )
+
+                exact_secret_match = _source_presentation_exact_secret_match(
+                    item, exact_secret_values
+                )
+            if joined_secret or exact_secret_match:
+                reasons.add("exact_secret_detected")
             if isinstance(item, ValidatedToolSyntaxSegment) and "base64_payload" in reasons:
                 # Final construction revalidates this grammar and excludes the
                 # atom from encoding scans (secret/path scans still apply).

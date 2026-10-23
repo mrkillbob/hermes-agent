@@ -1044,6 +1044,7 @@ def authorize_agent_sdk_kwargs(
         request_id=request_id,
         policy_digest=policy_digest,
     )
+    exact_secret_values = _exact_provider_secret_values()
     from hermes_constants import get_hermes_home
 
     _configured_state_dir = getattr(agent, "_llm_egress_state_dir", "")
@@ -1080,10 +1081,10 @@ def authorize_agent_sdk_kwargs(
         static_literal_hashes_by_policy={
             policy_digest: _structural_literal_hashes(body)
         },
-        exact_secret_values=_exact_provider_secret_values(),
+        exact_secret_values=exact_secret_values,
     )
     try:
-        with refusal_receipt_scope(agent, registry, (session_id, turn_id, request_id, policy_digest), typed_body):
+        with refusal_receipt_scope(agent, registry, (session_id, turn_id, request_id, policy_digest), request.payload, exact_secret_values=exact_secret_values):
             authorization = firewall.authorize(
                 request,
                 resolved_route,
