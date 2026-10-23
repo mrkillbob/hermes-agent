@@ -1,3 +1,4 @@
+import { JsonRpcGatewayError } from '@hermes/shared'
 import { atom } from 'nanostores'
 
 import { translateNow } from '@/i18n'
@@ -84,6 +85,57 @@ function defaultPlacement(kind: NotificationKind, action?: NotificationAction): 
 
 function cleanErrorText(value: string) {
   return value.replace(/^Error:\s*/, '').trim()
+}
+
+// These are the gateway's storage-unavailable and storage-write refusal codes.
+const STORAGE_RPC_CODES = new Set([-32000, 5000, 5007, 5008, 5017, 5036, 5070, 5071, 5072])
+
+// Keep in sync with the stable `code` and `cause` values in hermes_state_user_copy.py.
+const STORAGE_ERROR_CATEGORIES = new Set([
+  'disk_full',
+  'storage_busy',
+  'storage_corrupt',
+  'storage_index_corrupt',
+  'storage_locked',
+  'storage_readonly',
+  'storage_replaced',
+  'storage_session_missing',
+  'storage_session_rotated',
+  'storage_unavailable'
+])
+
+const STORAGE_ERROR_CAUSES = new Set([
+  'compression',
+  'compression_closed',
+  'corrupt',
+  'deleted_wal',
+  'disk',
+  'fts_index',
+  'locked',
+  'replaced',
+  'session_row_missing',
+  'turn_lease',
+  'unknown'
+])
+
+function storageRpcDiagnostic(error: unknown): string {
+  if (!(error instanceof JsonRpcGatewayError) || typeof error.code !== 'number' || !STORAGE_RPC_CODES.has(error.code)) {
+    return ''
+  }
+
+  if (typeof error.data !== 'object' || error.data === null) {
+    return ''
+  }
+
+  const data = error.data as { cause?: unknown; code?: unknown }
+
+  if (typeof data.code !== 'string' || !STORAGE_ERROR_CATEGORIES.has(data.code)) {
+    return ''
+  }
+
+  const cause = typeof data.cause === 'string' && STORAGE_ERROR_CAUSES.has(data.cause) ? data.cause : 'unclassified'
+
+  return ` [storage_rpc rpc_code=${error.code} storage_category=${data.code} storage_cause=${cause}]`
 }
 
 /** True when an error string is a disk-full / ENOSPC / SQLITE_FULL failure. */
@@ -332,7 +384,7 @@ function logErrorToDesktopLog(error: unknown, fallback: string): void {
     const raw: string =
       error instanceof Error ? (error.stack ?? error.message) : typeof error === 'string' ? error : fallback
 
-    window.hermesDesktop?.logLine?.(`[renderer error:${label}] ${fallback}: ${raw}`)
+    window.hermesDesktop?.logLine?.(`[renderer error:${label}] ${fallback}: ${raw}${storageRpcDiagnostic(error)}`)
   } catch {
     // A missing or closed IPC bridge must not prevent the error toast.
   }
