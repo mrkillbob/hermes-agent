@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from array import array
 from typing import Optional
 
 
@@ -57,16 +58,16 @@ _FENCE_OPEN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _FENCE_CLOSE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
 _BLOCKQUOTE = re.compile(r"^\s{0,3}>")
 _BLOCKQUOTE_EMPTY = re.compile(r"^\s{0,3}>\s*$")
-_BLOCKER_NEGATION = re.compile(r"\b(?:no|if|whether|unless)\s+(?:the\s+)?(?:[`'\"‘“]\s*)*$")
-_WHEN_INQUIRY = re.compile(r"\bwhen\s+(?:the\s+)?(?:[`'\"‘“]\s*)*$")
-_INQUIRY_VERB = re.compile(r"\b(?:check|review|record|inspect|determine|verify)\s*$")
+_BLOCKER_NEGATION = re.compile(r"\b(?:no|if|whether|unless)\b", re.IGNORECASE)
+_WHEN_INQUIRY = re.compile(r"\bwhen\b", re.IGNORECASE)
+_INQUIRY_VERB = re.compile(r"\b(?:check|review|record|inspect|determine|verify)\s*", re.IGNORECASE)
 _INLINE_QUOTES = {"'": "'", '"': '"', "‘": "’", "“": "”"}
 _INLINE_BARRIER = "\ue000"
 _EXAMPLE_CUE = re.compile(
-    r"(?:\bexample(?:\s+text)?\s*[:,-]?|\bfor example\s*,?|\bcompare the phrase)\s*$",
+    r"(?:\bexample(?:\s+text)?\s*[:,-]?|\bfor example\s*,?|\bcompare the phrase)",
     re.IGNORECASE,
 )
-_EXAMPLE_SUFFIX = re.compile(r"^\s+is an example sentence\b", re.IGNORECASE)
+_EXAMPLE_SUFFIX = re.compile(r"is an example sentence\b", re.IGNORECASE)
 
 
 def _fence_closes(line: str, marker: tuple[str, int]) -> bool:
@@ -75,96 +76,172 @@ def _fence_closes(line: str, marker: tuple[str, int]) -> bool:
     return bool(match and match.group(1)[0] == marker[0] and len(match.group(1)) >= marker[1])
 
 
-def _inline_quote_end(value: str, start: int, closing: str) -> int | None:
-    """Find a paired inline quote without crossing a line or contraction."""
-    index = start + 1
+def _title_delimiter_end(title: str) -> int | None:
+    """Find the first title clause delimiter with a single forward scan."""
+    index = 0
+    while index < len(title):
+        if title[index] in ":—–":
+            return index + 1
+        if title[index] not in " \t":
+            index += 1
+            continue
+        while index < len(title) and title[index] in " \t":
+            index += 1
+        if index < len(title) and title[index] == "-" and index + 1 < len(title) and title[index + 1] in " \t":
+            index += 1
+            while index < len(title) and title[index] in " \t":
+                index += 1
+            return index
+    return None
+
+
+def _normalize_title_dash_clauses(value: str) -> str:
+    """Replace title-only dash clause separators without regex rescans."""
+    parts: list[str] = []
+    chunk_start = 0
+    index = 0
     while index < len(value):
-        char = value[index]
-        if char in "\r\n":
-            return None
-        if char == "\\":
+        if value[index] in "—–":
+            parts.extend((value[chunk_start:index], "\n"))
+            index += 1
+            chunk_start = index
+            continue
+        if value[index] not in " \t":
+            index += 1
+            continue
+        separator_start = index
+        while index < len(value) and value[index] in " \t":
+            index += 1
+        if index < len(value) and value[index] == "-" and index + 1 < len(value) and value[index + 1] in " \t":
+            index += 1
+            while index < len(value) and value[index] in " \t":
+                index += 1
+            parts.extend((value[chunk_start:separator_start], "\n"))
+            chunk_start = index
+    parts.append(value[chunk_start:])
+    return "".join(parts)
+
+
+def _inline_markers(line: str) -> tuple[dict[str, list[int]], dict[int, list[int]]]:
+    """Index eligible quote closers and code runs once per line."""
+    quote_closers = {quote: [] for quote in set(_INLINE_QUOTES.values())}
+    index = 0
+    while index < len(line):
+        if line[index] == "\\":
             index += 2
             continue
-        if char == closing:
-            if (closing in {"'", "’"} and index + 1 < len(value)
-                    and value[index - 1].isalnum() and value[index + 1].isalnum()):
-                index += 1
-                continue
-            return index
+        if (line[index] in quote_closers
+                and not (line[index] in {"'", "’"} and index > 0
+                         and index + 1 < len(line)
+                         and line[index - 1].isalnum() and line[index + 1].isalnum())):
+            quote_closers[line[index]].append(index)
         index += 1
-    return None
 
-
-def _inline_code_end(value: str, start: int, run_length: int) -> int | None:
-    """Find an equal-length inline backtick run on the same line."""
-    index = start + run_length
-    while index < len(value):
-        if value[index] in "\r\n":
-            return None
-        if value[index] == "`":
-            end = index
-            while end < len(value) and value[end] == "`":
-                end += 1
-            if end - index == run_length:
-                return index
-            index = end
-        else:
+    code_runs: dict[int, list[int]] = {}
+    index = 0
+    while index < len(line):
+        if line[index] != "`":
             index += 1
-    return None
+            continue
+        end = index + 1
+        while end < len(line) and line[end] == "`":
+            end += 1
+        code_runs.setdefault(end - index, []).append(index)
+        index = end
+    return quote_closers, code_runs
 
 
-def _inline_span_is_example(value: str, start: int, end: int) -> bool:
-    """Whether a paired inline span is explicitly introduced as an example."""
-    prefix = value[:start].rsplit("\n", 1)[-1].rsplit("\r", 1)[-1]
-    suffix = value[end + 1:].splitlines()[0] if value[end + 1:] else ""
-    return bool(_EXAMPLE_CUE.search(prefix) or _EXAMPLE_SUFFIX.match(suffix))
+def _example_context(line: str) -> tuple[list[int], list[int], array]:
+    """Index cues and next-content positions for constant-time span checks."""
+    cue_ends = [match.end() for match in _EXAMPLE_CUE.finditer(line)]
+    suffix_starts = [match.start() for match in _EXAMPLE_SUFFIX.finditer(line)]
+    next_content = array("I", [len(line)]) * (len(line) + 1)
+    for index in range(len(line) - 1, -1, -1):
+        next_content[index] = index if not line[index].isspace() else next_content[index + 1]
+    return cue_ends, suffix_starts, next_content
+
+
+def _span_is_example(
+    start: int, end: int, cue_ends: list[int], suffix_starts: list[int], next_content: list[int],
+    cue_cursor: int, suffix_cursor: int,
+) -> tuple[bool, int, int]:
+    """Check adjacent example cues without copying or rescanning line prefixes."""
+    while cue_cursor < len(cue_ends) and cue_ends[cue_cursor] <= start:
+        cue_cursor += 1
+    if cue_cursor and next_content[cue_ends[cue_cursor - 1]] >= start:
+        return True, cue_cursor, suffix_cursor
+    while suffix_cursor < len(suffix_starts) and suffix_starts[suffix_cursor] < end + 1:
+        suffix_cursor += 1
+    if (suffix_cursor < len(suffix_starts) and end + 1 < suffix_starts[suffix_cursor]
+            and next_content[end + 1] == suffix_starts[suffix_cursor]):
+        return True, cue_cursor, suffix_cursor
+    return False, cue_cursor, suffix_cursor
+
+
+def _mask_inline_line(line: str) -> str:
+    """Mask only explicitly example-cued spans on one line."""
+    quote_closers, code_runs = _inline_markers(line)
+    cue_ends, suffix_starts, next_content = _example_context(line)
+    quote_cursors = dict.fromkeys(quote_closers, 0)
+    code_cursors = dict.fromkeys(code_runs, 0)
+    cue_cursor = 0
+    suffix_cursor = 0
+    masked: list[str] = []
+    index = 0
+    while index < len(line):
+        if line[index] == "`":
+            end_run = index + 1
+            while end_run < len(line) and line[end_run] == "`":
+                end_run += 1
+            run_length = end_run - index
+            runs = code_runs.get(run_length, [])
+            cursor = code_cursors.get(run_length, 0)
+            while cursor < len(runs) and runs[cursor] <= index:
+                cursor += 1
+            code_cursors[run_length] = cursor
+            if run_length < 3 and cursor < len(runs):
+                close = runs[cursor]
+                is_example, cue_cursor, suffix_cursor = _span_is_example(
+                    index, close + run_length - 1, cue_ends, suffix_starts, next_content,
+                    cue_cursor, suffix_cursor,
+                )
+                masked.append(_INLINE_BARRIER if is_example else line[index:close + run_length])
+                index = close + run_length
+                continue
+            masked.append(line[index:end_run])
+            index = end_run
+            continue
+
+        closing = _INLINE_QUOTES.get(line[index])
+        opens = closing is not None
+        if line[index] == "'" and index > 0 and (line[index - 1].isalnum() or line[index - 1] == "_"):
+            opens = False
+        if opens:
+            closers = quote_closers[closing]
+            cursor = quote_cursors[closing]
+            while cursor < len(closers) and closers[cursor] <= index:
+                cursor += 1
+            quote_cursors[closing] = cursor
+            if cursor < len(closers):
+                close = closers[cursor]
+                is_example, cue_cursor, suffix_cursor = _span_is_example(
+                    index, close, cue_ends, suffix_starts, next_content, cue_cursor, suffix_cursor,
+                )
+                masked.append(_INLINE_BARRIER if is_example else line[index:close + 1])
+                index = close + 1
+                continue
+        masked.append(line[index])
+        index += 1
+    return "".join(masked)
 
 
 def _mask_inline_examples(value: str) -> str:
     """Mask only explicitly example-cued inline spans, retaining line breaks."""
     masked: list[str] = []
-    index = 0
-    while index < len(value):
-        char = value[index]
-        if char in "\r\n":
-            masked.append(char)
-            index += 1
-            continue
-
-        if char == "`":
-            end_run = index + 1
-            while end_run < len(value) and value[end_run] == "`":
-                end_run += 1
-            run_length = end_run - index
-            if run_length < 3:
-                close = _inline_code_end(value, index, run_length)
-                if close is not None:
-                    end = close + run_length - 1
-                    if _inline_span_is_example(value, index, end):
-                        masked.append(_INLINE_BARRIER)
-                    else:
-                        masked.append(value[index:end + 1])
-                    index = close + run_length
-                    continue
-            masked.append(value[index:end_run])
-            index = end_run
-            continue
-
-        closing = _INLINE_QUOTES.get(char)
-        opens = closing is not None
-        if char == "'" and index > 0 and (value[index - 1].isalnum() or value[index - 1] == "_"):
-            opens = False
-        if opens:
-            close = _inline_quote_end(value, index, closing)
-            if close is not None:
-                if _inline_span_is_example(value, index, close):
-                    masked.append(_INLINE_BARRIER)
-                else:
-                    masked.append(value[index:close + 1])
-                index = close + 1
-                continue
-        masked.append(char)
-        index += 1
+    for chunk in value.splitlines(keepends=True):
+        line = chunk.rstrip("\r\n")
+        masked.append(_mask_inline_line(line))
+        masked.append(chunk[len(line):])
     return "".join(masked)
 
 
@@ -225,20 +302,55 @@ def _retained_operational_segments(value: str) -> list[str]:
     return retained
 
 
+def _context_prefixes(value: str, trigger_pattern: re.Pattern[str]) -> dict[int, int]:
+    """Index accepted trigger endpoints, including optional article/quote paths."""
+    endpoints: dict[int, int] = {}
+    for trigger in trigger_pattern.finditer(value):
+        word_end = trigger.end()
+        cursor = word_end
+        while cursor < len(value) and value[cursor].isspace():
+            cursor += 1
+        if cursor == word_end:
+            continue
+        endpoints[cursor] = trigger.start()
+        paths = [cursor]
+        if (value.startswith("the", cursor)
+                and (cursor + 3 == len(value) or not value[cursor + 3].isalnum())):
+            article_end = cursor + 3
+            if article_end < len(value) and value[article_end].isspace():
+                cursor = article_end
+                while cursor < len(value) and value[cursor].isspace():
+                    cursor += 1
+                endpoints[cursor] = trigger.start()
+                paths.append(cursor)
+        for path in paths:
+            cursor = path
+            while cursor < len(value) and value[cursor] in "`'\"‘“":
+                cursor += 1
+                while cursor < len(value) and value[cursor].isspace():
+                    cursor += 1
+                endpoints[cursor] = trigger.start()
+    return endpoints
+
+
 def _has_operational_blocker(segments: list[str]) -> bool:
     """Find concrete blockers while skipping immediate negative conditions."""
     for segment in segments:
         normalized = segment.casefold()
+        negation_ends = _context_prefixes(normalized, _BLOCKER_NEGATION)
+        when_starts = _context_prefixes(normalized, _WHEN_INQUIRY)
+        inquiry_ends = {match.end() for match in _INQUIRY_VERB.finditer(normalized)}
+        first_content = next(
+            (index for index, char in enumerate(normalized) if not char.isspace()), len(normalized),
+        )
         for pattern, _profile in _OPERATIONAL_BLOCKER_RULES:
             for match in re.finditer(pattern, normalized):
-                prefix = normalized[:match.start()]
-                if _BLOCKER_NEGATION.search(prefix):
+                if match.start() in negation_ends:
                     continue
-                when = _WHEN_INQUIRY.search(prefix)
-                if when:
-                    before_when = prefix[:when.start()].rstrip()
-                    if not before_when or _INQUIRY_VERB.search(before_when):
-                        continue
+                when_start = when_starts.get(match.start())
+                if (when_start is not None
+                        and (when_start <= first_content or when_start in inquiry_ends)):
+                    continue
                 return True
     return False
 
@@ -302,9 +414,9 @@ def repair_profile_for_task(title: Optional[str], body: Optional[str]) -> Option
     for pattern, profile in _TITLE_INTAKE_RULES:
         if re.match(pattern, title):
             masked_title = _mask_inline_examples(title)
-            delimiter = re.search(r":|[—–]|[ \t]+-[ \t]+", masked_title)
-            title_clause = masked_title[delimiter.end():] if delimiter else masked_title
-            title_clause = re.sub(r"[—–]|[ \t]+-[ \t]+", "\n", title_clause)
+            delimiter_end = _title_delimiter_end(masked_title)
+            title_clause = masked_title[delimiter_end:] if delimiter_end is not None else masked_title
+            title_clause = _normalize_title_dash_clauses(title_clause)
             if (_has_operational_blocker(_retained_operational_segments(title_clause))
                     or _has_operational_blocker(
                         _retained_operational_segments(_mask_inline_examples(body or ""))

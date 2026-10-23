@@ -151,9 +151,20 @@ def test_actual_usage_limit_failure_after_conditional_mention_routes(title, owne
     "> Workflow failure:\n> The workflow cannot run because LunaBot diagnostics have failed.\n  It is an example.",
     "```text\nThe workflow cannot run because the automation credential is missing.\n```",
     "`Automation credential is missing` is an example sentence.",
+    "Example text" + " " * 100_000 + ": " + "`automation credential is missing`.",
+    "`automation credential is missing`" + " " * 100_000 + "is an example sentence.",
+    "Check whether" + " " * 100_000 + "` automation credential is missing ` before remediation.",
 ])
 def test_causal_blockers_inside_inventory_or_examples_do_not_route(body):
     assert repair_profile_for_task(INTAKE_TITLES[0][0], body) == INTAKE_TITLES[0][1]
+
+
+@pytest.mark.parametrize("body", [
+    "‘unclosed note. The workflow cannot run because 'automation credential is missing'.",
+    "‘unclosed note. The workflow cannot run because `automation credential is missing`.",
+])
+def test_unmatched_curly_quote_does_not_hide_later_actual_inline_blocker(body):
+    assert repair_profile_for_task(INTAKE_TITLES[0][0], body) == "hermes-maintenance-steward"
 
 
 @pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
@@ -170,6 +181,7 @@ def test_inline_quoted_title_example_before_later_dash_keeps_title_owner():
 @pytest.mark.parametrize("body", [
     "Usage limits were exceeded. Example: `automation credential is missing`.",
     "Example: ‘automation credential is missing’. Usage limits were exceeded.",
+    "`automation credential is missing`is an example sentence.",
 ])
 def test_actual_blocker_before_or_after_inline_quote_stays_visible(body):
     assert repair_profile_for_task(INTAKE_TITLES[0][0], body) == "hermes-maintenance-steward"
@@ -202,6 +214,7 @@ def test_curly_contraction_apostrophe_does_not_open_a_quote():
 @pytest.mark.parametrize("body", [
     "The workflow is healthy; no automation credential is missing.",
     "Check whether the automation credential is missing before assessing pin drift.",
+    "   when the automation credential is missing",
     "Check if the automation credential is missing before remediation.",
     "Check if automation credential is missing before remediation.",
     "Review whether the automation credential is missing before approving the workflow.",
