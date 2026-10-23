@@ -453,6 +453,42 @@ def _typed_payload(value: Any, grant_texts: Sequence[tuple[str, SourceGrant]], u
     return _typed_payload_mapping(value, grant_texts, used_grants, **kwargs)
 
 
+def _is_native_nonterminal_result(
+    value: Mapping[str, Any],
+    output_call_id: Any,
+    native_nonterminal_call_ids: frozenset[str],
+    native_nonterminal_result_ids: frozenset[int],
+) -> bool:
+    """Require both the bound ID and the exact direct native result object."""
+    return (
+        id(value) in native_nonterminal_result_ids
+        and isinstance(output_call_id, str)
+        and output_call_id in native_nonterminal_call_ids
+        and (
+            (value.get("type") == "tool_result" and value.get("tool_use_id") == output_call_id)
+            or (value.get("role") == "tool" and value.get("tool_call_id") == output_call_id)
+            or (value.get("type") == "function_call_output" and value.get("call_id") == output_call_id)
+        )
+    )
+
+
+def _requires_untrusted_tool_result_provenance(
+    value: Mapping[str, Any],
+    *,
+    recognized_tool_result: bool,
+    native_nonterminal_result: bool,
+) -> bool:
+    """Keep unbound tool-shaped mappings fail-closed on protected routes."""
+    return (
+        recognized_tool_result
+        or (value.get("type") == "tool_result" and not native_nonterminal_result)
+        or (
+            (value.get("role") == "tool" or value.get("type") == "function_call_output")
+            and not native_nonterminal_result
+        )
+    )
+
+
 def _typed_payload_string(
     value: str,
     grant_texts: Sequence[tuple[str, SourceGrant]],
@@ -522,6 +558,7 @@ def _typed_payload_mapping(
     field_name: str | None = None,
     syntax_tool_call_ids: frozenset[str] = frozenset(),
     native_nonterminal_call_ids: frozenset[str] = frozenset(),
+    native_nonterminal_result_ids: frozenset[int] = frozenset(),
     pytest_terminal_call_ids: frozenset[str] = frozenset(),
     elided_kanban_tool_call_ids: frozenset[str] = frozenset(),
     kanban_attachment_tool_call_ids: frozenset[str] = frozenset(),
@@ -583,13 +620,12 @@ def _typed_payload_mapping(
             and output_call_id in syntax_tool_call_ids
             and is_tool_result_shape
         )
-        # Ordinary native sessions retain their existing unique, preceding,
-        # registered nonterminal admission. Owned-task routes supply no such
-        # IDs: their results still require a task projection or source proof.
-        is_native_nonterminal_result = (
-            value.get("type") == "tool_result"
-            and isinstance(output_call_id, str)
-            and output_call_id in native_nonterminal_call_ids
+        # Ordinary native admission is separate from owned-task projections.
+        is_native_nonterminal_result = _is_native_nonterminal_result(
+            value,
+            output_call_id,
+            native_nonterminal_call_ids,
+            native_nonterminal_result_ids,
         )
         is_elided_kanban_tool_result = (
             isinstance(output_call_id, str)
@@ -867,22 +903,10 @@ def _typed_payload_mapping_item(
         return
     if (
         state["require_terminal_provenance"]
-        and (
-            state["is_recognized_tool_result"]
-            or (
-                state["value"].get("type") == "tool_result"
-                and (
-                    not isinstance(state["output_call_id"], str)
-                    or state["output_call_id"] not in state["native_nonterminal_call_ids"]
-                )
-            )
-            or (
-                not isinstance(state["output_call_id"], str)
-                and (
-                    state["value"].get("role") == "tool"
-                    or state["value"].get("type") == "function_call_output"
-                )
-            )
+        and _requires_untrusted_tool_result_provenance(
+            state["value"],
+            recognized_tool_result=state["is_recognized_tool_result"],
+            native_nonterminal_result=state["is_native_nonterminal_result"],
         )
         and key in {"content", "output"}
     ):
@@ -896,6 +920,7 @@ def _typed_payload_mapping_item(
     sanitized_cap = state['sanitized_cap']
     syntax_tool_call_ids = state['syntax_tool_call_ids']
     native_nonterminal_call_ids = state['native_nonterminal_call_ids']
+    native_nonterminal_result_ids = state['native_nonterminal_result_ids']
     pytest_terminal_call_ids = state['pytest_terminal_call_ids']
     elided_kanban_tool_call_ids = state['elided_kanban_tool_call_ids']
     kanban_attachment_tool_call_ids = state['kanban_attachment_tool_call_ids']
@@ -1023,6 +1048,7 @@ def _typed_payload_mapping_item(
         field_name=key,
         syntax_tool_call_ids=syntax_tool_call_ids,
         native_nonterminal_call_ids=native_nonterminal_call_ids,
+        native_nonterminal_result_ids=native_nonterminal_result_ids,
         pytest_terminal_call_ids=pytest_terminal_call_ids,
         elided_kanban_tool_call_ids=elided_kanban_tool_call_ids,
         kanban_attachment_tool_call_ids=kanban_attachment_tool_call_ids,
