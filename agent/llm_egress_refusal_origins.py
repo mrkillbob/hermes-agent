@@ -331,7 +331,10 @@ def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
             item_type = _literal(_protocol_value(item, "type"))
             if _responses_function_call_is_well_formed(item):
                 add_call("responses_input", _protocol_value(item, "call_id"), item)
-            elif item_type == "function_call_output":
+            elif (
+                item_type == "function_call_output"
+                and _protocol_value(item, "role", _MISSING_PROTOCOL_VALUE) is _MISSING_PROTOCOL_VALUE
+            ):
                 add_result("responses_input", _protocol_value(item, "call_id"), item)
 
     valid_refs = set()
@@ -398,6 +401,11 @@ def _sequence_child_state(
     if not isinstance(child, Mapping):
         return inherited, False
     if collection in {"messages", "input"}:
+        if (
+            collection == "input"
+            and _protocol_value(child, "role", _MISSING_PROTOCOL_VALUE) is not _MISSING_PROTOCOL_VALUE
+        ):
+            return _message_origin(child, valid_tool_result_refs), True
         if collection == "input" and _literal(_protocol_value(child, "type")) == "function_call_output":
             origin = (
                 "tool_result"
