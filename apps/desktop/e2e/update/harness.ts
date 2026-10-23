@@ -20,6 +20,7 @@ import * as path from 'node:path'
 import { _electron, type ElectronApplication, expect, type Page, test } from '@playwright/test'
 
 import { type CoreSandbox, type ProcInfo, providerConfigYaml, sandboxProcesses } from '../core/harness'
+import { readProc } from '../core/process-census'
 import { type ScriptedProvider, startScriptedProvider } from '../core/provider'
 
 import { gatedOn, KNOWN } from './gates'
@@ -261,7 +262,39 @@ export async function launchInstalledApp(facts: InstallFacts, env: Record<string
 // ─── Observation ───────────────────────────────────────────────────────
 
 export function installProcesses(facts: InstallFacts): ProcInfo[] {
-  return sandboxProcesses({ hermesHome: facts.hermesHome } as CoreSandbox)
+  const processes = new Map(
+    sandboxProcesses({ hermesHome: facts.hermesHome } as CoreSandbox).map(proc => [proc.pid, proc])
+  )
+
+  // posix.sh relaunches the detached Desktop after an update, and its gateway
+  // can outlive the app. The home-scoped census does not identify every owned
+  // process, so include processes whose image belongs to this unique test
+  // sandbox. This catches detached lock holders and runtime workers at teardown.
+  if (process.platform === 'linux') {
+    const executableRoot = `${fs.realpathSync(facts.sandboxRoot)}/`
+
+    for (const entry of fs.readdirSync('/proc')) {
+      const pid = Number(entry)
+
+      if (!Number.isInteger(pid) || pid === process.pid) {
+        continue
+      }
+
+      const executable = exeOf(pid)
+
+      if (!executable.startsWith(executableRoot)) {
+        continue
+      }
+
+      const info = readProc(pid)
+
+      if (info?.cmdline) {
+        processes.set(pid, { pid, ppid: info.ppid, cmdline: info.cmdline })
+      }
+    }
+  }
+
+  return [...processes.values()]
 }
 
 function exeOf(pid: number): string {
@@ -366,7 +399,7 @@ export function diagnostics(facts: InstallFacts, extra = ''): string {
   return parts.filter(Boolean).join('\n')
 }
 
-/** SIGKILL every process that carries this install's HERMES_HOME (end of every spec). */
+/** SIGKILL only processes owned by this test install (end of every spec). */
 export function killInstallProcesses(facts: InstallFacts | null): void {
   if (!facts) {
     return
@@ -597,13 +630,17 @@ export async function currentAs(page: Page): Promise<{ currentSha?: string; upda
 
 /** Ask Electron to quit normally so its backend and child processes can shut down cleanly. */
 export async function closeQuietly(app: ElectronApplication): Promise<void> {
-  if (app.process().exitCode !== null || app.process().killed) return
+  if (app.process().exitCode !== null || app.process().killed) {
+    return
+  }
 
   const closed = app.waitForEvent('close', { timeout: 30_000 }).catch(() => undefined)
+
   try {
     await app.evaluate(({ app: electronApp }) => electronApp.quit())
   } catch {
     // The process may have exited while the quit request was being sent.
   }
+
   await closed
 }
