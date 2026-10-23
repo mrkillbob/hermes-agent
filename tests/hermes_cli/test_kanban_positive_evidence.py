@@ -205,6 +205,19 @@ def test_soft_lines_and_accepted_compounds_route_maintenance(title, owner, recor
     assert repair_profile_for_task(title, record) == "hermes-maintenance-steward"
 
 
+@pytest.mark.parametrize("record", [
+    'The workflow report says "Automation credential is missing."',
+    'The workflow report says “Automation credential is missing.”',
+    "An operator reported that ‘LunaBot diagnostics failed.’",
+    'The workflow report says "Automation credential is missing!"',
+    'The workflow failed because "Automation credential is missing."',
+    "The deployment cannot run because ‘LunaBot diagnostics failed!’",
+])
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+def test_report_quotes_allow_terminal_sentence_punctuation_inside_quote(title, owner, record):
+    assert repair_profile_for_task(title, record) == "hermes-maintenance-steward"
+
+
 @pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
 @pytest.mark.parametrize("record", [
     "Automation credential is missing; perhaps the workflow will recover",

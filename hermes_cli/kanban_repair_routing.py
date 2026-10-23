@@ -293,8 +293,13 @@ _P = "(?:" + "|".join((
     _CREDENTIAL, _GH_AUTH, _LEGACY_MARKER, _PROVIDER_RETURN, _QUOTA,
     _USAGE, _QUOTA_IMPACT, _USAGE_EVENT, _USAGE_CAUSE, _DIAGNOSTIC,
 )) + ")"
+# Reports often keep the sentence-ending period/exclamation mark inside their
+# quotation marks. Accept that punctuation only in the quoted positive record;
+# the enclosing report/causal frame and full-record match remain mandatory.
+_QUOTED_ENDING = r"[.!]?"
 _QUOTED_P = (
-    r"(?:'" + _P + r"'|\"" + _P + r"\"|‘" + _P + r"’|“" + _P + r"”|"
+    r"(?:'" + _P + _QUOTED_ENDING + r"'|\"" + _P + _QUOTED_ENDING + r"\"|"
+    r"‘" + _P + _QUOTED_ENDING + r"’|“" + _P + _QUOTED_ENDING + r"”|"
     r"(?P<code_ticks>`+)" + _P + r"(?P=code_ticks))"
 )
 _ALLOWED_TAIL = (
