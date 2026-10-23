@@ -6,6 +6,15 @@ import re
 from typing import Optional
 
 
+_CRON_PURPOSE_TERMS = ("scheduled job", "cron job")
+# Title alternatives are evaluated at their owner's existing table position,
+# preserving priority for PR audits and concrete maintenance/quota failures.
+_TITLE_REPAIR_RULES = {
+    "market-data-authority-auditor": r"^market[ -]data (?:freshness|authority)\b",
+    "hermes-maintenance-steward": r"^repair broken \.venv runtime link in hermes-agent worktree\s+",
+}
+
+
 # Ordered from narrowest scope to broadest so a PR audit is not swallowed by
 # the generic cron or maintenance rules.
 _REPAIR_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -44,7 +53,7 @@ _REPAIR_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("live-trading", "paper-safety", "paper-safety", "broker safety"), "paper-safety-guardian"),
     (("alpaca", "broker credential", "broker validation"), "coding-expert"),
     (("dashboard.secret", "state.db", "retired-wal", "gateway restart"), "hermes-maintenance-steward"),
-    (("cron", "scheduled job", "cron job"), "hermes-maintenance-steward"),
+    (_CRON_PURPOSE_TERMS, "hermes-maintenance-steward"),
     (("dependency skew", "missing/bounds unverified"), "dependency-tooling-health-sentinel"),
     (("rnd-", "resolve rnd", "adversarial-fuzz", "fuzz test", "permutation"), "rnd-adversarial-tester"),
 )
@@ -56,12 +65,18 @@ def repair_profile_for_task(title: Optional[str], body: Optional[str]) -> Option
     Matching is intentionally conservative: an unknown task stays in triage
     for explicit scope rather than letting the orchestrator perform work.
     """
-    text = f"{title or ''}\n{body or ''}".casefold()
+    title = (title or "").strip().casefold()
+    text = f"{title}\n{body or ''}".casefold()
     # This title owns a budget review, even when its inventory quotes unrelated
     # stewardship jobs or their old quota failures. It grants no execution rights.
-    if re.match(r"^model spend rebalance(?:\s*[:—–-]|\s*$)", (title or "").strip().casefold()):
+    if re.match(r"^model spend rebalance(?:\s*[:—–-]|\s*$)", title):
         return "resource-scheduler"
+    # A cron profile describes the evidence producer, not a scheduler defect.
+    cron_title = re.search(r"\bcron\b(?!\W+profiles?\b)", title)
     for needles, profile in _REPAIR_RULES:
-        if any(needle in text for needle in needles):
+        pattern = _TITLE_REPAIR_RULES.get(profile)
+        if (any(needle in text for needle in needles)
+                or (pattern and re.match(pattern, title))
+                or (needles == _CRON_PURPOSE_TERMS and cron_title)):
             return profile
     return None
