@@ -634,55 +634,73 @@ def import_board(
                 "cannot determine a board name from the archive — pass one "
                 "explicitly with --as <slug>"
             )
-        target = _available_slug(requested)
-
         staged_meta = _read_board_metadata(extracted / "board.json")
+        return _publish_imported_board(
+            requested, extracted, staged_db, staged_meta, manifest, activate
+        )
 
-        board_root = kb.board_dir(target)
-        board_root.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(staged_db), str(board_root / "kanban.db"))
-        for tree in ("attachments", "logs"):
-            src = extracted / tree
-            if src.is_dir():
-                shutil.move(str(src), str(board_root / tree))
 
-    # Rewritten rather than moved across: the archive's copy names a slug
-    # and a workdir that belong to the exporting machine.
-    name = str(staged_meta.get("name") or manifest.get("board_name") or target)
-    kb.write_board_metadata(
-        target,
-        name=name,
-        description=str(staged_meta.get("description") or ""),
-        icon=str(staged_meta.get("icon") or ""),
-        color=str(staged_meta.get("color") or ""),
-        archived=False,
+def _publish_imported_board(requested, extracted, staged_db, staged_meta, manifest, activate):
+    """Publish one imported board under the shared project-owner catalog fence."""
+    from hermes_cli.kanban_db_boards import (
+        _write_board_metadata,
+        board_ownership_lock,
+        board_project_ownership_lock,
     )
-    # Bring the imported schema up to this install's version before the
-    # relocation pass writes to it.
-    kb.init_db(board=target)
 
-    with kbc.connect_closing(board=target) as conn:
-        stats, warnings = _relocate_imported_rows(conn, target)
-        counts = _count_rows(conn)
+    # Import can publish rows whose old project IDs are still present in task
+    # history. Hold the catalog lock through publication, and choose any suffix
+    # only after acquiring it so concurrent creators cannot choose the same slug.
+    with board_project_ownership_lock(requested):
+        target = _available_slug(requested)
+        with board_ownership_lock(target):
+            board_root = kb.board_dir(target)
+            board_root.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(staged_db), str(board_root / "kanban.db"))
+            for tree in ("attachments", "logs"):
+                src = extracted / tree
+                if src.is_dir():
+                    shutil.move(str(src), str(board_root / tree))
 
-    if activate:
-        kb.set_current_board(target)
+            # Rewritten rather than moved across: the archive's copy names a slug
+            # and a workdir that belong to the exporting machine. The catalog
+            # and slug locks are already held, so use the internal writer instead
+            # of recursively taking the public writer's catalog reservation.
+            name = str(staged_meta.get("name") or manifest.get("board_name") or target)
+            _write_board_metadata(
+                target,
+                name=name,
+                description=str(staged_meta.get("description") or ""),
+                icon=str(staged_meta.get("icon") or ""),
+                color=str(staged_meta.get("color") or ""),
+                archived=False,
+            )
+            # Bring the imported schema up to this install's version before the
+            # relocation pass writes to it.
+            kb.init_db(board=target)
 
-    return {
-        "board": target,
-        "requested_board": requested,
-        "renamed": target != requested,
-        "name": name,
-        "path": str(kb.board_dir(target)),
-        "db_path": str(kb.kanban_db_path(target)),
-        "source": {
-            "board": manifest.get("board"),
-            "exported_at": manifest.get("exported_at"),
-            "hermes_version": manifest.get("hermes_version"),
-        },
-        "counts": counts,
-        "attachments_restored": stats["attachments"],
-        "tasks_parked": stats["parked"],
-        "warnings": warnings,
-        "activated": bool(activate),
-    }
+            with kbc.connect_closing(board=target) as conn:
+                stats, warnings = _relocate_imported_rows(conn, target)
+                counts = _count_rows(conn)
+
+            if activate:
+                kb.set_current_board(target)
+
+            return {
+                "board": target,
+                "requested_board": requested,
+                "renamed": target != requested,
+                "name": name,
+                "path": str(kb.board_dir(target)),
+                "db_path": str(kb.kanban_db_path(target)),
+                "source": {
+                    "board": manifest.get("board"),
+                    "exported_at": manifest.get("exported_at"),
+                    "hermes_version": manifest.get("hermes_version"),
+                },
+                "counts": counts,
+                "attachments_restored": stats["attachments"],
+                "tasks_parked": stats["parked"],
+                "warnings": warnings,
+                "activated": bool(activate),
+            }

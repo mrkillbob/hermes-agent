@@ -9,7 +9,9 @@ import sys
 from hermes_cli import projects_db as pdb
 
 
-def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+def build_parser(
+    parent_subparsers: argparse._SubParsersAction,
+) -> argparse.ArgumentParser:
     """Attach the ``project`` subcommand tree. Returns the top parser."""
     parser = parent_subparsers.add_parser(
         "project",
@@ -24,15 +26,28 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     sub = parser.add_subparsers(dest="project_action")
     p_create = sub.add_parser("create", help="Create a new project")
     p_create.add_argument("name", help="Human name, e.g. 'Hermes Agent'")
-    p_create.add_argument("folders", nargs="*", help="Folder paths to include (first = primary)")
+    p_create.add_argument(
+        "folders", nargs="*", help="Folder paths to include (first = primary)"
+    )
     p_create.add_argument("--slug", default=None, help="Explicit slug override")
-    p_create.add_argument("--primary", default=None, metavar="PATH", help="Primary repo path")
+    p_create.add_argument(
+        "--primary", default=None, metavar="PATH", help="Primary repo path"
+    )
     for opt in ("--description", "--icon", "--color"):
         p_create.add_argument(opt, default=None)
-    p_create.add_argument("--board", default=None, metavar="SLUG", help="Bind a kanban board")
-    p_create.add_argument("--use", action="store_true", help="Set as the active project")
+    p_create.add_argument(
+        "--board", default=None, metavar="SLUG", help="Bind a kanban board"
+    )
+    p_create.add_argument(
+        "--use", action="store_true", help="Set as the active project"
+    )
     p_list = sub.add_parser("list", aliases=["ls"], help="List projects")
-    p_list.add_argument("--all", action="store_true", dest="include_archived", help="Include archived projects")
+    p_list.add_argument(
+        "--all",
+        action="store_true",
+        dest="include_archived",
+        help="Include archived projects",
+    )
 
     def project_sub(name: str, help: str) -> argparse.ArgumentParser:
         sp = sub.add_parser(name, help=help)
@@ -44,21 +59,57 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_add.add_argument("path", help="Folder path")
     p_add.add_argument("--label", default=None)
     p_add.add_argument("--primary", action="store_true", help="Mark as primary repo")
-    project_sub("remove-folder", "Remove a folder from a project").add_argument("path", help="Folder path")
+    project_sub("remove-folder", "Remove a folder from a project").add_argument(
+        "path", help="Folder path"
+    )
     project_sub("rename", "Rename a project").add_argument("name", help="New name")
-    project_sub("set-primary", "Set the primary folder").add_argument("path", help="Folder path (must already be in project)")
+    project_sub("set-primary", "Set the primary folder").add_argument(
+        "path", help="Folder path (must already be in project)"
+    )
     p_use = sub.add_parser("use", help="Set the active project")
-    p_use.add_argument("project", nargs="?", default=None, help="Project id or slug (omit to clear)")
+    p_use.add_argument(
+        "project", nargs="?", default=None, help="Project id or slug (omit to clear)"
+    )
     project_sub("archive", "Archive a project")
     project_sub("restore", "Restore an archived project")
     project_sub("bind-board", "Bind a kanban board to a project").add_argument(
         "board", nargs="?", default="", help="Board slug (omit to unbind)"
     )
-    adoption = sub.add_parser("adopt-canonical", help="Adopt an existing root project into a named profile")
+    adoption = sub.add_parser(
+        "adopt-canonical", help="Adopt an existing root project into a named profile"
+    )
     adoption.add_argument("project_id", help="Exact existing canonical project ID")
-    adoption.add_argument("--target-profile", required=True, help="Existing named profile to repair")
-    adoption.add_argument("--expected-root", required=True, help="Expected canonical Git root")
-    adoption.add_argument("--expected-board", required=True, help="Expected shared board slug")
+    adoption.add_argument(
+        "--target-profile", required=True, help="Existing named profile to repair"
+    )
+    adoption.add_argument(
+        "--expected-root", required=True, help="Expected canonical Git root"
+    )
+    adoption.add_argument(
+        "--expected-board", required=True, help="Expected shared board slug"
+    )
+    reconcile = sub.add_parser(
+        "canonicalize-duplicate",
+        help="Retire one exact same-root duplicate and adopt the canonical project ID",
+    )
+    reconcile.add_argument(
+        "legacy_project_id", help="Exact duplicate project ID to retire"
+    )
+    reconcile.add_argument(
+        "--target-profile", required=True, help="Existing named profile to repair"
+    )
+    reconcile.add_argument(
+        "--expectations",
+        required=True,
+        metavar="JSON",
+        help="Operator-reviewed JSON snapshot of the expected canonical and legacy bindings/references",
+    )
+    reconcile.add_argument(
+        "--receipt",
+        required=True,
+        metavar="PATH",
+        help="New private recovery receipt path (must not already exist)",
+    )
     parser.set_defaults(_project_parser=parser)
     return parser
 
@@ -71,7 +122,10 @@ def projects_command(args: argparse.Namespace) -> int:
         if parser is not None:
             parser.print_help()
         else:
-            print("usage: hermes project <action> [options]\nRun 'hermes project --help' for the full list.", file=sys.stderr)
+            print(
+                "usage: hermes project <action> [options]\nRun 'hermes project --help' for the full list.",
+                file=sys.stderr,
+            )
         return 0
     handler = _HANDLERS.get(action)
     if handler is None:
@@ -126,20 +180,33 @@ def _with_project(fn):
 def _print_project(proj) -> None:
     print(f"{proj.slug}  [{proj.id}]{' (archived)' if proj.archived else ''}")
     print(f"  name:    {proj.name}")
-    for label, value in (("about", proj.description), ("board", proj.board_slug), ("primary", proj.primary_path)):
+    for label, value in (
+        ("about", proj.description),
+        ("board", proj.board_slug),
+        ("primary", proj.primary_path),
+    ):
         if value:
             print(f"  {label}:{' ' * (8 - len(label))}{value}")
     if proj.folders:
         print("  folders:")
         for f in proj.folders:
-            print(f"   {' *' if f.is_primary else '  '} {f.path}{f' ({f.label})' if f.label else ''}")
+            print(
+                f"   {' *' if f.is_primary else '  '} {f.path}{f' ({f.label})' if f.label else ''}"
+            )
 
 
 @_db_command
 def _cmd_create(args, conn) -> int:
     pid = pdb.create_project(
-        conn, name=args.name, slug=args.slug, folders=args.folders, primary_path=args.primary,
-        description=args.description, icon=args.icon, color=args.color, board_slug=args.board,
+        conn,
+        name=args.name,
+        slug=args.slug,
+        folders=args.folders,
+        primary_path=args.primary,
+        description=args.description,
+        icon=args.icon,
+        color=args.color,
+        board_slug=args.board,
     )
     if args.use:
         pdb.set_active(conn, pid)
@@ -165,12 +232,16 @@ def _cmd_create(args, conn) -> int:
 @_db_command
 def _cmd_list(args, conn):
     active = pdb.get_active_id(conn)
-    projs = pdb.list_projects(conn, include_archived=getattr(args, "include_archived", False))
+    projs = pdb.list_projects(
+        conn, include_archived=getattr(args, "include_archived", False)
+    )
     if not projs:
         return "No projects yet. Create one with `hermes project create <name>`."
     for p in projs:
         flags = " (archived)" if p.archived else ""
-        print(f"{'*' if p.id == active else ' '} {p.slug:<24} {p.name}{flags}  [{len(p.folders)} folder(s)]")
+        print(
+            f"{'*' if p.id == active else ' '} {p.slug:<24} {p.name}{flags}  [{len(p.folders)} folder(s)]"
+        )
     return 0
 
 
@@ -182,7 +253,9 @@ def _cmd_show(args, conn, proj) -> int:
 
 @_with_project
 def _cmd_add_folder(args, conn, proj) -> str:
-    path = pdb.add_folder(conn, proj.id, args.path, label=args.label, is_primary=args.primary)
+    path = pdb.add_folder(
+        conn, proj.id, args.path, label=args.label, is_primary=args.primary
+    )
     return f"Added {path} to {proj.slug}"
 
 
@@ -202,7 +275,9 @@ def _cmd_rename(args, conn, proj) -> str:
 @_with_project
 def _cmd_set_primary(args, conn, proj):
     if not pdb.set_primary(conn, proj.id, args.path):
-        return _err(f"'{args.path}' is not a folder of {proj.slug}; add it first with `hermes project add-folder`.")
+        return _err(
+            f"'{args.path}' is not a folder of {proj.slug}; add it first with `hermes project add-folder`."
+        )
     return f"Set primary of {proj.slug} -> {args.path}"
 
 
@@ -220,7 +295,12 @@ def _cmd_use(args, conn):
 
 def _flag_command(op: str, verb: str):
     """Handler for ``pdb.<op>(conn, proj.id)`` followed by ``"<verb> <slug>"``."""
-    return _with_project(lambda args, conn, proj: (getattr(pdb, op)(conn, proj.id), f"{verb} {proj.slug}")[1])
+    return _with_project(
+        lambda args, conn, proj: (
+            getattr(pdb, op)(conn, proj.id),
+            f"{verb} {proj.slug}",
+        )[1]
+    )
 
 
 @_with_project
@@ -230,7 +310,9 @@ def _cmd_bind_board(args, conn, proj) -> str:
     from hermes_cli import kanban_db as kb
 
     previous_slug = kb._normalize_board_slug(previous_board)
-    if previous_slug and (previous_slug == kb.DEFAULT_BOARD or kb.board_exists(previous_slug)):
+    if previous_slug and (
+        previous_slug == kb.DEFAULT_BOARD or kb.board_exists(previous_slug)
+    ):
         kb.write_board_metadata(previous_slug, project_id="")
     if not args.board.strip():
         return f"Unbound board from {proj.slug}"
@@ -254,11 +336,17 @@ def _cmd_adopt_canonical(args) -> int:
     from hermes_constants import get_hermes_home
 
     try:
-        if explicit_board_intent_is_pinned() or get_hermes_home().resolve() != _get_default_hermes_home().resolve():
-            raise ValueError("canonical adoption requires a root-profile operator outside task/child execution")
+        if (
+            explicit_board_intent_is_pinned()
+            or get_hermes_home().resolve() != _get_default_hermes_home().resolve()
+        ):
+            raise ValueError(
+                "canonical adoption requires a root-profile operator outside task/child execution"
+            )
         result = adopt_canonical_project(
             source_registry=pdb.projects_db_path().parent.resolve() / "projects.db",
-            target_registry=get_profile_dir(args.target_profile).resolve() / "projects.db",
+            target_registry=get_profile_dir(args.target_profile).resolve()
+            / "projects.db",
             target_profile=args.target_profile,
             expected_project_id=args.project_id,
             expected_root=args.expected_root,
@@ -271,8 +359,86 @@ def _cmd_adopt_canonical(args) -> int:
     return 0
 
 
+def _cmd_canonicalize_duplicate(args) -> int:
+    """Retire one exact duplicate under the existing root-operator boundary."""
+    import json
+    import sqlite3
+    from pathlib import Path
+
+    from agent.delegation_context import explicit_board_intent_is_pinned
+    from hermes_cli.profiles import _get_default_hermes_home, get_profile_dir
+    from hermes_cli.projects_reconcile import retire_exact_duplicate_and_adopt
+    from hermes_constants import get_hermes_home
+
+    expected_fields = {
+        "expected_project_id",
+        "expected_root",
+        "expected_board",
+        "expected_legacy_project",
+        "expected_legacy_folders",
+        "expected_active_id",
+        "expected_boards",
+        "expected_references",
+    }
+    try:
+        if (
+            explicit_board_intent_is_pinned()
+            or get_hermes_home().resolve() != _get_default_hermes_home().resolve()
+        ):
+            raise ValueError(
+                "canonical reconciliation requires a root-profile operator outside task/child execution"
+            )
+        expectation_path = Path(args.expectations)
+        if expectation_path.is_symlink() or not expectation_path.is_file():
+            raise ValueError("expectations must be an existing regular JSON file")
+        expected = json.loads(expectation_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(expected, dict) or set(expected) != expected_fields:
+            raise ValueError("expectations must contain exactly the documented fields")
+        if (
+            not isinstance(expected["expected_boards"], list)
+            or not all(isinstance(slug, str) for slug in expected["expected_boards"])
+            or len(set(expected["expected_boards"])) != len(expected["expected_boards"])
+            or not isinstance(expected["expected_references"], dict)
+            or set(expected["expected_references"]) != set(expected["expected_boards"])
+            or not all(
+                isinstance(expected[field], str)
+                for field in ("expected_project_id", "expected_root", "expected_board")
+            )
+            or not isinstance(expected["expected_legacy_project"], dict)
+            or not isinstance(expected["expected_legacy_folders"], list)
+            or expected["expected_active_id"] is not None
+            and not isinstance(expected["expected_active_id"], str)
+        ):
+            raise ValueError(
+                "expectations must enumerate a unique complete board/reference inventory"
+            )
+        source_registry = pdb.projects_db_path().parent.resolve() / "projects.db"
+        target_registry = get_profile_dir(args.target_profile).resolve() / "projects.db"
+        result = retire_exact_duplicate_and_adopt(
+            source_registry=source_registry,
+            target_registry=target_registry,
+            target_profile=args.target_profile,
+            expected_project_id=expected["expected_project_id"],
+            expected_root=expected["expected_root"],
+            expected_board=expected["expected_board"],
+            legacy_project_id=args.legacy_project_id,
+            expected_legacy_project=expected["expected_legacy_project"],
+            expected_legacy_folders=expected["expected_legacy_folders"],
+            expected_active_id=expected["expected_active_id"],
+            expected_boards=tuple(expected["expected_boards"]),
+            expected_references=expected["expected_references"],
+            backup_path=args.receipt,
+        )
+    except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
+        print(f"project: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 _HANDLERS = {
     "adopt-canonical": _cmd_adopt_canonical,
+    "canonicalize-duplicate": _cmd_canonicalize_duplicate,
     "create": _cmd_create,
     "list": _cmd_list,
     "ls": _cmd_list,
