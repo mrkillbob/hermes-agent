@@ -98,9 +98,17 @@ def test_explicit_profile_is_preserved_for_new_title_family(intake_board):
         assert result.routed_to_specialist == []
 
 
-def test_explicit_profile_bypasses_operational_blocker_routing(intake_board):
+@pytest.mark.parametrize("body", [
+    "Usage limits were exceeded.",
+    "missing hermes_cli",
+    "audit-pr unavailable",
+    "inspect-pr unavailable",
+    "audit_deferred",
+    "untrusted receipt",
+])
+def test_explicit_profile_bypasses_operational_blocker_routing(intake_board, body):
     with kbc.connect(board="intake") as conn:
-        task_id = kb.create_task(conn, title="GitHub Actions pin drift: inspect", body="Usage limits were exceeded.",
+        task_id = kb.create_task(conn, title="GitHub Actions pin drift: inspect", body=body,
                                  assignee="coding-expert", board="intake")
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         result = kbd.DispatchResult()

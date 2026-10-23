@@ -62,6 +62,14 @@ USAGE_LIMIT_FAILURES = [
     "Automation failed from usage limits.",
 ]
 
+LEGACY_MAINTENANCE_MARKERS = [
+    "missing hermes_cli",
+    "audit-pr unavailable",
+    "inspect-pr unavailable",
+    "audit_deferred",
+    "untrusted receipt",
+]
+
 INLINE_QUOTED_CAUSAL_BLOCKERS = [
     "The workflow cannot run because `automation credential is missing`.",
     "The workflow cannot run because 'quota is exhausted'.",
@@ -260,6 +268,52 @@ def test_local_pr_ci_legacy_owner_survives_no_evidence_blocker_prose():
     title = "Local PR CI audit for the current patch"
     body = "There is no evidence that the automation credential is missing."
     assert repair_profile_for_task(title, body) == "pr-local-ci-auditor"
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("marker", LEGACY_MAINTENANCE_MARKERS)
+def test_legacy_direct_maintenance_marker_routes_inside_intake_title(title, owner, marker):
+    assert repair_profile_for_task(title, f"The workflow report says {marker}.") == "hermes-maintenance-steward"
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("marker", LEGACY_MAINTENANCE_MARKERS)
+@pytest.mark.parametrize("template", [
+    "Inventory:\n{marker}.",
+    "Example text: `{marker}`.",
+    "Quoted: {marker}.",
+    "> quoted report:\n> {marker}.",
+    "```text\n{marker}.\n```",
+])
+def test_legacy_marker_in_inventory_or_example_keeps_title_owner(title, owner, marker, template):
+    body = template.format(marker=marker)
+    assert repair_profile_for_task(title, body) == owner
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("marker", LEGACY_MAINTENANCE_MARKERS)
+@pytest.mark.parametrize("prefix", ["No ", "If "])
+def test_immediately_negated_legacy_marker_keeps_title_owner(title, owner, marker, prefix):
+    assert repair_profile_for_task(title, f"{prefix}{marker} was found in the example.") == owner
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("marker", LEGACY_MAINTENANCE_MARKERS)
+@pytest.mark.parametrize("prefix", ["There is no evidence that ", "We found no indication that "])
+def test_scoped_no_evidence_legacy_marker_keeps_title_owner(title, owner, marker, prefix):
+    assert repair_profile_for_task(title, f"{prefix}{marker} was found.") == owner
+
+
+@pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)
+@pytest.mark.parametrize("marker", LEGACY_MAINTENANCE_MARKERS)
+def test_later_actual_legacy_marker_survives_negated_marker(title, owner, marker):
+    body = f"No {marker} in the example. Later report: {marker}."
+    assert repair_profile_for_task(title, body) == "hermes-maintenance-steward"
+
+
+@pytest.mark.parametrize("marker", LEGACY_MAINTENANCE_MARKERS)
+def test_local_pr_ci_legacy_priority_survives_direct_maintenance_marker(marker):
+    assert repair_profile_for_task("Local PR CI audit for the current patch", marker) == "pr-local-ci-auditor"
 
 
 @pytest.mark.parametrize(("title", "owner"), INTAKE_TITLES)

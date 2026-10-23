@@ -30,6 +30,8 @@ _OPERATIONAL_BLOCKER_RULES = (
      "hermes-maintenance-steward"),
     (r"\b(?:the )?gh auth failure\b",
      "hermes-maintenance-steward"),
+    (r"\b(?:missing hermes_cli|audit-pr unavailable|inspect-pr unavailable|audit_deferred|untrusted receipt)\b",
+     "hermes-maintenance-steward"),
     (r"\b(?:the )?provider returned usage limits\b",
      "hermes-maintenance-steward"),
     (r"\b(?:the )?(?:(?:workflow|provider|account|automation) )?(?:"
