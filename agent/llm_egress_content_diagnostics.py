@@ -9,6 +9,7 @@ from agent.llm_egress_firewall import (
     GeneratedContextSegment,
     GeneratedContextKey,
     LiteralSegment,
+    NativeMetadataSegment,
     OutboundText,
     SanitizedSegment,
     SourceBoundSegment,
@@ -99,6 +100,7 @@ def typed_payload_violation_locations(
     seen: set[int] = set()
     text_segments = (
         SanitizedSegment,
+        NativeMetadataSegment,
         GeneratedContextSegment,
         LiteralSegment,
         ValidatedToolSyntaxSegment,

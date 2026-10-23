@@ -7,7 +7,9 @@ from agent.llm_egress_firewall import (
     AnthropicThinkingReplaySegment,
     CodexReasoningReplaySegment,
     GeneratedContextSegment,
+    GeneratedContextKey,
     LiteralSegment,
+    NativeMetadataSegment,
     OutboundText,
     SanitizedSegment,
     SourceBoundSegment,
@@ -37,9 +39,14 @@ _ROOT_ORIGINS = {
     "text": "system_or_schema",
 }
 _ROOT_COLLECTIONS = {"messages": "messages", "input": "input"}
+_MISSING_PROTOCOL_VALUE = object()
 
 
 def _rendered_non_source_text(segment, text):
+    if isinstance(segment, NativeMetadataSegment):
+        from agent.source_provenance_diagnostics import native_metadata_scan_inputs
+        observed = native_metadata_scan_inputs(segment)
+        return observed[0] if observed is not None else ""
     if isinstance(segment, CodexReasoningReplaySegment):
         return text if _CODEX_ENCRYPTED_REASONING_REPLAY.fullmatch(text) else ""
     if isinstance(segment, AnthropicThinkingReplaySegment):
@@ -57,7 +64,7 @@ def _rendered_non_source_text(segment, text):
 def _typed_payload_exact_secret_match(segment, text, exact_secret_values):
     if not isinstance(segment, (
         SanitizedSegment, GeneratedContextSegment, LiteralSegment,
-        ValidatedToolSyntaxSegment,
+        ValidatedToolSyntaxSegment, NativeMetadataSegment,
     )):
         return False
     return _contains_exact_secret(
@@ -66,6 +73,19 @@ def _typed_payload_exact_secret_match(segment, text, exact_secret_values):
 
 
 def _typed_payload_shape_reasons(segment, text):
+    if isinstance(segment, NativeMetadataSegment):
+        from agent.source_provenance_diagnostics import native_metadata_scan_inputs
+        observed = native_metadata_scan_inputs(segment)
+        if observed is None:
+            return frozenset()
+        original, projection = observed
+        reasons = {
+            reason for _, found in content_free_violation_locations(original)
+            for reason in found if reason != "base64_payload"
+        }
+        if _contains_canonical_base64(projection):
+            reasons.add("base64_payload")
+        return frozenset(reasons)
     if isinstance(segment, (
         CodexReasoningReplaySegment,
         AnthropicThinkingReplaySegment,
@@ -89,41 +109,48 @@ def _joined_scan_segment_reasons(segments, exact_secret_values=()):
     """Mirror final contiguous scan groups and attribute only their fixed findings."""
     matched = {}
     joined_kinds = (
-        ((SanitizedSegment,), True),
+        ((SanitizedSegment, NativeMetadataSegment), True),
         ((LiteralSegment, SanitizedSegment, GeneratedContextSegment,
           CodexReasoningReplaySegment, AnthropicThinkingReplaySegment,
-          ValidatedToolSyntaxSegment), False),
+          ValidatedToolSyntaxSegment, NativeMetadataSegment), False),
     )
 
     for kinds, scan_base64 in joined_kinds:
-        indexes, texts = [], []
+        indexes, texts, encodings = [], [], []
         for index, segment in enumerate(segments):
             text = getattr(segment, "text", None)
             if isinstance(segment, kinds) and isinstance(text, str):
                 indexes.append(index)
                 texts.append(_rendered_non_source_text(segment, text))
+                if isinstance(segment, NativeMetadataSegment):
+                    from agent.source_provenance_diagnostics import native_metadata_scan_inputs
+                    observed = native_metadata_scan_inputs(segment)
+                    encodings.append(observed[1] if observed is not None else "")
+                else:
+                    encodings.append(texts[-1])
                 continue
             if len(indexes) > 1:
                 _record_joined_scan_reasons(
-                    matched, indexes, texts, scan_base64, exact_secret_values
+                    matched, indexes, texts, scan_base64, exact_secret_values, encodings
                 )
             indexes.clear()
             texts.clear()
+            encodings.clear()
         if len(indexes) > 1:
             _record_joined_scan_reasons(
-                matched, indexes, texts, scan_base64, exact_secret_values
+                matched, indexes, texts, scan_base64, exact_secret_values, encodings
             )
     return {index: frozenset(reasons) for index, reasons in matched.items()}
 
 
-def _record_joined_scan_reasons(matched, indexes, texts, scan_base64, exact_secret_values):
+def _record_joined_scan_reasons(matched, indexes, texts, scan_base64, exact_secret_values, encodings):
     combined = "".join(texts)
     reasons = set()
     if _contains_secret(combined):
         reasons.add("secret_detected")
     if _contains_private_absolute_path(combined):
         reasons.add("private_absolute_path")
-    if scan_base64 and _contains_canonical_base64(combined):
+    if scan_base64 and _contains_canonical_base64("".join(encodings)):
         reasons.add("base64_payload")
     if exact_secret_values and _contains_exact_secret(combined, exact_secret_values):
         reasons.add("exact_secret_detected")
@@ -143,13 +170,28 @@ class ToolResultRefusalSegment(UntrustedProvenanceSegment):
     __slots__ = ()
 
 
+def _protocol_value(value, name, default=None):
+    """Read the renderer's typed protocol keys without changing object identity."""
+    for key, child in value.items():
+        if (key.text if isinstance(key, GeneratedContextKey) else key) == name:
+            return child
+    return default
+
+
 def _literal(value: Any) -> str | None:
     from agent.llm_egress_firewall import LiteralSegment
 
     if isinstance(value, LiteralSegment):
         return value.text
-    if isinstance(value, SanitizedSegment):
+    if isinstance(value, (SanitizedSegment, GeneratedContextSegment)):
         return value.text
+    if isinstance(value, NativeMetadataSegment):
+        from agent.source_provenance_diagnostics import native_metadata_scan_inputs
+        observed = native_metadata_scan_inputs(value)
+        return observed[0] if observed is not None else None
+    if isinstance(value, OutboundText):
+        pieces = [_literal(segment) for segment in value.segments]
+        return "".join(pieces) if all(piece is not None for piece in pieces) else None
     if isinstance(value, ValidatedToolSyntaxSegment):
         rendered = _rendered_non_source_text(value, value.text)
         return rendered if rendered == value.text else None
@@ -158,11 +200,11 @@ def _literal(value: Any) -> str | None:
 
 def _responses_function_call_is_well_formed(item: Mapping[str, Any]) -> bool:
     """Recognize only the fixed Responses replay shape as assistant history."""
-    if _literal(item.get("type")) != "function_call":
+    if _literal(_protocol_value(item, "type")) != "function_call":
         return False
-    if not _literal(item.get("name")) or _literal(item.get("arguments")) is None:
+    if not _literal(_protocol_value(item, "name")) or _literal(_protocol_value(item, "arguments")) is None:
         return False
-    identifier = _literal(item.get("call_id"))
+    identifier = _literal(_protocol_value(item, "call_id"))
     if not identifier:
         return False
     from agent.message_sanitization import tool_call_id_variants
@@ -172,16 +214,19 @@ def _responses_function_call_is_well_formed(item: Mapping[str, Any]) -> bool:
 
 def _responses_reasoning_item_is_well_formed(item: Mapping[str, Any]) -> bool:
     """Recognize role-free Responses reasoning summaries as prior assistant output."""
-    if "role" in item or _literal(item.get("type")) != "reasoning":
+    if (
+        _protocol_value(item, "role", _MISSING_PROTOCOL_VALUE) is not _MISSING_PROTOCOL_VALUE
+        or _literal(_protocol_value(item, "type")) != "reasoning"
+    ):
         return False
-    encrypted_content = _literal(item.get("encrypted_content"))
-    summary = item.get("summary")
+    encrypted_content = _literal(_protocol_value(item, "encrypted_content"))
+    summary = _protocol_value(item, "summary")
     if not encrypted_content or not isinstance(summary, (list, tuple)) or not summary:
         return False
     return all(
         isinstance(part, Mapping)
-        and _literal(part.get("type")) == "summary_text"
-        and _literal(part.get("text")) is not None
+        and _literal(_protocol_value(part, "type")) == "summary_text"
+        and _literal(_protocol_value(part, "text")) is not None
         for part in summary
     )
 
@@ -205,7 +250,7 @@ def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
                 aliases = {
                     key: value
                     for key in ("call_id", "id", "response_item_id")
-                    if (value := _literal(call_entry.get(key))) is not None
+                    if (value := _literal(_protocol_value(call_entry, key))) is not None
                 }
             if not aliases:
                 key = "call_id" if kind == "responses_input" else "id"
@@ -230,40 +275,40 @@ def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
         for message in messages:
             if not isinstance(message, Mapping):
                 continue
-            role = _literal(message.get("role"))
+            role = _literal(_protocol_value(message, "role"))
             if role == "assistant":
-                tool_calls = message.get("tool_calls")
+                tool_calls = _protocol_value(message, "tool_calls")
                 if isinstance(tool_calls, (list, tuple)):
                     for call in tool_calls:
                         if (
                             isinstance(call, Mapping)
-                            and _literal(call.get("type")) == "function"
+                            and _literal(_protocol_value(call, "type")) == "function"
                         ):
-                            function = call.get("function")
+                            function = _protocol_value(call, "function")
                             if (
                                 isinstance(function, Mapping)
-                                and _literal(function.get("name"))
-                                and _literal(function.get("arguments")) is not None
+                                and _literal(_protocol_value(function, "name"))
+                                and _literal(_protocol_value(function, "arguments")) is not None
                             ):
-                                add_call("chat", call.get("id"), call)
-                content = message.get("content")
+                                add_call("chat", _protocol_value(call, "id"), call)
+                content = _protocol_value(message, "content")
                 if isinstance(content, (list, tuple)):
                     for block in content:
                         if (
                             isinstance(block, Mapping)
-                            and _literal(block.get("type")) == "tool_use"
-                            and _literal(block.get("name"))
-                            and isinstance(block.get("input"), Mapping)
+                            and _literal(_protocol_value(block, "type")) == "tool_use"
+                            and _literal(_protocol_value(block, "name"))
+                            and isinstance(_protocol_value(block, "input"), Mapping)
                         ):
-                            add_call("anthropic", block.get("id"), {"id": block.get("id")})
+                            add_call("anthropic", _protocol_value(block, "id"), {"id": _protocol_value(block, "id")})
             elif role == "tool":
-                add_result("chat", message.get("tool_call_id"), message)
+                add_result("chat", _protocol_value(message, "tool_call_id"), message)
             elif role == "user":
-                content = message.get("content")
+                content = _protocol_value(message, "content")
                 if isinstance(content, (list, tuple)):
                     for block in content:
-                        if isinstance(block, Mapping) and _literal(block.get("type")) == "tool_result":
-                            add_result("anthropic", block.get("tool_use_id"), block)
+                        if isinstance(block, Mapping) and _literal(_protocol_value(block, "type")) == "tool_result":
+                            add_result("anthropic", _protocol_value(block, "tool_use_id"), block)
 
     extra_body = value.get("extra_body")
     messages = (
@@ -280,11 +325,11 @@ def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
         for item in input_items:
             if not isinstance(item, Mapping):
                 continue
-            item_type = _literal(item.get("type"))
+            item_type = _literal(_protocol_value(item, "type"))
             if _responses_function_call_is_well_formed(item):
-                add_call("responses_input", item.get("call_id"), item)
+                add_call("responses_input", _protocol_value(item, "call_id"), item)
             elif item_type == "function_call_output":
-                add_result("responses_input", item.get("call_id"), item)
+                add_result("responses_input", _protocol_value(item, "call_id"), item)
 
     valid_refs = set()
     for kind, result_entries in results.items():
@@ -310,7 +355,7 @@ def _validated_tool_result_refs(value: Any) -> frozenset[tuple[str, int]]:
 def _message_origin(
     message: Mapping[str, Any], valid_tool_result_refs: frozenset[tuple[str, int]]
 ) -> str:
-    role = _literal(message.get("role"))
+    role = _literal(_protocol_value(message, "role"))
     if role in {"system", "developer"}:
         return "system_or_schema"
     if role == "assistant":
@@ -327,7 +372,7 @@ def _anthropic_content_origin(
     inherited: str,
     valid_tool_result_refs: frozenset[tuple[str, int]],
 ) -> str:
-    block_type = value.get("type")
+    block_type = _protocol_value(value, "type")
     protocol_type = _literal(block_type)
     if protocol_type is not None:
         block_type = protocol_type
@@ -350,7 +395,7 @@ def _sequence_child_state(
     if not isinstance(child, Mapping):
         return inherited, False
     if collection in {"messages", "input"}:
-        if collection == "input" and _literal(child.get("type")) == "function_call_output":
+        if collection == "input" and _literal(_protocol_value(child, "type")) == "function_call_output":
             origin = (
                 "tool_result"
                 if ("responses_input", id(child)) in valid_tool_result_refs
@@ -376,6 +421,7 @@ def _mapping_child_state(
     protocol_message,
     effective_input_in_extra_body,
 ):
+    key = key.text if isinstance(key, GeneratedContextKey) else key
     origin = inherited
     child_collection = None
     child_protocol_message = False

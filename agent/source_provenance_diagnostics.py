@@ -165,6 +165,27 @@ def receipt_scope(agent, registry, owner, *, refusal_origins=None):
 
 
 @_observe
+def record_native_metadata_scan(owner, segment, text, encoding_projection):
+    """Borrow only the current renderer's validated native scan inputs, in memory."""
+    active = _receipt.get()
+    if active is None or active[0] != owner or len(active) < 4:
+        return
+    if type(text) is str and type(encoding_projection) is str:
+        active[3].setdefault('native_metadata_scans', {})[id(segment)] = (
+            segment, text, encoding_projection)
+
+
+@_observe
+def native_metadata_scan_inputs(segment):
+    """Unobserved or invalid references supply no diagnostic content or authority."""
+    active = _receipt.get()
+    if active is None or len(active) < 4:
+        return None
+    observed = active[3].get('native_metadata_scans', {}).get(id(segment))
+    return observed[1:] if observed is not None and observed[0] is segment else None
+
+
+@_observe
 def record_verified_source_scan(owner, secret_scan_inputs, encoding_scan_inputs,
                                 exact_secret_values=()):
     """Remember only a fixed match from already-rendered, request-bound scan inputs."""

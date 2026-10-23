@@ -1190,11 +1190,11 @@ def authorize_agent_sdk_kwargs(
         exact_secret_values=exact_secret_values,
     )
     try:
-        with refusal_receipt_scope(agent, registry, (session_id, turn_id, request_id, policy_digest), request.payload, exact_secret_values=exact_secret_values):
-            authorization = authorize_with_native_metadata(
-                agent, resolved_route, body, request, native_nonterminal_call_ids,
-                native_nonterminal_result_ids, firewall, tuple(used_grants.values()),
-                enabled=not protected_kanban_remote)
+        authorization = authorize_with_native_metadata(
+            agent, resolved_route, body, request, native_nonterminal_call_ids,
+            native_nonterminal_result_ids, firewall, tuple(used_grants.values()), enabled=not protected_kanban_remote,
+            request_scope=lambda actual: refusal_receipt_scope(agent, registry,
+                (session_id, turn_id, request_id, policy_digest), actual.payload, exact_secret_values=exact_secret_values))
     except EgressBlocked:
         logger.warning(
             "LLM egress blocked grant counts: input=%d selected=%d",

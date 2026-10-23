@@ -1292,6 +1292,33 @@ def test_responses_nested_malformed_and_shadowed_shapes_do_not_gain_origins(
     assert _ENCODED not in json.dumps(diagnostics, sort_keys=True)
 
 
+@pytest.mark.parametrize("key_kind", ["raw", "generated"])
+@pytest.mark.parametrize("role_present", [False, True], ids=["absent-role", "null-role"])
+def test_responses_reasoning_requires_absent_role_key(tmp_path, key_kind, role_present):
+    key = GeneratedContextKey if key_kind == "generated" else str
+    item = {
+        key("type"): LiteralSegment("reasoning"),
+        key("encrypted_content"): LiteralSegment("synthetic-encrypted-reasoning"),
+        key("summary"): [{
+            key("type"): LiteralSegment("summary_text"),
+            key("text"): SanitizedSegment(_ENCODED),
+        }],
+    }
+    if role_present:
+        item[key("role")] = None
+
+    decision, receipt, authorization = _typed_firewall_result(
+        _agent(tmp_path), {"input": [item]}
+    )
+
+    assert decision.allowed is False
+    assert "base64_payload" in decision.reason_codes
+    assert authorization is None
+    diagnostics = receipt["source_provenance_diagnostics"]
+    assert diagnostics["refusal_origins"] == ["other" if role_present else "assistant_history"]
+    assert _ENCODED not in json.dumps(diagnostics, sort_keys=True)
+
+
 def test_responses_adapter_replayed_reasoning_summary_is_assistant_history(tmp_path):
     from agent.codex_responses_adapter import _chat_messages_to_responses_input
 
