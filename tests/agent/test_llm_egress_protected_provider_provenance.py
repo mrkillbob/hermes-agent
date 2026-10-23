@@ -227,3 +227,227 @@ def test_native_nonterminal_binding_and_existing_worker_admission_are_preserved(
     assert receipt.allowed
     assert authorized[field][1][surface] == output
     assert receipt.decision.source_segment_count == 0
+
+
+_NATIVE_PARITY_TOOL = "mcp__editor_a2a_native_fixture__a2a_submit"
+_NATIVE_PARITY_SCOPE = "session:egress-native-protocol-parity"
+
+
+def _native_protocol_frames(protocol, output, *, call_id="call_native_parity", name=_NATIVE_PARITY_TOOL):
+    call = {
+        "chat": {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}},
+        "anthropic": {"type": "tool_use", "id": call_id, "name": name, "input": {}},
+        "responses": {"type": "function_call", "call_id": call_id, "name": name, "arguments": "{}"},
+    }[protocol]
+    result = {
+        "chat": {"role": "tool", "tool_call_id": call_id, "content": output},
+        "anthropic": {"type": "tool_result", "tool_use_id": call_id, "content": output},
+        "responses": {"type": "function_call_output", "call_id": call_id, "output": output},
+    }[protocol]
+    if protocol == "chat":
+        body = {"messages": [{"role": "assistant", "tool_calls": [call]}, result]}
+    elif protocol == "anthropic":
+        body = {"messages": [
+            {"role": "assistant", "content": [call]},
+            {"role": "user", "content": [result]},
+        ]}
+    else:
+        body = {"input": [call, result]}
+    return body, call, result
+
+
+def _mutate_native_protocol_body(body, call, result, protocol, invalid_case):
+    def duplicate():
+        {
+            "chat": lambda: body["messages"][0]["tool_calls"].append(dict(call)),
+            "anthropic": lambda: body["messages"][0]["content"].append(dict(call)),
+            "responses": lambda: body["input"].insert(1, dict(call)),
+        }[protocol]()
+
+    def reverse_frames():
+        body[{"chat": "messages", "anthropic": "messages", "responses": "input"}[protocol]].reverse()
+
+    def move_call_to_non_assistant():
+        {
+            "chat": lambda: body["messages"][0].update(role="user"),
+            "anthropic": lambda: body["messages"][0].update(role="user"),
+            "responses": lambda: body["input"].__setitem__(
+                0, {"type": "message", "role": "user", "content": [call]}
+            ),
+        }[protocol]()
+
+    def nest_call_and_result():
+        body.clear()
+        body["metadata"] = {"nested": [call, result]}
+
+    def copy_result_into_nested_data():
+        body["metadata"] = {"nested": dict(result)}
+
+    {
+        "unregistered": lambda: {
+            "chat": lambda: call["function"].update(
+                name="mcp__editor_a2a_native_fixture__not_registered"
+            ),
+            "anthropic": lambda: call.update(
+                name="mcp__editor_a2a_native_fixture__not_registered"
+            ),
+            "responses": lambda: call.update(
+                name="mcp__editor_a2a_native_fixture__not_registered"
+            ),
+        }[protocol](),
+        "duplicate": duplicate,
+        "future": reverse_frames,
+        "mismatch": lambda: result.update(
+            **{
+                {"chat": "tool_call_id", "anthropic": "tool_use_id", "responses": "call_id"}[protocol]: "other"
+            }
+        ),
+        "non_assistant": move_call_to_non_assistant,
+        "nested": nest_call_and_result,
+        "nested_result": copy_result_into_nested_data,
+    }[invalid_case]()
+
+
+@pytest.fixture
+def _native_provider_dispatch_context():
+    """Register a synthetic tool only in a context-local test overlay."""
+    from tools.registry import registry
+
+    registry.deregister(_NATIVE_PARITY_TOOL, scope=_NATIVE_PARITY_SCOPE)
+    registry.register(
+        _NATIVE_PARITY_TOOL,
+        "session-fixture",
+        {"name": _NATIVE_PARITY_TOOL, "parameters": {"type": "object"}},
+        lambda _args: None,
+        scope=_NATIVE_PARITY_SCOPE,
+    )
+    try:
+        yield
+    finally:
+        registry.deregister(_NATIVE_PARITY_TOOL, scope=_NATIVE_PARITY_SCOPE)
+
+
+@pytest.mark.parametrize("protocol", ["chat", "anthropic", "responses"])
+def test_registered_session_native_results_are_admitted_by_explicit_protocol(
+    tmp_path, monkeypatch, protocol, _native_provider_dispatch_context
+):
+    from tools.registry import registry, session_tool_scope
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    body, _, _ = _native_protocol_frames(protocol, "bounded synthetic output")
+    callback = MagicMock(return_value="allowed")
+    provider = "anthropic" if protocol == "anthropic" else "nous"
+    api_mode = "responses" if protocol == "responses" else ("anthropic" if protocol == "anthropic" else "chat_completions")
+    with session_tool_scope(_NATIVE_PARITY_SCOPE):
+        assert registry.get_entry(_NATIVE_PARITY_TOOL) is not None
+        assert _dispatch_provider_request(
+            _agent(tmp_path, provider=provider, api_mode=api_mode), body, callback
+        ) == "allowed"
+        callback.assert_called_once()
+
+        for rejected in ("token=synthetic-secret-value", "c2VjcmV0LXBheWxvYWQ="):
+            unsafe, _, _ = _native_protocol_frames(protocol, rejected)
+            callback.reset_mock()
+            with pytest.raises(EgressBlocked):
+                _dispatch_provider_request(
+                    _agent(tmp_path, provider=provider, api_mode=api_mode), unsafe, callback
+                )
+            callback.assert_not_called()
+
+    with session_tool_scope("session:egress-native-protocol-other"):
+        assert registry.get_entry(_NATIVE_PARITY_TOOL) is None
+        callback.reset_mock()
+        with pytest.raises(EgressBlocked):
+            _dispatch_provider_request(
+                _agent(tmp_path, provider=provider, api_mode=api_mode), body, callback
+            )
+        callback.assert_not_called()
+
+    monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+    callback.reset_mock()
+    with session_tool_scope(_NATIVE_PARITY_SCOPE), pytest.raises(EgressBlocked):
+        _dispatch_provider_request(
+            _agent(tmp_path, provider=provider, api_mode=api_mode), body, callback
+        )
+    callback.assert_not_called()
+
+
+def test_registered_session_responses_frames_are_admitted_after_sdk_bypass(
+    tmp_path, monkeypatch, _native_provider_dispatch_context
+):
+    """The exact Responses wire input moved to extra_body keeps its call binding."""
+    from tools.registry import session_tool_scope
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    body, _, _ = _native_protocol_frames("responses", "bounded synthetic output")
+    request = {"extra_body": {"input": body.pop("input")}}
+    callback = MagicMock(return_value="allowed")
+    with session_tool_scope(_NATIVE_PARITY_SCOPE):
+        assert _dispatch_provider_request(
+            _agent(tmp_path, provider="nous", api_mode="responses"), request, callback
+        ) == "allowed"
+    callback.assert_called_once()
+
+    for rejected in ("token=synthetic-secret-value", "c2VjcmV0LXBheWxvYWQ="):
+        unsafe, _, _ = _native_protocol_frames("responses", rejected)
+        callback.reset_mock()
+        with session_tool_scope(_NATIVE_PARITY_SCOPE), pytest.raises(EgressBlocked):
+            _dispatch_provider_request(
+                _agent(tmp_path, provider="nous", api_mode="responses"),
+                {"extra_body": {"input": unsafe.pop("input")}},
+                callback,
+            )
+        callback.assert_not_called()
+
+
+def test_responses_extra_body_override_cannot_borrow_top_level_call_id(
+    tmp_path, monkeypatch, _native_provider_dispatch_context
+):
+    """Only the effective SDK-merged input may bind a direct native result."""
+    from tools.registry import session_tool_scope
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    top_level, _, result = _native_protocol_frames(
+        "responses", "bounded synthetic output"
+    )
+    # The SDK merges extra_body after the typed JSON, so this output replaces
+    # the valid top-level call/output pair. Reusing the same object also checks
+    # that identity-based result admission cannot borrow across the collision.
+    request = {
+        "input": top_level["input"],
+        "extra_body": {"input": [result]},
+    }
+    callback = MagicMock(return_value="allowed")
+    with session_tool_scope(_NATIVE_PARITY_SCOPE), pytest.raises(EgressBlocked):
+        _dispatch_provider_request(
+            _agent(tmp_path, provider="nous", api_mode="responses"), request, callback
+        )
+    callback.assert_not_called()
+
+
+@pytest.mark.parametrize("protocol", ["chat", "anthropic", "responses"])
+@pytest.mark.parametrize(
+    "invalid_case",
+    ["unregistered", "duplicate", "future", "mismatch", "non_assistant", "nested", "nested_result"],
+)
+def test_native_protocol_admission_rejects_unbound_or_nested_frames(
+    tmp_path, monkeypatch, protocol, invalid_case, _native_provider_dispatch_context
+):
+    from tools.registry import session_tool_scope
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_PROTECTED_REMOTE", raising=False)
+    body, call, result = _native_protocol_frames(protocol, "bounded synthetic output")
+    _mutate_native_protocol_body(body, call, result, protocol, invalid_case)
+
+    provider = "anthropic" if protocol == "anthropic" else "nous"
+    api_mode = "responses" if protocol == "responses" else ("anthropic" if protocol == "anthropic" else "chat_completions")
+    callback = MagicMock(return_value="allowed")
+    with session_tool_scope(_NATIVE_PARITY_SCOPE), pytest.raises(EgressBlocked):
+        _dispatch_provider_request(
+            _agent(tmp_path, provider=provider, api_mode=api_mode), body, callback
+        )
+    callback.assert_not_called()
