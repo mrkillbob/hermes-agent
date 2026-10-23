@@ -25,19 +25,19 @@ _TITLE_INTAKE_RULES = (
 # These direct operational blockers apply only inside matched intake-title
 # families, where they precede title-only ownership.
 _OPERATIONAL_BLOCKER_RULES = (
-    (r"(?:^|[\n.!?]\s*)\s*(?:the )?automation credential is missing\b",
+    (r"\b(?:the )?automation credential is missing\b",
      "hermes-maintenance-steward"),
-    (r"(?:^|[\n.!?]\s*)\s*(?:the )?gh auth failure\b",
+    (r"\b(?:the )?gh auth failure\b",
      "hermes-maintenance-steward"),
-    (r"(?:^|[\n.!?]\s*)\s*(?:the )?provider returned usage limits\b",
+    (r"\b(?:the )?provider returned usage limits\b",
      "hermes-maintenance-steward"),
-    (r"(?:^|[\n.!?]\s*)\s*(?:the )?(?:(?:workflow|provider|account|automation) )?(?:"
+    (r"\b(?:the )?(?:(?:workflow|provider|account|automation) )?(?:"
      r"quota (?:is|was|has been) (?:exhausted|exceeded)|"
      r"quota failures? (?:are|were|is|was)? ?(?:blocking|blocked|preventing|prevented|failing)|"
      r"usage limits (?:are|were|have been) (?:exceeded|exhausted)|"
      r"(?:quota|usage limits) (?:blocked|prevented|failed))\b",
      "hermes-maintenance-steward"),
-    (r"(?:^|[\n.!?]\s*)\s*(?:the )?lunabot diagnostics? (?:"
+    (r"\b(?:the )?lunabot diagnostics? (?:"
      r"failed|(?:has|have) failed|(?:is|are|was|were) (?:blocked|unavailable)|"
      r"(?:returned|reported|encountered) (?:an )?error)\b",
      "hermes-maintenance-steward"),
@@ -50,12 +50,115 @@ _FENCE_OPEN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _FENCE_CLOSE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
 _BLOCKQUOTE = re.compile(r"^\s{0,3}>")
 _BLOCKQUOTE_EMPTY = re.compile(r"^\s{0,3}>\s*$")
+_BLOCKER_NEGATION = re.compile(r"\b(?:no|if|whether|unless)\s+(?:the\s+)?(?:[`'\"‘“]\s*)*$")
+_WHEN_INQUIRY = re.compile(r"\bwhen\s+(?:the\s+)?(?:[`'\"‘“]\s*)*$")
+_INQUIRY_VERB = re.compile(r"\b(?:check|review|record|inspect|determine|verify)\s*$")
+_INLINE_QUOTES = {"'": "'", '"': '"', "‘": "’", "“": "”"}
+_INLINE_BARRIER = "\ue000"
+_EXAMPLE_CUE = re.compile(
+    r"(?:\bexample(?:\s+text)?\s*[:,-]?|\bfor example\s*,?|\bcompare the phrase)\s*$",
+    re.IGNORECASE,
+)
+_EXAMPLE_SUFFIX = re.compile(r"^\s+is an example sentence\b", re.IGNORECASE)
 
 
 def _fence_closes(line: str, marker: tuple[str, int]) -> bool:
     """Whether a Markdown fence line closes the active fence."""
     match = _FENCE_CLOSE.match(line)
     return bool(match and match.group(1)[0] == marker[0] and len(match.group(1)) >= marker[1])
+
+
+def _inline_quote_end(value: str, start: int, closing: str) -> int | None:
+    """Find a paired inline quote without crossing a line or contraction."""
+    index = start + 1
+    while index < len(value):
+        char = value[index]
+        if char in "\r\n":
+            return None
+        if char == "\\":
+            index += 2
+            continue
+        if char == closing:
+            if (closing in {"'", "’"} and index + 1 < len(value)
+                    and value[index - 1].isalnum() and value[index + 1].isalnum()):
+                index += 1
+                continue
+            return index
+        index += 1
+    return None
+
+
+def _inline_code_end(value: str, start: int, run_length: int) -> int | None:
+    """Find an equal-length inline backtick run on the same line."""
+    index = start + run_length
+    while index < len(value):
+        if value[index] in "\r\n":
+            return None
+        if value[index] == "`":
+            end = index
+            while end < len(value) and value[end] == "`":
+                end += 1
+            if end - index == run_length:
+                return index
+            index = end
+        else:
+            index += 1
+    return None
+
+
+def _inline_span_is_example(value: str, start: int, end: int) -> bool:
+    """Whether a paired inline span is explicitly introduced as an example."""
+    prefix = value[:start].rsplit("\n", 1)[-1].rsplit("\r", 1)[-1]
+    suffix = value[end + 1:].splitlines()[0] if value[end + 1:] else ""
+    return bool(_EXAMPLE_CUE.search(prefix) or _EXAMPLE_SUFFIX.match(suffix))
+
+
+def _mask_inline_examples(value: str) -> str:
+    """Mask only explicitly example-cued inline spans, retaining line breaks."""
+    masked: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char in "\r\n":
+            masked.append(char)
+            index += 1
+            continue
+
+        if char == "`":
+            end_run = index + 1
+            while end_run < len(value) and value[end_run] == "`":
+                end_run += 1
+            run_length = end_run - index
+            if run_length < 3:
+                close = _inline_code_end(value, index, run_length)
+                if close is not None:
+                    end = close + run_length - 1
+                    if _inline_span_is_example(value, index, end):
+                        masked.append(_INLINE_BARRIER)
+                    else:
+                        masked.append(value[index:end + 1])
+                    index = close + run_length
+                    continue
+            masked.append(value[index:end_run])
+            index = end_run
+            continue
+
+        closing = _INLINE_QUOTES.get(char)
+        opens = closing is not None
+        if char == "'" and index > 0 and (value[index - 1].isalnum() or value[index - 1] == "_"):
+            opens = False
+        if opens:
+            close = _inline_quote_end(value, index, closing)
+            if close is not None:
+                if _inline_span_is_example(value, index, close):
+                    masked.append(_INLINE_BARRIER)
+                else:
+                    masked.append(value[index:close + 1])
+                index = close + 1
+                continue
+        masked.append(char)
+        index += 1
+    return "".join(masked)
 
 
 def _retained_operational_segments(value: str) -> list[str]:
@@ -116,12 +219,21 @@ def _retained_operational_segments(value: str) -> list[str]:
 
 
 def _has_operational_blocker(segments: list[str]) -> bool:
-    """Check retained source segments independently for direct blockers."""
-    return any(
-        re.search(pattern, segment.casefold())
-        for segment in segments
-        for pattern, _profile in _OPERATIONAL_BLOCKER_RULES
-    )
+    """Find concrete blockers while skipping immediate negative conditions."""
+    for segment in segments:
+        normalized = segment.casefold()
+        for pattern, _profile in _OPERATIONAL_BLOCKER_RULES:
+            for match in re.finditer(pattern, normalized):
+                prefix = normalized[:match.start()]
+                if _BLOCKER_NEGATION.search(prefix):
+                    continue
+                when = _WHEN_INQUIRY.search(prefix)
+                if when:
+                    before_when = prefix[:when.start()].rstrip()
+                    if not before_when or _INQUIRY_VERB.search(before_when):
+                        continue
+                return True
+    return False
 
 
 # Ordered from narrowest scope to broadest so a PR audit is not swallowed by
@@ -182,11 +294,14 @@ def repair_profile_for_task(title: Optional[str], body: Optional[str]) -> Option
         return "resource-scheduler"
     for pattern, profile in _TITLE_INTAKE_RULES:
         if re.match(pattern, title):
-            delimiter = re.search(r":|[—–]|[ \t]+-[ \t]+", title)
-            title_clause = title[delimiter.end():] if delimiter else title
+            masked_title = _mask_inline_examples(title)
+            delimiter = re.search(r":|[—–]|[ \t]+-[ \t]+", masked_title)
+            title_clause = masked_title[delimiter.end():] if delimiter else masked_title
             title_clause = re.sub(r"[—–]|[ \t]+-[ \t]+", "\n", title_clause)
             if (_has_operational_blocker(_retained_operational_segments(title_clause))
-                    or _has_operational_blocker(_retained_operational_segments(body or ""))):
+                    or _has_operational_blocker(
+                        _retained_operational_segments(_mask_inline_examples(body or ""))
+                    )):
                 return "hermes-maintenance-steward"
             return profile
     # A cron profile describes the evidence producer, not a scheduler defect.
