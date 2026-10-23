@@ -7,6 +7,9 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import re
 import shutil
@@ -16,10 +19,7 @@ import subprocess
 import time
 import unicodedata
 from pathlib import Path
-from typing import Optional
-from typing import TYPE_CHECKING
-import contextlib
-import json
+from typing import TYPE_CHECKING, Optional
 
 from hermes_cli.worktree_ops import release_lsp_clients
 
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
 _REMOVABLE_KINDS = ("scratch", "worktree")
-_MAX_ARCHIVED_BOARD_MARKER_BYTES = 16 * 1024
+_ARCHIVED_BOARD_MARKER_READ_CHUNK = 8 * 1024
 
 
 def _path_key(path: Path | str | None) -> str:
@@ -181,8 +181,7 @@ def _archived_board_db_files(archive_root: Path) -> list[Path]:
         if not marker.is_file() or not database.is_file():
             raise OSError("archived board entry is missing its marker or database")
         try:
-            metadata = json.loads(_read_archived_board_marker(marker).decode("utf-8-sig"))
-            slug = _kb._require_slug(metadata.get("slug")) if isinstance(metadata, dict) else None
+            slug = _kb._require_slug(_read_archived_board_marker(marker))
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
             raise OSError("archived board marker is invalid") from None
         if not slug or not re.fullmatch(rf"{re.escape(slug)}-\d{{10}}(?:-[1-9]\d*)?", directory.name):
@@ -191,12 +190,12 @@ def _archived_board_db_files(archive_root: Path) -> list[Path]:
     return archived
 
 
-def _read_archived_board_marker(path: Path) -> bytes:
-    """Read a small regular marker only if its path and opened file stay stable."""
+def _read_archived_board_marker(path: Path) -> object:
+    """Read only the board identity while streaming and checking marker stability."""
     try:
         before = path.lstat()
-        if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_ARCHIVED_BOARD_MARKER_BYTES:
-            raise OSError("archived board marker is not a bounded regular file")
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("archived board marker is not a regular file")
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(path, flags)
     except OSError:
@@ -205,15 +204,21 @@ def _read_archived_board_marker(path: Path) -> bytes:
         opened = os.fstat(fd)
         if not _same_archive_marker_file(before, opened):
             raise OSError("archived board marker changed while opening")
-        raw = os.read(fd, _MAX_ARCHIVED_BOARD_MARKER_BYTES + 1)
+        raw_file = os.fdopen(fd, "rb", closefd=False)
+        text_file = io.TextIOWrapper(raw_file, encoding="utf-8-sig")
+        try:
+            from hermes_cli.kanban_archive_marker import read_board_slug
+
+            slug = read_board_slug(text_file, chunk_size=_ARCHIVED_BOARD_MARKER_READ_CHUNK)
+        finally:
+            text_file.detach()
+            raw_file.close()
         after = os.fstat(fd)
         path_after = path.lstat()
-        if (len(raw) != opened.st_size
-                or len(raw) > _MAX_ARCHIVED_BOARD_MARKER_BYTES
-                or not _same_archive_marker_file(opened, after)
+        if (not _same_archive_marker_file(opened, after)
                 or not _same_archive_marker_file(opened, path_after)):
             raise OSError("archived board marker changed while reading")
-        return raw
+        return slug
     finally:
         os.close(fd)
 

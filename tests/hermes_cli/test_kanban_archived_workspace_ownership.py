@@ -1,6 +1,7 @@
 """Archived board databases remain in cross-board workspace ownership scans."""
 
 import json
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -19,8 +20,8 @@ def hermes_home(tmp_path, monkeypatch):
     return home
 
 
-def _archived_board_with_live_workspace(slug: str, path: Path):
-    kb.create_board(slug)
+def _archived_board_with_live_workspace(slug: str, path: Path, **metadata):
+    kb.create_board(slug, **metadata)
     with kbc.connect_closing(board=slug) as conn:
         task_id = kb.create_task(conn, title="archived board still owns workspace")
         with kb.write_txn(conn):
@@ -68,6 +69,91 @@ def test_archived_sibling_is_scanned_but_empty_container_db_is_not(hermes_home):
             archived_db, archived_task, workspace._path_key(shared.resolve())
         )
     assert container_db.stat().st_size == 0
+
+
+def test_writer_produced_large_display_metadata_does_not_hide_archived_owner(hermes_home):
+    shared = hermes_home / "kanban" / "workspaces" / "large-display-metadata"
+    shared.mkdir(parents=True)
+    task_id, archived_db = _archived_board_with_live_workspace(
+        "large-description", shared, description="d" * 20_000, icon="i" * 2_000,
+    )
+
+    with kbc.connect_closing() as conn:
+        archived = archived_db.resolve()
+        assert archived in workspace._sibling_board_db_files(conn)
+        assert workspace._other_board_uses_path(
+            archived, task_id, workspace._path_key(shared.resolve())
+        )
+
+
+def test_streamed_marker_parser_bounds_reads_and_validates_the_whole_document():
+    from hermes_cli.kanban_archive_marker import read_board_slug
+
+    def assert_matches_previous_reader(document, *, chunk_size=4096):
+        previous_slug = kb._require_slug(json.loads(document).get("slug"))
+        streamed_slug = kb._require_slug(
+            read_board_slug(StringIO(document), chunk_size=chunk_size)
+        )
+        assert streamed_slug == previous_slug
+
+    class BoundedReader(StringIO):
+        def __init__(self, value):
+            super().__init__(value)
+            self.requests = []
+
+        def read(self, size=-1):
+            self.requests.append(size)
+            assert 0 < size <= 4096
+            return super().read(size)
+
+    reader = BoundedReader(
+        '{"description":"' + ("x" * 20_000) + '","sl\\u0075g":"large-board"}'
+    )
+    assert read_board_slug(reader, chunk_size=4096) == "large-board"
+    assert reader.requests and max(reader.requests) == 4096
+
+    malformed = BoundedReader(
+        '{"slug":"board","display":"' + ("x" * 20_000) + '"} trailing'
+    )
+    with pytest.raises(ValueError, match="trailing data"):
+        read_board_slug(malformed, chunk_size=4096)
+    assert read_board_slug(
+        StringIO(
+            '{"sl\\u0075g":"b\\u006fard","nested":{"slug":"wrong",'
+            '"rows":[1,{"slug":"also-wrong"}]}}'
+        ),
+        chunk_size=7,
+    ) == "board"
+    # Preserve json.loads last-key-wins behavior, even when an earlier slug
+    # value would not itself pass the board slug validator.
+    assert_matches_previous_reader('{"slug":[],"slug":"later-board"}', chunk_size=3)
+    assert_matches_previous_reader('{"slug":"first-board","slug":"last-board"}')
+
+    # The previous reader normalized arbitrary JSON scalar values through
+    # _require_slug, including booleans and numbers, and stripped Unicode
+    # whitespace before applying the 64-character slug limit.
+    for value, expected in ((123, "123"), (True, "true"), (False, "false")):
+        document = json.dumps({"slug": value})
+        assert_matches_previous_reader(document)
+        assert kb._require_slug(read_board_slug(StringIO(document))) == expected
+    padded = '{"slug":"' + ("\\u00a0" * 300) + "MiXeD" + ("\\u2003" * 300) + '"}'
+    assert_matches_previous_reader(padded, chunk_size=5)
+    assert kb._require_slug(read_board_slug(StringIO(padded), chunk_size=5)) == "mixed"
+
+    # Python's prior json.loads reader accepts these constants in ignored
+    # metadata; keep that compatibility while still validating the document.
+    constants = '{"slug":"owner","unused":[NaN,Infinity,-Infinity]}'
+    assert_matches_previous_reader(constants)
+    assert kb._require_slug(read_board_slug(StringIO(constants))) == "owner"
+    for invalid in (
+        '{"slug":"board","value":"\\q"}',
+        '{"slug":"board","value":01}',
+        '{"slug":"board",}',
+        '{"slug":"board","value":[1,]}',
+        '{"slug":"board","value":NaNx}',
+    ):
+        with pytest.raises(ValueError):
+            read_board_slug(StringIO(invalid), chunk_size=7)
 
 
 def test_unmarked_archived_database_makes_cleanup_unknown_and_preserves_workspace(hermes_home):
@@ -118,7 +204,7 @@ def test_invalid_archived_sibling_database_fails_closed(hermes_home):
     assert (shared / "keep.txt").read_text(encoding="utf-8") == "preserve"
 
 
-def test_oversized_archive_marker_makes_cleanup_unknown(hermes_home):
+def test_malformed_large_archive_marker_makes_cleanup_unknown(hermes_home):
     shared = hermes_home / "kanban" / "workspaces" / "oversized-marker"
     shared.mkdir(parents=True)
     (shared / "keep.txt").write_text("preserve", encoding="utf-8")
@@ -134,7 +220,7 @@ def test_oversized_archive_marker_makes_cleanup_unknown(hermes_home):
     archived_dir = kb.boards_root() / "_archived" / "oversized-1700000000"
     archived_dir.mkdir(parents=True)
     (archived_dir / "board.json").write_bytes(
-        b'{"slug":"oversized"}' + b" " * workspace._MAX_ARCHIVED_BOARD_MARKER_BYTES
+        b'{"slug":"oversized"}' + b" " * 20_000 + b" trailing"
     )
     (archived_dir / "kanban.db").touch()
     with kbc.connect_closing() as conn:
@@ -172,14 +258,16 @@ def test_archive_marker_replaced_while_reading_is_rejected(tmp_path, monkeypatch
     marker = tmp_path / "board.json"
     original = b'{"slug":"board"}'
     marker.write_bytes(original)
-    real_read = workspace.os.read
+    from hermes_cli import kanban_archive_marker
 
-    def replace_after_read(fd, size):
-        contents = real_read(fd, size)
+    real_parse = kanban_archive_marker.read_board_slug
+
+    def replace_after_read(stream, *, chunk_size):
+        slug = real_parse(stream, chunk_size=chunk_size)
         marker.write_bytes(original + b" ")
-        return contents
+        return slug
 
-    monkeypatch.setattr(workspace.os, "read", replace_after_read)
+    monkeypatch.setattr(kanban_archive_marker, "read_board_slug", replace_after_read)
     with pytest.raises(OSError, match="changed while reading"):
         workspace._read_archived_board_marker(marker)
 
