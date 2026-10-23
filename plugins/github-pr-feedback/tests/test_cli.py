@@ -900,7 +900,7 @@ def _windows_scan_lock_worker(
             release.wait(10)
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_windows_fresh_scan_lock_has_no_prelock_write_race(tmp_path: Path) -> None:
     import multiprocessing
 

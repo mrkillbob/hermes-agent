@@ -1874,7 +1874,7 @@ def test_kanban_protocol_evidence_is_not_a_base64_false_positive(
 
 
 def test_content_free_violation_locations_never_return_keys_or_values():
-    from agent.llm_egress_firewall import content_free_violation_locations
+    from agent.llm_egress_content_diagnostics import content_free_violation_locations
 
     private_path = "/Users/private/repository/file.py"
     encoded = base64.b64encode(b"encoded private detail").decode("ascii")

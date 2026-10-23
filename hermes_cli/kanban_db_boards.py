@@ -83,16 +83,40 @@ def board_ownership_lock(board: Optional[str]):
     return _FileLock(_kb.kanban_home() / "runtime" / "board-ownership" / f"{slug}.lock")
 
 
+def board_project_ownership_lock(board: Optional[str] = None):
+    """Serialize board-catalog/project-owner publication with exact reconciliation.
+
+    Per-slug locks cannot fence a publisher that creates a new board slug while a
+    registry reconciliation is validating the complete board inventory. This
+    stable root-scoped lock coordinates supported catalog publishers with that
+    operator repair; it does not grant board access or project authorization.
+    """
+    from hermes_cli.active_sessions import _FileLock
+
+    # Resolve None to the default board before the guard so refusal occurs
+    # before this process creates any lock-file or runtime directory.
+    _kb._assert_not_delegated_child_mutation(
+        _kb.board_dir(_kb._slug_or_default(board))
+    )
+    # Keep this lock in its own namespace: "catalog" is a valid board slug
+    # and already owns runtime/board-ownership/catalog.lock.
+    return _FileLock(_kb.kanban_home() / "runtime" / "board-project-catalog.lock")
+
+
 def write_board_metadata(
     board: Optional[str], *, name: Optional[str] = None, description: Optional[str] = None,
     icon: Optional[str] = None, color: Optional[str] = None, archived: Optional[bool] = None,
     default_workdir: Optional[str] = None, project_id: Optional[str] = None,
 ) -> dict:
     """Serialize metadata's read/modify/write with project-bound audit creation."""
-    with board_ownership_lock(board):
-        return _write_board_metadata(
-            board, name=name, description=description, icon=icon, color=color,
-            archived=archived, default_workdir=default_workdir, project_id=project_id)
+    # Every metadata write can publish a board marker on a DB-only directory,
+    # changing the complete inventory reviewed by reconciliation. Fence all
+    # public writes, including display-only updates whose project_id is None.
+    with board_project_ownership_lock(board):
+        with board_ownership_lock(board):
+            return _write_board_metadata(
+                board, name=name, description=description, icon=icon, color=color,
+                archived=archived, default_workdir=default_workdir, project_id=project_id)
 
 
 def _write_board_metadata(
@@ -140,13 +164,14 @@ def create_board(
     # Explicit creation clears any archived tombstone at this slug (left by
     # remove_board(archive=True)) — otherwise _kb.init_db() below would rightly
     # refuse to recreate the archived board's DB (#43243).
-    with board_ownership_lock(normed):
-        meta = _write_board_metadata(
-            normed, name=name, description=description, icon=icon, color=color,
-            default_workdir=default_workdir, project_id=project_id, archived=False,
-        )
-        # Touch the DB so list_boards() sees it immediately.
-        _kb.init_db(board=normed)
+    with board_project_ownership_lock(normed):
+        with board_ownership_lock(normed):
+            meta = _write_board_metadata(
+                normed, name=name, description=description, icon=icon, color=color,
+                default_workdir=default_workdir, project_id=project_id, archived=False,
+            )
+            # Touch the DB so list_boards() sees it immediately.
+            _kb.init_db(board=normed)
     return meta
 
 
@@ -178,8 +203,9 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
     """Archive (to ``boards/_archived/<slug>-<ts>/``) or delete a board;
     ``default`` cannot be removed. Returns ``{"slug", "action", "new_path"}``."""
     normed = _kb._require_slug(slug)
-    with board_ownership_lock(normed):
-        return _remove_board(normed, archive=archive)
+    with board_project_ownership_lock(normed):
+        with board_ownership_lock(normed):
+            return _remove_board(normed, archive=archive)
 
 
 def _remove_board(slug: str, *, archive: bool = True) -> dict:

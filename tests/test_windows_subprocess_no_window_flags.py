@@ -54,13 +54,14 @@ def _is_git_spawn(cmd) -> bool:
     return bool(cmd) and cmd[:2] == ["git", "-C"]
 
 
-def _make_fake_popen(spawns, *, stdout="ok\n", returncode=0):
+def _make_fake_popen(spawns, *, stdout="ok\n", returncode=0, pid=None):
     """Fast-path Popen stand-in: git returns within the budget."""
 
     class _FakePopen:
         def __init__(self, cmd, **kwargs):
             if _is_git_spawn(cmd):
                 spawns.append((cmd, kwargs))
+            self.pid = pid
             self.returncode = returncode
 
         def communicate(self, input=None, timeout=None):
@@ -116,15 +117,37 @@ def test_bounded_git_probe_fast_path_spawn_contract_windows(monkeypatch):
 
 def test_bounded_git_probe_nonzero_returncode_returns_empty(monkeypatch):
     from hermes_cli import _subprocess_compat
+    from hermes_cli.local_runtime import processes
+    from hermes_cli.probe_lifecycle import ProbeScope, bind_probe_scope
 
     spawns = []
-    monkeypatch.setattr(
-        _subprocess_compat.subprocess,
-        "Popen",
-        _make_fake_popen(spawns, stdout="garbage-should-not-leak\n", returncode=1),
-    )
+    # An opaque token cannot accidentally name a real process if this fixture
+    # escapes its controlled signal seam. Real Popen always supplies an identity.
+    identity = object()
+    groups, jobs = [], []
+    fake_popen = _make_fake_popen(
+        spawns, stdout="garbage-should-not-leak\n", returncode=1, pid=identity)
+    job = SimpleNamespace(close=lambda: jobs.append("closed"))
 
-    assert _subprocess_compat.bounded_git_probe(["git", "-C", "/repo", "status"], timeout=1.5) == ""
+    def close_group(pid, sig):
+        import signal
+
+        assert pid is identity
+        assert sig == signal.SIGKILL
+        groups.append(pid)
+
+    monkeypatch.setattr(_subprocess_compat.os, "killpg", close_group, raising=False)
+    monkeypatch.setattr(processes, "spawn_server", lambda cmd, **kw: (
+        fake_popen(cmd, **kw), job if _subprocess_compat.IS_WINDOWS else None))
+
+    scope = ProbeScope()
+    with bind_probe_scope(scope):
+        assert _subprocess_compat.bounded_git_probe(["git", "-C", "/repo", "status"], timeout=1.5) == ""
+    scope.close()
+
+    assert len(spawns) == 1
+    assert groups == ([] if _subprocess_compat.IS_WINDOWS else [identity])
+    assert jobs == (["closed"] if _subprocess_compat.IS_WINDOWS else [])
 
 
 

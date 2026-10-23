@@ -19,7 +19,8 @@ from typing import Dict, List, Optional, Tuple
 from agent.file_safety import HOME_CREDENTIAL_DIRS
 from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
 from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS
-from hermes_cli.profiles_remove import _rmtree_make_writable, _rmtree_with_retry, wait_profile_unowned
+from hermes_cli.profiles_remove import _rmtree_make_writable, _rmtree_with_retry, wait_profile_unowned, print_delete_summary
+from hermes_cli.profiles_lifecycle import profile_lifecycle_reservation, reserve_profile_operation
 from hermes_constants import (
     LOCAL_RUNTIME_ROOT_DIRS, PROFILE_ID_RE, clear_named_profile_deleted, mark_named_profile_deleted,
     named_profile_has_identity, named_profile_is_deleted, named_profile_is_live,
@@ -124,19 +125,23 @@ def _clone_all_copytree_ignore(source_dir: Path):
     only when the source is the default profile (see the two exclude sets above)."""
     source_resolved = source_dir.resolve()
     root_exclude = set(_CLONE_ALL_HISTORY_EXCLUDE_ROOT)
-    if source_resolved == _get_default_hermes_home().resolve():
+    default_source = source_resolved == _get_default_hermes_home().resolve()
+    if default_source:
         root_exclude |= _CLONE_ALL_DEFAULT_EXCLUDE_ROOT
 
     def _ignore(directory: str, names: list[str]) -> set:
         try:
-            at_root = Path(directory).resolve() == source_resolved
+            resolved = Path(directory).resolve()
+            at_root = resolved == source_resolved
         except (OSError, ValueError):
             # resolve() can fail on odd FS layouts (broken symlinks, missing parents).
             # Fail open — better to over-copy than silently drop user data.
-            at_root = False
+            resolved, at_root = None, False
         ignored = _non_exportable_entries(directory, names)
         if at_root:
             ignored.update(root_exclude & set(names))
+        if default_source and resolved == source_resolved / "runtime":
+            ignored.add("profile-lifecycle")
         return ignored
 
     return _ignore
@@ -1399,6 +1404,7 @@ def _bootstrap_profile_dir(profile_dir: Path, source_dir: Optional[Path],
         _clone_file(source_dir, profile_dir, SYNC_MANIFEST_NAME)
 
 
+@reserve_profile_operation("name")
 def create_profile(
     name: str, clone_from: Optional[str] = None, clone_all: bool = False, clone_config: bool = False,
     no_alias: bool = False, no_skills: bool = False, description: Optional[str] = None,
@@ -1738,29 +1744,6 @@ def _stop_bot_desktop(profile_dir: Path) -> None:
         reset_hermes_home_override(token)
 
 
-def _print_delete_summary(canon: str, profile_dir: Path, gw_running: bool, wrapper_path: Optional[Path]) -> None:
-    """Show what ``delete_profile`` is about to remove."""
-    model, provider = _read_config_model(profile_dir)
-    skill_count = _count_skills(profile_dir)
-    dist_name, dist_version, dist_source = _read_distribution_meta(profile_dir)
-    print(f"\nProfile: {canon}")
-    print(f"Path:    {profile_dir}")
-    if model:
-        print(f"Model:   {model}" + (f" ({provider})" if provider else ""))
-    if skill_count:
-        print(f"Skills:  {skill_count}")
-    if dist_name:
-        print(f"Distribution: {dist_name}@{dist_version or '?'}")
-        if dist_source:
-            print(f"Installed from: {dist_source}")
-    print("\nThis will permanently delete:")
-    print("  • All config, API keys, memories, sessions, skills, cron jobs")
-    if wrapper_path is not None:
-        print(f"  • Command alias ({wrapper_path})")
-    if gw_running:
-        print("  ⚠ Gateway is running — it will be stopped.")
-
-
 class ProfileIdentitySettlementPending(RuntimeError):
     """The profile's directory was deleted, but its durable session/routing identity was not
     settled (``hermes_cli.profile_identity.purge_profile_identity`` returned False).
@@ -1783,23 +1766,33 @@ class ProfileIdentitySettlementPending(RuntimeError):
 def delete_profile(name: str, yes: bool = False) -> Path:
     """Delete a profile, its wrapper script, and its gateway service (service disabled first
     to prevent auto-restart, gateway stopped if running)."""
-    canon = normalize_profile_name(name)
+    canon = _canon_valid(name)
     if canon == "default":
         raise ValueError("Cannot delete the default profile (~/.hermes).\nTo remove everything, use: hermes uninstall")
-    canon, profile_dir = _existing_profile_dir(canon)
+    expected_identity = None
+    if not yes:
+        from hermes_cli.profiles_remove import confirm_profile_delete
+        canon, profile_dir = _existing_profile_dir(canon)
+        expected_identity = confirm_profile_delete(canon, profile_dir)
+        if expected_identity is None:
+            return profile_dir
+
+    # Human input cannot reserve a name indefinitely. Bind confirmation to the original
+    # directory, then re-read runtime ownership under the normal lifecycle reservation.
+    with profile_lifecycle_reservation(get_profile_dir(canon)):
+        canon, profile_dir = _existing_profile_dir(canon)
+        current = profile_dir.stat()
+        if expected_identity is not None and (current.st_dev, current.st_ino, current.st_ctime_ns) != expected_identity:
+            raise RuntimeError(f"Profile '{canon}' changed while awaiting confirmation; review it before deleting.")
+        return _delete_profile_reserved(canon, profile_dir, show_summary=yes)
+
+
+def _delete_profile_reserved(canon: str, profile_dir: Path, *, show_summary: bool) -> Path:
+    """Run native teardown only while the caller holds this profile's reservation."""
     gw_running = _check_gateway_running(profile_dir)
     wrapper_path = _find_our_wrapper(canon)
-    _print_delete_summary(canon, profile_dir, gw_running, wrapper_path)
-    if not yes:
-        print()
-        try:
-            confirm = input(f"Type '{canon}' to confirm: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            confirm = None
-            print()
-        if confirm != canon:
-            print("Cancelled.")
-            return profile_dir
+    if show_summary:
+        print_delete_summary(canon, profile_dir, gw_running, wrapper_path)
 
     # 1. Disable service (prevents auto-restart); drop the s6 slot on container (host no-op).
     _cleanup_gateway_service(canon, profile_dir)
@@ -1865,6 +1858,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
         _rmtree_with_retry(profile_dir, _rmtree_make_writable)
         print(f"✓ Removed {profile_dir}")
     except Exception as e:
+        logger.exception("Profile directory removal failed")
         print(f"⚠ Could not remove {profile_dir}: {e}")
         remove_error = e
 
@@ -1945,14 +1939,14 @@ def _cleanup_gateway_service(name: str, profile_dir: Path) -> bool:
         def _run(*cmd: str) -> None:
             subprocess.run(list(cmd), capture_output=True, check=False, timeout=10)
 
-        from hermes_cli.profiles_service_cleanup import remove_system_systemd_unit, remove_windows_task
+        from hermes_cli.profiles_service_cleanup import owned_by_profile, remove_system_systemd_unit, remove_windows_task
 
         system = _platform.system()
         removed = False
         if system == "Linux":
             svc_name = get_service_name()
             svc_file = user_systemd_unit_dir() / f"{svc_name}.service"
-            if svc_file.exists():
+            if svc_file.exists() and owned_by_profile(svc_file, profile_dir):
                 _run("systemctl", "--user", "disable", svc_name)
                 _run("systemctl", "--user", "stop", svc_name)
                 svc_file.unlink(missing_ok=True)
@@ -1961,10 +1955,10 @@ def _cleanup_gateway_service(name: str, profile_dir: Path) -> bool:
                 removed = True
             # `gateway install --system` writes the same name under /etc; a survivor there
             # restarts the removed profile at boot exactly like the user unit at login.
-            removed = remove_system_systemd_unit() or removed
+            removed = remove_system_systemd_unit(profile_dir) or removed
         elif system == "Darwin":
             plist_path = get_launchd_plist_path()
-            if plist_path.exists():
+            if plist_path.exists() and owned_by_profile(plist_path, profile_dir):
                 _run("launchctl", "unload", str(plist_path))
                 plist_path.unlink(missing_ok=True)
                 print("✓ Launchd service removed")
@@ -2242,29 +2236,31 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
             "Specify a different name: hermes profile import <archive> --name <name>"
         )
     profile_dir = get_profile_dir(canon)
-    if profile_dir.exists():
-        raise _profile_exists_error(canon)
-    _get_profiles_root().mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="hermes_profile_import_") as tmpdir:
-        staging_root = Path(tmpdir)
-        safe_extract_targz(archive, staging_root)
-        extracted = staging_root / archive_root
-        if not extracted.is_dir():
-            raise ValueError(f"Profile archive root is missing or invalid: {archive_root}")
-        final_source = extracted
-        if archive_root != canon:
-            final_source = staging_root / canon
-            extracted.rename(final_source)
-        # Remove foreign runtime state before publishing, including file-shaped roots.
-        # A failed removal must abort import rather than install a stale PM selection.
-        for child in final_source.iterdir():
-            if child.name in PM_RUNTIME_ROOT_DIRS:
-                if child.is_dir():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-        shutil.move(str(final_source), str(profile_dir))
-    return profile_dir
+    with profile_lifecycle_reservation(profile_dir):
+        if profile_dir.exists():
+            raise _profile_exists_error(canon)
+        _get_profiles_root().mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="hermes_profile_import_") as tmpdir:
+            staging_root = Path(tmpdir)
+            safe_extract_targz(archive, staging_root)
+            extracted = staging_root / archive_root
+            if not extracted.is_dir():
+                raise ValueError(f"Profile archive root is missing or invalid: {archive_root}")
+            final_source = extracted
+            if archive_root != canon:
+                final_source = staging_root / canon
+                extracted.rename(final_source)
+            # Remove foreign runtime state before publishing, including file-shaped roots.
+            # A failed removal must abort import rather than install a stale PM selection.
+            for child in final_source.iterdir():
+                if child.name in PM_RUNTIME_ROOT_DIRS:
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+            shutil.move(str(final_source), str(profile_dir))
+        clear_named_profile_deleted(profile_dir)
+        return profile_dir
 
 
 # Rename
@@ -2284,6 +2280,7 @@ def _record_profile_rename(new_dir: Path, old_canon: str) -> None:
         logger.debug("profile rename: could not record previous name %r in %s: %s", old_canon, new_dir, exc)
 
 
+@reserve_profile_operation("old_name", "new_name")
 def rename_profile(old_name: str, new_name: str) -> Path:
     """Rename a profile: directory, wrapper script, service, active_profile. The default
     profile's home IS the installation root, so "renaming" it sets a presentation-only

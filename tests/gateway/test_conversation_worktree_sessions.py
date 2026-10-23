@@ -48,9 +48,21 @@ class _Manager:
         assert conversation_kind == "interactive"
         if self.fail_new:
             raise ConversationWorktreeError("bootstrap did not complete", phase="bootstrap")
+        self.bound_roots.append(root_session_id)
+        return self._binding(root_session_id)
+
+    def _binding(self, root_session_id: str) -> ConversationWorktreeBinding:
         path = self.root / root_session_id
         path.mkdir(parents=True, exist_ok=True)
-        self.bound_roots.append(root_session_id)
+        # Match the real manager's ownership prerequisite for native root leases.
+        from agent.conversation_worktree import _common_owner_claim_path
+
+        claim = _common_owner_claim_path(self.root, path)
+        claim.parent.mkdir(exist_ok=True)
+        claim.write_text(json.dumps({
+            "owner": "conversation-worktree-manager", "root_session_id": root_session_id,
+            "worktree_path": str(path.resolve()), "repo_common_dir": str(self.root.resolve()),
+        }))
         return ConversationWorktreeBinding(
             root_session_id=root_session_id,
             path=path,
@@ -257,7 +269,7 @@ def test_failed_gateway_switch_releases_only_new_target_candidate(
     first = store.get_or_create_session(source)
     old_lease = store._conversation_root_leases[first.session_id]
     target = "resume-target"
-    (manager.root / target).mkdir(parents=True)
+    manager._binding(target)
     monkeypatch.setattr(store, "_save", lambda: (_ for _ in ()).throw(OSError("denied")))
 
     with pytest.raises(OSError, match="denied"):
@@ -273,7 +285,7 @@ def test_concurrent_gateway_switch_releases_discarded_target_candidate(
 ):
     first = store.get_or_create_session(source)
     target = "resume-target"
-    (manager.root / target).mkdir(parents=True)
+    manager._binding(target)
     winner = SimpleNamespace(session_id="winner", conversation_worktree={})
     original_resolve = manager.resolve_existing_session
 
@@ -543,11 +555,7 @@ def test_explicit_fork_creation_failed_root_uses_recoverable_binding(store, mana
 
         def bind_new_root_session(self, session_id, *, conversation_kind):
             assert conversation_kind == "interactive"
-            return ConversationWorktreeBinding(
-                root_session_id=session_id, path=manager.root / session_id,
-                branch=f"hermes/session/{session_id}", base_commit="a" * 40,
-                repo_common_dir=manager.root,
-            )
+            return manager.bind_new_root_session(session_id, conversation_kind=conversation_kind)
 
     recovering = _RecoveringManager()
     store._db = _Db()
@@ -740,7 +748,7 @@ async def test_first_cli_handoff_reuses_verified_workspace_without_binding_claim
     from gateway.run import GatewayRunner
 
     cli_workspace = manager.root / "cli-session"
-    cli_workspace.mkdir(parents=True)
+    manager._binding("cli-session")
     config = GatewayConfig(
         platforms={Platform.DISCORD: PlatformConfig(enabled=True, token="test")}
     )

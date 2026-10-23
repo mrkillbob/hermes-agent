@@ -225,11 +225,35 @@ async function withTransientRetries(run, options: any = {}) {
   throw lastError
 }
 
+function boundedTicketDiagnostic(error: unknown): string | undefined {
+  if (!(error instanceof Error) || error.message !== 'Gateway ticket bootstrap failed') {
+    return
+  }
+
+  const line = error.stack?.split('\n').at(-1)
+  const match = line?.match(/^\[gateway-ticket cause=(deadline|response_too_large|ECONNREFUSED|ECONNRESET|ENOENT|ENOTDIR|EACCES|EPERM|EPIPE|ETIMEDOUT|socket_error) elapsed_ms=(\d{1,5}) connected=(true|false) received_data=(true|false)\]$/)
+
+  if (match && 'reason' in error && error.reason === match[1] && Number(match[2]) <= 60_000) {
+    return match[0]
+  }
+}
+
 /** Serialize a fresh-WS-URL attempt across Electron's IPC boundary. */
-async function gatewayWsUrlIpcResult(resolveWsUrl: () => Promise<string>) {
+async function gatewayWsUrlIpcResult(resolveWsUrl: () => Promise<string>, reportTicketFailure?: (diagnostic: string) => void) {
   try {
     return { ok: true as const, wsUrl: await resolveWsUrl() }
   } catch (error) {
+    const diagnostic = boundedTicketDiagnostic(error)
+
+    if (diagnostic && reportTicketFailure) {
+      // Diagnostic sinks must not replace the connection failure sent to the renderer.
+      try {
+        reportTicketFailure(diagnostic)
+      } catch {
+        // Keep logging failure observational; the IPC result below remains authoritative.
+      }
+    }
+
     return {
       error: error instanceof Error ? error.message : String(error),
       ...(isGatewayAuthRejection(error) ? { needsOauthLogin: true as const } : {}),

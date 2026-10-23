@@ -22,16 +22,25 @@ _GITHUB_ORIGIN = re.compile(
 _SHA = re.compile(r"[0-9a-f]{40}")
 
 
+def _run_git(args, *, cwd, timeout=10, check=False):
+    """Keep source-channel probes in the caller's bounded process lifetime."""
+    from hermes_cli._subprocess_compat import bounded_probe_run
+    from hermes_cli.source_check import source_git_env
+
+    result = bounded_probe_run(args, cwd=cwd, timeout=timeout, env=source_git_env(),
+                               raise_on_spawn_failure=True)
+    if result is None:
+        raise subprocess.TimeoutExpired(args, timeout)
+    if check:
+        result.check_returncode()
+    return result
+
+
 def source_repository(git_cmd=None, cwd=None) -> str:
     """GitHub forks own their releases; other origins must mirror official tags."""
     if git_cmd is not None:
-        from hermes_cli.source_check import source_git_env
-
-        result = subprocess.run(
+        result = _run_git(
             [*git_cmd, "config", "--get", "remote.origin.url"], cwd=cwd,
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
-            stdin=subprocess.DEVNULL, env=source_git_env(),
-            check=False,
         )
         match = _GITHUB_ORIGIN.fullmatch(result.stdout.strip())
         if result.returncode == 0 and match:
@@ -126,13 +135,8 @@ def _probe(git_cmd, cwd, *args):
     Before the updater's fetch the release commit is usually absent, and git 2.43 spends 7-12 s
     of CPU on a blobless clone failing to find it even with lazy fetch off (#137646).
     """
-    from hermes_cli.source_check import source_git_env
-
     try:
-        return subprocess.run(
-            [*git_cmd, *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=10, stdin=subprocess.DEVNULL, env=source_git_env(),
-            check=False)
+        return _run_git([*git_cmd, *args], cwd=cwd)
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug("git %s did not answer: %s", " ".join(args), exc)
         return None
@@ -144,12 +148,9 @@ def _head_containing(git_cmd, cwd, commit: str, repository: str) -> str | None:
     An unchosen default must never move a checkout backward on a guess, so an
     unknown relation (shallow history, GitHub unreachable) keeps HEAD.
     """
-    from hermes_cli.source_check import _github_compare, source_git_env
+    from hermes_cli.source_check import _github_compare
 
-    head = subprocess.run(
-        [*git_cmd, "rev-parse", "HEAD"], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=10, stdin=subprocess.DEVNULL, env=source_git_env(), check=False,
-    ).stdout.strip()
+    head = _run_git([*git_cmd, "rev-parse", "HEAD"], cwd=cwd).stdout.strip()
     if not _SHA.fullmatch(head):
         return None
     # An unanswered probe falls through to the comparison API, as a shallow checkout's does.
@@ -242,13 +243,8 @@ def _refuse_retirement_downgrade(request: dict, terminal: dict, git_cmd, cwd) ->
         if tuple(map(int, installed_version.split("."))) > tuple(map(int, request["sourceVersion"].split("."))):
             raise ValueError("Source retirement would downgrade a newer source version; select the destination channel explicitly")
     if git_cmd is not None:
-        from hermes_cli.source_check import source_git_env
-
-        result = subprocess.run(
+        result = _run_git(
             [*git_cmd, "rev-list", "--ancestry-path", f"{request['commit']}..HEAD"], cwd=cwd,
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
-            stdin=subprocess.DEVNULL, env=source_git_env(),
-            check=False,
         )
         # The target need not exist locally before the updater's fetch. When it
         # does, any descendants prove that this pinned build would roll us back.
@@ -261,10 +257,8 @@ def _refuse_retirement_downgrade(request: dict, terminal: dict, git_cmd, cwd) ->
             if current_manifest is None:
                 raise ValueError("Source retirement cannot verify the current destination build")
             current = current_manifest["request"]
-            installed = subprocess.run(
+            installed = _run_git(
                 [*git_cmd, "rev-parse", "HEAD"], cwd=cwd, check=True,
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
-                stdin=subprocess.DEVNULL, env=source_git_env(),
             ).stdout.strip()
             if installed == current["commit"] and installed != request["commit"]:
                 raise ValueError("Source retirement would downgrade the newer destination build; select the destination channel explicitly")
@@ -382,14 +376,10 @@ def _resolve_release(channel: str, git_cmd=None, cwd=None, *, repository=None,
     if not isinstance(sha, str) or not _SHA.fullmatch(sha):
         raise ValueError(f"No published commit for release {tag}")
     if git_cmd is not None:
-        from hermes_cli.source_check import source_git_env
-
         ref = f"refs/tags/{tag}"
-        result = subprocess.run(
+        result = _run_git(
             [*git_cmd, "ls-remote", "--tags", "origin", ref, ref + "^{}"],
-            cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            check=True, timeout=60, stdin=subprocess.DEVNULL,
-            env=source_git_env(),
+            cwd=cwd, check=True, timeout=60,
         )
         refs = dict((parts[1], parts[0]) for line in result.stdout.splitlines()
                     if len(parts := line.split()) == 2)

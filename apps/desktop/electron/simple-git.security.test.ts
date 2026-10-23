@@ -54,66 +54,101 @@ test('an explicitly supplied VISUAL editor is rejected', async () => {
   )
 })
 
-test('the host tuple retains OS environment and exact argv while dropping ambient guarded keys', async () => {
-  const dir = tempDir()
-  const hostScript = path.join(dir, 'host (João).cjs')
-  const gitBin = String.raw`C:\Program Files\Git\cmd\git.exe`
-  const args = ['--version', 'file with spaces', '--', '-option-looking.txt']
+test.each([undefined, '1'])(
+  'the host tuple preserves trusted authentication, OS environment and argv (prompt %s)',
+  async prompt => {
+    const dir = tempDir()
+    const hostScript = path.join(dir, 'host (João).cjs')
+    const gitBin = String.raw`C:\Program Files\Git\cmd\git.exe`
+    const args = ['--version', 'file with spaces', '--', '-option-looking.txt']
 
-  const envKeys = [
-    'HERMES_GIT_ARGV0',
-    'GIT_TERMINAL_PROMPT',
-    'SystemRoot',
-    'HERMES_HOST_CONTROL',
-    'PATH',
-    'Path',
-    'VISUAL',
-    'GIT_SSH_COMMAND',
-    'git_config_count',
-    'git_config_key_0',
-    'git_config_value_0'
-  ]
-
-  fs.writeFileSync(
-    hostScript,
-    `process.stdout.write(JSON.stringify({ args: process.argv.slice(2), env: Object.fromEntries(${JSON.stringify(envKeys)}.map(key => [key, process.env[key]])) }))`
-  )
-  vi.stubEnv('VISUAL', 'echo harmless')
-  vi.stubEnv('GIT_SSH_COMMAND', 'echo harmless')
-  vi.stubEnv('git_config_count', '1')
-  vi.stubEnv('git_config_key_0', 'trailer.test.command')
-  vi.stubEnv('git_config_value_0', 'echo harmless')
-  vi.stubEnv('SystemRoot', 'C:\\Windows')
-  vi.stubEnv('HERMES_HOST_CONTROL', 'retained')
-  vi.resetModules()
-  vi.doMock('./no-console-git', async importOriginal => {
-    const actual = await importOriginal<typeof NoConsoleGit>()
-
-    return {
-      ...actual,
-      windowsGitHost: () => ({ isWindows: true, pythonBin: process.execPath, scriptPath: hostScript })
+    // These values originate in Electron main's process.env, never IPC or repository data.
+    const authentication = {
+      GIT_SSH_COMMAND: 'echo harmless',
+      GIT_SSH: 'trusted-ssh-bin',
+      GIT_ASKPASS: 'trusted-git-askpass',
+      SSH_ASKPASS: 'trusted-ssh-askpass'
     }
-  })
-
-  try {
-    const { gitFor: hostedGitFor } = await import('./git-review-ops')
-    const output = JSON.parse(await hostedGitFor(dir, gitBin).raw(args))
-
-    assert.deepEqual(output.args, args)
-    assert.equal(output.env.HERMES_GIT_ARGV0, JSON.stringify(gitBin))
-    assert.equal(output.env.GIT_TERMINAL_PROMPT, '0')
-    assert.equal(output.env.SystemRoot, 'C:\\Windows')
-    assert.equal(output.env.HERMES_HOST_CONTROL, 'retained')
-    assert.equal(output.env.PATH ?? output.env.Path, process.env.PATH ?? process.env.Path)
-
-    for (const key of ['VISUAL', 'GIT_SSH_COMMAND', 'git_config_count', 'git_config_key_0', 'git_config_value_0']) {
-      assert.equal(output.env[key], undefined)
+    const guarded = {
+      VISUAL: 'echo harmless',
+      EDITOR: 'echo harmless',
+      PAGER: 'echo harmless',
+      PREFIX: '/foreign',
+      GIT_PAGER: 'echo harmless',
+      GIT_EDITOR: 'echo harmless',
+      GIT_DIR: '/foreign/.git',
+      GIT_WORK_TREE: '/foreign',
+      GIT_INDEX_FILE: '/foreign/index',
+      GIT_OBJECT_DIRECTORY: '/foreign/objects',
+      GIT_CONFIG: '/foreign/config',
+      GIT_CONFIG_GLOBAL: '/foreign/global',
+      GIT_CONFIG_SYSTEM: '/foreign/system',
+      GIT_CONFIG_PARAMETERS: "'trailer.test.command=echo harmless'",
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'trailer.test.command',
+      GIT_CONFIG_VALUE_0: 'echo harmless',
+      git_config_count: '1',
+      git_config_key_0: 'trailer.test.command',
+      git_config_value_0: 'echo harmless',
+      Git_Config_Count: '1',
+      Git_Config_Key_0: 'trailer.test.command',
+      Git_Config_Value_0: 'echo harmless',
+      GIT_SSH_COMMAND_EXTRA: 'echo harmless'
     }
-  } finally {
-    vi.doUnmock('./no-console-git')
+    const envKeys = [
+      'HERMES_GIT_ARGV0',
+      'GIT_TERMINAL_PROMPT',
+      'SystemRoot',
+      'HERMES_HOST_CONTROL',
+      'PATH',
+      'Path',
+      ...Object.keys(authentication),
+      ...Object.keys(guarded)
+    ]
+
+    fs.writeFileSync(
+      hostScript,
+      `process.stdout.write(JSON.stringify({ args: process.argv.slice(2), env: Object.fromEntries(${JSON.stringify(envKeys)}.map(key => [key, process.env[key]])) }))`
+    )
+    for (const [key, value] of Object.entries({ ...authentication, ...guarded })) {
+      vi.stubEnv(key, value)
+    }
+    vi.stubEnv('GIT_TERMINAL_PROMPT', prompt)
+    vi.stubEnv('SystemRoot', 'C:\\Windows')
+    vi.stubEnv('HERMES_HOST_CONTROL', 'retained')
     vi.resetModules()
+    vi.doMock('./no-console-git', async importOriginal => {
+      const actual = await importOriginal<typeof NoConsoleGit>()
+
+      return {
+        ...actual,
+        windowsGitHost: () => ({ isWindows: true, pythonBin: process.execPath, scriptPath: hostScript })
+      }
+    })
+
+    try {
+      const { gitFor: hostedGitFor } = await import('./git-review-ops')
+      const output = JSON.parse(await hostedGitFor(dir, gitBin).raw(args))
+
+      assert.deepEqual(output.args, args)
+      assert.equal(output.env.HERMES_GIT_ARGV0, JSON.stringify(gitBin))
+      assert.equal(output.env.GIT_TERMINAL_PROMPT, prompt ?? '0')
+      assert.equal(output.env.SystemRoot, 'C:\\Windows')
+      assert.equal(output.env.HERMES_HOST_CONTROL, 'retained')
+      assert.equal(output.env.PATH ?? output.env.Path, process.env.PATH ?? process.env.Path)
+
+      for (const [key, value] of Object.entries(authentication)) {
+        assert.equal(output.env[key], value, `${key} must preserve the trusted process value`)
+      }
+      for (const key of Object.keys(guarded)) {
+        assert.equal(output.env[key], undefined, `${key} must remain guarded`)
+      }
+    } finally {
+      vi.doUnmock('./no-console-git')
+      vi.resetModules()
+    }
   }
-})
+)
 
 test('review stage, unstage, diff and commit retain literal option-looking filenames', async () => {
   const dir = tempDir()

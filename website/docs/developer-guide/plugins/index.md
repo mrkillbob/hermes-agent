@@ -143,9 +143,46 @@ call to that server that is not annotated `readOnlyHint: true` asks the user
 first, and fails closed where nobody can answer (cron, unattended runs). The
 only other accepted value is `full`, the default, so a package can narrow
 access but never widen it. A `config.yaml` server with the same name replaces
-the package's entry, including its trust. Other harnesses ignore this extension.
+the package's entry, including its trust, but keeps the package's declared costs
+and spend limit (below) unless it sets its own. Other harnesses ignore this extension.
 `trust` can sit beside `app`, `requires` and `liveness` in the same server
 entry (see [Application declarations](./application-declarations.md)).
+
+A server whose tools spend money or credits can declare what each call costs
+and a budget per chat. Hermes then names the cost in the approval prompt along
+with the chat's running total, and a call that would take the chat past
+`spend_limit` asks first even when the user has made the server trusted:
+
+```json
+{
+  "extensions": {
+    "com.nousresearch.hermes": {
+      "servers": {
+        "renders": {
+          "trust": "untrusted",
+          "costs": {
+            "create_image": 20,
+            "animate": { "credits": [5, 20], "note": "per animation" }
+          },
+          "spend_limit": 100,
+          "cost_unit": "credits"
+        }
+      }
+    }
+  }
+}
+```
+
+Keys of `costs` are MCP tool names as the server lists them. A cost is a
+non-negative number, a `[min, max]` range, or an object with `credits` (number
+or range) and a short `note`. `spend_limit` is optional (`0` or absent = no
+limit) and `cost_unit` defaults to `credits`. A malformed table makes the
+package fail to load with an error naming the key. These map to the native
+`tool_costs`, `spend_limit` and `cost_unit` keys (see
+[Tool costs and spend limits](../../user-guide/features/mcp.md#tool-costs-and-spend-limits)).
+Costs are facts about the server, so they survive a user's same-name
+`config.yaml` entry (the way a user widens trust) unless that entry sets the
+key itself; the user's `spend_limit` wins, including `0` to turn it off.
 
 A long-running server can also declare a Hermes-specific tool-call `timeout`
 (in seconds) in `plugin.json`, without changing other servers' defaults:
@@ -939,7 +976,7 @@ Config and state have different owners: settings are user-visible behavior in
 
 ### Passive Kanban snapshots
 
-`ctx.kanban_readonly_snapshot(board, *, idempotency_key=None, idempotency_prefix=None)`
+`ctx.kanban_readonly_snapshot(board, *, idempotency_key=None, idempotency_prefix=None, row_projector=None)`
 is an additive in-process capability for unfenced control-plane plugins. It binds
 an explicit existing board to the registered owning home and refuses conflicting
 active/native roots, worker/delegation identity or path pins (including empty
@@ -955,10 +992,28 @@ archived rows. The selectors are mutually exclusive, nonempty text of at most
 512 characters; prefixes have no wildcard semantics. Plugins own the meaning of
 their keys and any domain-specific parsing or reconciliation.
 
+An optional trusted in-process `row_projector` callable can qualify each original
+row and return a compact dictionary, without retaining or returning unrelated
+body prose. It requires a selector and is not a serialized API, authorization
+capability, or permission to skip malformed rows. Exceptions refuse the complete
+snapshot. The original per-row byte, row-count and deadline bounds still apply;
+the aggregate returned-byte bound applies to the projected representation. For
+avoidance of doubt, original input processed can exceed 8 MiB. Projection changes
+the former all-column aggregate accounting to retained/returned encoded result
+size; it does not preserve an 8 MiB aggregate raw-processing cap. Every original
+row still must qualify within the per-row, row-count and deadline bounds. For
+example, the feedback plugin validates every legacy key and receipt hash before
+projecting identity proofs, including archived tasks. It does not cache or grant
+trust to those proofs. Database changes during enumeration and changes to the
+owner root, board marker or database identity fail closed at final revalidation.
+Board markers must be regular files of at most 64 KiB; bounded reads verify
+path/descriptor identity and unchanged size/timestamps within the same deadline.
+
 Reads use one existing canonical SQLite file in `mode=ro`, with query-only and
 trusted-schema restrictions. No initialization, migration, readiness update,
 current-board change or fallback occurs. A snapshot either completes within
-10,000 rows, 8 MiB of encoded task rows, 1 MiB per row and one second, or raises
+10,000 rows, 8 MiB of encoded returned rows, 1 MiB per original/returned row
+and one second, or raises
 `ValueError` without partial data. Returned values are JSON-safe dictionaries,
 strings and scalar values, never live database objects. Missing schema or
 unavailable/unsupported contexts fail closed. Normal SQLite coordination may

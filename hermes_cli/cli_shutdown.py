@@ -146,11 +146,17 @@ def _shutdown_cached_aux_clients() -> None:
     shutdown_cached_clients()
 
 
+def _shutdown_banner_probes() -> None:
+    from hermes_cli.banner import shutdown_prefetch_probes
+    shutdown_prefetch_probes()
+
+
 # Ordered teardown steps (attribute names, resolved at call time so tests can patch them)
 # and the exception class each swallows.
 # Async delegations and MCP servers live in the gateway, which owns their lifetime: a CLI exit
 # neither interrupts the delegations nor tears down MCP servers.
 _CLEANUP_STEPS = (
+    ("_shutdown_banner_probes", Exception),
     ("_stop_cli_wake_word", Exception), ("_cleanup_all_terminals", Exception),
     ("_cleanup_all_browsers", Exception), ("_shutdown_cached_aux_clients", Exception),
 )

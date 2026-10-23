@@ -324,9 +324,13 @@ async def start_gateway(profile: Optional[str] = None):
 
 
 @router.post("/api/gateway/stop")
-async def stop_gateway(profile: Optional[str] = None):
+async def stop_gateway(profile: Optional[str] = None, interrupt: bool = False):
+    from hermes_cli.web_server_gateway import live_session_refusal
+    # Live sessions refuse a stop unless the caller interrupts them deliberately (`?interrupt=true`).
+    if not interrupt and (refusal := await asyncio.to_thread(live_session_refusal, profile, "stop")):
+        raise HTTPException(status_code=409, detail=refusal)
     with http_failure("Failed to spawn gateway stop", 500, "Failed to stop gateway"):
-        proc = _spawn_hermes_action(_gateway_subcommand(profile, "stop"), "gateway-stop")
+        proc = _spawn_hermes_action(_gateway_subcommand(profile, "stop") + ["--interrupt"] * interrupt, "gateway-stop")
     return {"ok": True, "pid": proc.pid, "name": "gateway-stop"}
 
 

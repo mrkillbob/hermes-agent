@@ -585,8 +585,12 @@ def test_unknown_existing_slot_does_not_reclaim_held_lease(fresh_pool):
     source, pool, receipt, namespace, _, ledger, _ = fresh_pool
     pool._slot_path(receipt, 0, namespace).mkdir(parents=True)
     now = datetime.now(UTC)
-    ledger.claim_worktree_slot(_pool_ledger_slot(namespace, 0), owner_pid=9876,
-                   head_sha='b' * 40, claimed_at=now, stale_before=now-timedelta(hours=10))
+    from github_pr_feedback.worktree_lifecycle import materialization_for
+    candidate = pool._slot_path(receipt, 0, namespace)
+    with materialization_for(source, candidate, receipt.repository, ledger=ledger.path,
+                             slot_id=_pool_ledger_slot(namespace, 0)):
+        ledger.claim_worktree_slot(_pool_ledger_slot(namespace, 0), owner_pid=9876,
+                       head_sha='b' * 40, claimed_at=now, stale_before=now-timedelta(hours=10))
     slot = _pool_ledger_slot(namespace, 0)
     before = ledger._connection.execute(
         'SELECT * FROM worktree_pool_slots WHERE slot_id=?', (slot,)).fetchone()

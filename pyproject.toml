@@ -54,6 +54,10 @@ dependencies = [
   "tomli-w==1.2.0; python_version >= '3.14'",  # Preserve relative dependency paths in staged plugin metadata.
   # 0.18.17 requires ruamel.yaml.clib on 3.14, which has no Windows ARM64 wheel.
   "ruamel.yaml==0.18.16; python_version >= '3.14'",
+  # 0.18.16 only pulls in its C parser below 3.14, so every 3.14 install parsed YAML
+  # (plugin manifests, config) in pure Python: ~5 s of gateway startup on 1 vCPU.
+  # Declared where clib ships a cp314 wheel; elsewhere hermes_yaml falls back to pure.
+  "ruamel.yaml.clib==0.2.15; python_version >= '3.14' and platform_python_implementation == 'CPython' and (sys_platform == 'darwin' or (sys_platform == 'linux' and platform_machine in 'x86_64 aarch64 i686') or (sys_platform == 'win32' and platform_machine in 'AMD64 x86'))",
   "requests==2.33.0; python_version >= '3.14'",  # CVE-2026-25645
   "jinja2==3.1.6; python_version >= '3.14'",
   # Document-to-Markdown extraction for read_file (PDF, legacy Office,
@@ -425,14 +429,14 @@ acp = ["agent-client-protocol==0.9.0"]
 # pm (stt.mistral / tts.mistral) at first use — deliberately
 # NOT re-added to [all] so a future quarantined release can't break fresh
 # installs (see [all] policy comment below).
-mistral = ["mistralai==2.4.8"]
+mistral = ["mistralai==2.9.2"]
 # OTLP gateway monitoring export (optional). Provides the OpenTelemetry SDK +
 # OTLP/HTTP exporter for monitoring.gateway_health_export. Lazy-installed via
 # PM on first use; never a core dependency and deliberately
 # NOT in [all].
 otlp = [
-  "opentelemetry-sdk==1.39.1",
-  "opentelemetry-exporter-otlp-proto-http==1.39.1",
+  "opentelemetry-sdk==1.45.1",
+  "opentelemetry-exporter-otlp-proto-http==1.45.1",
 ]
 langfuse = ["langfuse==4.15.2"]
 bedrock = ["boto3==1.42.89"]
@@ -643,12 +647,8 @@ override-dependencies = [
 # check), never on users' machines: PM installs from this vetted lock and drops the
 # cutoff from what it generates (pm/workspace.py::_trust_core_lock), because many
 # package mirrors publish no upload times and uv rejects a file it cannot date
-# (#135589). Exact pins follow the same 3-day rule unless explicitly excepted below.
+# (#135589). Exact pins follow the same 3-day rule.
 exclude-newer = "3 days"
-# Approved GHSA-6q48-6c7w-9gw2 exception for the exact certifi pin above.
-# This cutoff admits only its verified artifacts, never later uploads.
-# Remove after 2026-10-23T02:24:16.604828Z, when normal quarantine is satisfied.
-exclude-newer-package = { certifi = "2026-10-20T02:24:17Z" }
 
 [tool.setuptools]
 # Root single-file modules are derived by setup.py at build time from the

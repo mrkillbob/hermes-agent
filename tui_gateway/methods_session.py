@@ -1413,32 +1413,6 @@ def _title_read(session: dict, db, key: str) -> str:
     return resolved_title
 
 
-def _conversation_cleanup_status(
-    verdict,
-    record,
-    *,
-    removed: bool,
-    failure_phase: str | None = None,
-    failure_message: str | None = None,
-) -> dict:
-    """Project a cleanup decision into the stable JSON-RPC response shape."""
-    result = {
-        "allowed": bool(verdict.allowed),
-        "reasons": list(verdict.reasons),
-        "removed": bool(removed),
-        "root_session_id": str(record.root_session_id),
-        "path": str(record.worktree_path),
-        "branch": str(record.branch),
-        "base_commit": str(record.base_commit),
-        "state": str(record.state),
-    }
-    if failure_phase is not None:
-        result["failure_phase"] = str(failure_phase)
-    if failure_message is not None:
-        result["failure_message"] = str(failure_message)
-    return result
-
-
 @method("session.worktree_cleanup")
 def _(rid, params: dict) -> dict:
     """Inspect or explicitly remove one exact managed conversation worktree."""
@@ -1446,8 +1420,8 @@ def _(rid, params: dict) -> dict:
     if not target:
         return _err(rid, 4006, "session_id required")
     action = str(params.get("action") or "inspect").strip()
-    if action not in {"inspect", "remove"}:
-        return _err(rid, 4006, "action must be 'inspect' or 'remove'")
+    if action not in {"inspect", "remove", "quarantine", "restore", "reconcile"}:
+        return _err(rid, 4006, "invalid worktree cleanup action")
 
     profile = str(params.get("profile") or "").strip() or None
     profile_home = _profile_home(profile)
@@ -1504,7 +1478,11 @@ def _(rid, params: dict) -> dict:
             # Cleanup performs bounded Git subprocesses; do not hold the global
             # session registry lock while it runs. Root-lease fencing governs the
             # destructive race after the active-state snapshot above.
+            result = None
             if action == "inspect":
+                result = manager.inspect_retention(root_session_id)
+                if result.outcome == "refused":
+                    result = None
                 verdict = manager.inspect_cleanup(
                     root_session_id,
                     active_session_bound=active,
@@ -1513,24 +1491,34 @@ def _(rid, params: dict) -> dict:
                 failure_phase = None
                 failure_message = None
             else:
-                result = manager.remove_after_explicit_request(
-                    root_session_id,
-                    active_session_bound=active,
-                )
+                operation = getattr(manager, {
+                    "remove": "remove_after_explicit_request",
+                    "quarantine": "quarantine_after_explicit_request",
+                    "restore": "restore_after_explicit_request",
+                    "reconcile": "reconcile_retention",
+                }[action])
+                result = operation(root_session_id, active_session_bound=active)
                 verdict = result.verdict
                 removed = result.removed
                 failure_phase = result.failure_phase
                 failure_message = result.failure_message
 
+            if result is not None and result.outcome in {"retained", "unknown"}:
+                verdict, removed = result.verdict, result.removed
+                failure_phase, failure_message = result.failure_phase, result.failure_message
             record = db.get_conversation_worktree(root_session_id)
             if record is None:
                 return _err(rid, 5036, "conversation worktree binding disappeared")
+            from .session_worktree_status import cleanup_status
             return _ok(
                 rid,
-                _conversation_cleanup_status(
+                cleanup_status(
                     verdict,
                     record,
                     removed=removed,
+                    outcome=result.outcome if result is not None else "inspected",
+                    retained_path=result.retained_path if result is not None else None,
+                    recovery_required=result.recovery_required if result is not None else False,
                     failure_phase=failure_phase,
                     failure_message=failure_message,
                 ),

@@ -278,6 +278,7 @@ class SessionActiveItem(Result):
     model: str
     preview: str
     session_key: str
+    source: str | None = None
     started_at: float
     status: LiveSessionStatus
     title: str
@@ -789,11 +790,14 @@ method("llm.oneshot", params=LlmOneshotParams, result=LlmOneshotResult,
 
 class SessionWorktreeCleanupParams(Params):
     session_id: str
-    action: str = "inspect"  # "inspect" | "remove"
+    action: str = "inspect"  # inspect | quarantine | restore | reconcile; remove refuses
     profile: str | None = None
 
 
 class SessionWorktreeCleanupResult(Result):
+    outcome: str = "inspected"
+    retained_path: str | None = None
+    recovery_required: bool = False
     allowed: bool
     reasons: list[str]
     removed: bool
@@ -807,4 +811,4 @@ class SessionWorktreeCleanupResult(Result):
 
 
 method("session.worktree_cleanup", params=SessionWorktreeCleanupParams, result=SessionWorktreeCleanupResult,
-       doc="Inspect or explicitly remove one managed conversation worktree.")
+       doc="Inspect, explicitly retain or restore one managed conversation worktree; removal is disabled.")

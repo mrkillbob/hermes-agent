@@ -228,3 +228,93 @@ def test_snapshot_file_stays_bound_to_registered_root_after_native_environment_c
     monkeypatch.setattr(kb, "board_exists", board_exists)
     result = ctx.kanban_readonly_snapshot("example", idempotency_prefix="example:")
     assert result["tasks"][0]["body"] == "private row"
+
+
+@pytest.mark.parametrize("projected", [False, True])
+@pytest.mark.parametrize("field", ["HERMES_HOME", "HERMES_KANBAN_HOME", "HERMES_CONTROL_HOME"])
+def test_admitted_snapshot_ignores_later_ambient_root_selection(board, tmp_path, monkeypatch, projected, field):
+    from hermes_cli import plugins_kanban as snapshots
+
+    ctx, home, _ = board
+    read = snapshots._rows
+
+    def change_ambient(*args, **kwargs):
+        rows = read(*args, **kwargs)
+        monkeypatch.setenv(field, str(tmp_path / "foreign"))
+        return rows
+
+    monkeypatch.setattr(snapshots, "_rows", change_ambient)
+    projection = {"row_projector": lambda row: {"id": row["id"]}} if projected else {}
+    result = ctx.kanban_readonly_snapshot("example", idempotency_prefix="example:", **projection)
+    assert result["control_root"] == str(home.resolve())
+    assert result["tasks"][0]["id"] == "one"
+    if not projected:
+        assert result["tasks"][0]["body"] == "private row"
+
+
+@pytest.mark.parametrize("change", ["manager-home", "manager-scope", "profile-context", "protected"])
+def test_admitted_snapshot_refuses_owner_or_protected_context_changes(board, tmp_path, monkeypatch, change):
+    from hermes_cli import plugins_kanban as snapshots
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+    ctx, _, _ = board
+    read = snapshots._rows
+    tokens = []
+
+    def change_owner(*args, **kwargs):
+        rows = read(*args, **kwargs)
+        actions = {
+            "manager-home": lambda: monkeypatch.setattr(ctx._manager, "home_path", tmp_path / "foreign"),
+            "manager-scope": lambda: monkeypatch.setattr(ctx._manager, "scope_key", str(tmp_path / "foreign")),
+            "profile-context": lambda: tokens.append(set_hermes_home_override(tmp_path / "foreign")),
+            "protected": lambda: monkeypatch.setenv("HERMES_KANBAN_TASK", ""),
+        }
+        actions[change]()
+        return rows
+
+    monkeypatch.setattr(snapshots, "_rows", change_owner)
+    try:
+        with pytest.raises(ValueError, match="^passive Kanban snapshot unavailable$"):
+            ctx.kanban_readonly_snapshot("example", idempotency_prefix="example:")
+    finally:
+        for token in reversed(tokens):
+            reset_hermes_home_override(token)
+
+
+@pytest.mark.parametrize("projected", [False, True])
+@pytest.mark.parametrize("registration", ["missing", "foreign-only", "captured-directory"])
+def test_registration_is_proved_in_captured_root(board, tmp_path, monkeypatch, projected, registration):
+    from hermes_cli import plugins_kanban as snapshots
+
+    ctx, home, path = board
+    marker = path.parent / "board.json"
+    if registration != "captured-directory":
+        marker.unlink()
+    else:
+        # Existing discovery trusts the directory slug, not JSON content.
+        marker.write_text('{"slug":"a-different-display-slug"}')
+    foreign = tmp_path / "foreign"
+    foreign_board = foreign / "kanban/boards/example"
+    foreign_board.mkdir(parents=True)
+    (foreign_board / "board.json").write_text('{"slug":"example"}')
+    (foreign_board / "kanban.db").write_bytes(path.read_bytes())
+    with closing(sqlite3.connect(foreign_board / "kanban.db")) as db:
+        db.execute("UPDATE tasks SET id='foreign', body='foreign row'")
+        db.commit()
+    admitted = snapshots._context_root
+
+    def drift_after_root_capture(manager):
+        root = admitted(manager)
+        if registration != "missing":
+            monkeypatch.setenv("HERMES_KANBAN_HOME", str(foreign))
+        return root
+
+    monkeypatch.setattr(snapshots, "_context_root", drift_after_root_capture)
+    projection = {"row_projector": lambda row: {"id": row["id"]}} if projected else {}
+    if registration == "captured-directory":
+        result = ctx.kanban_readonly_snapshot("example", idempotency_prefix="example:", **projection)
+        assert result["control_root"] == str(home.resolve())
+        assert [row["id"] for row in result["tasks"]] == ["one"]
+    else:
+        with pytest.raises(ValueError, match="^passive Kanban snapshot unavailable$"):
+            ctx.kanban_readonly_snapshot("example", idempotency_prefix="example:", **projection)

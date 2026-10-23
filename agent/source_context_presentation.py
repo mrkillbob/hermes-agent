@@ -9,9 +9,10 @@ from pathlib import Path, PurePosixPath
 import re
 
 from agent.llm_egress_firewall import (
-    SanitizedSegment, OutboundText, SourcePresentationSegment, UntrustedProvenanceSegment,
+    SanitizedSegment, OutboundText, SourcePresentationSegment,
     ValidatedToolSyntaxSegment, source_grant_digest,
 )
+from agent.llm_egress_refusal_origins import SourceBoundRefusalSegment
 
 READ_WITH_CONTEXT = 'read_file_with_context_v1'
 CONTEXT_TEXT = 'context_file_normalized_v1'
@@ -207,7 +208,7 @@ def segment_read_with_context(text, metadata, grant_texts, used_grants, *, regis
     """Preserve wire bytes while requiring one exact proof for each source component."""
     from agent.source_read_presentations import _segment_read_file_presentation
 
-    denied = UntrustedProvenanceSegment(sha256(text.encode('utf-8')).hexdigest())
+    denied = SourceBoundRefusalSegment(sha256(text.encode('utf-8')).hexdigest())
     if metadata.get('content_sha256') != sha256(text.encode('utf-8')).hexdigest():
         return denied
     try:

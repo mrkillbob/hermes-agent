@@ -110,11 +110,28 @@ def test_matching_schema_prose_does_not_authorize_user_content(tmp_path, monkeyp
 def test_diagnostics_follow_the_validated_identifier_encoding_scan():
     from agent.llm_egress_classifier import _typed_payload_violation_locations
     from agent.llm_egress_firewall import SanitizedSegment, ValidatedToolSyntaxSegment
+    from agent.egress_tool_syntax import validate_tool_syntax
+
     assert _typed_payload_violation_locations([
         ValidatedToolSyntaxSegment('literal_preservation', 'application_identifier'),
         ValidatedToolSyntaxSegment('prerequisite_checks', 'application_identifier'),
         ValidatedToolSyntaxSegment('tool_persistence', 'application_identifier'),
     ]) == ()
     assert _typed_payload_violation_locations([SanitizedSegment('c2VjcmV0LXBheWxvYWQ=')])
+    # A grammar-valid tool protocol identifier keeps its existing typed atom
+    # exemption from the Base64 scan.
+    valid_protocol_identifier = 'c2VjcmV0LXBheWxvYWQ'
+    assert validate_tool_syntax(
+        valid_protocol_identifier, 'tool_protocol_identifier'
+    ) == valid_protocol_identifier
     assert _typed_payload_violation_locations([
-        ValidatedToolSyntaxSegment('c2VjcmV0LXBheWxvYWQ=', 'application_identifier')])
+        ValidatedToolSyntaxSegment(valid_protocol_identifier, 'tool_protocol_identifier')
+    ]) == ()
+    # Invalid typed syntax is rendered empty before the final shape scan. It
+    # remains fail-closed as invalid_tool_syntax_segment, but its raw bytes
+    # are not reported as an encoding finding by this content-free helper.
+    invalid_application_identifier = 'c2VjcmV0LXBheWxvYWQ='
+    with pytest.raises(ValueError, match='invalid_tool_syntax_segment'):
+        validate_tool_syntax(invalid_application_identifier, 'application_identifier')
+    assert _typed_payload_violation_locations([ValidatedToolSyntaxSegment(
+        invalid_application_identifier, 'application_identifier')]) == ()

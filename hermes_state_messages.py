@@ -16,7 +16,7 @@ from agent.context_compressor import (
     _newest_checkpoint_carrier, split_user_originated_turn)
 from agent.memory_context import sanitize_context
 from agent.message_metadata import (
-    CANONICAL_ROW, DB_ROW_SNAPSHOT, MESSAGE_UID, TOOL_CALL_UID, TOOL_CALL_UIDS,
+    CANONICAL_ROW, DATA_USE, DB_ROW_SNAPSHOT, lift_data_use, MESSAGE_UID, TOOL_CALL_UID, TOOL_CALL_UIDS,
     index_tool_call_uids, message_uid_or_none, resolve_tool_call_uid, mint_uid, stamp_message_uid)
 from agent.message_sanitization import _sanitize_surrogates, coalesce_tool_call_id
 from hermes_cli.timefmt import coerce_epoch
@@ -269,7 +269,11 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
         encoded_content = self._encode_content(msg.get("content"))
         encoded_tool_calls = json.dumps(tool_calls) if tool_calls else None
         encoded_tool_name = _scrub_surrogates(msg.get("tool_name"))
-        display_metadata = self._encode_display_metadata(msg.get("display_metadata"))
+        display_metadata = msg.get("display_metadata")
+        if msg.get(DATA_USE) and isinstance(display_metadata, (dict, type(None))):
+            # Writers that copy a fixed field list (/branch) carry the key, not display_metadata.
+            display_metadata = {**(display_metadata or {}), DATA_USE: list(msg[DATA_USE])}
+        display_metadata = self._encode_display_metadata(display_metadata)
         identity_row = {
             "role": role, "content": encoded_content, "timestamp": message_timestamp,
             "tool_call_id": msg.get("tool_call_id"), "tool_calls": encoded_tool_calls,
@@ -456,13 +460,14 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
         self._bump_session_counters(conn, session_id, inserted, tool_calls_total, unit=False)
         return inserted
 
-    _ROW_STATE_KEYS = ("_row_id", DB_ROW_SNAPSHOT, "timestamp")
+    _ROW_STATE_KEYS = ("_row_id", DB_ROW_SNAPSHOT, "timestamp", "_compressed_summary")
 
     def _execute_transcript_write(self, fn, messages: list[dict[str, Any]], **kwargs):
         """``_execute_write(fn)`` for callbacks that stamp row state onto the caller's *messages* (every
         :meth:`_insert_message_rows` caller that passes caller-owned dicts; rewind and import insert fresh copies). Each attempt, and a final failure, restores the caller's
-        ``_row_id`` / digest / timestamp: a rolled-back insert's id is reused by SQLite, so a stale stamp
-        would make a later flush adopt another writer's row and drop this message."""
+        ``_row_id`` / digest / timestamp / inferred summary classification, preserving absent keys and
+        explicit values. A rolled-back insert's id is reused by SQLite, so a stale stamp would make
+        a later flush adopt another writer's row; an inferred marker must be proved anew on retry."""
         _absent = object()
         pre_state = [tuple(m.get(k, _absent) for k in self._ROW_STATE_KEYS) for m in messages]
 
@@ -930,6 +935,34 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
             carried_messages=carried_messages, covered_ids=covered_ids,
             unresolved_held=unresolved_held, held_for_cas=held_for_cas), compacted_messages)
 
+    def _carry_summary_markers(self, conn, session_id: str, messages: list[dict[str, Any]]) -> None:
+        """An unchanged durable carrier stays a carrier when a projection omits its private flag.
+
+        Match the logical identity, timestamp and displayed/API payload: a shared uid alone
+        must never classify a rewritten tool stub or another reply as a summary. Read donors
+        before archiving, on this transaction; another session cannot supply the classification.
+        """
+        def key(message):
+            role = message.get("role")
+            return (message_uid_or_none(message), role, message.get("timestamp"),
+                    self._encode_content(self._loaded_view_content(role, message.get("content"))),
+                    message.get("api_content"), message.get("tool_call_id"), message.get("tool_name"),
+                    json.dumps(_parse_tool_calls(message.get("tool_calls")), sort_keys=True))
+
+        carriers = set()
+        for row in conn.execute(
+                "SELECT role, content, timestamp, message_uid, api_content, tool_call_id, tool_calls, tool_name "
+                "FROM messages WHERE session_id = ? AND active = 1 AND _compressed_summary = 1 "
+                "AND message_uid IS NOT NULL AND message_uid <> ''", (session_id,)):
+            donor = dict(row)
+            donor[MESSAGE_UID] = row["message_uid"]
+            donor["content"] = self._decode_content(row["content"])
+            carriers.add(key(donor))
+        for message in messages:
+            if ("_compressed_summary" not in message and message_uid_or_none(message)
+                    and key(message) in carriers):
+                message["_compressed_summary"] = True
+
     def _archive_and_compact_on_conn(
             self, conn, session_id: str, compacted_messages: list[dict[str, Any]], *,
             model_config_patch: Optional[dict[str, Any]] = None, watermark: Optional[int] = None,
@@ -960,6 +993,7 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
                 from hermes_state_errors import HeldRowRewrittenError
                 raise HeldRowRewrittenError(
                     f"a held row of session {session_id} was rewritten in place before the commit")
+        self._carry_summary_markers(conn, session_id, compacted_messages)
         proved = self._proved_coverage(conn, session_id, covered_ids, unresolved_held, watermark)
         if proved is not None:
             return self._archive_named_rows(
@@ -1099,6 +1133,20 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
         """Fixed-width durable identity for indexed display-generation lookup."""
         return hashlib.sha256(repr(key).encode("utf-8", "surrogatepass")).digest()
 
+    @staticmethod
+    def _fold_summary_carrier(row, key: Any, first_by_uid: dict) -> Any:
+        """The display identity both display reads give *row*, scanning rows in ``id`` order.
+
+        A compaction carrier keeps its message's ``message_uid`` but not its content (the prior tail
+        wrapped around the summary), so it is a copy of the first row with that uid: shown once."""
+        uid = row["message_uid"]
+        if not uid:
+            return key
+        if row["_compressed_summary"]:
+            return first_by_uid.get(uid, key)
+        first_by_uid.setdefault(uid, key)
+        return key
+
     def _dedupe_display_generations(self, rows, *, drop_removed: bool = False):
         """Collapse compaction generations so each logical message appears once (the protected tail is copied
         into each generation: same role/content/timestamp, different ``active``/id); prefer the live row, then
@@ -1110,6 +1158,7 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
         (a micro-compaction merge also stands for the rows it absorbed)."""
         seen: dict[tuple[Any, ...], Any] = {}
         first_id: dict[tuple[Any, ...], int] = {}
+        uid_key: dict[Any, tuple[Any, ...]] = {}  # message_uid -> the display key of its first copy
         removed: dict[Any, bool] = {}  # copy identity -> its newest copy is removed (rows come in id order)
         identities: dict[tuple[Any, ...], list[Any]] = {}
         removed_ts: set[Any] = set()
@@ -1140,6 +1189,9 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
             if self._is_model_only_row(row):
                 continue
             key = key or self._display_dedupe_key(row)
+            # Only the summary carrier folds by uid: other rewritten copies (a pruned tool stub) must keep
+            # their archived original visible.
+            key = self._fold_summary_carrier(row, key, uid_key)
             cur = seen.get(key)
             if cur is None or (row["active"], row["id"]) > (cur["active"], cur["id"]):
                 seen[key] = row
@@ -1163,11 +1215,12 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
         on one definition of a logical message; the live copy wins its group via the read
         path's ``ORDER BY candidate.active DESC, candidate.id DESC``. Writes only on drift."""
         first_id: dict[bytes, int] = {}
+        uid_identity: dict[str, bytes] = {}  # message_uid -> its first copy's identity (the carrier rule)
         last_id = 0
         while True:
             rows = conn.execute(
                 "SELECT id, role, content, timestamp, tool_call_id, tool_calls, tool_name, "
-                "display_kind, display_metadata, display_order, display_identity, message_uid "
+                "display_kind, display_metadata, display_order, display_identity, message_uid, _compressed_summary "
                 "FROM messages INDEXED BY idx_messages_session_id "
                 "WHERE session_id = ? AND id > ? AND (active = 1 OR compacted = 1) "
                 "ORDER BY id LIMIT 1000",
@@ -1176,7 +1229,8 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
             updates = []
             for row in rows:
                 last_id = row["id"]
-                identity = self._display_identity(self._display_dedupe_key(row))
+                identity = self._fold_summary_carrier(
+                    row, self._display_identity(self._display_dedupe_key(row)), uid_identity)
                 # A row already holding this identity keeps its stored slot (an in-place prune changes a
                 # row's content, not its place); otherwise the slot is the identity's first row.
                 kept = row["display_order"] if row["display_identity"] == identity else None
@@ -1569,6 +1623,7 @@ class SessionMessagesMixin(UserMessageProjectionMixin, SessionDetachedResultsMix
             msg.update((col, row[col]) for col in ("api_content", "display_kind") if row[col])
             if row["display_metadata"] and (decoded := self._decode_display_metadata(row["display_metadata"])) is not None:
                 msg["display_metadata"] = decoded
+                lift_data_use(msg)
             if include_summary_markers and row["_compressed_summary"]:
                 msg["_compressed_summary"] = True
             msg.update(

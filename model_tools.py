@@ -263,6 +263,7 @@ def _tool_defs_cache_key(
     registry generation, config.yaml stat signature (dynamic schemas), kanban
     context, profile scope. check_fn results are TTL-cached in the registry.
     """
+    from tools.tool_presentation import current_frozen_editor_tool_names
     profile_scope = check_fn_cache_scope()
     if profile_scope == CHECK_FN_CACHE_BYPASS:
         return None
@@ -273,10 +274,11 @@ def _tool_defs_cache_key(
     except (FileNotFoundError, OSError, ImportError):
         cfg_fp = None
     return (
-        registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
+        registry.current_cache_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
         frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
         bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
         _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope,
+        current_frozen_editor_tool_names(),
     )
 
 
@@ -534,8 +536,14 @@ def _compute_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disa
     # Must be the LAST step (after sanitization); idempotent if called twice.
     try:
         from tools.tool_search import assemble_tool_defs, load_config as _load_ts_config
+        from tools.tool_presentation import current_frozen_editor_tool_names
         ts_cfg = _load_ts_config()
-        if not skip_tool_search_assembly and ts_cfg.enabled != "off":
+        # A frozen editor-only policy promises these exact schemas to the model.
+        # A narrowed or expanded catalog still follows ordinary progressive disclosure.
+        direct_names = current_frozen_editor_tool_names()
+        frozen_editor_catalog = direct_names is not None and direct_names == tuple(sorted(
+            tool['function']['name'] for tool in filtered_tools))
+        if not skip_tool_search_assembly and not frozen_editor_catalog and ts_cfg.enabled != "off":
             assembly = assemble_tool_defs(filtered_tools, context_length=_resolve_active_context_length(), config=ts_cfg)
             if assembly.activated and not quiet_mode:
                 print(f"🔎 Tool Search (tier {assembly.tier}): {assembly.deferred_count} "
@@ -735,7 +743,9 @@ def _dispatch_bridge_tool(function_name: str, function_args: dict[str, Any],
         return ts.dispatch_tool_search(args, current_tool_defs=current_defs, call=call), None
     if function_name == ts.TOOL_DESCRIBE_NAME:
         return ts.dispatch_tool_describe(args, current_tool_defs=current_defs, call=call), None
-    underlying_name, underlying_args, err = ts.resolve_underlying_call(args)
+    # Session-scoped names for the error path below: a core tool stripped from this
+    # session (clarify in a subagent) must not be told to "call it directly".
+    underlying_name, underlying_args, err = ts.resolve_underlying_call(args, ts.session_tool_names(current_defs))
     if err or not underlying_name:
         return tool_error(err or "tool_call could not be resolved"), None
     if underlying_name == ts.CONNECTOR_BATCH_SENTINEL:
@@ -747,9 +757,7 @@ def _dispatch_bridge_tool(function_name: str, function_args: dict[str, Any],
     # Session-gated GUI tools fail fast with their real reason (#120413):
     # tool_search can never surface them in this session.
     if underlying_name not in ts.scoped_deferrable_names(current_defs):
-        return tool_error(ts.out_of_scope_reason(underlying_name)
-                          or f"'{underlying_name}' is not available in this session. "
-                          "Use tool_search to find tools you can call."), None
+        return tool_error(ts.scope_block_reason(underlying_name)), None
     # Validate against the deferred tool's concrete schema — the generic
     # ``arguments: object`` bridge schema can't enforce it.
     probe_err = ts.validate_deferred_call_args(underlying_name, underlying_args)

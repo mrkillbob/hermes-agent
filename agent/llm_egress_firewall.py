@@ -35,6 +35,7 @@ from agent.redact import redact_sensitive_text
 from agent.source_fixed_literals import _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS
 from agent.egress_encoding_syntax import is_canonical_base64_encoding, is_iso_calendar_week
 from agent.egress_tool_syntax import validate_tool_syntax
+from agent.native_metadata_egress import NativeMetadataSegment, _render_bounded_sanitized
 
 
 class DestinationClass(StrEnum):
@@ -1494,47 +1495,6 @@ def redact_remote_unsafe_text(text: str) -> str:
     )
 
 
-def content_free_violation_locations(value: Any) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Return structural indexes and reasons without returning request text."""
-
-    locations: list[tuple[str, tuple[str, ...]]] = []
-    seen: set[int] = set()
-
-    def visit(item: Any, path: str) -> None:
-        if isinstance(item, str):
-            reasons: list[str] = []
-            if _contains_secret(item):
-                reasons.append("secret_detected")
-            if _contains_canonical_base64(item):
-                reasons.append("base64_payload")
-            if _contains_private_absolute_path(item):
-                reasons.append("private_absolute_path")
-            if reasons:
-                locations.append((path, tuple(reasons)))
-            return
-        if isinstance(item, Mapping):
-            identity = id(item)
-            if identity in seen:
-                locations.append((path, ("cyclic_container",)))
-                return
-            seen.add(identity)
-            for index, (key, child) in enumerate(item.items()):
-                visit(key, f"{path}.map[{index}].key")
-                visit(child, f"{path}.map[{index}].value")
-            return
-        if isinstance(item, (list, tuple, set, frozenset)):
-            identity = id(item)
-            if identity in seen:
-                locations.append((path, ("cyclic_container",)))
-                return
-            seen.add(identity)
-            for index, child in enumerate(item):
-                visit(child, f"{path}.sequence[{index}]")
-
-    visit(value, "$")
-    return tuple(locations)
-
-
 def _contains_grant_substring(grant_content: bytes, candidate: bytes) -> bool:
     """Reject source-derived proper substrings in sanitized text.
 
@@ -1614,7 +1574,7 @@ def _is_strict_sanitized_only_payload(
     an empty structural request from acquiring grantless status.
     """
 
-    if isinstance(value, SanitizedSegment):
+    if isinstance(value, (SanitizedSegment, NativeMetadataSegment)):
         return isinstance(value.text, str), 1 if isinstance(value.text, str) else 0
     if isinstance(value, GeneratedContextSegment):
         return isinstance(value.text, str), 1 if isinstance(value.text, str) else 0
@@ -1777,11 +1737,9 @@ class LLMEgressFirewall:
         grants: Sequence[SourceGrant] = (),
     ) -> AuthorizedEgress:
         """Construct and authorize immutable provider bytes or fail closed.
-
-        Remote and unknown destinations accept only ``TypedOutboundRequest``.
-        Source text is loaded from verified grants while constructing the
-        logical request, so no independent raw source-bearing payload exists
-        for a caller to send after preflight.
+        Remote and unknown destinations require ``TypedOutboundRequest``. Verified
+        grants supply source bytes during construction, leaving no independent
+        raw source payload for a caller to send after preflight.
         """
 
         provider = str(_route_value(route, "provider", ""))
@@ -1989,6 +1947,9 @@ class LLMEgressFirewall:
         sanitized_bytes = 0
         scan_values: list[str] = []
         base64_scan_values: list[str] = []
+        verified_source_scan_values: list[str] = []
+        verified_source_encoding_values: list[str] = []
+        encoding_projections: dict[int, str] = {}
         allowed_static_hashes = self._static_literal_hashes_by_policy.get(
             request.policy_digest,
             frozenset(),
@@ -2018,7 +1979,7 @@ class LLMEgressFirewall:
                 | GeneratedContextSegment
                 | CodexReasoningReplaySegment
                 | AnthropicThinkingReplaySegment
-                | ValidatedToolSyntaxSegment
+                | ValidatedToolSyntaxSegment | NativeMetadataSegment
                 | SourceBoundSegment
                 | SourcePresentationSegment
                 | UntrustedProvenanceSegment
@@ -2034,26 +1995,15 @@ class LLMEgressFirewall:
                 if any(content and content in encoded_literal for _, content in grant_contents.values()):
                     reasons.append("source_bytes_in_literal")
                 return segment.text
-            if isinstance(segment, SanitizedSegment):
-                if not allow_sanitized_segments:
-                    reasons.append("sanitized_segment_forbidden")
-                if isinstance(segment.text, str):
-                    encoded = segment.text.encode("utf-8")
-                    if len(encoded) > self._max_sanitized_segment_bytes:
-                        reasons.append("sanitized_segment_bytes_exceeded")
-                    sanitized_bytes += len(encoded)
-                    if sanitized_bytes > self._max_sanitized_bytes:
-                        reasons.append("sanitized_bytes_exceeded")
-                    if any(
-                        _contains_grant_substring(content, encoded)
-                        for _, content in grant_contents.values()
-                    ):
-                        reasons.append("source_bytes_in_sanitized_segment")
-                    scan_values.append(segment.text)
-                    base64_scan_values.append(segment.text)
-                    return segment.text
-                reasons.append("invalid_literal_segment")
-                return ""
+            if isinstance(segment, (SanitizedSegment, NativeMetadataSegment)):
+                text, projection, sanitized_bytes, segment_reasons = _render_bounded_sanitized(
+                    segment, request, grant_contents, allow_sanitized_segments,
+                    sanitized_bytes, self._max_sanitized_segment_bytes, self._max_sanitized_bytes)
+                reasons.extend(segment_reasons)
+                encoding_projections[id(segment)] = projection
+                scan_values.append(text)
+                base64_scan_values.append(projection)
+                return text
             if isinstance(segment, GeneratedContextSegment):
                 if not isinstance(segment.text, str):
                     reasons.append("invalid_generated_context_segment")
@@ -2121,8 +2071,12 @@ class LLMEgressFirewall:
                     return ""
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
-                scan_values.append(_source_text_for_secret_scan(text))
-                base64_scan_values.append(_source_text_for_base64_scan(text))
+                secret_scan = _source_text_for_secret_scan(text)
+                encoding_scan = _source_text_for_base64_scan(text)
+                scan_values.append(secret_scan)
+                base64_scan_values.append(encoding_scan)
+                verified_source_scan_values.append(secret_scan)
+                verified_source_encoding_values.append(encoding_scan)
                 return text
             if isinstance(segment, SourcePresentationSegment):
                 grant_and_content = grant_contents.get(segment.source_grant_digest)
@@ -2139,6 +2093,8 @@ class LLMEgressFirewall:
                 source_segment_count += 1
                 scan_values.extend(source_scans)
                 base64_scan_values.extend(source_encodings)
+                verified_source_scan_values.extend(source_scans)
+                verified_source_encoding_values.extend(source_encodings)
                 return segment.text
             if isinstance(segment, UntrustedProvenanceSegment):
                 reasons.append("untrusted_provenance")
@@ -2156,6 +2112,7 @@ class LLMEgressFirewall:
                     CodexReasoningReplaySegment,
                     AnthropicThinkingReplaySegment,
                     ValidatedToolSyntaxSegment,
+                    NativeMetadataSegment,
                     SourceBoundSegment,
                     SourcePresentationSegment,
                     UntrustedProvenanceSegment,
@@ -2165,6 +2122,7 @@ class LLMEgressFirewall:
             if isinstance(value, OutboundText):
                 rendered_parts: list[str] = []
                 adjacent_sanitized: list[str] = []
+                adjacent_original: list[str] = []
                 adjacent_non_source: list[str] = []
 
                 def flush_adjacent_sanitized() -> None:
@@ -2174,9 +2132,14 @@ class LLMEgressFirewall:
                         # boundaries. Re-scan each reconstructed contiguous
                         # sanitized span so splitting cannot conceal a secret,
                         # private path, or encoding across adjacent pieces.
-                        scan_values.append(combined)
+                        original = "".join(adjacent_original)
+                        scan_values.append(original)
                         base64_scan_values.append(combined)
+                        if any(_contains_grant_substring(content, original.encode("utf-8"))
+                               for _, content in grant_contents.values()):
+                            reasons.append("source_bytes_in_sanitized_segment")
                     adjacent_sanitized.clear()
+                    adjacent_original.clear()
 
                 def flush_adjacent_non_source() -> None:
                     if len(adjacent_non_source) > 1:
@@ -2189,8 +2152,9 @@ class LLMEgressFirewall:
                 for segment in value.segments:
                     rendered = render_text_segment(segment)
                     rendered_parts.append(rendered)
-                    if isinstance(segment, SanitizedSegment):
-                        adjacent_sanitized.append(rendered)
+                    if isinstance(segment, (SanitizedSegment, NativeMetadataSegment)):
+                        adjacent_sanitized.append(encoding_projections.get(id(segment), rendered))
+                        adjacent_original.append(rendered)
                     else:
                         flush_adjacent_sanitized()
                     if isinstance(
@@ -2202,6 +2166,7 @@ class LLMEgressFirewall:
                             CodexReasoningReplaySegment,
                             AnthropicThinkingReplaySegment,
                             ValidatedToolSyntaxSegment,
+                            NativeMetadataSegment,
                         ),
                     ):
                         adjacent_non_source.append(rendered)
@@ -2255,6 +2220,14 @@ class LLMEgressFirewall:
             return None
 
         rendered_payload = render(request.payload)
+        from agent.source_provenance_diagnostics import record_verified_source_scan
+        record_verified_source_scan(
+            (request.session_id, request.turn_id, request.request_id,
+             request.policy_digest),
+            tuple(verified_source_scan_values),
+            tuple(verified_source_encoding_values),
+            self._exact_secret_values,
+        )
         if not isinstance(rendered_payload, Mapping):
             reasons.append("invalid_typed_request_root")
             rendered_payload = {}
@@ -2321,6 +2294,8 @@ class LLMEgressFirewall:
             receipt[field] = _receipt_identifier(receipt[field])
         from agent.source_grant_verification import grant_receipt_fields
         receipt['source_grants'] = [grant_receipt_fields(grant) for grant in grants]
+        from agent.source_provenance_diagnostics import append_receipt_diagnostics
+        append_receipt_diagnostics(receipt, decision)
         flags = os.O_APPEND | os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW

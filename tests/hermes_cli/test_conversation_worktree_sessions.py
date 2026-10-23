@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,9 +69,19 @@ class _Manager:
         self.events: list[str] = []
         self.fail_next = False
 
-    def _binding(self, root_session_id: str) -> _Binding:
-        path = self.worktree_root / root_session_id
+    def _binding(self, root_session_id: str, *, path: Path | None = None) -> _Binding:
+        path = path or self.worktree_root / root_session_id
         path.mkdir(parents=True, exist_ok=True)
+        # Real manager bindings establish this claim before native lease acquisition.
+        from agent.conversation_worktree import _common_owner_claim_path
+
+        claim = _common_owner_claim_path(self.worktree_root, path)
+        claim.parent.mkdir(exist_ok=True)
+        claim.write_text(json.dumps({
+            "owner": "conversation-worktree-manager", "root_session_id": root_session_id,
+            "worktree_path": str(path.resolve()),
+            "repo_common_dir": str(self.worktree_root.resolve()),
+        }))
         return _Binding(
             root_session_id=root_session_id,
             path=path,
@@ -290,13 +301,7 @@ def test_cmd_chat_resume_replaces_persisted_stable_cwd_end_to_end(
         roots={session_id: session_id},
         session_cwds={session_id: str(stable)},
     )
-    manager.resolve_existing_session = lambda root_session_id: _Binding(
-        root_session_id=root_session_id,
-        path=managed,
-        branch=f"hermes/session/{root_session_id}",
-        base_commit="b" * 40,
-        repo_common_dir=manager.worktree_root,
-    )
+    manager.resolve_existing_session = lambda root_session_id: manager._binding(root_session_id, path=managed)
     captured: dict[str, str] = {}
     original_cwd = cli_module.os.getcwd()
 
