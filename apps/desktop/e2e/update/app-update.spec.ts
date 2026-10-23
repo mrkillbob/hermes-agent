@@ -28,11 +28,11 @@ import {
   currentAs,
   desktopLog,
   desktopMainProcesses,
+  desktopProcesses,
   diagnostics,
   git,
   handoffLog,
   launchInstalledApp,
-  nonGatewayProcesses,
   openAbout,
   publishUpstream,
   startInstallSession,
@@ -113,12 +113,21 @@ test('clicking Update now moves the backend to the new commit, relaunches the ap
         'the updated checkout is clean'
       ).toBe('')
 
-      // posix.sh launches the relaunched Electron app with setsid, so its main
-      // process owns a process group containing the Chromium children too. Signal
-      // that sandbox-owned group; the detached gateway is outside it and survives.
-      process.kill(-relaunched.pid, 'SIGTERM')
+      // The detached relaunch can leave Chromium helpers after its main PID or
+      // process group exits. Signal only executables from this test install's
+      // packaged Desktop directory; its separate gateway uses another directory.
+      for (const proc of desktopProcesses(facts)) {
+        try {
+          process.kill(proc.pid, 'SIGTERM')
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+            throw error
+          }
+        }
+      }
+
       await expect
-        .poll(() => nonGatewayProcesses(facts).map(p => `${p.pid} ${p.cmdline.slice(0, 160)}`), {
+        .poll(() => desktopProcesses(facts).map(p => `${p.pid} ${p.cmdline.slice(0, 160)}`), {
           timeout: 60_000,
           message: 'the relaunched app quits cleanly on SIGTERM (its gateway outlives it)'
         })

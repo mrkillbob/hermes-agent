@@ -305,13 +305,16 @@ function exeOf(pid: number): string {
   }
 }
 
-/** Live Desktop main processes of this install (the packaged exe, not its zygote/renderer/gpu children). */
-export function desktopMainProcesses(facts: InstallFacts): ProcInfo[] {
+/** Every process using this install's packaged Desktop executable (main + Chromium helpers). */
+export function desktopProcesses(facts: InstallFacts): ProcInfo[] {
   const exe = fs.realpathSync(path.dirname(packagedExe(facts)))
 
-  return installProcesses(facts).filter(
-    proc => exeOf(proc.pid).startsWith(exe + path.sep) && !/--type=/.test(proc.cmdline)
-  )
+  return installProcesses(facts).filter(proc => exeOf(proc.pid).startsWith(exe + path.sep))
+}
+
+/** Live Desktop main processes of this install (not its zygote/renderer/gpu children). */
+export function desktopMainProcesses(facts: InstallFacts): ProcInfo[] {
+  return desktopProcesses(facts).filter(proc => !/--type=/.test(proc.cmdline))
 }
 
 /** The `hermes serve` backend(s) of this install (children of the backend excluded). */
