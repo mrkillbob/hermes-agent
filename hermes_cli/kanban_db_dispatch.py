@@ -1288,130 +1288,12 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     return sweep
 
 
-def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]:
-    """Count each crash against the breaker; returns the task ids it tripped.
-
-    Protocol violations get a BOUNDED violation-only budget independent of
-    ``consecutive_failures`` (per-task ``max_retries`` takes precedence);
-    systemic same-error crashes (>= 3 identical fingerprints this tick) and
-    terminal provider errors (credential revoked, model gone — a retry cannot
-    heal them) trip immediately.
-    """
-    auto_blocked: list[str] = []
-    fp_counts: dict[str, int] = {}
-    for _, _, _, dead in crash_details:
-        fp = _error_fingerprint(dead.error_text)
-        fp_counts[fp] = fp_counts.get(fp, 0) + 1
-    for tid, pid, claimer, dead in crash_details:
-        error_text = dead.error_text
-        if dead.protocol_violation:
-            streak = _protocol_violation_streak(conn, tid)
-            trow = conn.execute("SELECT max_retries FROM tasks WHERE id = ?", (tid,)).fetchone()
-            if trow is None:
-                continue  # task deleted mid-loop
-            task_override = _kb._row_get(trow, "max_retries")
-            violation_limit = max(2,
-                int(task_override) if task_override is not None else _PROTOCOL_VIOLATION_FAILURE_LIMIT
-            )
-            if streak < violation_limit:
-                # Below budget: already back at ``ready`` with the error stamped.
-                # No ``_record_task_failure`` — must not consume the unified budget.
-                continue
-            # A worker protocol failure is a routing failure, not work being
-            # blocked.  Hand it back through deterministic intake so the
-            # source task can be repaired or reassigned; never trip the
-            # circuit breaker into the forbidden ``blocked`` lane.
-            routed, _, _ = _kb.route_worker_block_to_orchestrator(
-                conn, tid,
-                reason=(
-                    f"worker protocol violation after {streak} attempts: "
-                    f"{error_text}"
-                ),
-            )
-            tripped = False if routed else _record_task_failure(
-                conn, tid,
-                error=error_text,
-                outcome="crashed",
-                failure_limit=violation_limit,
-                force_trip=True,
-                release_claim=False,
-                end_run=False,
-                event_payload_extra={
-                    "pid": pid,
-                    "claimer": claimer,
-                    "protocol_violations": streak,
-                    "protocol_violation_limit": violation_limit,
-                },
-            )
-        elif dead.event_payload.get("failure_class") == "provider_egress_blocked":
-            # A proven local policy denial cannot be repaired by changing the
-            # worker role or provider. Hold the original task for correction;
-            # only retain the parser's bounded reason, never appended output.
-            tripped = _record_task_failure(
-                conn, tid,
-                error=dead.event_payload["privacy_reason"],
-                outcome="crashed",
-                force_trip=True,
-                release_claim=False,
-                end_run=False,
-                event_payload_extra={
-                    "pid": pid, "claimer": claimer,
-                    "failure_class": "provider_egress_blocked",
-                    "local_privacy_denial": True,
-                },
-            )
-        elif dead.terminal_provider:
-            # Provider failures belong to intake/provider repair.  Do not
-            # strand the task in ``blocked`` where no worker can recover it.
-            routed, _, _ = _kb.route_worker_block_to_orchestrator(
-                conn, tid,
-                reason=f"terminal provider failure: {error_text}",
-            )
-            tripped = False if routed else _record_task_failure(
-                conn, tid,
-                error=error_text,
-                outcome="crashed",
-                force_trip=True,
-                release_claim=False,
-                end_run=False,
-                event_payload_extra={"pid": pid, "claimer": claimer, "terminal_provider": True},
-            )
-        else:
-            is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
-            extra = {"pid": pid, "claimer": claimer}
-            if is_systemic:
-                # Trips at 1, below any ``failure_limit``: hold it for an operator.
-                extra["sticky"] = True
-            if _is_worker_strategy_failure(error_text):
-                routed, _, _ = _kb.route_worker_block_to_orchestrator(
-                    conn, tid,
-                    reason=f"worker strategy failure: {error_text}",
-                )
-                tripped = False if routed else _record_task_failure(
-                    conn, tid,
-                    error=error_text,
-                    outcome="crashed",
-                    failure_limit=1 if is_systemic else None,
-                    release_claim=False,
-                    end_run=False,
-                    event_payload_extra=extra,
-                )
-            else:
-                tripped = _record_task_failure(
-                    conn, tid,
-                    error=error_text,
-                    outcome="crashed",
-                    failure_limit=1 if is_systemic else None,
-                    release_claim=False,
-                    end_run=False,
-                    event_payload_extra=extra,
-                )
-        if tripped:
-            auto_blocked.append(tid)
-    return auto_blocked
-
-
-def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None) -> list[str]:
+def detect_crashed_workers(
+    conn: sqlite3.Connection,
+    board: Optional[str] = None,
+    *,
+    failure_limit: int | None = None,
+) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
     Restores the source phase immediately (no waiting for the claim TTL), for
@@ -1423,7 +1305,11 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     """
     sweep = _reclaim_dead_workers(conn, board=board)
     # Outside the main txn: account each crash and maybe trip the breaker.
-    auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
+    if sweep.crash_details:
+        from hermes_cli.kanban_db_recovery import _account_crashes
+        auto_blocked = _account_crashes(conn, sweep.crash_details, failure_limit=failure_limit)
+    else:
+        auto_blocked = []
     # Side-channel attributes keep the public ``list[str]`` return stable;
     # ``dispatch_once`` reads them to populate ``DispatchResult``. Rate-limited
     # requeues did NOT count a failure and are NOT crashes.
@@ -2541,7 +2427,7 @@ def _run_reclaim_phase(
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)
     result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
-    result.crashed = detect_crashed_workers(conn, board=board)
+    result.crashed = detect_crashed_workers(conn, board=board, failure_limit=failure_limit)
     # Side-channel attributes (see detect_crashed_workers); rate-limited tasks
     # went back to ``ready`` and the respawn guard defers them until quota clears.
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
