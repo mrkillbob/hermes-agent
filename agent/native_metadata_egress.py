@@ -419,3 +419,30 @@ def authorize_with_native_metadata(agent, route, body, request, calls, results, 
         authorization = firewall.authorize(replace(request, payload=payload), route, grants=grants)
         accepted()
         return authorization
+
+
+def _render_bounded_sanitized(segment, request, grants, allowed, total, segment_cap, aggregate_cap):
+    """Common original sanitizer budgets/scans, with request-bound metadata projection."""
+    from agent.llm_egress_firewall import _contains_grant_substring
+
+    reasons = []
+    if not allowed:
+        reasons.append("sanitized_segment_forbidden")
+    if not isinstance(segment.text, str):
+        return "", "", total, [*reasons, "invalid_literal_segment"]
+    projection = segment.text
+    if isinstance(segment, NativeMetadataSegment):
+        from agent.native_metadata_egress import validate_segment
+        try:
+            projection = validate_segment(segment, request)
+        except (ValueError, TypeError):
+            return "", "", total, [*reasons, "invalid_native_metadata_reference"]
+    encoded = segment.text.encode("utf-8")
+    if len(encoded) > segment_cap:
+        reasons.append("sanitized_segment_bytes_exceeded")
+    total += len(encoded)
+    if total > aggregate_cap:
+        reasons.append("sanitized_bytes_exceeded")
+    if any(_contains_grant_substring(content, encoded) for _, content in grants.values()):
+        reasons.append("source_bytes_in_sanitized_segment")
+    return segment.text, projection, total, reasons

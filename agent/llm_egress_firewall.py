@@ -35,6 +35,7 @@ from agent.redact import redact_sensitive_text
 from agent.source_fixed_literals import _BOUNDED_SOURCE_FIXED_LITERAL_ATOMS
 from agent.egress_encoding_syntax import is_canonical_base64_encoding, is_iso_calendar_week
 from agent.egress_tool_syntax import validate_tool_syntax
+from agent.native_metadata_egress import NativeMetadataSegment, _render_bounded_sanitized
 
 
 class DestinationClass(StrEnum):
@@ -45,8 +46,6 @@ class DestinationClass(StrEnum):
     REMOTE = "remote"
     UNKNOWN = "unknown"
 
-
-from agent.native_metadata_egress import NativeMetadataSegment
 
 @dataclass(frozen=True, slots=True)
 class SourceGrant:
@@ -1603,31 +1602,6 @@ def validate_sanitized_text(text: str, *, max_bytes: int = 32_768) -> str:
     return text
 
 
-def _render_bounded_sanitized(segment, request, grants, allowed, total, segment_cap, aggregate_cap):
-    """Common original sanitizer budgets/scans, with request-bound metadata projection."""
-    reasons = []
-    if not allowed:
-        reasons.append("sanitized_segment_forbidden")
-    if not isinstance(segment.text, str):
-        return "", "", total, [*reasons, "invalid_literal_segment"]
-    projection = segment.text
-    if isinstance(segment, NativeMetadataSegment):
-        from agent.native_metadata_egress import validate_segment
-        try:
-            projection = validate_segment(segment, request)
-        except (ValueError, TypeError):
-            return "", "", total, [*reasons, "invalid_native_metadata_reference"]
-    encoded = segment.text.encode("utf-8")
-    if len(encoded) > segment_cap:
-        reasons.append("sanitized_segment_bytes_exceeded")
-    total += len(encoded)
-    if total > aggregate_cap:
-        reasons.append("sanitized_bytes_exceeded")
-    if any(_contains_grant_substring(content, encoded) for _, content in grants.values()):
-        reasons.append("source_bytes_in_sanitized_segment")
-    return segment.text, projection, total, reasons
-
-
 def _is_strict_sanitized_only_payload(
     value: Any,
     *,
@@ -2044,8 +2018,7 @@ class LLMEgressFirewall:
                 | GeneratedContextSegment
                 | CodexReasoningReplaySegment
                 | AnthropicThinkingReplaySegment
-                | ValidatedToolSyntaxSegment
-                | NativeMetadataSegment
+                | ValidatedToolSyntaxSegment | NativeMetadataSegment
                 | SourceBoundSegment
                 | SourcePresentationSegment
                 | UntrustedProvenanceSegment
