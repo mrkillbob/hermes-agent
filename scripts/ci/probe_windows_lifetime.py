@@ -10,12 +10,23 @@ import sys
 import tempfile
 
 
-def child(domain, verbatim, legacy_record):
+def child(domain, verbatim, legacy_record, replace_after_verification):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from pm import lifetime
     from pm.filesystem import long_root
 
     domain = long_root(Path(domain)) if verbatim else Path(domain)
+    if replace_after_verification:
+        inspect = lifetime.Gate._verified_snapshot
+
+        def replace(guard, record, **kwargs):
+            verified = inspect(guard, record, **kwargs)
+            assert verified is not None
+            domain.rename(domain.with_name("original"))
+            domain.mkdir()
+            return verified
+
+        lifetime.Gate._verified_snapshot = replace
     print(json.dumps({"python": sys.version, "domain_argument": str(domain)}), flush=True)
     try:
         with lifetime.activity(domain, create=True):
@@ -49,9 +60,10 @@ def main():
     parser.add_argument("--domain")
     parser.add_argument("--verbatim", action="store_true")
     parser.add_argument("--legacy-record", action="store_true")
+    parser.add_argument("--replace-after-verification", action="store_true")
     options = parser.parse_args()
     if options.domain:
-        child(options.domain, options.verbatim, options.legacy_record)
+        child(options.domain, options.verbatim, options.legacy_record, options.replace_after_verification)
         return
     if os.name != "nt" or not options.legacy or not options.worker:
         parser.error("native Windows and both interpreter paths are required")
@@ -65,6 +77,7 @@ def main():
             ("verbatim-to-native", options.worker, options.worker, True, False, False, None),
             *((f"legacy-replaced-{entry}", options.legacy, options.worker, False, False, True, entry)
               for entry in ("domain", "gate", "activities")),
+            ("legacy-later-replaced-domain", options.legacy, options.worker, False, False, True, "after-verification"),
         ):
             domain = str(Path(temporary) / name / "state")
             print(f"CASE {name}", flush=True)
@@ -76,11 +89,14 @@ def main():
                 if label == "creator" and legacy_record:
                     command.append("--legacy-record")
                 if label == "reader" and replace:
-                    coordination = Path(domain).parent / ".lifetimes" / "state"
-                    target = Path(domain) if replace == "domain" else coordination / replace
-                    moved = target.with_name(target.name + ".replaced")
-                    target.rename(moved)
-                    target.mkdir() if moved.is_dir() else target.touch()
+                    if replace == "after-verification":
+                        command.append("--replace-after-verification")
+                    else:
+                        coordination = Path(domain).parent / ".lifetimes" / "state"
+                        target = Path(domain) if replace == "domain" else coordination / replace
+                        moved = target.with_name(target.name + ".replaced")
+                        target.rename(moved)
+                        target.mkdir() if moved.is_dir() else target.touch()
                 result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
                 print(f"{label}: exit={result.returncode}\n{result.stdout}{result.stderr}", flush=True)
                 if label == "reader" and replace:

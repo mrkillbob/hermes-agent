@@ -120,3 +120,22 @@ def test_retirement_receipt_accepts_an_equivalent_windows_path(tmp_path):
     with lifetime.activity(long_root(domain), create=True):
         with lifetime.gate(domain) as guard:
             assert guard.qualified
+
+
+def test_legacy_upgrade_cannot_certify_a_later_domain_replacement(tmp_path, monkeypatch):
+    domain = tmp_path / "installs" / "fixture"
+    _create_with_legacy_python(domain, legacy_record=True)
+    inspect = lifetime.Gate._verified_snapshot
+
+    def replace_after_verification(guard, record, **kwargs):
+        verified = inspect(guard, record, **kwargs)
+        assert verified is not None
+        domain.rename(domain.with_name("original"))
+        domain.mkdir()
+        return verified
+
+    monkeypatch.setattr(lifetime.Gate, "_verified_snapshot", replace_after_verification)
+    with pytest.raises(lifetime.LifetimeUnavailable, match="identity changed"):
+        lifetime.acquire_activity(domain)
+    with lifetime.gate(domain) as guard:
+        assert not guard.qualified

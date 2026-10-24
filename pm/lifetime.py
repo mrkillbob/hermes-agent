@@ -18,7 +18,9 @@ import time
 import uuid
 
 from pm.filesystem import durable_write_bytes, lock_fd, native
-from pm.lifetime_handles import directory_identity, file_identity, native_reference, open_hold
+from pm.lifetime_handles import (
+    directory_identities, directory_identity, file_identities, file_identity, native_reference, open_hold,
+)
 
 _ACTIVE = ContextVar("pm_lifetime_activities", default=())
 
@@ -108,29 +110,48 @@ class Gate:
         if not self.domain.exists():
             if not create:
                 raise LifetimeUnavailable("managed environment no longer exists")
-            if previous is not None and not self._matches(previous, retired=True):
+            retired = self._verified_snapshot(previous, retired=True) if previous is not None else None
+            if previous is not None and retired is None:
                 raise LifetimeUnavailable("missing managed state has no confirmed retirement")
             self.domain.mkdir(parents=True)
             self.activities.mkdir(exist_ok=True)
-            durable_write_bytes(self.marker, json.dumps(self._snapshot()).encode())
-        elif previous is not None:
-            if not self._matches(previous):
+            created = self._snapshot()
+            recreated_base = dict(created, retired=True)
+            recreated_base.pop("domain")
+            if retired is not None and recreated_base != retired:
                 raise LifetimeUnavailable("managed environment identity changed")
-            if not self.qualified:
-                durable_write_bytes(self.marker, json.dumps(self._snapshot()).encode())
+            durable_write_bytes(self.marker, json.dumps(created).encode())
+        elif previous is not None:
+            verified = self._verified_snapshot(previous)
+            if verified is None:
+                raise LifetimeUnavailable("managed environment identity changed")
+            if previous != verified:
+                durable_write_bytes(self.marker, json.dumps(verified).encode())
+                if not self.qualified:
+                    raise LifetimeUnavailable("managed environment identity changed")
         else:
             _identity(self.domain)
             self.activities.mkdir(exist_ok=True)
         _identity(self.activities)
 
-    def _matches(self, record, *, retired=False):
-        snapshot = self._base_snapshot if retired else self._snapshot
-        suffix = {"retired": True} if retired else {}
-        if record == {**snapshot(), **suffix}:
-            return True
+    def _verified_snapshot(self, record, *, retired=False):
+        try:
+            return self._inspect_snapshot(record, retired=retired)
+        except (OSError, ValueError, TypeError, LifetimeUnavailable):
+            return None
+
+    def _inspect_snapshot(self, record, *, retired):
+        base = {"version": 1, "path": _recorded_path(self.domain), "platform": os.name}
+        activities = directory_identities(self.activities)
+        locked = file_identities(self.fd)
+        domains = (None, None) if retired else directory_identities(self.domain)
+        snapshots = [{**base, "activities": activities[index], "gate": locked[index],
+                      **({"retired": True} if retired else {"domain": domains[index]})}
+                     for index in range(2 if os.name == "nt" else 1)]
         # A failed historical update can leave a 3.11 marker. Verify its entire
-        # known native snapshot under the gate before upgrading the protocol.
-        return os.name == "nt" and record == {**snapshot(legacy=True), **suffix}
+        # known snapshot under the gate; both representations come from the same
+        # handle per object. Publish these captured IDs, never a replacement's.
+        return snapshots[0] if record in snapshots else None
 
     def confirm_removed(self, ownership):
         if self.domain.exists() or self._record() != ownership or ownership != self._base_snapshot() | {"domain": ownership["domain"]}:

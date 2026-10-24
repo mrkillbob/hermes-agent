@@ -113,7 +113,7 @@ def native_reference(fd: int) -> int:
     return fd
 
 
-def _windows_identity(handle, *, legacy=False):
+def _windows_identities(handle):
     """Select one native identity protocol, independent of the calling Python."""
     import ctypes
     from ctypes import wintypes
@@ -134,30 +134,37 @@ def _windows_identity(handle, *, legacy=False):
     previous = FileInformation()
     if not api.GetFileInformationByHandle(handle, ctypes.byref(previous)):
         raise ctypes.WinError(ctypes.get_last_error())
-    if legacy:
-        return [previous.volume, (previous.index_high << 32) | previous.index_low], previous.attributes
+    legacy = [previous.volume, (previous.index_high << 32) | previous.index_low]
     api.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int,
                                                wintypes.LPVOID, wintypes.DWORD]
     api.GetFileInformationByHandleEx.restype = wintypes.BOOL
     current = FileIdInformation()
     if not api.GetFileInformationByHandleEx(handle, 18, ctypes.byref(current), ctypes.sizeof(current)):
         raise ctypes.WinError(ctypes.get_last_error())
-    return [current.volume, int.from_bytes(current.identifier, "little")], previous.attributes
+    return ([current.volume, int.from_bytes(current.identifier, "little")], legacy), previous.attributes
 
 
 def file_identity(fd, *, legacy=False):
+    return file_identities(fd)[int(legacy)]
+
+
+def file_identities(fd):
     if os.name == "nt":
-        return _windows_identity(native_reference(fd), legacy=legacy)[0]
+        return _windows_identities(native_reference(fd))[0]
     info = os.fstat(fd)
-    return [info.st_dev, info.st_ino]
+    return ([info.st_dev, info.st_ino],) * 2
 
 
 def directory_identity(path, *, legacy=False):
+    return directory_identities(path)[int(legacy)]
+
+
+def directory_identities(path):
     if os.name != "nt":
         info = Path(path).lstat()
         if not stat.S_ISDIR(info.st_mode):
             raise ValueError("lifetime path is not a concrete directory")
-        return [info.st_dev, info.st_ino]
+        return ([info.st_dev, info.st_ino],) * 2
     import ctypes
 
     api = _windows()
@@ -166,10 +173,10 @@ def directory_identity(path, *, legacy=False):
     if handle == ctypes.c_void_p(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        identity, attributes = _windows_identity(handle, legacy=legacy)
+        identities, attributes = _windows_identities(handle)
         if not attributes & 0x10 or attributes & 0x400:
             raise ValueError("lifetime path is not a concrete directory")
-        return identity
+        return identities
     finally:
         api.CloseHandle(handle)
 
