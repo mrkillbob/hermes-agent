@@ -327,13 +327,18 @@ test('clicking Update now moves the backend to the new commit, relaunches the ap
 
     await test.step('the running app offers the new upstream commit and hands off on click', async () => {
       const launched = await launchInstalledApp(facts, env)
-      firstMainPid = launched.app.process().pid ?? 0
-      await waitForInteractive(launched.app, launched.page).catch(error => {
-        throw new Error(`${(error as Error).message}\n${explain(launched.logTail())}`)
-      })
-      await openAbout(launched.page)
-      await waitForUpdateOffer(launched.page, target)
-      await clickUpdateNowAndExpectHandoff(launched, facts)
+
+      try {
+        firstMainPid = launched.app.process().pid ?? 0
+        await waitForInteractive(launched.app, launched.page).catch(error => {
+          throw new Error(`${(error as Error).message}\n${explain(launched.logTail())}`)
+        })
+        await openAbout(launched.page)
+        await waitForUpdateOffer(launched.page, target)
+        await clickUpdateNowAndExpectHandoff(launched, facts)
+      } finally {
+        await closeQuietly(launched.app)
+      }
     })
 
     await test.step('the update lands and the app relaunches itself', async () => {

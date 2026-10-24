@@ -633,17 +633,20 @@ export async function currentAs(page: Page): Promise<{ currentSha?: string; upda
 
 /** Ask Electron to quit normally so its backend and child processes can shut down cleanly. */
 export async function closeQuietly(app: ElectronApplication): Promise<void> {
-  if (app.process().exitCode !== null || app.process().killed) {
-    return
+  if (app.process().exitCode === null && !app.process().killed) {
+    const closed = app.waitForEvent('close', { timeout: 30_000 }).catch(() => undefined)
+
+    try {
+      await app.evaluate(({ app: electronApp }) => electronApp.quit())
+    } catch {
+      // The process may have exited while the quit request was being sent.
+    }
+
+    await closed
   }
 
-  const closed = app.waitForEvent('close', { timeout: 30_000 }).catch(() => undefined)
-
-  try {
-    await app.evaluate(({ app: electronApp }) => electronApp.quit())
-  } catch {
-    // The process may have exited while the quit request was being sent.
-  }
-
-  await closed
+  // Waiting for Electron's process exit alone leaves Playwright's BrowserContext
+  // and its DevTools connections open. ElectronApplication.close() performs the
+  // protocol/context teardown even when the app already quit for an update.
+  await app.close()
 }
