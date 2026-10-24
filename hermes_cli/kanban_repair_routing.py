@@ -31,6 +31,7 @@ _FENCE_CLOSE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
 _BLOCKQUOTE = re.compile(r"^\s{0,3}>")
 _BLOCKQUOTE_EMPTY = re.compile(r"^\s{0,3}>\s*$")
 _INLINE_QUOTES = {"'": "'", '"': '"', "‘": "’", "“": "”"}
+_INLINE_OPENERS = (*_INLINE_QUOTES, "`")
 _INLINE_BARRIER = "\ue000"
 _EXAMPLE_CUE = re.compile(
     r"(?:\bexample(?:\s+text)?\s*[:,-]?|\bfor example\s*,?|\bcompare the phrase)",
@@ -103,6 +104,8 @@ def _span_is_example(
 
 def _mask_inline_line(line: str) -> str:
     """Mask only explicitly example-cued paired spans on one line."""
+    if not any(marker in line for marker in _INLINE_OPENERS):
+        return line
     quote_closers, code_runs = _inline_markers(line)
     cue_ends, suffix_starts, next_content = _example_context(line)
     quote_cursors = dict.fromkeys(quote_closers, 0)
@@ -332,6 +335,8 @@ _QUOTED_CAUSAL_PREFIXES = ("the workflow ", "workflow ", "the deployment ", "dep
 
 def _paired_quote_ranges(line: str) -> list[tuple[int, int]]:
     """Return balanced same-line quote spans using the shared marker indexes."""
+    if not any(marker in line for marker in _INLINE_OPENERS):
+        return []
     quote_closers, code_runs = _inline_markers(line)
     ranges: list[tuple[int, int]] = []
     used: dict[str, int] = dict.fromkeys(quote_closers, 0)
