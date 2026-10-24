@@ -47,6 +47,12 @@ def _probe_root(tmp_path):
     shutil.copy2(real / "run_tests_parallel.py", scripts)
     # The runner shares the platforms() spec resolver with the CI lane selector.
     shutil.copy2(real / "ci" / "list_os_marked_tests.py", scripts / "ci")
+    for name in ('runner_lifetime.py', 'managed_pytest.py', 'lifetime_python.py', 'protected-python'):
+        shutil.copy2(real / name, scripts)
+    (root / 'pm').mkdir(exist_ok=True)
+    for name in ('__init__.py', 'filesystem.py', 'lifetime.py', 'lifetime_handles.py', 'lifetime_launch.py'):
+        shutil.copy2(real.parent / 'pm' / name, root / 'pm')
+
     return root
 
 

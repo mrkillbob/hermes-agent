@@ -50,7 +50,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # the Nix devShell's editable venv and CI's minimal installer lanes provide
 # one on purpose. The import check matters: a wrapped `hermes` binary exports
 # HERMES_PYTHON pointing at a release venv without pytest.
-_has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import pytest' 2>/dev/null; }
+_has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$BASH" "$SCRIPT_DIR/protected-python" "$1" -c 'import pytest' 2>/dev/null; }
 # shellcheck source=scripts/_activation.sh
 . "$SCRIPT_DIR/_activation.sh"
 if [ -z "${__HERMES_ACTIVATED:-}" ] && _has_pytest "${HERMES_PYTHON:-}"; then
@@ -73,6 +73,9 @@ else
   fi
 fi
 VENV_BIN="$(dirname "$PYTHON")"
+# Resolve while caller-owned tool locations are still available; the final
+# hermetic child receives this validated path through argv, never config/env.
+PROTECTION_BOOTSTRAP="$("$BASH" "$SCRIPT_DIR/protected-python" --print-bootstrap "$PYTHON")"
 
 
 # ── Live-gateway plugin (computed before we drop env) ───────────────────────
@@ -195,7 +198,7 @@ cd "$REPO_ROOT"
 # compiling on first import) avoids redundant work across ~2000 processes.
 # Uses git to list tracked .py files (skips venv, node_modules, etc).
 echo "▶ pre-compiling bytecode cache"
-"$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+"$BASH" "$SCRIPT_DIR/protected-python" "$PYTHON" -m compileall -q -j 1 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
 
 echo "▶ launching test runner"
 env -i \
@@ -213,4 +216,4 @@ env -i \
   ${HERMES_RUN_E2E:+HERMES_RUN_E2E="$HERMES_RUN_E2E"} \
   ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
   ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \
-  "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"
+  "$BASH" "$SCRIPT_DIR/protected-python" --bootstrap "$PROTECTION_BOOTSTRAP" --managed "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"

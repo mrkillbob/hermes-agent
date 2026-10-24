@@ -11,6 +11,10 @@ from pm.runtime import collect_runtime_generations
 
 
 def _generation(root: Path, name: str, *, published: bool = True, leased: bool = True) -> Path:
+    from pm.lifetime import activity
+
+    with activity(root, create=True):
+        pass
     generation = root / "generations" / name
     generation.mkdir(parents=True)
     if leased:
@@ -130,3 +134,15 @@ def test_lease_taken_while_a_peer_pruned_it_is_retaken(tmp_path, monkeypatch):
     finally:
         release()
     assert list(leases.iterdir()) == []
+
+
+def test_invalid_coordination_namespace_is_retained_without_failing_maintenance(tmp_path):
+    root = tmp_path / 'pm-runtime'
+    aborted = _generation(root, 'aborted', published=False)
+    from pm.lifetime import Gate
+
+    namespace = Gate(root).namespace
+    namespace.rename(tmp_path / 'previous-coordinator')
+    namespace.write_text('invalid coordinator')
+    assert collect_runtime_generations(root) == []
+    assert aborted.is_dir()

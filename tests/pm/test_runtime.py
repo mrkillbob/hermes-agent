@@ -171,7 +171,7 @@ def test_one_store_through_symlinked_homes_keeps_one_pm_runtime(tmp_path, monkey
 
     def stage(uv, python, environment, **_):
         staged.append(python)
-        environment.mkdir(parents=True)
+        environment.mkdir(parents=True, exist_ok=True)
         return runtime._python(environment)
 
     monkeypatch.setattr("pm.runtime_stage.stage_runtime", stage)

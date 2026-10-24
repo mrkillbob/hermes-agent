@@ -179,7 +179,9 @@ def _run_streaming(command: list[str], *, cwd: Path, env: dict[str, str],
                    timeout: int, output: TextSink) -> subprocess.CompletedProcess:
     """Keep CI progress live, a bounded diagnostic tail, and a wall-clock timeout."""
     deadline = time.monotonic() + timeout
-    proc = subprocess.Popen(command, cwd=native(cwd), env=env, stdout=subprocess.PIPE,
+    from pm.lifetime_launch import popen
+
+    proc = popen(command, cwd=native(cwd), env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=0)
     pipe = proc.stdout
     assert isinstance(pipe, io.TextIOWrapper)  # Popen was given stdout=PIPE and text=True.
@@ -277,6 +279,9 @@ def _fresh_build(environment: PythonEnvironment, *, sealed: bool) -> Iterator[No
     out = environment.destination
     # A concurrent creator wins intact: never enter cleanup before mkdir succeeds.
     out.mkdir(parents=True)
+    from pm.lifetime_cleanup import defer_failed_output, output_identity
+
+    identity = output_identity(out)
     try:
         environment.create()
         yield
@@ -284,7 +289,8 @@ def _fresh_build(environment: PythonEnvironment, *, sealed: bool) -> Iterator[No
         if sealed:
             prune_site_pth(out)
     except BaseException:
-        shutil.rmtree(out, ignore_errors=True)
+        if not defer_failed_output(out, identity):
+            shutil.rmtree(out, ignore_errors=True)
         raise
 
 
@@ -358,7 +364,9 @@ class PythonEnvironment:
                     else:
                         tail.close(result.returncode == 0)
                     return result
-                return subprocess.run(command, cwd=native(cwd), env=env, capture_output=True,
+                from pm.lifetime_launch import run
+
+                return run(command, cwd=native(cwd), env=env, capture_output=True,
                                       text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False)
             except subprocess.TimeoutExpired as exc:
                 from pm.index_config import TIMEOUT_HINT

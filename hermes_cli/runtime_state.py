@@ -44,7 +44,17 @@ def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_
     (``activate_dependencies`` still selects and leases the committed generation), writers that
     cannot be skipped pass ``timeout=None`` — an install the user asked for is theirs to wait on.
     """
+    from pm.lifetime import activity
+
     state = install_state_dir(project)
+    with activity(state, create=True):
+        with _install_mutex(state, timeout=timeout) as held:
+            yield held
+
+
+@contextmanager
+def _install_mutex(state: Path, *, timeout=INSTALL_LOCK_TIMEOUT_SECONDS):
+    """Internal mutex only; maintenance already owns the outside-state gate."""
     state.mkdir(parents=True, exist_ok=True)
     fd = os.open(state / ".install.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -147,6 +157,32 @@ def lease_generation(environment: Path) -> Callable[[], None]:
 
 
 def lease_directory(generation: Path) -> Callable[[], None]:
+    """Pin managed readers through the shared domain before touching generation leases."""
+    from pm.lifetime import acquire_activity, domain_for_generation, Gate, LifetimeUnavailable
+
+    generation = Path(generation)
+    if not generation.is_dir():
+        raise LifetimeUnavailable("dependency generation no longer exists")
+    managed = (generation / ".lease-managed").is_file()
+    domain = domain_for_generation(generation)
+    if not managed and not Gate(domain).marker.exists():
+        return lambda: None  # untouched external/legacy generations stay unqualified
+    owned = acquire_activity(domain, generation=generation)
+    try:
+        release_files = _lease_files(generation) if managed else lambda: None
+    except BaseException:
+        owned.close()
+        raise
+
+    def release():
+        try:
+            release_files()
+        finally:
+            owned.close()
+    return release
+
+
+def _lease_files(generation: Path) -> Callable[[], None]:
     """Pin a lease-managed generation directory for this process's lifetime."""
     if not (generation / ".lease-managed").is_file():
         return lambda: None  # Generations produced before leases stay conservatively retained.
@@ -188,23 +224,28 @@ def collect_generations(project: Path, *, min_age_seconds: float = 86400) -> lis
     root = install_state_dir(project)
     if not root.exists():
         return removed
-    with runtime_lock(project) as held:
-        if not held:
-            return removed  # maintenance: another process owns the install, skip rather than queue
-        recover_publication(project)
-        selected = selected_venv(project).parent.resolve()
-        generations = root / "environments"
-        if not generations.is_dir():
+    from pm.lifetime import collection_gate
+
+    with collection_gate(root) as guard:
+        if guard is None or not guard.qualified or guard.held(writers_only=True):
             return removed
-        for generation in generations.iterdir():
-            if generation.is_symlink() or not generation.is_dir() or generation.resolve() == selected:
-                continue
-            marker = generation / ".lease-managed"
-            if not marker.is_file() or time.time() - marker.stat().st_mtime < min_age_seconds:
-                continue
-            if not leases_held(generation):
-                shutil.rmtree(generation)
-                removed.append(generation)
+        with _install_mutex(root, timeout=0) as held:
+            if not held:
+                return removed
+            recover_publication(project)
+            selected = selected_venv(project).parent.resolve()
+            generations = root / "environments"
+            if not generations.is_dir():
+                return removed
+            for generation in generations.iterdir():
+                if generation.is_symlink() or not generation.is_dir() or generation.resolve() == selected:
+                    continue
+                marker = generation / ".lease-managed"
+                if not marker.is_file() or time.time() - marker.stat().st_mtime < min_age_seconds:
+                    continue
+                if not guard.held(generation=generation) and not leases_held(generation):
+                    shutil.rmtree(generation)
+                    removed.append(generation)
     return removed
 
 

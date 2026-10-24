@@ -15,9 +15,11 @@ from pm.install_states import collect_orphan_install_states, orphan_install_stat
 
 def _state(installs, key, project_root):
     state = installs / key
-    (state / "inputs").mkdir(parents=True)
-    (state / "inputs" / ".project-root").write_text(str(project_root), encoding="utf-8")
-    (state / "environments" / "gen" / "venv").mkdir(parents=True)
+    from pm.lifetime import activity
+    with activity(state, create=True):
+        (state / "inputs").mkdir(parents=True)
+        (state / "inputs" / ".project-root").write_text(str(project_root), encoding="utf-8")
+        (state / "environments" / "gen" / "venv").mkdir(parents=True)
     return state
 
 

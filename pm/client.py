@@ -122,7 +122,9 @@ def _request(operation, arguments, *, callbacks=None, pause_event=None, project_
     stopped = threading.Event()
     write_lock = threading.Lock()
     monitor = None
-    with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    from pm.lifetime_launch import popen
+
+    with popen(command, managed=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           text=True, encoding="utf-8", env=environment) as process:
         assert process.stdin is not None and process.stdout is not None
         writer = process.stdin

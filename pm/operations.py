@@ -287,36 +287,49 @@ def _ensure_generation(
             return python
         return None
 
-    existing = current(selected_python())
-    if existing is not None:
-        return existing
+    from pm.lifetime import activity, side_domain
+
+    # A read-only lazy refusal must not create an environment. A participating
+    # builder creates/qualifies its domain before opening any internal lock.
+    if root.exists():
+        with activity(side_domain(root)):
+            existing = current(selected_python())
+            if existing is not None:
+                return existing
     if not explicit and not lazy_installs_allowed():
         raise _refuse_lazy(name, "isolated Python environment is missing or outdated")
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / ".install.lock").open("a+b") as mutex:
-        lock_fd(mutex.fileno(), wait=True)
-        base_python = selected_python()
-        existing = current(base_python)
-        if existing is not None:
-            return existing
-        if base_python is None:
-            tools = _toolchain(explicit=explicit)
-            if tools is None:
-                raise InstallError(name, "PM's pinned toolchain is unavailable")
-            base_python = tools[1].resolve()
-        generation = root / f"gen-{uuid.uuid4().hex}"
-        generation.mkdir()
-        try:
-            python = build(generation, base_python)
-            if executable is not None and _tool(python, executable) is None:
-                raise InstallError(name, f"installed requirements do not provide {executable!r}")
-            from pm.environments import flush_before_selecting
-            flush_before_selecting()
-            _write(root / "active.json", {"generation": generation.name,
-                                           "inputs": identity(base_python), **record})
-        except BaseException:
-            shutil.rmtree(generation, ignore_errors=True)
-            raise
+    with activity(side_domain(root), create=True):
+        root.mkdir(parents=True, exist_ok=True)
+        with (root / ".install.lock").open("a+b") as mutex:
+            lock_fd(mutex.fileno(), wait=True)
+            base_python = selected_python()
+            existing = current(base_python)
+            if existing is not None:
+                return existing
+            if base_python is None:
+                tools = _toolchain(explicit=explicit)
+                if tools is None:
+                    raise InstallError(name, "PM's pinned toolchain is unavailable")
+                base_python = tools[1].resolve()
+            generation = root / f"gen-{uuid.uuid4().hex}"
+            generation.mkdir()
+            from pm.lifetime_cleanup import defer_failed_output, output_identity
+
+            owned_identity = output_identity(generation)
+            try:
+                python = build(generation, base_python)
+                if executable is not None and _tool(python, executable) is None:
+                    raise InstallError(name, f"installed requirements do not provide {executable!r}")
+                (generation / ".lease-managed").touch()
+                from pm.environments import flush_before_selecting
+                flush_before_selecting()
+                _write(root / "active.json", {"generation": generation.name,
+                                               "inputs": identity(base_python), **record})
+            except BaseException:
+                if not defer_failed_output(generation, owned_identity):
+                    shutil.rmtree(generation, ignore_errors=True)
+                raise
+
     return python
 
 

@@ -161,14 +161,15 @@ def extra_supported(extra: str, *, environment: dict[str, str] | None = None,
 
 def _evaluate_in_runtime(marker: str, environment: dict[str, str]) -> bool:
     import json
-    import subprocess
 
     from pm.runtime import runtime_command, runtime_environment
 
     try:
         command = runtime_command(Path(__file__).with_name("_marker_eval.py"),
                                   [marker, json.dumps(environment)])
-        result = subprocess.run(command, env=runtime_environment(), capture_output=True,
+        from pm.lifetime_launch import run
+
+        result = run(command, env=runtime_environment(), capture_output=True,
                                 text=True, timeout=60, check=False)
     except Exception:
         return True  # same fallback as a malformed marker: the resolver decides

@@ -41,7 +41,7 @@ def orphan_install_states(installs: Path) -> list[Path]:
     orphans: list[Path] = []
     for state in sorted(installs.iterdir()):
         record = state / "inputs" / ".project-root"
-        if not state.is_dir() or not record.is_file():
+        if state.is_symlink() or record.is_symlink() or not state.is_dir() or not record.is_file():
             continue
         try:
             root = record.read_text(encoding="utf-8-sig").strip()
@@ -58,10 +58,15 @@ def _held(state: Path) -> bool:
     from hermes_cli.runtime_state import leases_held
     from pm.filesystem import lock_fd
 
-    lock = state / ".install.lock"
-    if lock.exists():
+    locks = (state / ".install.lock", state / "test-environment" / ".install.lock",
+             state / "pm-runtime" / ".prepare.lock")
+    for lock in locks:
+        if lock.is_symlink():
+            return True
+        if not lock.exists():
+            continue
         try:
-            fd = os.open(lock, os.O_RDWR)
+            fd = os.open(lock, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
         except OSError:
             return True
         try:
@@ -69,7 +74,8 @@ def _held(state: Path) -> bool:
                 return True
         finally:
             os.close(fd)
-    for generations in (state / "environments", state / "pm-runtime" / "generations"):
+    for generations in (state / "environments", state / "pm-runtime" / "generations",
+                        state / "test-environment"):
         if generations.is_dir():
             for generation in generations.iterdir():
                 if generation.is_dir() and (generation / ".leases").is_dir() and leases_held(generation):
@@ -77,28 +83,45 @@ def _held(state: Path) -> bool:
     return False
 
 
+def _still_orphan(state: Path) -> bool:
+    record = state / "inputs" / ".project-root"
+    if state.is_symlink() or record.is_symlink():
+        return False
+    root = record.read_text(encoding="utf-8-sig").strip()
+    return bool(root) and _provably_deleted(Path(root), state.parent.resolve().parent)
+
+
+def _remove_state(state: Path) -> bool:
+    # Preserve the recovery record until all other children have been removed.
+    for child in state.iterdir():
+        if child.name == "inputs":
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                child.unlink()
+    if any(child.name != "inputs" for child in state.iterdir()):
+        return False
+    shutil.rmtree(state, ignore_errors=True)
+    return not state.exists()
+
+
 def collect_orphan_install_states(installs: Path) -> list[Path]:
-    """Remove every unheld orphan state dir under *installs*; returns what was removed."""
+    """Collect only identity-qualified, idle orphan domains under their outside-state gate."""
+    from pm.lifetime import gate, LifetimeUnavailable
+
     removed: list[Path] = []
     for state in orphan_install_states(installs):
-        if _held(state):
-            logger.debug("orphan install state %s is still held; skipped", state.name)
-            continue
-        # The record goes last, and only once everything else is gone: the startup prune runs on
-        # a daemon thread and a removal can fail part-way (an open file on Windows, a read-only
-        # dir), and a dir that lost its record first would never be recognised again.
-        for child in state.iterdir():
-            if child.name == "inputs":
-                continue
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child, ignore_errors=True)
-            else:
-                with contextlib.suppress(OSError):
-                    child.unlink()
-        if any(child.name != "inputs" for child in state.iterdir()):
-            logger.debug("orphan install state %s only partly removed; retried next pass", state.name)
-            continue
-        shutil.rmtree(state, ignore_errors=True)
-        if not state.exists():
-            removed.append(state)
+        try:
+            with gate(state, wait=False) as guard:
+                if (guard is None or not guard.qualified or guard.held()
+                        or not _still_orphan(state) or _held(state)):
+                    continue
+                ownership = guard._snapshot()
+                if _remove_state(state):
+                    guard.confirm_removed(ownership)
+                    removed.append(state)
+        except (OSError, ValueError, LifetimeUnavailable):
+            logger.debug("Retaining unqualified or inaccessible install state %s", state.name)
     return removed

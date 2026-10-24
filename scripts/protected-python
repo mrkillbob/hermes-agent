@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Register target lifetime before executing its interpreter, using an existing bootstrap.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(dirname "$here")"
+# shellcheck source=scripts/_activation.sh
+. "$here/_activation.sh"
+_outside_lifetime() {
+    local directory parent
+    directory="$(cd -P "$(dirname "$1")" && pwd)" || return 1
+    while [ "$directory" != / ] && [ -n "$directory" ]; do
+        parent="$(dirname "$directory")"
+        [ ! -e "$parent/.lifetimes/$(basename "$directory")/domain.json" ] || return 1
+        [ "$parent" != "$directory" ] || break
+        directory="$parent"
+    done
+}
+selected=""
+if [ "${1:-}" = --bootstrap ]; then
+    selected="${2:-}"
+    shift 2
+fi
+print_only=""
+if [ "${1:-}" = --print-bootstrap ]; then
+    print_only=1
+    shift
+fi
+target="${1:-}"
+[ "$target" != --managed ] || target="${2:-}"
+if [ -n "$selected" ]; then
+    [ -x "$selected" ] && _outside_lifetime "$selected" || {
+        echo 'error: selected bootstrap is unavailable or inside managed state' >&2
+        exit 1
+    }
+    bootstrap="$selected"
+else
+    bootstrap="$(hermes_bootstrap_python "$repo" _outside_lifetime)" || bootstrap=""
+fi
+if [ -z "$bootstrap" ] && [ -x "$target" ] && _outside_lifetime "$target"; then
+    bootstrap="$target"  # explicit external/legacy interpreters are not collectible
+fi
+[ -n "$bootstrap" ] || {
+    echo 'error: no existing bootstrap outside managed state; run supported setup first' >&2
+    exit 1
+}
+if [ -n "$print_only" ]; then
+    printf '%s\n' "$bootstrap"
+    exit 0
+fi
+exec "$bootstrap" -I -B "$here/lifetime_python.py" "$@"

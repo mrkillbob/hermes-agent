@@ -458,8 +458,12 @@ class Venv(StatePackage):
             from pm.plugins_state import enabled_plugins_ordered
             enabled_plugins_ordered(skip_invalid_secondary=skip_invalid_secondary)
         members = [] if repair else (enabled_member_dirs() if plugin_dirs is None else plugin_dirs)
+        from pm.lifetime_cleanup import defer_failed_output, output_identity
+
+        owned_identity = None
         try:
             generation.mkdir(parents=True)
+            owned_identity = output_identity(generation)
             (generation / ".lease-managed").touch()
             environment.create()
             prior = Facts(runtime_facts_path(project), strict=repair).get("venv") or {}
@@ -487,7 +491,8 @@ class Venv(StatePackage):
                 validate_environment(venv_command(project, candidate, ("-I",)),
                                      env=dict(environment.env), cwd=resolved_lock.parent)
         except BaseException:
-            shutil.rmtree(generation, ignore_errors=True)
+            if owned_identity is not None and not defer_failed_output(generation, owned_identity):
+                shutil.rmtree(generation, ignore_errors=True)
             raise
         (generation / ".lease-managed").touch()
         return {"environment": candidate, "resolved_lock": resolved_lock}
