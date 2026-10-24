@@ -12,6 +12,17 @@ from hermes_cli.kanban_worker_routing import (
 )
 
 
+_NVIDIA_CAPACITY_ALIASES = frozenset({
+    "nvidia", "nim", "nvidia-nim", "build-nvidia", "nemotron",
+})
+
+
+def _capacity_provider(provider):
+    """Collapse only NVIDIA transport aliases; distinct local endpoints stay distinct."""
+    key = provider.strip().lower()
+    return "nvidia" if key in _NVIDIA_CAPACITY_ALIASES else key
+
+
 def _cap(value):
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
@@ -60,10 +71,26 @@ class WorkerCapacity:
             return provider or route[0], model or route[1]
         return None
 
+    @staticmethod
+    def _capacity_key(route):
+        """Count provider aliases together without losing the routed model ID."""
+        return _capacity_provider(route[0]), route[1]
+
     def limit(self, route):
         limits = [self.model_cap]
         if isinstance(self.model_caps, dict):
-            limits.append(_cap(self.model_caps.get("/".join(route))))
+            # Existing config may spell a canonical provider or one of its
+            # aliases. Honor matching entries while keeping model IDs exact.
+            for key, value in self.model_caps.items():
+                if not isinstance(key, str):
+                    continue
+                provider, separator, model = key.partition("/")
+                if (
+                    separator
+                    and model == route[1]
+                    and _capacity_provider(provider) == _capacity_provider(route[0])
+                ):
+                    limits.append(_cap(value))
         if route[0].lower() in _LOCAL_KANBAN_PROVIDERS:
             # A protected local runtime can raise this to its configured
             # local-lane cap (normally 2). Without that runtime signal keep
@@ -82,8 +109,9 @@ class WorkerCapacity:
             return False
         route = self.route(row, assignee)
         cap = self.limit(route) if route else None
-        if cap is not None and self.models[route] >= cap:
-            result.skipped_per_model_capped.append((row["id"], *route, self.models[route]))
+        capacity_key = self._capacity_key(route) if route else None
+        if cap is not None and self.models[capacity_key] >= cap:
+            result.skipped_per_model_capped.append((row["id"], *route, self.models[capacity_key]))
             return False
         return True
 
@@ -91,4 +119,4 @@ class WorkerCapacity:
         self.profiles[assignee] += 1
         route = self.route(row, assignee)
         if route:
-            self.models[route] += 1
+            self.models[self._capacity_key(route)] += 1
