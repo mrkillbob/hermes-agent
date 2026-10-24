@@ -223,8 +223,14 @@ def _prune_unlocked_leases(leases: Path) -> bool:
     Fail closed: a lease this user cannot open (root-owned 0o600 from a ``sudo hermes`` on the
     same checkout) is held, never a boot failure.
     """
+    try:
+        entries = list(leases.iterdir())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # an unreadable/replaced namespace is not proof of no readers
     held = False
-    for lease in leases.glob("*"):
+    for lease in entries:
         try:
             fd = os.open(lease, os.O_RDWR)
         except FileNotFoundError:
