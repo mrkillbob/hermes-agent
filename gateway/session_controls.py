@@ -17,6 +17,8 @@ from hermes_state_runtime import RuntimeStoreError
 
 logger = logging.getLogger(__name__)
 
+_SESSION_CREATE_PHASES = frozenset({'stage', 'commit', 'restore', 'resume'})
+
 
 # A refusal names the check that fired: the client prints ``field``/``detail`` beside the reason
 # code, and this log line is what a report can quote when the client's copy is not enough.
@@ -45,6 +47,14 @@ def _storage_cause(exc: BaseException) -> str:
         cause = cause.__cause__
     bucket = classify_persistence_error(cause if cause is not None else exc)
     return bucket if bucket in PERSISTENCE_ERROR_CAUSES else 'unknown'
+
+
+def _log_session_create_storage_phase(phase: str, exc: RuntimeStoreError) -> None:
+    """Record only fixed create phase and persistence cause for a retryable refusal."""
+    if phase not in _SESSION_CREATE_PHASES:
+        phase = 'unknown'
+    logger.warning('session.create storage phase failure phase=%s cause=%s',
+                   phase, _storage_cause(exc))
 
 
 def _profile_label(profile_id) -> str:
@@ -456,51 +466,62 @@ class AuthorityConnection:
         from gateway.session_policy import BYPASS_FIELDS
         from gateway.session_runtime_workers import tracked_write
         from hermes_state_local import commit_local_session
-        # Bot Mode's forever-chat mint: born hidden from the sidebar. `follow_profile_config` stays in
-        # the frozen request: the policy re-reads the profile's current route every turn.
-        hidden = params.pop('hidden', False)
-        if type(hidden) is not bool:
-            raise RuntimeStoreError('invalid_params', field='hidden', detail='must be a boolean')
-        ref = title and resolve_titled_session(self.authority, self.actor, title, missing_ok=True)
-        if (not ref and title == 'Bot Chat'
-                and not any(params.get(name) is True for name in BYPASS_FIELDS)
-                and staged_creation_follows(self.authority, self.actor, params.get('request_id'))):
-            # ``chat -c "Bot Chat" --create-if-missing`` and any other titled create. A safe-mode
-            # or ignore-user-config launch never reads the profile, so it stays frozen. An exact
-            # retry of a creation staged without the flag keeps that frozen request.
-            params.setdefault('follow_profile_config', True)
-        if not ref:
-            skills_prompt = None
-            if 'skills' in params:
-                # Skill files are read off the owner loop, once per NEW session (a retried
-                # request_id resumes the frozen policy and never re-renders).
-                from gateway.session_local_recovery import local_identity
-                from gateway.session_policy import render_launch_skills
-                params.setdefault('request_id', uuid.uuid4().hex)
-                sid = local_identity(self.authority.profile_id, self.actor.subject, params['request_id'])
-                if self.authority.db.get_session(sid) is None:
-                    skills_prompt = await asyncio.to_thread(render_launch_skills, params, sid)
-            # Host-bound client values apply only over the gateway's own ticketed attach (run_api).
-            ref = stage_local_session(self.authority, self.actor, params, skills_prompt=skills_prompt,
-                                      client_local=self.native_owner)
-            if isinstance(ref, dict):
-                # The creation commit runs off the owner loop: a held writer must not freeze
-                # every session behind one new chat (N50).
-                receipt = ref
-                await tracked_write(self.authority, partial(
-                    commit_local_session, self.authority.db, epoch=self.authority.epoch, receipt=receipt))
-                ref = restore_local_session(self.authority, receipt['session_id'])
-            # `--accept-hooks`: record this launch's consent; ``resume`` below registers the hooks.
-            if params.get('accept_hooks') is True:
-                from gateway.session_policy import accept_launch_hooks, restore_policy
-                from hermes_state_local import local_receipt
-                policy = restore_policy(local_receipt(self.authority.db, ref.session_id)['policy'])
-                await asyncio.to_thread(accept_launch_hooks, policy)
-            if title:
-                await tracked_write(self.authority, partial(title_new_session, self.authority, ref, title))
-            if hidden:
-                await tracked_write(self.authority, partial(self.authority.db.set_session_hidden, ref.session_id, True))
-        return await self.resume(ref, {})
+        phase = 'stage'
+        try:
+            # Bot Mode's forever-chat mint: born hidden from the sidebar. `follow_profile_config` stays in
+            # the frozen request: the policy re-reads the profile's current route every turn.
+            hidden = params.pop('hidden', False)
+            if type(hidden) is not bool:
+                raise RuntimeStoreError('invalid_params', field='hidden', detail='must be a boolean')
+            ref = title and resolve_titled_session(self.authority, self.actor, title, missing_ok=True)
+            if (not ref and title == 'Bot Chat'
+                    and not any(params.get(name) is True for name in BYPASS_FIELDS)
+                    and staged_creation_follows(self.authority, self.actor, params.get('request_id'))):
+                # ``chat -c "Bot Chat" --create-if-missing`` and any other titled create. A safe-mode
+                # or ignore-user-config launch never reads the profile, so it stays frozen. An exact
+                # retry of a creation staged without the flag keeps that frozen request.
+                params.setdefault('follow_profile_config', True)
+            if not ref:
+                skills_prompt = None
+                if 'skills' in params:
+                    # Skill files are read off the owner loop, once per NEW session (a retried
+                    # request_id resumes the frozen policy and never re-renders).
+                    from gateway.session_local_recovery import local_identity
+                    from gateway.session_policy import render_launch_skills
+                    params.setdefault('request_id', uuid.uuid4().hex)
+                    sid = local_identity(self.authority.profile_id, self.actor.subject, params['request_id'])
+                    if self.authority.db.get_session(sid) is None:
+                        skills_prompt = await asyncio.to_thread(render_launch_skills, params, sid)
+                # Host-bound client values apply only over the gateway's own ticketed attach (run_api).
+                ref = stage_local_session(self.authority, self.actor, params, skills_prompt=skills_prompt,
+                                          client_local=self.native_owner)
+                if isinstance(ref, dict):
+                    # The creation commit runs off the owner loop: a held writer must not freeze
+                    # every session behind one new chat (N50).
+                    receipt = ref
+                    phase = 'commit'
+                    await tracked_write(self.authority, partial(
+                        commit_local_session, self.authority.db, epoch=self.authority.epoch, receipt=receipt))
+                    phase = 'restore'
+                    ref = restore_local_session(self.authority, receipt['session_id'])
+                # `--accept-hooks`: record this launch's consent; ``resume`` below registers the hooks.
+                phase = 'resume'
+                if params.get('accept_hooks') is True:
+                    from gateway.session_policy import accept_launch_hooks, restore_policy
+                    from hermes_state_local import local_receipt
+                    policy = restore_policy(local_receipt(self.authority.db, ref.session_id)['policy'])
+                    await asyncio.to_thread(accept_launch_hooks, policy)
+                if title:
+                    await tracked_write(self.authority, partial(title_new_session, self.authority, ref, title))
+                if hidden:
+                    await tracked_write(self.authority, partial(self.authority.db.set_session_hidden, ref.session_id, True))
+            else:
+                phase = 'resume'
+            return await self.resume(ref, {})
+        except RuntimeStoreError as exc:
+            if exc.reason == 'storage_unavailable':
+                _log_session_create_storage_phase(phase, exc)
+            raise
 
     async def ping(self, ref, params):
         if not self.actor.capabilities:

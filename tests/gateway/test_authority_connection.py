@@ -230,6 +230,67 @@ async def test_a_wrapped_storage_refusal_exposes_only_the_allowlisted_cause(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('phase', ['stage', 'commit', 'restore', 'resume'])
+async def test_session_create_storage_refusal_logs_only_fixed_phase_and_cause(
+        tmp_path, monkeypatch, caplog, phase):
+    """A create refusal records its failing phase without request or exception contents."""
+    import gateway.session_local
+    import gateway.session_local_recovery
+    import gateway.session_runtime_workers
+
+    from gateway.session_contract import SessionRef
+
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    try:
+        epoch = begin_runtime_epoch(db, instance_id='test')
+        authority = SessionAuthority(SimpleNamespace(), profile_id='test', instance_id='test',
+                                     db=db, epoch=epoch)
+        connection = AuthorityConnection(authority, object(), {'user_id': 'human'})
+
+        def refuse():
+            try:
+                raise sqlite3.OperationalError(
+                    'database is locked C:\\private\\state.db prompt=private token=secret')
+            except sqlite3.Error as cause:
+                raise RuntimeStoreError('storage_unavailable') from cause
+
+        monkeypatch.setattr(gateway.session_local, 'stage_local_session',
+                            lambda *args, **kwargs: refuse() if phase == 'stage' else
+                            {'session_id': 'private-session'})
+        monkeypatch.setattr(gateway.session_runtime_workers, 'tracked_write',
+                            lambda *args, **kwargs: refuse() if phase == 'commit' else _completed())
+        monkeypatch.setattr(gateway.session_local_recovery, 'restore_local_session',
+                            lambda *args, **kwargs: refuse() if phase == 'restore' else
+                            SessionRef('test', 'private-session'))
+
+        async def resume(ref, params):
+            if phase == 'resume':
+                refuse()
+            return {'session_id': ref.session_id}
+
+        connection.resume = resume
+        with caplog.at_level('WARNING', logger='gateway.session_controls'):
+            reply = await connection.dispatch({'id': 1, 'method': 'session.create',
+                                               'params': {'source': 'gui'}})
+
+        assert reply['error']['code'] == 4001
+        assert reply['error']['data'] == {'reason': 'storage_unavailable', 'cause': 'locked'}
+        phase_records = [record.getMessage() for record in caplog.records
+                         if 'session.create storage phase failure' in record.getMessage()]
+        assert phase_records == [f'session.create storage phase failure phase={phase} cause=locked']
+        assert 'state.db' not in caplog.text
+        assert 'private-session' not in caplog.text
+        assert 'private prompt' not in caplog.text
+        assert 'secret' not in caplog.text
+    finally:
+        db.close()
+
+
+async def _completed():
+    return None
+
+
+@pytest.mark.asyncio
 async def test_a_retrying_client_cannot_flood_the_log_with_storage_failures(tmp_path, caplog):
     """Clients retry on ``storage_unavailable``: each failure keeps one short line, the traceback comes
     once per method and error class, and a client-sized ``session_id`` is never copied whole."""
