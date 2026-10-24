@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -434,6 +435,63 @@ def test_line_two_stays_young_through_the_r6_release_wait(tmp_path):
         if script.poll() is None:
             assert script.wait(timeout=30) == 0
     assert not marker.exists()
+
+
+def test_launcher_resets_an_inherited_ignored_term_before_relaunch(tmp_path):
+    """The detached hand-off may be exec'd from Electron with SIGTERM ignored.
+    Bash cannot re-trap a signal ignored on entry, so its relaunched app must
+    receive the default disposition after the Python daemon boundary.
+    """
+    home, install = _install(tmp_path)
+    app_dir = install / "apps" / "desktop" / "release" / "linux-unpacked"
+    app_dir.mkdir(parents=True)
+    target = app_dir / "hermes"
+    observed = tmp_path / "relaunch-signal.txt"
+    target.write_text(
+        f"#!{sys.executable}\n"
+        "import os, signal, time\n"
+        f"open({str(observed)!r}, 'w', encoding='utf-8').write(f'{{os.getpid()}} {{signal.getsignal(signal.SIGTERM)}}')\n"
+        "time.sleep(5)\n",
+        encoding="utf-8",
+    )
+    target.chmod(0o755)
+
+    launcher_script = tmp_path / "launch-with-term-ignored.py"
+    launcher_script.write_text(
+        "import os, signal, sys\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"os.execv('/bin/bash', ['/bin/bash', {str(POSIX)!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    launcher = subprocess.Popen(
+        [sys.executable, str(launcher_script), "--install-root", str(install), "--no-ui", "--desktop-pid", "0",
+         "--relaunch-target", str(target), "--", "--no-sandbox"],
+        env=_env(tmp_path, home),
+        cwd=tmp_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    app_pid = None
+    try:
+        assert launcher.wait(timeout=60) == 0
+        deadline = time.monotonic() + 60
+        while not observed.exists():
+            assert time.monotonic() < deadline, "the updater did not relaunch the test app"
+            time.sleep(0.05)
+        app_pid_text, disposition = observed.read_text(encoding="utf-8").split()
+        app_pid = int(app_pid_text)
+        assert disposition == "0", "the relaunched app inherited SIGTERM=SIG_IGN"
+
+        # A pidfd reports this exact process's exit even if init has not yet
+        # reaped the detached child, unlike kill(pid, 0), which sees zombies.
+        with os.fdopen(os.pidfd_open(app_pid), "rb") as process:
+            signal.pidfd_send_signal(process.fileno(), signal.SIGTERM)
+            ready, _, _ = select.select([process], [], [], 2.5)
+            assert ready, "the test app did not exit on SIGTERM"
+    finally:
+        if launcher.poll() is None:
+            launcher.kill()
+        launcher.wait(timeout=10)
 
 
 def test_checkout_lock_probe_never_makes_a_concurrent_acquire_fail(tmp_path):
