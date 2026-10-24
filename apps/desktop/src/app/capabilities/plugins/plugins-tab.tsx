@@ -48,8 +48,8 @@ import { TOOLSETS_QUERY_KEY } from '../toolsets/toolsets-data'
 
 import { PluginFolderAccess } from './plugin-folder-access'
 import { mergePluginPackages, type PackageKind, type PluginPackage } from './plugin-packages'
-import { scopeIsForeignConnection } from './plugin-scope'
 import { PluginPageAccess } from './plugin-page-access'
+import { scopeIsForeignConnection } from './plugin-scope'
 import { runPluginUpdate } from './plugin-update'
 
 /** Deep-link anchor for a package row (`/capabilities?tab=plugins&plugin=<key>`).
