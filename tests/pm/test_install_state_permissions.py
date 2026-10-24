@@ -14,12 +14,16 @@ from pm.environments import install_state_dir, install_state_permission_message
 
 
 @pytest.mark.parametrize("phase", ["preparation", "activation"])
-def test_bootstrap_reports_unwritable_install_once(tmp_path, monkeypatch, phase):
+@pytest.mark.parametrize("coordination", [False, True])
+def test_bootstrap_reports_unwritable_install_once(tmp_path, monkeypatch, phase, coordination):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     root = Path(__file__).resolve().parents[2]
     target = install_state_dir(root) / (
         "pm-runtime/.prepare.lock" if phase == "preparation" else ".install.lock"
     )
+    if coordination:
+        from pm.lifetime import Gate
+        target = Gate(install_state_dir(root)).namespace / "gate"
     code = """
 import errno
 import sys
@@ -100,3 +104,16 @@ raise SystemExit(main(["repair"]))
     with pytest.raises(PermissionError):
         _early_recovery.recover_if_needed(project, argv=["pm", "repair"], explicit=True)
     assert "run `hermes pm repair`" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("relative", ["", "gate", "activities/reader"])
+def test_install_coordination_permissions_are_scoped_to_this_install(tmp_path, monkeypatch, relative):
+    from pm.lifetime import Gate
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    project = tmp_path / "source"
+    namespace = Gate(install_state_dir(project)).namespace
+    denied = namespace / relative
+    assert install_state_permission_message(project, PermissionError(13, "Permission denied", str(denied)))
+    other = namespace.parent / "unrelated-install" / "gate"
+    assert install_state_permission_message(project, PermissionError(13, "Permission denied", str(other))) is None

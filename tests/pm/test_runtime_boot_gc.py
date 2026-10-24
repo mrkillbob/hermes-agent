@@ -13,6 +13,10 @@ def test_bootstrap_lease_survives_selection_change(tmp_path, monkeypatch):
     repo.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     state = install_state_dir(repo)
+    from pm.lifetime import activity
+
+    with activity(state, create=True):
+        pass
     for name in ("first", "second", "unused"):
         venv = state / "environments" / name / "venv"
         venv.mkdir(parents=True)

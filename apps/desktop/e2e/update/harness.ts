@@ -73,8 +73,14 @@ export function seedInstall(): InstallFacts {
 }
 
 /** Put the pristine install + origin back (every spec starts from the same healthy install). */
-export function restoreInstall(): InstallFacts {
-  killInstallProcesses(readFacts())
+export async function restoreInstall(): Promise<InstallFacts> {
+  const before = readFacts()
+  killInstallProcesses(before)
+  await waitFor(
+    'fixture install processes to exit before restore',
+    () => installProcesses(before).length === 0,
+    { timeout: 10_000, interval: 100, explain: () => diagnostics(before) }
+  )
   const facts = JSON.parse(seed(['restore', UPDATE_ROOT], 10 * 60_000)) as InstallFacts
   fs.rmSync(userDataDir(facts), { recursive: true, force: true })
 
@@ -119,7 +125,7 @@ export interface InstallSession {
  * endpoint, and the GitHub edge the install's update check goes through.
  */
 export async function startInstallSession(): Promise<InstallSession> {
-  const facts = restoreInstall()
+  const facts = await restoreInstall()
   const provider = await startScriptedProvider()
   configureProvider(facts, provider.url)
   const edge = await startGithubEdge(facts.sandboxRoot, facts.origin, facts.env.SSL_CERT_FILE)
@@ -133,8 +139,17 @@ export async function startInstallSession(): Promise<InstallSession> {
     env,
     close: async () => {
       killInstallProcesses(facts)
-      await provider.close()
-      await edge.close()
+
+      try {
+        await waitFor(
+          'fixture install processes to exit before session close',
+          () => installProcesses(facts).length === 0,
+          { timeout: 10_000, interval: 100, explain: () => diagnostics(facts) }
+        )
+      } finally {
+        await provider.close()
+        await edge.close()
+      }
     }
   }
 }

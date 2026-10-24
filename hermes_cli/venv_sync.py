@@ -176,8 +176,10 @@ def completion_pending_path(project_root: Path) -> Path:
 def arm_completion(project_root: Path) -> Path:
     """Persist the tail obligation before selecting a new dependency generation."""
     pending = completion_pending_path(project_root)
-    pending.parent.mkdir(parents=True, exist_ok=True)
-    pending.write_text("source update tail not finished\n", encoding="utf-8")
+    from pm.lifetime import activity
+
+    with activity(pending.parent, create=True):
+        pending.write_text("source update tail not finished\n", encoding="utf-8")
     return pending
 
 

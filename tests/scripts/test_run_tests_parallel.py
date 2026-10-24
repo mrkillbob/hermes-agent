@@ -27,6 +27,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import venv
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,12 @@ def _probe_root(tmp_path):
     shutil.copy2(real / "run_tests_parallel.py", scripts)
     # The runner shares the platforms() spec resolver with the CI lane selector.
     shutil.copy2(real / "ci" / "list_os_marked_tests.py", scripts / "ci")
+    for name in ('runner_lifetime.py', 'managed_pytest.py', 'lifetime_python.py', 'protected-python'):
+        shutil.copy2(real / name, scripts)
+    (root / 'pm').mkdir(exist_ok=True)
+    for name in ('__init__.py', 'filesystem.py', 'lifetime.py', 'lifetime_handles.py', 'lifetime_launch.py'):
+        shutil.copy2(real.parent / 'pm' / name, root / 'pm')
+
     return root
 
 
@@ -665,6 +672,19 @@ def test_canonical_runner_confines_explicit_scratch(tmp_path: Path) -> None:
     for name in ("run_tests.sh", "_activation.sh"):
         shutil.copy2(real_scripts / name, root / "scripts" / name)
     shutil.copy2(real_scripts.parent / "hermes_constants_scratch.py", root)
+    # A stdlib-only outside-state bootstrap, independent of the qualified test target.
+    venv.EnvBuilder(with_pip=False).create(root / ".venv")
+    from pm.environments import site_packages, venv_python
+    from pm.lifetime import activity, domain_for_generation
+
+    generation = tmp_path / "managed-state" / "environments" / "probe"
+    with activity(domain_for_generation(generation), create=True):
+        target = generation / "venv"
+        venv.EnvBuilder(with_pip=False).create(target)
+        (generation / ".lease-managed").touch()
+        (site_packages(target) / "probe-test-dependencies.pth").write_text(
+            "\n".join(path for path in sys.path if Path(path).name in {"site-packages", "dist-packages"}) + "\n",
+            encoding="utf-8")
     scratch = tmp_path / "owned-scratch"
     scratch.mkdir()
     general_tmp = tmp_path / "general-tmp"
@@ -690,7 +710,7 @@ def test_canonical_runner_confines_explicit_scratch(tmp_path: Path) -> None:
     )
     env = os.environ.copy()
     env.pop("__HERMES_ACTIVATED", None)
-    env.update(HERMES_PYTHON=sys.executable, HERMES_TEST_SCRATCH_ROOT=str(scratch),
+    env.update(HERMES_PYTHON=str(venv_python(target)), HERMES_TEST_SCRATCH_ROOT=str(scratch),
                TMPDIR=str(general_tmp), TMP=str(general_tmp), TEMP=str(general_tmp),
                PYTHONPYCACHEPREFIX=str(pycache), PYTHONDONTWRITEBYTECODE="1",
                PYTHON_CPU_COUNT="1", HERMES_TEST_WORKERS="1", HERMES_TEST_FILE_RETRIES="0")

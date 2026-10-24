@@ -605,3 +605,44 @@ without upload times, it stops with `has no publish time`; use
 - **Interrupted dependency install:** startup requests the same PM repair before dependency activation. Automatic attempts are bounded; `pm repair` retries explicitly. A failed repair preserves the previous selection and its retry marker.
 - **Damaged Python executable or application source:** repair or reinstall through the package owner. PM cannot run without those files. Signed payload files are never modified by dependency repair.
 - **Unknown package or extra:** use the declared name. `pm install` takes package names, not Python extra names or pip specifications.
+
+### Managed environment lifetimes
+
+Managed builders and launchers register a private kernel-held activity before using a
+removable install environment. A short gate outside that environment coordinates
+registration with generation and orphan-state cleanup; readers keep independent
+references, so one long-running reader does not serialize other readers. Startup
+acquisition shares one timeout between registration and the install mutex; a reader
+that cannot register fails before accessing dependencies. A busy install mutex still
+allows the existing fallback while its lifetime protection remains held. Managed PM
+and test children inherit only those references, protecting startup and surviving a
+supervisor crash. The canonical test runner also protects its pytest probe and uses
+serial bytecode precompilation to avoid unregistered compilation workers.
+
+On POSIX, the dedicated CLI bootstrap starts without site initialization (`-I -S`)
+and replaces itself with the target interpreter. PID, process group, terminal and
+native signal exit status stay with that interpreter, so PID and group cancellation
+do not require forwarding or signal suppression. The single-threaded, non-reentrant
+bootstrap transfers only its exact lifetime descriptors; unrelated inherited
+descriptors are closed on exec. It restores descriptor flags and changed signal
+dispositions if exec fails, then releases its owned registration. Borrowed references
+remain owned by their caller. An unavailable `/proc/self/fd` and `/dev/fd` inventory,
+or unsupported threaded/library entry, fails before execution rather than leaking
+unrelated descriptors. This is a CLI startup contract, not a general threaded exec
+API. Windows retains explicit child supervision and native handle inheritance.
+
+Only a newly created domain receives identity-bound lifetime qualification. Existing
+or changed state, unreadable coordination metadata and unknown activity records are
+retained. A producer cleans up its own failed output after releasing its reference,
+under the same gate and only while all recorded output identities still match and no
+related activity remains. A surviving child leaves the failed output for an existing
+eligible cleanup pass; this adds no periodic collection or new retention threshold.
+
+This covers participating launchers, not arbitrary raw interpreter invocations,
+detached uncooperative descendants or global tool-store collection. Mixed older
+launchers and legacy state are not retroactively qualified. Windows lifetime handles
+use explicit native inheritance and sharing rules; platform qualification requires
+the native subprocess/crash regression tests on that platform. No configuration,
+profile, admission-policy or automation-pause setting changes as part of this protocol.
+Private records contain paths, filesystem identity, platform and generation scope,
+never request contents, credentials or externally exported telemetry.

@@ -96,7 +96,12 @@ def install_state_permission_message(project_root: Path, exc: PermissionError) -
     if not exc.filename:
         return None
     denied = Path(exc.filename).resolve()
-    if not denied.is_relative_to(install_state_dir(project_root).resolve()):
+    from pm.lifetime import Gate
+
+    state = install_state_dir(project_root).resolve()
+    coordination = Gate(state).namespace
+    if not (denied.is_relative_to(state) or denied.is_relative_to(coordination)
+            or denied == coordination.parent):
         return None
     return (f"install state is not writable by this user ({denied}); "
             "run as the install owner or grant write access")

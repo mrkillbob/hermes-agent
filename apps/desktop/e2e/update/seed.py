@@ -20,8 +20,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -29,6 +32,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from tests.e2e.core.upgrade import _helpers as H
 from tests.e2e.core.upgrade import _install_helpers as I
+from pm.lifetime import Gate, LifetimeUnavailable, gate
 
 
 def _paths(root: Path) -> dict[str, Path]:
@@ -175,12 +179,203 @@ def install(root: Path) -> None:
     print(json.dumps(facts))
 
 
+def _require_directory(path: Path, reason: str) -> None:
+    try:
+        if stat.S_ISDIR(path.lstat().st_mode):
+            return
+    except OSError as exc:
+        raise RuntimeError(f"{reason} is missing; reseed required") from exc
+    raise RuntimeError(f"{reason} is not a concrete directory; reseed required")
+
+
+def _require_regular_file(path: Path, reason: str) -> None:
+    try:
+        if stat.S_ISREG(path.lstat().st_mode):
+            return
+    except OSError as exc:
+        raise RuntimeError(f"{reason} is missing; reseed required") from exc
+    raise RuntimeError(f"{reason} is not a regular file; reseed required")
+
+
+def _fact_path(value: str, label: str) -> Path:
+    path = Path(value)
+    if ".." in path.parts:
+        raise RuntimeError(f"fixture {label} contains parent traversal; reseed required")
+    return Path(os.path.normpath(os.path.abspath(path)))
+
+
+def _require_directory_chain(base: Path, parts: tuple[str, ...], reason: str) -> Path:
+    cursor = base
+    for part in parts:
+        cursor /= part
+        _require_directory(cursor, reason)
+    return cursor
+
+
+def _restore_facts(p: dict[str, Path]) -> tuple[dict, Path, Path]:
+    for path in (p["sb"], p["origin"], p["golden"], p["golden"] / "sb", p["golden"] / "origin"):
+        _require_directory(path, "fixture root")
+    _require_regular_file(p["facts"], "fixture facts")
+    facts = json.loads(p["facts"].read_text(encoding="utf-8"))
+    sandbox = _fact_path(facts["sandboxRoot"], "sandboxRoot")
+    hermes_home = _fact_path(facts["hermesHome"], "hermesHome")
+    origin = _fact_path(facts["origin"], "origin")
+    expected_sandbox = Path(os.path.normpath(os.path.abspath(p["sb"])))
+    expected_origin = Path(os.path.normpath(os.path.abspath(p["origin"])))
+    env_home = _fact_path(facts["env"]["HERMES_HOME"], "HERMES_HOME")
+    if sandbox != expected_sandbox or not hermes_home.is_relative_to(sandbox) or env_home != hermes_home:
+        raise RuntimeError("fixture facts escape the owned sandbox; reseed required")
+    if origin != expected_origin:
+        raise RuntimeError("fixture origin escapes the owned sandbox; reseed required")
+    return facts, sandbox, hermes_home
+
+
+def _validate_restore_hierarchies(p: dict[str, Path], sandbox: Path, hermes_home: Path) -> Path:
+    home_parts = hermes_home.relative_to(sandbox).parts
+    current = _require_directory_chain(sandbox, home_parts + ("installs", ".lifetimes"), "fixture path")
+    golden_sandbox = p["golden"] / "sb"
+    _require_directory_chain(golden_sandbox, home_parts + ("installs", ".lifetimes"), "snapshot path")
+    return current
+
+
+def _domain_snapshot_paths(
+    domain: Path, sandbox: Path, golden_sandbox: Path
+) -> tuple[Path, Path]:
+    parts = domain.relative_to(sandbox).parts
+    live = _require_directory_chain(sandbox, parts, "managed fixture domain")
+    saved = _require_directory_chain(golden_sandbox, parts, "snapshot fixture domain")
+    return live, saved
+
+
+def _validate_lifetime_namespace(
+    namespace: Path, expected_marker: Path, domain: Path, sandbox: Path, golden_sandbox: Path
+) -> None:
+    _require_directory(namespace, "lifetime namespace")
+    _require_directory(namespace / "activities", "lifetime activities")
+    _require_regular_file(namespace / "gate", "lifetime gate")
+    marker = namespace / "domain.json"
+    _require_regular_file(marker, "lifetime qualification")
+    _require_regular_file(expected_marker, "snapshot qualification")
+    _domain_snapshot_paths(domain, sandbox, golden_sandbox)
+    if marker.read_bytes() != expected_marker.read_bytes():
+        raise RuntimeError("managed fixture qualification differs from snapshot; reseed required")
+
+
+def _namespace_markers(coordination: Path) -> list[Path]:
+    _require_directory(coordination, "lifetime coordination root")
+    markers = []
+    for namespace in sorted(coordination.iterdir()):
+        _require_directory(namespace, "lifetime namespace")
+        marker = namespace / "domain.json"
+        _require_regular_file(marker, "lifetime qualification")
+        markers.append(marker)
+    return markers
+
+
+def _managed_domains(p: dict[str, Path], sandbox: Path, hermes_home: Path) -> tuple[list[Path], Path]:
+    install_root = hermes_home / "installs"
+    coordination = _validate_restore_hierarchies(p, sandbox, hermes_home)
+    golden_coordination = p["golden"] / "sb" / hermes_home.relative_to(sandbox) / "installs" / ".lifetimes"
+    current_markers = _namespace_markers(coordination)
+    expected_markers = _namespace_markers(golden_coordination)
+    current_names = [marker.parent.name for marker in current_markers]
+    expected_names = [marker.parent.name for marker in expected_markers]
+    if current_names != expected_names:
+        raise RuntimeError("managed fixture domains differ from snapshot; reseed required")
+    domains = []
+    for marker, expected in zip(current_markers, expected_markers):
+        namespace = marker.parent
+        _require_directory(namespace, "lifetime namespace")
+        domain = install_root / namespace.name
+        _validate_lifetime_namespace(namespace, expected, domain, sandbox, p["golden"] / "sb")
+        domains.append(domain)
+    return domains, coordination
+
+
+def _lock_quiescent_domains(domains: list[Path], stack: ExitStack) -> list[Gate]:
+    guards = []
+    for domain in domains:
+        try:
+            guard = stack.enter_context(gate(domain, wait=False))
+        except (OSError, LifetimeUnavailable) as exc:
+            raise RuntimeError("cannot lock managed fixture identity; reseed required") from exc
+        if guard is None or not guard.qualified:
+            raise RuntimeError("managed fixture identity changed; reseed required")
+        if guard.held():
+            raise RuntimeError("managed fixture still has active readers; restore refused")
+        guards.append(guard)
+    return guards
+
+
+def _restore_locked_trees(p: dict[str, Path], guards: list[Gate], coordination: Path) -> None:
+    for key in ("sb", "origin"):
+        protected = coordination if key == "sb" else None
+        _reconcile_tree(p["golden"] / key, p[key], protected_coordination=protected)
+    if any(not guard.qualified for guard in guards):
+        raise RuntimeError("managed fixture identity changed during restore; reseed required")
+
+
 def restore(root: Path) -> None:
     p = _paths(root)
-    for key in ("sb", "origin"):
-        shutil.rmtree(p[key], ignore_errors=True)
-        subprocess.run(["cp", "-a", str(p["golden"] / key), str(p[key])], check=True)
-    print(p["facts"].read_text(encoding="utf-8"))
+    facts, sandbox, hermes_home = _restore_facts(p)
+    domains, coordination = _managed_domains(p, sandbox, hermes_home)
+    with ExitStack() as stack:
+        guards = _lock_quiescent_domains(domains, stack)
+        _restore_locked_trees(p, guards, coordination)
+    print(json.dumps(facts))
+
+
+def _remove_entry(path: Path) -> None:
+    """Remove one fixture entry without following a symlink at the entry itself."""
+    if path.is_symlink() or not path.is_dir():
+        path.unlink(missing_ok=True)
+    else:
+        shutil.rmtree(path)
+
+
+def _reconcile_tree(source: Path, target: Path, *, protected_coordination: Path | None = None) -> None:
+    """Restore owned fixture contents in place, retaining directory and lifetime-gate inodes."""
+    if source.is_symlink() or not source.is_dir() or target.is_symlink() or not target.is_dir():
+        raise RuntimeError("fixture root is not a concrete directory; reseed required")
+
+    source_entries = {entry.name: entry for entry in source.iterdir()}
+    target_entries = {entry.name: entry for entry in target.iterdir()}
+    for name, old in target_entries.items():
+        if protected_coordination is not None and target / name == protected_coordination:
+            continue
+        new = source_entries.get(name)
+        if new is None or (old.is_dir() and not old.is_symlink()) != (new.is_dir() and not new.is_symlink()):
+            _remove_entry(old)
+
+    for name, new in source_entries.items():
+        if protected_coordination is not None and target / name == protected_coordination:
+            continue
+        old = target / name
+        if new.is_symlink():
+            if old.exists() or old.is_symlink():
+                _remove_entry(old)
+            old.symlink_to(os.readlink(new), target_is_directory=new.is_dir())
+        elif new.is_dir():
+            if old.is_symlink() or (old.exists() and not old.is_dir()):
+                _remove_entry(old)
+            if not old.exists():
+                old.mkdir()
+            _reconcile_tree(new, old, protected_coordination=protected_coordination)
+            shutil.copystat(new, old, follow_symlinks=False)
+        elif new.is_file():
+            # Write a fresh sibling and atomically replace, so destination hardlinks are never
+            # modified through to an outside fixture path.
+            fd, temporary_name = tempfile.mkstemp(prefix=f".{old.name}.restore-", dir=old.parent)
+            os.close(fd)
+            temporary = Path(temporary_name)
+            try:
+                shutil.copyfile(new, temporary, follow_symlinks=False)
+                shutil.copystat(new, temporary, follow_symlinks=False)
+                os.replace(temporary, old)
+            finally:
+                temporary.unlink(missing_ok=True)
+        else:
+            raise RuntimeError(f"unsupported fixture entry {new}; reseed required")
 
 
 def publish(root: Path, message: str, rel: str, content_file: str) -> None:

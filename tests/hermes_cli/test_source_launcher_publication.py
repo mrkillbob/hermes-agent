@@ -15,7 +15,9 @@ from pm.environments import install_state_dir, site_packages
 ROOT = Path(__file__).resolve().parents[2]
 BOOT_FILES = (
     "hermes_bootstrap.py", "hermes_constants.py", "hermes_cli/__init__.py", "hermes_cli/_launchers.py",
-    "pm/environments.py", "pm/filesystem.py", "pm/paths.py", "hermes_cli/runtime_state.py",
+    "pm/environments.py", "pm/filesystem.py",
+    "pm/lifetime.py", "pm/lifetime_handles.py", "pm/lifetime_cleanup.py",
+    "pm/paths.py", "hermes_cli/runtime_state.py",
     "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py",
     "hermes_cli/venv_sync.py", "hermes_cli/steward.py",
     "hermes_cli/stderr_timestamp.py",
@@ -59,6 +61,10 @@ def fixture_tree(tmp_path, monkeypatch):
 
 
 def select_generation(repo, name, value):
+    from pm.lifetime import activity
+
+    with activity(install_state_dir(repo), create=True):
+        pass
     selected = install_state_dir(repo) / 'environments' / str(name) / 'venv'
     site = site_packages(selected)
     site.mkdir(parents=True)
