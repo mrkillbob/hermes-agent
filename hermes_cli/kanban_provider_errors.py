@@ -59,6 +59,9 @@ _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS = frozenset(
         "typed_request_required",
         "unknown_destination",
         "untrusted_provenance",
+        "unsupported_remote_task_transport",
+        "unverified_remote_task_context",
+        "unverified_remote_task_history",
         "untyped_request_value",
     }
 )
