@@ -133,8 +133,14 @@ def collect_superseded_generations(project_root: Path) -> None:
     Without this only a manual `hermes pm gc` reclaimed old environments. Safe
     right after a sync: the collectors skip leased, selected and day-young
     generations and yield to any in-flight install instead of waiting.
+    An operator pause defers this automatic cleanup until a later unpaused sync.
     """
     import logging
+
+    from agent.estop import check_paused
+
+    if check_paused("dependency-generation-cleanup", logging.getLogger(__name__)):
+        return
 
     from hermes_cli.runtime_state import collect_generations
     from pm.environments import install_state_dir
