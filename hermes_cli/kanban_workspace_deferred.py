@@ -75,7 +75,7 @@ def _defer_shared_workspace_cleanup(conn, task_id, path) -> bool:
     return True
 
 
-def _pending(conn, key):
+def _pending(conn, keys):
     from hermes_cli import kanban_db_workspace as ws
 
     rows = conn.execute(
@@ -92,7 +92,7 @@ def _pending(conn, key):
             payload = json.loads(row["payload"])
             identity = payload.get("identity")
             if (payload.get("reason") == "shared" and isinstance(identity, dict)
-                    and ws._path_key(identity["directory"]["path"]) == key):
+                    and ws._path_key(identity["directory"]["path"]) in keys):
                 pending.append((conn, dict(row), identity))
         except (ValueError, TypeError, KeyError, AttributeError):
             continue
@@ -111,16 +111,29 @@ def _eligible(conn, row, expected):
     )
 
 
+def _completed_workspace_keys(conn, task_id):
+    from hermes_cli import kanban_db_workspace as ws
+
+    rows = conn.execute(
+        "SELECT workspace_path FROM tasks WHERE workspace_path IS NOT NULL "
+        f"AND status IN {ws._TERMINAL_STATUSES_SQL} "
+        "AND (id=? OR id IN (SELECT parent_id FROM task_links WHERE child_id=?))",
+        (task_id, task_id),
+    ).fetchall()
+    return {ws._path_key(Path(row["workspace_path"]).expanduser().resolve(strict=False)) for row in rows}
+
+
 def resume_shared_cleanup(conn, task_id) -> None:
     """Best-effort continuation, with sibling DBs read-only and no recursion."""
     from hermes_cli import kanban_db_workspace as ws
 
     logger = ws._kb._log
     try:
-        row = conn.execute(ws._WORKSPACE_ROW_SQL, (task_id,)).fetchone()
-        if not row or not row["workspace_path"] or not ws._is_terminal_task(conn, task_id):
+        if not ws._is_terminal_task(conn, task_id):
             return
-        key = ws._path_key(Path(row["workspace_path"]).expanduser().resolve(strict=False))
+        keys = _completed_workspace_keys(conn, task_id)
+        if not keys:
+            return
         with contextlib.ExitStack() as stack:
             # Discover and read every board before removal. An unreadable board
             # leaves all candidates intact, even if a local owner looked free.
@@ -130,7 +143,7 @@ def resume_shared_cleanup(conn, task_id) -> None:
                 stack.callback(other.close)
                 other.row_factory = sqlite3.Row
                 boards.append(other)
-            pending = [entry for board in boards for entry in _pending(board, key)]
+            pending = [entry for board in boards for entry in _pending(board, keys)]
             for owner_conn, owner, identity in pending:
                 if not _eligible(owner_conn, owner, identity):
                     continue

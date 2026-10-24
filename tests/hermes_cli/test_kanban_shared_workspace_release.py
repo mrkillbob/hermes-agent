@@ -324,3 +324,55 @@ def test_continuation_failure_does_not_block_terminal_transition(home, repo, mon
         assert kb.archive_task(conn, borrower)
         assert kb.get_task(conn, borrower).status == "archived"
         assert path.is_dir()
+
+
+@pytest.mark.parametrize("owner_kind", ["scratch", "worktree"])
+@pytest.mark.parametrize("borrower_kind", ["scratch", "worktree", "dir"])
+@pytest.mark.parametrize("other_board", [False, True])
+def test_pathless_children_hold_terminal_borrower_workspace(home, repo, owner_kind, borrower_kind, other_board):
+    if other_board:
+        kb.create_board("borrower")
+    with kbc.connect_closing() as owner_conn, kbc.connect_closing(board="borrower" if other_board else None) as conn:
+        owner, path = _owner(owner_conn, owner_kind, repo)
+        borrower = kb.create_task(conn, title="borrower with handoff", workspace_kind=borrower_kind, workspace_path=str(path))
+        first = kb.create_task(conn, title="first handoff consumer", parents=[borrower], workspace_kind="dir")
+        last = kb.create_task(conn, title="last handoff consumer", parents=[borrower], workspace_kind="dir")
+        assert kb.archive_task(owner_conn, owner)
+        assert kb.archive_task(conn, borrower)
+        assert path.is_dir()
+        assert kb.archive_task(conn, first)
+        assert path.is_dir()
+        assert kb.archive_task(conn, last)
+        assert not path.exists()
+
+
+def test_cross_board_id_collision_retains_pathless_children(home, repo, monkeypatch):
+    kb.create_board("borrower")
+    with kbc.connect_closing() as owner_conn, kbc.connect_closing(board="borrower") as conn:
+        owner, path = _owner(owner_conn, "scratch", repo)
+        with monkeypatch.context() as patch:
+            patch.setattr(kb, "_new_task_id", lambda: owner)
+            borrower = _borrower(conn, path)
+        child = kb.create_task(conn, title="pathless handoff", parents=[borrower], workspace_kind="dir")
+        assert borrower == owner
+        assert kb.archive_task(owner_conn, owner)
+        assert kb.archive_task(conn, borrower)
+        assert path.is_dir()
+        assert kb.archive_task(conn, child)
+        assert not path.exists()
+
+
+def test_new_handoff_consumer_rechecked_before_removal(home, repo, monkeypatch):
+    with kbc.connect_closing() as conn:
+        owner, path = _owner(conn, "scratch", repo)
+        borrower = _borrower(conn, path)
+        assert kb.archive_task(conn, owner)
+        children = []
+
+        def new_child(_):
+            children.append(kb.create_task(conn, title="new handoff", parents=[borrower], workspace_kind="dir"))
+
+        monkeypatch.setattr(kbw, "release_lsp_clients", new_child)
+        assert kb.archive_task(conn, borrower)
+        assert len(children) == 1
+        assert path.is_dir()

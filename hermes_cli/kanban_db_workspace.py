@@ -91,17 +91,20 @@ def _is_terminal_task(conn: sqlite3.Connection, task_id: str) -> bool:
     return conn.execute(_TERMINAL_TASK_SQL, (task_id,)).fetchone() is not None
 
 
-_OTHER_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
-    "WHERE id != ? AND workspace_path IS NOT NULL "
-    f"AND status NOT IN {_TERMINAL_STATUSES_SQL}"
+# A terminal borrower still owns handoff storage while a direct child is live.
+_WORKSPACE_CONSUMER_SQL = (
+    f"(t.status NOT IN {_TERMINAL_STATUSES_SQL} OR EXISTS ("
+    "SELECT 1 FROM task_links l JOIN tasks child ON child.id=l.child_id "
+    f"WHERE l.parent_id=t.id AND child.status NOT IN {_TERMINAL_STATUSES_SQL}))"
 )
-# Sibling boards mint their own ids, so the id being cleaned up here can
-# name a different live task there. Do not exclude it.
+_OTHER_LIVE_PATHS_SQL = (
+    "SELECT t.workspace_path FROM tasks t "
+    "WHERE t.id != ? AND t.workspace_path IS NOT NULL AND " + _WORKSPACE_CONSUMER_SQL
+)
+# Sibling boards mint their own ids; do not exclude an unrelated task there.
 _ANY_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
-    "WHERE workspace_path IS NOT NULL "
-    f"AND status NOT IN {_TERMINAL_STATUSES_SQL}"
+    "SELECT t.workspace_path FROM tasks t "
+    "WHERE t.workspace_path IS NOT NULL AND " + _WORKSPACE_CONSUMER_SQL
 )
 
 
