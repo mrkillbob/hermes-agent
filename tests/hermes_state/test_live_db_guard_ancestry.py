@@ -154,6 +154,19 @@ class TestPytestProcessRecognition:
     def test_ignores_non_pytest_invocations(self, cmdline):
         assert not hermes_state_guard._process_looks_like_pytest(self._FakeProc(cmdline))
 
+    @pytest.mark.parametrize("separator", ["/", "\\"])
+    def test_recognises_managed_entry_at_script_position(self, separator):
+        entry = str(REPO_ROOT / "scripts" / "managed_pytest.py").replace("/", separator)
+        command = [sys.executable, entry, "tests/"]
+        assert hermes_state_guard._process_looks_like_pytest(self._FakeProc(command))
+
+    @pytest.mark.parametrize("command", [
+        ["python", "-c"], ["hermes", "run"], ["cat"],
+    ])
+    def test_managed_entry_as_data_is_not_a_pytest_launcher(self, command):
+        entry = str(REPO_ROOT / "scripts" / "managed_pytest.py")
+        assert not hermes_state_guard._process_looks_like_pytest(self._FakeProc([*command, entry]))
+
     def test_unreadable_process_is_not_pytest(self):
         class _Denied:
             def cmdline(self):
