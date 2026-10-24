@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from hermes_cli.worktree_ops import release_lsp_clients
+from hermes_cli.kanban_workspace_deferred import _defer_shared_workspace_cleanup, resume_shared_cleanup
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -90,17 +91,20 @@ def _is_terminal_task(conn: sqlite3.Connection, task_id: str) -> bool:
     return conn.execute(_TERMINAL_TASK_SQL, (task_id,)).fetchone() is not None
 
 
-_OTHER_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
-    "WHERE id != ? AND workspace_path IS NOT NULL "
-    f"AND status NOT IN {_TERMINAL_STATUSES_SQL}"
+# A terminal borrower still owns handoff storage while a direct child is live.
+_WORKSPACE_CONSUMER_SQL = (
+    f"(t.status NOT IN {_TERMINAL_STATUSES_SQL} OR EXISTS ("
+    "SELECT 1 FROM task_links l JOIN tasks child ON child.id=l.child_id "
+    f"WHERE l.parent_id=t.id AND child.status NOT IN {_TERMINAL_STATUSES_SQL}))"
 )
-# Sibling boards mint their own ids, so the id being cleaned up here can
-# name a different live task there. Do not exclude it.
+_OTHER_LIVE_PATHS_SQL = (
+    "SELECT t.workspace_path FROM tasks t "
+    "WHERE t.id != ? AND t.workspace_path IS NOT NULL AND " + _WORKSPACE_CONSUMER_SQL
+)
+# Sibling boards mint their own ids; do not exclude an unrelated task there.
 _ANY_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
-    "WHERE workspace_path IS NOT NULL "
-    f"AND status NOT IN {_TERMINAL_STATUSES_SQL}"
+    "SELECT t.workspace_path FROM tasks t "
+    "WHERE t.workspace_path IS NOT NULL AND " + _WORKSPACE_CONSUMER_SQL
 )
 
 
@@ -284,35 +288,6 @@ def _workspace_in_use_by_other(
             )
             return "unknown"
     return None
-
-
-def _defer_shared_workspace_cleanup(
-    conn: sqlite3.Connection, task_id: str, path: Path | str
-) -> bool:
-    """Skip removal and record why, when *path* may still be used by a live task."""
-    reason = _workspace_in_use_by_other(conn, task_id, path)
-    if reason is None:
-        return False
-    if reason == "shared":
-        _kb._log.warning(
-            "Deferring workspace cleanup for task %s: %s is still used by "
-            "another non-terminal task",
-            task_id, path,
-        )
-    else:
-        _kb._log.warning(
-            "Deferring workspace cleanup for task %s: cannot tell whether "
-            "another task still uses %s",
-            task_id, path,
-        )
-    try:
-        _kb._append_event(
-            conn, task_id, "workspace_cleanup_deferred_shared",
-            {"path": str(path), "reason": reason},
-        )
-    except sqlite3.Error:
-        pass
-    return True
 
 
 def _defer_shared_worktree_cleanup(
@@ -500,10 +475,12 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         _try_cleanup_parent_workspaces(conn, task_id)
     except Exception:
         pass  # best-effort — never block completion
+    finally:
+        resume_shared_cleanup(conn, task_id)
 
 
 def _cleanup_worktree_workspace(
-    task_id: str, path: str, branch_name: Optional[str] = None
+    task_id: str, path: str, branch_name: Optional[str] = None, *, identity_check=None
 ) -> None:
     """Remove a finished task's linked git worktree when it holds no work.
     Mirrors the CLI startup pruner (``cli._prune_stale_worktrees``): removal
@@ -555,11 +532,15 @@ def _cleanup_worktree_workspace(
         # No --force: git's own dirty guard re-verifies at removal time, so if
         # the tree became dirty since our check (TOCTOU) removal fails safe.
         release_lsp_clients(str(worktree_path))
+        if identity_check is not None and not identity_check():
+            return
         result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
         if result.returncode != 0:
             # Windows can retain a directory handle briefly after cwd changes.
             # Retry once without --force; Git still enforces its dirty guard.
             time.sleep(0.1)
+            if identity_check is not None and not identity_check():
+                return
             result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
         if result.returncode != 0:
             _kb._log.warning(
