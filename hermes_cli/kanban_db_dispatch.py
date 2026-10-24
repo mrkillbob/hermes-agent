@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -1589,11 +1590,14 @@ def check_respawn_guard(
         "ORDER BY ended_at DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    if latest_run is not None and latest_run["outcome"] == "spawn_failed":
-        if rl_cooldown > 0 and _kb._json_dict(latest_run["metadata"]).get("infrastructure"):
-            ended_at = _kb._to_epoch(latest_run["ended_at"])
-            if ended_at is not None and (now - ended_at) < rl_cooldown:
-                return "infrastructure_cooldown"
+    infrastructure_failure = (
+        latest_run is not None and latest_run["outcome"] == "spawn_failed"
+        and _kb._json_dict(latest_run["metadata"]).get("infrastructure")
+    )
+    if infrastructure_failure and rl_cooldown > 0:
+        ended_at = _kb._to_epoch(latest_run["ended_at"])
+        if ended_at is not None and (now - ended_at) < rl_cooldown:
+            return "infrastructure_cooldown"
     if latest_run is not None and latest_run["outcome"] == "rate_limited":
         if rl_cooldown <= 0:
             # Cooldown disabled — respawn immediately, skipping blocker_auth so
@@ -1613,7 +1617,7 @@ def check_respawn_guard(
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    if err and latest_outcome != "crashed" and not infrastructure_failure and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
@@ -2262,15 +2266,14 @@ def _dispatch_lane_task(
     if claimed is None:
         return False
     try:
-        resolved_branch_name = None
-        if claimed.workspace_kind == "worktree":
-            workspace, resolved_branch_name = _kbw._resolve_worktree_workspace(claimed, board=board)
-        else:
-            workspace = _kbw.resolve_workspace(claimed, board=board)
+        workspace, resolved_branch_name = _kbw.resolve_dispatch_workspace(claimed, board=board)
     except Exception as exc:
         if _record_task_failure(
             conn, claimed.id, f"workspace: {exc}",
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
+            infrastructure=isinstance(exc, OSError) and exc.errno in (
+                errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC),
+            ),
         ):
             result.auto_blocked.append(claimed.id)
         return False
@@ -2302,15 +2305,7 @@ def _dispatch_lane_task(
                 _kb._append_event(conn, claimed.id, "workspace_deferred", payload, run_id=run_id)
             return False
     try:
-        _kbw.set_workspace_path(conn, claimed.id, str(workspace))
-        if claimed.workspace_kind == "worktree":
-            assigned_branch = (
-                resolved_branch_name
-                or (claimed.branch_name or "").strip()
-                or f"wt/{claimed.id}"
-            )
-            _kbw.set_branch_name(conn, claimed.id, assigned_branch)
-            _kbw.set_worktree_base(conn, claimed.id, workspace, assigned_branch)
+        _kbw.persist_dispatch_workspace(conn, claimed, workspace, resolved_branch_name)
     except Exception as exc:
         if _record_task_failure(
             conn, claimed.id, f"workspace: {exc}",
