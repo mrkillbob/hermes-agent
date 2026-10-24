@@ -611,7 +611,10 @@ without upload times, it stops with `has no publish time`; use
 Managed builders and launchers register a private kernel-held activity before using a
 removable install environment. A short gate outside that environment coordinates
 registration with generation and orphan-state cleanup; readers keep independent
-references, so one long-running reader does not serialize other readers. Managed PM
+references, so one long-running reader does not serialize other readers. Startup
+acquisition shares one timeout between registration and the install mutex; a reader
+that cannot register fails before accessing dependencies. A busy install mutex still
+allows the existing fallback while its lifetime protection remains held. Managed PM
 and test children inherit only those references, protecting startup and surviving a
 supervisor crash. The canonical test runner also protects its pytest probe and uses
 serial bytecode precompilation to avoid unregistered compilation workers.

@@ -38,7 +38,11 @@ INSTALL_LOCK_TIMEOUT_SECONDS = 10.0
 # ``O_CREAT|O_EXCL`` and ``flock`` (two syscalls; the window is microseconds, the margin generous).
 @contextmanager
 def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_SECONDS):
-    """Hold the per-install dependency lock; yields True when held, False when the wait expired.
+    """Acquire lifetime protection and the install mutex within one wait budget.
+
+    Raises LifetimeUnavailable if registration times out: an unregistered reader
+    cannot safely fall back. Yields False only for a busy install mutex, while
+    the activity still protects the caller's selection and generation lease.
 
     Callers decide what a lost race means: readers skip the work the lock guards and carry on
     (``activate_dependencies`` still selects and leases the committed generation), writers that
@@ -46,9 +50,14 @@ def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_
     """
     from pm.lifetime import activity
 
+    deadline = None if timeout is None else time.monotonic() + timeout
     state = install_state_dir(project)
-    with activity(state, create=True):
-        with _install_mutex(state, timeout=timeout) as held:
+
+    def remaining():
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+    with activity(state, create=True, deadline=deadline):
+        with _install_mutex(state, timeout=remaining()) as held:
             yield held
 
 

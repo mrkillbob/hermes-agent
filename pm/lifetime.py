@@ -14,6 +14,7 @@ import os
 import re
 from pathlib import Path
 import stat
+import time
 import uuid
 
 from pm.filesystem import durable_write_bytes, lock_fd
@@ -143,7 +144,7 @@ class Gate:
 
 
 @contextmanager
-def gate(domain, *, wait=True):
+def gate(domain, *, wait=True, deadline=None):
     guard = Gate(domain)
     root = guard.namespace.parent
     root.mkdir(parents=True, exist_ok=True)
@@ -153,7 +154,8 @@ def gate(domain, *, wait=True):
     path = guard.namespace / "gate"
     fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        if not lock_fd(fd, wait=wait):
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        if not lock_fd(fd, wait=wait, timeout=remaining):
             yield None
             return
         opened, named = os.fstat(fd), path.lstat()
@@ -217,15 +219,17 @@ class Activity:
             pass  # stale unlocked records are pruned under the next gate
 
 
-def acquire_activity(domain, *, generation=None, create=False):
-    with gate(domain) as guard:
+def acquire_activity(domain, *, generation=None, create=False, deadline=None):
+    with gate(domain, deadline=deadline) as guard:
+        if guard is None:
+            raise LifetimeUnavailable("timed out acquiring environment lifetime protection")
         guard.prepare(create)
         return Activity(guard, generation)
 
 
 @contextmanager
-def activity(domain, *, generation=None, create=False):
-    owned = acquire_activity(domain, generation=generation, create=create)
+def activity(domain, *, generation=None, create=False, deadline=None):
+    owned = acquire_activity(domain, generation=generation, create=create, deadline=deadline)
     token = _ACTIVE.set((*_ACTIVE.get(), owned))
     try:
         yield owned
