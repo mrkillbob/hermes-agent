@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
 
       - name: Record immutable input
@@ -49,6 +49,7 @@ jobs:
             destination="$RUNNER_TEMP/task22-source/npm-locks/$project"
             mkdir -p "$destination"
             cp "$project/package-lock.json" "$destination/package-lock.json"
+            (cd "$project" && npm audit --package-lock-only --audit-level=high --json) > "$destination/audit.json"
           done
           git diff -- '**/package-lock.json' package-lock.json > "$RUNNER_TEMP/task22-source/npm-locks.diff"
           if find . -type d -name node_modules -print -quit | grep -q .; then
@@ -77,35 +78,34 @@ jobs:
           save-python-cache: 'false'
           save-node-cache: 'false'
 
-      - name: Prove the MCP fixture API repair and run focused mock regressions
+      - name: Prove bundled SDK selection and check repaired cleanup and prompts
         run: |
           set -euo pipefail
-          fixture=tests/tools/test_delegate_mcp_inheritance.py
-          candidate="$RUNNER_TEMP/task22-MCP-candidate.py"
-          cp "$fixture" "$candidate"
-          trap 'cp "$candidate" "$fixture"' EXIT
-          git show 5ce1ad7f0d244eb3f44b9cb2bd49b891e971b87e:"$fixture" > "$fixture"
+          candidate="$RUNNER_TEMP/task22-pyproject-candidate.toml"
+          cp pyproject.toml "$candidate"
+          trap 'cp "$candidate" pyproject.toml' EXIT
+          git show 103247be1b6495bb345a115e7441731c6893397b:pyproject.toml > pyproject.toml
           set +e
           env -u __HERMES_ACTIVATED __HERMES_TESTS_REEXEC=1 PYTHONDONTWRITEBYTECODE=1 \
             HERMES_TEST_SCRATCH_ROOT="$RUNNER_TEMP/task22-test-scratch" \
             bash scripts/run_tests.sh -j1 --file-timeout 30 --file-retries 0 \
-            tests/tools/test_delegate_mcp_inheritance.py::test_public_lifecycle_narrows_while_delegate_task_inherits_parent_surface \
-            2>&1 | tee "$RUNNER_TEMP/task22-source/MCP-baseline-red.log"
+            tests/pm/test_sync_langfuse_selection.py \
+            2>&1 | tee "$RUNNER_TEMP/task22-source/Langfuse-selection-baseline-red.log"
           red_rc=${PIPESTATUS[0]}
           set -e
-          cp "$candidate" "$fixture"
+          cp "$candidate" pyproject.toml
           trap - EXIT
           test "$red_rc" -eq 1
-          grep -F "_build_children() got an unexpected keyword argument 'routing_cfg'" \
-            "$RUNNER_TEMP/task22-source/MCP-baseline-red.log"
+          grep -F "AssertionError: Bundled Langfuse extra is not selectable" \
+            "$RUNNER_TEMP/task22-source/Langfuse-selection-baseline-red.log"
           env -u __HERMES_ACTIVATED __HERMES_TESTS_REEXEC=1 PYTHONDONTWRITEBYTECODE=1 \
             HERMES_TEST_SCRATCH_ROOT="$RUNNER_TEMP/task22-test-scratch" \
             bash scripts/run_tests.sh -j1 --file-timeout 30 --file-retries 0 \
-            tests/agent/test_sync_window_request_budget.py \
-            tests/tools/test_sync_browser_vault_capture.py \
             tests/tools/test_sync_delegation_profile_cleanup.py \
-            tests/agent/test_subagent_lifecycle_context.py \
-            tests/tools/test_delegate_mcp_inheritance.py \
+            tests/pm/test_sync_langfuse_selection.py \
+            tests/plugins/test_langfuse_plugin.py::TestRuntimeGate \
+            tests/ci/test_prompt_surface.py \
+            tests/test_packaging_metadata.py \
             2>&1 | tee "$RUNNER_TEMP/task22-source/focused-candidate.log"
 
       - name: Render prompt fixtures with network blocked and fresh state

@@ -440,6 +440,8 @@ otlp = [
   "opentelemetry-sdk==1.45.1",
   "opentelemetry-exporter-otlp-proto-http==1.45.1",
 ]
+# Retain the bundled opt-in plugin until its separate catalog admission.
+langfuse = ["langfuse==4.15.2"]
 bedrock = ["boto3==1.43.115"]
 vertex = ["google-auth==2.62.0"]
 azure-identity = ["azure-identity==1.26.0"]

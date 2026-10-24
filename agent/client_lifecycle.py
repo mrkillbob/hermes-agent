@@ -110,6 +110,7 @@ class ClientLifecycleMixin:
                 children = list(self._active_children)
                 self._active_children.clear()
         except Exception:
+            logger.debug("Could not snapshot active children during teardown", exc_info=True)
             return
         for child in children:
             with suppress(Exception), child_profile_scope(child):
@@ -118,7 +119,7 @@ class ClientLifecycleMixin:
                         child.release_clients()
                         continue
                     except Exception:
-                        pass
+                        logger.debug("Could not softly release child clients; falling back to close", exc_info=True)
                 _quietly(lambda: child.close())
 
     def _close_task_resources(self, task_id: str) -> None:
