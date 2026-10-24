@@ -409,3 +409,135 @@ def test_terminal_or_reclaimed_task_releases_model_capacity(
         assert following.skipped_per_model_capped == [
             (first, "ollama-launch", "qwen3.6:27b", 1)
         ]
+
+
+@pytest.mark.parametrize("cap_provider", ["nvidia", "nim"])
+def test_provider_aliases_share_capacity_and_model_ids_remain_distinct(
+    kanban_with_profiles, cap_provider,
+):
+    """Provider aliases share a bucket, but only for the exact same model."""
+    kb = kanban_with_profiles
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
+    with kbc.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        nvidia = _create_overridden(
+            kb, conn, "canonical", provider="nvidia",
+            model="nvidia/llama-3.1-nemotron-70b-instruct",
+        )
+        nim = _create_overridden(
+            kb, conn, "alias", provider="nim",
+            model="nvidia/llama-3.1-nemotron-70b-instruct",
+        )
+        different_model = _create_overridden(
+            kb, conn, "different model", provider="nim",
+            model="nvidia/llama-3.1-nemotron-49b-v1.5",
+        )
+        different_provider = _create_overridden(
+            kb, conn, "different provider", provider="openrouter",
+            model="nvidia/llama-3.1-nemotron-70b-instruct",
+        )
+
+        result = kbd.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: os.getpid(),
+            dry_run=True,
+            max_in_progress_per_model=4,
+            max_in_progress_by_model={
+                f"{cap_provider}/nvidia/llama-3.1-nemotron-70b-instruct": 1
+            },
+        )
+
+    assert {task_id for task_id, _who, _workspace in result.spawned} == {
+        nvidia, different_model, different_provider
+    }
+    assert result.skipped_per_model_capped == [
+        (nim, "nim", "nvidia/llama-3.1-nemotron-70b-instruct", 1)
+    ]
+
+
+def test_local_provider_aliases_keep_separate_capacity_buckets(
+    kanban_with_profiles,
+):
+    """Generic `custom` normalization must not merge distinct local endpoints."""
+    kb = kanban_with_profiles
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
+    with kbc.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        ollama = _create_overridden(
+            kb, conn, "ollama", provider="ollama", model="shared-model"
+        )
+        llamacpp = _create_overridden(
+            kb, conn, "llama.cpp", provider="llamacpp", model="shared-model"
+        )
+
+        result = kbd.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: os.getpid(),
+            dry_run=True,
+            max_in_progress_per_model=4,
+        )
+
+    assert {task_id for task_id, _who, _workspace in result.spawned} == {
+        ollama, llamacpp
+    }
+    assert result.skipped_per_model_capped == []
+
+
+def test_preexisting_running_provider_alias_counts_against_capacity(
+    kanban_with_profiles,
+):
+    """A running NIM row consumes the same NVIDIA model bucket before dispatch."""
+    from types import SimpleNamespace
+
+    kb = kanban_with_profiles
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli.kanban_worker_capacity import WorkerCapacity
+    model = "nvidia/llama-3.1-nemotron-70b-instruct"
+    running_alias = {
+        "id": "already-running",
+        "assignee": "alpha",
+        "provider_override": "nim",
+        "model_override": model,
+    }
+    with kbc.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        waiting = _create_overridden(
+            kb, conn, "waiting", provider="nvidia", model=model
+        )
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (waiting,)).fetchone()
+        capacity = WorkerCapacity(conn, model_cap=1, other_running_rows=[running_alias])
+        result = SimpleNamespace(
+            skipped_per_profile_capped=[], skipped_per_model_capped=[]
+        )
+
+        allowed = capacity.allows(row, row["assignee"], result)
+
+    assert not allowed
+    assert result.skipped_per_model_capped == [(waiting, "nvidia", model, 1)]
+
+
+def test_conflicting_nvidia_alias_caps_use_stricter_limit(kanban_with_profiles):
+    """Conflicting canonical/alias caps must not loosen the shared bucket."""
+    kb = kanban_with_profiles
+    from hermes_cli import kanban_db_connect as kbc, kanban_db_dispatch as kbd
+    model = "nvidia/llama-3.1-nemotron-70b-instruct"
+    with kbc.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        tasks = [
+            _create_overridden(kb, conn, "nvidia-1", provider="nvidia", model=model),
+            _create_overridden(kb, conn, "nim-1", provider="nim", model=model),
+            _create_overridden(kb, conn, "nvidia-2", provider="nvidia", model=model),
+        ]
+        result = kbd.dispatch_once(
+            conn,
+            spawn_fn=lambda *_args, **_kwargs: os.getpid(),
+            dry_run=True,
+            max_in_progress_per_model=4,
+            max_in_progress_by_model={
+                f"nvidia/{model}": 3,
+                f"nim/{model}": 2,
+            },
+        )
+
+    assert {task_id for task_id, _who, _workspace in result.spawned} == set(tasks[:2])
+    assert result.skipped_per_model_capped == [(tasks[2], "nvidia", model, 2)]
