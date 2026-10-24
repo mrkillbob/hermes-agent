@@ -16,6 +16,7 @@
  */
 
 import * as fs from 'node:fs'
+import os from 'node:os'
 
 import { expect, test } from '@playwright/test'
 
@@ -43,6 +44,30 @@ import {
 const RUN = Date.now().toString(36)
 const U = (n: number) => `U${n}-${RUN}`
 const A = (n: number) => `A${n}-${RUN}`
+
+/** Read only the signal state for this test's exact Linux Electron PID. */
+function linuxSigtermState(pid: number): string {
+  if (process.platform !== 'linux') {
+    return `pid=${pid} signal-state=unavailable-platform`
+  }
+
+  try {
+    const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8')
+    const field = (name: string) => new RegExp(`^${name}:\\s*([0-9a-f]+)$`, 'mi').exec(status)?.[1]
+    const state = /^State:\s*(.+)$/m.exec(status)?.[1]?.trim() ?? 'unknown'
+    const bit = 1n << BigInt(os.constants.signals.SIGTERM - 1)
+
+    const hasSignal = (name: string) => {
+      const value = field(name)
+
+      return value === undefined ? 'unknown' : String((BigInt(`0x${value}`) & bit) !== 0n)
+    }
+
+    return `pid=${pid} state=${state} SIGTERM(blocked=${hasSignal('SigBlk')},ignored=${hasSignal('SigIgn')},caught=${hasSignal('SigCgt')},pending=${hasSignal('ShdPnd')})`
+  } catch (error) {
+    return `pid=${pid} signal-state=unreadable (${(error as NodeJS.ErrnoException).code ?? 'error'})`
+  }
+}
 
 test('clicking Update now moves the backend to the new commit, relaunches the app, and chat works after', async () => {
   test.setTimeout(20 * 60_000)
@@ -113,6 +138,11 @@ test('clicking Update now moves the backend to the new commit, relaunches the ap
         'the updated checkout is clean'
       ).toBe('')
 
+      // Capture only the relaunched main app's signal state. This distinguishes
+      // a still-blocked/ignored SIGTERM from a quit handler that failed to exit.
+      const mainBeforeSignal = desktopMainProcesses(facts)
+      const signalStateBefore = mainBeforeSignal.map(proc => linuxSigtermState(proc.pid))
+
       // The detached relaunch can leave Chromium helpers after its main PID or
       // process group exits. Signal only executables from this test install's
       // packaged Desktop directory; its separate gateway uses another directory.
@@ -126,12 +156,21 @@ test('clicking Update now moves the backend to the new commit, relaunches the ap
         }
       }
 
-      await expect
-        .poll(() => desktopProcesses(facts).map(p => `${p.pid} ${p.cmdline.slice(0, 160)}`), {
-          timeout: 60_000,
-          message: 'the relaunched app quits cleanly on SIGTERM (its gateway outlives it)'
-        })
-        .toEqual([])
+      try {
+        await expect
+          .poll(() => desktopProcesses(facts).map(p => `${p.pid} ${p.cmdline.slice(0, 160)}`), {
+            timeout: 60_000,
+            message: 'the relaunched app quits cleanly on SIGTERM (its gateway outlives it)'
+          })
+          .toEqual([])
+      } catch (error) {
+        const mainAfterSignal = desktopMainProcesses(facts)
+        const signalStateAfter = mainAfterSignal.map(proc => linuxSigtermState(proc.pid))
+
+        throw new Error(
+          `${(error as Error).message}\nSIGTERM diagnostics before=${signalStateBefore.join('; ') || 'main process absent'}; after=${signalStateAfter.join('; ') || 'main process exited'}`
+        )
+      }
     })
 
     await test.step('the updated app boots to chat, a turn completes, and it reports itself current', async () => {
