@@ -17,8 +17,8 @@ import stat
 import time
 import uuid
 
-from pm.filesystem import durable_write_bytes, lock_fd
-from pm.lifetime_handles import native_reference, open_hold
+from pm.filesystem import durable_write_bytes, lock_fd, native
+from pm.lifetime_handles import directory_identity, file_identity, native_reference, open_hold
 
 _ACTIVE = ContextVar("pm_lifetime_activities", default=())
 
@@ -27,11 +27,27 @@ class LifetimeUnavailable(RuntimeError):
     """Required ownership coordination could not be established."""
 
 
-def _identity(path):
+def _identity(path, *, legacy=False):
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode):
         raise LifetimeUnavailable("lifetime path is not a concrete directory")
+    if os.name == "nt":
+        try:
+            return directory_identity(path, legacy=legacy)
+        except ValueError as exc:
+            raise LifetimeUnavailable(str(exc)) from exc
     return [info.st_dev, info.st_ino]
+
+
+def _recorded_path(path):
+    return os.path.normcase(native(path)) if os.name == "nt" else str(path)
+
+
+def _generation_scope(generation, domain):
+    generation = Path(generation).resolve()
+    if os.name == "nt":
+        generation, domain = Path(native(generation)), Path(native(domain))
+    return str(generation.relative_to(domain))
 
 
 def _regular(path):
@@ -59,19 +75,22 @@ class Gate:
         self.marker = self.namespace / "domain.json"
         self.fd = None
 
-    def _base_snapshot(self):
-        return {"version": 1, "path": str(self.domain), "platform": os.name,
-                "activities": _identity(self.activities),
-                "gate": [os.fstat(self.fd).st_dev, os.fstat(self.fd).st_ino]}
+    def _base_snapshot(self, *, legacy=False):
+        return {"version": 1, "path": _recorded_path(self.domain), "platform": os.name,
+                "activities": _identity(self.activities, legacy=legacy),
+                "gate": file_identity(self.fd, legacy=legacy)}
 
-    def _snapshot(self):
-        return {**self._base_snapshot(), "domain": _identity(self.domain)}
+    def _snapshot(self, *, legacy=False):
+        return {**self._base_snapshot(legacy=legacy), "domain": _identity(self.domain, legacy=legacy)}
 
     def _record(self):
         try:
             if not _regular(self.marker):
                 raise LifetimeUnavailable("lifetime qualification is not a regular file")
-            return json.loads(self.marker.read_text())
+            record = json.loads(self.marker.read_text())
+            if isinstance(record, dict) and isinstance(record.get("path"), str):
+                record["path"] = _recorded_path(record["path"])
+            return record
         except FileNotFoundError:
             return None
         except (OSError, ValueError) as exc:
@@ -89,18 +108,29 @@ class Gate:
         if not self.domain.exists():
             if not create:
                 raise LifetimeUnavailable("managed environment no longer exists")
-            if previous is not None and previous != {**self._base_snapshot(), "retired": True}:
+            if previous is not None and not self._matches(previous, retired=True):
                 raise LifetimeUnavailable("missing managed state has no confirmed retirement")
             self.domain.mkdir(parents=True)
             self.activities.mkdir(exist_ok=True)
             durable_write_bytes(self.marker, json.dumps(self._snapshot()).encode())
         elif previous is not None:
-            if not self.qualified:
+            if not self._matches(previous):
                 raise LifetimeUnavailable("managed environment identity changed")
+            if not self.qualified:
+                durable_write_bytes(self.marker, json.dumps(self._snapshot()).encode())
         else:
             _identity(self.domain)
             self.activities.mkdir(exist_ok=True)
         _identity(self.activities)
+
+    def _matches(self, record, *, retired=False):
+        snapshot = self._base_snapshot if retired else self._snapshot
+        suffix = {"retired": True} if retired else {}
+        if record == {**snapshot(), **suffix}:
+            return True
+        # A failed historical update can leave a 3.11 marker. Verify its entire
+        # known native snapshot under the gate before upgrading the protocol.
+        return os.name == "nt" and record == {**snapshot(legacy=True), **suffix}
 
     def confirm_removed(self, ownership):
         if self.domain.exists() or self._record() != ownership or ownership != self._base_snapshot() | {"domain": ownership["domain"]}:
@@ -111,7 +141,7 @@ class Gate:
         """Probe under this gate; only its exact target and whole-domain writers pin a generation."""
         try:
             entries = list(self.activities.iterdir())
-            target = str(Path(generation).resolve().relative_to(self.domain)) if generation else None
+            target = _generation_scope(generation, self.domain) if generation else None
             for entry in entries:
                 if not _regular(entry):
                     return True
@@ -120,7 +150,7 @@ class Gate:
                 try:
                     data = json.loads(entry.read_text())
                     if (set(data) != {"version", "domain", "platform", "generation"}
-                            or data["version"] != 1 or data["domain"] != _identity(self.domain)
+                            or data["version"] != 1 or not self._activity_domain_matches(data["domain"])
                             or data["platform"] != os.name):
                         return True
                     scope = data["generation"]
@@ -141,6 +171,10 @@ class Gate:
             return False
         except (OSError, ValueError, LifetimeUnavailable):
             return True
+
+    def _activity_domain_matches(self, identity):
+        return (identity == _identity(self.domain) or
+                (os.name == "nt" and identity == _identity(self.domain, legacy=True)))
 
 
 @contextmanager
@@ -179,7 +213,7 @@ class Activity:
                 _identity(Path(generation))
             except OSError as exc:
                 raise LifetimeUnavailable("dependency generation no longer exists") from exc
-        scope = str(Path(generation).resolve().relative_to(self.domain)) if generation else None
+        scope = _generation_scope(generation, self.domain) if generation else None
         data = {"version": 1, "domain": _identity(self.domain), "generation": scope, "platform": os.name}
         self.data = json.dumps(data).encode()
         durable_write_bytes(self.path, self.data)
