@@ -20,8 +20,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -29,6 +32,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from tests.e2e.core.upgrade import _helpers as H
 from tests.e2e.core.upgrade import _install_helpers as I
+from pm.lifetime import Gate, LifetimeUnavailable, gate
 
 
 def _paths(root: Path) -> dict[str, Path]:
@@ -177,10 +181,158 @@ def install(root: Path) -> None:
 
 def restore(root: Path) -> None:
     p = _paths(root)
-    for key in ("sb", "origin"):
-        shutil.rmtree(p[key], ignore_errors=True)
-        subprocess.run(["cp", "-a", str(p["golden"] / key), str(p[key])], check=True)
+    for path in (p["sb"], p["origin"], p["golden"], p["golden"] / "sb", p["golden"] / "origin"):
+        try:
+            if not stat.S_ISDIR(path.lstat().st_mode):
+                raise RuntimeError("fixture root is not a concrete directory; reseed required")
+        except OSError as exc:
+            raise RuntimeError("fixture root is missing; reseed required") from exc
+    try:
+        if not stat.S_ISREG(p["facts"].lstat().st_mode):
+            raise RuntimeError("fixture facts are not a regular file; reseed required")
+    except OSError as exc:
+        raise RuntimeError("fixture facts are missing; reseed required") from exc
+    facts = json.loads(p["facts"].read_text(encoding="utf-8"))
+    sandbox = Path(facts["sandboxRoot"]).absolute()
+    hermes_home = Path(facts["hermesHome"]).absolute()
+    origin = Path(facts["origin"]).absolute()
+    expected_sandbox = p["sb"].absolute()
+    if (sandbox != expected_sandbox or not hermes_home.is_relative_to(sandbox)
+            or Path(facts["env"]["HERMES_HOME"]).absolute() != hermes_home
+            or origin != p["origin"].absolute()):
+        raise RuntimeError("fixture facts escape the owned sandbox; reseed required")
+
+    golden_sandbox = p["golden"] / "sb"
+    sandbox_paths = (
+        (sandbox, hermes_home),
+        (golden_sandbox, golden_sandbox / hermes_home.relative_to(sandbox)),
+    )
+    for base, descendant in sandbox_paths:
+        cursor = base
+        for part in (*descendant.relative_to(base).parts, "installs", ".lifetimes"):
+            cursor /= part
+            try:
+                if not stat.S_ISDIR(cursor.lstat().st_mode):
+                    raise RuntimeError("fixture facts cross a non-directory path; reseed required")
+            except OSError as exc:
+                raise RuntimeError("fixture facts cross a missing path; reseed required") from exc
+
+    # Qualification records bind physical identities. Validate and lock every managed install
+    # domain before reconciling either tree; never let snapshot metadata certify a copied inode.
+    install_root = hermes_home / "installs"
+    domains = []
+    coordination = install_root / ".lifetimes"
+    expected_coordination = p["golden"] / "sb" / hermes_home.relative_to(sandbox) / "installs" / ".lifetimes"
+    for path in (install_root, coordination, expected_coordination):
+        try:
+            if not stat.S_ISDIR(path.lstat().st_mode):
+                raise RuntimeError("managed fixture coordination path is not concrete; reseed required")
+        except OSError as exc:
+            raise RuntimeError("managed fixture coordination path is missing; reseed required") from exc
+    current_markers = sorted(coordination.glob("*/domain.json"))
+    expected_markers = sorted(expected_coordination.glob("*/domain.json"))
+    if [marker.parent.name for marker in current_markers] != [marker.parent.name for marker in expected_markers]:
+        raise RuntimeError("managed fixture domains differ from snapshot; reseed required")
+    for marker, expected_marker in zip(current_markers, expected_markers):
+        namespace = marker.parent
+        domain = install_root / namespace.name
+        guard = Gate(domain)
+        try:
+            if (not stat.S_ISDIR(namespace.lstat().st_mode)
+                    or not stat.S_ISDIR(guard.activities.lstat().st_mode)
+                    or not stat.S_ISREG(guard.marker.lstat().st_mode)
+                    or not stat.S_ISREG(expected_marker.lstat().st_mode)):
+                raise RuntimeError("managed fixture identity is incomplete; reseed required")
+            guard.domain.lstat()
+            guard.activities.lstat()
+            guard.marker.lstat()
+            (namespace / "gate").lstat()
+            relative_domain = domain.relative_to(sandbox)
+            source_cursor = p["golden"] / "sb"
+            target_cursor = p["sb"]
+            for part in relative_domain.parts:
+                source_cursor /= part
+                target_cursor /= part
+                if (not stat.S_ISDIR(source_cursor.lstat().st_mode)
+                        or not stat.S_ISDIR(target_cursor.lstat().st_mode)):
+                    raise RuntimeError("managed fixture directory cannot be reconciled in place; reseed required")
+            if guard.marker.read_bytes() != expected_marker.read_bytes():
+                raise RuntimeError("managed fixture qualification differs from snapshot; reseed required")
+        except OSError as exc:
+            raise RuntimeError("managed fixture identity is missing; reseed required") from exc
+        domains.append(domain)
+
+    with ExitStack() as stack:
+        guards = []
+        for domain in domains:
+            try:
+                guard = stack.enter_context(gate(domain, wait=False))
+            except (OSError, LifetimeUnavailable) as exc:
+                raise RuntimeError("cannot lock managed fixture identity; reseed required") from exc
+            if guard is None or not guard.qualified:
+                raise RuntimeError("managed fixture identity changed; reseed required")
+            if guard.held():
+                raise RuntimeError("managed fixture still has active readers; restore refused")
+            guards.append(guard)
+
+        for key in ("sb", "origin"):
+            _reconcile_tree(p["golden"] / key, p[key], preserve_coordination=(key == "sb"))
+        if any(not guard.qualified for guard in guards):
+            raise RuntimeError("managed fixture identity changed during restore; reseed required")
     print(p["facts"].read_text(encoding="utf-8"))
+
+
+def _remove_entry(path: Path) -> None:
+    """Remove one fixture entry without following a symlink at the entry itself."""
+    if path.is_symlink() or not path.is_dir():
+        path.unlink(missing_ok=True)
+    else:
+        shutil.rmtree(path)
+
+
+def _reconcile_tree(source: Path, target: Path, *, preserve_coordination: bool = False) -> None:
+    """Restore owned fixture contents in place, retaining directory and lifetime-gate inodes."""
+    if source.is_symlink() or not source.is_dir() or target.is_symlink() or not target.is_dir():
+        raise RuntimeError("fixture root is not a concrete directory; reseed required")
+
+    source_entries = {entry.name: entry for entry in source.iterdir()}
+    target_entries = {entry.name: entry for entry in target.iterdir()}
+    for name, old in target_entries.items():
+        if preserve_coordination and name == ".lifetimes" and target.name == "installs":
+            continue
+        new = source_entries.get(name)
+        if new is None or (old.is_dir() and not old.is_symlink()) != (new.is_dir() and not new.is_symlink()):
+            _remove_entry(old)
+
+    for name, new in source_entries.items():
+        if preserve_coordination and name == ".lifetimes" and target.name == "installs":
+            continue
+        old = target / name
+        if new.is_symlink():
+            if old.exists() or old.is_symlink():
+                _remove_entry(old)
+            old.symlink_to(os.readlink(new), target_is_directory=new.is_dir())
+        elif new.is_dir():
+            if old.is_symlink() or (old.exists() and not old.is_dir()):
+                _remove_entry(old)
+            if not old.exists():
+                old.mkdir()
+            _reconcile_tree(new, old, preserve_coordination=preserve_coordination)
+            shutil.copystat(new, old, follow_symlinks=False)
+        elif new.is_file():
+            # Write a fresh sibling and atomically replace, so destination hardlinks are never
+            # modified through to an outside fixture path.
+            fd, temporary_name = tempfile.mkstemp(prefix=f".{old.name}.restore-", dir=old.parent)
+            os.close(fd)
+            temporary = Path(temporary_name)
+            try:
+                shutil.copyfile(new, temporary, follow_symlinks=False)
+                shutil.copystat(new, temporary, follow_symlinks=False)
+                os.replace(temporary, old)
+            finally:
+                temporary.unlink(missing_ok=True)
+        else:
+            raise RuntimeError(f"unsupported fixture entry {new}; reseed required")
 
 
 def publish(root: Path, message: str, rel: str, content_file: str) -> None:
