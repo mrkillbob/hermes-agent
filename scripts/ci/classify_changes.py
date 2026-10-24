@@ -444,6 +444,8 @@ _E2E_LANES: dict[str, tuple[str, ...]] = {
     ),
     "e2e_upgrade": (
         "agent/estop.py",
+        "agent/file_safety.py",
+        "agent/jiter_preload.py",
         ".github/workflows/ci.yaml",
         ".github/actions/",
         *_PY_TEST_HARNESS,
