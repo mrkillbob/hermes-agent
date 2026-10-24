@@ -76,7 +76,8 @@ def test_automatic_collection_honors_pause(tmp_path, monkeypatch, entry, sentine
         assert calls == ["app", "runtime"]
 
 
-def test_paused_collection_needs_no_installed_dependencies(tmp_path):
+@pytest.mark.parametrize("sparse", [False, True])
+def test_paused_collection_needs_no_installed_dependencies(tmp_path, sparse):
     import os
     import subprocess
 
@@ -84,6 +85,19 @@ def test_paused_collection_needs_no_installed_dependencies(tmp_path):
     home.mkdir()
     (home / "ESTOP").touch()
     source = Path(__file__).resolve().parents[2]
+    if sparse:
+        import shutil
+
+        copied = tmp_path / "source"
+        for folder, names in {
+            "agent": ("__init__.py", "jiter_preload.py", "estop.py", "file_safety.py"),
+            "hermes_cli": ("__init__.py", "venv_sync.py", "steward.py"),
+        }.items():
+            (copied / folder).mkdir(parents=True)
+            for name in names:
+                shutil.copy2(source / folder / name, copied / folder / name)
+        shutil.copy2(source / "hermes_constants.py", copied / "hermes_constants.py")
+        source = copied
     program = f"""
 import sys
 sys.path.insert(0, {str(source)!r})
