@@ -29,7 +29,6 @@ import {
   closeQuietly,
   currentAs,
   desktopLog,
-  desktopMainProcesses,
   desktopProcesses,
   diagnostics,
   git,
@@ -84,6 +83,18 @@ function linuxProcStat(pid: number, statPath = `/proc/${pid}/stat`): LinuxProcSt
   } catch {
     return null
   }
+}
+
+function desktopMainProcessesForInstall(
+  facts: Parameters<typeof desktopProcesses>[0]
+): ReturnType<typeof desktopProcesses> {
+  return desktopProcesses(facts).filter(proc => {
+    if (/--type=/.test(proc.cmdline)) {
+      return false
+    }
+
+    return process.platform !== 'linux' || linuxProcStat(proc.pid)?.comm === 'Hermes'
+  })
 }
 
 function linuxWaitChannel(pid: number, waitChannelPath = `/proc/${pid}/wchan`): string {
@@ -345,10 +356,15 @@ test('clicking Update now moves the backend to the new commit, relaunches the ap
       // The updater's progress window can be the same Electron binary (--app=http://127.0.0.1:...): not a relaunch.
       const relaunched = await waitFor(
         'the app to relaunch itself',
-        () =>
-          desktopMainProcesses(facts).find(
-            proc => proc.pid !== firstMainPid && !/--app=|https?:\/\/127\.0\.0\.1/.test(proc.cmdline)
-          ),
+        () => {
+          const proc = desktopMainProcessesForInstall(facts).find(
+            candidate => candidate.pid !== firstMainPid && !/--app=|https?:\/\/127\.0\.0\.1/.test(candidate.cmdline)
+          )
+
+          const startTicks = proc ? linuxProcStat(proc.pid)?.startTicks : undefined
+
+          return proc && (process.platform !== 'linux' || startTicks) ? { ...proc, startTicks } : undefined
+        },
         { timeout: 3 * 60_000, interval: 1_000, explain: () => explain(`handoff log:\n${handoffLog(facts)}`) }
       )
 
@@ -374,7 +390,7 @@ test('clicking Update now moves the backend to the new commit, relaunches the ap
 
       // Keep stable identities for the packaged process family before signaling;
       // a later process with the same PID must not be mistaken for this app.
-      const mainBeforeSignal = desktopMainProcesses(facts)
+      const mainBeforeSignal = desktopMainProcessesForInstall(facts)
       const processesBeforeSignal = desktopProcesses(facts)
 
       const beforeStartTicks = new Map(
@@ -385,16 +401,27 @@ test('clicking Update now moves the backend to the new commit, relaunches the ap
         .slice(0, 4)
         .map(proc => linuxProcessSnapshot(proc.pid, undefined, processesBeforeSignal))
 
-      // The detached relaunch can leave Chromium helpers after its main PID or
-      // process group exits. Signal only executables from this test install's
-      // packaged Desktop directory; its separate gateway uses another directory.
-      for (const proc of desktopProcesses(facts)) {
-        try {
-          process.kill(proc.pid, 'SIGTERM')
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
-            throw error
-          }
+      // Signal the relaunched main process and let Chromium tear down its own
+      // helpers. Simultaneously signaling the GPU process makes Chromium report
+      // a fatal GPU-child failure during the very shutdown this test exercises.
+      const relaunchedStartTicks = relaunched.startTicks
+      const liveRelaunchedMain = desktopMainProcessesForInstall(facts).find(proc => proc.pid === relaunched.pid)
+
+      if (
+        !liveRelaunchedMain ||
+        (process.platform === 'linux' &&
+          (!relaunchedStartTicks ||
+            beforeStartTicks.get(relaunched.pid) !== relaunchedStartTicks ||
+            linuxProcStat(relaunched.pid)?.startTicks !== relaunchedStartTicks))
+      ) {
+        throw new Error('the relaunched Desktop process identity changed before the SIGTERM check')
+      }
+
+      try {
+        process.kill(relaunched.pid, 'SIGTERM')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+          throw error
         }
       }
 
