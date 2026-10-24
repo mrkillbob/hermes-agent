@@ -42,6 +42,7 @@ describe('JsonRpcRequestChannel', () => {
     expect(error).toBeInstanceOf(JsonRpcGatewayError)
     expect(error.code).toBe(-32601)
     expect(error.data).toEqual({ method: 'projects.create' })
+    expect(error.method).toBe('projects.create')
     expect(events).toEqual(['session.info'])
   })
 

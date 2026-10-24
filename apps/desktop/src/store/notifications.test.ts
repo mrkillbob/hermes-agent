@@ -114,7 +114,8 @@ test('storage RPC logging keeps allowlisted diagnostics and excludes raw gateway
       code: 'storage_unavailable',
       cause: 'unknown',
       details: 'C:\\private\\state.db prompt=private prompt session_id=private-session token=secret'
-    }
+    },
+    method: 'session.create'
   })
 
   ;(window as unknown as { hermesDesktop: { logLine: typeof logLine } }).hermesDesktop = { logLine }
@@ -126,6 +127,7 @@ test('storage RPC logging keeps allowlisted diagnostics and excludes raw gateway
     expect(line).toContain('rpc_code=5000')
     expect(line).toContain('storage_category=storage_unavailable')
     expect(line).toContain('storage_cause=unknown')
+    expect(line).toContain('rpc_method=session.create')
     expect(line).not.toContain('state.db')
     expect(line).not.toContain('private prompt')
     expect(line).not.toContain('private-session')
@@ -151,7 +153,8 @@ test.each([4001, 5001])('storage RPC diagnostics recognize canonical wire reason
     notifyError(
       new JsonRpcGatewayError('storage_unavailable', {
         code,
-        data: { reason: 'storage_unavailable', cause: 'locked', detail: 'C:\\private\\state.db token=secret' }
+        data: { reason: 'storage_unavailable', cause: 'locked', detail: 'C:\\private\\state.db token=secret' },
+        method: 'prompt.submit'
       }),
       'Session unavailable'
     )
@@ -160,6 +163,7 @@ test.each([4001, 5001])('storage RPC diagnostics recognize canonical wire reason
     expect(line).toContain(`rpc_code=${code}`)
     expect(line).toContain('storage_category=storage_unavailable')
     expect(line).toContain('storage_cause=locked')
+    expect(line).toContain('rpc_method=prompt.submit')
     expect(line).not.toContain('state.db')
     expect(line).not.toContain('secret')
   } finally {
@@ -182,13 +186,15 @@ test('storage RPC logging rejects unrecognized codes and redacts invalid causes'
     notifyError(
       new JsonRpcGatewayError('Session storage is unavailable', {
         code: 5000,
-        data: { code: 'storage_unavailable', cause: 'C:\\private\\state.db token=secret' }
+        data: { code: 'storage_unavailable', cause: 'C:\\private\\state.db token=secret' },
+        method: 'C:\\private\\state.db token=secret'
       }),
       'Session unavailable'
     )
 
     const storageLine = logLine.mock.calls[0]?.[0] as string
     expect(storageLine).toContain('storage_cause=unclassified')
+    expect(storageLine).toContain('rpc_method=unknown')
     expect(storageLine).not.toContain('state.db')
     expect(storageLine).not.toContain('secret')
 
