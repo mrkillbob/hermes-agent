@@ -1561,98 +1561,6 @@ def validate_sanitized_text(text: str, *, max_bytes: int = 32_768) -> str:
     return text
 
 
-def _is_strict_sanitized_only_payload(
-    value: Any,
-    *,
-    seen: set[int] | None = None,
-) -> tuple[bool, int]:
-    """Recognize the one grantless remote shape approved by policy.
-
-    Every text leaf must be an explicit :class:`SanitizedSegment`. Raw text,
-    static literals, source references, binary values, cycles, and unsupported
-    containers make the entire payload ineligible. The positive count prevents
-    an empty structural request from acquiring grantless status.
-    """
-
-    if isinstance(value, (SanitizedSegment, NativeMetadataSegment)):
-        return isinstance(value.text, str), 1 if isinstance(value.text, str) else 0
-    if isinstance(value, GeneratedContextSegment):
-        return isinstance(value.text, str), 1 if isinstance(value.text, str) else 0
-    if isinstance(value, GeneratedContextKey):
-        return isinstance(value.text, str), 0
-    if isinstance(value, CodexReasoningReplaySegment):
-        return (
-            isinstance(value.text, str)
-            and _CODEX_ENCRYPTED_REASONING_REPLAY.fullmatch(value.text) is not None,
-            1 if isinstance(value.text, str) else 0,
-        )
-    if isinstance(value, AnthropicThinkingReplaySegment):
-        return (
-            isinstance(value.text, str)
-            and _ANTHROPIC_THINKING_SIGNATURE_REPLAY.fullmatch(value.text) is not None,
-            1 if isinstance(value.text, str) else 0,
-        )
-    if isinstance(value, UntrustedProvenanceSegment):
-        return False, 0
-    if isinstance(value, ValidatedToolSyntaxSegment):
-        try:
-            validate_tool_syntax(value.text, value.syntax_kind)
-        except (TypeError, ValueError):
-            return False, 0
-        return True, 1
-    if isinstance(value, LiteralSegment):
-        return isinstance(value.text, str), 0
-    if isinstance(value, SourceBoundSegment):
-        return False, 0
-    if isinstance(value, SourcePresentationSegment):
-        return False, 0
-    if isinstance(value, OutboundText):
-        if not value.segments:
-            return False, 0
-        count = 0
-        for segment in value.segments:
-            allowed, segment_count = _is_strict_sanitized_only_payload(segment, seen=seen)
-            if not allowed:
-                return False, 0
-            count += segment_count
-        return count > 0, count
-    if value is None or isinstance(value, (bool, int)):
-        return True, 0
-    if isinstance(value, float):
-        return math.isfinite(value), 0
-    if isinstance(value, (str, bytes, bytearray, memoryview, set, frozenset)):
-        return False, 0
-    if seen is None:
-        seen = set()
-    if isinstance(value, Mapping):
-        identity = id(value)
-        if identity in seen:
-            return False, 0
-        seen.add(identity)
-        count = 0
-        for key, item in value.items():
-            if not isinstance(key, (str, GeneratedContextKey)):
-                return False, 0
-            allowed, item_count = _is_strict_sanitized_only_payload(item, seen=seen)
-            if not allowed:
-                return False, 0
-            count += item_count
-        return True, count
-    if isinstance(value, (list, tuple)):
-        identity = id(value)
-        if identity in seen:
-            return False, 0
-        seen.add(identity)
-        count = 0
-        for item in value:
-            allowed, item_count = _is_strict_sanitized_only_payload(item, seen=seen)
-            if not allowed:
-                return False, 0
-            count += item_count
-        return True, count
-    return False, 0
-
-
 class LLMEgressFirewall:
     """Validate a final LLM request and record a content-free receipt."""
 
@@ -1770,10 +1678,20 @@ class LLMEgressFirewall:
         snapshot_scans = []
         source_segment_count = 0
         sanitized_only = False
-        if typed_request is not None:
-            sanitized_shape, sanitized_count = _is_strict_sanitized_only_payload(
-                typed_request.payload
+        final_base64_scan_values: Sequence[str] = ()
+        final_base64_scan_origins: Sequence[tuple[str, int] | tuple[str, None]] = ()
+        base64_scan_origins: list[tuple[str, int] | tuple[str, None]] = []
+        origin_capture_failed = False
+
+        def capture_base64_scan_origin(carrier, message_index):
+            nonlocal origin_capture_failed
+            from agent.llm_egress_firewall_payload import capture_scan_origin
+            origin_capture_failed |= not capture_scan_origin(
+                base64_scan_origins, carrier, message_index
             )
+        if typed_request is not None:
+            from agent.llm_egress_firewall_payload import is_strict_sanitized_only_payload
+            sanitized_shape, sanitized_count = is_strict_sanitized_only_payload(typed_request.payload)
             sanitized_only = sanitized_shape and sanitized_count > 0
 
         if destination == DestinationClass.UNKNOWN:
@@ -1814,12 +1732,15 @@ class LLMEgressFirewall:
                     typed_request,
                     grant_contents,
                     allow_sanitized_segments=True,
+                    scan_origin_callback=capture_base64_scan_origin,
                 )
             )
             reasons.extend(construction_reasons)
             scan_values.extend(_source_text_for_secret_scan(text) for text in snapshot_scans)
-            base64_scan_values.extend(_source_text_for_base64_scan(text, allow_fixed_source_literals=True)
-                                      for text in snapshot_scans)
+            from agent.llm_egress_firewall_payload import append_snapshot_scan_inputs
+            append_snapshot_scan_inputs(
+                snapshot_scans, base64_scan_values, capture_base64_scan_origin
+            )
         else:
             logical_request = request
             scan_values = request
@@ -1894,6 +1815,13 @@ class LLMEgressFirewall:
             try:
                 if _contains_canonical_base64(base64_scan_values):
                     reasons.append("base64_payload")
+                    from agent.llm_egress_firewall_payload import final_scan_attribution_inputs
+                    final_base64_scan_values, final_base64_scan_origins = final_scan_attribution_inputs(
+                        typed_request,
+                        base64_scan_values,
+                        base64_scan_origins,
+                        origin_capture_failed,
+                    )
             except Exception:
                 reasons.append("base64_scan_failed")
             try:
@@ -1922,7 +1850,13 @@ class LLMEgressFirewall:
             grant_digests=tuple(source_grant_digest(grant) for grant in valid_grants),
         )
         if not decision.allowed:
-            self._block(decision, valid_grants, request)
+            self._block(
+                decision,
+                valid_grants,
+                request,
+                final_scan_values=final_base64_scan_values,
+                final_scan_origins=final_base64_scan_origins,
+            )
 
         try:
             self._append_receipt(decision, valid_grants, request)
@@ -1938,6 +1872,7 @@ class LLMEgressFirewall:
         grant_contents: Mapping[str, tuple[SourceGrant, bytes]],
         *,
         allow_sanitized_segments: bool = False,
+        scan_origin_callback=None,
     ) -> tuple[Mapping[str, Any], list[str], int, list[str], list[str]]:
         """Build a plain JSON request exclusively from typed segment nodes."""
 
@@ -1955,11 +1890,18 @@ class LLMEgressFirewall:
             frozenset(),
         )
 
+        def record_base64_scan(text, carrier, message_index):
+            base64_scan_values.append(text)
+            if scan_origin_callback is not None:
+                scan_origin_callback(carrier, message_index)
+
         def require_static_literal(
             text: str,
             *,
             scan_base64: bool = True,
             scan_secret: bool = True,
+            carrier="aggregate",
+            message_index=None,
         ) -> None:
             # Provenance authorization and content safety are independent.
             # Every rendered text atom is scanned again immediately before
@@ -1968,9 +1910,23 @@ class LLMEgressFirewall:
             if scan_secret:
                 scan_values.append(text)
             if scan_base64:
-                base64_scan_values.append(text)
+                record_base64_scan(text, carrier, message_index)
             if static_literal_sha256(text) not in allowed_static_hashes:
                 reasons.append("static_literal_not_allowed")
+
+        def validate_tool_syntax_segment(segment, current_sanitized_bytes):
+            try:
+                text = validate_tool_syntax(segment.text, segment.syntax_kind)
+            except (TypeError, ValueError):
+                return None
+            encoded_size = len(text.encode("utf-8"))
+            segment_reasons = []
+            if encoded_size > self._max_sanitized_segment_bytes:
+                segment_reasons.append("sanitized_segment_bytes_exceeded")
+            next_sanitized_bytes = current_sanitized_bytes + encoded_size
+            if next_sanitized_bytes > self._max_sanitized_bytes:
+                segment_reasons.append("sanitized_bytes_exceeded")
+            return text, next_sanitized_bytes, segment_reasons
 
         def render_text_segment(
             segment: (
@@ -1984,13 +1940,16 @@ class LLMEgressFirewall:
                 | SourcePresentationSegment
                 | UntrustedProvenanceSegment
             ),
+            *, carrier="aggregate", message_index=None,
         ) -> str:
             nonlocal sanitized_bytes, source_segment_count
             if isinstance(segment, LiteralSegment):
                 if not isinstance(segment.text, str):
                     reasons.append("invalid_literal_segment")
                     return ""
-                require_static_literal(segment.text)
+                require_static_literal(
+                    segment.text, carrier=carrier, message_index=message_index
+                )
                 encoded_literal = segment.text.encode("utf-8")
                 if any(content and content in encoded_literal for _, content in grant_contents.values()):
                     reasons.append("source_bytes_in_literal")
@@ -2002,7 +1961,7 @@ class LLMEgressFirewall:
                 reasons.extend(segment_reasons)
                 encoding_projections[id(segment)] = projection
                 scan_values.append(text)
-                base64_scan_values.append(projection)
+                record_base64_scan(projection, carrier, message_index)
                 return text
             if isinstance(segment, GeneratedContextSegment):
                 if not isinstance(segment.text, str):
@@ -2013,8 +1972,9 @@ class LLMEgressFirewall:
                 # depth, but do not charge generated context to the smaller
                 # untrusted-text budget.
                 scan_values.append(segment.text)
-                base64_scan_values.append(
-                    _generated_context_text_for_base64_scan(segment.text)
+                record_base64_scan(
+                    _generated_context_text_for_base64_scan(segment.text),
+                    carrier, message_index,
                 )
                 return segment.text
             if isinstance(segment, CodexReasoningReplaySegment):
@@ -2042,17 +2002,12 @@ class LLMEgressFirewall:
                 # provider itself round-trips as opaque binding data.
                 return segment.text
             if isinstance(segment, ValidatedToolSyntaxSegment):
-                try:
-                    text = validate_tool_syntax(segment.text, segment.syntax_kind)
-                except (TypeError, ValueError):
+                result = validate_tool_syntax_segment(segment, sanitized_bytes)
+                if result is None:
                     reasons.append("invalid_tool_syntax_segment")
                     return ""
-                encoded = text.encode("utf-8")
-                if len(encoded) > self._max_sanitized_segment_bytes:
-                    reasons.append("sanitized_segment_bytes_exceeded")
-                sanitized_bytes += len(encoded)
-                if sanitized_bytes > self._max_sanitized_bytes:
-                    reasons.append("sanitized_bytes_exceeded")
+                text, sanitized_bytes, segment_reasons = result
+                reasons.extend(segment_reasons)
                 scan_values.append(text)
                 return text
             if isinstance(segment, SourceBoundSegment):
@@ -2074,7 +2029,7 @@ class LLMEgressFirewall:
                 secret_scan = _source_text_for_secret_scan(text)
                 encoding_scan = _source_text_for_base64_scan(text)
                 scan_values.append(secret_scan)
-                base64_scan_values.append(encoding_scan)
+                record_base64_scan(encoding_scan, carrier, message_index)
                 verified_source_scan_values.append(secret_scan)
                 verified_source_encoding_values.append(encoding_scan)
                 return text
@@ -2092,7 +2047,8 @@ class LLMEgressFirewall:
                 referenced_grants.add(segment.source_grant_digest)
                 source_segment_count += 1
                 scan_values.extend(source_scans)
-                base64_scan_values.extend(source_encodings)
+                for source_encoding in source_encodings:
+                    record_base64_scan(source_encoding, carrier, message_index)
                 verified_source_scan_values.extend(source_scans)
                 verified_source_encoding_values.extend(source_encodings)
                 return segment.text
@@ -2102,7 +2058,18 @@ class LLMEgressFirewall:
             reasons.append("invalid_source_segment")
             return ""
 
-        def render(value: Any) -> Any:
+        def message_carrier(message):
+            role = message.get("role") if isinstance(message, Mapping) else None
+            if isinstance(role, LiteralSegment):
+                role = role.text
+            if type(role) is not str:
+                return "message_content"
+            return {
+                "tool": "tool_result",
+                "user": "user_message",
+            }.get(role, "message_content")
+
+        def render(value: Any, *, carrier="aggregate", message_index=None) -> Any:
             if isinstance(
                 value,
                 (
@@ -2118,7 +2085,9 @@ class LLMEgressFirewall:
                     UntrustedProvenanceSegment,
                 ),
             ):
-                return render_text_segment(value)
+                return render_text_segment(
+                    value, carrier=carrier, message_index=message_index
+                )
             if isinstance(value, OutboundText):
                 rendered_parts: list[str] = []
                 adjacent_sanitized: list[str] = []
@@ -2134,7 +2103,7 @@ class LLMEgressFirewall:
                         # private path, or encoding across adjacent pieces.
                         original = "".join(adjacent_original)
                         scan_values.append(original)
-                        base64_scan_values.append(combined)
+                        record_base64_scan(combined, carrier, message_index)
                         if any(_contains_grant_substring(content, original.encode("utf-8"))
                                for _, content in grant_contents.values()):
                             reasons.append("source_bytes_in_sanitized_segment")
@@ -2150,7 +2119,9 @@ class LLMEgressFirewall:
                     adjacent_non_source.clear()
 
                 for segment in value.segments:
-                    rendered = render_text_segment(segment)
+                    rendered = render_text_segment(
+                        segment, carrier=carrier, message_index=message_index
+                    )
                     rendered_parts.append(rendered)
                     if isinstance(segment, (SanitizedSegment, NativeMetadataSegment)):
                         adjacent_sanitized.append(encoding_projections.get(id(segment), rendered))
@@ -2194,10 +2165,25 @@ class LLMEgressFirewall:
                     else:
                         reasons.append("invalid_request_key")
                         continue
-                    rendered[rendered_key] = render(item)
+                    if rendered_key == "messages" and isinstance(item, (list, tuple)):
+                        rendered[rendered_key] = [
+                            render(
+                                message,
+                                carrier=message_carrier(message),
+                                message_index=index,
+                            )
+                            for index, message in enumerate(item)
+                        ]
+                    else:
+                        rendered[rendered_key] = render(
+                            item, carrier=carrier, message_index=message_index
+                        )
                 return rendered
             if isinstance(value, (list, tuple)):
-                return [render(item) for item in value]
+                return [
+                    render(item, carrier=carrier, message_index=message_index)
+                    for item in value
+                ]
             if isinstance(value, float) and not math.isfinite(value):
                 reasons.append("non_finite_number")
                 return None
@@ -2212,6 +2198,8 @@ class LLMEgressFirewall:
                 require_static_literal(
                     json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":")),
                     scan_base64=False,
+                    carrier=carrier,
+                    message_index=message_index,
                 )
                 return value
             # In particular, raw strings and bytes are not remote request
@@ -2257,9 +2245,14 @@ class LLMEgressFirewall:
         self,
         decision: EgressDecision,
         grants: Sequence[SourceGrant] = (), request: Mapping[str, Any] | TypedOutboundRequest | None = None,
+        *, final_scan_values=(), final_scan_origins=(),
     ) -> None:
         try:
-            self._append_receipt(decision, grants, request)
+            self._append_receipt(
+                decision, grants, request,
+                final_scan_values=final_scan_values,
+                final_scan_origins=final_scan_origins,
+            )
         except OSError:
             decision = replace(
                 decision,
@@ -2271,6 +2264,7 @@ class LLMEgressFirewall:
         self,
         decision: EgressDecision,
         grants: Sequence[SourceGrant], request: Mapping[str, Any] | TypedOutboundRequest | None = None,
+        *, final_scan_values=(), final_scan_origins=(),
     ) -> None:
         try:
             if self._state_dir.is_symlink():
@@ -2295,7 +2289,10 @@ class LLMEgressFirewall:
         from agent.source_grant_verification import grant_receipt_fields
         receipt['source_grants'] = [grant_receipt_fields(grant) for grant in grants]
         from agent.llm_egress_request_diagnostics import append_private_receipt_diagnostics
-        append_private_receipt_diagnostics(receipt, decision, request=request)
+        append_private_receipt_diagnostics(
+            receipt, decision, request=request, final_scan_values=final_scan_values,
+            final_scan_origins=final_scan_origins,
+        )
         flags = os.O_APPEND | os.O_CREAT | os.O_RDWR
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW

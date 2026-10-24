@@ -393,6 +393,9 @@ def test_candidate_observation_follows_real_renderer_and_respects_finite_schema(
         assert private["lineage_status"] == "supported"
         for finding in private["findings"]:
             assert set(finding) <= {"reason", "scan_stage", "basis", "carrier", "temporal", "message_index"}
+        for finding in private["final_scan_attribution"]:
+            assert set(finding) <= {"reason", "carrier", "message_index"}
         assert set(private) <= {"version", "admission_ref", "authority_epoch", "execution_generation",
                                 "admission_sequence", "authorization_ordinal", "admission_binding",
-                                "request_binding", "lineage_status", "findings", "findings_overflow", "lineage_overflow"}
+                                "request_binding", "lineage_status", "findings", "findings_overflow",
+                                "lineage_overflow", "final_scan_attribution"}
