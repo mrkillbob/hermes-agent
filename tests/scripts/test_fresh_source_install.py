@@ -44,6 +44,7 @@ def _copy_fixture_source(source: Path) -> None:
 
 def test_fixture_maintenance_without_agent_runtime(tmp_path):
     """The stripped installer still performs genuine scope planning and SQLite verification."""
+    import dotenv
     import ruamel.yaml
 
     source = tmp_path / "source"
@@ -51,6 +52,7 @@ def test_fixture_maintenance_without_agent_runtime(tmp_path):
     _copy_fixture_source(source)
     dependencies = tmp_path / "dependencies"
     shutil.copytree(Path(ruamel.yaml.__file__).parents[1], dependencies / "ruamel")
+    shutil.copytree(Path(dotenv.__file__).parent, dependencies / "dotenv")
     home = tmp_path / "home"
     home.mkdir()
     script = """
@@ -133,9 +135,11 @@ def test_current_installer_publishes_real_dependencies_and_warm_path(tmp_path, s
     _wheel(wheels, "installer_probe", "1.0")
     recipe = tomllib.loads((source / "pm/pyproject.toml").read_text())
     yaml_dep = next(d for d in recipe["project"]["dependencies"] if d.startswith("ruamel.yaml"))
+    app = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    dotenv_dep = next(d for d in app["project"]["dependencies"] if d.startswith("python-dotenv=="))
     (source / "pyproject.toml").write_text(
         '[project]\nname="installer-fixture"\nversion="1"\nrequires-python=">=3.14"\n'
-        f'dependencies=["installer-probe==1.0",{json.dumps(yaml_dep)}]\n'
+        f'dependencies=["installer-probe==1.0",{json.dumps(yaml_dep)},{json.dumps(dotenv_dep)}]\n'
         '[project.optional-dependencies]\nall=[]\n[dependency-groups]\ndev=[]\ntest=[]\n'
         '[tool.uv]\npackage=false\n'
         '[tool.uv.sources]\ninstaller-probe={path="wheels/installer_probe-1.0-py3-none-any.whl"}\n',
