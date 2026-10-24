@@ -746,6 +746,12 @@ def _repo_root_for_worktree_target(path: Path) -> Optional[Path]:
         current = current.parent
 
 
+def _require_worktree_root(path: Path) -> None:
+    root = _git_toplevel(path)
+    if root is None or _path_key(root) != _path_key(path.resolve(strict=False)):
+        raise ValueError(f"worktree path must be a checkout root: {path}")
+
+
 def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> None:
     """Materialize ``target`` as a linked git worktree under ``repo_root``."""
     from hermes_cli.worktree_base import resolve_worktree_base
@@ -787,6 +793,12 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
     repo_common = _git_common_dir(repo_root)
     if (target.exists() and repo_common is not None
             and _path_key(_git_common_dir(target)) == _path_key(repo_common)):
+        _require_worktree_root(target)
+        if not _is_linked_worktree_checkout(target) or _git_current_branch(target) != branch_name:
+            raise ValueError(
+                f"worktree target is occupied by another assignment: {target} "
+                f"(expected branch {branch_name})"
+            )
         if not _assigned_base_is_recorded():
             _record_assigned_base(_assignment_base())
         bootstrap_worktree_environments(
@@ -883,6 +895,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     requested_resolved = requested.resolve(strict=False)
 
     if requested.exists() and _is_linked_worktree_checkout(requested):
+        _require_worktree_root(requested)
         actual_branch = _git_current_branch(requested)
         if actual_branch == branch_name:
             from hermes_cli.worktree_environment import bootstrap_worktree_environments
@@ -911,9 +924,9 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
             if _path_key(fallback.resolve(strict=False)) != _path_key(requested_resolved):
                 _ensure_git_worktree(fallback_root, fallback, branch_name)
                 return fallback.resolve(strict=False), branch_name
-        # No repo to anchor a fallback on (or the occupied path IS this task's
-        # own canonical worktree): keep the legacy reuse rather than fail dispatch.
-        return requested_resolved, actual_branch or branch_name
+        # No distinct target can be established. Preserve the occupied checkout
+        # rather than dispatch this assignment on another task's branch.
+        raise ValueError(f"worktree target is occupied by another assignment: {requested}")
 
     repo_root = _git_toplevel(requested)
     if repo_root is not None and _path_key(requested_resolved) == _path_key(repo_root):

@@ -24,6 +24,10 @@ def test_fresh_takeover_prepares_generation_and_runs_selected_python(tmp_path):
         shutil.copytree(source / name, root / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     for name in ("hermes_constants.py", "hermes_dir_acl.py", "hermes_yaml.py", "utils.py", "hermes_bootstrap.py"):
         shutil.copy2(source / name, root / name)
+    # Post-sync cleanup imports the real pause protocol before any collector.
+    (root / "agent").mkdir()
+    for name in ("__init__.py", "jiter_preload.py", "estop.py", "file_safety.py"):
+        shutil.copy2(source / "agent" / name, root / "agent" / name)
     home, store, wheels = (tmp_path / name for name in ("home", "tools", "wheels"))
     for directory in (home, store, wheels):
         directory.mkdir()

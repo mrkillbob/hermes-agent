@@ -120,6 +120,9 @@ def _kill(req: dict) -> dict:
     try:
         os.kill(int(req["pid"]), int(req.get("sig", signal.SIGTERM)))
         return {"ok": True}
+    except ProcessLookupError:
+        # A census is a snapshot: the process may exit before the signal arrives.
+        return {"ok": False}
     except OSError as exc:
         return {"ok": False, "error": str(exc)}
 
