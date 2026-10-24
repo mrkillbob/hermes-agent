@@ -5,7 +5,7 @@ import path from 'node:path'
 import { type ConsoleMessage, errors, expect, type Locator, type Page } from '@playwright/test'
 import { z } from 'zod'
 
-import { beginSelectionCapture, type SelectionCapture } from './desktop-selection-diagnostics.ts'
+import { beginSelectionCapture, type ComposerSelection, type SelectionCapture } from './desktop-selection-diagnostics.ts'
 import { MOCK_MODEL_ID, validateMockUrl } from './mock-provider-config.ts'
 import { MOCK_REPLY } from './mock-server.ts'
 
@@ -381,32 +381,36 @@ async function rendererEvidence(page: Page, consoleLines: readonly string[]): Pr
   return ['--- renderer state ---', JSON.stringify(state, null, 2), '--- renderer console ---', ...consoleLines].join('\n')
 }
 
-/** Apps prettify a model id ("mock-model" renders as "Mock Model"), so compare with case and separators folded. */
-function foldModelName(text: string): string {
-  return text.toLowerCase().replace(/[\s_-]+/g, ' ')
-}
+const selectionValue = (value: string | null): string => value ?? 'missing'
 
-/**
- * Wait until the page shows the seeded mock model. Older desktops keep the
- * composer's model as renderer state and ship it as the session override on
- * session.create, so a send before the configured model has loaded goes to the
- * app's default provider and the mock never sees the prompt (v2026.7.1 sent to
- * openrouter and got a 401). The name is searched in the page text rather than
- * a selector because the chip's markup differs between app versions. An app
- * that never renders the name proceeds after the timeout and the
- * mock-received assertion still decides; the note lands in the renderer log.
- */
-async function waitForMockModel(page: Page, notes: string[], timeoutMs: number = 30_000): Promise<void> {
-  const wanted = foldModelName(MOCK_MODEL_ID)
+/** Require the exact inert route written by the smoke fixture before the driver types or sends. */
+export async function waitForMockSelection(
+  capture: SelectionCapture,
+  { timeoutMs = 30_000, intervalMs = 100 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<ComposerSelection> {
+  const initial = await capture.readSelection()
+
+  if (initial === null) {
+    throw new Error('Selection diagnostics unavailable; chat was not submitted')
+  }
+
+  let current: ComposerSelection = initial
+
+  const ready = (value: ComposerSelection): boolean => value.model === MOCK_MODEL_ID && value.provider === 'custom'
+
+  if (ready(current)) { return current }
 
   try {
-    await expect.poll(
-      async (): Promise<boolean> => foldModelName(await page.evaluate((): string => document.body.innerText)).includes(wanted),
-      { timeout: timeoutMs },
-    ).toBe(true)
+    await expect.poll(async (): Promise<boolean> => {
+      current = await capture.readSelection() ?? current
+
+      return ready(current)
+    }, { timeout: timeoutMs, intervals: [intervalMs] }).toBe(true)
   } catch {
-    notes.push(`[smoke] the page never showed "${MOCK_MODEL_ID}" within ${timeoutMs}ms; sending anyway`)
+    throw new Error(`Seeded mock selection did not become ready; chat was not submitted (model=${selectionValue(current.model)} provider=${selectionValue(current.provider)})`)
   }
+
+  return current
 }
 
 /** Lifecycle belongs to the caller, so this also runs inside the OLD update window. */
@@ -443,7 +447,7 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
     const composer = await waitForChatReady(page)
     await selectionCapture.checkpoint('chat-ready')
 
-    await waitForMockModel(page, consoleLines)
+    await waitForMockSelection(selectionCapture)
 
     const identity = await readChatIdentity(page)
 

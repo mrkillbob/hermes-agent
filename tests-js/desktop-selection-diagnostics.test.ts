@@ -102,6 +102,22 @@ test('records initialization and session selection order without changing writes
 
 })
 
+test('exposes only the current allowlisted model and provider selection for a readiness gate', () => {
+  const f = fixture()
+
+  try {
+    expect(f.observer.selection()).toEqual({ model: null, provider: null, source: null })
+    f.storage.setItem('hermes.desktop.composer.model', 'mock-model')
+    expect(f.observer.selection()).toEqual({ model: 'mock-model', provider: null, source: null })
+    f.storage.setItem('hermes.desktop.composer.provider', 'custom')
+    f.storage.setItem('hermes.desktop.composer.model-source', 'default')
+    expect(f.observer.selection()).toEqual({ model: 'mock-model', provider: 'custom', source: 'default' })
+    f.storage.setItem('hermes.desktop.composer.model', 'private-model-name')
+    expect(f.observer.selection()).toEqual({ model: 'non-fixture', provider: 'custom', source: 'default' })
+    expect(JSON.stringify(f.observer.selection())).not.toContain('private-model-name')
+  } finally { f.observer.stop() }
+})
+
 test('bounds evidence, filters secrets and ignores other preferences and non-create frames', () => {
   const f = fixture()
 

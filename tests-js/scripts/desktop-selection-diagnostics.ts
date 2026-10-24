@@ -5,8 +5,15 @@ import type { JSHandle, Page } from '@playwright/test'
 
 export type SelectionStage = 'capture-start' | 'chat-ready' | 'before-submit' | 'after-submit' | 'complete' | 'failed' | 'capture-stop'
 
+export interface ComposerSelection {
+  model: 'mock-model' | 'non-fixture' | null
+  provider: 'custom' | 'non-fixture' | null
+  source: 'manual' | 'default' | null
+}
+
 export interface SelectionCapture {
   checkpoint: (stage: SelectionStage) => Promise<void>
+  readSelection: () => Promise<ComposerSelection | null>
   stop: () => Promise<void>
 }
 
@@ -30,10 +37,10 @@ export function installSelectionObserver(
 
   // A string's shape cannot establish that it contains no credentials or URL.
   // Keep only the two identifiers owned by the inert smoke configuration.
-  const identifier = (value: unknown, fixture: 'mock-model' | 'custom'): string | null =>
+  const identifier = <T extends 'mock-model' | 'custom'>(value: unknown, fixture: T): T | 'non-fixture' | null =>
     typeof value !== 'string' || value === '' ? null : value === fixture ? fixture : 'non-fixture'
 
-  const selection = () => {
+  const selection = (): ComposerSelection => {
     try {
       const source = target.localStorage.getItem(keys[2])
 
@@ -111,6 +118,7 @@ export function installSelectionObserver(
   record('capture-start', { composer: selection(), socketObserved, storageObserved })
 
   return {
+    selection,
     checkpoint(stage: SelectionStage) {
       if (stage !== 'capture-start') { record(stage, { composer: selection() }) }
 
@@ -149,9 +157,20 @@ export async function beginSelectionCapture(page: Page, outDir: string, phase: s
     }
   }
 
+  const readSelection = async (): Promise<ComposerSelection | null> => {
+    if (!handle) { return null }
+
+    try { return await handle.evaluate(observer => observer.selection()) }
+    catch {
+      unavailable = true
+
+      return null
+    }
+  }
+
   await checkpoint('capture-start')
 
-  return { checkpoint, stop: async () => {
+  return { checkpoint, readSelection, stop: async () => {
     try { await checkpoint('capture-stop') }
     finally {
       if (handle) {
