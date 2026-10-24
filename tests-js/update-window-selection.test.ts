@@ -199,6 +199,7 @@ test('diagnostic cleanup errors do not replace the preparation error', async () 
         await capture.checkpoint(stage)
         throw new Error('diagnostic checkpoint failed')
       },
+      readSelection: async () => capture.readSelection(),
       stop: async () => {
         await capture.stop()
         throw new Error('diagnostic stop failed')
