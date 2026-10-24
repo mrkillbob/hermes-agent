@@ -694,13 +694,14 @@ launch_app() { # attempted BEFORE the terminal event (launch acceptance is
     # immediate exec failure (ENOENT, ELF mismatch, dead sandbox) dies
     # within the window and downgrades to manual instead of lying.
     (cd "${RELAUNCH_CWD:-/}" 2>/dev/null || cd /
-     # The relaunched app must not inherit the hand-off's update env or an
-     # ignored SIGTERM disposition from its shell. Bash cannot re-trap a signal
-     # ignored on entry, so make the reset explicit at this exec boundary.
+     # The relaunched app must not inherit the hand-off's update env, an ignored
+     # SIGTERM disposition, or a blocked SIGTERM mask from its shell. Bash
+     # cannot re-trap a signal ignored on entry, so reset both at this boundary.
      env -u HERMES_UPDATE_STATUS_FILE -u HERMES_UPDATE_STARTED_AT -u HERMES_UPDATE_HANDOFF_PID -u PYTHONUNBUFFERED \
        setsid /usr/bin/python3 -c '
 import os, signal, sys
 signal.signal(signal.SIGTERM, signal.SIG_DFL)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
 os.execv(sys.argv[1], [sys.argv[1], *sys.argv[2:]])
 ' "$RELAUNCH_TARGET" ${RELAUNCH_ARGS[@]+"${RELAUNCH_ARGS[@]}"} >/dev/null 2>&1 &
      echo $! > "$STATUS.launchpid") || { log "WARNING: relaunch spawn failed"; return 1; }

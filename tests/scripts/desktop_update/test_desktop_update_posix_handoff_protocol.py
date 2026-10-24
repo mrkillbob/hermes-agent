@@ -23,6 +23,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
 
 import pytest
@@ -437,10 +438,10 @@ def test_line_two_stays_young_through_the_r6_release_wait(tmp_path):
     assert not marker.exists()
 
 
-def test_launcher_resets_an_inherited_ignored_term_before_relaunch(tmp_path):
-    """The detached hand-off may be exec'd from Electron with SIGTERM ignored.
-    Bash cannot re-trap a signal ignored on entry, so its relaunched app must
-    receive the default disposition after the Python daemon boundary.
+def test_launcher_resets_inherited_term_state_before_relaunch(tmp_path):
+    """The detached hand-off may inherit ignored or blocked SIGTERM from Electron.
+    The relaunched app must receive the default disposition and an unblocked
+    signal mask after the Python daemon boundary.
     """
     home, install = _install(tmp_path)
     app_dir = install / "apps" / "desktop" / "release" / "linux-unpacked"
@@ -450,16 +451,18 @@ def test_launcher_resets_an_inherited_ignored_term_before_relaunch(tmp_path):
     target.write_text(
         f"#!{sys.executable}\n"
         "import os, signal, time\n"
-        f"open({str(observed)!r}, 'w', encoding='utf-8').write(f'{{os.getpid()}} {{signal.getsignal(signal.SIGTERM)}}')\n"
+        f"blocked = signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, set())\n"
+        f"open({str(observed)!r}, 'w', encoding='utf-8').write(f'{{os.getpid()}} {{signal.getsignal(signal.SIGTERM)}} {{blocked}}')\n"
         "time.sleep(5)\n",
         encoding="utf-8",
     )
     target.chmod(0o755)
 
-    launcher_script = tmp_path / "launch-with-term-ignored.py"
+    launcher_script = tmp_path / "launch-with-term-ignored-and-blocked.py"
     launcher_script.write_text(
         "import os, signal, sys\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})\n"
         f"os.execv('/bin/bash', ['/bin/bash', {str(POSIX)!r}, *sys.argv[1:]])\n",
         encoding="utf-8",
     )
@@ -478,9 +481,10 @@ def test_launcher_resets_an_inherited_ignored_term_before_relaunch(tmp_path):
         while not observed.exists():
             assert time.monotonic() < deadline, "the updater did not relaunch the test app"
             time.sleep(0.05)
-        app_pid_text, disposition = observed.read_text(encoding="utf-8").split()
+        app_pid_text, disposition, blocked = observed.read_text(encoding="utf-8").split()
         app_pid = int(app_pid_text)
         assert disposition == "0", "the relaunched app inherited SIGTERM=SIG_IGN"
+        assert blocked == "False", "the relaunched app inherited a blocked SIGTERM mask"
 
         # A pidfd reports this exact process's exit even if init has not yet
         # reaped the detached child, unlike kill(pid, 0), which sees zombies.
