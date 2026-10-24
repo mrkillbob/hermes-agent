@@ -47,4 +47,4 @@ if [ -n "$print_only" ]; then
     printf '%s\n' "$bootstrap"
     exit 0
 fi
-exec "$bootstrap" -I -B "$here/lifetime_python.py" "$@"
+exec "$bootstrap" -I -S -B "$here/lifetime_python.py" "$@"

@@ -1,8 +1,9 @@
 """Native lifetime references; Windows sharing holds survive handle inheritance."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import copy
+import errno
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -109,3 +110,61 @@ def native_reference(fd: int) -> int:
         import msvcrt
         return msvcrt.get_osfhandle(fd)
     return fd
+
+
+def _descriptor_flags(required):
+    """Snapshot before mutation; /dev/fd enumeration can include its already closed fd."""
+    for directory in ('/proc/self/fd', '/dev/fd'):
+        try:
+            names = os.listdir(directory)
+            break
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+    else:
+        raise RuntimeError('cannot inspect bootstrap descriptors before exec')
+    candidates = {int(name) for name in names if name.isdecimal()} | set(required)
+    flags = {}
+    for fd in candidates:
+        if fd <= 2 and fd not in required:
+            continue
+        try:
+            inherited, info = os.get_inheritable(fd), os.fstat(fd)
+            flags[fd] = (inherited, info.st_dev, info.st_ino, info.st_mode)
+        except OSError as error:
+            if error.errno != errno.EBADF or fd in required:
+                raise
+    return flags
+
+
+def _restore_descriptor(fd, previous, required):
+    try:
+        info = os.fstat(fd)
+    except OSError as error:
+        if error.errno == errno.EBADF and fd not in required:
+            return
+        raise
+    if (info.st_dev, info.st_ino, info.st_mode) != previous[1:]:
+        raise RuntimeError('bootstrap descriptor identity changed during exec')
+    os.set_inheritable(fd, previous[0])
+
+
+@contextmanager
+def exec_descriptors(references):
+    """CLI-only POSIX exec custody, with close_fds semantics and complete failure rollback."""
+    import signal
+
+    required = frozenset(references)
+    flags = _descriptor_flags(required)
+    resets = [(number, signal.getsignal(number)) for name in ('SIGPIPE', 'SIGXFZ', 'SIGXFSZ')
+              if (number := getattr(signal, name, None)) is not None]
+    with ExitStack() as rollback:
+        for fd, previous in flags.items():
+            wanted = fd in required
+            if previous[0] != wanted:
+                rollback.callback(_restore_descriptor, fd, previous, required)
+                os.set_inheritable(fd, wanted)
+        for number, handler in resets:
+            if handler == signal.SIG_IGN:
+                rollback.callback(signal.signal, number, handler)
+                signal.signal(number, signal.SIG_DFL)
+        yield

@@ -619,6 +619,18 @@ and test children inherit only those references, protecting startup and survivin
 supervisor crash. The canonical test runner also protects its pytest probe and uses
 serial bytecode precompilation to avoid unregistered compilation workers.
 
+On POSIX, the dedicated CLI bootstrap starts without site initialization (`-I -S`)
+and replaces itself with the target interpreter. PID, process group, terminal and
+native signal exit status stay with that interpreter, so PID and group cancellation
+do not require forwarding or signal suppression. The single-threaded, non-reentrant
+bootstrap transfers only its exact lifetime descriptors; unrelated inherited
+descriptors are closed on exec. It restores descriptor flags and changed signal
+dispositions if exec fails, then releases its owned registration. Borrowed references
+remain owned by their caller. An unavailable `/proc/self/fd` and `/dev/fd` inventory,
+or unsupported threaded/library entry, fails before execution rather than leaking
+unrelated descriptors. This is a CLI startup contract, not a general threaded exec
+API. Windows retains explicit child supervision and native handle inheritance.
+
 Only a newly created domain receives identity-bound lifetime qualification. Existing
 or changed state, unreadable coordination metadata and unknown activity records are
 retained. A producer cleans up its own failed output after releasing its reference,

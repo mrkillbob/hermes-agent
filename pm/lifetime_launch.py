@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
+import os
 import subprocess
 import sys
 
@@ -10,6 +11,7 @@ from pm.lifetime import activity, active_references, domain_for_generation, Gate
 from pm.lifetime_handles import inherit
 
 _BORROWED = ()
+_EXECUTING = False
 _FLAG = '--pm-lifetime-references='
 
 
@@ -68,14 +70,37 @@ def run(command, *, managed=False, **options):
         return subprocess.run(args, **inherited)  # noqa: PLW1510 -- check is explicitly forwarded in options
 
 
+def _exec_bootstrap(arguments, managed):
+    """Only the fresh stdlib CLI bootstrap may sweep descriptors and replace itself."""
+    import threading
+    from pm.lifetime_handles import exec_descriptors
+
+    global _EXECUTING
+    if (not sys.flags.no_site or threading.current_thread() is not threading.main_thread()
+            or threading.active_count() != 1 or _EXECUTING):
+        raise RuntimeError('POSIX lifetime exec requires the single-threaded stdlib bootstrap (-S)')
+    _EXECUTING = True
+    try:
+        with protected(arguments, managed=managed) as (command, inherited):
+            with exec_descriptors(inherited.get('pass_fds', ())):
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os.execvp(command[0], command)
+                raise RuntimeError('bootstrap exec unexpectedly returned')
+    finally:
+        _EXECUTING = False
+
+
 def main(arguments=None):
-    """A non-removable bootstrap supervises a target; status and signals remain observable."""
+    """Exec on POSIX preserves one signal recipient; Windows retains child supervision."""
     arguments = list(sys.argv[1:] if arguments is None else arguments)
     managed = bool(arguments and arguments[0] == '--managed')
     if managed:
         arguments.pop(0)
     if not arguments:
         raise ValueError('a target interpreter is required')
+    if os.name == 'posix':
+        return _exec_bootstrap(arguments, managed)
     # The child inherits its own kernel reference before its first instruction.
     # A hard exit of this supervisor cannot release that child's protection.
     with popen(arguments, managed=managed) as child:
