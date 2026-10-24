@@ -24,6 +24,9 @@ import { defineConfig } from '@playwright/test'
 export default defineConfig({
   testDir: '.',
   testMatch: '*.spec.ts',
+  // Electron's npm entry point lazily downloads its binary when it is first
+  // required. Resolve it once before parallel workers can race that download.
+  globalSetup: './global-setup.ts',
   timeout: 360_000,
   expect: { timeout: 60_000 },
   retries: 0,

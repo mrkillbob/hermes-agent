@@ -582,8 +582,12 @@ def assert_healthy_at_head(leg: Leg, provider: FakeLLMServer, final: subprocess.
     turn = leg.run("-z", marker)
     assert turn.returncode == 0 and TRACEBACK not in turn.stderr, H.describe(turn)
     assert provider.default_text in turn.stdout, H.describe(turn)
-    new = provider.main_requests()[n_before:]
-    assert len(new) == 1 and marker in json.dumps(new[0]["messages"]), "one-shot turn did not reach the provider once"
+    # The preserved nightly cron can become due while this long upgrade suite
+    # runs. Attribute requests by this turn's unique marker, not by every call
+    # the shared module-scoped provider received since n_before.
+    new = [request for request in provider.main_requests()[n_before:]
+           if marker in json.dumps(request["messages"])]
+    assert len(new) == 1, "one-shot turn did not reach the provider once"
     fp = db_fingerprint(leg.hermes_home / "state.db")
     assert fp["integrity"] == [("ok",)]
     assert len(fp["sessions"]) == len(before["default"]["db"]["sessions"]) + 1, "post-update turn not persisted"

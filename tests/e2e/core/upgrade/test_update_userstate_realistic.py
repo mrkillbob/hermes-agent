@@ -248,7 +248,10 @@ def test_every_profile_session_resumes_after_update(world, provider):
         follow = f"follow-up after the update in {name}"
         cp = _ok(sb.cli(*_pargs(name), "-z", follow, "--resume", sid))
         assert provider.default_text in cp.stdout, I.describe(cp)
-        new = provider.main_requests()[n:]
+        # The preserved 03:00 cron may fire during this long-running suite and
+        # shares the fake provider. Count only the request carrying this turn.
+        new = [request for request in provider.main_requests()[n:]
+               if follow in json.dumps(request["messages"])]
         assert len(new) == 1, f"{name}: resumed turn sent {len(new)} provider requests"
         wire = json.dumps(new[0]["messages"])
         assert world["markers"][name] in wire and follow in wire, (
