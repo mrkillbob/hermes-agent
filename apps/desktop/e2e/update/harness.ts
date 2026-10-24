@@ -20,6 +20,7 @@ import * as path from 'node:path'
 import { _electron, type ElectronApplication, expect, type Page, test } from '@playwright/test'
 
 import { type CoreSandbox, type ProcInfo, providerConfigYaml, sandboxProcesses } from '../core/harness'
+import { readProc } from '../core/process-census'
 import { type ScriptedProvider, startScriptedProvider } from '../core/provider'
 
 import { gatedOn, KNOWN } from './gates'
@@ -233,7 +234,10 @@ export function configureProvider(facts: InstallFacts, providerUrl: string): voi
   // Do not let the boot readiness gate launch an unrelated long-lived gateway.
   fs.writeFileSync(
     config,
-    providerConfigYaml(providerUrl, `${update && !update.endsWith('\n') ? `${update}\n` : update}kanban:\n  dispatch_in_gateway: false\n`)
+    providerConfigYaml(
+      providerUrl,
+      `${update && !update.endsWith('\n') ? `${update}\n` : update}kanban:\n  dispatch_in_gateway: false\n`
+    )
   )
   fs.writeFileSync(path.join(facts.hermesHome, '.env'), 'MOCK_API_KEY=update-e2e-key\n')
 }
@@ -243,6 +247,8 @@ export interface LaunchedApp {
   page: Page
   logs: string[]
   logTail: () => string
+  pid: number | undefined
+  startTicks: string | undefined
 }
 
 export async function launchInstalledApp(facts: InstallFacts, env: Record<string, string>): Promise<LaunchedApp> {
@@ -254,6 +260,24 @@ export async function launchInstalledApp(facts: InstallFacts, env: Record<string
     env,
     cwd: facts.home
   })
+
+  const pid = app.process().pid
+  let startTicks: string | undefined
+
+  if (process.platform === 'linux' && pid !== undefined) {
+    try {
+      const raw = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+
+      const fields = raw
+        .slice(raw.lastIndexOf(')') + 2)
+        .trim()
+        .split(/\s+/)
+
+      startTicks = fields.length >= 20 ? fields[19] : undefined
+    } catch {
+      startTicks = undefined
+    }
+  }
 
   const collect = (chunk: Buffer) => {
     logs.push(...chunk.toString('utf8').split('\n').filter(Boolean))
@@ -270,13 +294,45 @@ export async function launchInstalledApp(facts: InstallFacts, env: Record<string
     throw new Error(`installed app never opened a window: ${(error as Error).message.split('\n')[0]}\n${logTail()}`)
   })
 
-  return { app, page, logs, logTail }
+  return { app, page, logs, logTail, pid, startTicks }
 }
 
 // ─── Observation ───────────────────────────────────────────────────────
 
 export function installProcesses(facts: InstallFacts): ProcInfo[] {
-  return sandboxProcesses({ hermesHome: facts.hermesHome } as CoreSandbox)
+  const processes = new Map(
+    sandboxProcesses({ hermesHome: facts.hermesHome } as CoreSandbox).map(proc => [proc.pid, proc])
+  )
+
+  // posix.sh relaunches the detached Desktop after an update, and its gateway
+  // can outlive the app. The home-scoped census does not identify every owned
+  // process, so include processes whose image belongs to this unique test
+  // sandbox. This catches detached lock holders and runtime workers at teardown.
+  if (process.platform === 'linux') {
+    const executableRoot = `${fs.realpathSync(facts.sandboxRoot)}/`
+
+    for (const entry of fs.readdirSync('/proc')) {
+      const pid = Number(entry)
+
+      if (!Number.isInteger(pid) || pid === process.pid) {
+        continue
+      }
+
+      const executable = exeOf(pid)
+
+      if (!executable.startsWith(executableRoot)) {
+        continue
+      }
+
+      const info = readProc(pid)
+
+      if (info?.cmdline) {
+        processes.set(pid, { pid, ppid: info.ppid, cmdline: info.cmdline })
+      }
+    }
+  }
+
+  return [...processes.values()]
 }
 
 function exeOf(pid: number): string {
@@ -287,13 +343,16 @@ function exeOf(pid: number): string {
   }
 }
 
-/** Live Desktop main processes of this install (the packaged exe, not its zygote/renderer/gpu children). */
-export function desktopMainProcesses(facts: InstallFacts): ProcInfo[] {
+/** Every process using this install's packaged Desktop executable (main + Chromium helpers). */
+export function desktopProcesses(facts: InstallFacts): ProcInfo[] {
   const exe = fs.realpathSync(path.dirname(packagedExe(facts)))
 
-  return installProcesses(facts).filter(
-    proc => exeOf(proc.pid).startsWith(exe + path.sep) && !/--type=/.test(proc.cmdline)
-  )
+  return installProcesses(facts).filter(proc => exeOf(proc.pid).startsWith(exe + path.sep))
+}
+
+/** Live Desktop main processes of this install (not its zygote/renderer/gpu children). */
+export function desktopMainProcesses(facts: InstallFacts): ProcInfo[] {
+  return desktopProcesses(facts).filter(proc => !/--type=/.test(proc.cmdline))
 }
 
 /** The `hermes serve` backend(s) of this install (children of the backend excluded). */
@@ -381,7 +440,7 @@ export function diagnostics(facts: InstallFacts, extra = ''): string {
   return parts.filter(Boolean).join('\n')
 }
 
-/** SIGKILL every process that carries this install's HERMES_HOME (end of every spec). */
+/** SIGKILL only processes owned by this test install (end of every spec). */
 export function killInstallProcesses(facts: InstallFacts | null): void {
   if (!facts) {
     return
@@ -492,36 +551,51 @@ export function updateLogLines(facts: InstallFacts, offset = 0): string {
     .join('\n')
 }
 
-async function attachUpdateRendererState(launched: LaunchedApp, phase: string, rendererErrorCount: number): Promise<void> {
+async function attachUpdateRendererState(
+  launched: LaunchedApp,
+  phase: string,
+  rendererErrorCount: number
+): Promise<void> {
   // Structural metadata only: never attach renderer text, screenshots, URLs or error messages.
   let deadline: ReturnType<typeof setTimeout> | undefined
 
-  const snapshot = await Promise.race([launched.page.evaluate(() => {
-    const desktop = (window as unknown as { hermesDesktop?: { updates?: unknown } }).hermesDesktop
+  const snapshot = await Promise.race([
+    launched.page
+      .evaluate(() => {
+        const desktop = (window as unknown as { hermesDesktop?: { updates?: unknown } }).hermesDesktop
 
-    const buttons = [...document.querySelectorAll('button')].filter(button =>
-      /^update now$/i.test(button.textContent?.trim() ?? '')
-    )
+        const buttons = [...document.querySelectorAll('button')].filter(button =>
+          /^update now$/i.test(button.textContent?.trim() ?? '')
+        )
 
-    return {
-      desktopBridgeAvailable: Boolean(desktop),
-      updateBridgeAvailable: Boolean(desktop?.updates),
-      dialogs: document.querySelectorAll('[role="dialog"]').length,
-      updateButtons: buttons.length,
-      updateButtonsDisabled: buttons.filter(button => button.disabled).length
-    }
-  }).catch(() => null), new Promise<null>(resolve => {
-    deadline = setTimeout(() => resolve(null), 2_000)
-  })]).finally(() => clearTimeout(deadline))
+        return {
+          desktopBridgeAvailable: Boolean(desktop),
+          updateBridgeAvailable: Boolean(desktop?.updates),
+          dialogs: document.querySelectorAll('[role="dialog"]').length,
+          updateButtons: buttons.length,
+          updateButtonsDisabled: buttons.filter(button => button.disabled).length
+        }
+      })
+      .catch(() => null),
+    new Promise<null>(resolve => {
+      deadline = setTimeout(() => resolve(null), 2_000)
+    })
+  ]).finally(() => clearTimeout(deadline))
 
   await test.info().attach(`update-renderer-${phase}`, {
     contentType: 'application/json',
-    body: Buffer.from(JSON.stringify({
-      pageClosed: launched.page.isClosed(),
-      rendererErrorCount,
-      snapshotAvailable: snapshot !== null,
-      ...(snapshot !== null ? snapshot : {})
-    }, null, 2))
+    body: Buffer.from(
+      JSON.stringify(
+        {
+          pageClosed: launched.page.isClosed(),
+          rendererErrorCount,
+          snapshotAvailable: snapshot !== null,
+          ...(snapshot !== null ? snapshot : {})
+        },
+        null,
+        2
+      )
+    )
   })
 }
 
@@ -538,7 +612,9 @@ export async function clickUpdateNowAndExpectHandoff(launched: LaunchedApp, fact
   })
   let rendererErrorCount = 0
 
-  const onRendererError = () => { rendererErrorCount += 1 }
+  const onRendererError = () => {
+    rendererErrorCount += 1
+  }
 
   launched.page.on('pageerror', onRendererError)
 
@@ -612,17 +688,20 @@ export async function currentAs(page: Page): Promise<{ currentSha?: string; upda
 
 /** Ask Electron to quit normally so its backend and child processes can shut down cleanly. */
 export async function closeQuietly(app: ElectronApplication): Promise<void> {
-  if (app.process().exitCode !== null || app.process().killed) {
-    return
+  if (app.process().exitCode === null && !app.process().killed) {
+    const closed = app.waitForEvent('close', { timeout: 30_000 }).catch(() => undefined)
+
+    try {
+      await app.evaluate(({ app: electronApp }) => electronApp.quit())
+    } catch {
+      // The process may have exited while the quit request was being sent.
+    }
+
+    await closed
   }
 
-  const closed = app.waitForEvent('close', { timeout: 30_000 }).catch(() => undefined)
-
-  try {
-    await app.evaluate(({ app: electronApp }) => electronApp.quit())
-  } catch {
-    // The process may have exited while the quit request was being sent.
-  }
-
-  await closed
+  // Waiting for Electron's process exit alone leaves Playwright's BrowserContext
+  // and its DevTools connections open. ElectronApplication.close() performs the
+  // protocol/context teardown even when the app already quit for an update.
+  await app.close()
 }

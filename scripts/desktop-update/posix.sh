@@ -694,9 +694,16 @@ launch_app() { # attempted BEFORE the terminal event (launch acceptance is
     # immediate exec failure (ENOENT, ELF mismatch, dead sandbox) dies
     # within the window and downgrades to manual instead of lying.
     (cd "${RELAUNCH_CWD:-/}" 2>/dev/null || cd /
-     # The relaunched app must not inherit the hand-off's update env.
+     # The relaunched app must not inherit the hand-off's update env, an ignored
+     # SIGTERM disposition, or a blocked SIGTERM mask from its shell. Bash
+     # cannot re-trap a signal ignored on entry, so reset both at this boundary.
      env -u HERMES_UPDATE_STATUS_FILE -u HERMES_UPDATE_STARTED_AT -u HERMES_UPDATE_HANDOFF_PID -u PYTHONUNBUFFERED \
-       setsid "$RELAUNCH_TARGET" ${RELAUNCH_ARGS[@]+"${RELAUNCH_ARGS[@]}"} >/dev/null 2>&1 &
+       setsid /usr/bin/python3 -c '
+import os, signal, sys
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+os.execv(sys.argv[1], [sys.argv[1], *sys.argv[2:]])
+' "$RELAUNCH_TARGET" ${RELAUNCH_ARGS[@]+"${RELAUNCH_ARGS[@]}"} >/dev/null 2>&1 &
      echo $! > "$STATUS.launchpid") || { log "WARNING: relaunch spawn failed"; return 1; }
     local lp
     lp="$(cat "$STATUS.launchpid" 2>/dev/null)"; rm -f "$STATUS.launchpid" 2>/dev/null
@@ -990,9 +997,8 @@ if [ "$HANDOFF_DAEMONIZED" -ne 1 ]; then
   # every re-exec, causing this block to re-fire forever (self-exec loop,
   # unbounded argv growth) whenever relaunch args were present.
   # nohup leaves SIGHUP ignored, and an ignored-at-entry signal can never be
-  # re-trapped by bash, so every child (hermes update, gateways it starts, the
-  # relaunched app) inherited it. The daemon has no terminal after setsid:
-  # restore the default before exec.
+  # re-trapped by bash. The daemon has no terminal after setsid: restore HUP
+  # before exec. launch_app() resets SIGTERM at the packaged-app exec boundary.
   /usr/bin/nohup /usr/bin/python3 -c '
 import os, signal, sys
 env = os.environ.copy()
