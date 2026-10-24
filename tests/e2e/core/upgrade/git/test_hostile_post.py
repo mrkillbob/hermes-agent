@@ -326,11 +326,10 @@ def _kill_born_after(host: NamespaceHost, before: set[int]) -> list[int]:
         live = [p["pid"] for p in host.procs() if p["pid"] not in before and p["state"] not in ("Z", "X")]
         if not live:
             break
-        for pid in live:
-            host.kill(pid, signal.SIGSTOP)
-        for pid in live:
-            host.kill(pid, signal.SIGKILL)  # windows-footgun: ok - linux-only (bwrap) module
-            if pid not in killed:
+        stopped = [pid for pid in live if host.kill(pid, signal.SIGSTOP)]
+        for pid in stopped:
+            did_kill = host.kill(pid, signal.SIGKILL)  # windows-footgun: ok - linux-only (bwrap) module
+            if did_kill and pid not in killed:
                 killed.append(pid)
         time.sleep(0.5)
     return killed
