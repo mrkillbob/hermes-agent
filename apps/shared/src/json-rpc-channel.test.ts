@@ -19,7 +19,7 @@ describe('JsonRpcRequestChannel', () => {
 
     const ok = channel.request<{ ok: boolean }>('session.create', { cols: 80 })
     const okId = last().id
-    const failing = channel.request('projects.create')
+    const failing = channel.request('prompt.submit')
     const failId = last().id
 
     expect(okId).toBe('x1')
@@ -42,7 +42,7 @@ describe('JsonRpcRequestChannel', () => {
     expect(error).toBeInstanceOf(JsonRpcGatewayError)
     expect(error.code).toBe(-32601)
     expect(error.data).toEqual({ method: 'projects.create' })
-    expect(error.method).toBe('projects.create')
+    expect(error.method).toBe('prompt.submit')
     expect(events).toEqual(['session.info'])
   })
 
