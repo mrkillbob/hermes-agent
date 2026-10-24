@@ -67,7 +67,9 @@ def payload_tree(tmp_path: Path):
 
     # Exercise the real bootstrap before the fixture entry point.
     for relative in ("hermes_bootstrap.py", "hermes_constants.py", "hermes_cli/__init__.py",
-                     "pm/environments.py", "pm/filesystem.py", "hermes_cli/runtime_state.py",
+                     "pm/environments.py", "pm/filesystem.py",
+                     "pm/lifetime.py", "pm/lifetime_handles.py", "pm/lifetime_cleanup.py",
+                     "hermes_cli/runtime_state.py",
                      "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py",
                      # prepare_launch returns early for a fixture repo (no .git), but the bootstrap
                      # imports these two before it can tell.
