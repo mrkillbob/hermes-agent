@@ -65,12 +65,14 @@ const isServerRequestFrame = (frame: JsonRpcFrame): frame is JsonRpcFrame & { id
 export class JsonRpcGatewayError extends Error {
   readonly code?: number
   readonly data?: unknown
+  readonly method?: string
 
-  constructor(message: string, options?: { code?: number; data?: unknown }) {
+  constructor(message: string, options?: { code?: number; data?: unknown; method?: string }) {
     super(message)
     this.name = 'JsonRpcGatewayError'
     this.code = options?.code
     this.data = options?.data
+    this.method = options?.method
   }
 }
 
@@ -95,12 +97,17 @@ export const JSON_RPC_INTERNAL_ERROR = -32603
 export const JSON_RPC_SESSION_NOT_SHOWN = 4404
 
 /** Map a raw `error` member of a response frame to the typed error every surface inspects. */
-export function jsonRpcErrorFromFrame(raw: unknown, fallbackMessage = 'Hermes RPC failed'): JsonRpcGatewayError {
+export function jsonRpcErrorFromFrame(
+  raw: unknown,
+  fallbackMessage = 'Hermes RPC failed',
+  method?: string
+): JsonRpcGatewayError {
   const err = (raw && typeof raw === 'object' ? raw : {}) as JsonRpcErrorPayload
 
   return new JsonRpcGatewayError(typeof err.message === 'string' && err.message ? err.message : fallbackMessage, {
     code: typeof err.code === 'number' ? err.code : undefined,
-    data: err.data
+    data: err.data,
+    method
   })
 }
 
@@ -151,6 +158,7 @@ export interface JsonRpcRequestChannelOptions {
 export type HeartbeatLiveness = 'any-inbound' | 'response'
 
 interface PendingCall {
+  method: string
   reject: (error: Error) => void
   resolve: (value: unknown) => void
   timer?: ReturnType<typeof setTimeout>
@@ -285,6 +293,7 @@ export class JsonRpcRequestChannel {
       }
 
       const pending: PendingCall = {
+        method,
         resolve: value => {
           detachAbort()
           resolve(value as T)
@@ -481,7 +490,7 @@ export class JsonRpcRequestChannel {
         this.clearPending(frame.id)
 
         if (frame.error) {
-          call.reject(jsonRpcErrorFromFrame(frame.error))
+          call.reject(jsonRpcErrorFromFrame(frame.error, 'Hermes RPC failed', call.method))
         } else {
           // Reconnect contract: `session.resume` / `session.activate` /
           // `session.events.since` answer with `open_requests` — the server→

@@ -118,6 +118,14 @@ const STORAGE_ERROR_CAUSES = new Set([
   'unknown'
 ])
 
+// RPC names are diagnostic context only. Keep this list closed so an unexpected
+// method value from an error object can never become free-form log content.
+const STORAGE_RPC_METHODS = new Set([
+  'prompt.submit',
+  'session.attach',
+  'session.create'
+])
+
 function storageRpcDiagnostic(error: unknown): string {
   if (!(error instanceof JsonRpcGatewayError) || typeof error.code !== 'number' || !STORAGE_RPC_CODES.has(error.code)) {
     return ''
@@ -143,8 +151,9 @@ function storageRpcDiagnostic(error: unknown): string {
   }
 
   const cause = typeof data.cause === 'string' && STORAGE_ERROR_CAUSES.has(data.cause) ? data.cause : 'unclassified'
+  const method = typeof error.method === 'string' && STORAGE_RPC_METHODS.has(error.method) ? error.method : 'unknown'
 
-  return ` [storage_rpc rpc_code=${error.code} storage_category=${category} storage_cause=${cause}]`
+  return ` [storage_rpc rpc_code=${error.code} storage_category=${category} storage_cause=${cause} rpc_method=${method}]`
 }
 
 /** True when an error string is a disk-full / ENOSPC / SQLITE_FULL failure. */
