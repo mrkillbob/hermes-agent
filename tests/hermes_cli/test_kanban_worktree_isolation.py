@@ -16,6 +16,7 @@ Two-part fix under test:
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -104,9 +105,18 @@ def test_decompose_worktree_children_get_own_workspace(kanban_home):
 
 
 
-def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
+@pytest.mark.parametrize("placement", ["default", "configured", "external_sibling"])
+def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path, placement):
     repo = _make_repo(tmp_path)
-    occupied = _add_worktree(repo, repo / ".worktrees" / "sibling", "wt/sibling")
+    workspace_root = repo / ".worktrees"
+    if placement != "default":
+        workspace_root = tmp_path / "configured-workspaces"
+        (kanban_home / "config.yaml").write_text(json.dumps({
+            "kanban": {"worktree_roots": {str(repo.resolve()): str(workspace_root)}}
+        }))
+    sibling_root = workspace_root if placement == "external_sibling" else repo / ".worktrees"
+    occupied = _add_worktree(repo, sibling_root / "sibling", "wt/sibling")
+    (occupied / "sibling-work.txt").write_text("unfinished sibling work\n")
 
     with kbc.connect() as conn:
         tid = kb.create_task(
@@ -118,7 +128,7 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
         task = kb.get_task(conn, tid)
 
     workspace, branch = kbw._resolve_worktree_workspace(task)
-    assert workspace == (repo / ".worktrees" / tid).resolve()
+    assert workspace == (workspace_root / tid).resolve()
     assert branch == f"wt/{tid}"
     # The sibling's checkout is untouched, still on its own branch.
     assert (occupied / "README.md").exists()
@@ -127,6 +137,51 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert head == "wt/sibling"
+    assert (occupied / "sibling-work.txt").read_text() == "unfinished sibling work\n"
+    assert kbw._resolve_worktree_workspace(task) == (workspace, branch)
+    if placement != "default":
+        assert not (repo / ".worktrees" / tid).exists()
+
+
+def test_occupied_worktree_rejects_invalid_location_policy(kanban_home, tmp_path):
+    repo = _make_repo(tmp_path)
+    occupied = _add_worktree(repo, repo / ".worktrees" / "sibling", "wt/sibling")
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="second sibling", workspace_kind="worktree", workspace_path=str(occupied),
+        )
+        task = kb.get_task(conn, tid)
+    (kanban_home / "config.yaml").write_text(json.dumps({
+        "kanban": {"worktree_roots": {str(repo.resolve()): "relative-location"}}
+    }))
+
+    with pytest.raises(ValueError, match="absolute separate directory"):
+        kbw._resolve_worktree_workspace(task)
+    assert not (repo / ".worktrees" / tid).exists()
+    assert (occupied / "README.md").read_text() == "base\n"
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_configured_fallback_alias_preserves_occupied_worktree(kanban_home, tmp_path):
+    repo = _make_repo(tmp_path)
+    occupied = _add_worktree(repo, repo / ".worktrees" / "sibling", "wt/sibling")
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="second sibling", workspace_kind="worktree", workspace_path=str(occupied),
+        )
+        task = kb.get_task(conn, tid)
+    root = tmp_path / "configured-workspaces"
+    root.mkdir()
+    alias = root / tid
+    alias.symlink_to(occupied, target_is_directory=True)
+    (kanban_home / "config.yaml").write_text(json.dumps({
+        "kanban": {"worktree_roots": {str(repo.resolve()): str(root)}}
+    }))
+
+    assert kbw._resolve_worktree_workspace(task) == (occupied.resolve(), "wt/sibling")
+    assert alias.is_symlink()
+    assert (occupied / "README.md").read_text() == "base\n"
+    assert not (repo / ".worktrees" / tid).exists()
 
 
 
