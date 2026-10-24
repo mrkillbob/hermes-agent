@@ -15,6 +15,7 @@
  * server (local bare origin) and the LLM provider.
  */
 
+import { type ChildProcess, fork } from 'node:child_process'
 import * as fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -23,9 +24,16 @@ import { expect, test } from '@playwright/test'
 
 import { recordWebSockets, send, waitForInteractive } from '../core/harness'
 
+import { gatedOn, KNOWN } from './gates'
+import {
+  canAcknowledgeHandoffDriverDisposal,
+  type HandoffDriverCommand,
+  type HandoffDriverMessage,
+  markerPrecedesAppExit,
+  processIdentityExited
+} from './handoff-driver-protocol'
 import {
   backendServeProcesses,
-  clickUpdateNowAndExpectHandoff,
   closeQuietly,
   currentAs,
   desktopLog,
@@ -33,12 +41,11 @@ import {
   diagnostics,
   git,
   handoffLog,
+  isAlive,
   launchInstalledApp,
-  openAbout,
   publishUpstream,
   startInstallSession,
-  waitFor,
-  waitForUpdateOffer
+  waitFor
 } from './harness'
 
 const RUN = Date.now().toString(36)
@@ -314,6 +321,303 @@ function shutdownBreadcrumbs(facts: { hermesHome: string }): string {
   return lines.join('\n') || '(no matching shutdown or GPU breadcrumbs in captured logs)'
 }
 
+function sendDriverCommand(driver: ChildProcess, command: HandoffDriverCommand): Promise<void> {
+  if (!driver.connected) {
+    return Promise.reject(new Error(`handoff driver IPC closed before ${command.type}`))
+  }
+
+  return new Promise((resolve, reject) => {
+    driver.send(command, error => (error ? reject(error) : resolve()))
+  })
+}
+
+function driverMessageQueue(driver: ChildProcess): {
+  next: (timeoutMs: number) => Promise<HandoffDriverMessage>
+  stderr: () => string
+} {
+  const queued: HandoffDriverMessage[] = []
+  let wake: (() => void) | undefined
+  let hasExited = false
+  let stderr = ''
+  driver.stderr?.on('data', chunk => {
+    stderr = `${stderr}${chunk.toString('utf8')}`.slice(-8_000)
+  })
+  driver.on('message', message => {
+    queued.push(message as HandoffDriverMessage)
+    wake?.()
+    wake = undefined
+  })
+  driver.once('exit', () => {
+    hasExited = true
+    wake?.()
+    wake = undefined
+  })
+
+  return {
+    async next(timeoutMs) {
+      const deadline = Date.now() + timeoutMs
+
+      while (queued.length === 0) {
+        const remaining = deadline - Date.now()
+
+        if (hasExited) {
+          throw new Error(`handoff driver exited before its next message; stderr: ${stderr || '(empty)'}`)
+        }
+
+        if (remaining <= 0) {
+          throw new Error(`timed out waiting for handoff driver message; stderr: ${stderr || '(empty)'}`)
+        }
+
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            wake = undefined
+            reject(new Error('handoff driver message timeout'))
+          }, remaining)
+
+          wake = () => {
+            clearTimeout(timer)
+            resolve()
+          }
+        })
+      }
+
+      return queued.shift()!
+    },
+    stderr: () => stderr
+  }
+}
+
+async function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined
+
+  try {
+    await Promise.race([
+      promise.then(
+        () => undefined,
+        () => undefined
+      ),
+      new Promise<void>(resolve => {
+        timer = setTimeout(resolve, timeoutMs)
+      })
+    ])
+  } finally {
+    if (timer) {
+      clearTimeout(timer)
+    }
+  }
+}
+
+function markerTimestampAfter(text: string, offset: number): number | undefined {
+  const match = text
+    .slice(offset)
+    .split('\n')
+    .map(line =>
+      /^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3}).*\[updates\] hand-off script took the update marker(?: at the deadline)? \(pid \d+\)/.exec(
+        line
+      )
+    )
+    .find(Boolean)
+
+  if (!match) {
+    return undefined
+  }
+
+  // desktop.log uses local time; Date parses this timestamp in the same
+  // runner-local zone that produced it.
+  const timestamp = Date.parse(match[1].replace(' ', 'T').replace(',', '.'))
+
+  return Number.isFinite(timestamp) ? timestamp : undefined
+}
+
+function originalAppIdentityAbsent(pid: number, startTicks: string | undefined): boolean {
+  if (process.platform === 'linux') {
+    const current = linuxProcStat(pid)
+
+    return !current || processIdentityExited(current.startTicks, current.state, startTicks!)
+  }
+
+  return !isAlive(pid)
+}
+
+async function disposeHandoffDriverAfterUpdate(
+  facts: Parameters<typeof desktopProcesses>[0],
+  env: Record<string, string>,
+  targetSha: string
+): Promise<number> {
+  const driver = fork(path.join(import.meta.dirname, 'handoff-driver.ts'), [], {
+    cwd: path.resolve(import.meta.dirname, '../..'),
+    execArgv: ['--import', 'tsx/esm'],
+    env: process.env,
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc']
+  })
+
+  const messages = driverMessageQueue(driver)
+  let driverExited = false
+
+  const exited = new Promise<void>(resolve =>
+    driver.once('exit', () => {
+      driverExited = true
+      resolve()
+    })
+  )
+
+  const exitedWithin = async (timeoutMs: number): Promise<boolean> => {
+    let timer: NodeJS.Timeout | undefined
+
+    const timedOut = new Promise<boolean>(resolve => {
+      timer = setTimeout(() => resolve(false), timeoutMs)
+    })
+
+    try {
+      return await Promise.race([exited.then(() => true), timedOut])
+    } finally {
+      if (timer) {
+        clearTimeout(timer)
+      }
+    }
+  }
+
+  const stopDriverOnly = async () => {
+    if (driverExited) {
+      return
+    }
+
+    await settleWithin(sendDriverCommand(driver, { type: 'abort' }), 500)
+    await exitedWithin(2_500)
+
+    if (!driverExited) {
+      // This PID belongs to the isolated Playwright driver, never the app or updater.
+      driver.kill('SIGKILL')
+      await exitedWithin(2_000)
+    }
+  }
+
+  try {
+    const offset = desktopLog(facts).length
+    await sendDriverCommand(driver, { type: 'start', facts, env, targetSha })
+    const launched = await messages.next(30_000)
+
+    if (launched.type === 'driver-error') {
+      throw new Error(`handoff driver failed during ${launched.stage}: ${launched.error}; ${messages.stderr()}`)
+    }
+
+    if (launched.type !== 'launched') {
+      throw new Error(`expected handoff driver launch identity, received ${launched.type}`)
+    }
+
+    const pid = launched.pid
+    const original = linuxProcStat(pid)
+    const startTicks = launched.startTicks
+
+    if (!pid || (process.platform === 'linux' && (!startTicks || !original || original.startTicks !== startTicks))) {
+      throw new Error(`could not establish original app process identity for PID ${pid}`)
+    }
+
+    await sendDriverCommand(driver, { type: 'identity-ack' })
+    const ready = await messages.next(180_000)
+
+    if (ready.type !== 'ready' || ready.pid !== pid) {
+      throw new Error(`expected handoff driver ready for original PID ${pid}, received ${ready.type}`)
+    }
+
+    if (process.platform === 'linux' && linuxProcStat(pid)?.startTicks !== startTicks) {
+      throw new Error(`original app identity changed before readiness for PID ${pid}`)
+    }
+
+    await sendDriverCommand(driver, { type: 'click' })
+    let appExit: Extract<HandoffDriverMessage, { type: 'app-exit' }> | undefined
+    const clickDeadline = Date.now() + 120_000
+    let handoffFailure: string | undefined
+
+    while (!appExit && !handoffFailure && Date.now() < clickDeadline) {
+      let message: HandoffDriverMessage | undefined
+
+      try {
+        message = await messages.next(Math.min(1_000, clickDeadline - Date.now()))
+      } catch (error) {
+        if (!String(error).includes('handoff driver message timeout')) {
+          throw error
+        }
+      }
+
+      if (message?.type === 'driver-error') {
+        throw new Error(`handoff driver failed during ${message.stage}: ${message.error}; ${messages.stderr()}`)
+      }
+
+      if (message?.type === 'click-result') {
+        if (!message.ok) {
+          throw new Error(`Update now click failed: ${message.error}`)
+        }
+      }
+
+      if (message?.type === 'app-exit') {
+        appExit = message
+      }
+
+      const newLog = desktopLog(facts).slice(offset)
+
+      if (!appExit && /\[updates\] .*(fail|cancel|refus|could not|already running)/i.test(newLog)) {
+        handoffFailure = newLog
+      }
+    }
+
+    if (!appExit) {
+      if (handoffFailure) {
+        await gatedOn(KNOWN.preflightPython, () => {
+          expect(
+            false,
+            `"Update now" hands off to the updater and the app quits for it; the app logged:\n${handoffFailure}`
+          ).toBe(true)
+        })
+      }
+
+      throw new Error(`the app did not quit for updater hand-off within 120 seconds\n${diagnostics(facts)}`)
+    }
+
+    // The marker's own timestamp must predate the ChildProcess exit report,
+    // and procfs must independently show that this exact PID/start-time is gone.
+    await waitFor(
+      'the original app process identity to disappear after updater hand-off',
+      () => originalAppIdentityAbsent(pid, startTicks) || undefined,
+      { timeout: 10_000, interval: 50 }
+    )
+    const markerAt = markerTimestampAfter(desktopLog(facts), offset)
+
+    const evidence = {
+      markerAdoptedBeforeAppExit: markerPrecedesAppExit(markerAt, appExit.observedAt),
+      originalAppExitReported: appExit.pid === pid,
+      originalAppPidMatches: appExit.pid === pid,
+      originalAppIdentityAbsent: originalAppIdentityAbsent(pid, startTicks)
+    }
+
+    if (!canAcknowledgeHandoffDriverDisposal(evidence)) {
+      throw new Error(
+        `handoff disposal evidence incomplete: ${JSON.stringify({ ...evidence, markerAt, appExit, pid, startTicks })}`
+      )
+    }
+
+    await sendDriverCommand(driver, { type: 'dispose' })
+    const disposed = await messages.next(5_000)
+
+    if (disposed.type !== 'disposed') {
+      throw new Error(`expected driver disposal acknowledgment, received ${disposed.type}`)
+    }
+
+    if (!(await exitedWithin(5_000))) {
+      throw new Error('driver did not exit after disposal')
+    }
+
+    if (!originalAppIdentityAbsent(pid, startTicks)) {
+      throw new Error('original app identity reappeared after driver disposal')
+    }
+
+    return pid
+  } catch (error) {
+    await stopDriverOnly()
+    throw error
+  }
+}
+
 test('clicking Update now moves the backend to the new commit, relaunches the app, and chat works after', async () => {
   test.setTimeout(20 * 60_000)
   const session = await startInstallSession()
@@ -326,19 +630,7 @@ test('clicking Update now moves the backend to the new commit, relaunches the ap
     let firstMainPid = 0
 
     await test.step('the running app offers the new upstream commit and hands off on click', async () => {
-      const launched = await launchInstalledApp(facts, env)
-
-      try {
-        firstMainPid = launched.app.process().pid ?? 0
-        await waitForInteractive(launched.app, launched.page).catch(error => {
-          throw new Error(`${(error as Error).message}\n${explain(launched.logTail())}`)
-        })
-        await openAbout(launched.page)
-        await waitForUpdateOffer(launched.page, target)
-        await clickUpdateNowAndExpectHandoff(launched, facts)
-      } finally {
-        await closeQuietly(launched.app)
-      }
+      firstMainPid = await disposeHandoffDriverAfterUpdate(facts, env, target)
     })
 
     await test.step('the update lands and the app relaunches itself', async () => {

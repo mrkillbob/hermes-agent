@@ -219,7 +219,10 @@ export function configureProvider(facts: InstallFacts, providerUrl: string): voi
   // Do not let the boot readiness gate launch an unrelated long-lived gateway.
   fs.writeFileSync(
     config,
-    providerConfigYaml(providerUrl, `${update && !update.endsWith('\n') ? `${update}\n` : update}kanban:\n  dispatch_in_gateway: false\n`)
+    providerConfigYaml(
+      providerUrl,
+      `${update && !update.endsWith('\n') ? `${update}\n` : update}kanban:\n  dispatch_in_gateway: false\n`
+    )
   )
   fs.writeFileSync(path.join(facts.hermesHome, '.env'), 'MOCK_API_KEY=update-e2e-key\n')
 }
@@ -229,6 +232,8 @@ export interface LaunchedApp {
   page: Page
   logs: string[]
   logTail: () => string
+  pid: number | undefined
+  startTicks: string | undefined
 }
 
 export async function launchInstalledApp(facts: InstallFacts, env: Record<string, string>): Promise<LaunchedApp> {
@@ -240,6 +245,24 @@ export async function launchInstalledApp(facts: InstallFacts, env: Record<string
     env,
     cwd: facts.home
   })
+
+  const pid = app.process().pid
+  let startTicks: string | undefined
+
+  if (process.platform === 'linux' && pid !== undefined) {
+    try {
+      const raw = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+
+      const fields = raw
+        .slice(raw.lastIndexOf(')') + 2)
+        .trim()
+        .split(/\s+/)
+
+      startTicks = fields.length >= 20 ? fields[19] : undefined
+    } catch {
+      startTicks = undefined
+    }
+  }
 
   const collect = (chunk: Buffer) => {
     logs.push(...chunk.toString('utf8').split('\n').filter(Boolean))
@@ -256,7 +279,7 @@ export async function launchInstalledApp(facts: InstallFacts, env: Record<string
     throw new Error(`installed app never opened a window: ${(error as Error).message.split('\n')[0]}\n${logTail()}`)
   })
 
-  return { app, page, logs, logTail }
+  return { app, page, logs, logTail, pid, startTicks }
 }
 
 // ─── Observation ───────────────────────────────────────────────────────
@@ -513,36 +536,51 @@ export function updateLogLines(facts: InstallFacts, offset = 0): string {
     .join('\n')
 }
 
-async function attachUpdateRendererState(launched: LaunchedApp, phase: string, rendererErrorCount: number): Promise<void> {
+async function attachUpdateRendererState(
+  launched: LaunchedApp,
+  phase: string,
+  rendererErrorCount: number
+): Promise<void> {
   // Structural metadata only: never attach renderer text, screenshots, URLs or error messages.
   let deadline: ReturnType<typeof setTimeout> | undefined
 
-  const snapshot = await Promise.race([launched.page.evaluate(() => {
-    const desktop = (window as unknown as { hermesDesktop?: { updates?: unknown } }).hermesDesktop
+  const snapshot = await Promise.race([
+    launched.page
+      .evaluate(() => {
+        const desktop = (window as unknown as { hermesDesktop?: { updates?: unknown } }).hermesDesktop
 
-    const buttons = [...document.querySelectorAll('button')].filter(button =>
-      /^update now$/i.test(button.textContent?.trim() ?? '')
-    )
+        const buttons = [...document.querySelectorAll('button')].filter(button =>
+          /^update now$/i.test(button.textContent?.trim() ?? '')
+        )
 
-    return {
-      desktopBridgeAvailable: Boolean(desktop),
-      updateBridgeAvailable: Boolean(desktop?.updates),
-      dialogs: document.querySelectorAll('[role="dialog"]').length,
-      updateButtons: buttons.length,
-      updateButtonsDisabled: buttons.filter(button => button.disabled).length
-    }
-  }).catch(() => null), new Promise<null>(resolve => {
-    deadline = setTimeout(() => resolve(null), 2_000)
-  })]).finally(() => clearTimeout(deadline))
+        return {
+          desktopBridgeAvailable: Boolean(desktop),
+          updateBridgeAvailable: Boolean(desktop?.updates),
+          dialogs: document.querySelectorAll('[role="dialog"]').length,
+          updateButtons: buttons.length,
+          updateButtonsDisabled: buttons.filter(button => button.disabled).length
+        }
+      })
+      .catch(() => null),
+    new Promise<null>(resolve => {
+      deadline = setTimeout(() => resolve(null), 2_000)
+    })
+  ]).finally(() => clearTimeout(deadline))
 
   await test.info().attach(`update-renderer-${phase}`, {
     contentType: 'application/json',
-    body: Buffer.from(JSON.stringify({
-      pageClosed: launched.page.isClosed(),
-      rendererErrorCount,
-      snapshotAvailable: snapshot !== null,
-      ...(snapshot !== null ? snapshot : {})
-    }, null, 2))
+    body: Buffer.from(
+      JSON.stringify(
+        {
+          pageClosed: launched.page.isClosed(),
+          rendererErrorCount,
+          snapshotAvailable: snapshot !== null,
+          ...(snapshot !== null ? snapshot : {})
+        },
+        null,
+        2
+      )
+    )
   })
 }
 
@@ -559,7 +597,9 @@ export async function clickUpdateNowAndExpectHandoff(launched: LaunchedApp, fact
   })
   let rendererErrorCount = 0
 
-  const onRendererError = () => { rendererErrorCount += 1 }
+  const onRendererError = () => {
+    rendererErrorCount += 1
+  }
 
   launched.page.on('pageerror', onRendererError)
 
