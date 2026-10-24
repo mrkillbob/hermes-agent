@@ -55,6 +55,7 @@ function linuxSigtermState(pid: number): string {
     const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8')
     const field = (name: string) => new RegExp(`^${name}:\\s*([0-9a-f]+)$`, 'mi').exec(status)?.[1]
     const state = /^State:\s*(.+)$/m.exec(status)?.[1]?.trim() ?? 'unknown'
+    const waitChannel = fs.readFileSync(`/proc/${pid}/wchan`, 'utf8').trim() || 'unknown'
     const bit = 1n << BigInt(os.constants.signals.SIGTERM - 1)
 
     const hasSignal = (name: string) => {
@@ -63,7 +64,7 @@ function linuxSigtermState(pid: number): string {
       return value === undefined ? 'unknown' : String((BigInt(`0x${value}`) & bit) !== 0n)
     }
 
-    return `pid=${pid} state=${state} SIGTERM(blocked=${hasSignal('SigBlk')},ignored=${hasSignal('SigIgn')},caught=${hasSignal('SigCgt')},pending=${hasSignal('ShdPnd')})`
+    return `pid=${pid} state=${state} wchan=${waitChannel} SIGTERM(blocked=${hasSignal('SigBlk')},ignored=${hasSignal('SigIgn')},caught=${hasSignal('SigCgt')},pending=${hasSignal('ShdPnd')})`
   } catch (error) {
     return `pid=${pid} signal-state=unreadable (${(error as NodeJS.ErrnoException).code ?? 'error'})`
   }
