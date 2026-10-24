@@ -1,6 +1,7 @@
 """Census-to-signal exit races are not process ownership errors."""
 
 import errno
+import importlib
 import signal
 
 import pytest
@@ -40,9 +41,10 @@ def test_successful_signal_is_confirmed(monkeypatch):
 
 
 @pytest.mark.platforms("posix")
+@pytest.mark.parametrize("module", ["test_hostile_post", "test_hostile_pause"])
 @pytest.mark.parametrize("exit_signal", ["stop", "kill"])
-def test_kill_census_reports_only_confirmed_kills(monkeypatch, exit_signal):
-    from tests.e2e.core.upgrade.git import test_hostile_post as post
+def test_kill_census_reports_only_confirmed_kills(monkeypatch, exit_signal, module):
+    post = importlib.import_module(f"tests.e2e.core.upgrade.git.{module}")
 
     class Host:
         def __init__(self):
@@ -70,8 +72,9 @@ def test_kill_census_reports_only_confirmed_kills(monkeypatch, exit_signal):
 
 
 @pytest.mark.platforms("posix")
-def test_census_does_not_hide_agent_ownership_error(monkeypatch):
-    from tests.e2e.core.upgrade.git import test_hostile_post as post
+@pytest.mark.parametrize("module", ["test_hostile_post", "test_hostile_pause"])
+def test_census_does_not_hide_agent_ownership_error(monkeypatch, module):
+    post = importlib.import_module(f"tests.e2e.core.upgrade.git.{module}")
 
     class Host:
         def procs(self):
