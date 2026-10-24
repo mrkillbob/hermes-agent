@@ -361,6 +361,9 @@ class SubagentLifecycleService:
             raise SubagentLifecycleError("No active Hermes parent session is available.")
         request = _coerce_request(request)
         self._validate_request(request, parent)
+        context = self._workforce_context(request)
+        if context is not None and len(context) > _MAX_CONTEXT_CHARS:
+            raise SubagentLifecycleError("Composed context exceeds 32000 characters.")
         parent_session_id = _session_id_of(parent)
         if request.parent_session_id and request.parent_session_id != parent_session_id:
             raise SubagentLifecycleError("parent_session_id does not match the active session.")
@@ -381,7 +384,7 @@ class SubagentLifecycleService:
         except ValueError as exc:
             raise SubagentLifecycleError(str(exc)) from exc
         child = _build_child_preserving_parent_tools(
-            task_index=0, goal=request.goal, context=request.context,
+            task_index=0, goal=request.goal, context=context,
             toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
             model=request.model or creds["model"], max_iterations=DEFAULT_MAX_ITERATIONS,
             task_count=1, parent_agent=parent, role=request.role, **_credential_overrides(creds, routing_cfg),
