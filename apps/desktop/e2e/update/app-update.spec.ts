@@ -439,6 +439,92 @@ function originalAppIdentityAbsent(pid: number, startTicks: string | undefined):
   return !isAlive(pid)
 }
 
+async function driverExitedWithin(exited: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined
+
+  const timedOut = new Promise<boolean>(resolve => {
+    timer = setTimeout(() => resolve(false), timeoutMs)
+  })
+
+  try {
+    return await Promise.race([exited.then(() => true), timedOut])
+  } finally {
+    if (timer) {
+      clearTimeout(timer)
+    }
+  }
+}
+
+async function stopDriverOnly(driver: ChildProcess, exited: Promise<void>, isExited: () => boolean): Promise<void> {
+  if (isExited()) {
+    return
+  }
+
+  await settleWithin(sendDriverCommand(driver, { type: 'abort' }), 500)
+  await driverExitedWithin(exited, 2_500)
+
+  if (!isExited()) {
+    // This PID belongs to the isolated Playwright driver, never the app or updater.
+    driver.kill('SIGKILL')
+    await driverExitedWithin(exited, 2_000)
+  }
+}
+
+async function waitForUpdaterAppExit(
+  messages: ReturnType<typeof driverMessageQueue>,
+  facts: Parameters<typeof desktopProcesses>[0],
+  offset: number
+): Promise<Extract<HandoffDriverMessage, { type: 'app-exit' }>> {
+  const deadline = Date.now() + 120_000
+  let appExit: Extract<HandoffDriverMessage, { type: 'app-exit' }> | undefined
+  let handoffFailure: string | undefined
+
+  while (!appExit && !handoffFailure && Date.now() < deadline) {
+    let message: HandoffDriverMessage | undefined
+
+    try {
+      message = await messages.next(Math.min(1_000, deadline - Date.now()))
+    } catch (error) {
+      if (!String(error).includes('handoff driver message timeout')) {
+        throw error
+      }
+    }
+
+    if (message?.type === 'driver-error') {
+      throw new Error(`handoff driver failed during ${message.stage}: ${message.error}; ${messages.stderr()}`)
+    }
+
+    if (message?.type === 'click-result' && !message.ok) {
+      throw new Error(`Update now click failed: ${message.error}`)
+    }
+
+    if (message?.type === 'app-exit') {
+      appExit = message
+    }
+
+    const newLog = desktopLog(facts).slice(offset)
+
+    if (!appExit && /\[updates\] .*(fail|cancel|refus|could not|already running)/i.test(newLog)) {
+      handoffFailure = newLog
+    }
+  }
+
+  if (appExit) {
+    return appExit
+  }
+
+  if (handoffFailure) {
+    await gatedOn(KNOWN.preflightPython, () => {
+      expect(
+        false,
+        `"Update now" hands off to the updater and the app quits for it; the app logged:\n${handoffFailure}`
+      ).toBe(true)
+    })
+  }
+
+  throw new Error(`the app did not quit for updater hand-off within 120 seconds\n${diagnostics(facts)}`)
+}
+
 async function disposeHandoffDriverAfterUpdate(
   facts: Parameters<typeof desktopProcesses>[0],
   env: Record<string, string>,
@@ -460,37 +546,6 @@ async function disposeHandoffDriverAfterUpdate(
       resolve()
     })
   )
-
-  const exitedWithin = async (timeoutMs: number): Promise<boolean> => {
-    let timer: NodeJS.Timeout | undefined
-
-    const timedOut = new Promise<boolean>(resolve => {
-      timer = setTimeout(() => resolve(false), timeoutMs)
-    })
-
-    try {
-      return await Promise.race([exited.then(() => true), timedOut])
-    } finally {
-      if (timer) {
-        clearTimeout(timer)
-      }
-    }
-  }
-
-  const stopDriverOnly = async () => {
-    if (driverExited) {
-      return
-    }
-
-    await settleWithin(sendDriverCommand(driver, { type: 'abort' }), 500)
-    await exitedWithin(2_500)
-
-    if (!driverExited) {
-      // This PID belongs to the isolated Playwright driver, never the app or updater.
-      driver.kill('SIGKILL')
-      await exitedWithin(2_000)
-    }
-  }
 
   try {
     const offset = desktopLog(facts).length
@@ -525,54 +580,7 @@ async function disposeHandoffDriverAfterUpdate(
     }
 
     await sendDriverCommand(driver, { type: 'click' })
-    let appExit: Extract<HandoffDriverMessage, { type: 'app-exit' }> | undefined
-    const clickDeadline = Date.now() + 120_000
-    let handoffFailure: string | undefined
-
-    while (!appExit && !handoffFailure && Date.now() < clickDeadline) {
-      let message: HandoffDriverMessage | undefined
-
-      try {
-        message = await messages.next(Math.min(1_000, clickDeadline - Date.now()))
-      } catch (error) {
-        if (!String(error).includes('handoff driver message timeout')) {
-          throw error
-        }
-      }
-
-      if (message?.type === 'driver-error') {
-        throw new Error(`handoff driver failed during ${message.stage}: ${message.error}; ${messages.stderr()}`)
-      }
-
-      if (message?.type === 'click-result') {
-        if (!message.ok) {
-          throw new Error(`Update now click failed: ${message.error}`)
-        }
-      }
-
-      if (message?.type === 'app-exit') {
-        appExit = message
-      }
-
-      const newLog = desktopLog(facts).slice(offset)
-
-      if (!appExit && /\[updates\] .*(fail|cancel|refus|could not|already running)/i.test(newLog)) {
-        handoffFailure = newLog
-      }
-    }
-
-    if (!appExit) {
-      if (handoffFailure) {
-        await gatedOn(KNOWN.preflightPython, () => {
-          expect(
-            false,
-            `"Update now" hands off to the updater and the app quits for it; the app logged:\n${handoffFailure}`
-          ).toBe(true)
-        })
-      }
-
-      throw new Error(`the app did not quit for updater hand-off within 120 seconds\n${diagnostics(facts)}`)
-    }
+    const appExit = await waitForUpdaterAppExit(messages, facts, offset)
 
     // The marker's own timestamp must predate the ChildProcess exit report,
     // and procfs must independently show that this exact PID/start-time is gone.
@@ -603,7 +611,7 @@ async function disposeHandoffDriverAfterUpdate(
       throw new Error(`expected driver disposal acknowledgment, received ${disposed.type}`)
     }
 
-    if (!(await exitedWithin(5_000))) {
+    if (!(await driverExitedWithin(exited, 5_000))) {
       throw new Error('driver did not exit after disposal')
     }
 
@@ -613,7 +621,7 @@ async function disposeHandoffDriverAfterUpdate(
 
     return pid
   } catch (error) {
-    await stopDriverOnly()
+    await stopDriverOnly(driver, exited, () => driverExited)
     throw error
   }
 }
