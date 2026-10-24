@@ -20,7 +20,7 @@ import * as path from 'node:path'
 import { _electron, type ElectronApplication, expect, type Page, test } from '@playwright/test'
 
 import { type CoreSandbox, type ProcInfo, providerConfigYaml, sandboxProcesses } from '../core/harness'
-import { readProc } from '../core/process-census'
+import { processesRunningFrom } from '../core/process-census'
 import { type ScriptedProvider, startScriptedProvider } from '../core/provider'
 
 import { gatedOn, KNOWN } from './gates'
@@ -299,40 +299,15 @@ export async function launchInstalledApp(facts: InstallFacts, env: Record<string
 
 // ─── Observation ───────────────────────────────────────────────────────
 
+/**
+ * Processes carrying this install's HERMES_HOME, plus every process of its packaged app:
+ * Electron 44 zeroes the app's /proc environ, so only the executable path names those.
+ */
 export function installProcesses(facts: InstallFacts): ProcInfo[] {
-  const processes = new Map(
-    sandboxProcesses({ hermesHome: facts.hermesHome } as CoreSandbox).map(proc => [proc.pid, proc])
-  )
+  const census = sandboxProcesses({ hermesHome: facts.hermesHome } as CoreSandbox)
+  const known = new Set(census.map(proc => proc.pid))
 
-  // posix.sh relaunches the detached Desktop after an update, and its gateway
-  // can outlive the app. The home-scoped census does not identify every owned
-  // process, so include processes whose image belongs to this unique test
-  // sandbox. This catches detached lock holders and runtime workers at teardown.
-  if (process.platform === 'linux') {
-    const executableRoot = `${fs.realpathSync(facts.sandboxRoot)}/`
-
-    for (const entry of fs.readdirSync('/proc')) {
-      const pid = Number(entry)
-
-      if (!Number.isInteger(pid) || pid === process.pid) {
-        continue
-      }
-
-      const executable = exeOf(pid)
-
-      if (!executable.startsWith(executableRoot)) {
-        continue
-      }
-
-      const info = readProc(pid)
-
-      if (info?.cmdline) {
-        processes.set(pid, { pid, ppid: info.ppid, cmdline: info.cmdline })
-      }
-    }
-  }
-
-  return [...processes.values()]
+  return [...census, ...processesRunningFrom(releaseDir(facts)).filter(proc => !known.has(proc.pid))]
 }
 
 function exeOf(pid: number): string {
@@ -352,7 +327,10 @@ export function desktopProcesses(facts: InstallFacts): ProcInfo[] {
 
 /** Live Desktop main processes of this install (not its zygote/renderer/gpu children). */
 export function desktopMainProcesses(facts: InstallFacts): ProcInfo[] {
-  return desktopProcesses(facts).filter(proc => !/--type=/.test(proc.cmdline))
+  const candidates = desktopProcesses(facts).filter(proc => !/--type=/.test(proc.cmdline))
+  const pids = new Set(candidates.map(proc => proc.pid))
+
+  return candidates.filter(proc => !pids.has(proc.ppid))
 }
 
 /** The `hermes serve` backend(s) of this install (children of the backend excluded). */
