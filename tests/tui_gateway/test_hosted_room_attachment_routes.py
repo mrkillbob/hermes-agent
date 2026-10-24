@@ -108,9 +108,11 @@ def _server_module():
 
 
 def _legacy_runtime(db: Path, rpc: HostedRoomServerRPC) -> HostedRoomRuntime:
+    # Routing tests keep a valid lease; expiry has separate clock-driven coverage.
+    now = time.time()
     return HostedRoomRuntime(
         db_path=db, rooms=[BINDING], rpc=rpc, turn_lock=RecordingTurnLocks(),
-        lease_ttl_seconds=0.4, poll_interval_seconds=0.01)
+        clock=lambda: now, lease_ttl_seconds=0.4, poll_interval_seconds=0.01)
 
 
 class DispatchingPeerClient:
@@ -149,9 +151,10 @@ def _peer_runtime(db: Path, client: DispatchingPeerClient) -> HostedRoomRuntime:
             task_id=task["identity"].task_id,
             execution_generation=int(task["execution_generation"]))
 
+    now = time.time()
     return HostedRoomRuntime(
         db_path=db, rooms=[BINDING], transport_resolver=resolve, turn_lock=RecordingTurnLocks(),
-        lease_ttl_seconds=0.4, poll_interval_seconds=0.01)
+        clock=lambda: now, lease_ttl_seconds=0.4, poll_interval_seconds=0.01)
 
 
 def _assert_refused_as_proven_failure(task: dict, runtime: HostedRoomRuntime) -> None:
@@ -205,3 +208,40 @@ def test_peer_route_still_runs_a_turn_without_a_file(db: Path):
     assert task["status"] == "settled", runtime.status()["last_error"]
     assert task["result"]["text"] == "Read it."
     assert len(client.dispatches) == 1
+
+
+@pytest.mark.parametrize("route", ["legacy", "peer"])
+def test_attachment_refusal_is_independent_of_host_clock_progress(db: Path, monkeypatch, route: str):
+    constructor = HostedRoomRuntime
+    host_time = [time.time()]
+    recover = state.recover_room
+    advances = []
+
+    def recover_after_host_pause(*args, **kwargs):
+        before = host_time[0]
+        host_time[0] += 1.0
+        advances.append(host_time[0] - before)
+        return recover(*args, **kwargs)
+
+    def runtime_with_advancing_default_clock(*args, **kwargs):
+        # A scheduler pause can consume the fixture's entire 0.4s lease.
+        # Only fixtures that explicitly inject their routing clock avoid it.
+        kwargs.setdefault("clock", lambda: host_time[0])
+        return constructor(*args, **kwargs)
+
+    monkeypatch.setattr(f"{__name__}.HostedRoomRuntime", runtime_with_advancing_default_clock)
+    monkeypatch.setattr(state, "recover_room", recover_after_host_pause)
+    identity = _admit(db, attachments=ATTACHMENTS)
+    if route == "legacy":
+        server, dispatches = _server_module()
+        runtime = _legacy_runtime(db, HostedRoomServerRPC(server))
+    else:
+        client = DispatchingPeerClient()
+        dispatches = client.dispatches
+        runtime = _peer_runtime(db, client)
+
+    task = _run_until_settled_or_error(runtime, db, identity)
+
+    _assert_refused_as_proven_failure(task, runtime)
+    assert dispatches == []
+    assert advances and all(delta > 0.4 for delta in advances)
