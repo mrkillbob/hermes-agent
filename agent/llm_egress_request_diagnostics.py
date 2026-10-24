@@ -364,7 +364,9 @@ def scoped_request(agent, request, context, *, exact_secret_values=(), route=Non
             pass
 
 
-def append_receipt_binding(receipt, decision, *, request):
+def append_receipt_binding(
+    receipt, decision, *, request, final_scan_values=(), final_scan_origins=()
+):
     active = _attempt_context.get()
     if active is None or getattr(decision, "allowed", True):
         return
@@ -385,6 +387,16 @@ def append_receipt_binding(receipt, decision, *, request):
                 combined = final + fields["findings"]
                 fields["findings"] = combined[:16]
                 fields["findings_overflow"] = fields["findings_overflow"] or overflow or len(combined) > 16
+                try:
+                    attribution = _final_scan_attribution(
+                        getattr(decision, "reason_codes", ()),
+                        final_scan_values,
+                        final_scan_origins,
+                    )
+                except Exception:  # health: allow BLE001 -- Optional correlation cannot drop the refusal receipt.
+                    attribution = [{"reason": "base64_payload", "carrier": "aggregate"}]
+                if attribution:
+                    fields["final_scan_attribution"] = attribution
                 receipt["refusal_request_v1"] = fields
     except Exception:  # health: allow BLE001 -- Optional diagnostics cannot change egress outcomes.
         return
@@ -424,6 +436,42 @@ def _final_scan_findings(reason_codes):
         for code in dict.fromkeys(reason_map.get(code, "other") for code in reason_codes)
     ]
     return findings[:16], len(findings) > 16
+
+
+def _final_scan_attribution(reason_codes, scan_values, scan_origins):
+    """Correlate scanner hits using content-free origins captured during rendering."""
+    if "base64_payload" not in reason_codes or not scan_values:
+        return []
+    from agent.llm_egress_firewall import _contains_canonical_base64
+
+    findings = set()
+    try:
+        for index, value in enumerate(scan_values):
+            if not isinstance(value, str) or not _contains_canonical_base64(value):
+                continue
+            origin = scan_origins[index] if index < len(scan_origins) else None
+            if (
+                isinstance(origin, tuple) and len(origin) == 2
+                and origin[0] in {"tool_result", "user_message", "message_content"}
+                and type(origin[1]) is int and origin[1] >= 0
+            ):
+                findings.add(("base64_payload", origin[0], origin[1]))
+            else:
+                findings.add(("base64_payload", "aggregate", None))
+    except Exception:  # health: allow BLE001 -- Optional attribution must not affect egress.
+        return [{"reason": "base64_payload", "carrier": "aggregate"}]
+
+    if not findings:
+        return [{"reason": "base64_payload", "carrier": "aggregate"}]
+    ordered = [
+        ({"reason": reason, "carrier": carrier, **({"message_index": index} if index is not None else {})})
+        for reason, carrier, index in sorted(
+            findings, key=lambda item: (item[1], -1 if item[2] is None else item[2])
+        )
+    ]
+    if len(ordered) > 16:
+        return [*ordered[:15], {"reason": "base64_payload", "carrier": "aggregate"}]
+    return ordered
 
 
 def receipt_fields(scope, attempt, *, request, owner=None):
@@ -481,10 +529,15 @@ def private_receipt_scope(agent, registry, owner, request, route, exact_secret_v
         exact_secret_values=exact_secret_values, route=route)
 
 
-def append_private_receipt_diagnostics(receipt, decision, *, request):
+def append_private_receipt_diagnostics(
+    receipt, decision, *, request, final_scan_values=(), final_scan_origins=()
+):
     from agent.source_provenance_diagnostics import append_receipt_diagnostics
     append_receipt_diagnostics(receipt, decision)
-    append_receipt_binding(receipt, decision, request=request)
+    append_receipt_binding(
+        receipt, decision, request=request,
+        final_scan_values=final_scan_values, final_scan_origins=final_scan_origins,
+    )
 
 
 __all__ = ["DiagnosticAttempt", "DiagnosticScope", "LineageTable", "activate",

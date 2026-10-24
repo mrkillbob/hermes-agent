@@ -183,6 +183,76 @@ def test_scoped_request_serializes_only_matching_blocked_attempt():
         diagnostics.reset(token)
 
 
+def test_final_scan_diagnostic_correlates_post_tool_message_without_content():
+    from agent.llm_egress_request_diagnostics import _final_scan_attribution
+
+    encoded = "cHJpdmF0ZSBwYXlsb2Fk"  # synthetic encoded test content
+    attribution = _final_scan_attribution(
+        ("base64_payload",), (encoded,), (("tool_result", 1),)
+    )
+
+    assert attribution == [{
+        "reason": "base64_payload",
+        "carrier": "tool_result",
+        "message_index": 1,
+    }]
+    serialized = json.dumps(attribution)
+    assert encoded not in serialized
+    assert "private payload" not in serialized
+
+
+def test_final_scan_diagnostic_keeps_ambiguous_transformed_content_aggregate():
+    from agent.llm_egress_request_diagnostics import _final_scan_attribution
+
+    encoded = "cHJpdmF0ZSBwYXlsb2Fk"
+    attribution = _final_scan_attribution(
+        ("base64_payload",), (encoded,), (("aggregate", None),)
+    )
+
+    assert attribution == [{"reason": "base64_payload", "carrier": "aggregate"}]
+    assert encoded not in json.dumps(attribution)
+
+
+def test_pre_aggregate_base64_rejection_has_no_final_scan_attribution():
+    from agent.llm_egress_request_diagnostics import _final_scan_attribution
+
+    attribution = _final_scan_attribution(
+        ("base64_payload",), (), ()
+    )
+
+    assert attribution == []
+
+
+def test_final_scan_diagnostic_falls_back_when_origin_capture_is_incomplete():
+    from agent.llm_egress_request_diagnostics import _final_scan_attribution
+
+    attribution = _final_scan_attribution(
+        ("base64_payload",), ("cHJpdmF0ZSBwYXlsb2Fk",), ()
+    )
+
+    assert attribution == [{"reason": "base64_payload", "carrier": "aggregate"}]
+
+
+def test_optional_origin_capture_memory_error_disables_attribution_only():
+    from agent.llm_egress_firewall_payload import capture_scan_origin, final_scan_attribution_inputs
+
+    class AllocationFailure:
+        def append(self, _value):
+            raise MemoryError
+
+    assert capture_scan_origin([], "tool_result", 2) is True
+    assert capture_scan_origin(AllocationFailure(), "tool_result", 2) is False
+    assert final_scan_attribution_inputs(object(), ["scan"], [], True) == ((), ())
+
+    values = ["scan"]
+    origins = [("tool_result", 2)]
+    captured_values, captured_origins = final_scan_attribution_inputs(
+        object(), values, origins, False
+    )
+    assert captured_values is values
+    assert captured_origins is origins
+
+
 def test_failed_nested_binding_masks_outer_attempt_and_exited_attempt_is_revoked():
     scope = _scope(admission_id="f" * 32)
     token = diagnostics.activate(scope)
