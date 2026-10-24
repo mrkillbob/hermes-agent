@@ -72,6 +72,17 @@ timeouts are explicitly rejected until Hermes can
 support them without weakening isolation. Use `allowed_toolsets` to narrow a
 child; Hermes's existing unsafe-tool block remains enforced.
 
+`allowed_toolsets` narrows the names passed into child resolution; it does not
+guarantee that the final child schema contains only those named sets. By
+default, `delegation.inherit_mcp_toolsets` appends every MCP toolset held by the
+parent to a narrowed child request. Setting it to `false` disables only that
+automatic append: a parent MCP toolset named explicitly in `allowed_toolsets`
+is still available, and synchronous `delegate_task` children inherit the
+parent's toolsets. The parent’s `disabled_toolsets` and the child role’s blocked
+tools are applied after expansion. The public lifecycle API also rejects
+unknown toolset names and, when the parent has an explicit enabled set, names
+outside that set before constructing a child.
+
 ## Workforce governance
 
 For specialist workers, `governance` carries the reusable controls inspired by

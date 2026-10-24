@@ -272,7 +272,7 @@ messaging = [
   "python-telegram-bot[webhooks]==22.8",
   "discord.py[voice]==2.7.1",
   "aiohttp==3.14.5",
-  "brotlicffi==1.2.0.2",
+  "brotlicffi==1.2.1.0",
   "slack-bolt==1.30.0",
   "slack-sdk==3.44.1",
   "qrcode==7.4.2",
@@ -547,8 +547,8 @@ dev = [
   "starlette==1.3.1",
   "ty==0.0.82",
   "ruff==0.15.10",
-  "setuptools==83.0.0",
-] # starlette: CVE-2026-48710; setuptools: 83 (torch >=2.13 requires setuptools 83)
+  "setuptools==84.1.0",
+] # starlette: CVE-2026-48710; setuptools: >=84.1.0 fixes GHSA-xmj3-9gf7-h52w
 # Native launcher and provider-catalog E2E dependencies belong in the test
 # environment, not the core runtime. Keep the Anthropic SDK at the same
 # reviewed version as the optional runtime extra above.
@@ -563,7 +563,7 @@ test = [
 # PEP 517 isolated builds. Without wheel in
 # requires, the isolation sandbox only gets setuptools and the build
 # fails with ModuleNotFoundError: wheel.cli (#96488).
-requires = ["setuptools==83.0.0", "wheel>=0.46.1,<0.48"]
+requires = ["setuptools==84.1.0", "wheel>=0.46.1,<0.48"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
@@ -614,6 +614,8 @@ default-groups = []
 # where extras that only ever coexist on 3.14 (kittentts vs neutts) conflict.
 environments = ["python_version >= '3.14'"]
 constraint-dependencies = [
+  # Keep both torch and huggingface-hub above the filelock advisory range.
+  "filelock>=4.2.1,<5",
   # PTB's optional webhooks server must include the request-parser fixes.
   "tornado>=6.5.9,<7",
   # GHSA-54p9-h82j-f925: release item-set operands after union/subtraction.
@@ -649,6 +651,12 @@ override-dependencies = [
 # package mirrors publish no upload times and uv rejects a file it cannot date
 # (#135589). Exact pins follow the same 3-day rule.
 exclude-newer = "3 days"
+
+# Temporary security exception for GHSA-9v8h-qqgm-4m35; exact pin above.
+# Covers only the verified 1.2.1.0 artifacts uploaded through this instant.
+# Remove after 2026-10-25T16:19:33.199953Z, when all artifacts are 3 days old.
+[tool.uv.exclude-newer-package]
+brotlicffi = "2026-10-22T16:19:34Z"
 
 [tool.setuptools]
 # Root single-file modules are derived by setup.py at build time from the

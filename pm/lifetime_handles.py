@@ -7,6 +7,7 @@ import errno
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import stat
 
 
 def _windows():
@@ -110,6 +111,74 @@ def native_reference(fd: int) -> int:
         import msvcrt
         return msvcrt.get_osfhandle(fd)
     return fd
+
+
+def _windows_identities(handle):
+    """Select one native identity protocol, independent of the calling Python."""
+    import ctypes
+    from ctypes import wintypes
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [("attributes", wintypes.DWORD), ("created", wintypes.FILETIME),
+                    ("accessed", wintypes.FILETIME), ("written", wintypes.FILETIME),
+                    ("volume", wintypes.DWORD), ("size_high", wintypes.DWORD),
+                    ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
+                    ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD)]
+
+    class FileIdInformation(ctypes.Structure):
+        _fields_ = [("volume", ctypes.c_ulonglong), ("identifier", ctypes.c_ubyte * 16)]
+
+    api = _windows()
+    api.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(FileInformation)]
+    api.GetFileInformationByHandle.restype = wintypes.BOOL
+    previous = FileInformation()
+    if not api.GetFileInformationByHandle(handle, ctypes.byref(previous)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    legacy = [previous.volume, (previous.index_high << 32) | previous.index_low]
+    api.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                               wintypes.LPVOID, wintypes.DWORD]
+    api.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    current = FileIdInformation()
+    if not api.GetFileInformationByHandleEx(handle, 18, ctypes.byref(current), ctypes.sizeof(current)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return ([current.volume, int.from_bytes(current.identifier, "little")], legacy), previous.attributes
+
+
+def file_identity(fd, *, legacy=False):
+    return file_identities(fd)[int(legacy)]
+
+
+def file_identities(fd):
+    if os.name == "nt":
+        return _windows_identities(native_reference(fd))[0]
+    info = os.fstat(fd)
+    return ([info.st_dev, info.st_ino],) * 2
+
+
+def directory_identity(path, *, legacy=False):
+    return directory_identities(path)[int(legacy)]
+
+
+def directory_identities(path):
+    if os.name != "nt":
+        info = Path(path).lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("lifetime path is not a concrete directory")
+        return ([info.st_dev, info.st_ino],) * 2
+    import ctypes
+
+    api = _windows()
+    # Inspect the named object itself and allow ordinary concurrent readers/writers.
+    handle = api.CreateFileW(str(path), 0x80, 7, None, 3, 0x02200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        identities, attributes = _windows_identities(handle)
+        if not attributes & 0x10 or attributes & 0x400:
+            raise ValueError("lifetime path is not a concrete directory")
+        return identities
+    finally:
+        api.CloseHandle(handle)
 
 
 def _descriptor_flags(required):
