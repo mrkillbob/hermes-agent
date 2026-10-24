@@ -41,11 +41,17 @@ def finish(monkeypatch, context, result):
     assert session_kanban._run_worker_turns(object(), frame, []) == result
 
 
-def test_owner_policy_refusal_blocks_original_task_on_first_attempt(attempt, monkeypatch):
+@pytest.mark.parametrize('reason_code', [
+    'base64_payload',
+    'unverified_remote_task_context',
+    'unverified_remote_task_history',
+    'unsupported_remote_task_transport',
+])
+def test_owner_policy_refusal_blocks_original_task_on_first_attempt(attempt, monkeypatch, reason_code):
     conn, task, context = attempt
-    reply = 'Hermes blocked this request under its local privacy policy. Reason codes: base64_payload'
+    reply = 'Hermes blocked this request under its local privacy policy. Reason codes: ' + reason_code
     finish(monkeypatch, context, {'failed': True, 'failure_reason': 'egress_policy_blocked',
-           'failure_retryable': False, 'egress_reason_codes': ['base64_payload'], 'final_response': reply})
+           'failure_retryable': False, 'egress_reason_codes': [reason_code], 'final_response': reply})
     # Owner workers have neither the CLI's initialization banner nor its raw exception text.
     kb.worker_log_path(task.id).parent.mkdir(parents=True, exist_ok=True)
     kb.worker_log_path(task.id).write_text(reply)
@@ -53,7 +59,7 @@ def test_owner_policy_refusal_blocks_original_task_on_first_attempt(attempt, mon
     current = kb.get_task(conn, task.id)
     assert current.status == 'blocked'
     assert (current.assignee, current.body, current.model_override) == ('worker', 'Original scope', 'approved-model')
-    assert current.last_failure_error == 'provider egress blocked: LLM egress blocked: base64_payload'
+    assert current.last_failure_error == 'provider egress blocked: LLM egress blocked: ' + reason_code
     assert not any(event.kind == 'routed_to_repair_profile' for event in kb.list_events(conn, task.id))
 
 
@@ -65,6 +71,29 @@ def test_current_owner_crash_does_not_reuse_old_unmarked_log_denial(attempt, mon
     dispatch.detect_crashed_workers(conn)
     assert kb.get_task(conn, task.id).status == 'ready'
     assert 'base64_payload' not in kb.get_task(conn, task.id).last_failure_error
+
+
+@pytest.mark.parametrize('reason_code', [
+    'unverified_remote_task_context',
+    'unverified_remote_task_history',
+    'unsupported_remote_task_transport',
+])
+def test_legacy_remote_guard_denial_blocks_without_owner_result(attempt, reason_code):
+    conn, task, _ = attempt
+    log_path = kb.worker_log_path(task.id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text('Initializing agent...\nLLM egress blocked: ' + reason_code + '\n')
+
+    dispatch.detect_crashed_workers(conn)
+
+    current = kb.get_task(conn, task.id)
+    assert current.status == 'blocked'
+    assert current.consecutive_failures == 1
+    assert (current.assignee, current.body, current.model_override) == (
+        'worker', 'Original scope', 'approved-model',
+    )
+    assert current.last_failure_error == 'provider egress blocked: LLM egress blocked: ' + reason_code
+    assert not any(event.kind == 'routed_to_repair_profile' for event in kb.list_events(conn, task.id))
 
 
 @pytest.mark.parametrize('reason', ['timeout', 'rate_limit'])
