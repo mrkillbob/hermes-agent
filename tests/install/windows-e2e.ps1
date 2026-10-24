@@ -1334,6 +1334,13 @@ function Seed-PreservationFixtures {
     $external = Join-Path $WorkRoot "external-mnemosyne-runtime"
     & $DriverPython (Join-Path $AssetsDir "verify-plugin-preservation.py") seed --home $HermesHome --external $external
     if ($LASTEXITCODE -ne 0) { throw "could not seed fresh preservation fixtures (exit $LASTEXITCODE)" }
+    # Profiles are configuration/credential islands. The Desktop keeps this
+    # newly owned fixture profile active, so configure its mock before either
+    # preservation snapshot; the root home's mock does not configure it.
+    $profileHome = Join-Path $HermesHome 'profiles\e2e-preserve'
+    $configWriter = [IO.Path]::GetFullPath((Join-Path $AssetsDir '..\..\..\tests-js\scripts\mock-provider-config.ts'))
+    & $DriverNode $configWriter $profileHome $env:HERMES_E2E_MOCK_URL
+    if ($LASTEXITCODE -ne 0) { throw 'preservation profile mock configuration failed' }
 }
 
 function Invoke-PreserveSnapshot {
