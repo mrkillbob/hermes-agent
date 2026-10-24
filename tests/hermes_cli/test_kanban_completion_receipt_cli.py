@@ -197,6 +197,10 @@ def test_manual_claim_persists_actual_branch_and_base_for_clean_completion(
             kbw.set_workspace_path(conn, tid, workspace)
         branch = "codex/actual-manual-branch"
         _git(workspace, "branch", "-m", branch)
+        # Intentional reassignment must agree with the checkout before reuse;
+        # claim must not silently adopt an unrelated branch at the same path.
+        with kbc.connect_closing() as conn:
+            kbw.set_branch_name(conn, tid, branch)
     assert _cmd_claim(argparse.Namespace(task_id=tid, ttl=900)) == 0
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, tid)
@@ -211,6 +215,43 @@ def test_manual_claim_persists_actual_branch_and_base_for_clean_completion(
     )) == 0
     with kbc.connect_closing() as conn:
         assert kb.get_task(conn, tid).status == "done"
+
+
+@pytest.mark.parametrize("caller", ["manual", "dispatcher"])
+def test_claim_preserves_an_undeclared_branch_change(manual_worktree, caller):
+    _repo, tid, _base = manual_worktree
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+        workspace = kbw.resolve_workspace(task)
+        kbw.set_workspace_path(conn, tid, workspace)
+    _git(workspace, "branch", "-m", "codex/foreign-assignment")
+    marker = workspace / "unfinished.txt"
+    marker.write_text("preserve foreign work\n", encoding="utf-8")
+
+    if caller == "manual":
+        assert _cmd_claim(argparse.Namespace(task_id=tid, ttl=900)) == 1
+    else:
+        with kbc.connect_closing() as conn:
+            result = kbd.dispatch_once(
+                conn, default_assignee="default",
+                spawn_fn=lambda *_args: pytest.fail("must not spawn on a foreign branch"),
+            )
+            assert not result.spawned
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.branch_name == "codex/manual-receipt"
+        assert task.workspace_path == str(workspace)
+        assert task.status == "ready" and task.current_run_id is None
+        assert task.claim_lock is None and task.claim_expires is None
+        assert task.worker_pid is None
+        assert "occupied" in task.last_failure_error
+        run = conn.execute(
+            "SELECT outcome, ended_at FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        assert run["outcome"] == "spawn_failed" and run["ended_at"] is not None
+    assert _git(workspace, "branch", "--show-current") == "codex/foreign-assignment"
+    assert marker.read_text(encoding="utf-8") == "preserve foreign work\n"
 
 
 @pytest.mark.parametrize("evidence", ["missing", "conflicting", "fabricated", "commit"])
