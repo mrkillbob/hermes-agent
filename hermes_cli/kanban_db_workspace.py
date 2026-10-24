@@ -899,9 +899,15 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
         # verbatim, so siblings all point here). Reusing it would run this task
         # on the other task's branch — silent cross-task provenance corruption,
         # unsafe under concurrency — so fall back to our own worktree.
-        fallback_root = _repo_root_for_worktree_target(requested.parent)
+        common = _git_common_dir(requested)
+        fallback_root = (
+            common.parent if common is not None and common.name == ".git"
+            else _repo_root_for_worktree_target(requested.parent)
+        )
         if fallback_root is not None:
-            fallback = fallback_root / ".worktrees" / task.id
+            from hermes_cli.kanban_worktree_policy import project_worktree_path
+
+            fallback = project_worktree_path(fallback_root, task.id)
             if _path_key(fallback.resolve(strict=False)) != _path_key(requested_resolved):
                 _ensure_git_worktree(fallback_root, fallback, branch_name)
                 return fallback.resolve(strict=False), branch_name
@@ -924,6 +930,24 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
         requested = project_worktree_path(repo_root, task.id)
     _ensure_git_worktree(repo_root, requested, branch_name)
     return requested, branch_name
+
+
+def resolve_dispatch_workspace(task: Task, *, board: Optional[str] = None) -> tuple[Path, Optional[str]]:
+    """Resolve a worker workspace together with its actual assignment branch."""
+    if task.workspace_kind == "worktree":
+        return _resolve_worktree_workspace(task, board=board)
+    return resolve_workspace(task, board=board), None
+
+
+def persist_dispatch_workspace(
+    conn: sqlite3.Connection, task: Task, workspace: Path, resolved_branch_name: Optional[str],
+) -> None:
+    """Persist the resolved assignment before a dispatcher releases its worker."""
+    set_workspace_path(conn, task.id, str(workspace))
+    if task.workspace_kind == "worktree":
+        branch = resolved_branch_name or (task.branch_name or "").strip() or f"wt/{task.id}"
+        set_branch_name(conn, task.id, branch)
+        set_worktree_base(conn, task.id, workspace, branch)
 
 
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
