@@ -18,8 +18,9 @@ import { usePromptActions } from '../use-prompt-actions'
 import { reconcileDurableHistory } from '../use-session-actions/utils'
 import { useSessionStateCache } from '../use-session-state-cache'
 
-import { useMessageStream } from './index'
 import { bindReceiptUserRows } from './receipt-user-rows'
+
+import { useMessageStream } from './index'
 
 const SID = 'completion-runtime'
 const STORED = 'completion-stored'
@@ -253,6 +254,7 @@ it.each(['Revise the answer.', 'Give the answer.'])(
       { id: 'user-original', role: 'user', parts: [{ type: 'text', text: 'Give the answer.' }] },
       { id: 'user-redirect', role: 'user', parts: [{ type: 'text', text: redirectText }] }
     ]
+
     const partial = {
       row_ids: [73, 74],
       user_row_id: 73,
@@ -261,47 +263,76 @@ it.each(['Revise the answer.', 'Give the answer.'])(
       submission_id: 'original'
     }
     expect(bindReceiptUserRows(messages, partial)).toBe(messages)
+
     const missingBubble = { ...partial, row_ids: [71, 73, 74], user_row_id: 71, user_row_ids: [71, 73] }
     expect(bindReceiptUserRows(messages.slice(0, 1), missingBubble)[0].rowId).toBeUndefined()
   }
 )
 
-it('reconciles the redirect once after compaction receipts only its surviving suffix', async () => {
-  const h = mount()
-  await h.submit()
-  await h.send('message.start')
-  await h.send('message.delta', { text: 'Partial' })
-  await flush()
-  await h.redirect()
-  await h.send('message.delta', { text: ' then revised.' })
-  await h.send('message.complete', {
-    text: 'Revised.',
-    persisted_turn: {
-      row_ids: [73, 74],
-      user_row_id: 73,
-      user_row_ids: [73],
-      final_assistant_row_id: 74,
-      complete: false,
-      submission_id: submissionIdOf(h)
-    }
-  })
-  expect(
-    h
-      .state()
-      .messages.filter(m => m.role === 'user')
-      .map(m => m.rowId)
-  ).toEqual([undefined, undefined])
-  const page = toChatMessages([
-    { id: 71, role: 'user', content: 'Give the answer.' },
-    { id: 72, role: 'assistant', content: 'Partial' },
-    { id: 73, role: 'user', content: 'Revise the answer.' },
-    { id: 74, role: 'assistant', content: 'Revised.' }
-  ])
-  const users = graftRefreshedTailOntoBackfill(page, h.state().messages).filter(m => m.role === 'user')
-  expect(users.map(chatMessageText)).toEqual(['Give the answer.', 'Revise the answer.'])
-  expect(users.map(m => m.rowId)).toEqual([71, 73])
-  h.dispose()
-})
+it.each([true, false])(
+  'reconciles the redirect once after compaction receipts only its surviving suffix (shared prefix=%s)',
+  async sharedPrefix => {
+    const h = mount()
+    const prefix = sharedPrefix
+      ? [
+          { id: 60, role: 'user' as const, content: 'Earlier question one.' },
+          { id: 61, role: 'assistant' as const, content: 'Earlier reply one.' },
+          { id: 62, role: 'user' as const, content: 'Earlier question two.' },
+          { id: 63, role: 'assistant' as const, content: 'Earlier reply two.' }
+        ]
+      : []
+
+    h.update(state => ({ ...state, messages: toChatMessages(prefix) }))
+    await h.submit()
+    const submitted = h.state().messages.find(m => m.role === 'user' && m.id.startsWith('user-'))!
+
+    await h.send('message.start')
+    await h.send('message.delta', { text: 'Partial' })
+    await flush()
+    await h.redirect()
+    await h.send('message.delta', { text: ' then revised.' })
+    await h.send('message.complete', {
+      text: 'Revised.',
+      persisted_turn: {
+        row_ids: [73, 74],
+        user_row_id: 73,
+        user_row_ids: [73],
+        final_assistant_row_id: 74,
+        complete: false,
+        submission_id: submitted.id.replace(/^user-/, '')
+      }
+    })
+    const prefixUsers = prefix.filter(m => m.role === 'user')
+
+    expect(
+      h
+        .state()
+        .messages.filter(m => m.role === 'user')
+        .map(m => m.rowId)
+    ).toEqual([...prefixUsers.map(m => m.id), undefined, undefined])
+
+    const page = toChatMessages([
+      ...prefix,
+      { id: 71, role: 'user', content: 'Give the answer.' },
+      { id: 72, role: 'assistant', content: 'Partial' },
+      { id: 73, role: 'user', content: 'Revise the answer.' },
+      { id: 74, role: 'assistant', content: 'Revised.' }
+    ])
+    const previous = h.state().messages
+    const grafted = graftRefreshedTailOntoBackfill(page, previous)
+    // Warm resume grafts any older pages, then reconciles durable history
+    // with pending local turns. Grafting alone is not the display contract.
+    const users = reconcileDurableHistory(grafted, previous).filter(m => m.role === 'user')
+
+    expect(users.map(chatMessageText)).toEqual([
+      ...prefixUsers.map(m => m.content),
+      'Give the answer.',
+      'Revise the answer.'
+    ])
+    expect(users.map(m => m.rowId)).toEqual([...prefixUsers.map(m => m.id), 71, 73])
+    h.dispose()
+  }
+)
 
 it('binds a viewer that never sent the turn only when it shows exactly the receipt rows', async () => {
   const h = mount()
