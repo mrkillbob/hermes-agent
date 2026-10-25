@@ -25,6 +25,7 @@ from tests.ci.test_update_ci_routing import _REPO, _ci_run, _consumers_reached, 
     "pm/plugins_state.py",
     "pm/install.py",
     "hermes_cli/backup.py",
+    "hermes_cli/config_load.py",  # effective update-feed config reads cache/maintenance policy
     "hermes_cli/backup_profiles.py",
     "hermes_state_file_identity.py",
 ])

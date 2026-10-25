@@ -88,6 +88,9 @@ def test_native_boot_stays_held_through_marker_loss_and_restart(tmp_path, monkey
     peer = root / 'tests/gateway/fixtures/startup_hold_peer.py'
     from pm.lifetime_launch import popen
     effects = []
+    before_child = sorted(str(path.relative_to(home)) for path in home.rglob('*') if path.is_file())
+    assert 'SOUL.md' not in before_child
+    assert not (home / 'backups').exists()
     for remove_marker in (True, False):
         with (tmp_path / 'boot.log').open('w+') as log, popen(
                 [sys.executable, str(peer)], cwd=root, env={**os.environ, 'HERMES_HOME': str(home)},
@@ -110,8 +113,10 @@ def test_native_boot_stays_held_through_marker_loss_and_restart(tmp_path, monkey
             finally:
                 stop(child)
         assert not (home / 'forbidden-effect').exists()
+        assert not (home / 'SOUL.md').exists()
+        assert not (home / 'backups').exists()
         assert {name: stamp(name) for name in preserved} == preserved
         effects.append(sorted(str(path.relative_to(home)) for path in home.rglob('*') if path.is_file()))
     drain_startup.restore(hold_id=hold['hold_id'])
     assert not marker.exists()
-    print(json.dumps({'held_boots': 2, 'marker_loss_survived': True, 'provider_calls': 0, 'files': effects}))
+    print(json.dumps({'held_boots': 2, 'marker_loss_survived': True, 'provider_calls': 0, 'before_child': before_child, 'files': effects}))

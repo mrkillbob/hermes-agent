@@ -118,6 +118,8 @@ def audit(event, args):
 
 
 blocked = {
+    ('hermes_cli.config', '_ensure_default_soul_md'),
+    ('hermes_cli.config_backups', 'backup_config'),
     ('hermes_cli.plugins', 'discover_plugins'),
     ('hermes_cli.plugins', 'get_plugin_auxiliary_tasks'),
     ('hermes_cli.boot_bootstrap', 'install_enabled'),

@@ -905,7 +905,11 @@ The held owner skips provider and plugin discovery, private secret hydration,
 adapters, cron, hosted work, environment probes, collectors and automatic source
 or dependency recovery. Pending recovery debt refuses boot. Dependency selection
 and lifetime protection still apply. Existing malformed state databases refuse
-without automatic repair or quarantine.
+without automatic repair or quarantine. Config reads retain managed overlays,
+environment expansion, last-known-good settings and database durability options;
+they defer home/SOUL initialization and good/corrupt backup creation, migration
+and pruning. Parse diagnostics and refusal to overwrite unreadable config remain.
+Deferred reads do not suppress normal maintenance after the deferral ends.
 
 Allowed effects are native ownership/listener artifacts, logs and runtime status,
 required state schema and ownership epochs, and lifetime/coordination references.

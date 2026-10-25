@@ -17,7 +17,7 @@ from utils import file_signature
 
 logger = logging.getLogger(__name__)
 
-# (config_path, mtime_ns, size) tuples already warned about, so concurrent CLI/gateway
+# (config_path, *file_signature, deferred) tuples already warned about, so CLI/gateway
 # loads of a broken config.yaml don't spam stderr. A changed file (new mtime) warns again.
 _CONFIG_PARSE_WARNED: set = set()
 
@@ -66,6 +66,14 @@ def format_config_parse_failure(config_path: Path, exc: Exception, *, fallback: 
     return f"Your settings file ({config_path}) has a formatting error{at}. {fallback_msg} {repair}"
 
 
+def _backup_parse_failure(config_path: Path, exc: Exception, *, deferred: bool):
+    # A transient read error leaves intact bytes; a held reader must not migrate/prune backups.
+    if isinstance(exc, OSError) or deferred:
+        return None
+    from hermes_cli.config_backups import backup_config
+    return backup_config(config_path, "corrupt")
+
+
 def _warn_config_parse_failure(
     config_path: Path, exc: Exception, *, fallback: str = "defaults") -> None:
     """Surface a config.yaml parse failure to log and stderr (once per file signature).
@@ -75,19 +83,19 @@ def _warn_config_parse_failure(
     ``"last-known-good"`` (in-process retention of the previously loaded config — see the codex#31188 port
     in ``hermes_cli.config._load_config_impl``).
     """
+    from hermes_cli.startup_hold import defer_maintenance
+    deferred = defer_maintenance()
     try:
         st = config_path.stat()
         sig = file_signature(st)
-        key = (str(config_path), *sig)
+        key = (str(config_path), *sig, deferred)
         _CONFIG_PARSE_FAILURES[str(config_path)] = (*sig, str(exc))
     except OSError:
-        key = (str(config_path), 0, 0, 0, 0)
+        key = (str(config_path), 0, 0, 0, 0, deferred)
     if key in _CONFIG_PARSE_WARNED:
         return
     _CONFIG_PARSE_WARNED.add(key)
-    from hermes_cli.config_backups import backup_config
-    # A read error leaves an intact file behind: no "corrupt" copy of a good file.
-    backup_path = None if isinstance(exc, OSError) else backup_config(config_path, "corrupt")
+    backup_path = _backup_parse_failure(config_path, exc, deferred=deferred)
     msg = format_config_parse_failure(config_path, exc, fallback=fallback)
     if backup_path is not None:
         msg += f" A copy of the broken file was saved to {backup_path}."

@@ -365,6 +365,7 @@ _UPDATE_DEPENDENCIES = (
     "hermes_cli/gui_uninstall.py",
     "hermes_cli/linux_desktop_entry.py",
     "hermes_cli/config_effective.py",  # source_releases reads the profile-scoped update feed
+    "hermes_cli/config_load.py",  # effective config cache and deferred read maintenance
     "hermes_cli/github_api.py",  # source_check's release lookup
     "hermes_cli/build_info.py",
     "hermes_cli/image_provenance.py",
