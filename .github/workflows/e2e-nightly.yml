@@ -27,7 +27,16 @@ jobs:
           command: npm ci
       - name: Prepare locked Electron
         run: node scripts/build/electron-runtime.mjs --source .
-      - name: Build unchanged desktop sources
+      - name: Prove partial receipt regression on the original binder
+        run: |
+          mkdir -p "$RUNNER_TEMP/task26-compaction"
+          git restore --source=11229c795c1911f7e4835c46fe8df41565fe8d2a --worktree -- apps/desktop/src/app/session/hooks/use-message-stream/receipt-user-rows.ts
+          set +e
+          (cd apps/desktop && npx vitest run --project ui src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx) 2>&1 | tee "$RUNNER_TEMP/task26-compaction/receipt-red.log"
+          RESULT=${PIPESTATUS[0]}
+          set -e
+          test "$RESULT" = 1
+      - name: Build desktop with the original binder
         working-directory: apps/desktop
         run: npm run build
       - name: Compare original parent and corrected current contract
@@ -48,6 +57,11 @@ jobs:
               git restore --source=bd9e28062515b8eae1a870954a0c12996f6a42c1 --worktree -- agent "$SPEC"
             else
               git restore --source=HEAD --worktree -- agent "$SPEC"
+              if [ "$CASE" = candidate ]; then
+                git restore --source=HEAD --worktree -- apps/desktop/src/app/session/hooks/use-message-stream/receipt-user-rows.ts
+                (cd apps/desktop && npx vitest run --project ui src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx) 2>&1 | tee "$RECEIPTS/receipt-green.log"
+                (cd apps/desktop && npm run build) 2>&1 | tee "$RECEIPTS/candidate-build.log"
+              fi
               if [ "$CASE" = current ]; then
                 git restore --source=11229c795c1911f7e4835c46fe8df41565fe8d2a --worktree -- agent
               fi
