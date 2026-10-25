@@ -1,30 +1,8 @@
 /**
- * #121088 — an acknowledged Desktop prompt is appended a second time, after its
- * own reply, when refreshed history carries synthetic user-role rows written by
- * an in-place compaction inside that prompt's turn.
- *
- * Mechanism (apps/desktop/src/app/session/hooks/use-session-actions/utils.ts ::
- * preserveLocalPendingTurnMessages): an optimistic prompt without a row-id
- * receipt survives a refresh unless (a) its text equals `latestAuthoritativeUser`
- * — the LAST user-role row of the refreshed tail — or (b) the user row at the
- * same role ordinal pairs with it. Real processes produce both misses here:
- *
- *   U3 turn:  tool round (todo_list) pushes the request over threshold_tokens
- *             -> in-place compaction #1 appends the todo-snapshot user row S1
- *             -> the resumed stream is still running when …
- *   U4:       … the user redirects (busy submit = correction, optimistic row, no
- *             row-id receipt) -> tool round -> in-place compaction #2 appends
- *             snapshot S2 after the committed U4 -> final reply A6.
- *
- * The live view never shows S1/S2 (not streamed). On the next refresh the
- * stored history is [.., U3, A3i, S1, A5, U4, A4i, S2, A6]: S1 shifts U4's role
- * ordinal onto S1 (miss b) and S2 is the latest user row (miss a), so the
- * optimistic U4 is re-appended after A6.
- *
- * Compaction threshold is calibrated from a first throwaway session's real
- * request size, so the config (written before the scenario session's agent is
- * built) crosses threshold exactly at the two tool rounds regardless of how big
- * the system prompt / tool schemas are on this commit.
+ * An acknowledged redirect remains a single human prompt across two real
+ * in-place compactions. Todo state survives as tool data; it must never become
+ * a synthetic user prompt or select a scripted provider turn (#121088, PR402).
+ * The threshold is calibrated from a real request before the scenario starts.
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -43,14 +21,8 @@ import {
   waitForInteractive,
   writeProviderHome
 } from './harness'
-import { expectNoSymptom } from './known'
 import { installDuplicateSampler } from './oracle'
 import { gate, startScriptedProvider } from './provider'
-
-const KNOWN: Record<string, string | undefined> = {
-  dupPrompt:
-    '#121088 acknowledged redirect prompt re-appended after its reply when in-place compaction wrote synthetic user rows inside its turn'
-}
 
 const nonce = Math.random()
   .toString(36)
@@ -60,7 +32,37 @@ const nonce = Math.random()
 
 const U = (n: number) => `U${n}-${nonce}`
 const A = (n: number) => `A${n}-${nonce}`
-const SNAPSHOT = '[Your active task list was preserved across context compression]'
+const TODO_PROVENANCE = 'hermes_compaction_todo_state_v1'
+
+interface Todo {
+  id: string
+  content: string
+  status: string
+  parent?: string
+}
+
+function todos(marker: number): Todo[] {
+  return [
+    { id: '1', content: `${U(marker)} ${marker === 5 ? 'draft' : 'ship'} the report`, status: 'in_progress' },
+    { id: '2', content: 'preserve the finished subtask', status: marker === 5 ? 'completed' : 'cancelled', parent: '1' }
+  ]
+}
+
+function todoState(
+  content: string
+): { provenance?: string; todos?: Todo[]; revision?: number; reference?: string } | undefined {
+  try {
+    return JSON.parse(content)
+  } catch {
+    return undefined
+  }
+}
+
+function hasTodoState(content: string, marker: string): boolean {
+  const data = todoState(content)
+
+  return data?.provenance === TODO_PROVENANCE && data.todos?.some(todo => todo.content.includes(marker)) === true
+}
 
 // Token budget (rough estimator ≈ chars/4) above the calibrated base request:
 //   history 2×24k chars ≈ 12k  < X=18k (turn-start preflight must NOT fire)
@@ -171,6 +173,7 @@ test('an acknowledged redirect prompt renders once after in-place compaction ins
   writeProviderHome(sandbox.hermesHome, provider.url, compressionYaml(250_000))
   const { app, page } = await launchCoreApp(coreAppEnv(sandbox))
   const ws = recordWebSockets(page)
+  const hold = gate()
 
   try {
     await waitForInteractive(app, page)
@@ -204,54 +207,47 @@ test('an acknowledged redirect prompt renders once after in-place compaction ins
     const sid = await currentSessionId(page)
     expect(sid, 'scenario session id').not.toBe('')
 
-    const hold = gate()
     provider.script(U(3), [
       {
         text: [`${A(3)}i `, filler('p', ROUND_CHARS)],
         toolCalls: [
           {
             name: 'todo_list',
-            args: { todos: [{ id: '1', content: `${U(5)} draft the report`, status: 'in_progress' }] }
+            args: { todos: todos(5) }
           }
         ]
       },
-      { text: [`${A(3)} `, 'compaction ', 'one ', 'missed'] }
+      { text: [`${A(5)} `, 'slow ', 'after ', 'compaction'], holdAfterFirstChunk: hold }
     ])
-    // After compaction #1 the last user row is snapshot S1 (first marker U5).
-    provider.script(U(5), [{ text: [`${A(5)} `, 'slow ', 'after ', 'compaction'], holdAfterFirstChunk: hold }])
     provider.script(U(4), [
       {
         text: [`${A(4)}i `, filler('q', ROUND_CHARS)],
         toolCalls: [
           {
             name: 'todo_list',
-            args: { todos: [{ id: '1', content: `${U(6)} ship the report`, status: 'in_progress' }] }
+            args: { todos: todos(6) }
           }
         ]
       },
-      { text: [`${A(4)} `, 'compaction ', 'two ', 'missed'] }
+      { text: [`${A(6)} `, 'after ', 'second ', 'compaction'] }
     ])
-    // After compaction #2 the last user row is snapshot S2 (first marker U6).
-    provider.script(U(6), [{ text: [`${A(6)} `, 'after ', 'second ', 'compaction'] }])
 
     await send(page, `${U(3)} plan it`, 'Enter', ws)
-    await provider.streamStarted(U(5))
     await expect(viewport(page)).toContainText(A(5), { timeout: 60_000 })
 
     // Busy submit: the redirect correction, an optimistic row with no row-id receipt.
     await send(page, `${U(4)} change course`, 'Enter', ws)
     await expect
-      .poll(() => provider.completions.some(c => c.marker === U(6) && c.finished), {
+      .poll(() => provider.completions.some(c => c.marker === U(4) && c.sentText.startsWith(A(6)) && c.finished), {
         timeout: 90_000,
-        message: 'post-compaction-#2 reply (keyed on snapshot S2) never finished'
+        message: 'redirect continuation with preserved todo data never finished'
       })
       .toBe(true)
     hold.open()
     await settled(page)
     await expect(viewport(page)).toContainText(A(6), { timeout: 30_000 })
 
-    // ── Preconditions (ordinary): two in-place compactions committed inside the
-    // turn; stored history = committed U4, synthetic S1 before it, S2 after it.
+    // Two in-place compactions commit inside the turns without adding human rows.
     const agentLog = fs.readFileSync(path.join(sandbox.hermesHome, 'logs', 'agent.log'), 'utf8')
 
     const committed = agentLog
@@ -268,45 +264,84 @@ test('an acknowledged redirect prompt renders once after in-place compaction ins
       summaries.map(c => c.finished && !c.aborted),
       'two summary requests answered'
     ).toEqual([true, true])
-    expect(
-      provider.completions.some(c => (c.marker === U(3) || c.marker === U(4)) && c.step === 1),
-      'no un-compacted continuation'
-    ).toBe(false)
+    for (const [turn, reply, marker] of [
+      [3, 5, 5],
+      [4, 6, 6]
+    ]) {
+      const continuation = provider.completions.find(c => c.marker === U(turn) && c.sentText.startsWith(A(reply)))
+      expect(continuation, 'the real human turn owns its post-compaction continuation').toBeTruthy()
+      const messages = continuation!.body.messages as {
+        role: string
+        content?: string
+        tool_call_id?: string
+        tool_calls?: { id: string; function: { name: string; arguments: string } }[]
+      }[]
+      const states = messages.filter(m => m.role === 'tool' && hasTodoState(m.content ?? '', U(marker)))
+      expect(states).toHaveLength(1)
+      expect(todoState(states[0].content ?? '')).toMatchObject({
+        todos: todos(marker),
+        revision: turn - 2,
+        reference: expect.stringContaining('not a new user instruction')
+      })
+      const paired = messages[messages.indexOf(states[0]) - 1]
+      expect(paired.role).toBe('assistant')
+      expect(todoState(states[0].content ?? '')?.todos).toEqual(todos(marker))
+      expect(todoState(states[0].content ?? '')?.reference).toContain('latest human request')
+      const call = paired.tool_calls
+      expect(call).toHaveLength(1)
+      expect(call![0]).toMatchObject({ id: states[0].tool_call_id, function: { name: 'todo_list' } })
+      expect(JSON.parse(call![0].function.arguments)).toEqual({})
+      expect(messages.some(m => m.role === 'user' && (m.content ?? '').includes(U(marker)))).toBe(false)
+    }
 
     const active = sessionRows(sandbox.hermesHome, sid).filter(r => r.active === 1)
     const users = active.filter(r => r.role === 'user')
     const committedU4 = users.filter(r => r.content === `${U(4)} change course`)
     expect(committedU4.length, 'the correction is committed exactly once in active history').toBe(1)
-    const s2 = users.find(r => r.content.startsWith(SNAPSHOT) && r.content.includes(U(6)))
-    expect(s2, 'snapshot S2 (synthetic user row) is active').toBeTruthy()
+    const s2 = active.find(r => r.role === 'tool' && hasTodoState(r.content, U(6)))
+    expect(s2, 'complete todo state S2 is active tool data').toBeTruthy()
+    expect(todoState(s2!.content)).toMatchObject({ todos: todos(6), revision: 2 })
     const a6 = active.find(r => r.role === 'assistant' && r.content.startsWith(A(6)))
     expect(a6, 'final reply A6 is stored').toBeTruthy()
     expect(committedU4[0].id < s2!.id && s2!.id < a6!.id, 'stored order: U4 < S2 < A6').toBe(true)
     const all = sessionRows(sandbox.hermesHome, sid)
 
     expect(
-      all.some(r => r.role === 'user' && r.content.startsWith(SNAPSHOT) && r.content.includes(U(5))),
-      'snapshot S1 from compaction #1 is stored'
+      all.some(r => r.role === 'tool' && hasTodoState(r.content, U(5))),
+      'tool state S1 from compaction #1 remains recoverable'
     ).toBe(true)
 
     // Observation 1: the settled live view. A turn-settle refresh may already
     // have reconciled the stored history (timing-dependent), so it is part of
     // the symptom window rather than an ordinary expect.
     const live = dupShape((await renderedTranscript(page)).bubbles)
+    expect(live.userCopies, 'live view preserves the redirect').toBe(1)
 
     // ── Refresh through preserveLocalPendingTurnMessages: switch away and back.
     await openSession(page, '')
     await expect(viewport(page)).not.toContainText(A(6))
+    // A test-owned edit to the stored reply supplies a fetched-only witness.
+    // It changes no human row, todo carrier, ordering, or optimistic receipt.
+    const refreshWitness = `persisted-refresh-${nonce}`
+    const db = new DatabaseSync(path.join(sandbox.hermesHome, 'state.db'))
+
+    try {
+      const updated = db
+        .prepare("UPDATE messages SET content = content || ? WHERE session_id = ? AND id = ? AND role = 'assistant'")
+        .run(` ${refreshWitness}`, sid, a6!.id)
+      expect(Number(updated.changes)).toBe(1)
+    } finally {
+      db.close()
+    }
+
     await openSession(page, sid)
-    // Refreshed stored history landed (only it carries S2), so the reconcile ran.
-    await expect(viewport(page).getByText(U(6)).first(), 'refreshed history renders snapshot S2').toBeVisible({
-      timeout: 60_000
-    })
+    await expect(viewport(page)).toContainText(refreshWitness)
     await expect(viewport(page)).toContainText(A(6))
 
     // Observation 2: the switch-back view; observation 3: every sampled frame
     // since the redirect (the in-page sampler records transient duplicates).
     const switched = dupShape((await renderedTranscript(page)).bubbles)
+    expect(switched.userCopies, 'switch-back view preserves the redirect').toBe(1)
     const hits = await samplerHits(page, U(4))
     const symptom = live.dup || switched.dup || hits.some(h => h.bubbles.length > 1)
     // ── Reload (no local optimistic state): stored history alone renders U4 once.
@@ -325,14 +360,26 @@ test('an acknowledged redirect prompt renders once after in-place compaction ins
       'after reload, no user bubble after the final reply'
     ).toBe(false)
 
-    // Last: the KNOWN symptom (an expected failure while #121088 is open, a pass once fixed).
-    expectNoSymptom(
-      KNOWN.dupPrompt,
+    expect(
       symptom,
-      'the redirect prompt U4 renders as two user bubbles / a user bubble after its reply A6',
-      JSON.stringify({ live, switched, sampler: hits.slice(0, 2) })
-    )
+      `the redirect must render once before its reply: ${JSON.stringify({ live, switched, sampler: hits.slice(0, 2) })}`
+    ).toBe(false)
   } finally {
+    if (test.info().status !== test.info().expectedStatus) {
+      await test.info().attach('compaction-routing', {
+        contentType: 'application/json',
+        body: JSON.stringify(
+          provider.completions.map(c => ({
+            marker: c.marker,
+            step: c.step,
+            finished: c.finished,
+            aborted: c.aborted,
+            roles: (c.body.messages as { role: string }[]).map(m => m.role)
+          }))
+        )
+      })
+    }
+    hold.open()
     await app.close().catch(() => undefined)
     await provider.close()
     sandbox.cleanup()
