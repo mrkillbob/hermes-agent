@@ -27,11 +27,3 @@ may move a transitive core package within core's declared ranges
 (`tests/pm/test_workspace_build_inputs.py::test_plugin_can_move_compatible_transitive_but_not_exact_requirement`).
 Plugin `python_dependencies` follow the plugin's own policy. Teknium's rulings: "plugins dont have to abide by our 14 day rule … Only hermes'
 dependencies themselves have to"; dates are checked by us, not users; pinned deps need >3 days.
-
-Temporary fork-owner-authorized security exception (2026-10-24): only
-`brotlicffi==1.2.1.0` may use the package cutoff `2026-10-22T16:19:34Z` to
-remediate GHSA-9v8h-qqgm-4m35. Keep the exact pin and PyPI-verified artifact
-hashes, constrained by `tests/test_packaging_metadata.py`. No other package or
-future Brotlicffi version is exempt. The global three-day rule remains unchanged.
-Remove this cutoff and regenerate `uv.lock` after `2026-10-25T16:19:33.199953Z`,
-when every artifact satisfies it. The earlier certifi exception has expired.

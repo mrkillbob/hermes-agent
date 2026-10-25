@@ -669,12 +669,6 @@ override-dependencies = [
 # (#135589). Exact pins follow the same 3-day rule.
 exclude-newer = "3 days"
 
-# Temporary security exception for GHSA-9v8h-qqgm-4m35; exact pin above.
-# Covers only the verified 1.2.1.0 artifacts uploaded through this instant.
-# Remove after 2026-10-25T16:19:33.199953Z, when all artifacts are 3 days old.
-[tool.uv.exclude-newer-package]
-brotlicffi = "2026-10-22T16:19:34Z"
-
 [tool.setuptools]
 # Root single-file modules are derived by setup.py at build time from the
 # source tree (see the ``_root_py_modules`` helper there). A static

@@ -13,9 +13,6 @@ supported-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P3D"
 
-[options.exclude-newer-package]
-brotlicffi = "2026-10-22T16:19:34Z"
-
 [manifest]
 constraints = [
     { name = "filelock", specifier = ">=4.2.1,<5" },
