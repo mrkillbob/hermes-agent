@@ -3516,7 +3516,7 @@ def _commit_compaction(
     messages_before_compression: Optional[list], made_progress: bool, attempt: _Attempt,
     verbatim_tail: Optional[list] = None, carried_messages: Optional[list] = None,
     todo_snapshot: Optional[dict] = None, candidate_preflighted: bool = False,
-    prepared_tail_ids: Optional[set] = None,
+    prepared_tail_ids: Optional[set] = None, prepared_retired_tail_rows: int = 0,
 ) -> _CommitOutcome:
     """Persist the compacted transcript: anti-growth guard, memory extraction, then the
     in-place archive or the parent->child rotation.
@@ -3562,7 +3562,9 @@ def _commit_compaction(
                 # searchable) + insert `compressed` atomically; no pre-flush (tail already in).
                 # Tail rows tagged by compress() are archived as superseded duplicates, not
                 # compacted=1. Count against the FINAL list — salvage may have dropped rows.
-                tail_count = sum(1 for m in compressed if id(m) in _tail_tagged_ids)
+                # Refreshing a protected todo exchange retires original rows. They
+                # still occupy slots in the original suffix being superseded.
+                tail_count = sum(1 for m in compressed if id(m) in _tail_tagged_ids) + prepared_retired_tail_rows
                 _tail_held = messages[max(0, len(messages) - tail_count):]
                 # The rewind takes the newest `tail_count` durable rows as the tail's originals, so a tail row
                 # with none (this turn's user row, which the CLI and gateway persist after preflight; unflushed
@@ -4164,7 +4166,7 @@ def compress_context(
             system_message=system_message, compressed_user_turn_outcome=compressed_user_turn_outcome,
             messages_before_compression=messages_before_compression, made_progress=_compression_made_progress,
             attempt=attempt, verbatim_tail=verbatim_tail, todo_snapshot=phase.todo_snapshot, candidate_preflighted=True,
-            prepared_tail_ids=candidate.tail_ids,
+            prepared_tail_ids=candidate.tail_ids, prepared_retired_tail_rows=candidate.retired_tail_rows,
             # The reinserted copy keeps the original's _row_id/timestamp (production flush stamps
             # both); carry exactly that one row so the commit rewinds the durable original instead
             # of archiving it compacted=1 next to a fresh twin (display would show it twice). The
