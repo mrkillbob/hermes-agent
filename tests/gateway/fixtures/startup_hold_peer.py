@@ -1,4 +1,4 @@
-"""Fresh native-entry witness: no provider, helper, plugin or maintenance effects."""
+"""Fresh native-entry witness: bounded identity/ownership reads, no task effects."""
 import os
 from pathlib import Path
 import runpy
@@ -17,6 +17,41 @@ def refuse(effect):
     os._exit(85)
 
 
+
+def _registration_query_matches(command, executable, *, expected_executable, task_name):
+    """Complete argv and executable identity, never a /Query prefix or basename permission."""
+    import ntpath
+    if not isinstance(command, (list, tuple)) or len(command) != 4 or not isinstance(command[0], str):
+        return False
+    expected = ntpath.normcase(expected_executable)
+    if executable is not None and (not isinstance(executable, str) or ntpath.normcase(executable) != expected):
+        return False
+    return ntpath.normcase(command[0]) == expected and list(command[1:]) == ['/Query', '/TN', task_name]
+
+
+def _windows_schtasks_executable():
+    """Ask the native OS, not PATH/SystemRoot, which system executable is trusted."""
+    if sys.platform != 'win32':
+        return None
+    import ctypes
+    from ctypes import wintypes
+    query = ctypes.WinDLL('kernel32', use_last_error=True).GetSystemDirectoryW
+    query.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    query.restype = wintypes.UINT
+    buffer = ctypes.create_unicode_buffer(32768)
+    size = query(buffer, len(buffer))
+    return os.path.join(buffer.value, 'schtasks.exe') if 0 < size < len(buffer) else None
+
+
+def _native_registration_query_allowed(command, executable):
+    expected = _windows_schtasks_executable()
+    if expected is None:
+        return False
+    from hermes_cli.gateway_windows import get_task_name
+    return _registration_query_matches(command, executable,
+        expected_executable=expected, task_name=get_task_name())
+
+
 def audit(event, args):
     if event == 'subprocess.Popen':
         command = args[1]
@@ -31,6 +66,8 @@ def audit(event, args):
             verb = command[1] if len(command) > 1 else ''
             if verb in {'rev-parse', 'branch', 'log', 'tag', 'describe', 'merge-base', 'rev-list', 'show'} or command[1:4] == ['--no-optional-locks', 'status', '--porcelain']:
                 return  # bounded, read-only executing-code identity; no provider/plugin work
+        if _native_registration_query_allowed(command, args[0]):
+            return  # preserve the existing bounded supervised-owner conflict observation
     if event in {'socket.connect', 'subprocess.Popen', 'os.system', 'os.posix_spawn'}:
         refuse(event)
     if event == 'open' and isinstance(args[0], (str, bytes)):
@@ -56,8 +93,13 @@ def profile(frame, event, arg):
         refuse(frame.f_globals['__name__'] + '.' + frame.f_code.co_name)
 
 
-sys.addaudithook(audit)
-sys.setprofile(profile)
-threading.setprofile(profile)
-sys.argv = ['hermes', 'gateway', 'run']
-runpy.run_module('hermes_cli.main', run_name='__main__')
+def main():
+    sys.addaudithook(audit)
+    sys.setprofile(profile)
+    threading.setprofile(profile)
+    sys.argv = ['hermes', 'gateway', 'run']
+    runpy.run_module('hermes_cli.main', run_name='__main__')
+
+
+if __name__ == '__main__':
+    main()

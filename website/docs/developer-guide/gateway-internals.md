@@ -912,6 +912,12 @@ required state schema and ownership epochs, and lifetime/coordination references
 Shutdown closes those owned resources while preserving prior cron history, ACP
 session termination state, lifecycle evidence and deferred turn-recovery markers.
 Read-only source identity probes disable lazy fetching and filesystem-monitor hooks.
+Existing owner-conflict checks remain in place, including Windows's bounded local
+`schtasks /Query /TN <current-task>` registration observation. This read does not
+establish owner identity by itself; PID/profile locks still apply. It does not
+install, start, stop or refresh a service. The native witness permits only the
+trusted OS executable (resolved with [GetSystemDirectoryW](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemdirectoryw)) and that complete current-task query, retaining all other
+helper, network, provider, plugin and maintenance traps.
 
 The private `.startup-hold.json` journal is published before the drain marker.
 Its preparing/held/restoring phases keep the hold active after marker loss,
