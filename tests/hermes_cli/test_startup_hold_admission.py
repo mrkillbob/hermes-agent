@@ -111,3 +111,67 @@ def test_expanded_prior_marker_refuses_before_publishing_either_file(home):
         drain_startup.begin()
     assert marker.read_bytes() == prior
     assert not (home / '.startup-hold.json').exists()
+
+
+@pytest.mark.platforms('any')
+@pytest.mark.parametrize('action,purpose',[('release','gateway'),('timeout','gateway'),
+                                         ('hold','serve'),('hold','gateway')])
+def test_parallel_startup_waits_only_for_bounded_admission(tmp_path,monkeypatch,action,purpose):
+    from hermes_cli import startup_hold
+    from pm.lifetime_launch import popen
+    from tests.waiting import wait_until
+    monkeypatch.setenv('HERMES_HOME',str(tmp_path))
+    code = r"""
+import os
+from pathlib import Path
+from pm import filesystem
+from hermes_cli import startup_hold
+home=Path(os.environ['HERMES_HOME'])
+real_lock=filesystem.lock_fd
+seen=[]
+def observed(fd,*,wait,timeout=None):
+    if not seen:
+        result=real_lock(fd,wait=False)
+        if not result:
+            seen.append(True)
+            (home/'contended').write_text('real native lock contention')
+            if wait:
+                return real_lock(fd,wait=True,timeout=timeout)
+        return result
+    return real_lock(fd,wait=wait,timeout=timeout)
+filesystem.lock_fd=observed
+arguments=['gateway','run'] if os.environ['TEST_STARTUP_PURPOSE']=='gateway' else ['serve']
+startup_hold.register_process_writer(arguments)
+(home/'registered').write_text(str(startup_hold.active()))
+"""
+    gate=startup_hold.admission_gate()
+    gate.__enter__()
+    process=None
+    try:
+        process=popen([sys.executable,'-c',code],cwd=Path(__file__).resolve().parents[2],
+                      env=dict(os.environ,HERMES_HOME=str(tmp_path),TEST_STARTUP_PURPOSE=purpose),
+                      stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        assert wait_until(lambda:(tmp_path/'contended').exists() or process.poll() is not None,timeout=10)
+        assert (tmp_path/'contended').exists()
+        assert not (tmp_path/'registered').exists()
+        if action == 'hold':
+            # Any durable journal, including preparing/corrupt state, must fail closed.
+            (tmp_path/startup_hold.JOURNAL_FILENAME).write_text('{}')
+        if action != 'timeout':
+            gate.__exit__(None,None,None)
+            gate=None
+        out,err=process.communicate(timeout=10)
+        if action != 'timeout' and not (action=='hold' and purpose=='serve'):
+            assert process.returncode==0,(out,err)
+            assert (tmp_path/'registered').read_text()==str(action=='hold')
+            assert len(list((tmp_path/'.startup-writers').glob('*.hold')))==1
+        else:
+            assert process.returncode != 0,(out,err)
+            assert 'startup_hold_writers_busy' in err
+            assert not (tmp_path/'.startup-writers').exists()
+    finally:
+        if gate is not None:
+            gate.__exit__(None,None,None)
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.communicate(timeout=10)

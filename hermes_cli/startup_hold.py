@@ -150,8 +150,8 @@ def recovery_pending(project_root):
 
 
 @contextmanager
-def admission_gate():
-    """One stable, nonblocking coordination inode; never remove or explicitly unlock it."""
+def admission_gate(*, wait=False):
+    """Stable coordination inode: controls fail fast; startup may wait at most five seconds."""
     from pm.filesystem import lock_fd
     from hermes_dir_acl import make_user_dir
     home = get_default_hermes_root()
@@ -162,7 +162,7 @@ def admission_gate():
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or (info.st_dev, info.st_ino) != (path.stat().st_dev, path.stat().st_ino)
-                or not lock_fd(fd, wait=False)):
+                or not lock_fd(fd, wait=wait, timeout=5.0 if wait else 0.0)):
             raise RuntimeError('startup_hold_writers_busy')
         yield
     finally:
@@ -211,7 +211,7 @@ def _children_quiescent():
 def writer_scope(*, native=False):
     from pm.lifetime_handles import open_hold
     from hermes_dir_acl import make_user_dir
-    with admission_gate():
+    with admission_gate(wait=True):
         if active() and not native:
             raise RuntimeError('startup_hold_writers_busy')
         directory = _writer_directory()
@@ -225,14 +225,49 @@ def writer_scope(*, native=False):
         except BaseException:
             os.close(fd)
             raise
+    with _writer_lifetime(fd, path):
+        yield fd
+
+
+def _owns_writer_reference(fd, path, identity):
+    from pm.filesystem import lock_fd
+    from pm.lifetime_handles import open_hold
+    try:
+        opened, named = os.fstat(fd), path.lstat()
+        if (path.parent.is_symlink() or not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(named.st_mode) or opened.st_nlink != 1 or named.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != identity
+                or (named.st_dev, named.st_ino) != identity):
+            return False
+        probe = open_hold(path)
+        if probe is not None:
+            os.close(probe)
+            return False  # An unlocked reopen is not the original held description.
+        # Windows leases already use native sharing exclusion, not PM byte locks.
+        return os.name == 'nt' or lock_fd(fd, wait=False)
+    except (ImportError, OSError, RuntimeError):
+        return False
+
+
+@contextmanager
+def _writer_lifetime(fd, path):
+    info = os.fstat(fd)
+    identity = info.st_dev, info.st_ino
+    root = str(path.parent.parent.resolve())
     try:
         yield fd
     finally:
-        try:
-            if _writer_quiescent():
-                _write_reference(fd, 'quiescent')
-        finally:
-            os.close(fd)  # no explicit unlock: a child's inherited reference may remain
+        if _owns_writer_reference(fd, path, identity):
+            try:
+                if _writer_quiescent():
+                    _write_reference(fd, 'quiescent')
+            finally:
+                if _owns_writer_reference(fd, path, identity):
+                    os.close(fd)  # No unlock: an inherited reference may remain.
+                else:
+                    _uncertain_children.add(root)
+        else:
+            _uncertain_children.add(root)  # Never write or close a reused foreign descriptor.
 
 
 @contextmanager
@@ -279,18 +314,56 @@ def writer_exclusion():
             os.close(fd)
 
 
+def _process_writer_purpose(argv):
+    command = _command(argv)
+    if command[:2] == ['gateway', 'run']:
+        return 'gateway'
+    return command[0] if command[:1] in (['serve'], ['dashboard']) else None
+
+
+def _writer_reference_path(fd):
+    info = os.fstat(fd)
+    directory = get_default_hermes_root().resolve() / '.startup-writers'
+    if directory.is_symlink() or not directory.is_dir():
+        raise RuntimeError('startup_writer_handoff_unavailable')
+    matches = []
+    for path in directory.iterdir():
+        named = path.lstat()
+        if (stat.S_ISREG(named.st_mode) and named.st_nlink == 1
+                and (named.st_dev, named.st_ino) == (info.st_dev, info.st_ino)):
+            matches.append(path)
+    if len(matches) != 1:
+        raise RuntimeError('startup_writer_handoff_unavailable')
+    path = matches[0]
+    try:
+        valid = path.suffix == '.hold' and uuid.UUID(path.stem).hex == path.stem
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RuntimeError('startup_writer_handoff_unavailable')
+    return path
+
+
+def _retain_process_writer(scope, native, purpose, *, path=None):
+    fd = scope.__enter__()
+    path = _writer_reference_path(fd) if path is None else path
+    info = os.fstat(fd)
+    identity = info.st_dev, info.st_ino
+    if not _owns_writer_reference(fd, path, identity):
+        raise RuntimeError('startup_writer_handoff_unavailable')
+    _process_writers.append((scope, fd, native, purpose, path, identity))
+    # Registered before PM/plugins: runs after their cleanup, retains the raw
+    # reference until this last callback and actual process departure.
+    atexit.register(scope.__exit__, None, None, None)
+
+
 def register_process_writer(argv):
     """Reserve before a supported standalone entry can perform any startup effects."""
-    command = _command(argv)
-    native = command[:2] == ['gateway', 'run']
-    if not (native or command[:1] in (['serve'], ['dashboard'])) or _process_writers:
+    purpose = _process_writer_purpose(argv)
+    if purpose is None or _process_writers:
         return
-    scope = writer_scope(native=native)
-    fd = scope.__enter__()
-    _process_writers.append((scope, fd, native))
-    # Registered before PM/plugins: runs after their atexit callbacks. The raw
-    # reference stays owned until this last cleanup/actual process departure.
-    atexit.register(scope.__exit__, None, None, None)
+    native = purpose == 'gateway'
+    _retain_process_writer(writer_scope(native=native), native, purpose)
 
 
 def mark_native_exit_ready():
@@ -301,9 +374,12 @@ def mark_native_exit_ready():
     Exclusion also requires this exact process incarnation to have departed.
     """
     if _children_quiescent():
-        for _scope, fd, native in _process_writers:
+        for _scope, fd, native, _purpose, path, identity in _process_writers:
             if native:
-                _write_reference(fd, 'exit_ready')
+                if _owns_writer_reference(fd, path, identity):
+                    _write_reference(fd, 'exit_ready')
+                else:
+                    _uncertain_children.add(str(path.parent.parent))
 
 
 def mark_uncertain_children():

@@ -205,7 +205,7 @@ def _map_ssl_cert_file_for_git(git_cmd) -> None:
 # test_update_post_pull_syntax_guard derives that set from the real entry paths and pins it here.
 _UPDATE_CRITICAL_FILES = (
     "hermes_bootstrap.py", "hermes_cli/_parser.py", "hermes_cli/_launchers.py",
-    "hermes_cli/startup_hold.py",
+    "hermes_cli/startup_hold.py", "hermes_cli/startup_hold_exec.py",
     "hermes_cli/_early_recovery.py", "hermes_cli/update_lock.py", "hermes_cli/update_custody.py",
     "hermes_cli/update_handoff.py", "hermes_cli/venv_sync.py", "pm/__init__.py", "pm/environments.py",
     "hermes_cli/main.py", "hermes_cli/config.py", "hermes_cli/__init__.py",

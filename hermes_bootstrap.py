@@ -630,6 +630,9 @@ if _legacy_post_swap is not None:
     raise SystemExit(_continue_legacy_post_swap(_handoff_path, argv_tail=_argv_tail))
 
 from hermes_cli import startup_hold as _startup_hold_policy
+if hasattr(sys, '_hermes_startup_writer_handoff'):
+    from hermes_cli.startup_hold_exec import adopt_process_writer
+    adopt_process_writer()
 _startup_hold_policy.enter_boot(_root, sys.argv[1:])
 _startup_hold_policy.register_process_writer(sys.argv[1:])
 
@@ -678,7 +681,9 @@ if not _pm_repair:
                 import subprocess
 
                 raise RelaunchExit(subprocess.call(_command))
-            os.execv(str(_launch_python), _command)
+            from hermes_cli.startup_hold_exec import writer_exec_handoff
+            with writer_exec_handoff(_command) as _exec_command:
+                os.execv(str(_launch_python), _exec_command)
     except Exception as exc:
         if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
             print(f"hermes: {message}", file=sys.stderr)

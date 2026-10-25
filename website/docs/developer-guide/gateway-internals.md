@@ -901,6 +901,15 @@ attach or rescan an owner. Desktop continues to refuse a held runtime.
 Ensure is a transport operation: parent startup maintenance is deferred; any
 ordinary unmanaged native child reserves its own startup writer lifetime.
 
+Concurrent startup registrations may wait up to five seconds for the admission
+mutex; hold/control transactions still fail fast. Registration rechecks the hold
+under that mutex before any dependency/profile work. Planned POSIX interpreter
+re-entry retains the same locked writer reference, restores non-inheritance before
+recovery helpers run, and consumes an exact one-use same-process handoff. Failed
+exec restores the original reservation; uncertain or foreign descriptors remain
+debt and are never written or closed as if they were owned. Opaque-child debt
+survives re-entry. Windows retains its native sharing-based lifetime protection.
+
 The held owner skips provider and plugin discovery, private secret hydration,
 adapters, cron, hosted work, environment probes, collectors and automatic source
 or dependency recovery. Pending recovery debt refuses boot. Dependency selection
