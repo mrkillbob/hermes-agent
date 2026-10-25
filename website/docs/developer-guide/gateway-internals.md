@@ -917,7 +917,10 @@ Existing owner-conflict checks remain in place, including Windows's bounded loca
 establish owner identity by itself; PID/profile locks still apply. It does not
 install, start, stop or refresh a service. The native witness permits only the
 trusted OS executable (resolved with [GetSystemDirectoryW](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemdirectoryw)) and that complete current-task query, retaining all other
-helper, network, provider, plugin and maintenance traps.
+helper, provider, plugin and maintenance traps. The event loop's internal
+wakeup socket pair is also permitted only when the exact stdlib self-pipe and
+fallback code objects, connecting socket and live listener address all match.
+Ordinary loopback and external connections remain forbidden by the witness.
 
 The private `.startup-hold.json` journal is published before the drain marker.
 Its preparing/held/restoring phases keep the hold active after marker loss,

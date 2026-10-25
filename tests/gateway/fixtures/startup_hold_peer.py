@@ -5,6 +5,14 @@ import runpy
 import sys
 import traceback
 import threading
+import socket
+from asyncio.selector_events import BaseSelectorEventLoop
+from asyncio.proactor_events import BaseProactorEventLoop
+
+_SOCKET_TYPE = socket.socket
+_SOCKETPAIR_CODE = socket._fallback_socketpair.__code__
+_SELF_PIPE_CODES = frozenset((BaseSelectorEventLoop._make_self_pipe.__code__,
+                            BaseProactorEventLoop._make_self_pipe.__code__))
 
 root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(root))
@@ -52,6 +60,37 @@ def _native_registration_query_allowed(command, executable):
         expected_executable=expected, task_name=get_task_name())
 
 
+
+def _socketpair_endpoint_matches(args, values):
+    if len(args) != 2:
+        return False
+    client, listener = values.get('csock'), values.get('lsock')
+    if args[0] is not client or type(client) is not _SOCKET_TYPE or type(listener) is not _SOCKET_TYPE:
+        return False
+    if client.fileno() < 0 or listener.fileno() < 0:
+        return False
+    if (client.family not in (socket.AF_INET, socket.AF_INET6) or client.family != listener.family
+            or client.type != socket.SOCK_STREAM or listener.type != socket.SOCK_STREAM):
+        return False
+    try:
+        endpoint = listener.getsockname()[:2]
+    except OSError:
+        return False
+    return (endpoint[0] in ('127.0.0.1', '::1') and type(endpoint[1]) is int
+            and 0 < endpoint[1] <= 65535 and type(args[1]) is tuple and args[1] == endpoint)
+
+
+def _self_pipe_connect_allowed(args):
+    try:
+        frame = sys._getframe(2)  # exact audit caller, never an arbitrary stack-name match
+    except ValueError:
+        return False
+    if (frame.f_code is not _SOCKETPAIR_CODE or frame.f_back is None
+            or frame.f_back.f_code not in _SELF_PIPE_CODES):
+        return False
+    return _socketpair_endpoint_matches(args, frame.f_locals)
+
+
 def audit(event, args):
     if event == 'subprocess.Popen':
         command = args[1]
@@ -68,6 +107,8 @@ def audit(event, args):
                 return  # bounded, read-only executing-code identity; no provider/plugin work
         if _native_registration_query_allowed(command, args[0]):
             return  # preserve the existing bounded supervised-owner conflict observation
+    if event == 'socket.connect' and _self_pipe_connect_allowed(args):
+        return  # actual asyncio wakeup IPC, not an ordinary loopback/network permission
     if event in {'socket.connect', 'subprocess.Popen', 'os.system', 'os.posix_spawn'}:
         refuse(event)
     if event == 'open' and isinstance(args[0], (str, bytes)):
