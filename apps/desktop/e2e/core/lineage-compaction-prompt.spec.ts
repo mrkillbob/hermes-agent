@@ -172,6 +172,10 @@ test('an acknowledged redirect prompt renders once after in-place compaction ins
   const sandbox = createCoreSandbox('lcp')
   writeProviderHome(sandbox.hermesHome, provider.url, compressionYaml(250_000))
   const { app, page } = await launchCoreApp(coreAppEnv(sandbox))
+  const diagnostic: string[] = []
+  page.on('console', msg => {
+    if (msg.text().startsWith('TASK26_RECONCILE')) diagnostic.push(msg.text())
+  })
   const ws = recordWebSockets(page)
   const hold = gate()
 
@@ -369,6 +373,9 @@ test('an acknowledged redirect prompt renders once after in-place compaction ins
     ).toBe(false)
   } finally {
     if (test.info().status !== test.info().expectedStatus) {
+      await test
+        .info()
+        .attach('reconcile-diagnostics', { contentType: 'application/json', body: JSON.stringify(diagnostic) })
       await test.info().attach('compaction-routing', {
         contentType: 'application/json',
         body: JSON.stringify(
