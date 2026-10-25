@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import ast
+import base64
 import hashlib
 import json
 import os
@@ -13,6 +15,9 @@ import uuid
 
 _ATTRIBUTE = '_hermes_startup_writer_handoff'
 _LIMIT = 16_384
+_EXEC_PREFIX = "import base64; exec(base64.b64decode('"
+_EXEC_SUFFIX = "'))"
+_TERMINAL = '\n_hermes_restore_startup_writer()\ndel _hermes_restore_startup_writer\n'
 
 
 def _hex(value):
@@ -68,7 +73,7 @@ def _prelude(capability, body):
     body_length = len(body)
     digest = hashlib.sha256(body.encode("utf-8", "surrogatepass")).hexdigest()
     # Runs before the original relaunch body or any recoverable-checkout imports.
-    return f'''import hashlib, os, stat, sys
+    return f'''import base64, hashlib, os, stat, sys
 def _hermes_restore_startup_writer():
     info = os.fstat({capability['fd']!r})
     if (os.getpid() != {capability['pid']!r}
@@ -77,12 +82,18 @@ def _hermes_restore_startup_writer():
             or not os.get_inheritable({capability['fd']!r})):
         raise RuntimeError('startup_writer_handoff_unavailable')
     if (len(sys.orig_argv) < 2 or sys.orig_argv[-2] != '-c'
-            or not isinstance(sys.orig_argv[-1], str)
-            or hashlib.sha256(sys.orig_argv[-1][-{body_length!r}:].encode('utf-8', 'surrogatepass')).hexdigest() != {digest!r}):
+            or not isinstance(sys.orig_argv[-1], str)):
+        raise RuntimeError('startup_writer_handoff_unavailable')
+    source = sys.orig_argv[-1]
+    if source.startswith({_EXEC_PREFIX!r}):
+        if not source.endswith({_EXEC_SUFFIX!r}):
+            raise RuntimeError('startup_writer_handoff_unavailable')
+        source = base64.b64decode(source[{len(_EXEC_PREFIX)!r}:-{len(_EXEC_SUFFIX)!r}], validate=True).decode('utf-8')
+    if hashlib.sha256(source[-{body_length!r}:].encode('utf-8', 'surrogatepass')).hexdigest() != {digest!r}:
         raise RuntimeError('startup_writer_handoff_unavailable')
     os.set_inheritable({capability['fd']!r}, False)
     # Remove only this transport so a later -c relaunch cannot replay the old nonce.
-    sys.orig_argv[-1] = sys.orig_argv[-1][-{body_length!r}:]
+    sys.orig_argv[-1] = source[-{body_length!r}:]
     setattr(sys, {_ATTRIBUTE!r}, {capability!r})
 _hermes_restore_startup_writer()
 del _hermes_restore_startup_writer
@@ -132,13 +143,15 @@ def writer_exec_handoff(command):
     try:
         _write(fd, json.dumps(capability).encode('ascii'))
         os.set_inheritable(fd, True)
-        yield [*command[:-1], _prelude(capability, command[-1]) + command[-1]]
+        source = _prelude(capability, command[-1]) + command[-1]
+        encoded = base64.b64encode(source.encode('utf-8')).decode('ascii')
+        yield [*command[:-1], _EXEC_PREFIX + encoded + _EXEC_SUFFIX]
     finally:
         _restore(fd, Path(capability['root']) / '.startup-writers' / capability['name'],
                  identity, previous, inherited, position)
 
 
-def _validate_shape(capability):
+def _validate_structure(capability):
     keys = {'schema', 'state', 'pid', 'create_time', 'fd', 'root', 'name', 'device',
             'inode', 'native', 'purpose', 'nonce', 'uncertain'}
     if not isinstance(capability, dict) or set(capability) != keys:
@@ -149,9 +162,41 @@ def _validate_shape(capability):
             or not _hex(capability['name'][:-5])):
         raise RuntimeError('startup_writer_handoff_unavailable')
     if (any(type(capability[k]) is not int or capability[k] < 0 for k in ('pid', 'fd', 'device', 'inode'))
-            or capability['pid'] != os.getpid() or capability['fd'] <= 2
-            or type(capability['native']) is not bool or type(capability['uncertain']) is not bool):
+            or capability['fd'] <= 2 or not isinstance(capability['root'], str) or not capability['root']
+            or capability['purpose'] not in ('gateway', 'serve', 'dashboard')
+            or type(capability['native']) is not bool or type(capability['uncertain']) is not bool
+            or capability['native'] != (capability['purpose'] == 'gateway')):
         raise RuntimeError('startup_writer_handoff_unavailable')
+
+
+def _validate_shape(capability):
+    _validate_structure(capability)
+    if capability['pid'] != os.getpid():
+        raise RuntimeError('startup_writer_handoff_unavailable')
+
+
+def writer_exec_body(source):
+    """Read only the exact emitted envelope; its body still needs canonical entry parsing."""
+    if len(source) > 262_144 or not source.startswith('import base64, hashlib, os, stat, sys\n'):
+        return None
+    prefix, separator, body = source.partition(_TERMINAL)
+    if not separator or not body or len(prefix) > 2 * _LIMIT:
+        return None
+    try:
+        tree = ast.parse(prefix + separator)
+        if len(tree.body) != 4 or not isinstance(tree.body[1], ast.FunctionDef):
+            return None
+        final = tree.body[1].body[-1]
+        if not isinstance(final, ast.Expr) or not isinstance(final.value, ast.Call):
+            return None
+        call = final.value
+        if not isinstance(call.func, ast.Name) or call.func.id != 'setattr' or len(call.args) != 3:
+            return None
+        capability = ast.literal_eval(call.args[2])
+        _validate_structure(capability)
+        return body if _prelude(capability, body) == prefix + separator else None
+    except (ValueError, TypeError, SyntaxError, RuntimeError, KeyError, IndexError, RecursionError):
+        return None
 
 
 def _validate_reference(capability):
