@@ -55,21 +55,14 @@ def test_starlette_server_pins_and_lock_exclude_cve_2026_48710():
 
 
 def test_every_dependency_is_held_to_one_three_day_release_age():
-    """Keep the global age rule and bound the temporary Brotlicffi exception.
-
-    The cutoff admits only the reviewed release and artifacts. Removing the
-    exception restores the uniform three-day rule.
-    """
+    """Keep the global age rule and preserve the reviewed Brotlicffi artifacts."""
     manifest = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     uv = manifest["tool"]["uv"]
     lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
     assert uv["exclude-newer"] == "3 days"
+    assert "exclude-newer-package" not in uv
     assert lock["options"].get("exclude-newer-span") == "P3D"
-    exception = uv.get("exclude-newer-package", {})
-    assert lock["options"].get("exclude-newer-package", {}) == exception
-    if not exception:
-        return
-    assert exception == {"brotlicffi": "2026-10-22T16:19:34Z"}
+    assert "exclude-newer-package" not in lock["options"]
     pins = [req for req in map(Requirement, manifest["project"]["optional-dependencies"]["messaging"])
             if req.name == "brotlicffi"]
     assert len(pins) == 1 and str(pins[0].specifier) == "==1.2.1.0"
