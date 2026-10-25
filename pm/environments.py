@@ -455,7 +455,7 @@ def _require_own_dependencies(project_root: Path) -> None:
         raise NoCommittedEnvironment("no dependency environment is committed for this install")
 
 
-def activate_dependencies(project_root: Path) -> None:
+def activate_dependencies(project_root: Path, *, allow_recovery: bool = True) -> None:
     """Select the committed tree at process boot, before third-party imports.
 
     A process with no extension selection keeps its original launch contract.
@@ -470,7 +470,7 @@ def activate_dependencies(project_root: Path) -> None:
         # this process only reads the committed selection, so it proceeds without waiting rather
         # than leaving the backend unbound (see runtime_lock).
         with runtime_lock(project_root) as held:
-            if held:
+            if held and allow_recovery:
                 recover_publication(project_root)
             environment = committed_venv(project_root)
             if environment is None:

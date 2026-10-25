@@ -32,7 +32,8 @@ def body():
 
 def held(runner=None):
     """A booted held owner cannot reopen if its marker disappears or is replaced."""
-    if bool(getattr(runner, '_kanban_drain', False)):
+    from hermes_cli.startup_hold import active
+    if bool(getattr(runner, '_kanban_drain', False)) or active(runner):
         return True
     current = body()
     if current is not None and 'kanban_once' in current:
@@ -176,6 +177,8 @@ def permitted(claim, *, instance_id):
 def latch(runner):
     """Before runtime recovery: retain the hold through all owner startup/exit paths."""
     if held():
+        from hermes_cli.startup_hold import active
+        runner._startup_hold = active(runner)
         runner._kanban_drain = True
         runner._external_drain_active = True
         runner._kanban_drain_session = None
@@ -220,6 +223,9 @@ def admission_allowed(authority, session_id):
 
 
 def method_allowed(connection, method, params):
+    from hermes_cli.startup_hold import active
+    if active(connection.authority.runner):
+        return method in {'ping', 'runtime.describe'}
     if method in {'ping', 'runtime.describe'}:
         return True
     if method in {'worker.adopt', 'worker.persist'}:

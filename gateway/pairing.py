@@ -337,9 +337,11 @@ class PairingStore:
             root = get_default_hermes_root()
             profile_home = root if profile == "default" else root / "profiles" / profile
         self._dir = get_hermes_dir("platforms/pairing", "pairing", home=profile_home) if profile else _default_pairing_dir()
-        self._dir.mkdir(parents=True, exist_ok=True)
-        # Merge the alternate old/new layout so upgrades cannot split approvals.
-        _migrate_split_pairing_dirs(home=profile_home, active=self._dir)
+        from hermes_cli.startup_hold import active
+        if not active():
+            self._dir.mkdir(parents=True, exist_ok=True)
+            # Merge the alternate old/new layout so upgrades cannot split approvals.
+            _migrate_split_pairing_dirs(home=profile_home, active=self._dir)
         self._lock = threading.RLock()  # adapters run concurrently in threads sharing one store
         self._profile = profile  # for diagnostics / log lines
         self._approved_cache: dict = {}

@@ -883,3 +883,52 @@ Managed consumers can wait for an already queued or active root-owner boot befor
 Quickstart and Activate reject a busy boot transition instead of waiting to register an unobserved job. Their admission deadline is captured before threadpool dispatch and rechecked before job creation, so a delayed planning/admission worker cannot register setup beyond the request budget. Already accepted jobs retain their normal polling, Stop cancellation and generation fences.
 
 Quickstart reads the running router's model listing before accepting setup and again before transferring model weights after engine repricing. An unregistered selection, active boot or unavailable listing refuses setup without reloading or stopping the shared server. With no running server, normal staging and owner boot remain available. Final activation still verifies the live listing if server state changes after preflight.
+
+
+## Native startup hold without a task
+
+`hermes gateway drain hold` creates a targetless startup hold while ESTOP is
+engaged. Empty boards are valid: it neither opens Kanban storage nor selects a
+card. `hermes gateway drain status` reports its hold ID and `armed: false`.
+It cannot be armed, claimed, nested with another protected hold, or used for a
+one-card dispatch exception.
+
+Start the native owner explicitly with `hermes gateway run`. It reports
+`state=draining, drain_reason=startup_hold`; its authenticated native connection
+allows only `ping` and `runtime.describe`, with no session-creation capability.
+`gateway ensure --json` reports the hold with exit 6 and does not start, replace,
+attach or rescan an owner. Desktop continues to refuse a held runtime.
+Ensure is a transport operation: parent startup maintenance is deferred; any
+ordinary unmanaged native child reserves its own startup writer lifetime.
+
+The held owner skips provider and plugin discovery, private secret hydration,
+adapters, cron, hosted work, environment probes, collectors and automatic source
+or dependency recovery. Pending recovery debt refuses boot. Dependency selection
+and lifetime protection still apply. Existing malformed state databases refuse
+without automatic repair or quarantine.
+
+Allowed effects are native ownership/listener artifacts, logs and runtime status,
+required state schema and ownership epochs, and lifetime/coordination references.
+Shutdown closes those owned resources while preserving prior cron history, ACP
+session termination state, lifecycle evidence and deferred turn-recovery markers.
+Read-only source identity probes disable lazy fetching and filesystem-monitor hooks.
+
+The private `.startup-hold.json` journal is published before the drain marker.
+Its preparing/held/restoring phases keep the hold active after marker loss,
+process death or an interrupted restoration. Corrupt or uncertain state stays
+held. Publication refuses a prior marker that would exceed the bounded readers
+after JSON escaping.
+
+After the native owner and other backend writers have actually exited, restore
+with `hermes gateway drain restore --hold-id ID`. Restoration reserves checkout
+custody, dependency-publication, dispatcher, admission, marker and profile locks,
+rechecks recovery debt, and requires exact process-incarnation departure evidence.
+It restores the prior marker bytes or absence; it does not clear ESTOP or change
+cron schedules. A changed marker or stale ID refuses restoration. Interrupted
+preparation/restoration can be retried with the original journal identity.
+
+Standalone backends publish references before initialization, and native owners
+reserve before PM/env work or profile ownership. Abrupt departures, unavailable
+process inventories and opaque helper descendants retain uncertainty rather than
+being retired from PID death alone. Such debt requires separate verified operator
+reconciliation; deleting records is not part of this command.

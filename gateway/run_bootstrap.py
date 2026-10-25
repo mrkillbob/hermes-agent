@@ -141,7 +141,9 @@ def _start_gateway_configure_logging(verbosity: Optional[int]) -> None:
         from tools.skills_sync import sync_skills
         sync_skills(quiet=True)
 
-    _best_effort(_sync_skills)
+    from hermes_cli.startup_hold import active
+    if not active():
+        _best_effort(_sync_skills)
 
     # Centralized logging (agent.log INFO+, errors.log WARNING+, gateway.log gateway-only); idempotent.
     from hermes_logging import setup_logging, _safe_stderr
@@ -221,6 +223,9 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
                 logger.warning("Shutdown context: %s", format_context_for_log(_shutdown_ctx))
 
             def _diagnostic() -> None:
+                from hermes_cli.startup_hold import active
+                if active(runner):
+                    return
                 # Heavyweight (ps auxf, pstree, dmesg), detached so it finishes even if our cgroup is torn
                 # down; bounded by an internal timeout, never blocks.
                 from gateway.shutdown_forensics import spawn_async_diagnostic
@@ -777,6 +782,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         os,
         threading,
     )
+    from hermes_cli.startup_hold import active
+    from gateway.drain_startup import native_config
+    config = native_config(config, replace=replace, force=force)
     # Set here (not at import) so incidental gateway.run imports from CLI code don't poison it.
     os.environ["HERMES_EXEC_ASK"] = "1"
     _start_gateway_resolve_terminal_cwd()
@@ -800,7 +808,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     # Multiplex-only: the ONE host gateway decides first. Attach to it, make it serve this profile,
     # replace it (--replace) or refuse — before anything below binds a port or claims a PID file.
-    _host_decision = await _host_attach_or_none(replace, force)
+    _host_decision = None if active() else await _host_attach_or_none(replace, force)
     if _host_decision is not None:
         return _host_decision
 
@@ -907,6 +915,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             # Report if the previous life died uncleanly (SIGKILL / OOM / VM death), then claim the
             # sentinel for this life. After the PID-file claim so a --replace loser can't clobber it.
             # The store scan that report used to run here is deferred: see below.
+            from hermes_cli.startup_hold import active
+            if active(runner):
+                return None
             from gateway.lifecycle_ledger import record_startup
             return record_startup()
 

@@ -115,7 +115,8 @@ def _endpoint(payload: dict, home: Path, control_home: Path | None = None) -> Ga
     from gateway.drain_control import RESTART_WAIT_REASON
     restart_wait = state == "draining" and payload.get("drain_reason") == RESTART_WAIT_REASON
     from gateway.drain_kanban import REASON
-    kanban_wait = state == 'draining' and payload.get('drain_reason') == REASON
+    from hermes_cli.startup_hold import REASON as STARTUP_REASON
+    kanban_wait = state == 'draining' and payload.get('drain_reason') in {REASON, STARTUP_REASON}
     if state in {"starting", "draining", "conflict"} and not (restart_wait or kanban_wait):
         # An auto-started gateway ending through its idle exit names that, so its clients wait
         # for it to go and start a fresh one instead of reporting a refusal.
@@ -151,7 +152,7 @@ def _endpoint(payload: dict, home: Path, control_home: Path | None = None) -> Ga
         supervisor=supervisor, capabilities=frozenset(capabilities),
         control_home=str(control_home) if control_home is not None else None,
         code_sha=code_sha if isinstance(code_sha := payload.get("code_sha"), str) and code_sha else None,
-    ), reason_code=RESTART_WAIT_REASON if restart_wait else REASON if kanban_wait else None)
+    ), reason_code=RESTART_WAIT_REASON if restart_wait else payload['drain_reason'] if kanban_wait else None)
 
 
 def control_home_for(home: Path, endpoint: GatewayEndpoint | None) -> Path:
@@ -389,6 +390,11 @@ def _observe_replacing_stale(home: Path, deadline: float, replaced: set[Path]) -
     return GatewayDiscovery("draining", reason_code="replaced")
 
 
+def _validate_ensure_timeout(timeout):
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be finite and positive")
+
+
 def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = DEFAULT_ENSURE_TIMEOUT,
                            idle_exit: bool = False) -> GatewayDiscovery:
     """Ensure once; pending remains pending at deadline.
@@ -412,8 +418,10 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = DEFAULT
     )
     from hermes_constants import get_default_hermes_root, get_process_hermes_home
 
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout must be finite and positive")
+    _validate_ensure_timeout(timeout)
+    from hermes_cli.startup_hold import active, REASON as STARTUP_REASON
+    if active():
+        return GatewayDiscovery('draining', reason_code=STARTUP_REASON)
     deadline = time.monotonic() + timeout
     home = _overlay_owner_home(Path(_canonical_home(profile_home)))
     requested = False

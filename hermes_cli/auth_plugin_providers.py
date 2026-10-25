@@ -115,6 +115,9 @@ def sync_plugin_provider_registry() -> int:
     whose own imports pull ``hermes_cli.auth`` in mid-``_discover_providers()`` sees only what was
     registered so far, and every later plugin would otherwise fail with "Unknown provider" (#102123).
     """
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return 0
     from hermes_cli.auth import BUILTIN_PROVIDER_IDS, PROVIDER_REGISTRY
 
     try:

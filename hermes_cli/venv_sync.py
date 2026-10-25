@@ -361,6 +361,9 @@ def prepare_launch(project_root: Path, argv: list[str]) -> Path | None:
     re-run the tail (and its environment builds) on each boot until the disk fills.
     Return the store interpreter when this process must restart cleanly.
     """
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance(argv):
+        return None
     import os
     import sys
 

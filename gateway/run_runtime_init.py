@@ -9,7 +9,8 @@ class GatewayRuntimeInitMixin:
     def _init_runtime_settings(self) -> None:
         """Load ephemeral per-call config (prefill, reasoning, busy modes, timeouts, routing)."""
         from gateway.run import (Dict, Optional, _load_gateway_config)
-        self._prefill_messages = self._load_prefill_messages()
+        from hermes_cli.startup_hold import active
+        self._prefill_messages = [] if active(self) else self._load_prefill_messages()
         self._reasoning_config = self._load_reasoning_config()
         self._service_tier = self._load_service_tier()
         self._show_reasoning = self._load_show_reasoning()
@@ -220,7 +221,8 @@ class GatewayRuntimeInitMixin:
         # One HookRegistry per served profile home, resolved from the active scope at emit time.
         self.hooks = ProfileHookRegistries()
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
-        self._voice_mode: Dict[str, str] = self._load_voice_modes()
+        from hermes_cli.startup_hold import active
+        self._voice_mode: Dict[str, str] = {} if active(self) else self._load_voice_modes()
         # Per-(bot, guild, text channel, user) transcript dedup: voice/STT can emit one utterance twice.
         self._recent_voice_transcripts: Dict[tuple, List[tuple[float, str]]] = {}
         # Background tasks kept referenced so they are not garbage-collected mid-execution.
@@ -239,3 +241,38 @@ class GatewayRuntimeInitMixin:
         self._scale_to_zero_cooldown_until: float = 0.0
         self._scale_to_zero_no_suspend_logged: bool = False
         self._scale_to_zero_direct_platform_logged: bool = False
+
+
+    def _warn_if_docker_media_delivery_is_risky(self) -> None:
+        """Warn when Docker-backed gateways lack an explicit export mount: MEDIA delivery runs in the
+        gateway process, so model-emitted paths like `/output/report.txt` must be host-readable."""
+        from gateway.run import (os, json, logger, Platform, _DOCKER_VOLUME_SPEC_RE, _DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS)
+        from hermes_cli.startup_hold import active
+        if active(self):
+            return
+        if os.getenv("TERMINAL_ENV", "").strip().lower() != "docker":
+            return
+        connected = self.config.get_connected_platforms()
+        messaging_platforms = [p for p in connected if p not in {Platform.LOCAL, Platform.API_SERVER, Platform.WEBHOOK}]
+        if not messaging_platforms:
+            return
+
+        raw_volumes = os.getenv("TERMINAL_DOCKER_VOLUMES", "").strip()
+        volumes: list[str] = []
+        if raw_volumes:
+            try:
+                parsed = json.loads(raw_volumes)
+                if isinstance(parsed, list):
+                    volumes = [str(v) for v in parsed if isinstance(v, str)]
+            except (ValueError, TypeError):
+                logger.debug("Could not parse TERMINAL_DOCKER_VOLUMES for gateway media warning", exc_info=True)
+
+        for spec in volumes:
+            match = _DOCKER_VOLUME_SPEC_RE.match(spec)
+            if match and match.group("container") in _DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS:
+                return
+        logger.warning(
+            "Docker backend is enabled for the messaging gateway but no explicit host-visible "
+            "output mount (for example '/home/user/.hermes/cache/documents:/output') is configured. "
+            "This is fine if the model already emits host-visible paths, but MEDIA file delivery can fail "
+            "for container-local paths like '/workspace/...' or '/output/...'.")

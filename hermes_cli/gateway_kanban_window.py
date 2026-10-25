@@ -22,6 +22,10 @@ def _selected_target(args, path):
 
 
 def _status():
+    from hermes_cli.startup_hold import read_marker, journal_present, REASON
+    if journal_present() or REASON in (read_marker() or {}):
+        from gateway.drain_startup import status
+        return status()
     from gateway.drain_kanban import state, _remaining
     _, value = state()
     return dict(window_id=value['window_id'], task_id=value['target']['task_id'], board=value['target']['board'],
@@ -64,14 +68,24 @@ def _cancel(args):
 
 
 def _restore(args):
+    if getattr(args, 'hold_id', None):
+        from gateway.drain_startup import restore
+        restore(hold_id=args.hold_id)
+        return {'restored': True}
     from gateway.drain_kanban import restore
     # The marker writer itself reserves canonical owner locks through restoration.
     restore(window_id=args.window_id, owner_stopped=True)
     return {'restored': True}
 
 
+def _hold(_args):
+    from gateway.drain_startup import begin, status
+    begin()
+    return status()
+
+
 def execute(args):
-    actions = {'begin': _begin, 'arm': _arm, 'status': lambda _: _status(), 'cancel': _cancel, 'restore': _restore}
+    actions = {'hold': _hold, 'begin': _begin, 'arm': _arm, 'status': lambda _: _status(), 'cancel': _cancel, 'restore': _restore}
     return actions[args.drain_action](args)
 
 
@@ -91,8 +105,13 @@ def add_parser(subparsers):
     begin.add_argument('--task-id', required=True)
     begin.add_argument('--board', default='default')
     begin.add_argument('--seconds', type=int, default=900)
+    actions.add_parser('hold', help='Under ESTOP, hold native startup without selecting or admitting any task')
     actions.add_parser('status', help='Read the hold and grant without exposing the prior marker')
-    for action in ('arm', 'cancel', 'restore'):
+    for action in ('arm', 'cancel'):
         command = actions.add_parser(action)
         command.add_argument('--window-id', required=True)
+    restore = actions.add_parser('restore')
+    identity = restore.add_mutually_exclusive_group(required=True)
+    identity.add_argument('--window-id')
+    identity.add_argument('--hold-id')
     parser.set_defaults(func=cmd_gateway_drain)

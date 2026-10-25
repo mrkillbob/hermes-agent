@@ -507,6 +507,9 @@ def load_hermes_dotenv(
 ) -> list[Path]:
     """Load Hermes env files: ``~/.hermes/.env`` overrides stale shell exports; project ``.env`` is a dev
     fallback that only fills gaps when the user env exists (and overrides shell vars when it does not)."""
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return []
     from agent.safe_worker_policy import worker_config_snapshot
 
     # The private bootstrap supplies credentials explicitly; do not rehydrate

@@ -4573,14 +4573,20 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
     kill an existing instance first (avoids systemd restart loops); force: skip the supervised guard;
     idle_exit: a client auto-started this unsupervised gateway, so it exits once idle
     (``gateway.unmanaged_idle_exit_seconds``)."""
+    from hermes_cli.startup_hold import active
+    if active() and (replace or force):
+        raise RuntimeError('startup_hold: replacement is unavailable')
     _guard_official_docker_root_gateway()
-    _attach_to_host_gateway_or_guard(force=force, replace=replace)
+    if not active():
+        _attach_to_host_gateway_or_guard(force=force, replace=replace)
     _guard_supervised_gateway_conflict(force=force)
     _guard_existing_gateway_process_conflict(replace=replace)
     sys.path.insert(0, str(PROJECT_ROOT))
-    _apply_startup_watchdog_config()
-    from hermes_cli.observability.shared_metrics_process import begin_process
-    begin_process("gateway")
+    from hermes_cli.startup_hold import active
+    if not active():
+        _apply_startup_watchdog_config()
+        from hermes_cli.observability.shared_metrics_process import begin_process
+        begin_process("gateway")
 
     # Detached Windows runs (HERMES_GATEWAY_DETACHED=1, or non-TTY for older wrappers) ignore
     # console-control broadcasts from sibling CLIs; foreground runs keep Ctrl+C-to-stop.
@@ -4598,7 +4604,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
 
     # Refresh the systemd unit on every boot so restart settings stay current even after an
     # exit-code-75 respawn (stale-code or /restart), which bypasses `hermes gateway restart`.
-    if supports_systemd_services():
+    if not active() and supports_systemd_services():
         try:
             refresh_systemd_unit_if_needed(system=False)
         except Exception:
@@ -4629,7 +4635,8 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
     )
     _atexit.register(lambda: _exit_diag("atexit.hook", sys_exc=repr(sys.exc_info())))
 
-    _respawn_storm_backoff()
+    if not active():
+        _respawn_storm_backoff()
 
     def _hard_exit_after_gateway_teardown(code: int) -> None:
         # Mirror gateway.run.main()'s wedge-proof exit: bypass Python finalization so non-daemon
@@ -5060,7 +5067,8 @@ def _print_runtime_health() -> None:
 
 
 def _cmd_run(args):
-    if _maybe_redirect_run_to_s6_supervision(args):
+    from hermes_cli.startup_hold import active
+    if not active() and _maybe_redirect_run_to_s6_supervision(args):
         return  # unreachable; execvp doesn't return
     if getattr(args, "external_supervisor", False):
         os.environ[EXTERNAL_GATEWAY_SUPERVISOR_ENV] = "1"
@@ -5283,20 +5291,9 @@ def _host_multiplexer_is_ours(owner) -> bool:
         return False
 
 
-def _print_unfolded_gateway_note(owner) -> None:
-    """Detect-and-converge: name the per-profile gateways `--all` no longer sweeps, never kill them."""
-    try:
-        others = [pid for pid in find_gateway_pids(all_profiles=True) if pid != owner.pid]
-    except Exception:
-        return
-    if not others:
-        return
-    print(f"  {len(others)} per-profile gateway process(es) still run beside it "
-          f"(PIDs: {', '.join(str(p) for p in others)}).")
-    print("  They were left running; fold them in with: hermes gateway migrate --multiplex")
-
 
 def _cmd_start(args):
+    from hermes_cli.gateway_profile_lifecycle import _print_unfolded_gateway_note
     from hermes_cli.gateway_profile_lifecycle import host_scope_for_all_verb, profile_lifecycle
     if profile_lifecycle("start", args):
         return
@@ -5436,6 +5433,7 @@ def _restart_all(system: bool, detach: bool = False) -> None:
 
 
 def _restart_all_as_host(owner, system: bool, detach: bool = False) -> None:
+    from hermes_cli.gateway_profile_lifecycle import _print_unfolded_gateway_note
     service_stopped = _stop_installed_service(system)
     if owner is not None:
         # Stop ONLY the host process: its served set comes back with it, and any per-profile
@@ -5594,16 +5592,9 @@ _STATUS_STOPPED_HINTS = {
 }
 
 
-def _status_host_kind() -> str:
-    if is_termux():
-        return "termux"
-    if is_wsl():
-        return "wsl"
-    return "windows" if is_windows() else "other"
-
 
 def _cmd_status(args):
-    from hermes_cli.gateway_profile_lifecycle import print_parked_status
+    from hermes_cli.gateway_profile_lifecycle import print_parked_status, _status_host_kind
     from hermes_cli.gateway_status_notes import print_standalone_by_config, report_incompatible_owner
     deep = getattr(args, "deep", False)
     full = getattr(args, "full", False)

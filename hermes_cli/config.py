@@ -1255,6 +1255,9 @@ def warn_deprecated_cwd_env_vars() -> None:
     """Warn if MESSAGING_CWD / TERMINAL_CWD is set in .env (canonical: terminal.cwd in config.yaml).
     Reads the file rather than ``os.environ`` because runtime bridges and session restoration
     legitimately set ``TERMINAL_CWD``."""
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return
     try:
         env_map = load_env()
     except Exception:
@@ -3992,6 +3995,9 @@ def config_command(args):
 def _inject_profile_env_vars() -> None:
     """Expose env_vars of every ``auth_type="api_key"`` provider in providers/ via OPTIONAL_ENV_VARS
     without editing this file."""
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return
     try:
         from providers import list_providers
         for _pp in list_providers():
