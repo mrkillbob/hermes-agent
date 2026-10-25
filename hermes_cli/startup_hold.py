@@ -33,7 +33,7 @@ def marker_path():
 def _read_json(path, limit=1_048_576):
     """Absent is None; unreadable, nonregular or malformed is a fail-closed hold."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
     except FileNotFoundError:
         return {} if path.is_symlink() else None
     except OSError:
@@ -76,7 +76,7 @@ def read_marker():
 
 def read_marker_bytes():
     try:
-        fd = os.open(marker_path(), os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | os.O_NONBLOCK)
+        fd = os.open(marker_path(), os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
     except FileNotFoundError:
         if marker_path().is_symlink():
             raise RuntimeError('startup_hold_unavailable') from None
