@@ -63,6 +63,12 @@ export function bindReceiptUserRows(messages: ChatMessage[], receipt: PersistedT
 
   const candidates = messages.flatMap((message, index) => (index >= start && isTurnUserBubble(message) ? [index] : []))
 
+  // Compaction can receipt only a surviving suffix. Its submission still
+  // names the initial prompt, so mismatched partial sets cannot be paired.
+  if (receipt.complete !== true && candidates.length !== ids.length) {
+    return messages
+  }
+
   // Unanchored, a missing bubble makes every later pairing ambiguous. Anchored,
   // the prompt is still certain even when a later bubble is absent.
   const paired =

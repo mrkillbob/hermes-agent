@@ -18,6 +18,8 @@ import { usePromptActions } from '../use-prompt-actions'
 import { reconcileDurableHistory } from '../use-session-actions/utils'
 import { useSessionStateCache } from '../use-session-state-cache'
 
+import { bindReceiptUserRows } from './receipt-user-rows'
+
 import { useMessageStream } from './index'
 
 const SID = 'completion-runtime'
@@ -195,7 +197,11 @@ it('binds the sent prompt to the receipt row named by its submission', async () 
   await h.send('message.complete', {
     text: ANSWER,
     persisted_turn: {
-      row_ids: [71, 72], user_row_id: 71, user_row_ids: [71], final_assistant_row_id: 72, complete: true,
+      row_ids: [71, 72],
+      user_row_id: 71,
+      user_row_ids: [71],
+      final_assistant_row_id: 72,
+      complete: true,
       submission_id: submissionIdOf(h)
     }
   })
@@ -223,14 +229,174 @@ it('binds the prompt and the steer of a turn whose receipt is not complete', asy
   await h.send('message.complete', {
     text: 'Revised.',
     persisted_turn: {
-      row_ids: [71, 72, 73, 74], user_row_id: 71, user_row_ids: [71, 73], final_assistant_row_id: 74,
-      complete: false, submission_id: submissionIdOf(h)
+      row_ids: [71, 72, 73, 74],
+      user_row_id: 71,
+      user_row_ids: [71, 73],
+      final_assistant_row_id: 74,
+      complete: false,
+      submission_id: submissionIdOf(h)
     }
   })
 
-  expect(h.state().messages.filter(m => m.role === 'user').map(m => m.rowId)).toEqual([71, 73])
+  expect(
+    h
+      .state()
+      .messages.filter(m => m.role === 'user')
+      .map(m => m.rowId)
+  ).toEqual([71, 73])
   h.dispose()
 })
+
+it.each(['Revise the answer.', 'Give the answer.'])(
+  'does not bind a compacted suffix receipt onto the initial prompt (%s)',
+  redirectText => {
+    const messages: ChatMessage[] = [
+      { id: 'user-original', role: 'user', parts: [{ type: 'text', text: 'Give the answer.' }] },
+      { id: 'user-redirect', role: 'user', parts: [{ type: 'text', text: redirectText }] }
+    ]
+
+    const partial = {
+      row_ids: [73, 74],
+      user_row_id: 73,
+      user_row_ids: [73],
+      complete: false,
+      submission_id: 'original'
+    }
+
+    expect(bindReceiptUserRows(messages, partial)).toBe(messages)
+
+    const missingBubble = { ...partial, row_ids: [71, 73, 74], user_row_id: 71, user_row_ids: [71, 73] }
+
+    expect(bindReceiptUserRows(messages.slice(0, 1), missingBubble)[0].rowId).toBeUndefined()
+  }
+)
+
+it.each(['shared-prefix', 'unanchored', 'expanded-prefix-fold', 'unanchored-fold'] as const)(
+  'reconciles the redirect once after compaction receipts only its surviving suffix (%s)',
+  async shape => {
+    const sharedPrefix = shape === 'shared-prefix' || shape === 'expanded-prefix-fold'
+    const folded = shape.endsWith('-fold')
+    const h = mount()
+
+    const prefix = sharedPrefix
+      ? [
+          { id: 60, role: 'user' as const, content: 'Earlier question one.' },
+          { id: 61, role: 'assistant' as const, content: 'Earlier reply one.' },
+          { id: 62, role: 'user' as const, content: 'Earlier question two.' },
+          { id: 63, role: 'assistant' as const, content: 'Earlier reply two.' }
+        ]
+      : []
+
+    h.update(state => ({ ...state, messages: toChatMessages(prefix) }))
+    await h.submit()
+    const submitted = h.state().messages.find(m => m.role === 'user' && m.id.startsWith('user-'))!
+
+    await h.send('message.start')
+    await h.send('message.delta', { text: 'Partial' })
+    await flush()
+    await h.redirect()
+    await h.send('message.delta', { text: ' then revised.' })
+    await h.send('message.complete', {
+      text: 'Revised.',
+      persisted_turn: {
+        row_ids: folded ? [73, 74, 75, 76] : [73, 74],
+        user_row_id: 73,
+        user_row_ids: [73],
+        final_assistant_row_id: folded ? 76 : 74,
+        complete: false,
+        submission_id: submitted.id.replace(/^user-/, '')
+      }
+    })
+    const prefixUsers = prefix.filter(m => m.role === 'user')
+
+    expect(
+      h
+        .state()
+        .messages.filter(m => m.role === 'user')
+        .map(m => m.rowId)
+    ).toEqual([...prefixUsers.map(m => m.id), undefined, undefined])
+
+    const expanded =
+      shape === 'expanded-prefix-fold'
+        ? [
+            { id: 58, role: 'user' as const, content: 'Newly fetched earlier question.' },
+            { id: 59, role: 'assistant' as const, content: 'Newly fetched earlier reply.' }
+          ]
+        : []
+
+    const replies = folded
+      ? [
+          {
+            id: 74,
+            role: 'assistant' as const,
+            content: '',
+            tool_calls: [
+              { id: 'turn-call', type: 'function' as const, function: { name: 'terminal', arguments: '{}' } }
+            ]
+          },
+          { id: 75, role: 'tool' as const, tool_call_id: 'turn-call', tool_name: 'terminal', content: 'ok' },
+          { id: 76, role: 'assistant' as const, content: 'Revised.' }
+        ]
+      : [{ id: 74, role: 'assistant' as const, content: 'Revised.' }]
+
+    const page = toChatMessages([
+      ...expanded,
+      ...prefix,
+      { id: 71, role: 'user', content: 'Give the answer.' },
+      { id: 72, role: 'assistant', content: 'Partial' },
+      { id: 73, role: 'user', content: 'Revise the answer.' },
+      ...replies
+    ])
+
+    const storedUsers = [...expanded.filter(m => m.role === 'user'), ...prefixUsers]
+    const previous = h.state().messages
+    const grafted = graftRefreshedTailOntoBackfill(page, previous)
+    // Warm resume grafts any older pages, then reconciles durable history
+    // with pending local turns. Grafting alone is not the display contract.
+    const refreshedHistory = reconcileDurableHistory(grafted, previous)
+    const users = refreshedHistory.filter(m => m.role === 'user')
+
+    if (folded) {
+      expect(
+        refreshedHistory.some(m => m.parts.some(p => p.type === 'tool-call' && p.toolCallId === 'turn-call'))
+      ).toBe(true)
+    }
+
+    expect(users.map(chatMessageText)).toEqual([
+      ...storedUsers.map(m => m.content),
+      'Give the answer.',
+      'Revise the answer.'
+    ])
+    expect(users.map(m => m.rowId)).toEqual([...storedUsers.map(m => m.id), 71, 73])
+
+    if (shape === 'unanchored' || shape === 'expanded-prefix-fold') {
+      // The overlapping-tail path must keep a new occurrence after the
+      // partially receipted reply, even when it repeats either prompt.
+      for (const text of ['Give the answer.', 'Revise the answer.']) {
+        const nextPrompt: ChatMessage = {
+          id: `user-next-${text}`,
+          role: 'user',
+          parts: [{ type: 'text', text }]
+        }
+
+        const withNext = [...previous, nextPrompt]
+        const refreshed = reconcileDurableHistory(graftRefreshedTailOntoBackfill(page, withNext), withNext)
+        const nextUsers = refreshed.filter(m => m.role === 'user')
+
+        expect(nextUsers.map(chatMessageText)).toEqual([
+          ...storedUsers.map(m => m.content),
+          'Give the answer.',
+          'Revise the answer.',
+          text
+        ])
+        expect(nextUsers.at(-1)?.id).toBe(nextPrompt.id)
+        expect(nextUsers.at(-1)?.rowId).toBeUndefined()
+      }
+    }
+
+    h.dispose()
+  }
+)
 
 it('binds a viewer that never sent the turn only when it shows exactly the receipt rows', async () => {
   const h = mount()
@@ -240,13 +406,20 @@ it('binds a viewer that never sent the turn only when it shows exactly the recei
     { id: 61, role: 'assistant', content: 'Before.' }
   ])
 
-  h.update(state => ({ ...state, messages: [...earlier, { id: 'user-peer', role: 'user', parts: [{ type: 'text', text: 'Give the answer.' }] }] }))
+  h.update(state => ({
+    ...state,
+    messages: [...earlier, { id: 'user-peer', role: 'user', parts: [{ type: 'text', text: 'Give the answer.' }] }]
+  }))
   await h.send('message.start')
   await h.send('message.delta', { text: ANSWER })
   await h.send('message.complete', {
     text: ANSWER,
     persisted_turn: {
-      row_ids: [71, 72], user_row_id: 71, user_row_ids: [71], final_assistant_row_id: 72, complete: true,
+      row_ids: [71, 72],
+      user_row_id: 71,
+      user_row_ids: [71],
+      final_assistant_row_id: 72,
+      complete: true,
       submission_id: 'sent-from-another-window'
     }
   })
