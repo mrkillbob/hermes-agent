@@ -266,6 +266,9 @@ class TestInPlaceAntiGrowthGuard:
             _seed(db, sid, "salvage")
             agent = _make_agent(db, sid, in_place=True)
             agent._last_flushed_db_idx = 5
+            agent._todo_store.write([{
+                "id": "1", "content": "leftover", "status": "pending",
+            }])
 
             tool_calls = [
                 {"id": call_id, "function": {"name": "terminal", "arguments": "{}"}}
@@ -285,11 +288,7 @@ class TestInPlaceAntiGrowthGuard:
                 {"role": "tool", "tool_call_id": "c1", "content": "OLD1 " + ("x" * 8000)},
                 {"role": "tool", "tool_call_id": "c2", "content": "OLD2 " + ("y" * 8000)},
                 {"role": "tool", "tool_call_id": "c3", "content": "keep-me " + ("z" * 100)},
-                {
-                    "role": "user",
-                    "content": "Current todos:\n- [ ] leftover",
-                    "_todo_snapshot_synthetic": True,
-                },
+                {"role": "user", "content": "thanks"},
             ]
             assert estimate_messages_tokens_rough(grown) > estimate_messages_tokens_rough(original)
             compressor = agent.context_compressor

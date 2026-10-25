@@ -23,6 +23,13 @@ from tools.process_registry_notifications import format_process_notification
 from tools.todo_tool import TODO_INJECTION_HEADER
 
 
+@pytest.fixture(autouse=True)
+def _isolated_compression_provider_ports(monkeypatch):
+    """These tests cover state/DB behavior, with provider probing kept inert."""
+    monkeypatch.setattr("agent.context_compressor.get_model_context_length", lambda *args, **kwargs: 256_000)
+    monkeypatch.setattr("agent.conversation_compression.check_compression_model_feasibility", lambda agent: None)
+
+
 def _response(content: str) -> SimpleNamespace:
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
@@ -408,8 +415,8 @@ def test_compress_context_todo_snapshot_stays_synthetic_across_two_boundaries(
     assert first_handoff[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] is False
     assert "First boundary" in first_handoff["content"]
     assert any(
-        message.get("role") == "user"
-        and str(message.get("content") or "").startswith(TODO_INJECTION_HEADER)
+        message.get("role") == "tool"
+        and message.get("tool_name") == "todo_list"
         for message in first
     )
     projected = db.get_messages_as_conversation(session_id)

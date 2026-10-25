@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
+from agent.compression_todo_reference import todo_steer_suffix
 from agent.auxiliary_client import AuxiliaryExplicitCancellation
 from agent.context_compressor_summary import _accepts_keyword_argument
 from agent.context_engine import automatic_compaction_status_message, sanitize_memory_context
@@ -2204,7 +2205,8 @@ def _message_contains_busy_steer(message: Any) -> bool:
     """Return whether *message* carries a busy-steer marker.
     Steer follow-ups are now their own ``role=user`` rows (caught by ``_is_real_user_message``); in
     transcripts persisted before that they ride inside ``role=tool`` results, so those still count."""
-    text = _message_text(message)
+    suffix = todo_steer_suffix(message)
+    text = _message_text(message) if suffix is None else suffix
     if not text:
         return False
     open_marker, close_marker = _steer_markers()
@@ -2213,7 +2215,8 @@ def _message_contains_busy_steer(message: Any) -> bool:
 
 def _extract_steer_text_from_message(message: Any) -> Optional[str]:
     """Extract the inner user text from a steer marker, or None."""
-    text = _message_text(message)
+    suffix = todo_steer_suffix(message)
+    text = _message_text(message) if suffix is None else suffix
     if not text:
         return None
     open_marker, close_marker = _steer_markers()
@@ -3005,77 +3008,11 @@ def _run_summary_dispatch(
 
 
 def _fold_todo_snapshot(agent: Any, compressed: list) -> None:
-    """Strip stale todo snapshots from ``compressed`` and fold the live one in (in place)."""
-    todo_snapshot = agent._todo_store.format_for_injection()
-    # Non-empty store (even all done) is authoritative: drop the old snapshot. A
-    # truly empty store may be un-rehydrated post-compaction: keep the snapshot.
-    _todo_has_items = getattr(agent._todo_store, "has_items", None)
-    # Store may implement only format_for_injection(); unknown authority must
-    # preserve the pending snapshot rather than risk deleting it.
-    _todo_store_is_authoritative = False
-    with contextlib.suppress(Exception):
-        _todo_store_is_authoritative = bool(_todo_has_items()) if callable(_todo_has_items) else False
-    if _todo_store_is_authoritative:
-        for _todo_idx in range(len(compressed) - 1, -1, -1):
-            _todo_message = compressed[_todo_idx]
-            if not isinstance(_todo_message, dict) or _todo_message.get("role") != "user":
-                continue
-            _todo_content = _todo_message.get("content")
-            _todo_stripped = _strip_stale_todo_snapshot(_todo_content)
-            if _todo_stripped == _todo_content:
-                continue
-            if _todo_message.get("_todo_snapshot_synthetic") and _todo_snapshot_is_only_content(
-                _todo_content, _todo_stripped
-            ):
-                compressed.pop(_todo_idx)
-                if _todo_idx < len(compressed):
-                    # A standalone snapshot can drift from the tail; deleting it may expose two
-                    # assistant rows, so use the normal replay repair to keep metadata consistent.
-                    agent._repair_message_sequence(compressed)
-            else:
-                _replace_message_content(_todo_message, _todo_stripped)
-                # No longer todo-only scaffolding; other synthetic flags stay authoritative and
-                # _is_real_user_message() recomputes provenance from content + flags.
-                _todo_message.pop("_todo_snapshot_synthetic", None)
-            break
-    if todo_snapshot:
-        # If this boundary pruned skill bodies, the policy behind the todos is gone:
-        # add a reload notice after TODO_INJECTION_HEADER so both strip together.
-        # Retention parity (#84718): the snapshot below re-injects the imperative verbatim. If this same
-        # boundary pruned skill bodies to [SKILL_PRUNED: ...] markers, the policy that governed those tasks
-        # is gone — couple a reload instruction to the snapshot so the imperative never crosses the boundary
-        # alone.
-        _reload_notice = _pruned_skill_reload_notice(compressed)
-        if _reload_notice:
-            todo_snapshot = f"{todo_snapshot}\n\n{_reload_notice}"
-        # Fold the snapshot into a trailing REAL user msg (no synthetic user/user pair);
-        # strip old snapshots first. Scaffolding tails must not absorb it (provenance).
-        # Any snapshot merged at an earlier boundary is stripped first so repeated compactions refresh
-        # rather than accumulate todo state (#26981). Scaffolding tails (continuation marker, summary
-        # handoff, a bare stale snapshot row) must never absorb the snapshot: merging would upgrade them to
-        # "real user" evidence and break zero-user provenance (#69292), so those keep the flagged standalone
-        # append and the real-user preservation pass continues to see todo scaffolding, not human intent.
-        from agent.context_compressor import _append_text_to_content
-        merged = False
-        _tail = compressed[-1] if compressed and isinstance(compressed[-1], dict) else None
-        if _tail is not None and _tail.get("role") == "user":
-            _stripped = _strip_stale_todo_snapshot(_tail.get("content"))
-            _probe = {key: value for key, value in _tail.items() if key != "content"}
-            _probe["content"] = _stripped
-            if _is_real_user_message(_probe):
-                _snapshot_text = f"\n\n{todo_snapshot}" if isinstance(_stripped, str) and _stripped else todo_snapshot
-                _replace_message_content(_tail, _append_text_to_content(_stripped, _snapshot_text))
-                merged = True
-            elif (
-                _stripped != _tail.get("content") and not _message_text({"role": "user", "content": _stripped}).strip()
-            ):
-                # The tail was nothing but an earlier snapshot row —
-                # refresh it in place instead of stacking a duplicate.
-                _replace_message_content(_tail, todo_snapshot)
-                _tail["_todo_snapshot_synthetic"] = True
-                merged = True
-        if not merged:
-            compressed.append({"role": "user", "content": todo_snapshot, "_todo_snapshot_synthetic": True})
+    """Refresh full todo state as a paired read-only tool result."""
+    from agent.compression_todo_state import fold_todo_state, prepare_todo_state
+
+    snapshot = prepare_todo_state(agent, compressed)
+    fold_todo_state(agent, compressed, snapshot=snapshot, reload_notice=_pruned_skill_reload_notice(compressed))
 
 
 def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
@@ -3578,6 +3515,8 @@ def _commit_compaction(
     new_system_prompt: str, system_message: str, compressed_user_turn_outcome: str,
     messages_before_compression: Optional[list], made_progress: bool, attempt: _Attempt,
     verbatim_tail: Optional[list] = None, carried_messages: Optional[list] = None,
+    todo_snapshot: Optional[dict] = None, candidate_preflighted: bool = False,
+    prepared_tail_ids: Optional[set] = None,
 ) -> _CommitOutcome:
     """Persist the compacted transcript: anti-growth guard, memory extraction, then the
     in-place archive or the parent->child rotation.
@@ -3586,6 +3525,8 @@ def _commit_compaction(
     ``refused_prompt`` so the caller hands back the input unchanged. ``verbatim_tail`` (``/compress here N``) is
     re-inserted after the compacted head by either commit and stamped once durable.
     """
+    from agent.compression_todo_state import TodoStateDeferred, validate_todo_state
+
     session_commit_succeeded = False
     compacted_in_place = False
     commit_started_at = time.monotonic()
@@ -3596,15 +3537,19 @@ def _commit_compaction(
         try:
             # Pop _compaction_tail tags before the size estimate / rotation: they must not
             # inflate anti-growth or reach the provider. Track ids: salvage may subset list.
-            _tail_tagged_ids = {id(m) for m in compressed if isinstance(m, dict) and m.pop("_compaction_tail", None)}
+            _tail_tagged_ids = prepared_tail_ids if prepared_tail_ids is not None else {
+                id(m) for m in compressed if isinstance(m, dict) and m.pop("_compaction_tail", None)
+            }
             original_messages = messages_before_compression if messages_before_compression is not None else messages
-            compressed, _refused_sp = _salvage_or_refuse_grown_transcript(
-                agent, original_messages, compressed, system_message=system_message, attempt=attempt,
-            )
-            if compressed is None:
-                return _CommitOutcome(
-                    compressed=messages, refused_prompt=_refused_sp, commit_started_at=commit_started_at
+            if not candidate_preflighted:
+                compressed, _refused_sp = _salvage_or_refuse_grown_transcript(
+                    agent, original_messages, compressed, system_message=system_message, attempt=attempt,
                 )
+                if compressed is None:
+                    return _CommitOutcome(
+                        compressed=messages, refused_prompt=_refused_sp, commit_started_at=commit_started_at
+                    )
+                validate_todo_state([*compressed, *(verbatim_tail or [])], todo_snapshot)
             # Publish memory only after every refusal gate, from the immutable pre-compression snapshot.
             # The engine's session-end reset nulls the in-flight attempt telemetry the success emit
             # still needs (#118580), so hold it across the call.
@@ -3704,6 +3649,8 @@ def _commit_compaction(
                 agent._last_flushed_db_idx = len(compressed)
                 agent._flushed_db_message_session_id = agent.session_id
             session_commit_succeeded = True
+        except TodoStateDeferred:
+            raise
         except Exception as e:
             # Rotation: atomic publication failed (including lease loss) — keep the parent live and discard the stale
             # compacted snapshot. In-place: archive_and_compact is atomic so old rows stay active, but marker-swept
@@ -3772,20 +3719,28 @@ class _SummaryPhase:
     approx_tokens: Optional[int] = None
     pre_msg_count: int = 0
     abort_prompt: Optional[str] = None
+    todo_snapshot: Optional[dict] = None
 
 
 def _run_summary_phase(
     agent: Any, messages: list, *, lease: _CompressionLease, in_place: bool, checkpoint_required: bool,
     approx_tokens: Optional[int], focus_topic: Optional[str], force: bool, bypass_cooldown: bool,
     commit_fence: Optional[CompressionCommitFence], hard_cancel_event: Any, system_message: str,
-    attempt: _Attempt,
+    attempt: _Attempt, verbatim_tail: Optional[list] = None,
 ) -> _SummaryPhase:
     """Adopt a grown durable parent, gather memory context and run the summarizer.
     A hard cancel restores the compressor snapshot + live list, records a stall backoff while the lease is
     still held, and aborts; any other failure restores the live list, releases the lease and re-raises."""
+    from agent.compression_todo_state import (
+        TodoStateDeferred, defer_todo_compaction as _defer_todo_compaction, prepare_todo_state,
+        todo_tail_owns_state as _todo_tail_owns_state,
+    )
+
     pre_msg_count = len(messages)
     _activity_heartbeat: Optional[_CompressionActivityHeartbeat] = None
     messages_before_compression = None
+    todo_snapshot = None
+    persist_idx_before = getattr(agent, "_persist_user_message_idx", None)
 
     def _stop_heartbeat(desc: str) -> None:
         nonlocal _activity_heartbeat
@@ -3805,6 +3760,8 @@ def _run_summary_phase(
                 # Adopted list is fully durable: re-anchor persist idx at the end so the post-
                 # compression flush skips it; run_agent marker sync realigns _session_messages.
                 agent._persist_user_message_idx = len(messages)
+        todo_snapshot = prepare_todo_state(agent, [*messages, *(verbatim_tail or [])])
+        _todo_tail_owns_state(verbatim_tail, todo_snapshot)
         memory_context = _pre_compress_memory_context(agent, messages, checkpoint_required)
         compress_fn, compress_kwargs = _resolve_compress_call(
             agent, approx_tokens=approx_tokens, focus_topic=focus_topic, force=force, memory_context=memory_context,
@@ -3823,6 +3780,16 @@ def _run_summary_phase(
             agent, messages, compress_fn, compress_kwargs, commit_fence=commit_fence,
             attempt_generation=attempt.generation, hard_cancel_event=hard_cancel_event,
         )
+    except TodoStateDeferred as exc:
+        try:
+            attempt.restore_compressor(agent.context_compressor)
+        finally:
+            agent._persist_user_message_idx = persist_idx_before
+            _restore_messages_snapshot(messages, messages_before_compression)
+            _stop_heartbeat("todo state deferred")
+            lease.release()
+        _defer_todo_compaction(agent, str(exc))
+        return _SummaryPhase(messages=messages, abort_prompt=system_message)
     except AuxiliaryExplicitCancellation:
         try:
             attempt.restore_compressor(agent.context_compressor)
@@ -3868,7 +3835,7 @@ def _run_summary_phase(
         _stop_heartbeat("context compression completed")
     return _SummaryPhase(
         messages=messages, compressed=compressed, messages_before_compression=messages_before_compression,
-        approx_tokens=approx_tokens, pre_msg_count=pre_msg_count,
+        approx_tokens=approx_tokens, pre_msg_count=pre_msg_count, todo_snapshot=todo_snapshot,
     )
 
 
@@ -4021,6 +3988,12 @@ def compress_context(
     overflow_reason: The error classifier's reason for the provider rejection an ``"overflow"`` attempt
     recovers from (``"context_overflow"``, ``"payload_too_large"``, ``"long_context_tier"``). Telemetry only.
     """
+    from agent.compression_todo_state import (
+        preflight_todo_compaction, prepare_compaction_candidate, reconcile_published_todo_state,
+    )
+
+    if not preflight_todo_compaction(agent, messages, verbatim_tail):
+        return messages, system_message
     mark_task_history_unverified(agent)
     attempt = _begin_compression_attempt(
         agent, force=force, defer_notification=defer_context_engine_notification, trigger=trigger,
@@ -4135,6 +4108,7 @@ def compress_context(
         agent, messages, lease=lease, in_place=in_place, checkpoint_required=checkpoint_required,
         approx_tokens=approx_tokens, focus_topic=focus_topic, force=force, bypass_cooldown=bypass_cooldown,
         commit_fence=commit_fence, hard_cancel_event=_hard_cancel_event, system_message=system_message, attempt=attempt,
+        verbatim_tail=verbatim_tail,
     )
     if phase.abort_prompt is not None:
         return phase.messages, phase.abort_prompt
@@ -4175,43 +4149,31 @@ def compress_context(
                 )
                 return messages, _existing_sp
         _warn_summary_or_aux_fallback(agent)
-        # A just-delivered reply the engine folded away must stay live or the
-        # next render drops it from the surface (#118900). It runs FIRST: the
-        # todo fold rewrites the trailing user row, and both later passes place themselves around the tail, so the
-        # reply has to be back in its chronological slot before they look.
-        from agent.conversation_compression_reply_anchor import _ensure_compressed_keeps_last_assistant_reply
-
-        # `/compress here N` hands only the HEAD in as `messages` and carries the kept tail
-        # separately: the head's last assistant is an OLD reply the user explicitly asked to
-        # fold, not the just-delivered one (which lives in the verbatim tail), so the guard
-        # must not undo the compression it was asked for.
-        reinserted_reply = None if verbatim_tail else _ensure_compressed_keeps_last_assistant_reply(
-            messages, compressed, session_id=agent.session_id,
+        candidate = prepare_compaction_candidate(
+            agent, messages, compressed, original=messages_before_compression, snapshot=phase.todo_snapshot,
+            system_message=system_message, attempt=attempt, verbatim_tail=verbatim_tail,
         )
-        if reinserted_reply is not None:
-            logger.info(
-                "Compression: engine folded away the just-delivered assistant reply; reinserted it into the "
-                "active set (session=%s).", agent.session_id or "none",
-            )
-        _fold_todo_snapshot(agent, compressed)
-        compressed_user_turn_outcome = _ensure_compressed_has_user_turn(messages, compressed)
+        if candidate.messages is None:
+            _restore_messages_snapshot(messages, messages_before_compression)
+            return messages, candidate.refused_prompt
+        compressed, reinserted_reply = candidate.messages, candidate.reply
+        compressed_user_turn_outcome = candidate.user_turn_outcome
         new_system_prompt = _rebuild_system_prompt_at_boundary(agent, system_message)
         commit = _commit_compaction(
             agent, messages, compressed, in_place=in_place, lease=lease, new_system_prompt=new_system_prompt,
             system_message=system_message, compressed_user_turn_outcome=compressed_user_turn_outcome,
             messages_before_compression=messages_before_compression, made_progress=_compression_made_progress,
-            attempt=attempt, verbatim_tail=verbatim_tail,
+            attempt=attempt, verbatim_tail=verbatim_tail, todo_snapshot=phase.todo_snapshot, candidate_preflighted=True,
+            prepared_tail_ids=candidate.tail_ids,
             # The reinserted copy keeps the original's _row_id/timestamp (production flush stamps
             # both); carry exactly that one row so the commit rewinds the durable original instead
             # of archiving it compacted=1 next to a fresh twin (display would show it twice). The
             # todo fold / user-anchor rows above keep their own class and are not carried.
             carried_messages=[reinserted_reply] if reinserted_reply is not None else None,
         )
-        if commit.refused_prompt is not None:
-            _restore_messages_snapshot(messages, messages_before_compression)
-            return messages, commit.refused_prompt
         compressed = commit.compressed
         split_status = commit.split_status
+        reconcile_published_todo_state(agent, phase.todo_snapshot, commit)
         _compressed_est = _finish_compaction_boundary(
             agent, compressed, new_system_prompt=new_system_prompt, old_session_id=commit.old_session_id,
             in_place=in_place, compacted_in_place=commit.compacted_in_place,
