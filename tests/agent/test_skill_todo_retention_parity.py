@@ -39,6 +39,16 @@ from hermes_state import SessionDB
 from tools.todo_tool import TODO_INJECTION_HEADER
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolated_compression_provider_ports(monkeypatch):
+    """These tests cover state/DB behavior, with provider probing kept inert."""
+    monkeypatch.setattr("agent.context_compressor.get_model_context_length", lambda *args, **kwargs: 256_000)
+    monkeypatch.setattr("agent.conversation_compression.check_compression_model_feasibility", lambda agent: None)
+
+
 def _build_agent_with_db(db: SessionDB, session_id: str, platform: str = "cli"):
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
         from run_agent import AIAgent
@@ -167,13 +177,13 @@ class TestSkillGuidanceSurvivesWithTodos:
             {"role": "assistant", "content": "acknowledged"},
             {"role": "user", "content": "tail"},
         ]
-        agent._todo_store._items = [
+        agent._todo_store.write([
             {
                 "id": "remove",
                 "content": "Remove the Lightning screen",
                 "status": "pending",
             }
-        ]
+        ])
         compressed, _ = agent._compress_context(
             _msgs(), "sys", approx_tokens=120_000
         )
@@ -186,18 +196,14 @@ class TestSkillGuidanceSurvivesWithTodos:
             + _skill_pruned_marker("hodle-design-system")
         )
         compressed = self._run_compaction(tmp_path, summary)
-        tail_text = str(compressed[-1]["content"])
-        assert TODO_INJECTION_HEADER in tail_text
+        tail_text = str(next(m for m in compressed if m.get("tool_name") == "todo_list")["content"])
+        assert "hermes_compaction_todo_state_v1" in tail_text
         assert "Remove the Lightning screen" in tail_text
         # Parity: the same message that preserved the imperative carries the
         # policy-recovery instruction.
         assert _PRUNED_SKILL_RELOAD_NOTICE_HEADER in tail_text
         assert "skill_view(name='hodle-design-system')" in tail_text
-        # Ordering: header first (the synthetic-row classifier keys on it),
-        # notice after, inside the same strip window.
-        assert tail_text.index(TODO_INJECTION_HEADER) < tail_text.index(
-            _PRUNED_SKILL_RELOAD_NOTICE_HEADER
-        )
+
 
 
     def test_synthetic_row_classification_unbroken(self, tmp_path):
@@ -219,9 +225,9 @@ class TestSkillGuidanceSurvivesWithTodos:
             {"role": "user", "content": summary},
             {"role": "assistant", "content": "acknowledged"},
         ]
-        agent._todo_store._items = [
+        agent._todo_store.write([
             {"id": "t1", "content": "task A", "status": "pending"}
-        ]
+        ])
         compressed, _ = agent._compress_context(
             _msgs(), "sys", approx_tokens=120_000
         )
@@ -230,14 +236,15 @@ class TestSkillGuidanceSurvivesWithTodos:
             m
             for m in compressed
             if isinstance(m, dict)
-            and TODO_INJECTION_HEADER in str(m.get("content") or "")
+            and m.get("role") == "tool"
+            and m.get("tool_name") == "todo_list"
         ]
         assert len(snapshot_rows) == 1
         row = snapshot_rows[0]
         assert _PRUNED_SKILL_RELOAD_NOTICE_HEADER in str(row["content"])
         assert row.get("_todo_snapshot_synthetic") is True
         assert not _is_real_user_message(row)
-        assert ContextCompressor._is_synthetic_compression_user_turn(row)
+        assert row["role"] == "tool"
 
 
 class TestNoticeStripLifecycle:
@@ -301,18 +308,12 @@ class TestNoticeStripLifecycle:
             {"role": "assistant", "content": original[-1]["content"]},
             {"role": "user", "content": stale_tail},
         ]
-        agent._todo_store._items = [
+        agent._todo_store.write([
             {"id": "t1", "content": "fresh task", "status": "pending"}
-        ]
+        ])
         compressed, _ = agent._compress_context(
             original, "sys", approx_tokens=120_000
         )
         db.close()
-        tail_text = str(compressed[-1]["content"])
-        assert tail_text.count(TODO_INJECTION_HEADER) == 1
-        assert tail_text.count(_PRUNED_SKILL_RELOAD_NOTICE_HEADER) == 1
-        assert "stale task" not in tail_text
-        assert "stale-skill" not in tail_text
-        assert "fresh task" in tail_text
-        assert "skill_view(name='hodle-design-system')" in tail_text
-        assert "keep this human text" in tail_text
+        assert compressed == original
+        assert agent._compression_todo_deferred_reason == "ambiguous legacy todo text"

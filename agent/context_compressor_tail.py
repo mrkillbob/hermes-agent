@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent.compression_todo_state import is_todo_state_result
+
 # Demote tool results older than the newest N rounds so the tail budget binds
 # (the tool-group alignment floor otherwise keeps ~32K of tool output alive).
 _LEAN_TAIL_KEEP_TOOL_ROUNDS = 6
@@ -85,7 +87,7 @@ def demote_stale_tail_tools(
     for i in range(tail_start, len(messages)):
         msg = messages[i]
         content = msg.get("content")
-        if msg.get("role") != "tool" or i in protected or not isinstance(content, str):
+        if msg.get("role") != "tool" or i in protected or not isinstance(content, str) or is_todo_state_result(msg):
             continue
         if i == current_assignment_idx:
             if current_assignment_summary is not None:

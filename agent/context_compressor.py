@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from agent.compression_todo_state import is_todo_state_result
 from agent.image_eviction_policy import images_all_within_many_image_limit, latched_retire_count, outbound_image_retire_count, outbound_retired_image_ids
 from agent.compression_marker import (
     ELISION_MARKER_MAX_LEN,
@@ -543,22 +544,6 @@ def _looks_like_compaction_summary(msg: dict[str, Any], content: str) -> bool:
     return bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY)) or "CONTEXT COMPACTION" in head or "Conversation Summary" in head
 
 
-def _salvage_reduce_todo_snapshot(out: list[dict[str, Any]]) -> None:
-    """Last-resort shrink: drop the synthetic todo snapshot, keeping only a pruned-skill reload notice if present."""
-    from agent.conversation_compression import _PRUNED_SKILL_RELOAD_NOTICE_HEADER
-    for i in range(len(out) - 1, -1, -1):
-        msg = out[i]
-        if not isinstance(msg, dict) or not (msg.get("_todo_snapshot_synthetic") and msg.get("role") == "user"):
-            continue
-        content = msg.get("content")
-        notice_idx = content.find(_PRUNED_SKILL_RELOAD_NOTICE_HEADER) if isinstance(content, str) else -1
-        if notice_idx >= 0:
-            msg["content"] = content[notice_idx:]
-        else:
-            del out[i]
-        return
-
-
 def salvage_grown_transcript(
     original: list[dict[str, Any]], candidate: list[dict[str, Any]], budget: Optional[int] = None,
 ) -> Optional[list[dict[str, Any]]]:
@@ -577,7 +562,7 @@ def salvage_grown_transcript(
     for index, msg in enumerate(out):
         if not isinstance(msg, dict):
             continue
-        if msg.get("role") == "tool" and index not in keep_tools:
+        if msg.get("role") == "tool" and index not in keep_tools and not is_todo_state_result(msg):
             content = msg.get("content")
             if isinstance(content, str) and len(content) > _PRUNE_MIN_CHARS:
                 msg["content"] = _PRUNED_TOOL_PLACEHOLDER
@@ -589,8 +574,6 @@ def salvage_grown_transcript(
         ):
             msg["content"] = elide(content, _SALVAGE_SUMMARY_MAX_CHARS) + "\n\n" + _SUMMARY_END_MARKER
     _prune_stale_reasoning_replay(out)
-    if estimate_messages_tokens_rough(out) >= budget:
-        _salvage_reduce_todo_snapshot(out)
     has_user = any(isinstance(message, dict) and message.get("role") == "user" for message in out)
     return out if has_user and estimate_messages_tokens_rough(out) < budget else None
 
@@ -3184,7 +3167,8 @@ class ContextCompressor(
             msg = result[i]
             content = msg.get("content") or ""
             # Non-string/multimodal-envelope shapes can't be hashed by text.
-            if msg.get("role") != "tool" or not isinstance(content, str) or len(content) < _PRUNE_MIN_CHARS:
+            if (msg.get("role") != "tool" or not isinstance(content, str)
+                    or len(content) < _PRUNE_MIN_CHARS or is_todo_state_result(msg)):
                 continue
             h = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
             if h in content_hashes:
@@ -3203,7 +3187,7 @@ class ContextCompressor(
         ``protected_skills`` (lower-cased) spares matching skill_view bodies; pressure demotion still retains the
         current worker assignment while overriding the skill guard."""
         msg = result[idx]
-        if msg.get("role") != "tool":
+        if msg.get("role") != "tool" or is_todo_state_result(msg):
             return False
         content = msg.get("content", "")
         if isinstance(content, list) or (isinstance(content, dict) and content.get("_multimodal")):
