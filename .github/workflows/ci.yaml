@@ -49,8 +49,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/delivery-evidence"
           # The supported local driver unsets signing/notary credentials and disables
           # outer identity discovery. Its nested signer may recheck the empty hosted
-          # keychain. Explicit ad-hoc signing creates no certificate or credential.
-          bash scripts/build-bundle.sh --variant bundled -- -c.mac.identity=- --publish never \
+          # keychain. Keep the accepted custom signer and default supported policy;
+          # strict validation below determines whether a signed candidate exists.
+          bash scripts/build-bundle.sh --variant bundled -- --publish never \
             2>&1 | tee "$RUNNER_TEMP/delivery-evidence/build.log"
 
       - name: Verify the packaged app and record immutable delivery identity
@@ -149,5 +150,41 @@ jobs:
         with:
           name: mac-candidate-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/delivery-evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Record unverified package identity after a failure
+        if: ${{ failure() && !cancelled() }}
+        shell: bash
+        run: |
+          python3 -I -S -B - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          rows = []
+          for path in sorted(Path('apps/desktop/release').glob('*.zip')):
+              with path.open('rb') as stream:
+                  sha = hashlib.file_digest(stream, 'sha256').hexdigest()
+              rows.append({'path': str(path), 'bytes': path.stat().st_size, 'sha256': sha})
+          output = Path(os.environ['RUNNER_TEMP']) / 'unverified-artifact-receipt.json'
+          signatures = []
+          for app in Path('apps/desktop/release').glob('mac-arm64/*.app'):
+              for arguments in (['--verify', '--deep', '--strict', '--verbose=2'], ['-d', '--verbose=4']):
+                  result = subprocess.run(['codesign', *arguments, str(app)], capture_output=True, text=True, check=False)
+                  signatures.append({'app': str(app), 'arguments': arguments, 'exit_code': result.returncode,
+                                     'stdout': result.stdout, 'stderr': result.stderr})
+          output.write_text(json.dumps({'source_commit': os.environ['TARGET_COMMIT'],
+              'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'verified': False, 'installation_authorized': False, 'files': rows,
+              'signature_diagnostics': signatures}, indent=2) + '\n')
+          PY
+
+      - name: Quarantine unverified archive after a failure
+        if: ${{ failure() && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: UNVERIFIED-mac-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/desktop/release/*.zip
+            ${{ runner.temp }}/unverified-artifact-receipt.json
           if-no-files-found: warn
           retention-days: 14
