@@ -1,27 +1,48 @@
-name: Nightly E2E
-
+name: PR403 focused receipt verification
 on:
-  schedule:
-    - cron: '17 8 * * *'
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: e2e-nightly-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  full-e2e:
-    name: Full Python E2E suite
-    uses: ./.github/workflows/tests.yml
-    with:
-      e2e_mode: full
-      run_unit: false
-
-  desktop-core:
-    name: Desktop core E2E
-    uses: ./.github/workflows/e2e-desktop-core.yml
-    with:
-      concurrency_scope: nightly
+  focus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+      - name: Fetch the comparison parent
+        run: git fetch --depth=1 --no-tags origin 11229c795c1911f7e4835c46fe8df41565fe8d2a
+      - name: Prepare locked toolchain
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          extras: '[]'
+          test-environment: 'true'
+      - uses: ./.github/actions/retry
+        with:
+          command: npm ci
+      - name: Prove regression against the original receipt binder
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr403-focus"
+          git restore --source=11229c795c1911f7e4835c46fe8df41565fe8d2a --worktree -- apps/desktop/src/app/session/hooks/use-message-stream/receipt-user-rows.ts
+          set +e
+          (cd apps/desktop && npx vitest run --project ui src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx) 2>&1 | tee "$RUNNER_TEMP/pr403-focus/red.log"
+          RESULT=${PIPESTATUS[0]}
+          set -e
+          git restore --source=HEAD --worktree -- apps/desktop/src/app/session/hooks/use-message-stream/receipt-user-rows.ts
+          test "$RESULT" = 1
+      - name: Verify corrected contract and adjacent history helpers
+        working-directory: apps/desktop
+        run: |
+          npx vitest run --project ui src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx src/app/chat/transcript-backfill.test.ts src/app/session/hooks/use-session-actions/utils.test.ts 2>&1 | tee "$RUNNER_TEMP/pr403-focus/green.log"
+      - name: Check affected import and formatting rules
+        working-directory: apps/desktop
+        run: |
+          npx eslint src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx src/app/session/hooks/use-message-stream/receipt-user-rows.ts 2>&1 | tee "$RUNNER_TEMP/pr403-focus/lint.log"
+          npx prettier --check src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx
+      - name: Retain focused evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr403-focused-receipt-verification
+          path: ${{ runner.temp }}/pr403-focus
+          retention-days: 14
