@@ -3560,10 +3560,8 @@ def _commit_compaction(
             if in_place:
                 # In-place compaction: same session_id; soft-archive old turns (active=0, still
                 # searchable) + insert `compressed` atomically; no pre-flush (tail already in).
-                # Tail rows tagged by compress() are archived as superseded duplicates, not
-                # compacted=1. Count against the FINAL list — salvage may have dropped rows.
-                # Refreshing a protected todo exchange retires original rows. They
-                # still occupy slots in the original suffix being superseded.
+                # Include retired carrier originals in the superseded suffix width;
+                # count surviving tags after salvage may have dropped candidate rows.
                 tail_count = sum(1 for m in compressed if id(m) in _tail_tagged_ids) + prepared_retired_tail_rows
                 _tail_held = messages[max(0, len(messages) - tail_count):]
                 # The rewind takes the newest `tail_count` durable rows as the tail's originals, so a tail row
