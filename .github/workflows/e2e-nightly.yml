@@ -3,6 +3,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
 jobs:
   focus:
     runs-on: ubuntu-24.04
@@ -33,12 +36,12 @@ jobs:
       - name: Verify corrected contract and adjacent history helpers
         working-directory: apps/desktop
         run: |
-          npx vitest run --project ui src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx src/app/chat/transcript-backfill.test.ts src/app/session/hooks/use-session-actions/utils.test.ts 2>&1 | tee "$RUNNER_TEMP/pr403-focus/green.log"
+          npx vitest run --project ui src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx src/app/chat/transcript-backfill.test.ts src/app/chat/transcript-fold-identity.test.ts src/app/chat/transcript-backfill.tool-fold-graft.test.ts src/app/session/hooks/use-session-actions/utils.test.ts 2>&1 | tee "$RUNNER_TEMP/pr403-focus/green.log"
       - name: Check affected import and formatting rules
         working-directory: apps/desktop
         run: |
-          npx eslint src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx src/app/session/hooks/use-message-stream/receipt-user-rows.ts 2>&1 | tee "$RUNNER_TEMP/pr403-focus/lint.log"
-          npx prettier --check src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx
+          npx eslint --max-warnings=0 src/app/chat/transcript-backfill.ts src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx src/app/session/hooks/use-message-stream/receipt-user-rows.ts 2>&1 | tee "$RUNNER_TEMP/pr403-focus/lint.log"
+          npx prettier --check src/app/chat/transcript-backfill.ts src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx src/app/session/hooks/use-message-stream/receipt-user-rows.ts
       - name: Retain focused evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
