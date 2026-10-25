@@ -373,6 +373,29 @@ test('an acknowledged redirect prompt renders once after in-place compaction ins
     ).toBe(false)
   } finally {
     if (test.info().status !== test.info().expectedStatus) {
+      const diagnosticDb = new DatabaseSync(path.join(sandbox.hermesHome, 'state.db'), { readOnly: true })
+      try {
+        await test.info().attach('compaction-user-rows', {
+          contentType: 'application/json',
+          body: JSON.stringify(
+            diagnosticDb
+              .prepare(
+                "SELECT id,role,active,compacted,display_order,message_uid,timestamp,content FROM messages WHERE role = 'user' AND content LIKE ?"
+              )
+              .all(`%${U(4)}%`)
+          )
+        })
+        const lines = fs.readFileSync(path.join(sandbox.hermesHome, 'logs', 'agent.log'), 'utf8').split('\n')
+        await test
+          .info()
+          .attach('tail-accounting', {
+            contentType: 'text/plain',
+            body: lines.filter(l => l.includes('TASK26')).join('\n')
+          })
+      } finally {
+        diagnosticDb.close()
+      }
+
       await test
         .info()
         .attach('reconcile-diagnostics', { contentType: 'application/json', body: JSON.stringify(diagnostic) })
