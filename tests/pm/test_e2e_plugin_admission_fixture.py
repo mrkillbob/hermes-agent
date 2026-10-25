@@ -112,7 +112,8 @@ def test_python_member_still_reaches_build_boundary(e2e_home, monkeypatch):
     member.mkdir()
     (member / "plugin.yaml").write_text("name: python-member\n", encoding="utf-8")
     (member / "pyproject.toml").write_text(
-        '[project]\nname = "python-member"\nversion = "1.0.0"\n', encoding="utf-8")
+        '[project]\nname = "python-member"\nversion = "1.0.0"\n'
+        'dependencies = ["packaging==26.3"]\n', encoding="utf-8")
 
     class RebuildAttempted(RuntimeError):
         pass
