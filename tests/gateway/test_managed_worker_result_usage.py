@@ -3,6 +3,8 @@ accounting fields of ``run_conversation`` and the owner commits them with ``usag
 ``-z --usage-file`` on a managed session reports tokens, cost, model and exit reason."""
 import io
 
+import pytest
+
 from agent.managed_worker import accept_result, encode_frame, read_frame, result_frame
 from hermes_cli.oneshot import _USAGE_KEYS
 
@@ -158,3 +160,58 @@ def test_worker_result_frame_carries_the_usage_window_refusal():
     surface = build_error_surface_from_result(result, 'nous', 'm')
     assert surface['code'] == 'usage_window' and surface['message'] == message
     assert surface['resets_at'] == 1_900_000_000.0
+
+
+def _usage_limit_payload():
+    from agent.plan_limits import CreditsOption, LimitHit, ModelSuggestion
+    return LimitHit(gauge_id='top_tier', scope='top_tier', limit_name='monthly large-model',
+                    resets_at_ms=1_900_000_000_000, message='Top-tier limit reached', current_model='large/model',
+                    suggestions=(ModelSuggestion(model='small/model', label='Small model', note='included'),
+                                 ModelSuggestion(model='any/model:free', label='Free model', note='free')),
+                    credits=CreditsOption('add_credits')).to_payload()
+
+
+def test_worker_limit_recovery_round_trip_reaches_the_error_surface():
+    from agent.error_surface import build_error_surface_from_result
+    limit = _usage_limit_payload()
+    raw = {'final_response': '', 'failed': True, 'failure_reason': 'billing',
+           'usage_window_message': limit['message'], 'usage_limit': limit}
+    wire = read_frame(io.BytesIO(encode_frame({'type': 'result', 'result': result_frame(raw)})))
+    accepted, _usage = accept_result(wire['result'])
+    assert accepted['usage_limit'] == limit
+    assert build_error_surface_from_result(accepted, 'nous', 'large/model')['usage_limit'] == limit
+
+
+def test_worker_limit_recovery_projects_only_bounded_known_fields():
+    limit = _usage_limit_payload()
+    limit.update(message='x' * 5000, internal={'secret': 'do not transmit'})
+    limit['suggestions'][0].update(label='y' * 5000, internal='do not transmit')
+    limit['credits']['internal'] = 'do not transmit'
+    frame = result_frame({'final_response': '', 'usage_limit': limit})
+    accepted, _usage = accept_result(frame)
+    bounded = accepted['usage_limit']
+    assert bounded['message'] == 'x' * 4096
+    assert bounded['suggestions'][0]['label'] == 'y' * 4096
+    assert 'internal' not in bounded and 'internal' not in bounded['suggestions'][0]
+    assert bounded['credits'] == {'action': 'add_credits'}
+    assert limit['message'] == 'x' * 5000 and 'internal' in limit['credits']
+
+
+@pytest.mark.parametrize('patch', [
+    {'internal': 'unknown'}, {'message': {'nested': 'no'}}, {'message': 'x' * 4097},
+    {'resets_at_ms': True}, {'resets_at_ms': 1.5}, {'resets_at_ms': -1}, {'resets_at_ms': 2**64},
+    {'suggestions': 'not a list'}, {'suggestions': [None]},
+    {'suggestions': [{'model': 'm', 'label': 'M', 'note': 'free', 'internal': 'unknown'}]},
+    {'suggestions': [{'model': ['nested'], 'label': 'M', 'note': 'free'}]},
+    {'suggestions': [{'model': 'm', 'label': 'M', 'note': 'free'}] * 3},
+    {'credits': []}, {'credits': {'action': ['nested']}}, {'credits': {'action': 'add_credits', 'extra': True}},
+])
+def test_worker_owner_rejects_unbounded_or_unknown_usage_limit_data(patch):
+    with pytest.raises(ValueError, match='invalid_worker_result'):
+        accept_result({'final_response': '', 'usage_limit': {**_usage_limit_payload(), **patch}})
+
+
+def test_worker_result_with_no_usage_limit_remains_accepted():
+    accepted, _usage = accept_result({'final_response': '', 'usage_limit': None})
+    assert 'usage_limit' not in accepted
+    assert 'usage_limit' not in result_frame({'final_response': '', 'usage_limit': {'message': 'incomplete'}})

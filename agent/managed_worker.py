@@ -33,30 +33,79 @@ RESULT_FIELDS = ('final_response', 'failed', 'interrupted', 'completed', 'partia
                  'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens',
                  'estimated_cost_usd', 'cost_status', 'cost_source', 'service_tier', 'failure_reason',
                  'session_id', 'requested_model', 'served_model', '_turn_input_tokens', '_turn_output_tokens',
-                 'failure_retryable', 'failure_resets_at', 'billing_block', 'free_tier', 'usage_window_message')
+                 'failure_retryable', 'failure_resets_at', 'billing_block', 'free_tier', 'usage_window_message', 'usage_limit')
 # The structured fields and their allowed keys: ``billing_block`` (``agent/billing_links.BillingBlock``
 # plus ``unverified``) and ``free_tier`` (``agent/turn_recovery._stamp_free_tier``). With
 # ``failure_reason``, ``failure_retryable`` and ``failure_resets_at`` they are what
 # ``agent.error_surface.build_error_surface_from_result`` reads for the owner's error card.
 BILLING_FIELDS = ('provider', 'provider_label', 'model', 'billing_url', 'is_nous', 'message', 'unverified')
-STRUCTURED_FIELDS = {'billing_block': BILLING_FIELDS, 'free_tier': ('kind', 'message')}
+USAGE_LIMIT_TEXT = ('gauge_id', 'scope', 'limit_name', 'message', 'current_model')
+USAGE_LIMIT_FIELDS = (*USAGE_LIMIT_TEXT, 'resets_at_ms', 'suggestions', 'credits')
+SUGGESTION_FIELDS = ('model', 'label', 'note', 'provider')
+STRUCTURED_FIELDS = {'billing_block': BILLING_FIELDS, 'free_tier': ('kind', 'message'),
+                     'usage_limit': USAGE_LIMIT_FIELDS}
 
 
 def _scalar(value):
     return value is None or type(value) in (bool, int, float) or (isinstance(value, str) and len(value) <= 4096)
 
 
+def _text_fields(value, allowed, required):
+    return (isinstance(value, dict) and set(required) <= set(value) <= set(allowed)
+            and all(isinstance(v, str) and len(v) <= 4096 for v in value.values()))
+
+
+def _usage_limit(value):
+    # The existing LimitHit wire shape, not an arbitrary nested worker object. Keep the
+    # plan's at-most-two suggestions and the same per-string bound as other result fields.
+    if not isinstance(value, dict) or set(value) - set(USAGE_LIMIT_FIELDS):
+        return False
+    text = {k: v for k, v in value.items() if k in USAGE_LIMIT_TEXT}
+    if not _text_fields(text, USAGE_LIMIT_TEXT, ('gauge_id', 'scope', 'limit_name', 'message')):
+        return False
+    reset = value.get('resets_at_ms')
+    if reset is not None and (type(reset) is not int or not 0 <= reset <= 2**63 - 1):
+        return False
+    suggestions = value.get('suggestions', [])
+    if not isinstance(suggestions, list) or len(suggestions) > 2 or any(
+            not _text_fields(s, SUGGESTION_FIELDS, ('model', 'label', 'note')) for s in suggestions):
+        return False
+    credits = value.get('credits')
+    return credits is None or _text_fields(credits, ('action',), ('action',))
+
+
+def _usage_limit_frame(value):
+    if not isinstance(value, dict):
+        return None
+    def project(row, fields):
+        return {k: v[:4096] if isinstance(v, str) else v for k, v in row.items() if k in fields}
+    frame = project(value, USAGE_LIMIT_FIELDS)
+    if isinstance(suggestions := frame.get('suggestions'), list):
+        if len(suggestions) > 2 or any(not isinstance(s, dict) for s in suggestions):
+            return None
+        frame['suggestions'] = [project(s, SUGGESTION_FIELDS) for s in suggestions]
+    if isinstance(credits := frame.get('credits'), dict):
+        frame['credits'] = project(credits, ('action',))
+    return frame if _usage_limit(frame) else None
+
+
 def _structured(key, value):
+    if key == 'usage_limit':
+        return _usage_limit(value)
     return isinstance(value, dict) and not set(value) - set(STRUCTURED_FIELDS[key]) and all(map(_scalar, value.values()))
 
 
 def result_frame(result):
-    """Worker side: the receipt fields of ``run_conversation``'s result, scalars only, text bounded."""
+    """Worker side: the receipt fields of ``run_conversation``'s result, with bounded structured failures."""
     from agent.managed_request_budget import stamp_request_budget_result
     result = stamp_request_budget_result(result)
     frame = {k: (v[:4096] if isinstance(v, str) and k != 'final_response' else v) for k, v in result.items()
              if k in RESULT_FIELDS and k not in STRUCTURED_FIELDS and (v is None or type(v) in (bool, int, float, str))}
     for key, fields in STRUCTURED_FIELDS.items():
+        if key == 'usage_limit':
+            if (block := _usage_limit_frame(result.get(key))) is not None:
+                frame[key] = block
+            continue
         if isinstance(block := result.get(key), dict):
             frame[key] = {k: v[:4096] if isinstance(v, str) else v for k, v in block.items()
                           if k in fields and (v is None or type(v) in (bool, int, float, str))}
