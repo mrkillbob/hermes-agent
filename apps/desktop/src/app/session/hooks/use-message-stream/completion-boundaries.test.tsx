@@ -19,6 +19,7 @@ import { reconcileDurableHistory } from '../use-session-actions/utils'
 import { useSessionStateCache } from '../use-session-state-cache'
 
 import { useMessageStream } from './index'
+import { bindReceiptUserRows } from './receipt-user-rows'
 
 const SID = 'completion-runtime'
 const STORED = 'completion-stored'
@@ -195,7 +196,11 @@ it('binds the sent prompt to the receipt row named by its submission', async () 
   await h.send('message.complete', {
     text: ANSWER,
     persisted_turn: {
-      row_ids: [71, 72], user_row_id: 71, user_row_ids: [71], final_assistant_row_id: 72, complete: true,
+      row_ids: [71, 72],
+      user_row_id: 71,
+      user_row_ids: [71],
+      final_assistant_row_id: 72,
+      complete: true,
       submission_id: submissionIdOf(h)
     }
   })
@@ -223,12 +228,78 @@ it('binds the prompt and the steer of a turn whose receipt is not complete', asy
   await h.send('message.complete', {
     text: 'Revised.',
     persisted_turn: {
-      row_ids: [71, 72, 73, 74], user_row_id: 71, user_row_ids: [71, 73], final_assistant_row_id: 74,
-      complete: false, submission_id: submissionIdOf(h)
+      row_ids: [71, 72, 73, 74],
+      user_row_id: 71,
+      user_row_ids: [71, 73],
+      final_assistant_row_id: 74,
+      complete: false,
+      submission_id: submissionIdOf(h)
     }
   })
 
-  expect(h.state().messages.filter(m => m.role === 'user').map(m => m.rowId)).toEqual([71, 73])
+  expect(
+    h
+      .state()
+      .messages.filter(m => m.role === 'user')
+      .map(m => m.rowId)
+  ).toEqual([71, 73])
+  h.dispose()
+})
+
+it.each(['Revise the answer.', 'Give the answer.'])(
+  'does not bind a compacted suffix receipt onto the initial prompt (%s)',
+  redirectText => {
+    const messages: ChatMessage[] = [
+      { id: 'user-original', role: 'user', parts: [{ type: 'text', text: 'Give the answer.' }] },
+      { id: 'user-redirect', role: 'user', parts: [{ type: 'text', text: redirectText }] }
+    ]
+    const partial = {
+      row_ids: [73, 74],
+      user_row_id: 73,
+      user_row_ids: [73],
+      complete: false,
+      submission_id: 'original'
+    }
+    expect(bindReceiptUserRows(messages, partial)).toBe(messages)
+    const missingBubble = { ...partial, row_ids: [71, 73, 74], user_row_id: 71, user_row_ids: [71, 73] }
+    expect(bindReceiptUserRows(messages.slice(0, 1), missingBubble)[0].rowId).toBeUndefined()
+  }
+)
+
+it('reconciles the redirect once after compaction receipts only its surviving suffix', async () => {
+  const h = mount()
+  await h.submit()
+  await h.send('message.start')
+  await h.send('message.delta', { text: 'Partial' })
+  await flush()
+  await h.redirect()
+  await h.send('message.delta', { text: ' then revised.' })
+  await h.send('message.complete', {
+    text: 'Revised.',
+    persisted_turn: {
+      row_ids: [73, 74],
+      user_row_id: 73,
+      user_row_ids: [73],
+      final_assistant_row_id: 74,
+      complete: false,
+      submission_id: submissionIdOf(h)
+    }
+  })
+  expect(
+    h
+      .state()
+      .messages.filter(m => m.role === 'user')
+      .map(m => m.rowId)
+  ).toEqual([undefined, undefined])
+  const page = toChatMessages([
+    { id: 71, role: 'user', content: 'Give the answer.' },
+    { id: 72, role: 'assistant', content: 'Partial' },
+    { id: 73, role: 'user', content: 'Revise the answer.' },
+    { id: 74, role: 'assistant', content: 'Revised.' }
+  ])
+  const users = graftRefreshedTailOntoBackfill(page, h.state().messages).filter(m => m.role === 'user')
+  expect(users.map(chatMessageText)).toEqual(['Give the answer.', 'Revise the answer.'])
+  expect(users.map(m => m.rowId)).toEqual([71, 73])
   h.dispose()
 })
 
@@ -240,13 +311,20 @@ it('binds a viewer that never sent the turn only when it shows exactly the recei
     { id: 61, role: 'assistant', content: 'Before.' }
   ])
 
-  h.update(state => ({ ...state, messages: [...earlier, { id: 'user-peer', role: 'user', parts: [{ type: 'text', text: 'Give the answer.' }] }] }))
+  h.update(state => ({
+    ...state,
+    messages: [...earlier, { id: 'user-peer', role: 'user', parts: [{ type: 'text', text: 'Give the answer.' }] }]
+  }))
   await h.send('message.start')
   await h.send('message.delta', { text: ANSWER })
   await h.send('message.complete', {
     text: ANSWER,
     persisted_turn: {
-      row_ids: [71, 72], user_row_id: 71, user_row_ids: [71], final_assistant_row_id: 72, complete: true,
+      row_ids: [71, 72],
+      user_row_id: 71,
+      user_row_ids: [71],
+      final_assistant_row_id: 72,
+      complete: true,
       submission_id: 'sent-from-another-window'
     }
   })
