@@ -31,7 +31,7 @@ def homes(tmp_path, monkeypatch):
 
 
 def snapshot(home):
-    return {str(p.relative_to(home)): (p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns)
+    return {p.relative_to(home).as_posix(): (p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns)
             for p in home.rglob('*') if p.is_file()}
 
 
