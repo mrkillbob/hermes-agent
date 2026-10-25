@@ -298,18 +298,22 @@ interface StoredRowSlot {
 function leadingRowsForRefreshedTurn(
   leading: ChatMessage[],
   previous: ChatMessage,
-  refreshedBySource: Map<number, ChatMessage>
+  refreshedBySource: Map<number, ChatMessage>,
+  fresh: boolean
 ): ChatMessage[] {
   const receipt = previous.persistedTurn
   const userIds = receipt?.user_row_ids
 
   if (
+    fresh ||
+    previous.role !== 'assistant' ||
     previous.pending ||
     previous.interim ||
     receipt?.complete !== false ||
     !Array.isArray(userIds) ||
     userIds.length === 0 ||
     new Set(userIds).size !== userIds.length ||
+    !transcriptRowIds(previous).some(id => refreshedBySource.get(id)?.role === 'assistant') ||
     !userIds.every(id => Number.isSafeInteger(id) && id > 0 && refreshedBySource.get(id)?.role === 'user')
   ) {
     return leading
@@ -388,10 +392,9 @@ function mergeOverlappingTail(previous: ChatMessage[], refreshedTail: ChatMessag
 
       // The fresh page replaces the row; keep the window's leading rows when
       // the page brought none of its own for it.
-      const leading =
-        fresh && existing && pending.length === 0
-          ? leadingRowsForRefreshedTurn(existing.leading, existing.message, refreshedBySource)
-          : pending
+      const ownLeading = leadingRowsForRefreshedTurn(pending, message, refreshedBySource, fresh)
+
+      const leading = fresh && existing && ownLeading.length === 0 ? existing.leading : ownLeading
       byRowId.set(rowId, { message, leading })
       pending = []
     }

@@ -271,9 +271,11 @@ it.each(['Revise the answer.', 'Give the answer.'])(
   }
 )
 
-it.each([true, false])(
-  'reconciles the redirect once after compaction receipts only its surviving suffix (shared prefix=%s)',
-  async sharedPrefix => {
+it.each(['shared-prefix', 'unanchored', 'expanded-prefix-fold', 'unanchored-fold'] as const)(
+  'reconciles the redirect once after compaction receipts only its surviving suffix (%s)',
+  async shape => {
+    const sharedPrefix = shape === 'shared-prefix' || shape === 'expanded-prefix-fold'
+    const folded = shape.endsWith('-fold')
     const h = mount()
 
     const prefix = sharedPrefix
@@ -297,10 +299,10 @@ it.each([true, false])(
     await h.send('message.complete', {
       text: 'Revised.',
       persisted_turn: {
-        row_ids: [73, 74],
+        row_ids: folded ? [73, 74, 75, 76] : [73, 74],
         user_row_id: 73,
         user_row_ids: [73],
-        final_assistant_row_id: 74,
+        final_assistant_row_id: folded ? 76 : 74,
         complete: false,
         submission_id: submitted.id.replace(/^user-/, '')
       }
@@ -314,28 +316,60 @@ it.each([true, false])(
         .map(m => m.rowId)
     ).toEqual([...prefixUsers.map(m => m.id), undefined, undefined])
 
+    const expanded =
+      shape === 'expanded-prefix-fold'
+        ? [
+            { id: 58, role: 'user' as const, content: 'Newly fetched earlier question.' },
+            { id: 59, role: 'assistant' as const, content: 'Newly fetched earlier reply.' }
+          ]
+        : []
+
+    const replies = folded
+      ? [
+          {
+            id: 74,
+            role: 'assistant' as const,
+            content: '',
+            tool_calls: [
+              { id: 'turn-call', type: 'function' as const, function: { name: 'terminal', arguments: '{}' } }
+            ]
+          },
+          { id: 75, role: 'tool' as const, tool_call_id: 'turn-call', tool_name: 'terminal', content: 'ok' },
+          { id: 76, role: 'assistant' as const, content: 'Revised.' }
+        ]
+      : [{ id: 74, role: 'assistant' as const, content: 'Revised.' }]
+
     const page = toChatMessages([
+      ...expanded,
       ...prefix,
       { id: 71, role: 'user', content: 'Give the answer.' },
       { id: 72, role: 'assistant', content: 'Partial' },
       { id: 73, role: 'user', content: 'Revise the answer.' },
-      { id: 74, role: 'assistant', content: 'Revised.' }
+      ...replies
     ])
 
+    const storedUsers = [...expanded.filter(m => m.role === 'user'), ...prefixUsers]
     const previous = h.state().messages
     const grafted = graftRefreshedTailOntoBackfill(page, previous)
     // Warm resume grafts any older pages, then reconciles durable history
     // with pending local turns. Grafting alone is not the display contract.
-    const users = reconcileDurableHistory(grafted, previous).filter(m => m.role === 'user')
+    const refreshedHistory = reconcileDurableHistory(grafted, previous)
+    const users = refreshedHistory.filter(m => m.role === 'user')
+
+    if (folded) {
+      expect(
+        refreshedHistory.some(m => m.parts.some(p => p.type === 'tool-call' && p.toolCallId === 'turn-call'))
+      ).toBe(true)
+    }
 
     expect(users.map(chatMessageText)).toEqual([
-      ...prefixUsers.map(m => m.content),
+      ...storedUsers.map(m => m.content),
       'Give the answer.',
       'Revise the answer.'
     ])
-    expect(users.map(m => m.rowId)).toEqual([...prefixUsers.map(m => m.id), 71, 73])
+    expect(users.map(m => m.rowId)).toEqual([...storedUsers.map(m => m.id), 71, 73])
 
-    if (!sharedPrefix) {
+    if (shape === 'unanchored' || shape === 'expanded-prefix-fold') {
       // The overlapping-tail path must keep a new occurrence after the
       // partially receipted reply, even when it repeats either prompt.
       for (const text of ['Give the answer.', 'Revise the answer.']) {
@@ -349,7 +383,12 @@ it.each([true, false])(
         const refreshed = reconcileDurableHistory(graftRefreshedTailOntoBackfill(page, withNext), withNext)
         const nextUsers = refreshed.filter(m => m.role === 'user')
 
-        expect(nextUsers.map(chatMessageText)).toEqual(['Give the answer.', 'Revise the answer.', text])
+        expect(nextUsers.map(chatMessageText)).toEqual([
+          ...storedUsers.map(m => m.content),
+          'Give the answer.',
+          'Revise the answer.',
+          text
+        ])
         expect(nextUsers.at(-1)?.id).toBe(nextPrompt.id)
         expect(nextUsers.at(-1)?.rowId).toBeUndefined()
       }
