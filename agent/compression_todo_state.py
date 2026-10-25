@@ -179,14 +179,15 @@ def prepare_todo_state(agent: Any, messages: list) -> dict | None:
     return snapshot
 
 
-def fold_todo_state(agent: Any, messages: list, *, snapshot: dict | None, reload_notice: str = "") -> None:
-    """Refresh exactly one complete read exchange, retaining unrelated messages."""
+def fold_todo_state(agent: Any, messages: list, *, snapshot: dict | None, reload_notice: str = "") -> int:
+    """Refresh one read exchange; return the original protected rows it retired."""
     from agent.message_sanitization import coalesce_tool_call_id
 
     _legacy_suffixes(agent, messages, snapshot)
     payload = _payload(snapshot, reload_notice) if snapshot is not None else None
     if payload is None and not any(is_todo_state_result(message) for message in messages):
-        return
+        return 0
+    retired_tail_rows = 0
     removed_ids = set()
     out = []
     for index, message in enumerate(messages):
@@ -194,6 +195,7 @@ def fold_todo_state(agent: Any, messages: list, *, snapshot: dict | None, reload
             if not _paired_todo_result(messages, index):
                 raise TodoStateDeferred("unpaired derived todo result")
             removed_ids.add(message["tool_call_id"])
+            retired_tail_rows += bool(message.get("_compaction_tail"))
             continue
         if isinstance(message, dict) and message.get("role") == "user" and message.get("_todo_snapshot_synthetic") is True:
             # Preflight proved every text part to be the exact old standalone
@@ -201,6 +203,7 @@ def fold_todo_state(agent: Any, messages: list, *, snapshot: dict | None, reload
             content = message.get("content")
             if not isinstance(content, str):
                 raise TodoStateDeferred("mixed legacy todo carrier")
+            retired_tail_rows += bool(message.get("_compaction_tail"))
             continue
         out.append(copy.deepcopy(message))
     for message in out[:]:
@@ -212,6 +215,7 @@ def fold_todo_state(agent: Any, messages: list, *, snapshot: dict | None, reload
                 message.pop("tool_calls", None)
                 from agent.agent_runtime_helpers import _msg_has_payload
                 if not _msg_has_payload(message):
+                    retired_tail_rows += bool(message.get("_compaction_tail"))
                     out.remove(message)
     if payload is not None:
         call_id = "todo_compaction_" + uuid.uuid4().hex
@@ -236,6 +240,7 @@ def fold_todo_state(agent: Any, messages: list, *, snapshot: dict | None, reload
     agent._repair_message_sequence(out)
     validate_todo_state(out, snapshot)
     messages[:] = out
+    return retired_tail_rows
 
 
 def reconcile_todo_store(agent: Any, snapshot: dict | None) -> None:
@@ -292,6 +297,7 @@ class TodoCompactionCandidate:
     reply: dict | None = None
     tail_ids: set | None = None
     refused_prompt: str | None = None
+    retired_tail_rows: int = 0
 
 
 def prepare_compaction_candidate(
@@ -314,7 +320,8 @@ def prepare_compaction_candidate(
         reload_notice = _pruned_skill_reload_notice(compressed)
         if tail_owns_todo and reload_notice:
             raise TodoStateDeferred("new skill reload guidance cannot alter the preserved todo tail")
-        fold_todo_state(agent, compressed, snapshot=None if tail_owns_todo else snapshot, reload_notice=reload_notice)
+        retired_tail_rows = fold_todo_state(
+            agent, compressed, snapshot=None if tail_owns_todo else snapshot, reload_notice=reload_notice)
         outcome = _ensure_compressed_has_user_turn(messages, compressed)
         # Match the commit site's original ordering: internal tail tags are
         # bookkeeping, not wire tokens. Retain their identity set for archive.
@@ -327,7 +334,7 @@ def prepare_compaction_candidate(
             if compressed is None:
                 return TodoCompactionCandidate(None, refused_prompt=refused)
         validate_todo_state([*compressed, *(verbatim_tail or [])], snapshot)
-        return TodoCompactionCandidate(compressed, outcome, reply, tail_ids)
+        return TodoCompactionCandidate(compressed, outcome, reply, tail_ids, retired_tail_rows=retired_tail_rows)
     except TodoStateDeferred as exc:
         attempt.restore_compressor(agent.context_compressor)
         defer_todo_compaction(agent, str(exc))
