@@ -315,19 +315,18 @@ test('an acknowledged redirect prompt renders once after in-place compaction ins
     // have reconciled the stored history (timing-dependent), so it is part of
     // the symptom window rather than an ordinary expect.
     const live = dupShape((await renderedTranscript(page)).bubbles)
-    expect(live.userCopies, 'live view preserves the redirect').toBe(1)
 
     // ── Refresh through preserveLocalPendingTurnMessages: switch away and back.
     await openSession(page, '')
     await expect(viewport(page)).not.toContainText(A(6))
-    // A separate stored-only assistant notice supplies a fetched-history witness.
+    // A separate stored-only system notice supplies a fetched-history witness.
     // Existing reply text and every human row/receipt remain unchanged.
     const refreshWitness = `persisted-refresh-${nonce}`
     const db = new DatabaseSync(path.join(sandbox.hermesHome, 'state.db'))
 
     try {
       const inserted = db
-        .prepare("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'assistant', ?, ?)")
+        .prepare("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'system', ?, ?)")
         .run(sid, refreshWitness, Date.now() / 1000)
       expect(Number(inserted.changes)).toBe(1)
     } finally {
@@ -341,9 +340,13 @@ test('an acknowledged redirect prompt renders once after in-place compaction ins
     // Observation 2: the switch-back view; observation 3: every sampled frame
     // since the redirect (the in-page sampler records transient duplicates).
     const switched = dupShape((await renderedTranscript(page)).bubbles)
-    expect(switched.userCopies, 'switch-back view preserves the redirect').toBe(1)
     const hits = await samplerHits(page, U(4))
-    const symptom = live.dup || switched.dup || hits.some(h => h.bubbles.length > 1)
+    const symptom =
+      live.dup ||
+      switched.dup ||
+      live.userCopies !== 1 ||
+      switched.userCopies !== 1 ||
+      hits.some(h => h.bubbles.length > 1)
     // ── Reload (no local optimistic state): stored history alone renders U4 once.
     await page.reload()
     await waitForInteractive(app, page)
