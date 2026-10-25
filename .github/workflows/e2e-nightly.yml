@@ -43,11 +43,14 @@ jobs:
           SPEC=apps/desktop/e2e/core/lineage-compaction-prompt.spec.ts
           RECEIPTS="$RUNNER_TEMP/task26-compaction"
           mkdir -p "$RECEIPTS"
-          for CASE in parent candidate; do
+          for CASE in parent current candidate; do
             if [ "$CASE" = parent ]; then
               git restore --source=bd9e28062515b8eae1a870954a0c12996f6a42c1 --worktree -- agent "$SPEC"
             else
               git restore --source=HEAD --worktree -- agent "$SPEC"
+              if [ "$CASE" = current ]; then
+                git restore --source=11229c795c1911f7e4835c46fe8df41565fe8d2a --worktree -- agent
+              fi
             fi
             "$HERMES_E2E_PYTHON" -c 'import agent.conversation_compression as m; print(m.__file__)' | tee "$RECEIPTS/$CASE-import.txt"
             git diff --stat | tee "$RECEIPTS/$CASE-source.txt"
@@ -61,7 +64,7 @@ jobs:
             done
           done
           git restore --source=HEAD --worktree -- agent "$SPEC"
-          test "$(cat "$RECEIPTS/parent.exit")" = 0 && test "$(cat "$RECEIPTS/candidate.exit")" = 0
+          test "$(cat "$RECEIPTS/parent.exit")" = 0 && test "$(cat "$RECEIPTS/current.exit")" = 1 && test "$(cat "$RECEIPTS/candidate.exit")" = 0
       - name: Retain comparison evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
