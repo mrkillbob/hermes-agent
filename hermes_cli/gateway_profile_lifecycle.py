@@ -236,9 +236,9 @@ def _print_host_hint() -> None:
 
 def _print_unfolded_gateway_note(owner) -> None:
     """Detect-and-converge: name the per-profile gateways `--all` no longer sweeps, never kill them."""
-    from gateway.status import find_gateway_pids
+    from hermes_cli import gateway as gw
     try:
-        others = [pid for pid in find_gateway_pids(all_profiles=True) if pid != owner.pid]
+        others = [pid for pid in gw.find_gateway_pids(all_profiles=True) if pid != owner.pid]
     except Exception:
         return
     if not others:

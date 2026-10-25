@@ -248,7 +248,7 @@ def test_restart_all_does_not_attach_to_the_process_it_just_stopped(
     monkeypatch.setattr(gw, "kill_gateway_processes", lambda **k: 1)
     monkeypatch.setattr(gw, "_wait_for_api_server_port_free", lambda *a, **k: None)
     monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: None)
-    monkeypatch.setattr(gw, "_print_unfolded_gateway_note", lambda owner: None)
+    monkeypatch.setattr("hermes_cli.gateway_profile_lifecycle._print_unfolded_gateway_note", lambda owner: None)
 
     def _stopped(*a, **k):
         # The owner really is gone by the time the re-entry happens.

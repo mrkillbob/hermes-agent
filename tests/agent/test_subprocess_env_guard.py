@@ -50,6 +50,12 @@ ALLOWED_RAW_SPAWN_ENV_FILES = {
     # only raw copy is the except-fallback for when the tools package itself
     # cannot be imported, so the user's typed command still runs.
     "hermes_cli/bang_shell.py",
+    # Executing-code identity is imported during auth_constants initialization;
+    # the full local subprocess factory cycles through auth/config here. These
+    # fixed read-only Git probes inherit the existing environment, adding only
+    # held-startup fences for fsmonitor, lazy fetch and optional locks. No agent
+    # or provider child runs through this early identity path.
+    "hermes_cli/version_info.py",
     # These children are Hermes itself and need its full environment: the gateway respawn
     # watcher (generated script source), the launchd stderr-timestamp wrapper around the
     # gateway command, and the skills sync that seeds a new profile.

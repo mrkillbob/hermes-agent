@@ -20,6 +20,10 @@ def refuse(effect):
 def audit(event, args):
     if event == 'subprocess.Popen':
         command = args[1]
+        if isinstance(command, str):
+            # Windows audits the list2cmdline serialization, not the input list.
+            from hermes_cli._subprocess_compat import split_command_line
+            command = split_command_line(command)
         if isinstance(command, (list, tuple)) and command and command[0] == 'git':
             if command[1:3] != ['-c', 'core.fsmonitor=false'] or args[3].get('GIT_NO_LAZY_FETCH') != '1':
                 refuse('unfenced-git-probe')

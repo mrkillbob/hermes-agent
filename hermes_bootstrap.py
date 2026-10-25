@@ -617,6 +617,18 @@ _defer_startup_recovery = _startup_hold_defers_early_recovery()
 if not _defer_startup_recovery:
     _settle_interrupted_update()
 
+_legacy_post_swap = _legacy_post_swap_invocation(sys.argv[1:])
+if _legacy_post_swap is not None:
+    if _defer_startup_recovery:
+        raise SystemExit("startup_hold: legacy update continuation is held")
+    # This continuation exists precisely because the replacement tree may not
+    # run under the old release's dependency graph. Take it over before PM
+    # activation, launch preparation, or argparse imports any of that graph.
+    from hermes_cli.update_handoff import _continue_legacy_post_swap
+
+    _handoff_path, _argv_tail = _legacy_post_swap
+    raise SystemExit(_continue_legacy_post_swap(_handoff_path, argv_tail=_argv_tail))
+
 from hermes_cli import startup_hold as _startup_hold_policy
 _startup_hold_policy.enter_boot(_root, sys.argv[1:])
 _startup_hold_policy.register_process_writer(sys.argv[1:])
@@ -635,15 +647,7 @@ def _pin_launcher_home() -> None:
 
 _pin_launcher_home()
 
-_legacy_post_swap = _legacy_post_swap_invocation(sys.argv[1:])
-if _legacy_post_swap is not None:
-    # This continuation exists precisely because the replacement tree may not
-    # run under the old release's dependency graph. Take it over before PM
-    # activation, launch preparation, or argparse imports any of that graph.
-    from hermes_cli.update_handoff import _continue_legacy_post_swap
 
-    _handoff_path, _argv_tail = _legacy_post_swap
-    raise SystemExit(_continue_legacy_post_swap(_handoff_path, argv_tail=_argv_tail))
 
 
 class RelaunchExit(SystemExit):
