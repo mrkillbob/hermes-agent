@@ -33,29 +33,82 @@ RESULT_FIELDS = ('final_response', 'failed', 'interrupted', 'completed', 'partia
                  'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens',
                  'estimated_cost_usd', 'cost_status', 'cost_source', 'service_tier', 'failure_reason',
                  'session_id', 'requested_model', 'served_model', '_turn_input_tokens', '_turn_output_tokens',
-                 'billing_block')
-# ``billing_block`` (``agent/billing_links.BillingBlock`` plus ``unverified``) is the one structured field.
+                 'failure_retryable', 'failure_resets_at', 'billing_block', 'free_tier', 'usage_window_message', 'usage_limit')
+# The structured fields and their allowed keys: ``billing_block`` (``agent/billing_links.BillingBlock``
+# plus ``unverified``) and ``free_tier`` (``agent/turn_recovery._stamp_free_tier``). With
+# ``failure_reason``, ``failure_retryable`` and ``failure_resets_at`` they are what
+# ``agent.error_surface.build_error_surface_from_result`` reads for the owner's error card.
 BILLING_FIELDS = ('provider', 'provider_label', 'model', 'billing_url', 'is_nous', 'message', 'unverified')
+USAGE_LIMIT_TEXT = ('gauge_id', 'scope', 'limit_name', 'message', 'current_model')
+USAGE_LIMIT_FIELDS = (*USAGE_LIMIT_TEXT, 'resets_at_ms', 'suggestions', 'credits')
+SUGGESTION_FIELDS = ('model', 'label', 'note', 'provider')
+STRUCTURED_FIELDS = {'billing_block': BILLING_FIELDS, 'free_tier': ('kind', 'message'),
+                     'usage_limit': USAGE_LIMIT_FIELDS}
 
 
 def _scalar(value):
     return value is None or type(value) in (bool, int, float) or (isinstance(value, str) and len(value) <= 4096)
 
 
-def _billing_block(value):
-    return isinstance(value, dict) and not set(value) - set(BILLING_FIELDS) and all(map(_scalar, value.values()))
+def _text_fields(value, allowed, required):
+    return (isinstance(value, dict) and set(required) <= set(value) <= set(allowed)
+            and all(isinstance(v, str) and len(v) <= 4096 for v in value.values()))
+
+
+def _usage_limit(value):
+    # The existing LimitHit wire shape, not an arbitrary nested worker object. Keep the
+    # plan's at-most-two suggestions and the same per-string bound as other result fields.
+    if not isinstance(value, dict) or set(value) - set(USAGE_LIMIT_FIELDS):
+        return False
+    text = {k: v for k, v in value.items() if k in USAGE_LIMIT_TEXT}
+    if not _text_fields(text, USAGE_LIMIT_TEXT, ('gauge_id', 'scope', 'limit_name', 'message')):
+        return False
+    reset = value.get('resets_at_ms')
+    if reset is not None and (type(reset) is not int or not 0 <= reset <= 2**63 - 1):
+        return False
+    suggestions = value.get('suggestions', [])
+    if not isinstance(suggestions, list) or len(suggestions) > 2 or any(
+            not _text_fields(s, SUGGESTION_FIELDS, ('model', 'label', 'note')) for s in suggestions):
+        return False
+    credits = value.get('credits')
+    return credits is None or _text_fields(credits, ('action',), ('action',))
+
+
+def _usage_limit_frame(value):
+    if not isinstance(value, dict):
+        return None
+    def project(row, fields):
+        return {k: v[:4096] if isinstance(v, str) else v for k, v in row.items() if k in fields}
+    frame = project(value, USAGE_LIMIT_FIELDS)
+    if isinstance(suggestions := frame.get('suggestions'), list):
+        if len(suggestions) > 2 or any(not isinstance(s, dict) for s in suggestions):
+            return None
+        frame['suggestions'] = [project(s, SUGGESTION_FIELDS) for s in suggestions]
+    if isinstance(credits := frame.get('credits'), dict):
+        frame['credits'] = project(credits, ('action',))
+    return frame if _usage_limit(frame) else None
+
+
+def _structured(key, value):
+    if key == 'usage_limit':
+        return _usage_limit(value)
+    return isinstance(value, dict) and not set(value) - set(STRUCTURED_FIELDS[key]) and all(map(_scalar, value.values()))
 
 
 def result_frame(result):
-    """Worker side: the receipt fields of ``run_conversation``'s result, scalars only, text bounded."""
+    """Worker side: the receipt fields of ``run_conversation``'s result, with bounded structured failures."""
     from agent.managed_request_budget import stamp_request_budget_result
     result = stamp_request_budget_result(result)
     frame = {k: (v[:4096] if isinstance(v, str) and k != 'final_response' else v) for k, v in result.items()
-             if k in RESULT_FIELDS and k != 'billing_block' and (v is None or type(v) in (bool, int, float, str))}
-    block = result.get('billing_block')
-    if isinstance(block, dict):
-        frame['billing_block'] = {k: v[:4096] if isinstance(v, str) else v for k, v in block.items()
-                                  if k in BILLING_FIELDS and (v is None or type(v) in (bool, int, float, str))}
+             if k in RESULT_FIELDS and k not in STRUCTURED_FIELDS and (v is None or type(v) in (bool, int, float, str))}
+    for key, fields in STRUCTURED_FIELDS.items():
+        if key == 'usage_limit':
+            if (block := _usage_limit_frame(result.get(key))) is not None:
+                frame[key] = block
+            continue
+        if isinstance(block := result.get(key), dict):
+            frame[key] = {k: v[:4096] if isinstance(v, str) else v for k, v in block.items()
+                          if k in fields and (v is None or type(v) in (bool, int, float, str))}
     return frame
 
 
@@ -63,13 +116,15 @@ def accept_result(result):
     """Owner side of the worker's result frame: ``(result, usage)`` in the in-process turn's shape
     (gateway projection: prompt/completion tokens as input/output), or ValueError."""
     if (not isinstance(result, dict) or set(result) - set(RESULT_FIELDS) or not isinstance(result.get('final_response'), str)
-            or result.get('billing_block') is not None and not _billing_block(result['billing_block'])
-            or any(not _scalar(value) for key, value in result.items() if key not in ('final_response', 'billing_block'))):
+            or any(result.get(key) is not None and not _structured(key, result[key]) for key in STRUCTURED_FIELDS)
+            or any(not _scalar(value) for key, value in result.items()
+                   if key != 'final_response' and key not in STRUCTURED_FIELDS)):
         raise ValueError('invalid_worker_result')
     accepted = dict(result)
-    if accepted.get('billing_block') is None:
-        # Every failure other than a billing wall carries no block.
-        accepted.pop('billing_block', None)
+    for key in STRUCTURED_FIELDS:
+        if accepted.get(key) is None:
+            # A failure other than a billing wall or a free-tier refusal carries no block.
+            accepted.pop(key, None)
     turn_in, turn_out = accepted.pop('_turn_input_tokens', None), accepted.pop('_turn_output_tokens', None)
     if any(value is not None and (type(value) is not int or value < 0) for value in (turn_in, turn_out)):
         raise ValueError('invalid_worker_result')
@@ -402,7 +457,9 @@ def execute(frame, channel):
                 frame = {**frame, 'text': content}
             before = (getattr(agent, 'session_prompt_tokens', 0) or 0,
                       getattr(agent, 'session_completion_tokens', 0) or 0)
-            result = run_worker_turns(agent, frame, history)
+            # Most failed results name no provider or model; the owner's error card needs the agent's.
+            result = {'provider': getattr(agent, 'provider', None), 'model': getattr(agent, 'model', None),
+                      **run_worker_turns(agent, frame, history)}
             result['_turn_input_tokens'] = max(0, (getattr(agent, 'session_prompt_tokens', 0) or 0) - before[0])
             result['_turn_output_tokens'] = max(0, (getattr(agent, 'session_completion_tokens', 0) or 0) - before[1])
             retire_agent(agent)

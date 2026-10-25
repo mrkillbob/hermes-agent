@@ -237,10 +237,10 @@ async def execute_admission(authority, ref, row):
             from gateway.session_cron import execute
             return await execute(authority, ref, row, policy)
         local_policy = policy
-        from gateway.session_managed_worker import managed_policy, execute_managed
+        from gateway.session_managed_worker import managed_policy, admit_managed
         policy = managed_policy(authority, ref)
         if policy is not None:
-            return await execute_managed(authority, ref, row, policy)
+            return await admit_managed(authority, ref, row, policy)
     finally:
         restore_suspended(inherited_diagnostics)
     live = authority.sessions[ref.session_id]

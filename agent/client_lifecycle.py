@@ -101,6 +101,27 @@ def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb
 
 
 class ClientLifecycleMixin:
+    def _close_active_children(self, *, soft: bool) -> None:
+        """Detach and close per-turn child agents; ``soft`` releases their clients first, falling back to close()."""
+        from run_agent import _quietly
+        from tools.delegate_tool_routes import child_profile_scope
+        try:
+            with self._active_children_lock:
+                children = list(self._active_children)
+                self._active_children.clear()
+        except Exception:
+            logger.debug("Could not snapshot active children during teardown", exc_info=True)
+            return
+        for child in children:
+            with suppress(Exception), child_profile_scope(child):
+                if soft:
+                    try:
+                        child.release_clients()
+                        continue
+                    except Exception:
+                        logger.debug("Could not softly release child clients; falling back to close", exc_info=True)
+                _quietly(lambda: child.close())
+
     def _close_task_resources(self, task_id: str) -> None:
         """Release task resources without treating a shared environment as process ownership."""
         from run_agent import _quietly, cleanup_browser, cleanup_vm

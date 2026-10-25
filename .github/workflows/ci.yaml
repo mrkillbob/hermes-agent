@@ -608,7 +608,9 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 1
-          sparse-checkout: scripts/ci/timings_report.py
+          sparse-checkout: |
+            scripts/ci/timings_report.py
+            scripts/ci/cache_report.py
           sparse-checkout-cone-mode: false
 
       - name: Restore baseline cache (PR only)

@@ -54,6 +54,7 @@ def test_protected_worker_loads_supported_direct_tool_scope(
     if marker:
         monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
     monkeypatch.setattr("hermes_cli.plugins.discover_plugins", lambda: None)
+    monkeypatch.setattr("hermes_cli.left_core_migration.recover_at_startup", lambda **_kwargs: [])
     # A cached adapter may still return a stale schema: the final loaded surface
     # must agree with the persisted scope used by refresh/search/dispatch.
     definitions = [
@@ -67,7 +68,6 @@ def test_protected_worker_loads_supported_direct_tool_scope(
         return definitions
 
     monkeypatch.setattr(model_tools, "get_tool_definitions", schemas)
-    monkeypatch.setattr("agent.oneshot_footprint.prune_oneshot_tools", lambda tools: tools)
     monkeypatch.setattr("tools.connectors.turn.side_agent_tool_drops", lambda agent: set())
     agent = SimpleNamespace(
         provider=provider, _fallback_chain=fallback, quiet_mode=True,

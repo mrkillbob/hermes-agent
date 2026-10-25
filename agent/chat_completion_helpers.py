@@ -32,6 +32,7 @@ from agent.error_classifier import (
 from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
 from agent.errors import EmptyStreamError
 from agent.chat_completion_local import _streams_llamacpp, stale_giveup
+from agent.chat_completion_headers import _chat_completion_capturing_headers
 from agent.chat_completion_stream_monitor import StreamingWaitMonitor
 from agent.fast_mode import effective_request_overrides
 from agent.remote_task_context import (
@@ -52,9 +53,7 @@ from agent.message_sanitization import (
     strip_images_for_rejecting_model,
 )
 from agent.reasoning_summaries import (
-    append_streamed_reasoning_detail, separate_glued_reasoning_blocks,
-    streamed_reasoning_detail_text,
-)
+    append_streamed_reasoning_detail, separate_glued_reasoning_blocks, streamed_reasoning_detail_text)
 from agent.local_prompt_progress import prompt_progress, with_prompt_progress
 from agent.repetition_guard import RunawayStreamWatch, is_repetition_dominated
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
@@ -886,8 +885,8 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     request_client = prepare_provider_client(make_client("chat_completion_request"))
     return _dispatch_provider_request(
         agent, api_kwargs,
-        lambda authorized: request_client.chat.completions.create(
-            **bypass_chat_sdk_request_transform(authorized, request_client)),
+        lambda authorized: _chat_completion_capturing_headers(
+            agent, request_client, bypass_chat_sdk_request_transform(authorized, request_client)),
     )
 
 
@@ -2454,11 +2453,8 @@ def cleanup_task_resources(agent, task_id: str) -> None:
     terminal envs (``_cleanup_inactive_envs`` reaps them after ``terminal.lifetime_seconds``)
     and ``cleanup_browser`` in headed mode (the inactivity reaper handles idle sessions)."""
     def _headed() -> bool:
-        try:
-            from tools.browser_tool_cloud import _is_headed_mode
-            return _is_headed_mode()
-        except Exception:
-            return bool(os.environ.get("AGENT_BROWSER_HEADED"))
+        from tools.browser_session_cloud import is_headed_mode
+        return is_headed_mode()
 
     for label, skip, skip_what, cleanup in (
         ("VM", is_persistent_env, "cleanup_vm for persistent env", lambda: _ra().cleanup_vm(task_id)),

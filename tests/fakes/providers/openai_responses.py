@@ -260,7 +260,7 @@ def turn_events(turn: Turn) -> list[dict[str, Any]]:
     usage = ResponseUsage(
         input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
         total_tokens=turn.input_tokens + turn.output_tokens,
-        input_tokens_details=InputTokensDetails(cached_tokens=turn.cached_tokens),
+        input_tokens_details=InputTokensDetails(cached_tokens=turn.cached_tokens, cache_write_tokens=0),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=0))
     events.append(ResponseCompletedEvent(response=_response(resp_id, "completed", built, usage),
                                          sequence_number=seq(), type="response.completed"))

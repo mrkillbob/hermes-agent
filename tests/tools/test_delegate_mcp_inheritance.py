@@ -113,10 +113,10 @@ def child_runtime(monkeypatch, tmp_path, registered_tools):
         return child
 
     def build_delegate_task_child():
-        child_list, error = delegate._build_children(
-            [{"goal": "inspect schemas only"}],
-            [None],
-            {
+        from tools.delegate_tool_routes import TaskRoute
+
+        route = TaskRoute(
+            creds={
                 "provider": "openrouter",
                 "model": "test/model",
                 "api_key": "fixture-only",
@@ -126,10 +126,15 @@ def child_runtime(monkeypatch, tmp_path, registered_tools):
                 "command": None,
                 "args": None,
             },
+            routing_cfg={},
+        )
+        child_list, error = delegate._build_children(
+            [{"goal": "inspect schemas only"}],
+            [None],
+            [route],
             top_role="leaf",
             max_iterations=2,
             parent_agent=parent,
-            routing_cfg={},
             live_deleg_id=None,
             live_writers=[],
         )
