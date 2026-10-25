@@ -320,16 +320,16 @@ test('an acknowledged redirect prompt renders once after in-place compaction ins
     // ── Refresh through preserveLocalPendingTurnMessages: switch away and back.
     await openSession(page, '')
     await expect(viewport(page)).not.toContainText(A(6))
-    // A test-owned edit to the stored reply supplies a fetched-only witness.
-    // It changes no human row, todo carrier, ordering, or optimistic receipt.
+    // A separate stored-only assistant notice supplies a fetched-history witness.
+    // Existing reply text and every human row/receipt remain unchanged.
     const refreshWitness = `persisted-refresh-${nonce}`
     const db = new DatabaseSync(path.join(sandbox.hermesHome, 'state.db'))
 
     try {
-      const updated = db
-        .prepare("UPDATE messages SET content = content || ? WHERE session_id = ? AND id = ? AND role = 'assistant'")
-        .run(` ${refreshWitness}`, sid, a6!.id)
-      expect(Number(updated.changes)).toBe(1)
+      const inserted = db
+        .prepare("INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'assistant', ?, ?)")
+        .run(sid, refreshWitness, Date.now() / 1000)
+      expect(Number(inserted.changes)).toBe(1)
     } finally {
       db.close()
     }
