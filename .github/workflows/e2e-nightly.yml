@@ -33,6 +33,15 @@ jobs:
           set -e
           git restore --source=HEAD --worktree -- apps/desktop/src/app/session/hooks/use-message-stream/receipt-user-rows.ts
           test "$RESULT" = 1
+      - name: Prove overlap regression against the original graft
+        run: |
+          git restore --source=11229c795c1911f7e4835c46fe8df41565fe8d2a --worktree -- apps/desktop/src/app/chat/transcript-backfill.ts
+          set +e
+          (cd apps/desktop && npx vitest run --project ui src/app/session/hooks/use-message-stream/completion-boundaries.test.tsx) 2>&1 | tee "$RUNNER_TEMP/pr403-focus/graft-red.log"
+          RESULT=${PIPESTATUS[0]}
+          set -e
+          git restore --source=HEAD --worktree -- apps/desktop/src/app/chat/transcript-backfill.ts
+          test "$RESULT" = 1
       - name: Verify corrected contract and adjacent history helpers
         working-directory: apps/desktop
         run: |
