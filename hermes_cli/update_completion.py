@@ -352,7 +352,10 @@ def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
             ensure_tools_for_sync()
             # An update never fails because of a plugin: misfits are disabled and reported.
             pm.sync_venv(explicit=True, project_root=root, evict_incompatible_plugins=True)
-            collect_superseded_generations(root)
+            # First-hop adapters can carry an explicit cleanup hold across interpreters.
+            # Keep normal unpaused cleanup unless the durable request says exactly True.
+            if request.get("defer_collection") is not True:
+                collect_superseded_generations(root)
         finally:
             request["pm_receipt"] = receipt.last_for_update(update_id)
             _write_json(request_path, request)
