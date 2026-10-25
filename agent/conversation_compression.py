@@ -3563,6 +3563,7 @@ def _commit_compaction(
                 # Tail rows tagged by compress() are archived as superseded duplicates, not
                 # compacted=1. Count against the FINAL list — salvage may have dropped rows.
                 tail_count = sum(1 for m in compressed if id(m) in _tail_tagged_ids)
+                logger.warning("TASK26 tail_count=%s originals=%s", tail_count, [(m.get('role'), m.get('_row_id'), bool(m.get('_compaction_tail'))) for m in messages])
                 _tail_held = messages[max(0, len(messages) - tail_count):]
                 # The rewind takes the newest `tail_count` durable rows as the tail's originals, so a tail row
                 # with none (this turn's user row, which the CLI and gateway persist after preflight; unflushed
