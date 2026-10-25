@@ -422,7 +422,7 @@ function appendSessionFilters(url: string, options: SessionQueryOptions): string
 
 export const api = {
   buildWsUrl,
-  getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getStatus: (profile?: string) => fetchJSON<StatusResponse>(profile === undefined ? "/api/status" : `/api/status?profile=${encodeURIComponent(profile || "current")}`),
   /**
    * Identity probe for the dashboard auth gate (Phase 7).
    *
