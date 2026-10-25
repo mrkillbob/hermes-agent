@@ -2837,7 +2837,7 @@ def claim_job_for_fire(
         if (_claim_is_live(job.get("fire_claim"), now, claim_ttl_seconds)
                 and not _fire_claim_owner_is_dead(job.get("fire_claim"))):
             return False  # someone holds a fresh claim
-        from cron.occurrences import completed_occurrence, scheduled_instant
+        from cron.occurrences import occurrence_blocks_dispatch, scheduled_instant
 
         # ``manual`` (an off-tick run-now) must NOT stamp an occurrence identity: outside a
         # scheduler tick ``next_run_at`` is the NEXT occurrence, not the one being run, so
@@ -2859,7 +2859,7 @@ def claim_job_for_fire(
         if (instant is not None
                 and datetime.fromisoformat(instant) - now >= timedelta(seconds=FIRE_CLAIM_SKEW_SECONDS)):
             instant = None
-        if instant and completed_occurrence(job, instant):
+        if not manual_fire and occurrence_blocks_dispatch(job, instant):
             if job.get("schedule", {}).get("kind") in {"cron", "interval"}:
                 nxt = compute_next_run(job["schedule"], now.isoformat())
                 if nxt:
@@ -3315,9 +3315,9 @@ def _evaluate_due_job(job: dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     # into both fields, and any rewrite of next_run_at (edit, re-anchor, fire-claim advance) must
     # invalidate the marker. Do not "fix" this with _ensure_aware normalization.
     manual_run = job.get("manual_run_at") == next_run
-    from cron.occurrences import completed_occurrence, scheduled_instant
+    from cron.occurrences import occurrence_blocks_dispatch, scheduled_instant
 
-    if not manual_run and completed_occurrence(job, next_run):
+    if not manual_run and occurrence_blocks_dispatch(job, next_run):
         new_next = d.recompute_next() if recurring else None
         if new_next:
             scan.persist(job["id"], next_run_at=new_next)

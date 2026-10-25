@@ -19,18 +19,25 @@ def scheduled_instant(value):
         return None
 
 
-def completed_occurrence(job, instant):
-    """Unknown/failed/pruned attempts cannot prove completion: keep them eligible."""
+class LedgerUnavailable(Exception):
+    """Completion evidence could not be read; this does not prove the slot never ran."""
+
+
+def _completion_evidence(job, instant, *, require_readable=False):
+    """Read exact completion evidence; one-shots also require readable legacy ledgers."""
     from cron.constants import FIRE_CLAIM_SKEW_SECONDS
     from cron.executions import _transaction
 
     instant = scheduled_instant(instant)
-    if instant is None:
+    if instant is None and not require_readable:
         return False
     # A skewed early fire (see claim_job_for_fire) legitimately completes just before its slot.
-    earliest_real = datetime.fromisoformat(instant) - timedelta(seconds=FIRE_CLAIM_SKEW_SECONDS)
+    earliest_real = (datetime.fromisoformat(instant) - timedelta(seconds=FIRE_CLAIM_SKEW_SECONDS)
+                     if instant is not None else None)
     try:
         with _transaction() as conn:
+            if instant is None:
+                return False  # readable, but legacy/ambiguous timestamps prove no exact completion
             rows = conn.execute(
                 "SELECT id, finished_at, claimed_at FROM executions "
                 "WHERE job_id=? AND scheduled_instant=? "
@@ -50,9 +57,30 @@ def completed_occurrence(job, instant):
                     row["finished_at"] or row["claimed_at"])
                 return True
         return False
-    except Exception:
+    except Exception as exc:
         logger.warning("Cannot check completed occurrence for job %s", job['id'], exc_info=True)
+        raise LedgerUnavailable(str(exc)) from exc
+
+
+def completed_occurrence(job, instant):
+    """Legacy lookup: keep cached schedulers' False-on-error contract across upgrades."""
+    try:
+        return _completion_evidence(job, instant)
+    except LedgerUnavailable:
         return False
+
+
+def occurrence_blocks_dispatch(job, instant):
+    """Completed slots block dispatch; unreadable evidence also blocks one-shots.
+
+    A one-shot must remain scheduled, without a claim or missed-run retirement, until
+    the ledger is readable. Preserve the established recurring fallback on read errors.
+    """
+    once = job.get("schedule", {}).get("kind") == "once"
+    try:
+        return _completion_evidence(job, instant, require_readable=once)
+    except LedgerUnavailable:
+        return once
 
 
 # --- Pending slot: the occurrence a tick took off the schedule but has not yet claimed ---
