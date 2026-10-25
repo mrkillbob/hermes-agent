@@ -1,27 +1,71 @@
-name: Nightly E2E
-
+name: Task26 focused compaction acceptance
 on:
-  schedule:
-    - cron: '17 8 * * *'
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: e2e-nightly-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  full-e2e:
-    name: Full Python E2E suite
-    uses: ./.github/workflows/tests.yml
-    with:
-      e2e_mode: full
-      run_unit: false
-
-  desktop-core:
-    name: Desktop core E2E
-    uses: ./.github/workflows/e2e-desktop-core.yml
-    with:
-      concurrency_scope: nightly
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          fetch-depth: 0
+      - name: Install Electron system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64 libx11-dev
+      - name: Prepare locked toolchain
+        id: pm
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          extras: '[]'
+          test-environment: 'true'
+      - uses: ./.github/actions/retry
+        with:
+          command: npm ci
+      - name: Prepare locked Electron
+        run: node scripts/build/electron-runtime.mjs --source .
+      - name: Build unchanged desktop sources
+        working-directory: apps/desktop
+        run: npm run build
+      - name: Compare original parent and corrected current contract
+        env:
+          HERMES_E2E_PYTHON: ${{ steps.pm.outputs.python-path }}
+          CI: 'true'
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
+          ANTHROPIC_API_KEY: ''
+        run: |
+          set -euo pipefail
+          SPEC=apps/desktop/e2e/core/lineage-compaction-prompt.spec.ts
+          RECEIPTS="$RUNNER_TEMP/task26-compaction"
+          mkdir -p "$RECEIPTS"
+          for CASE in parent candidate; do
+            if [ "$CASE" = parent ]; then
+              git restore --source=bd9e28062515b8eae1a870954a0c12996f6a42c1 --worktree -- agent "$SPEC"
+            else
+              git restore --source=HEAD --worktree -- agent "$SPEC"
+            fi
+            "$HERMES_E2E_PYTHON" -c 'import agent.conversation_compression as m; print(m.__file__)' | tee "$RECEIPTS/$CASE-import.txt"
+            git diff --stat | tee "$RECEIPTS/$CASE-source.txt"
+            set +e
+            (cd apps/desktop && xvfb-run -a --server-args='-screen 0 1280x1024x24' npx playwright test -c e2e/core/playwright.config.ts lineage-compaction-prompt.spec.ts --workers=1) 2>&1 | tee "$RECEIPTS/$CASE.log"
+            RESULT=${PIPESTATUS[0]}
+            set -e
+            echo "$RESULT" > "$RECEIPTS/$CASE.exit"
+            for DIR in test-results/core playwright-report/core; do
+              [ ! -d "apps/desktop/$DIR" ] || cp -R "apps/desktop/$DIR" "$RECEIPTS/$CASE-$(dirname "$DIR")"
+            done
+          done
+          git restore --source=HEAD --worktree -- agent "$SPEC"
+          test "$(cat "$RECEIPTS/parent.exit")" = 0 && test "$(cat "$RECEIPTS/candidate.exit")" = 0
+      - name: Retain comparison evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: task26-compaction-comparison
+          path: ${{ runner.temp }}/task26-compaction
+          retention-days: 14
