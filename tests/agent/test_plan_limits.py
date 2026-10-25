@@ -97,6 +97,26 @@ class TestSuggestions:
         ]
         assert all(s.provider == "nous" for s in out)
 
+    @pytest.mark.parametrize(("gauges", "pricing", "expected"), [
+        (TOP_FULL, None, ["any/model:free"]),
+        (TOP_FULL, {}, ["any/model:free"]),
+        (TOP_FULL, {"example/model-a": PRICING["example/model-a"]},
+         ["example/model-a", "any/model:free"]),
+        (HEALTHY, {}, ["unknown/large", "example/model-a"]),
+        (DAY_FULL, {}, ["any/model:free"]),
+    ])
+    def test_recovery_suggestions_require_known_tiers_only_when_top_tier_is_full(self, gauges, pricing, expected):
+        featured = ("unknown/large", "example/model-a", "any/model:free")
+        out = pl.suggest_models("example/model-c", gauges, pricing=pricing, featured=featured)
+        assert [s.model for s in out] == expected
+        assert all(s.note == (pl.NOTE_FREE if s.model.endswith(":free") else pl.NOTE_INCLUDED) for s in out)
+
+    def test_cold_catalog_limit_hit_keeps_only_independently_free_recovery(self, monkeypatch):
+        monkeypatch.setattr(pl, "cached_pricing", lambda base_url: {})
+        hit = pl.limit_hit(_agent("example/model-c", TOP_FULL), message="top tier exhausted")
+        assert hit is not None and hit.gauge_id == "top_tier"
+        assert [(s.model, s.note) for s in hit.suggestions] == [("example/model-free:free", pl.NOTE_FREE)]
+
     def test_window_limit_offers_only_free_models(self):
         out = pl.suggest_models("example/model-b", DAY_FULL, pricing=PRICING, featured=FEATURED)
         assert [(s.model, s.note) for s in out] == [("example/model-free:free", pl.NOTE_FREE)]

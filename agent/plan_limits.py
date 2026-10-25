@@ -220,7 +220,10 @@ def suggest_models(
     for model in pool:
         if model == current_model or _billed_elsewhere(model, pricing):
             continue
-        if is_blocked(model, gauges, pricing) or not _fits_context(model, needed_tokens, base_url):
+        # Recovery must not offer an unknown-tier model into the same exhausted allowance.
+        blocked = blocking_gauge(model, gauges, free=is_free(model, pricing),
+                                 top_tier=_top_tier_mark(model, pricing) is not False)
+        if blocked is not None or not _fits_context(model, needed_tokens, base_url):
             continue
         out.append(ModelSuggestion(model=model, label=model_label(model, pricing),
                                    note=NOTE_FREE if is_free(model, pricing) else NOTE_INCLUDED))
