@@ -262,9 +262,11 @@ it.each(['Revise the answer.', 'Give the answer.'])(
       complete: false,
       submission_id: 'original'
     }
+
     expect(bindReceiptUserRows(messages, partial)).toBe(messages)
 
     const missingBubble = { ...partial, row_ids: [71, 73, 74], user_row_id: 71, user_row_ids: [71, 73] }
+
     expect(bindReceiptUserRows(messages.slice(0, 1), missingBubble)[0].rowId).toBeUndefined()
   }
 )
@@ -273,6 +275,7 @@ it.each([true, false])(
   'reconciles the redirect once after compaction receipts only its surviving suffix (shared prefix=%s)',
   async sharedPrefix => {
     const h = mount()
+
     const prefix = sharedPrefix
       ? [
           { id: 60, role: 'user' as const, content: 'Earlier question one.' },
@@ -318,6 +321,7 @@ it.each([true, false])(
       { id: 73, role: 'user', content: 'Revise the answer.' },
       { id: 74, role: 'assistant', content: 'Revised.' }
     ])
+
     const previous = h.state().messages
     const grafted = graftRefreshedTailOntoBackfill(page, previous)
     // Warm resume grafts any older pages, then reconciles durable history
@@ -330,6 +334,27 @@ it.each([true, false])(
       'Revise the answer.'
     ])
     expect(users.map(m => m.rowId)).toEqual([...prefixUsers.map(m => m.id), 71, 73])
+
+    if (!sharedPrefix) {
+      // The overlapping-tail path must keep a new occurrence after the
+      // partially receipted reply, even when it repeats either prompt.
+      for (const text of ['Give the answer.', 'Revise the answer.']) {
+        const nextPrompt: ChatMessage = {
+          id: `user-next-${text}`,
+          role: 'user',
+          parts: [{ type: 'text', text }]
+        }
+
+        const withNext = [...previous, nextPrompt]
+        const refreshed = reconcileDurableHistory(graftRefreshedTailOntoBackfill(page, withNext), withNext)
+        const nextUsers = refreshed.filter(m => m.role === 'user')
+
+        expect(nextUsers.map(chatMessageText)).toEqual(['Give the answer.', 'Revise the answer.', text])
+        expect(nextUsers.at(-1)?.id).toBe(nextPrompt.id)
+        expect(nextUsers.at(-1)?.rowId).toBeUndefined()
+      }
+    }
+
     h.dispose()
   }
 )

@@ -294,6 +294,34 @@ interface StoredRowSlot {
   leading: ChatMessage[]
 }
 
+/** Defer only the replaced partial turn's leading user projections to reconciliation. */
+function leadingRowsForRefreshedTurn(
+  leading: ChatMessage[],
+  previous: ChatMessage,
+  refreshedBySource: Map<number, ChatMessage>
+): ChatMessage[] {
+  const receipt = previous.persistedTurn
+  const userIds = receipt?.user_row_ids
+
+  if (
+    previous.pending ||
+    previous.interim ||
+    receipt?.complete !== false ||
+    !Array.isArray(userIds) ||
+    userIds.length === 0 ||
+    new Set(userIds).size !== userIds.length ||
+    !userIds.every(id => Number.isSafeInteger(id) && id > 0 && refreshedBySource.get(id)?.role === 'user')
+  ) {
+    return leading
+  }
+
+  // These users precede the receipted reply; the caller reconciles them with
+  // the fresh stored users. Later unacknowledged repeats remain in the graft.
+  return leading.filter(
+    message => message.role !== 'user' || !message.id.startsWith('user-') || transcriptRowIds(message).length > 0
+  )
+}
+
 /**
  * Stored-id merge for a page that overlaps the window but does not anchor in
  * front of it. A row with no stored id travels with the next stored row after
@@ -360,7 +388,10 @@ function mergeOverlappingTail(previous: ChatMessage[], refreshedTail: ChatMessag
 
       // The fresh page replaces the row; keep the window's leading rows when
       // the page brought none of its own for it.
-      const leading = fresh && existing && pending.length === 0 ? existing.leading : pending
+      const leading =
+        fresh && existing && pending.length === 0
+          ? leadingRowsForRefreshedTurn(existing.leading, existing.message, refreshedBySource)
+          : pending
       byRowId.set(rowId, { message, leading })
       pending = []
     }
