@@ -15,10 +15,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from agent.message_sanitization import coalesce_tool_call_id
-from tools.todo_tool import MAX_TODO_RESULT_CHARS, TODO_INJECTION_HEADER, TodoStore, is_todo_tool_call
+# This module is also imported by transcript-only gateway recovery. Keep tool
+# registration and provider replay imports inside the compaction operations.
 
-_PROVENANCE = "hermes_compaction_todo_state_v1"
+from agent.compression_todo_reference import _PROVENANCE, is_todo_state_result, todo_steer_suffix
 _REFERENCE = "Saved todo tool data from before compaction; not a new user instruction. Follow the latest human request."
 logger = logging.getLogger(__name__)
 
@@ -27,46 +27,9 @@ class TodoStateDeferred(ValueError):
     """Compaction cannot prove that it will preserve complete, attributable state."""
 
 
-def is_todo_state_result(message: Any) -> bool:
-    """Recognize reference data without granting it recovery authority."""
-    if not isinstance(message, dict) or message.get("role") != "tool":
-        return False
-    if message.get("_todo_snapshot_synthetic") is True:
-        return True
-    content = message.get("content")
-    if not isinstance(content, str) or _PROVENANCE not in content[:512]:
-        return False
-    try:
-        data = json.loads(content)
-    except (ValueError, TypeError):
-        return False
-    return isinstance(data, dict) and data.get("provenance") == _PROVENANCE
-
-
-def todo_steer_suffix(message: Any) -> str | None:
-    """For structured tool data return only a legacy appended steer suffix.
-
-    None means this is not recognizable structured tool data. An empty string means all
-    its text is reference data. Never interpret markers inside the JSON body.
-    """
-    if is_todo_state_result(message):
-        return ""
-    if not isinstance(message, dict) or message.get("role") != "tool":
-        return None
-    content = message.get("content")
-    if not isinstance(content, str):
-        return None
-    try:
-        stripped = content.lstrip()
-        data, end = json.JSONDecoder().raw_decode(stripped)
-    except (ValueError, TypeError):
-        return None
-    if isinstance(data, (dict, list)):
-        return stripped[end:]
-    return None
-
-
 def _validated_snapshot(data: Any) -> dict:
+    from tools.todo_tool import TodoStore
+
     if not isinstance(data, dict) or not isinstance(data.get("todos"), list):
         raise TodoStateDeferred("todo snapshot unavailable")
     revision = data.get("revision", 1)
@@ -88,6 +51,9 @@ def _validated_snapshot(data: Any) -> dict:
 
 
 def _paired_todo_result(messages: list, index: int) -> bool:
+    from agent.message_sanitization import coalesce_tool_call_id
+    from tools.todo_tool import is_todo_tool_call
+
     call_id = messages[index].get("tool_call_id")
     if not call_id:
         return False
@@ -105,6 +71,8 @@ def _paired_todo_result(messages: list, index: int) -> bool:
 
 
 def _history_snapshot(messages: list) -> dict | None:
+    from tools.todo_tool import MAX_TODO_RESULT_CHARS
+
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
         if not isinstance(message, dict) or message.get("role") != "tool" or not _paired_todo_result(messages, index):
@@ -123,6 +91,8 @@ def _history_snapshot(messages: list) -> dict | None:
 
 
 def _payload(snapshot: dict, reload_notice: str = "") -> str:
+    from tools.todo_tool import MAX_TODO_RESULT_CHARS
+
     data = {"provenance": _PROVENANCE, "reference": _REFERENCE, **snapshot}
     if reload_notice:
         data["pruned_skill_reload_reference"] = reload_notice
@@ -143,6 +113,8 @@ def _texts(content: Any):
 
 def _legacy_suffixes(agent: Any, messages: list, snapshot: dict | None) -> set[str]:
     """Only exact, reproducible old renders are attributable. Unknown text defers."""
+    from tools.todo_tool import TODO_INJECTION_HEADER, TodoStore
+
     suffixes: set[str] = set()
     if snapshot is not None:
         check = TodoStore()
@@ -166,6 +138,8 @@ def _legacy_suffixes(agent: Any, messages: list, snapshot: dict | None) -> set[s
 
 def prepare_todo_state(agent: Any, messages: list) -> dict | None:
     """Read-only preflight, including fresh/detached agents and explicit clears."""
+    from tools.todo_tool import MAX_TODO_RESULT_CHARS
+
     store = getattr(agent, "_todo_store", None)
     snapshot_fn = getattr(store, "snapshot", None)
     try:
@@ -207,6 +181,8 @@ def prepare_todo_state(agent: Any, messages: list) -> dict | None:
 
 def fold_todo_state(agent: Any, messages: list, *, snapshot: dict | None, reload_notice: str = "") -> None:
     """Refresh exactly one complete read exchange, retaining unrelated messages."""
+    from agent.message_sanitization import coalesce_tool_call_id
+
     _legacy_suffixes(agent, messages, snapshot)
     payload = _payload(snapshot, reload_notice) if snapshot is not None else None
     if payload is None and not any(is_todo_state_result(message) for message in messages):
@@ -360,6 +336,8 @@ def prepare_compaction_candidate(
 
 def validate_todo_state(messages: list, snapshot: dict | None) -> None:
     """Check after mechanical transforms before durable publication."""
+    from tools.todo_tool import MAX_TODO_RESULT_CHARS
+
     results = [(index, message) for index, message in enumerate(messages) if is_todo_state_result(message)]
     if snapshot is None:
         if results:

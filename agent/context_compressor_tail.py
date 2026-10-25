@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agent.compression_todo_state import is_todo_state_result
+from agent.compression_todo_reference import is_todo_state_result
 
 # Demote tool results older than the newest N rounds so the tail budget binds
 # (the tool-group alignment floor otherwise keeps ~32K of tool output alive).

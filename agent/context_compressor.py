@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from agent.compression_todo_state import is_todo_state_result
+from agent.compression_todo_reference import is_todo_state_result
 from agent.image_eviction_policy import images_all_within_many_image_limit, latched_retire_count, outbound_image_retire_count, outbound_retired_image_ids
 from agent.compression_marker import (
     ELISION_MARKER_MAX_LEN,

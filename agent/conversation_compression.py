@@ -28,12 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
-from agent.compression_todo_state import (
-    TodoStateDeferred, defer_todo_compaction as _defer_todo_compaction,
-    fold_todo_state, prepare_todo_state, preflight_todo_compaction, prepare_compaction_candidate,
-    reconcile_published_todo_state, todo_steer_suffix, todo_tail_owns_state as _todo_tail_owns_state,
-    validate_todo_state,
-)
+from agent.compression_todo_reference import todo_steer_suffix
 from agent.auxiliary_client import AuxiliaryExplicitCancellation
 from agent.context_compressor_summary import _accepts_keyword_argument
 from agent.context_engine import automatic_compaction_status_message, sanitize_memory_context
@@ -3014,6 +3009,8 @@ def _run_summary_dispatch(
 
 def _fold_todo_snapshot(agent: Any, compressed: list) -> None:
     """Refresh full todo state as a paired read-only tool result."""
+    from agent.compression_todo_state import fold_todo_state, prepare_todo_state
+
     snapshot = prepare_todo_state(agent, compressed)
     fold_todo_state(agent, compressed, snapshot=snapshot, reload_notice=_pruned_skill_reload_notice(compressed))
 
@@ -3528,6 +3525,8 @@ def _commit_compaction(
     ``refused_prompt`` so the caller hands back the input unchanged. ``verbatim_tail`` (``/compress here N``) is
     re-inserted after the compacted head by either commit and stamped once durable.
     """
+    from agent.compression_todo_state import TodoStateDeferred, validate_todo_state
+
     session_commit_succeeded = False
     compacted_in_place = False
     commit_started_at = time.monotonic()
@@ -3732,6 +3731,11 @@ def _run_summary_phase(
     """Adopt a grown durable parent, gather memory context and run the summarizer.
     A hard cancel restores the compressor snapshot + live list, records a stall backoff while the lease is
     still held, and aborts; any other failure restores the live list, releases the lease and re-raises."""
+    from agent.compression_todo_state import (
+        TodoStateDeferred, defer_todo_compaction as _defer_todo_compaction, prepare_todo_state,
+        todo_tail_owns_state as _todo_tail_owns_state,
+    )
+
     pre_msg_count = len(messages)
     _activity_heartbeat: Optional[_CompressionActivityHeartbeat] = None
     messages_before_compression = None
@@ -3984,6 +3988,10 @@ def compress_context(
     overflow_reason: The error classifier's reason for the provider rejection an ``"overflow"`` attempt
     recovers from (``"context_overflow"``, ``"payload_too_large"``, ``"long_context_tier"``). Telemetry only.
     """
+    from agent.compression_todo_state import (
+        preflight_todo_compaction, prepare_compaction_candidate, reconcile_published_todo_state,
+    )
+
     if not preflight_todo_compaction(agent, messages, verbatim_tail):
         return messages, system_message
     mark_task_history_unverified(agent)
