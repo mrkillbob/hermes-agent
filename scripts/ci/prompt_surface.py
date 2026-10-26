@@ -79,6 +79,11 @@ def _pin_environment() -> None:
     socket.socket.connect = refuse  # type: ignore[method-assign]
     socket.create_connection = refuse  # type: ignore[assignment]
     socket.getaddrinfo = refuse  # type: ignore[assignment]
+    # Initialize native runtime metadata before pinning the skill index platform.
+    # macOS Python otherwise looks for nonexistent Linux sysconfig/psutil modules.
+    import sysconfig
+    sysconfig.get_config_vars()
+    import psutil  # bind the native extension before the presentation-only pin
     sys.platform = "linux"  # skills index ``platforms:`` gate
 
     import hermes_time
@@ -198,6 +203,7 @@ def render(out: Path) -> int:
     """Render into *out* from a fresh child process and home, so nothing from the caller's
     environment, config or imported modules reaches the bytes."""
     with tempfile.TemporaryDirectory(prefix="prompt-surface-") as tmp:
+        tmp = str(Path(tmp).resolve())
         home = Path(tmp) / "home"
         home.mkdir()
         staging = Path(tmp) / "out"

@@ -18277,6 +18277,17 @@
             ],
             "default": null,
             "title": "Name"
+          },
+          "staged_upload": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StagedFileUpload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -20297,6 +20308,30 @@
           "task_id": {
             "title": "Task Id",
             "type": "string"
+          },
+          "member_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Member Id"
+          },
+          "execution_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Execution Generation"
           }
         },
         "required": [
@@ -34019,6 +34054,7 @@
       },
       "RoomActor": {
         "additionalProperties": false,
+        "description": "``hosted_rooms._ACTOR_FIELDS``; member replies carry ``profile`` plus, when known,\n``display_name`` and the peer ``connection_id`` (``hosted_room_discussion._member_actor``).",
         "properties": {
           "kind": {
             "title": "Kind",
@@ -34027,6 +34063,42 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Display Name"
+          },
+          "connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Connection Id"
           }
         },
         "required": [
@@ -34194,7 +34266,7 @@
       },
       "RoomDriverStatus": {
         "additionalProperties": false,
-        "description": "``HostedRoomService.status(room_id)``; ``pending_actions`` rows are ``{kind: retry, task_id}``\nor the driver's approval action (``kind: approval`` + run/session/approval context).\n``member_activity`` lists live tasks in admission order (absent from older gateways).",
+        "description": "``HostedRoomService.status(room_id)``; ``pending_actions`` rows are the exact attempt\n(``hosted_room_service.attempt_action``: ``kind`` + ``member_id``/``task_id``/``execution_generation``)\nor the driver's approval action (``kind: approval`` + run/session/approval context).\n``member_activity`` lists live tasks in admission order (absent from older gateways).",
         "properties": {
           "running": {
             "title": "Running",
@@ -42317,6 +42389,31 @@
         "title": "SpawnTreeSaveResult",
         "type": "object"
       },
+      "StagedFileUpload": {
+        "additionalProperties": false,
+        "description": "Source identity returned by the browser upload route, checked against the live profile.",
+        "properties": {
+          "install_id": {
+            "title": "Install Id",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "profile_home": {
+            "title": "Profile Home",
+            "type": "string"
+          }
+        },
+        "required": [
+          "install_id",
+          "path",
+          "profile_home"
+        ],
+        "title": "StagedFileUpload",
+        "type": "object"
+      },
       "StatusUpdatePayload": {
         "additionalProperties": false,
         "description": "``server._status_update`` and the direct emitters (goal / loop / heartbeat / process).",
@@ -48502,7 +48599,7 @@
     },
     {
       "name": "prompt.cancel",
-      "summary": "Retire a still-queued admission; a started one is unaffected.",
+      "summary": "Retire a queued admission; a started one is interrupted in the same call.",
       "params": [
         {
           "name": "params",

@@ -1,6 +1,7 @@
 import { isStableOpen, reconnectBackoffDelayMs } from '@hermes/shared'
 
 import type { HermesConnection } from '@/global'
+import { isBrowserHostedDesktop } from '@/lib/platform'
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 
 import {
@@ -275,7 +276,7 @@ export function pluginSocket(
 
     // No pinned bridge or descriptor, or OAuth cookie auth (WS tickets are single-use,
     // core-managed): stay on the polling fallback rather than half-working.
-    if (stale() || !connection || connection.authMode === 'oauth') {
+    if (stale() || !connection || connection.authMode === 'oauth' || isBrowserHostedDesktop()) {
       return
     }
 

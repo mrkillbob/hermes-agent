@@ -2857,19 +2857,6 @@ class _StreamingCall(StreamingWaitMonitor):
             except Exception:
                 logger.debug("Managed provider stream cleanup failed", exc_info=True)
 
-    def _start_stream_attempt(self) -> int:
-        with self.stream_attempt_lock:
-            self.stream_attempt_state["current"] += 1
-            attempt_id = int(self.stream_attempt_state["current"])
-            self.last_chunk_time["t"] = time.time()
-        self._stale_kill_requested = False
-        # Attempt-local: a dead attempt's prompt progress must not mask the next load notice, and
-        # its tool name (died before any text) must not label a later partial stub or retry.
-        self.provider_tool_in_flight["yes"], self.prompt_progress["progress"] = False, None
-        self.result["partial_tool_names"] = []
-        self.deltas_were_sent["yes"] = False
-        return attempt_id
-
     def _cancel_current_stream_attempt(self, reason: str, *, expected_attempt_id: int | None = None) -> bool:
         with self.stream_attempt_lock:
             current = int(self.stream_attempt_state["current"])
@@ -2936,7 +2923,7 @@ class _StreamingCall(StreamingWaitMonitor):
         reasoning tags inside it must still reach the display: route through
         the delta callback for tag extraction (the CLI drops non-reasoning text
         once the stream box is closed)."""
-        if self.agent.stream_delta_callback:
+        if self.agent.stream_delta_callback and not getattr(self.agent, "_hold_stream", False):
             self._quiet(lambda: (self.agent.stream_delta_callback(text), self.agent._record_streamed_assistant_text(text)))
 
     def _new_diag(self) -> dict:
@@ -3909,7 +3896,8 @@ class _StreamingCall(StreamingWaitMonitor):
         still be unwinding SSL BIOs (FD-recycle corruption); the OpenAI primary
         is replaced lazily."""
         if not self._cancel_current_stream_attempt("stale_stream_kill", expected_attempt_id=attempt_id):
-            return  # A retry started after the monitor measured this attempt's stale interval.
+            self._advance_cancelled_stall(elapsed, attempt_id)
+            return
         _est_ctx = estimate_request_context_tokens(self.api_kwargs)
         logger.warning(
             "Stream stale for %.0fs (threshold %.0fs) — no chunks received. model=%s context=~%s tokens. Killing connection.",
@@ -3924,10 +3912,7 @@ class _StreamingCall(StreamingWaitMonitor):
             self.clients.close_once("stale_stream_kill")
         self._shutdown_stale_attempt_socket(_killed_response)
         self._count_stale_attempt()
-        # Reset the timer so we don't kill repeatedly while the worker unwinds.
-        self.last_chunk_time["t"] = time.time()
-        self.agent._emit_wait_notice(f"⚠ no output from provider for {int(elapsed)}s — reconnecting...")
-        self.agent._touch_activity(f"stale stream detected after {int(elapsed)}s, reconnecting")
+        self._rearm_or_abandon_after_kill(elapsed, expected_attempt_id=attempt_id)
 
     def _abort_for_interrupt(self, stale_elapsed: float) -> None:
         """/stop seen by the monitor: mark cancelled, abort the request-local
@@ -3975,12 +3960,13 @@ class _StreamingCall(StreamingWaitMonitor):
             return
         self._stream_stale_timeout = _cloud_stale_timeout_for(self.agent, self.api_kwargs)
 
-    def _partial_stream_stub(self):
+    def _partial_stream_stub(self, error):
         """Tokens already reached the platform: a finish_reason="length" stub fires the
         continuation machinery; tool_calls=None blocks executing incomplete calls.
-        Content may be EMPTY on purpose — the loop skips appending an empty stub and
-        only sends the nudge (placeholder text leaked into the stitched response)."""
-        error = self.result["error"]
+        Content may be EMPTY (dropped tool call, overflow) — the loop skips appending an
+        empty stub and only sends the nudge (placeholder text leaked into the stitched
+        response). A text-only death with 0 visible chars never gets here: the error
+        handler reclassifies it as undelivered (#112419)."""
         _partial_text = (getattr(self.agent, "_current_streamed_assistant_text", "") or "").strip() or None
         _partial_names = list(self.result.get("partial_tool_names") or [])
         if _partial_names:
@@ -4058,29 +4044,30 @@ class _StreamingCall(StreamingWaitMonitor):
             raise InterruptedError("Agent interrupted during streaming API call")
         if self.agent._interrupt_requested:  # worker returned early before the monitor saw the flag
             raise InterruptedError("Agent interrupted during streaming API call (post-worker)")
-        if self.result["error"] is not None:
-            # Quiet/test consumers can suppress delta callbacks even though the stream accumulator
-            # has already received user-visible text or an incomplete tool call. Preserve the
-            # partial-stub contract based on captured state, not only on whether a UI consumed it.
+        # Read the outcome once: an abandoned worker can still write into ``self.result`` later.
+        error, response = self.result["error"], self.result["response"]
+        if self._abandon_error is not None:
+            # Same bounded Relay join as /stop (#81521), before the retry opens a new scope.
+            _join_worker_for_relay_teardown(self.worker, label="Abandoned streaming")
+            error, response = self._abandon_error, None
+            self._forget_invisible_deltas(error)  # nothing visible: retry, not a stub
+        if error is not None:
             has_partial_response = (
                 self.deltas_were_sent["yes"]
                 or bool((getattr(self.agent, "_current_streamed_assistant_text", "") or "").strip())
-                or bool(getattr(self, "result", {}).get("partial_tool_names"))
+                or bool(self.result.get("partial_tool_names"))
             )
-            # Inline contexts have no streaming consumer until this call returns. Internal
-            # accumulator text therefore is not delivered output; preserve the transport error
-            # so the caller can retry instead of continuing from an invisible partial stub.
             if self.worker is None and not self.deltas_were_sent["yes"]:
-                has_partial_response = bool(getattr(self, "result", {}).get("partial_tool_names"))
+                has_partial_response = bool(self.result.get("partial_tool_names"))
             if has_partial_response:
-                return self._partial_stream_stub()
-            raise self.result["error"]
-        if self.result["response"] is not None:
+                return self._partial_stream_stub(error)
+            raise error
+        if response is not None:
             _reset_stale_streak(self.agent)  # provider proved responsive: clear the breaker
         # Propagate first-chunk timing for the ``post_api_request`` hook.
         if isinstance(self.clients.diag, dict) and self.clients.diag.get("first_chunk_at"):
             self.agent._last_api_first_chunk_at = float(self.clients.diag["first_chunk_at"])
-        return self.result["response"]
+        return response
 
 
 def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=None):

@@ -408,3 +408,50 @@ def test_mcp_serve_is_never_installed_automatically(tmp_path):
     assert lcm.migrate_home(home, install=lambda name: installs.append(name) or {"ok": True},
                             say=lambda _m: None) == []
     assert installs == []
+
+
+_LANGFUSE_KEYS_ENV = "HERMES_LANGFUSE_PUBLIC_KEY=pk-lf-x\nHERMES_LANGFUSE_SECRET_KEY=sk-lf-x\n"
+
+
+@pytest.mark.parametrize(("config", "managed", "in_use"), [
+    ("plugins:\n  enabled: [observability/langfuse]\n", "", True),
+    ("plugins:\n  enabled: [langfuse]\n", "", True),                   # legacy bare name the loader accepted
+    ("plugins:\n  enabled: [observability/langfuse]\n  disabled: [langfuse]\n", "", False),  # disabled wins
+    ("plugins:\n  enabled: [other]\n", "", False),
+    ("", "", False),                                                   # keys alone: it was opt-in
+    ("", "plugins:\n  enabled: [observability/langfuse]\n", True),     # an administrator's pinned list
+])
+def test_langfuse_in_use_is_the_bundled_plugin_enabled(tmp_path, monkeypatch, config, managed, in_use):
+    home = _home(tmp_path, env=_LANGFUSE_KEYS_ENV, config=config)
+    managed_dir = tmp_path / "managed"
+    managed_dir.mkdir()
+    if managed:
+        (managed_dir / "config.yaml").write_text(managed, encoding="utf-8")
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_dir))
+    assert lcm.langfuse_in_use(home) is in_use
+
+
+def test_old_langfuse_plugin_key_keeps_naming_the_catalog_plugin(tmp_path, monkeypatch):
+    """`observability/langfuse` (every pre-move doc, an administrator's pinned list) names the install
+    while the plugin is absent, and selects/resolves the installed plugin once it is there."""
+    from hermes_cli.plugins_cmd import _find_plugin_entry, _unknown_plugin_message
+    from hermes_cli.plugins_discovery import IN_BOTH_LISTS, gate_manifest
+    from hermes_cli.plugins_manifest import PluginManifest
+    home = _home(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for name in ("observability/langfuse", "langfuse"):
+        message = _unknown_plugin_message(name)
+        assert "moved out of core into the 'langfuse' plugin" in message
+        assert "hermes plugins install langfuse" in message
+    assert "moved out of core" not in _unknown_plugin_message("nonexistent")
+
+    plugin_dir = home / "plugins" / "langfuse"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.yaml").write_text("name: langfuse\nversion: 2.0.0\n", encoding="utf-8")
+    (plugin_dir / "__init__.py").write_text("def register(ctx):\n    pass\n", encoding="utf-8")
+    assert _find_plugin_entry("observability/langfuse")[5] == "langfuse"
+    manifest = PluginManifest(name="langfuse", source="user", path=str(plugin_dir), key="langfuse")
+    assert gate_manifest(manifest, set(), {"observability/langfuse"}).action == "load"
+    # The old key in plugins.disabled still names the plugin, so with the new key enabled both lists do.
+    assert gate_manifest(manifest, {"observability/langfuse"}, {"langfuse"}).error == IN_BOTH_LISTS
+    assert gate_manifest(manifest, {"observability/langfuse"}, None).error == "disabled via config"

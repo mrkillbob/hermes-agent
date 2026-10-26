@@ -1,4 +1,9 @@
-"""Display and heartbeat phase of the request-local streaming monitor."""
+"""Display and heartbeat phase of the request-local streaming monitor.
+
+Also holds the stale-kill follow-up (re-arm, abandon a wedged worker, stop claiming liveness
+for a wedged inline call) and the shared "no visible text was delivered" check
+(``_forget_invisible_deltas``) used by the error and abandon paths.
+"""
 
 import logging
 import time
@@ -9,8 +14,10 @@ from agent import chat_completion_wait_notice as wn
 from agent.model_metadata import is_local_endpoint
 from agent.proxy_bypass import is_loopback_host
 from agent.sleep_clock import SleepWatch
-
 logger = logging.getLogger(__name__)
+
+# Kills of one dispatched attempt whose worker never unwinds before the monitor gives up on it.
+_STALE_ABANDON_KILLS = 3
 
 
 class _CancellationState(dict):
@@ -107,6 +114,108 @@ class StreamingWaitMonitor:
                     _shutdown_socket(sock)
         return len(seen)
 
+    # Stale-kill bookkeeping: consecutive kills of the SAME dispatched attempt, and the error
+    # that ends a call whose worker those kills could not unwind.
+    _last_killed_attempt = 0
+    _same_attempt_kills = 0
+    _abandon_error = None
+    # Inline call wedged past the limit: the stale-timer re-arm time after which activity touches
+    # are withheld (None = claim liveness as usual). A real chunk after it lifts the hold.
+    _liveness_withheld_at = None
+
+    def _claims_liveness(self) -> bool:
+        since = self._liveness_withheld_at
+        return since is None or self.last_chunk_time["t"] > since
+
+    def _start_stream_attempt(self) -> int:
+        with self.stream_attempt_lock:
+            if self._request_cancelled["value"]:
+                raise InterruptedError("Stream request ended before retry")
+            self.stream_attempt_state["current"] += 1
+            attempt_id = int(self.stream_attempt_state["current"])
+            self.last_chunk_time["t"] = time.time()
+        self._stale_kill_requested = False
+        # Attempt-local: a dead attempt's prompt progress must not mask the next load notice, and
+        # its tool name (died before any text) must not label a later partial stub or retry.
+        self.provider_tool_in_flight["yes"], self.prompt_progress["progress"] = False, None
+        self.result["partial_tool_names"] = []
+        self.deltas_were_sent["yes"] = False
+        return attempt_id
+
+    def _advance_cancelled_stall(self, elapsed: float, attempt_id: int) -> None:
+        """Advance a cancelled current attempt without cancelling it or counting a new attempt."""
+        # A cancelled worker may remain wedged after its socket was shut down. Advance
+        # abandonment without cancelling again or crediting another circuit-breaker attempt.
+        with self.stream_attempt_lock:
+            cancelled_current = (self.stream_attempt_state["current"] == attempt_id
+                                 and attempt_id in self.stream_attempt_state["cancelled"])
+        if cancelled_current:
+            logger.warning("Stream stale for %.0fs after cancellation; worker still has not unwound (attempt=%s).",
+                           elapsed, attempt_id)
+            self._rearm_or_abandon_after_kill(elapsed, expected_attempt_id=attempt_id)
+
+    def _rearm_or_abandon_after_kill(self, elapsed: float, *, expected_attempt_id: int | None = None) -> None:
+        """After a stale kill: re-arm the stale timer and announce the reconnect, unless the
+        same dispatched attempt has now been killed ``_STALE_ABANDON_KILLS`` times without
+        unwinding. Then the request is parked where a socket shutdown cannot reach it, and
+        re-killing it every window would stall the turn forever: a worker thread is abandoned;
+        an inline call (cron, delegated children) runs on the caller's thread and cannot be,
+        so the monitor stops touching activity and the owner's inactivity watchdog ends it."""
+        # Reset the timer so we don't kill repeatedly while the worker unwinds.
+        with self.stream_attempt_lock:
+            attempt = int(self.stream_attempt_state["current"])
+            if expected_attempt_id is not None and attempt != expected_attempt_id:
+                return
+            self.last_chunk_time["t"] = time.time()
+        rekill = bool(attempt) and attempt == self._last_killed_attempt
+        self._last_killed_attempt = attempt
+        self._same_attempt_kills = self._same_attempt_kills + 1 if rekill else 1
+        if not rekill:
+            self._liveness_withheld_at = None
+        if attempt and self._same_attempt_kills >= _STALE_ABANDON_KILLS:
+            if self.worker is not None:
+                self._abandon_wedged_worker(elapsed, attempt)
+                return
+            if self._liveness_withheld_at is None:
+                logger.error(
+                    "Inline streaming call did not unwind after %d stale kills of attempt %s; no longer "
+                    "reporting it as active, so the inactivity watchdog can end it. model=%s",
+                    self._same_attempt_kills, attempt, self.api_kwargs.get("model", "unknown"))
+            self._liveness_withheld_at = self.last_chunk_time["t"]
+        if self._claims_liveness():  # the reconnect notice touches activity too (_emit_wait_notice)
+            self.agent._emit_wait_notice(f"⚠ no output from provider for {int(elapsed)}s — reconnecting...")
+            self.agent._touch_activity(f"stale stream detected after {int(elapsed)}s, reconnecting")
+
+    def _forget_invisible_deltas(self, exc) -> bool:
+        """Deltas fired but nothing visible reached a consumer (whitespace/think-only deltas,
+        or no display consumer at all) and no tool call is in flight: from the user's and the
+        model's point of view NOTHING was delivered. The "partial delivery" stub would be
+        EMPTY and the loop would ask the model to continue from nowhere, so it repeats the
+        lost step (#112419). Reset delivery so the failure is handled as undelivered (retry
+        the unchanged request) instead. Returns whether a partial tool call is in flight."""
+        tool_in_flight = bool(self.result.get("partial_tool_names")) or self.provider_tool_in_flight["yes"]
+        self._visible_text_delivered(exc, tool_in_flight)
+        return tool_in_flight
+
+    def _abandon_wedged_worker(self, elapsed: float, attempt: int) -> None:
+        """Publish abandonment only while the sampled cancelled attempt still owns the request."""
+        with self.stream_attempt_lock:
+            if (self.stream_attempt_state["current"] != attempt
+                    or attempt not in self.stream_attempt_state["cancelled"]):
+                return
+            self._abandon_error = TimeoutError(
+                f"Provider stream stalled: no chunks and the request worker did not unwind after "
+                f"{self._same_attempt_kills} stale-stream kills; request abandoned.")
+            # Publish the flag with the outcome under the attempt lock. Its socket callback
+            # runs afterward, so it cannot block a retry's identity check inside this lock.
+            dict.__setitem__(self._request_cancelled, "value", True)
+            self._call_done.set()
+        self._shutdown_stale_attempt_socket(getattr(self, "_attempt_stream_response", None))
+        logger.error(
+            "Streaming worker did not unwind after %d stale kills of attempt %s (%.0fs since last chunk); "
+            "abandoning the request. model=%s", self._same_attempt_kills, attempt, elapsed,
+            self.api_kwargs.get("model", "unknown"))
+
     def _poll_local_load_notice(self, now: float) -> bool:
         """Managed local server: surface a cold model's weight-load progress
         instead of the 60s neutral "waiting on <model>" notice. Polled ~1s only while no
@@ -179,7 +288,9 @@ class StreamingWaitMonitor:
 
     def _heartbeat(self, waiting_secs: int) -> None:
         """Gateway inactivity heartbeat: the start-to-first-chunk gap (thinking,
-        local prefill) can exceed the gateway timeout."""
+        local prefill) can exceed the gateway timeout. Withheld for a wedged inline call."""
+        if not self._claims_liveness():
+            return
         if waiting_secs >= 60.0:
             # No chunks for 60s+: say WHAT the wait is and WHEN recovery kicks in —
             # once per silence, not every heartbeat (#92550).
@@ -227,12 +338,9 @@ class StreamingWaitMonitor:
                 self._heartbeat(int(_hb_now - self.last_chunk_time["t"]))
             with self.stream_attempt_lock:
                 _stale_attempt = int(self.stream_attempt_state["current"])
-                _stale_attempt_active = (
-                    _stale_attempt > 0
-                    and _stale_attempt not in self.stream_attempt_state["cancelled"]
-                )
+                _stale_attempt_dispatched = _stale_attempt > 0
             _stale_elapsed = time.time() - self.last_chunk_time["t"]
-            if _stale_attempt_active and _stale_elapsed > self._stream_stale_timeout:
+            if _stale_attempt_dispatched and _stale_elapsed > self._stream_stale_timeout:
                 self._mon.wait_notice_started_ts = None  # Reconnect status has its own owner.
                 self._mon.wait_notice.reset()
                 self._kill_stale_stream(_stale_elapsed, _stale_attempt)
