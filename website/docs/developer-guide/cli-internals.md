@@ -89,6 +89,25 @@ it guards. `plan → snapshot → apply → restart-per-kind → verify → repo
   `_old_updater.stop_for_relaunch` → `_run_child`. Removing a name
   bricks every release mid-update. see `tests/compat/old_updater_surface.json`.
 
+### Sealed native checkout custody
+
+A Mac `Contents/Resources/agent-payload/<repo>` keeps its checkout gate beside the canonical
+`.app`: `.<app basename>.hermes-update.lock`, with a separate `.identity` receipt. Neither file
+belongs in signed Resources or a profile's dependency state. All homes, source aliases and
+users of that app resolve the same gate. An unwritable parent refuses custody; there is no
+home-scoped or temporary fallback. Git common-directory and writable ZIP locks retain their paths.
+
+The existing kernel gate protects validation of the exact manifest/stamp and source/container
+identity. Replaced metadata, a replaced gate, a lost receipt after acquisition, or an old embedded
+lock refuses admission. Gate and receipt are never deleted/rebound by normal release. Replacing a
+package at the same canonical path requires an explicit steward lifecycle decision after real
+quiescence; changing the manifest must not silently create a second custody namespace.
+
+Shell/Desktop readers delegate sealed held/free qualification to the central stdlib-only reader,
+without bootstrap, PM activation or provider imports. Missing Python or uncertain metadata means
+held. A valid unused app is free, so these probes cannot turn sealed distribution into a permanent
+startup hold. Native Windows and mutable source recovery retain their existing protocols.
+
 Process-scan coordination between updater, serve/dashboard, and gateway is being replaced by a
 gateway-owned control socket (#92091); scans are the fallback layer for old/crashed processes — read
 #92091 before adding any heuristic. Process identity rules (never argv substrings; canonical

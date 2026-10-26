@@ -513,8 +513,23 @@ marker_release_locked() { # A7 rule 5 / corpus "release"
 }
 
 # ── the checkout lock (hermes_cli/update_lock.py::checkout_lock_path) ────────
+# Sealed native code is updated by its external steward. These source-update readers
+# delegate sealed identity qualification to the shared stdlib-only reader.
+sealed_checkout_app() {
+  local root payload resources contents app
+  root="$(cd -P "$INSTALL_ROOT" 2>/dev/null && pwd)" || root="$INSTALL_ROOT"
+  payload="$(dirname "$root")"; resources="$(dirname "$payload")"
+  contents="$(dirname "$resources")"; app="$(dirname "$contents")"
+  [ "$(basename "$payload")" = agent-payload ] && [ "$(basename "$resources")" = Resources ] &&
+    [ "$(basename "$contents")" = Contents ] || return 1
+  case "$app" in *.app) printf '%s\n' "$app" ;; *) return 1 ;; esac
+}
+
 checkout_lock_path() {
-  local root="$INSTALL_ROOT" dot="$INSTALL_ROOT/.git" gitdir line common
+  local root="$INSTALL_ROOT" dot="$INSTALL_ROOT/.git" gitdir line common app
+  if app="$(sealed_checkout_app)"; then
+    printf '%s/.%s.hermes-update.lock\n' "$(dirname "$app")" "$(basename "$app")"; return
+  fi
   if [ -d "$dot" ]; then
     gitdir="$dot"
   elif [ -f "$dot" ]; then
@@ -544,8 +559,25 @@ checkout_lock_held() { # 0 iff some process holds the checkout kernel lock right
   # our close. No tool, or a lock file that exists but cannot be opened (root-
   # owned after `sudo hermes update`): held -- fail closed like the Desktop's
   # own probe (checkout_held): reclaim needs a provably free checkout.
+  if sealed_checkout_app >/dev/null; then
+    local code_root
+    code_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 -I -S -B -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+try:
+    from hermes_cli.update_lock import checkout_lock_held
+    held = checkout_lock_held(Path(sys.argv[2]))
+except Exception:
+    sys.exit(2)
+sys.exit(0 if held else 1)
+' "$code_root" "$INSTALL_ROOT"
+    [ "$?" -ne 1 ]; return
+  fi
   local path rc tool="$MARKER_LOCK_TOOL_FORCED"
-  path="$(checkout_lock_path)"
+  path="$(checkout_lock_path)" || return 0
   [ -f "$path" ] || return 1
   if [ -z "$tool" ]; then
     if command -v perl >/dev/null 2>&1; then tool=perl

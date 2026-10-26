@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile as execFileCallback, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -223,5 +223,50 @@ test.skipIf(process.platform === 'win32')('the remote judge reads ps lstart in U
     assert.equal(Number(stdout.trim()), Date.UTC(2026, 10, 1, 6, 30) / 1000)
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(process.platform === 'win32')('remote namespaced payload probes custody even without a marker', async () => {
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'hermes-sealed-remote-'))
+  try {
+    const app = path.join(temp, 'Hermes.app')
+    const payload = path.join(app, 'Contents', 'Resources', 'agent-payload')
+    const root = path.join(payload, 'hermes-agent')
+    mkdirSync(path.join(root, 'hermes_cli'), { recursive: true })
+    writeFileSync(path.join(root, 'hermes_cli', '__init__.py'), '')
+    const repository = path.resolve(__dirname, '../../..')
+    for (const name of ['update_lock.py', 'update_lock_payload.py']) {
+      copyFileSync(path.join(repository, 'hermes_cli', name), path.join(root, 'hermes_cli', name))
+    }
+    const runtime = { repoDir: 'hermes-agent', toolsDir: 'tools', storePython: 'tools/python/bin/python3',
+      sitePackages: 'venv/site-packages', commands: { hermes: 'bin/hermes-native' } }
+    const manifest = path.join(payload, 'manifest.json')
+    writeFileSync(manifest, JSON.stringify({ schema: 1, target: 'darwin-arm64', repo: 'hermes-agent',
+      venv: 'venv', store: 'tools', ref: 'a'.repeat(40), runtime }))
+    writeFileSync(path.join(root, 'install-stamp.json'), JSON.stringify({ schemaVersion: 1,
+      commit: 'a'.repeat(40), dirty: false, payload: 'bundled', distribution: 'desktop-app',
+      updateMechanism: 'external', runtime }))
+    mkdirSync(path.join(payload, 'bin'))
+    const executable = path.join(payload, 'bin', 'hermes-native')
+    writeFileSync(executable, 'fixture only; never executed')
+    const marker = path.join(temp, 'home', '.hermes-update-in-progress')
+    const probe = async () => (await execFile('python3', ['-I', '-S', '-B', '-c',
+      REMOTE_MARKER_GATE_PY, marker, '', executable])).stdout.trim()
+    assert.equal(await probe(), 'CLEAR')
+    assert.equal(existsSync(path.dirname(marker)), false, 'read-only probe creates no home or marker mutex')
+    const refusedLaunch = async () => {
+      const result = await gate([marker, 'echo PAYLOAD-RAN', executable])
+      assert.deepEqual(result, { code: 75, stdout: '', stderr: 'HELD' })
+    }
+    await withCheckoutLockHeld(path.join(temp, '.Hermes.app.hermes-update.lock'), async () => {
+      assert.equal(await probe(), 'HELD')
+      await refusedLaunch()
+    })
+    unlinkSync(manifest)
+    assert.equal(await probe(), 'HELD')
+    await refusedLaunch()
+    assert.equal(existsSync(path.join(root, '.hermes-update.lock')), false)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
   }
 })

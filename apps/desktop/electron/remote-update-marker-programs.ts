@@ -8,7 +8,8 @@
  * is live only while `now - started_at <= V1_MAX_AGE_S`. Owner or delegate live => LIVE, both dead =>
  * CLEAR, malformed => UNCERTAIN. Only the host's system Python (POSIX) or
  * PowerShell/.NET (Windows relaunch/spawn) runs these: nothing imports the
- * checkout an updater may be replacing.
+ * mutable checkout an updater may be replacing. Sealed Mac custody delegates only
+ * to its stdlib reader; invalid or unavailable package qualification stays uncertain.
  *
  * The Python stays free of double quotes: managed-ssh-update ships it to Windows
  * as a PowerShell native argument, and PowerShell 5.1 does not escape them.
@@ -121,15 +122,12 @@ def marker_verdict(raw):
  * resolved). Then it either prints the verdict (no payload: the relaunch probe)
  * or runs the payload as `sh -c payload hermes-update-mutex <fd>` still holding
  * the lock. A refused payload exits 75 with the verdict on stderr. The probe
- * skips the lock when there is no marker, so it never creates files on a clean host.
+ * probes checkout custody without creating the marker mutex when there is no marker.
  */
 export const REMOTE_MARKER_GATE_PY = `${REMOTE_MARKER_JUDGE_PY}
-import fcntl,subprocess
+import fcntl,json,subprocess
 marker=sys.argv[1]
 payload=sys.argv[2] if len(sys.argv)>2 and sys.argv[2] else None
-if payload is None and not os.path.lexists(marker):
-    print('CLEAR');sys.exit(0)
-
 def hold(fd):
     deadline=time.monotonic()+10
     while True:
@@ -144,7 +142,14 @@ def read_marker():
         with open(marker,'rb') as stream:return stream.read(4097)
     except FileNotFoundError:return None
 
+def sealed_checkout_app(root):
+    root=os.path.realpath(root);payload=os.path.dirname(root);resources=os.path.dirname(payload)
+    contents=os.path.dirname(resources);app=os.path.dirname(contents)
+    return app if os.path.basename(payload)=='agent-payload' and os.path.basename(resources)=='Resources' and os.path.basename(contents)=='Contents' and app.endswith('.app') else None
+
 def checkout_lock(root):
+    app=sealed_checkout_app(root)
+    if app:return os.path.join(os.path.dirname(app),'.'+os.path.basename(app)+'.hermes-update.lock')
     # hermes_cli/update_lock.py::checkout_lock_path: <git common dir>/hermes-update.lock, else <root>/.hermes-update.lock.
     plain=os.path.join(root,'.hermes-update.lock');dot=os.path.join(root,'.git')
     try:
@@ -160,12 +165,40 @@ def checkout_lock(root):
     except (OSError,ValueError):return plain
     return os.path.join(os.path.normpath(gitdir),'hermes-update.lock')
 
+def source_root(exe):
+    command=os.path.realpath(os.path.expanduser(exe));bin_dir=os.path.dirname(command)
+    payload_root=os.path.dirname(bin_dir)
+    if os.path.basename(bin_dir)=='bin' and sealed_checkout_app(os.path.join(payload_root,'source')):
+        manifest=os.path.join(payload_root,'manifest.json')
+        fd=os.open(manifest,os.O_RDONLY|os.O_NONBLOCK|getattr(os,'O_NOFOLLOW',0))
+        try:
+            found=os.fstat(fd)
+            if not __import__('stat').S_ISREG(found.st_mode) or found.st_nlink!=1:raise ValueError('payload manifest not regular')
+            raw=os.read(fd,65537)
+        finally:os.close(fd)
+        if len(raw)>65536:raise ValueError('payload manifest too large')
+        repo=json.loads(raw)['repo']
+        if not isinstance(repo,str) or not repo or os.path.basename(repo)!=repo:raise ValueError('payload repo invalid')
+        root=os.path.realpath(os.path.join(payload_root,repo))
+        if os.path.dirname(root)!=payload_root:raise ValueError('payload repo escapes')
+        return root
+    return os.path.dirname(os.path.dirname(os.path.dirname(command)))
+
 def checkout_held():
     # update_lock.checkout_lock_held: take the flock for one try and drop it. A lock file that
     # exists but cannot be opened or probed counts as held: reclaim needs a provably free checkout.
     roots=[os.path.join(os.path.dirname(marker),'hermes-agent')]
-    roots+=[os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(os.path.expanduser(exe))))) for exe in sys.argv[3:] if exe]
+    try:roots+=[source_root(exe) for exe in sys.argv[3:] if exe]
+    except (OSError,ValueError,TypeError,KeyError):return True
     for root in roots:
+        if sealed_checkout_app(root):
+            try:
+                sys.path.insert(0,root)
+                from hermes_cli.update_lock import checkout_lock_held,checkout_lock_path
+                if str(checkout_lock_path(root))!=checkout_lock(root):return True
+                if checkout_lock_held(__import__('pathlib').Path(root)):return True
+            except Exception:return True
+            continue
         try:lock=os.open(checkout_lock(root),os.O_RDONLY|os.O_CLOEXEC)
         except (FileNotFoundError,NotADirectoryError):continue
         except OSError:return True
@@ -174,15 +207,18 @@ def checkout_held():
         finally:os.close(lock)
     return False
 
+if payload is None and not os.path.lexists(marker):
+    print('HELD' if checkout_held() else 'CLEAR');sys.exit(0)
+
 os.makedirs(os.path.dirname(marker),exist_ok=True)
 try:fd=os.open(marker+'.lock',os.O_RDWR|os.O_CREAT|os.O_CLOEXEC,0o644)
 except PermissionError:fd=os.open(marker+'.lock',os.O_RDONLY|os.O_CLOEXEC)
 verdict='UNCERTAIN'
 if hold(fd):
     raw=read_marker();verdict=marker_verdict(raw)
-    if verdict=='CLEAR' and raw is not None:
+    if verdict=='CLEAR':
         if checkout_held():verdict='HELD'
-        else:
+        elif raw is not None:
             try:os.unlink(marker)
             except FileNotFoundError:pass
 if payload is None or verdict!='CLEAR':
