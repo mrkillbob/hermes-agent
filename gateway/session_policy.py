@@ -455,7 +455,7 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
         # launch route folds in: it holds while the profile still targets this, and a later profile edit
         # supersedes it. Without it the first turn's followed route replaces the pick.
         config.setdefault('model', {})['selection_profile'] = list(profile_target(config))
-    _apply_launch_overrides(params, config)
+    _apply_launch_overrides(params, config, ignore_user_config=ignore_user_config)
     # The posture is opt-in (``session.create`` only) and needs a folder the client named: the daemon's own
     # directory (the fallback above) is no workspace, and ``tool`` is a third-party integration. An explicit
     # pick wins anyway; skipping it here also spares the probe.
@@ -574,13 +574,18 @@ def _with_entry_pick(params, config):
     return {**params, 'provider': identity}
 
 
-def _apply_launch_overrides(params, config):
+def _apply_launch_overrides(params, config, *, ignore_user_config=False):
     """Validate the explicit model/agent launch overrides and fold them into *config*."""
     from urllib.parse import urlsplit
     from hermes_cli.config import resolve_turn_limit
     from hermes_constants import parse_reasoning_effort
-    params = _with_entry_pick(_without_auto_pick(params), config)
-    picks_profile_entry = 'provider' in params and _keeps_profile_route(params['provider'], config)
+    params = _without_auto_pick(params)
+    # A bypass snapshot has code defaults and explicit picks, no profile route to match. Importing
+    # its resolver discovers provider catalogs and probes the home, violating that isolation.
+    if not ignore_user_config:
+        params = _with_entry_pick(params, config)
+    picks_profile_entry = (not ignore_user_config and 'provider' in params
+                           and _keeps_profile_route(params['provider'], config))
     if 'provider' in params and not picks_profile_entry:
         model = config.setdefault('model', {})
         # A provider pick is a route change: the profile's endpoint, wire protocol and
