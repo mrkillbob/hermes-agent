@@ -23,7 +23,7 @@ def hermes_home(tmp_path, monkeypatch):
 
 
 def test_restart_all_stamps_the_marker_after_the_host_is_stopped(hermes_home, monkeypatch):
-    from hermes_cli import gateway as gw
+    from hermes_cli import gateway as gw, gateway_profile_lifecycle
 
     marker = hermes_home / ".restart_pending.json"
     seen: dict[str, bool] = {}
@@ -31,7 +31,7 @@ def test_restart_all_stamps_the_marker_after_the_host_is_stopped(hermes_home, mo
         gw, "_stop_installed_service", lambda system: seen.setdefault("marker_at_stop", marker.exists()) or False
     )
     monkeypatch.setattr(gw, "_stop_host_multiplexer", lambda owner: 1)
-    monkeypatch.setattr(gw, "_print_unfolded_gateway_note", lambda owner: None)
+    monkeypatch.setattr(gateway_profile_lifecycle, "_print_unfolded_gateway_note", lambda owner: None)
     monkeypatch.setattr(gw, "_wait_for_gateway_exit", lambda **kw: None)
     monkeypatch.setattr(gw, "_wait_for_api_server_port_free", lambda: None)
     monkeypatch.setattr(gw, "_discard_dead_host_record", lambda: None)
