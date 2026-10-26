@@ -10,6 +10,7 @@ import json
 import os
 import threading
 from typing import Callable
+from urllib.parse import urlsplit
 
 
 class RequestBudgetExhausted(InterruptedError):
@@ -17,7 +18,7 @@ class RequestBudgetExhausted(InterruptedError):
 
 
 class _RequestBudget:
-    def __init__(self, limit: int):
+    def __init__(self, limit: int, route=None):
         self.pid = os.getpid()
         self.limit = limit
         self.used = 0
@@ -25,6 +26,7 @@ class _RequestBudget:
         self.reason: str | None = None
         self.on_stop: Callable[[], None] | None = None
         self.lock = threading.Lock()
+        self.route = route
 
 
 _budget: _RequestBudget | None = None
@@ -51,7 +53,22 @@ def bind_worker_request_budget(frame: dict) -> None:
     with _bind_lock:
         if _budget is not None:
             raise RuntimeError('worker request budget already bound')
-        _budget = _RequestBudget(limit)
+        _budget = _RequestBudget(limit, _restricted_route(value, context))
+
+
+def _restricted_route(value, context):
+    if 'local_text_only' not in value:
+        return None
+    from hermes_cli.kanban_execution_budget import validate_budget
+    validate_budget(value)
+    route = context.get('route')
+    if not isinstance(route, dict) or not isinstance(route.get('model'), str):
+        raise ValueError('invalid_worker_request_budget')
+    endpoint = urlsplit(route.get('base_url') or '')
+    if (endpoint.scheme not in {'http', 'https'} or endpoint.hostname not in {'localhost', '127.0.0.1', '::1'}
+            or endpoint.username is not None or endpoint.password is not None):
+        raise ValueError('invalid_worker_request_budget')
+    return (endpoint.scheme, endpoint.hostname, endpoint.port or (443 if endpoint.scheme == 'https' else 80), route['model'])
 
 
 def _current_budget() -> _RequestBudget | None:
@@ -117,11 +134,28 @@ def consume_provider_request() -> None:
 
 
 def _request_hook(request) -> None:
+    _check_request_route(request)
     consume_provider_request()
 
 
 async def _async_request_hook(request) -> None:
+    _check_request_route(request)
     consume_provider_request()
+
+
+def _check_request_route(request):
+    budget = _current_budget()
+    if budget is None or budget.route is None:
+        return
+    try:
+        url = urlsplit(str(request.url))
+        payload = json.loads(request.content)
+        route = (url.scheme, url.hostname, url.port or (443 if url.scheme == 'https' else 80), payload['model'])
+        matches = route == budget.route and url.username is None and url.password is None
+    except (ValueError, TypeError, KeyError):
+        matches = False
+    if not matches:
+        _refuse(budget, 'local_text_route_mismatch')
 
 
 def prepare_provider_client(client):

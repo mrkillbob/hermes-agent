@@ -11,7 +11,8 @@ logger = logging.getLogger("run_agent")
 
 def _fallback_entries(fallback_model) -> list[dict[str, Any]]:
     """Normalize legacy single-dict ``fallback_model`` / list ``fallback_providers``."""
-    if os.environ.get("HERMES_KANBAN_LOCAL_ONLY") == "1":
+    from agent.local_text_policy import local_text_only
+    if local_text_only() or os.environ.get("HERMES_KANBAN_LOCAL_ONLY") == "1":
         return []
     if isinstance(fallback_model, dict):
         fallback_model = [fallback_model]

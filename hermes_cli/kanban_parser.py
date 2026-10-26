@@ -381,6 +381,7 @@ _SPECS = [
     ], help="Archive one or more tasks"),
     _cmd("tail", [_TASK_ID, _arg("--interval", type=float, default=1.0)], help="Follow a task's event stream"),
     _cmd("dispatch", [
+        _arg("--local-text-only", action="store_true", help="One bounded local text request with no tools, fallback or auxiliary calls; requires all budget flags and --requests 1"),
         _arg("--wall-seconds", type=int, help="Bound one exact managed worker to at most 120 seconds; requires all budget flags"),
         _arg("--output-bytes", type=int, help="Combined worker output ceiling, at most 65536 bytes"),
         _arg("--requests", type=int, help="Provider request ceiling, at most 4; requires --task-id and --max 1"),
