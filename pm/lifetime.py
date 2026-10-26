@@ -29,7 +29,21 @@ class LifetimeUnavailable(RuntimeError):
     """Required ownership coordination could not be established."""
 
 
-def _identity(path, *, legacy=False):
+def _stable_id(value):
+    if (not isinstance(value, list) or len(value) != 2
+            or type(value[1]) is not int or value[1] <= 0 or not isinstance(value[0], str)):
+        return False
+    try:
+        parsed = uuid.UUID(value[0])
+        return bool(parsed.int) and str(parsed) == value[0]
+    except ValueError:
+        return False
+
+
+def _identity(path, *, legacy=False, stable=False):
+    if stable:
+        from hermes_platform.host.volume_identity import local_directory_identity
+        return local_directory_identity(path)
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode):
         raise LifetimeUnavailable("lifetime path is not a concrete directory")
@@ -70,20 +84,65 @@ def domain_for_generation(generation: Path) -> Path:
 
 
 class Gate:
-    def __init__(self, domain):
+    def __init__(self, domain, *, stable_identity=False):
         self.domain = Path(domain).resolve(strict=False)
         self.namespace = self.domain.parent / ".lifetimes" / self.domain.name
         self.activities = self.namespace / "activities"
         self.marker = self.namespace / "domain.json"
         self.fd = None
+        self.stable = stable_identity
+        self.require_stable = stable_identity
+        self.namespace_created = False
+
+    def bind_protocol(self):
+        """Select once under the held kernel gate; unknown records never downgrade."""
+        previous = self._record()
+        if previous is None:
+            return
+        if not isinstance(previous, dict) or type(previous.get('version')) is not int:
+            raise LifetimeUnavailable('unknown lifetime identity protocol')
+        keys = {'version', 'path', 'platform', 'activities', 'gate'}
+        keys.add('retired' if previous.get('retired') is True else 'domain')
+        if previous['version'] == 2 and previous.get('identity') == 'darwin_local_volume_uuid':
+            keys.add('identity')
+            stable = True
+        elif previous['version'] == 1:
+            stable = False
+        else:
+            raise LifetimeUnavailable('unknown lifetime identity protocol')
+        if set(previous) != keys:
+            raise LifetimeUnavailable('unknown lifetime identity protocol')
+        if stable and (previous['path'] != _recorded_path(self.domain)
+                       or type(previous['platform']) is not str or previous['platform'] != os.name
+                       or any(not _stable_id(previous[key]) for key in
+                              ('activities', 'gate', *(() if 'retired' in previous else ('domain',))))):
+            raise LifetimeUnavailable('unknown lifetime identity protocol')
+        self.stable = stable
+
+    def _stable_gate_identity(self):
+        from hermes_platform.host.volume_identity import local_file_identity, _object_version
+        path = self.namespace / 'gate'
+        before = os.fstat(self.fd)
+        if _object_version(path.lstat()) != _object_version(before):
+            raise LifetimeUnavailable('lifetime gate identity changed')
+        identity = local_file_identity(self.fd)
+        if any(_object_version(info) != _object_version(before)
+               for info in (os.fstat(self.fd), path.lstat())):
+            raise LifetimeUnavailable('lifetime gate identity changed')
+        return identity
 
     def _base_snapshot(self, *, legacy=False):
+        if self.stable:
+            return {'version': 2, 'identity': 'darwin_local_volume_uuid',
+                    'path': _recorded_path(self.domain), 'platform': os.name,
+                    'activities': _identity(self.activities, stable=True),
+                    'gate': self._stable_gate_identity()}
         return {"version": 1, "path": _recorded_path(self.domain), "platform": os.name,
                 "activities": _identity(self.activities, legacy=legacy),
                 "gate": file_identity(self.fd, legacy=legacy)}
 
     def _snapshot(self, *, legacy=False):
-        return {**self._base_snapshot(legacy=legacy), "domain": _identity(self.domain, legacy=legacy)}
+        return {**self._base_snapshot(legacy=legacy), "domain": _identity(self.domain, legacy=legacy, stable=self.stable)}
 
     def _record(self):
         try:
@@ -107,6 +166,12 @@ class Gate:
 
     def prepare(self, create):
         previous = self._record()
+        if self.require_stable and not self.stable:
+            raise LifetimeUnavailable('stable lifetime identity requires new qualified state')
+        if self.stable and previous is None and (self.domain.exists() or not self.namespace_created):
+            raise LifetimeUnavailable('stable lifetime identity requires new qualified state')
+        if self.stable and previous is None and any(path.name != 'gate' for path in self.namespace.iterdir()):
+            raise LifetimeUnavailable('stable lifetime identity requires new qualified state')
         if not self.domain.exists():
             if not create:
                 raise LifetimeUnavailable("managed environment no longer exists")
@@ -141,6 +206,10 @@ class Gate:
             return None
 
     def _inspect_snapshot(self, record, *, retired):
+        if self.stable:
+            snapshot = self._base_snapshot() | ({'retired': True} if retired else
+                                               {'domain': _identity(self.domain, stable=True)})
+            return snapshot if record == snapshot else None
         base = {"version": 1, "path": _recorded_path(self.domain), "platform": os.name}
         activities = directory_identities(self.activities)
         locked = file_identities(self.fd)
@@ -170,8 +239,12 @@ class Gate:
                     return True
                 try:
                     data = json.loads(entry.read_text())
-                    if (set(data) != {"version", "domain", "platform", "generation"}
-                            or data["version"] != 1 or not self._activity_domain_matches(data["domain"])
+                    keys = {'version', 'domain', 'platform', 'generation'} | ({'identity'} if self.stable else set())
+                    if (set(data) != keys or type(data.get('version')) is not int
+                            or data['version'] != (2 if self.stable else 1)
+                            or (self.stable and data.get('identity') != 'darwin_local_volume_uuid')
+                            or (self.stable and not _stable_id(data.get('domain')))
+                            or not self._activity_domain_matches(data["domain"])
                             or data["platform"] != os.name):
                         return True
                     scope = data["generation"]
@@ -194,17 +267,23 @@ class Gate:
             return True
 
     def _activity_domain_matches(self, identity):
+        if self.stable:
+            return identity == _identity(self.domain, stable=True)
         return (identity == _identity(self.domain) or
                 (os.name == "nt" and identity == _identity(self.domain, legacy=True)))
 
 
 @contextmanager
-def gate(domain, *, wait=True, deadline=None):
-    guard = Gate(domain)
+def gate(domain, *, wait=True, deadline=None, stable_identity=False):
+    guard = Gate(domain, stable_identity=stable_identity)
     root = guard.namespace.parent
     root.mkdir(parents=True, exist_ok=True)
     _identity(root)
-    guard.namespace.mkdir(exist_ok=True)
+    try:
+        guard.namespace.mkdir()
+        guard.namespace_created = True
+    except FileExistsError:
+        pass
     _identity(guard.namespace)
     path = guard.namespace / "gate"
     fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -217,6 +296,7 @@ def gate(domain, *, wait=True, deadline=None):
         if not stat.S_ISREG(named.st_mode) or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
             raise LifetimeUnavailable("lifetime gate identity changed")
         guard.fd = fd
+        guard.bind_protocol()
         yield guard
     finally:
         os.close(fd)
@@ -227,7 +307,7 @@ class Activity:
         self.domain = guard.domain
         self.path = guard.activities / uuid.uuid4().hex
         self.failed_outputs = {}
-        self.domain_identity = _identity(self.domain)
+        self.domain_identity = _identity(self.domain, stable=guard.stable)
         self.coordination = guard._base_snapshot()
         if generation is not None:
             try:
@@ -235,7 +315,10 @@ class Activity:
             except OSError as exc:
                 raise LifetimeUnavailable("dependency generation no longer exists") from exc
         scope = _generation_scope(generation, self.domain) if generation else None
-        data = {"version": 1, "domain": _identity(self.domain), "generation": scope, "platform": os.name}
+        data = {'version': 2 if guard.stable else 1, 'domain': self.domain_identity,
+                'generation': scope, 'platform': os.name}
+        if guard.stable:
+            data['identity'] = 'darwin_local_volume_uuid'
         self.data = json.dumps(data).encode()
         durable_write_bytes(self.path, self.data)
         self.fd = open_hold(self.path, reader=True)
@@ -274,8 +357,8 @@ class Activity:
             pass  # stale unlocked records are pruned under the next gate
 
 
-def acquire_activity(domain, *, generation=None, create=False, deadline=None):
-    with gate(domain, deadline=deadline) as guard:
+def acquire_activity(domain, *, generation=None, create=False, deadline=None, stable_identity=False):
+    with gate(domain, deadline=deadline, stable_identity=stable_identity) as guard:
         if guard is None:
             raise LifetimeUnavailable("timed out acquiring environment lifetime protection")
         guard.prepare(create)
@@ -283,8 +366,9 @@ def acquire_activity(domain, *, generation=None, create=False, deadline=None):
 
 
 @contextmanager
-def activity(domain, *, generation=None, create=False, deadline=None):
-    owned = acquire_activity(domain, generation=generation, create=create, deadline=deadline)
+def activity(domain, *, generation=None, create=False, deadline=None, stable_identity=False):
+    owned = acquire_activity(domain, generation=generation, create=create, deadline=deadline,
+                             stable_identity=stable_identity)
     token = _ACTIVE.set((*_ACTIVE.get(), owned))
     try:
         yield owned

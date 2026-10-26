@@ -39,3 +39,42 @@ def test_native_directory_and_file_volume_are_descriptor_bound(tmp_path):
     finally:
         os.close(file_fd)
         os.close(root_fd)
+
+
+@pytest.mark.platforms('macos')
+def test_persistent_file_and_directory_ids_retain_inode_on_native_volume(tmp_path):
+    from hermes_platform.host.volume_identity import local_directory_identity, local_file_identity
+    target = tmp_path / 'fixture'
+    target.write_bytes(b'fixture')
+    fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        file_id = local_file_identity(fd)
+        directory_id = local_directory_identity(tmp_path)
+        assert file_id == [directory_id[0], target.stat().st_ino]
+        assert directory_id[1] == tmp_path.stat().st_ino
+        assert uuid.UUID(file_id[0]).int
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.platforms('not macos')
+def test_unsupported_host_refuses_directory_identity_without_native_flags(tmp_path):
+    from hermes_platform.host.volume_identity import local_directory_identity
+    with pytest.raises(OSError, match='native directory identity unavailable'):
+        local_directory_identity(tmp_path)
+
+
+@pytest.mark.platforms('macos')
+def test_directory_replacement_during_capture_is_refused(tmp_path, monkeypatch):
+    from hermes_platform.host import volume_identity
+    target = tmp_path / 'directory'
+    target.mkdir()
+    original = volume_identity.local_volume_identity
+    def replaced(fd):
+        value = original(fd)
+        target.rename(tmp_path / 'previous')
+        target.mkdir()
+        return value
+    monkeypatch.setattr(volume_identity, 'local_volume_identity', replaced)
+    with pytest.raises(OSError, match='identity changed'):
+        volume_identity.local_directory_identity(target)

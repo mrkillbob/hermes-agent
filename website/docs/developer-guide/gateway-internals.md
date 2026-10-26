@@ -1007,6 +1007,15 @@ not volume replacement. Unsupported attributes, network filesystems and changed
 inodes or ledger metadata refuse. Existing schema1 records keep their original
 strict device checks; they are never migrated, backdated or rebound.
 
+Preparation also opts its source-controller runtime custody into native local-volume
+lifetime identities. This requires a genuinely fresh PM domain and coordination
+namespace, or an already qualified version2 domain. Existing version1/unqualified
+state refuses; no control-root redirect, deletion or silent upgrade is supplied.
+The persisted lifetime gate must survive mount renumbering before the postboot
+transaction can even reach checkpoint validation. Operator qualification therefore
+includes the complete persisted checkout/runtime gate across a device-remap fixture,
+not only a simulated boot UUID. Default runtime lifetime acquisition is unchanged.
+
 A separately qualified external schema2 controller may manage hold and restore
 around an older runtime with the same journal/marker/writer protocol. That
 runtime must perform genuine owner registration under the normal ledger lock;

@@ -52,7 +52,7 @@ def _checkout_root():
 
 
 @contextmanager
-def _checkout_custody():
+def _checkout_custody(*, stable_identity=False):
     from hermes_cli import update_lock
     from hermes_cli.runtime_state import runtime_lock
     root = _checkout_root()
@@ -65,7 +65,8 @@ def _checkout_custody():
         proof = update_lock._HELD
         if not proof or not proof.get('owned') or proof.get('fd') is None:
             raise RuntimeStoreError('startup_hold_checkout_busy')
-        with runtime_lock(root, timeout=0) as held:
+        options = {'stable_identity': True} if stable_identity else {}
+        with runtime_lock(root, timeout=0, **options) as held:
             if not held:
                 raise RuntimeStoreError('startup_hold_checkout_busy')
             if startup_hold.recovery_pending(root):

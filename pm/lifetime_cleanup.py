@@ -28,7 +28,7 @@ def finish_failed_outputs(owner, guard):
     """Under the gate, preserve changed outputs and any surviving child/ancestor hold."""
     from pm.lifetime import _identity
 
-    if (_identity(owner.domain) != owner.domain_identity
+    if (_identity(owner.domain, stable=guard.stable) != owner.domain_identity
             or guard._base_snapshot() != owner.coordination):
         return
     # Validate the complete ownership graph before touching any ancestor: a

@@ -1,5 +1,8 @@
 """Native persistent local filesystem identity of an already-open descriptor."""
 import ctypes
+import os
+from pathlib import Path
+import stat
 import struct
 import sys
 import uuid
@@ -42,3 +45,35 @@ def local_volume_identity(fd):
     if api.fgetattrlist(fd, ctypes.byref(attributes), result, len(result), 0):
         raise OSError(ctypes.get_errno(), 'native volume identity unavailable')
     return _decode_volume(result.raw)
+
+
+def _object_version(info):
+    return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink
+
+
+def local_file_identity(fd):
+    """Persistent identity, while retaining exact current descriptor stability."""
+    before = os.fstat(fd)
+    volume = local_volume_identity(fd)
+    if before.st_ino <= 0 or _object_version(before) != _object_version(os.fstat(fd)):
+        raise OSError('native object identity changed')
+    return [volume, before.st_ino]
+
+
+def local_directory_identity(path):
+    """Open the actual directory; links and replacement during capture refuse."""
+    if sys.platform != 'darwin':
+        raise OSError('native directory identity unavailable')
+    path = Path(path)
+    before = path.lstat()
+    if not stat.S_ISDIR(before.st_mode):
+        raise OSError('native directory identity unavailable')
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        identity = local_file_identity(fd)
+        if any(_object_version(info) != _object_version(before)
+               for info in (os.fstat(fd), path.lstat())):
+            raise OSError('native directory identity changed')
+        return identity
+    finally:
+        os.close(fd)
