@@ -238,7 +238,8 @@ def test_sealed_existing_open_and_creator_races_never_recreate(tmp_path, monkeyp
 
     monkeypatch.setattr(os, 'open', racing_open)
     refused = update_lock._acquire_checkout(root)
-    assert (refused is None) == (race in {'creator', 'readonly'})
+    expected = race == 'creator' or (race == 'readonly' and sys.platform != 'win32')
+    assert (refused is None) == expected
     assert len(creations) == (1 if race.startswith('creator') else 0)
     if race == 'creator_then_unlink':
         assert not gate.exists()
