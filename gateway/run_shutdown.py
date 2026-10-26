@@ -31,6 +31,7 @@ from gateway.run_common import _UNSET
 from gateway.run_runtime import interrupt_side_agents, managed_turn_count, stop_managed_turns
 from gateway.run_shutdown_session_end import GatewaySessionEndMixin
 from gateway.run_shutdown_drain import GatewayExternalDrainMixin
+from gateway.run_shutdown_diagnostics import GatewayShutdownDiagnosticsMixin
 from gateway.shutdown_watchdog import (
     arm_shutdown_watchdog, effective_shutdown_watchdog_delay, resolve_shutdown_watchdog_delay,
 )
@@ -166,7 +167,7 @@ def _delivery_target_key(platform_value: str, chat_id, thread_id, *, profile: Op
     return _notice_target_key(platform_value, chat_id, thread_id)
 
 
-class GatewayShutdownMixin(GatewaySessionEndMixin, GatewayExternalDrainMixin):
+class GatewayShutdownMixin(GatewaySessionEndMixin, GatewayExternalDrainMixin, GatewayShutdownDiagnosticsMixin):
     """Stop/drain/restart, scale-to-zero and active-work accounting methods for GatewayRunner."""
 
     @dataclasses.dataclass
@@ -1760,6 +1761,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin, GatewayExternalDrainMixin):
         worker runs, the thread is left to finish on its own; the thread-based shutdown
         watchdog remains the hard backstop.
         """
+        from hermes_cli.startup_hold import active
+        if active():
+            return []
         return await asyncio.to_thread(
             GatewayShutdownMixin._stop_kill_tool_subprocesses, phase
         )
@@ -1969,6 +1973,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin, GatewayExternalDrainMixin):
             # worker-thread loops that died with their ThreadPoolExecutor (notably cron ticks) only get
             # swept here. Without this, long-running gateways accumulate async httpx transports until they
             # hit EMFILE on macOS's default RLIMIT_NOFILE=256. See #14210.
+            from hermes_cli.startup_hold import active
+            if active(self):
+                return
             from agent.auxiliary_client import shutdown_cached_clients
             shutdown_cached_clients()
 
@@ -2058,6 +2065,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin, GatewayExternalDrainMixin):
         releases PID/lock ownership after the writer drain."""
         from gateway.run import _hermes_home, _planned_restart_notification_path, _shutdown_gateway_health_export
         from utils import atomic_json_write
+        from hermes_cli.startup_hold import active
+        if active(self):
+            return _shutdown_gateway_health_export(self)
         if getattr(self, "_startup_cleanup_only", False):  # start never ran: keep startup_failed + crash markers
             return _shutdown_gateway_health_export(self)
         # Clean-shutdown marker skips crash-turn recovery next boot; a timed-out drain left
@@ -2113,23 +2123,6 @@ class GatewayShutdownMixin(GatewaySessionEndMixin, GatewayExternalDrainMixin):
             logger.debug("Failed to flush terminal gateway runtime status", exc_info=True)
         _shutdown_gateway_health_export(self)
         logger.info("Gateway stopped (total teardown %.2fs)", ctx.elapsed())
-
-    def _shutdown_watchdog_snapshot(self, ctx: GatewayShutdownMixin._StopContext) -> dict:
-        """State dumped by the thread-based shutdown watchdog when teardown hangs."""
-        return {
-            "restart_requested": bool(self._restart_requested),
-            "draining": bool(self._draining),
-            "running": bool(self._running),
-            "active_agents": self._running_agent_count(),
-            "active_cron_jobs": self._active_cron_job_count(),
-            "active_api_runs": self._active_api_run_count(),
-            "active_deferred_agent_workers": ctx.deferred_count(),
-            "restart_drain_timeout": self._restart_drain_timeout,
-            "effective_drain_timeout": effective_stop_drain_timeout(self),
-            "launchd_exit_timeout_s": getattr(self, "_launchd_exit_timeout_s", None),
-            "watchdog_delay_s": effective_shutdown_watchdog_delay(self),
-            "phase_elapsed_s": ctx.elapsed() if ctx.started_at is not None else None,
-        }
 
     async def _stop_impl(self) -> None:
         """Run every ``_stop_*`` phase under the thread-based shutdown watchdog."""

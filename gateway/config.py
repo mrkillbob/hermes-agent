@@ -854,6 +854,9 @@ class GatewayConfig:
 
 def load_gateway_config() -> GatewayConfig:
     """Load gateway configuration. Priority: env > ~/.hermes/config.yaml > legacy gateway.json > defaults."""
+    from hermes_cli.startup_hold import active
+    if active():
+        return GatewayConfig(platforms={}, multiplex_profiles=False)
     from gateway import config_loader
 
     _home = get_hermes_home()

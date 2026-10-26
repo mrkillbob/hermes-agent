@@ -1870,6 +1870,9 @@ def load_gateway_config_for_runner() -> "GatewayConfig":
     default root, not ``get_hermes_home()`` — a named launcher's home is not the owner
     of the primary adapter map.
     """
+    from hermes_cli.startup_hold import active
+    if active():
+        return GatewayConfig(platforms={}, multiplex_profiles=False)
     from hermes_cli.gateway_multiplex_mode import log_multiplex_decision, resolve_multiplex_mode
     cfg = load_gateway_config()
     log_multiplex_decision(resolve_multiplex_mode(cfg))
@@ -2082,6 +2085,9 @@ def _bridge_auxiliary_config_to_env(_auxiliary_cfg: dict) -> None:
 
 def _bridge_config_to_env(_cfg: dict) -> None:
     """Export config.yaml settings to the env vars os.getenv() consumers read."""
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return
     for _key, _val in _cfg.items():  # top-level scalars: fallback only, never override .env
         if isinstance(_val, (str, int, float, bool)) and _key not in os.environ:
             os.environ[_key] = str(_val)
@@ -2129,6 +2135,9 @@ def _load_bridge_config(config_path: Path) -> dict:
     """Effective USER config (no defaults) for the presence-sensitive env bridge: only keys the user
     or the managed layer wrote get bridged, else all of DEFAULT_CONFIG would be exported. A bypass
     worker bridges its frozen explicit snapshot instead: the profile file is exactly what it must not read."""
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return {}
     from agent.safe_worker_policy import worker_config_snapshot
     snapshot = worker_config_snapshot()
     if snapshot is not None:
@@ -2248,6 +2257,10 @@ _EXECUTOR_QUIESCE_TIMEOUT = 2.0
 
 def _own_policy_open_startup_violation(config) -> Optional[str]:
     """Return a startup-abort reason when open policy lacks allow-all opt-in."""
+    from hermes_cli.startup_hold import active
+    if active():
+        return 'startup_hold: adapters must remain disabled' if any(
+            getattr(value, 'enabled', False) for value in getattr(config, 'platforms', {}).values()) else None
     with suppress(Exception):  # idempotent; callers may hand in a config load_gateway_config never built
         from hermes_cli.plugins import discover_plugins
         discover_plugins()
@@ -2892,6 +2905,9 @@ def _load_gateway_config(config_path: Path | None = None) -> dict:
     DEFAULT_CONFIG merge) — ``{}`` on any error (fail-open). Defaults to the active gateway home
     (``_hermes_home`` monkeypatches apply); multiplexers pass a path.
     """
+    from hermes_cli.startup_hold import active
+    if active():
+        return {}
     if config_path is None:
         config_path = _gateway_config_home() / 'config.yaml'
     try:
@@ -3454,8 +3470,13 @@ class GatewayRunner(
         # See #64674.
         # Injected configs keep their mode (including None), except the launching profile's
         # standalone opt-out: --config must not turn that profile into a host multiplexer.
+        from hermes_cli.startup_hold import active, latch_boot
+        self._startup_hold = active()
+        if self._startup_hold:
+            latch_boot()
+            config = GatewayConfig(platforms={}, multiplex_profiles=False)
         self.config = config if config is not None else load_gateway_config_for_runner()
-        if config is not None:
+        if config is not None and not self._startup_hold:
             from hermes_cli.gateway_multiplex_mode import standalone_launcher_decision, log_multiplex_decision
             decision = standalone_launcher_decision(self.config)
             if decision is not None:
@@ -3604,36 +3625,6 @@ class GatewayRunner(
         elif self._teams_pipeline_runtime_error:
             logger.warning(
                 "Teams pipeline runtime unavailable: %s", self._teams_pipeline_runtime_error)
-
-    def _warn_if_docker_media_delivery_is_risky(self) -> None:
-        """Warn when Docker-backed gateways lack an explicit export mount: MEDIA delivery runs in the
-        gateway process, so model-emitted paths like `/output/report.txt` must be host-readable."""
-        if os.getenv("TERMINAL_ENV", "").strip().lower() != "docker":
-            return
-        connected = self.config.get_connected_platforms()
-        messaging_platforms = [p for p in connected if p not in {Platform.LOCAL, Platform.API_SERVER, Platform.WEBHOOK}]
-        if not messaging_platforms:
-            return
-
-        raw_volumes = os.getenv("TERMINAL_DOCKER_VOLUMES", "").strip()
-        volumes: list[str] = []
-        if raw_volumes:
-            try:
-                parsed = json.loads(raw_volumes)
-                if isinstance(parsed, list):
-                    volumes = [str(v) for v in parsed if isinstance(v, str)]
-            except Exception:
-                logger.debug("Could not parse TERMINAL_DOCKER_VOLUMES for gateway media warning", exc_info=True)
-
-        for spec in volumes:
-            match = _DOCKER_VOLUME_SPEC_RE.match(spec)
-            if match and match.group("container") in _DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS:
-                return
-        logger.warning(
-            "Docker backend is enabled for the messaging gateway but no explicit host-visible "
-            "output mount (for example '/home/user/.hermes/cache/documents:/output') is configured. "
-            "This is fine if the model already emits host-visible paths, but MEDIA file delivery can fail "
-            "for container-local paths like '/workspace/...' or '/output/...'.")
 
     _VOICE_MODE_PATH = _hermes_home / "gateway_voice_mode.json"
 
@@ -5236,6 +5227,8 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
 
     for _step in (_release_locks, _mark_exited, _drain_logs):
         _best_effort(_step)
+    from hermes_cli.startup_hold import mark_native_exit_ready
+    _best_effort(mark_native_exit_ready)
     os._exit(exit_code)
 
 

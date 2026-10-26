@@ -130,6 +130,9 @@ def drain_marker_lock(*, home=None):
 
 
 def _protected_marker(home):
+    from hermes_cli.startup_hold import journal_present
+    if journal_present(home):
+        return True
     try:
         drain_request_path(home).stat()
     except FileNotFoundError:
@@ -137,7 +140,7 @@ def _protected_marker(home):
     except OSError:
         return True
     current = read_drain_request(home=home)
-    return not current or 'kanban_once' in current
+    return not current or 'kanban_once' in current or 'startup_hold' in current
 
 
 def write_drain_request(
@@ -208,11 +211,14 @@ def _marker_is_expired(body: dict[str, Any]) -> bool:
 def _active_drain_body(home: Optional[Path]) -> Optional[dict[str, Any]]:
     """Marker body if present AND not stale (definite epoch mismatch or expired), else None."""
     body = read_drain_request(home=home)
+    from hermes_cli.startup_hold import journal_present
+    if journal_present(home):
+        return {'action': 'drain', 'startup_hold': {}}
     if body is None:
         return None
     # A one-card permission may expire or lose its owner; the surrounding hold must
     # survive both. Only verified restoration may remove this operator-owned marker.
-    if 'kanban_once' in body:
+    if 'kanban_once' in body or 'startup_hold' in body:
         return body
     current, marker_epoch = current_instantiation_epoch(), body.get("epoch")
     if (current and marker_epoch and marker_epoch != current) or _marker_is_expired(body):

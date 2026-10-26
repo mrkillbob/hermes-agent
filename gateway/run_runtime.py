@@ -584,7 +584,8 @@ def publish_gateway_runtime_ready(runner):
         'session-authority-v1', 'durable-admission-v1', 'event-replay-v1'])
     from gateway.drain_kanban import held, REASON
     if held(runner):
-        descriptor.update(state='draining', drain_reason=REASON)
+        from hermes_cli.startup_hold import active, REASON as STARTUP_REASON
+        descriptor.update(state='draining', drain_reason=STARTUP_REASON if active(runner) else REASON)
     else:
         from gateway.session_hosted_service import start_ready_hosted_services
         start_ready_hosted_services(runner)
@@ -663,7 +664,8 @@ async def settle_gateway_runtime(runner, budget=None, reason=None):
     # Work settled above. ACP has no per-session destroy,
     # so the stop is the end of every ACP session nobody is viewing (#118216).
     from gateway.session_acp_lifecycle import end_idle_acp_sessions
-    for authority in _authorities(runner):
+    from hermes_cli.startup_hold import active
+    for authority in (() if active(runner) else _authorities(runner)):
         try:
             end_idle_acp_sessions(authority)
         except Exception:

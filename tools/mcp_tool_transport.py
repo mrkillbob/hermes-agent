@@ -403,6 +403,8 @@ class MCPServerTransportMixin:
         _config._write_stderr_log_header(self.name)
         stderr = _config._StderrTee(_config._get_mcp_stderr_log())
         try:
+            from hermes_cli.startup_hold import mark_uncertain_children
+            mark_uncertain_children()
             async with _core.stdio_client(server_params, errlog=stderr.sink) as (read_stream, write_stream):
                 # New PIDs for force-kill cleanup, minus non-MCP children (slash_worker, LSP) racing
                 # into the window: they share the TUI's pgid — leaking them would killpg() the TUI.
