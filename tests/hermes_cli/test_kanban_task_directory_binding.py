@@ -10,7 +10,7 @@ import pytest
 from hermes_cli import kanban_db as kb, projects_db
 from hermes_cli.kanban_db_connect import connect_closing
 from hermes_cli.kanban_task_binding import BindingExpectation, correct_task_binding
-from tests.hermes_cli.test_kanban_task_binding import binding_case
+from tests.hermes_cli.test_kanban_task_binding import binding_case, _revision
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def _correct(case, directory, **changes):
         source_board="alpha",
         task_id=task_id,
         target_project_id=project,
-        expected=BindingExpectation.from_task(row, project_root=str(roots[0])),
+        expected=BindingExpectation.from_task(row, project_root=str(roots[0]), revision=_revision(case)),
         target_root=str(roots[0]),
         reason="Offline local-only artifact inspection; preserve holds",
         backup_path=str(root / "directory-before.tar.gz"),
