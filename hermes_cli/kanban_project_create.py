@@ -8,7 +8,8 @@ from hermes_cli.sqlite_util import write_txn
 def create_task(conn, *, project_id=None, board=None, require_active_project=False, **kwargs):
     """Keep project retirement serialized through a committed, confirmed task binding.
 
-    Ordinary callers retain permissive linking. Strict callers supply a canonical ID,
+    Ordinary callers may link archived projects but must resolve their scope.
+    Strict callers supply a canonical ID,
     never a slug or a cross-profile fallback. The registry writer reservation prevents
     archive/delete/rebind commits while the ordinary task transaction commits. Both
     stores remain separate: this is ordering, not a cross-database rollback guarantee.
