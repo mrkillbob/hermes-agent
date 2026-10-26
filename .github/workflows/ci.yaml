@@ -1,693 +1,404 @@
-name: CI
-# Keep a fresh workflow event available after transient hosted-runner startup failures.
+name: Pinned mergedafa09df3 Mac delivery candidate
 
-# Orchestrator workflow. Runs ``detect-changes`` once, then conditionally
-# calls the sub-workflows that a PR can actually affect. A final
-# ``all-checks-pass`` gate job aggregates results so branch protection only
-# needs to require a single check.
-#
-# Sub-workflows are triggered via ``workflow_call`` and keep their own job
-# definitions, matrices, and concurrency settings. They no longer have
-# ``push:`` / ``pull_request:`` triggers of their own — everything flows
-# through this file.
-#
-# SECURITY: this workflow runs PR-controlled actions, workflows, and code.
-# Do not add ``secrets: inherit`` or GitHub App credentials here. Trusted
-# main-only automation uses protected environments in its own workflows.
-
+# Artifact-only preparation branch. This does not replace main's CI or publish a release.
 on:
   workflow_dispatch:
-    inputs:
-      release:
-        description: 'Stable-release candidate run: force every applicability lane and make the aggregate gate strict (skipped required lanes fail).'
-        required: false
-        type: boolean
-        default: false
-      strict_acceptance:
-        description: "Acceptance runs only: known_failure owners whose gaps FAIL this run instead of xfailing ('upd-txn', a comma list, or '1' for every gap). Sets HERMES_E2E_STRICT_ACCEPTANCE for the E2E suites (tests/e2e/core/_pending_fixes.py)."
-        required: false
-        type: string
-        default: ''
-  workflow_call:
-    inputs:
-      commit:
-        description: Commit to test and build. Empty keeps the triggering commit.
-        type: string
-        default: ''
-      release:
-        description: 'Stable-release candidate run: force every applicability lane and make the aggregate gate strict (skipped required lanes fail).'
-        required: false
-        type: boolean
-        default: false
-  pull_request:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
-  pull-requests: read
 
-# Cancel stale PR work when a new commit arrives. Pushes, dispatches, and
-# release calls keep their current run and are never cancelled by this rule.
 concurrency:
-  group: ci-${{ github.event_name }}-${{ inputs.release == true && github.run_id || github.ref }}
-  cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
+  group: hermes-native-artifact-afa09df3a4543dad93c19d6077aca4d7c51530fa
+  cancel-in-progress: false
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────
-  # detect: run the classifier once. Every downstream job reads its outputs
-  # to decide whether to run. On push/dispatch the classifier fails open
-  # (all lanes true) so post-merge validation is never weakened.
-  #
-  # A release run (inputs.release) additionally forces every lane true via
-  # the `release-forced-*` outputs: a stable candidate must run the FULL
-  # pipeline, not the lanes its diff would touch — the diff of a release
-  # tag is not a meaningful applicability signal.
-  # ─────────────────────────────────────────────────────────────────────
-  detect:
-    name: Detect affected areas
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      python: ${{ steps.gate-lanes.outputs.python }}
-      python_prod: ${{ steps.gate-lanes.outputs.python_prod }}
-      frontend: ${{ steps.gate-lanes.outputs.frontend }}
-      site: ${{ steps.gate-lanes.outputs.site }}
-      scan: ${{ steps.gate-lanes.outputs.scan }}
-      deps: ${{ steps.gate-lanes.outputs.deps }}
-      uv_lock: ${{ steps.gate-lanes.outputs.uv_lock }}
-      npm_lock: ${{ steps.gate-lanes.outputs.npm_lock }}
-      bootstrap: ${{ steps.gate-lanes.outputs.bootstrap }}
-      desktop_updater: ${{ steps.gate-lanes.outputs.desktop_updater }}
-      rust: ${{ steps.gate-lanes.outputs.rust }}
-      remote_backends: ${{ steps.gate-lanes.outputs.remote_backends }}
-      catalog: ${{ steps.gate-lanes.outputs.catalog }}
-      docker_meta: ${{ steps.gate-lanes.outputs.docker_meta }}
-      mcp_catalog: ${{ steps.gate-lanes.outputs.mcp_catalog }}
-      e2e: ${{ steps.gate-lanes.outputs.e2e }}
-      e2e_upgrade: ${{ steps.gate-lanes.outputs.e2e_upgrade }}
-      e2e_desktop_core: ${{ steps.gate-lanes.outputs.e2e_desktop_core }}
-      e2e_desktop_update: ${{ steps.gate-lanes.outputs.e2e_desktop_update }}
-      ci_review: ${{ steps.classify.outputs.ci_review }}
-      ci_review_files: ${{ steps.classify.outputs.ci_review_files }}
-      event_name: ${{ github.event_name }}
-      os_tests_scope: ${{ steps.platform-policy.outputs.os_tests_scope }}
-      bootstrap_tests_scope: ${{ steps.platform-policy.outputs.bootstrap_tests_scope }}
-      advisory_windows: ${{ steps.platform-policy.outputs.advisory_windows }}
-    steps:
-      - name: Fetch the diff classifier at this event's SHA
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLASSIFIER_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          CLASSIFIER_REF: ${{ inputs.commit || github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -euo pipefail
-          for path in .github/actions/detect-changes/action.yml scripts/ci/classify_changes.py scripts/ci/platform_test_scope.py; do
-            mkdir -p "$(dirname "$path")"
-            # GitHub can throttle even authenticated requests. Decode only a
-            # successful response so an API error cannot become action source.
-            response="$(mktemp)"
-            trap 'rm -f "$response"' EXIT
-            for attempt in 1 2 3; do
-              if gh api "repos/${CLASSIFIER_REPOSITORY}/contents/${path}?ref=${CLASSIFIER_REF}" --jq .content > "$response"; then
-                break
-              fi
-              if [ "$attempt" = 3 ]; then
-                echo "::error::Classifier fetch failed after 3 attempts: $path"
-                exit 1
-              fi
-              echo "::warning::Classifier fetch failed (attempt $attempt); retrying in 10s"
-              sleep 10
-            done
-            base64 --decode < "$response" > "$path"
-            rm -f "$response"
-          done
-      - name: Detect affected areas
-        id: classify
-        uses: ./.github/actions/detect-changes
-        with:
-          github-token: ${{ github.token }}
-      - name: Force all lanes on release
-        # Overwrite the classifier outputs with 'true' when inputs.release.
-        # ci_review stays raw: it only ever feeds the PR review-label gate.
-        # Upstream E2E runs on release/dispatch; forks let the classifier pick E2E lanes per diff.
-        id: gate-lanes
-        env:
-          RELEASE: ${{ inputs.release }}
-          EVENT_NAME: ${{ github.event_name }}
-          REPOSITORY: ${{ github.repository }}
-          CLASSIFIED: ${{ toJSON(steps.classify.outputs) }}
-        run: |
-          python3 - <<'PY'
-          import json, os
-          values = json.loads(os.environ['CLASSIFIED'])
-          release = os.environ['RELEASE'] == 'true'
-          e2e_allowed = (release or os.environ['EVENT_NAME'] == 'workflow_dispatch'
-                         or os.environ['REPOSITORY'] != 'NousResearch/hermes-agent')
-          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-              for lane, value in values.items():
-                  if lane.startswith('e2e') and not e2e_allowed:
-                      value = 'false'
-                  elif release and value in ('true', 'false'):
-                      value = 'true'
-                  if '\n' in value or '\r' in value:
-                      continue
-                  output.write(f'{lane}={value}\n')
-          PY
-
-      - name: Select native platform test policy
-        id: platform-policy
-        env:
-          POLICY_REPOSITORY: ${{ github.repository }}
-          POLICY_RELEASE: ${{ inputs.release }}
-          POLICY_REF_TYPE: ${{ github.ref_type }}
-        run: |
-          python3 scripts/ci/platform_test_scope.py policy \
-            --repository "$POLICY_REPOSITORY" --release "$POLICY_RELEASE" \
-            --ref-type "$POLICY_REF_TYPE"
-
-  # ─────────────────────────────────────────────────────────────────────
-  # Lane-gated sub-workflows. Each runs in parallel after detect finishes.
-  # Skipped workflows (if condition is false) don't spin up runners.
-  #
-  # The E2E suites (e2e, e2e-upgrade, both Desktop suites, and the two
-  # Windows journeys in tests-os) run on release/dispatch upstream. Public forks
-  # retain their classified PR/push lanes and full native journeys.
-  # ─────────────────────────────────────────────────────────────────────
-  tests:
-    name: Python tests
-    needs: detect
-    # Its E2E jobs are lanes of their own: a lane the classifier sets must reach
-    # its job whatever `python` says (tests/ci/test_update_ci_routing.py).
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true'
-    uses: ./.github/workflows/tests.yml
-    with:
-      # NousResearch runs the full unit suite on one 32-core runner. Forks
-      # have standard 4-core runners, so use more, smaller slices there.
-      commit: ${{ inputs.commit }}
-      slice_count: ${{ github.repository == 'NousResearch/hermes-agent' && 1 || 24 }}
-      # The fork runs the complete suite on parallel GitHub-hosted shards; E2E
-      # lanes still follow the diff classifier.
-      e2e_mode: full
-      e2e: ${{ needs.detect.outputs.e2e == 'true' }}
-      e2e_upgrade: ${{ needs.detect.outputs.e2e_upgrade == 'true' }}
-      strict_acceptance: ${{ inputs.strict_acceptance || '' }}
-
-  # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
-  # the OS-marked tests it collects are skipped there by design (see the
-  # `_OS_MARKS` comment in tests/conftest.py) — this is where they run.
-  # Gated on `python` and on each lane it consumes: desktop_updater is set by
-  # TypeScript-only changes too (the Electron marker / result readers), and with
-  # `python` alone those never reached the Windows hand-off tests below.
-  # This fork's Windows-native advisory callers retain visible results.
-  tests-os:
-    name: OS-specific tests
-    needs: detect
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.desktop_updater == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true'
-    uses: ./.github/workflows/tests-os.yml
-    with:
-      commit: ${{ inputs.commit }}
-      platform_scope: ${{ needs.detect.outputs.os_tests_scope }}
-      # The Windows lane spawns the real desktop-update hand-off script
-      # (tests/test_desktop_update_windows_*.py) only when that surface
-      # changed; unit-level platforms("windows") tests always run.
-      desktop_updater: ${{ needs.detect.outputs.desktop_updater == 'true' }}
-      e2e: ${{ needs.detect.outputs.e2e == 'true' }}
-      e2e_upgrade: ${{ needs.detect.outputs.e2e_upgrade == 'true' }}
-      strict_acceptance: ${{ inputs.strict_acceptance || '' }}
-
-  tests-windows-advisory:
-    name: Windows-only tests (advisory)
-    needs: detect
-    if: (needs.detect.outputs.python == 'true' || needs.detect.outputs.desktop_updater == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true') && needs.detect.outputs.advisory_windows == 'true'
-    uses: ./.github/workflows/tests-os.yml
-    with:
-      commit: ${{ inputs.commit }}
-      platform_scope: windows
-      desktop_updater: ${{ needs.detect.outputs.desktop_updater == 'true' }}
-      e2e: ${{ needs.detect.outputs.e2e == 'true' }}
-      e2e_upgrade: ${{ needs.detect.outputs.e2e_upgrade == 'true' }}
-      strict_acceptance: ${{ inputs.strict_acceptance || '' }}
-
-  lint:
-    name: Python lints
-    needs: detect
-    # frontend too: the code-health ratchet in lint.yml also covers TypeScript.
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.frontend == 'true'
-    uses: ./.github/workflows/lint.yml
-    with:
-      commit: ${{ inputs.commit }}
-      event_name: ${{ needs.detect.outputs.event_name }}
-      python: ${{ needs.detect.outputs.python == 'true' }}
-
-  js-tests:
-    name: JS & TS checks
-    needs: detect
-    if: needs.detect.outputs.frontend == 'true'
-    uses: ./.github/workflows/js-tests.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  rust-tests:
-    name: Rust tests
-    needs: detect
-    # Only for PRs that touch a Rust crate. `.rs` is under apps/, so these
-    # changes used to run the TypeScript matrix and nothing that compiles them.
-    if: needs.detect.outputs.rust == 'true'
-    uses: ./.github/workflows/rust-tests.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  catalog-tests:
-    name: Catalog tests
-    needs: detect
-    # A PR that changes only catalog entry data runs these instead of the
-    # Python suite (the classifier turns `python` off for it); required whenever
-    # detect selects it.
-    if: needs.detect.outputs.catalog == 'true'
-    uses: ./.github/workflows/catalog-tests.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  remote-backends:
-    name: Remote terminal backends
-    needs: detect
-    # The SSH and Docker terminal backends against a real sshd container and the
-    # runner's Docker daemon. Only PRs that touch the backends / terminal tool /
-    # their real tests start it (and every push to main); it runs in parallel with
-    # the other lanes and is required whenever detect selects it.
-    if: needs.detect.outputs.remote_backends == 'true'
-    uses: ./.github/workflows/remote-backends.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  bootstrap-installer:
-    name: Bootstrap installer
-    needs: detect
-    # The bootstrap-installer path: install.sh, the pin fragments it embeds,
-    # and the version stamp it ships. The PowerShell installer's native tests
-    # are platforms("windows") pytest files and run in tests-os.
-    if: needs.detect.outputs.bootstrap == 'true'
-    uses: ./.github/workflows/bootstrap-installer.yml
-    with:
-      commit: ${{ inputs.commit }}
-      platform_scope: ${{ needs.detect.outputs.bootstrap_tests_scope }}
-
-  bootstrap-windows-advisory:
-    name: Windows-only bootstrap installer (advisory)
-    needs: detect
-    if: needs.detect.outputs.bootstrap == 'true' && needs.detect.outputs.advisory_windows == 'true'
-    uses: ./.github/workflows/bootstrap-installer.yml
-    with:
-      commit: ${{ inputs.commit }}
-      platform_scope: windows
-
-  e2e-desktop:
-    name: Desktop E2E
-    needs: detect
-    # python_prod (not python): the Playwright suite exercises the built app
-    # + `hermes serve` backend, which never import anything under tests/.
-    # Tests-only PRs (~17% of commits) skip this 5-minute job — the longest
-    # single job in the workflow — while still running the full pytest lanes.
-    #
-    # Re-disabled (Sep 2026): the Sep 1 re-enable is still incredibly flaky.
-    # Keep this a bare `if: false`. The earlier
-    # `${{ false && (... || ...) }}` form on this reusable-workflow job made
-    # GitHub's workflow parser fail at startup ("An unexpected error has
-    # occurred") — every ci.yaml run repo-wide dispatched 0 jobs from
-    # 24f5a60ed1 until this line changed. To re-enable, restore:
-    #   if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
-    if: ${{ github.event_name == 'workflow_call' }}
-    uses: ./.github/workflows/e2e-desktop.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  e2e-desktop-core:
-    name: Desktop core E2E
-    needs: detect
-    # The deterministic core suite (apps/desktop/e2e/core): transcript
-    # integrity, boot/respawn/orphans, clarify+approval. Run it on PRs so
-    # lifecycle and profile-routing regressions are found before merge; retries 0.
-    if: ${{ needs.detect.outputs.e2e_desktop_core == 'true' }}
-    uses: ./.github/workflows/e2e-desktop-core.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  e2e-desktop-update:
-    name: Desktop update E2E
-    needs: detect
-    # apps/desktop/e2e/update: a real install.sh install + packaged Desktop,
-    # first run, "Update now" hand-off/relaunch, concurrent-update refusal.
-    # Required when it runs: a PR that touches the Desktop update path (the
-    # classifier's e2e_desktop_update lane) cannot merge on a red shard. Like
-    # the Linux e2e-upgrade shards and the Windows install + update journey
-    # (tests / tests-os, gated on e2e_upgrade), it is skipped — and the skip
-    # counts as success — when the PR does not touch that path.
-    if: ${{ needs.detect.outputs.e2e_desktop_update == 'true' }}
-    uses: ./.github/workflows/e2e-desktop-update.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  docs-site:
-    name: Docs Site
-    needs: detect
-    if: needs.detect.outputs.site == 'true'
-    uses: ./.github/workflows/docs-site-checks.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  history-check:
-    name: Deny unrelated histories
-    needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request'
-    uses: ./.github/workflows/history-check.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  contributor-check:
-    name: Check contributors
-    needs: detect
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.catalog == 'true'
-    uses: ./.github/workflows/contributor-check.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  uv-lockfile:
-    name: Check uv.lock
-    needs: detect
-    # Gated: `uv lock --check` re-resolves the whole dependency graph against
-    # PyPI, so on every PR it spent a network round-trip — and, on a registry
-    # blip, a blocking red X — for diffs that cannot desync the lockfile
-    # (docs, frontend, prose). Only pyproject.toml / uv.lock can. A
-    # `.github/` change still forces it on via the classifier's fail-open.
-    if: needs.detect.outputs.uv_lock == 'true'
-    uses: ./.github/workflows/uv-lockfile-check.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  infographic-check:
-    name: Check no committed infographics
-    needs: detect
-    uses: ./.github/workflows/infographic-check.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  profile-artifact-check:
-    name: Profile artifact check
-    needs: detect
-    uses: ./.github/workflows/profile-artifact-check.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  icons-freshness-check:
-    name: Icon assets freshness
-    needs: detect
-    uses: ./.github/workflows/icons-freshness-check.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  case-collision-check:
-    name: Check no case-colliding filenames
-    needs: detect
-    uses: ./.github/workflows/case-collision-check.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  blob-size-check:
-    name: Check no large binaries
-    needs: detect
-    uses: ./.github/workflows/blob-size-check.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  lazy-deps-guard:
-    name: No production imports of the tools.lazy_deps stub
-    needs: detect
-    uses: ./.github/workflows/lazy-deps-guard.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  lockfile-diff:
-    name: package-lock.json diff
-    needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request' && needs.detect.outputs.npm_lock == 'true'
-    uses: ./.github/workflows/lockfile-diff.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  # Advisory summary of the committed prompt-surface snapshot's diff. A stdlib-only job over two
-  # committed directories: cheap enough to run on every Python PR, and silent when nothing moved.
-  prompt-surface-diff:
-    name: Prompt surface diff
-    needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request' && needs.detect.outputs.python == 'true'
-    uses: ./.github/workflows/prompt-surface-diff.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  docker-lint:
-    name: Lint Docker scripts
-    needs: detect
-    if: needs.detect.outputs.docker_meta == 'true'
-    uses: ./.github/workflows/docker-lint.yml
-    with:
-      commit: ${{ inputs.commit }}
-
-  supply-chain:
-    name: Supply-chain scan
-    needs: detect
-    if: needs.detect.outputs.event_name == 'pull_request' && (needs.detect.outputs.scan == 'true' || needs.detect.outputs.deps == 'true' || needs.detect.outputs.npm_lock == 'true')
-    permissions:
-      contents: read
-      pull-requests: read
-    uses: ./.github/workflows/supply-chain-audit.yml
-    with:
-      commit: ${{ inputs.commit }}
-      event_name: ${{ needs.detect.outputs.event_name }}
-      scan: ${{ needs.detect.outputs.scan == 'true' }}
-      deps: ${{ needs.detect.outputs.deps == 'true' }}
-      npm_lock: ${{ needs.detect.outputs.npm_lock == 'true' }}
-
-  review-labels:
-    name: Review label gate
-    needs: [detect, supply-chain]
-    if: always() && needs.detect.outputs.event_name == 'pull_request' && (needs.detect.outputs.ci_review == 'true' || needs.detect.outputs.mcp_catalog == 'true' || needs.supply-chain.outputs.critical_findings == 'true')
-    permissions:
-      contents: read
-      pull-requests: read
-    uses: ./.github/workflows/review-labels.yml
-    with:
-      commit: ${{ inputs.commit }}
-      ci_review: ${{ needs.detect.outputs.ci_review == 'true' }}
-      ci_review_files: ${{ needs.detect.outputs.ci_review_files }}
-      mcp_catalog: ${{ needs.detect.outputs.mcp_catalog == 'true' }}
-      supply_chain: ${{ needs.supply-chain.outputs.critical_findings == 'true' }}
-
-  osv-scanner:
-    name: OSV scan
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-    # PR scans use the artifact/review-status path below. Direct main pushes
-    # are scanned by osv-scanner.yml's push trigger so they can publish SARIF.
-    if: github.event_name == 'pull_request'
-    uses: ./.github/workflows/osv-scanner.yml
-    with:
-      commit: ${{ inputs.commit }}
-      # A literal false avoids re-evaluation across nested reusable-workflow
-      # boundaries, which previously recreated the Advanced Security warning.
-      upload-sarif: false
-
-  # ─────────────────────────────────────────────────────────────────────
-  # Gate: runs after everything. ``if: always()`` ensures it reports a
-  # status even when some deps were skipped.
-  #
-  #   Non-release (PR/push): failure fails. Update/E2E consumers selected
-  #   by detect.outputs must succeed; only unselected consumers may skip.
-  #   Release (inputs.release): strict — every required job must be
-  #   `success`. A skipped required lane fails the gate; only the PR-only
-  #   jobs (history-check, lockfile-diff, prompt-surface-diff, supply-chain, review-labels) and
-  #   the deferred Desktop E2E (e2e-desktop) may skip. The OSV scan's
-  #   findings are advisory, but its execution is required.
-  #
-  # Branch protection should require ONLY this check. The separately
-  # named Windows-native advisory callers keep their real results visible
-  # without joining these required dependencies. Shared checks stay required.
-  #
-  # The check name carries a version. The ruleset requires a check NAME, and a
-  # green check run recorded on a PR head stays valid forever, so a PR whose
-  # last CI predates a new required job still merges on that old green (32
-  # PRs merged without the code-health ratchet that way). When the required
-  # set gains a job every open PR must pass, bump the version here and in the
-  # protect-main ruleset in the same rollout: older greens then no longer
-  # count, and each PR needs one fresh CI run before it can merge.
-  #
-  # Outputs ``needs-json`` — a compact ``{job_name: result}`` dict — so
-  # the live comment poller can list failed jobs in the PR comment.
-  # ─────────────────────────────────────────────────────────────────────
-  all-checks-pass:
-    name: ${{ github.repository == 'NousResearch/hermes-agent' && 'All required checks pass (v2)' || 'All required checks pass' }}
-    needs:
-      - detect
-      - tests
-      - tests-os
-      - lint
-      - js-tests
-      - rust-tests
-      - remote-backends
-      - catalog-tests
-      - bootstrap-installer
-      - e2e-desktop
-      - e2e-desktop-core
-      - e2e-desktop-update
-      - docs-site
-      - history-check
-      - contributor-check
-      - uv-lockfile
-      - infographic-check
-      - case-collision-check
-      - blob-size-check
-      - lazy-deps-guard
-      - lockfile-diff
-      - prompt-surface-diff
-      - docker-lint
-      - profile-artifact-check
-      - icons-freshness-check
-      - supply-chain
-      - review-labels
-      - osv-scanner
-      # OSV findings are advisory, but the PR scan still runs so its artifact
-      # and review status are collected. It does not fail on existing CVEs.
-      # The image build runs in its own workflow (docker.yml) and reports
-      # its own check. It was never required here, because it is too slow
-      # to block a merge. A separate run also stops it from holding this
-      # run open. That is what blocked ``gh run rerun``.
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      needs-json: ${{ steps.evaluate.outputs.needs-json }}
+  mac-candidate:
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      TARGET_COMMIT: afa09df3a4543dad93c19d6077aca4d7c51530fa
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      HERMES_BUNDLE_ENV_JSON: '{}'
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
-          ref: ${{ inputs.commit || github.sha }}
-      - name: Evaluate job results
-        id: evaluate
-        # Shared with the stable orchestrator (scripts/ci/required_results.py
-        # is imported there). NEEDS is the toJSON(needs) context; RELEASE
-        # switches the gate into strict mode for release runs.
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-          RELEASE: ${{ inputs.release }}
-        run: |
-          args=()
-          if [ "$RELEASE" = true ]; then args+=(--release); fi
-          printf '%s' "$NEEDS" | python3 scripts/ci/required_results.py "${args[@]}"
-
-  # ─────────────────────────────────────────────────────────────────────
-  # CI timing report: collect per-job/step durations from the GitHub API,
-  # cache them on main (as a baseline), and on PRs generate an HTML diff
-  # report with a gantt chart + per-step breakdown. The report is uploaded
-  # as an artifact and a markdown summary is written to $GITHUB_STEP_SUMMARY.
-  #
-  # The live comment poller dynamically fetches all review-status-* artifacts
-  # across the orchestrator and sub-workflow runs every cycle, so its link
-  # points straight at that report.
-  # ─────────────────────────────────────────────────────────────────────
-  ci-timings:
-    name: CI timing report
-    needs: [all-checks-pass]
-    # Keep failure diagnostics, but let superseded runs release concurrency.
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
-        with:
-          ref: ${{ inputs.commit }}
+          ref: afa09df3a4543dad93c19d6077aca4d7c51530fa
           fetch-depth: 1
-          sparse-checkout: |
-            scripts/ci/timings_report.py
-            scripts/ci/cache_report.py
-          sparse-checkout-cone-mode: false
+          persist-credentials: false
 
-      - name: Restore baseline cache (PR only)
-        if: github.event_name == 'pull_request'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ci-timings-baseline.json
-          # Prefix-match: exact key will never hit (run_id differs), so
-          # restore-keys finds the most recent baseline from main.
-          key: ci-timings-baseline-never-exact
-          restore-keys: |
-            ci-timings-baseline-
-
-      - name: Collect timings and generate report
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+      - name: Verify source and native host before preparation
+        shell: bash
         run: |
-          python3 scripts/ci/timings_report.py \
-            --baseline ci-timings-baseline.json \
-            --output ci-timings-report.html \
-            --json-out ci-timings.json \
-            --summary-out ci-timings-summary.md
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "4fda621e1f8118d963d72b5bc57bf09ffbdcba54"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          python3 -I -S -B - <<'PY'
+          import shutil, sys
+          assert sys.version_info >= (3, 11), sys.version
+          free = shutil.disk_usage('.').free
+          assert free >= 20 * 1024**3, f'Insufficient ephemeral build space: {free}'
+          print('Bootstrap:', sys.version, 'free bytes:', free)
+          PY
+          # The accepted nested signer can inspect the disposable runner keychain.
+          # Fail before building if it contains a signing identity; none is imported.
+          security find-identity -v -p codesigning > "$RUNNER_TEMP/signing-identities.txt"
+          grep -F '0 valid identities found' "$RUNNER_TEMP/signing-identities.txt"
 
-      - name: Upload HTML report
-        # Advisory report — artifact-service blips must not fail the job.
-        continue-on-error: true
+      - name: Build the exact bundled candidate without release credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/delivery-evidence"
+          # The supported local driver unsets signing/notary credentials and disables
+          # outer identity discovery. Its nested signer may recheck the empty hosted
+          # keychain. Keep the accepted custom signer and default supported policy;
+          # strict validation below determines whether a signed candidate exists.
+          bash scripts/build-bundle.sh --variant bundled -- --publish never \
+            2>&1 | tee "$RUNNER_TEMP/delivery-evidence/build.log"
+
+      - name: Seal only the disposable artifact with the accepted local signer
+        shell: bash
+        run: |
+          set -euo pipefail
+          # No app launch, install, credentials or product-source changes.
+          cat > "$RUNNER_TEMP/seal_mac_artifact.py" <<'ARTIFACT_ADAPTER'
+          """Artifact-only adapter for the pinned source's existing local signer.
+          
+          Only a disposable hosted build output is a supported caller. This never launches
+          the app, imports Hermes configuration, selects credentials or installs anything.
+          """
+          import ast
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import plistlib
+          import shutil
+          import subprocess
+          from typing import Optional
+          
+          run = subprocess.run
+          INPUTS = {
+              "hermes_cli/main_desktop.py": "733b6189936245775485bae05b70c2dd67b1b3a7d0f274a1304b18858636202f",
+              "apps/desktop/electron/entitlements.mac.plist": "edd08f7902e28a4c99832bdfc10ce1c89a56c10d09a79630ee950c4ca7950716",
+              "apps/desktop/electron/entitlements.mac.inherit.plist": "599fc23e7c84738aaee58080755b64a9ee79611fa501959c2cbeb2421de18399",
+          }
+          
+          
+          def sha(path):
+              with path.open("rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+          
+          
+          def load_pinned_signer(repo: Path):
+              for relative, expected in INPUTS.items():
+                  path = repo / relative
+                  if not path.is_file() or sha(path) != expected:
+                      raise ValueError(f"signer source changed: {relative}")
+              path = repo / "hermes_cli/main_desktop.py"
+              names = {"_desktop_macos_bundle_id", "_codesign_verify", "_desktop_macos_local_codesign"}
+              selected = [node for node in ast.parse(path.read_bytes()).body
+                          if isinstance(node, ast.FunctionDef) and node.name in names]
+              if {node.name for node in selected} != names:
+                  raise ValueError("signer source functions missing")
+              namespace = dict(Path=Path, Optional=Optional, os=os, shutil=shutil, subprocess=subprocess)
+              exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"), namespace)
+              return namespace["_desktop_macos_local_codesign"]
+          
+          
+          load_signer = load_pinned_signer
+          
+          
+          def check_paths(repo: Path, app: Path) -> None:
+              release = repo / "apps/desktop/release/mac-arm64"
+              if app.parent != release or app.suffix != ".app" or not app.is_dir():
+                  raise ValueError("app must belong to the owned release directory")
+              if release.resolve() != release.absolute() or app.is_symlink():
+                  raise ValueError("release must not alias another directory")
+              for path in app.rglob("*"):
+                  if path.is_symlink() and not path.resolve().is_relative_to(app.resolve()):
+                      raise ValueError(f"artifact link escapes app: {path}")
+                  if not path.is_symlink() and path.is_file() and path.stat().st_nlink != 1:
+                      raise ValueError(f"artifact hardlink is not detached: {path}")
+          
+          
+          def payload_snapshot(payload):
+              return {str(p.relative_to(payload)): ("link", os.readlink(p)) if p.is_symlink()
+                      else ("directory", p.stat().st_mode) if p.is_dir()
+                      else ("file", p.stat().st_mode, sha(p)) for p in payload.rglob("*")}
+          
+          
+          def seal_artifact(repo: Path, app: Path) -> dict:
+              check_paths(repo, app)
+              payload = app / "Contents/Resources/agent-payload"
+              stamp = json.loads((app / "Contents/Resources/install-stamp.json").read_text())
+              manifest = json.loads((payload / "manifest.json").read_text())
+              target = "afa09df3a4543dad93c19d6077aca4d7c51530fa"
+              if (stamp.get("commit") != target or stamp.get("dirty") is not False
+                      or stamp.get("payload") != "bundled" or manifest.get("ref") != target
+                      or manifest.get("target") != "darwin-arm64"):
+                  raise ValueError("artifact source identity mismatch")
+              prepared = json.loads((repo / ".build/desktop-job/prepared.json").read_text())
+              python = Path(prepared["python"])
+              if (prepared.get("schema") != 1 or not python.is_absolute() or not python.is_file()
+                      or not python.resolve().is_relative_to(repo / ".cache/desktop-inputs/tools")):
+                  raise ValueError("prepared interpreter escapes owned build tools")
+              signer = load_signer(repo)
+              info = run(["codesign", "-d", "--verbose=4", str(app)], capture_output=True, check=False)
+              for line in (info.stdout + info.stderr).decode().splitlines():
+                  if line.startswith("TeamIdentifier=") and line != "TeamIdentifier=not set":
+                      raise ValueError("refusing publisher signature downgrade")
+              if signer(app, desktop_dir=repo / "apps/desktop", identity="-") is not True:
+                  raise ValueError("accepted local signer did not strictly verify")
+              environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(repo / ".build/desktop-job/home"),
+                             "HERMES_HOME": str(repo / ".build/desktop-job/hermes-home"),
+                             "HERMES_RUNTIME_DIR": str(repo / ".cache/desktop-inputs/tools"),
+                             "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUTF8": "1"}
+              run([str(python), "-I", "-S", "-B", str(repo / "scripts/bundles/payload.py"), "rehash", str(payload)],
+                  cwd=repo, env=environment, check=True)
+              snapshot = payload_snapshot(payload)
+              entitlements = repo / "apps/desktop/electron/entitlements.mac.plist"
+              identifier = plistlib.loads((app / "Contents/Info.plist").read_bytes())["CFBundleIdentifier"]
+              run(["codesign", "--force", "--sign", "-", "--timestamp=none", "--options", "runtime",
+                   "--entitlements", str(entitlements), "--requirements", f'=designated => identifier "{identifier}"',
+                   str(app)], check=True, capture_output=True)
+              if payload_snapshot(payload) != snapshot:
+                  raise ValueError("payload changed during outer seal")
+              run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)], check=True, capture_output=True)
+              signature = run(["codesign", "-d", "--verbose=4", str(app)], check=True, capture_output=True)
+              signature_text = (signature.stdout + signature.stderr).decode()
+              for expected in ("Signature=adhoc", "TeamIdentifier=not set", "runtime", f"Identifier={identifier}"):
+                  if expected not in signature_text:
+                      raise ValueError(f"final signature missing {expected}")
+              if not (app / "Contents/_CodeSignature/CodeResources").is_file():
+                  raise ValueError("final resource envelope missing")
+              actual = run(["codesign", "-d", "--entitlements", ":-", str(app)], check=True, capture_output=True)
+              if plistlib.loads(actual.stdout) != plistlib.loads(entitlements.read_bytes()):
+                  raise ValueError("final main entitlements differ from accepted source")
+              return {"strict_verified": True, "payload_unchanged_after_outer_seal": True,
+                      "application_launched": False, "installed_on_user_host": False,
+                      "signer_inputs_sha256": INPUTS, "signature": signature_text,
+                      "payload_files_recorded": len(snapshot), "notarized": False}
+          
+          
+          if __name__ == "__main__":
+              if os.environ.get("GITHUB_ACTIONS") != "true":
+                  raise SystemExit("artifact adapter is restricted to disposable hosted builds")
+              repo = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+              if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
+                  raise SystemExit("native ARM64 Mac required")
+              head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+              if head != "afa09df3a4543dad93c19d6077aca4d7c51530fa":
+                  raise SystemExit("final accepted source pin required")
+              apps = list((repo / "apps/desktop/release/mac-arm64").glob("*.app"))
+              if len(apps) != 1:
+                  raise SystemExit("exactly one fresh app required")
+              try:
+                  receipt = seal_artifact(repo, apps[0])
+              except subprocess.CalledProcessError as error:
+                  # Existing helper captures codesign output. Preserve the actual failure
+                  # without retrying, weakening verification or falling back to deep-sign.
+                  print((error.stdout or b"").decode(errors="replace"))
+                  print((error.stderr or b"").decode(errors="replace"))
+                  raise
+              evidence = Path(os.environ["RUNNER_TEMP"]) / "delivery-evidence"
+              (evidence / "artifact-sealing.json").write_text(json.dumps(receipt, indent=2) + "\n")
+          ARTIFACT_ADAPTER
+          python3 -I -S -B "$RUNNER_TEMP/seal_mac_artifact.py"
+          # Original builder outputs remain unverified and are never uploaded as candidates.
+          mkdir -p apps/desktop/release/sealed-candidate
+          app=(apps/desktop/release/mac-arm64/*.app)
+          test "${#app[@]}" -eq 1
+          ditto -c -k --keepParent --sequesterRsrc --zlibCompressionLevel 1 \
+            "${app[0]}" apps/desktop/release/sealed-candidate/Hermes-afa09df3-arm64-adhoc.zip
+
+      - name: Verify the packaged app and record immutable delivery identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S -B - <<'PY'
+          import ast, hashlib, json, os, plistlib, stat, subprocess, tomllib, zipfile
+          from pathlib import Path
+          root = Path.cwd()
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'delivery-evidence'
+          def command(*args):
+              return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT).strip()
+          def digest(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+          assert command('git', 'rev-parse', 'HEAD') == os.environ['TARGET_COMMIT']
+          assert not command('git', 'status', '--porcelain', '--untracked-files=all')
+          release = root / 'apps/desktop/release'
+          apps = list(release.glob('mac-arm64/*.app'))
+          assert len(apps) == 1, [str(p) for p in apps]
+          app = apps[0]
+          info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+          executable = app / 'Contents/MacOS' / info['CFBundleExecutable']
+          assert os.access(executable, os.X_OK)
+          architectures = command('lipo', '-archs', str(executable)).split()
+          assert 'arm64' in architectures, architectures
+          resources = app / 'Contents/Resources'
+          stamp_file = resources / 'install-stamp.json'
+          stamp = json.loads(stamp_file.read_text())
+          assert stamp['schemaVersion'] == 1
+          assert stamp['commit'] == os.environ['TARGET_COMMIT']
+          assert stamp['dirty'] is False and stamp['source'] == 'commit-build'
+          assert stamp['payload'] == 'bundled' and stamp['updateMechanism'] == 'external'
+          assert stamp['distribution'] == 'desktop-app'
+          assert (resources / 'app.asar').is_file()
+          payload = resources / 'agent-payload'
+          assert payload.is_dir() and (payload / 'manifest.json').is_file()
+          manifest = json.loads((payload / 'manifest.json').read_text())
+          assert manifest['schema'] == 1 and manifest['target'] == 'darwin-arm64'
+          assert manifest['ref'] == os.environ['TARGET_COMMIT']
+          runtime = stamp['runtime']
+          assert runtime == manifest['runtime']
+          for relative in (runtime['repoDir'], runtime['storePython'], *runtime['commands'].values()):
+              selected = (payload / relative).resolve()
+              assert selected.is_relative_to(payload.resolve()) and selected.exists(), relative
+          python_architectures = command('lipo', '-archs', str(payload / runtime['storePython'])).split()
+          assert 'arm64' in python_architectures, python_architectures
+          embedded_stamp = payload / runtime['repoDir'] / 'install-stamp.json'
+          assert json.loads(embedded_stamp.read_text()) == stamp
+          expected_source_git_blobs = {'agent/agent_init.py': 'c1db6fc2ff2fd5c4c57550b3de59c2e6b6baea0a', 'agent/agent_init_context_values.py': 'c66e6e6f3d15d15e85a98209ee1b123892dcd4c6', 'agent/agent_init_fallback.py': '2ffef5265d06731dcc53e98a930e8833d03d45a7', 'agent/agent_init_ollama.py': '8f30dda3d47b477d0f839c717b7f8e52bf716647', 'agent/agent_runtime_helpers.py': 'f8c2bae4357aa1c60707d49328929fb90d29b525', 'agent/auxiliary_client.py': 'f64ae9f11d7a9e6e03046da51b94106ec1908ed8', 'agent/auxiliary_client_messages.py': '950736e289036f6ba8eabdcbc7adfa6560cb3416', 'agent/image_routing.py': '6a614beb2bc67808067e4da7e57283b968e50459', 'agent/kanban_stop.py': 'c22da4296848c0d8115a645e3e5c2a190fb236c5', 'agent/local_text_policy.py': '487fe0afb3a28a84fc63cd18ad97fd3796525b6f', 'agent/managed_request_budget.py': 'e40ab4ac6c1ff99dc4c6791fc99194e2c109a2c5', 'agent/managed_worker.py': 'f375e303f63213b5d22f7d85800ce4f1b806cff6', 'agent/model_metadata.py': '2421a52b7525df86c3703acdaafbb5d6a9535025', 'agent/model_metadata_http.py': '6e20f88f67f837976cbbafdb79334c874c13e98f', 'agent/model_metadata_names.py': '3a13c0eea0a1fcf98495c6e286ca2f0d412130af', 'agent/reasoning_params.py': '665f12ab95be8948ce6f2e6ed718b936bae8d179', 'agent/route_binding.py': '97e348fc21f6cde4083c48917ad0592e9a74510d', 'agent/safe_worker_policy.py': '72189f373172a618d3698292b07db77eeca0389e', 'agent/system_prompt.py': '125d324c50e30d60786c08b1bc6845b6b801d951', 'agent/tool_executor.py': 'd5fc0a59b601b5fa08dc199cefb1b74eb3a9873f', 'agent/tool_executor_arguments.py': 'cde11358e3d29c99aefa727d5317fb890da9ecec', 'agent/turn_finalizer.py': 'ab15ebf37f82816b42f64e6a30c50751380e286e', 'apps/shared/src/gateway-contract.generated.ts': 'b345cafdf3f3470069e96e37afb0f8b1b7b8a3ad', 'apps/shared/src/gateway-contract.openrpc.json': '7ace21b9636c0a8f487fb33ebeba58957660660c', 'cron/occurrences.py': '90f140c8f02afc1579922b9a3d87445c7c1694e6', 'gateway/drain_startup.py': '1c68d3756abdd0cdbd1b47b52af79643d1456371', 'gateway/session_kanban.py': '3c44d920293e8a2305a08d7eb39d46d18c687e69', 'gateway/session_kanban_restriction.py': '7e47c0bc5e561d3bf7d2a0febfb7a78b08a6703b', 'gateway/session_kanban_route.py': 'b915588b4f136897d0972ebf9be7fd31ce035b3b', 'gateway/session_kanban_text_result.py': '5ddde3da9e0b322c8b5c7713b8713bdcc66ee8ad', 'gateway/session_managed_worker.py': 'a4b6ea07bca896ec734c74306ec4e8126d76926f', 'gateway/session_worker_construct.py': 'f250df3d1e842cda0da022a055a2466fe66c7679', 'gateway/status_inline_source.py': '5ae4e45fe4da2561405e2df856c4609d5c67b7ea', 'hermes_bootstrap.py': 'e51b81f85341f2747842c08054ca4875fc2049e5', 'hermes_cli/gateway_kanban_window.py': '5bb249aadc3632985476ced0ac9ada46c9c44e2e', 'hermes_cli/kanban_execution_budget.py': 'db3e0df4814540c5045dd2a8a3ab4677b14c04f6', 'hermes_cli/kanban_parser.py': '7b2c7e83aee6de59dfadf265ecca12eeae47f711', 'hermes_cli/kanban_project_create.py': '2b6e1e085c9c2290ad3536b5bd3b1260d119b2af', 'hermes_cli/kanban_project_link.py': 'c9733aa784ab550c2d4d30b633b3d1e01e20d30e', 'hermes_cli/kanban_task_binding.py': '47a0636d4c2575212156c8e5b630d18cfdce7db8', 'hermes_cli/kanban_task_revision.py': '9abb4a2b14101ed3a535befdc8ad2086fb95c750', 'hermes_cli/models_local.py': '2259d18fd12c4cf3687f18c48ae39f67ff1be69e', 'hermes_cli/process_identity.py': 'dc1e9e8de31f7bc49932a0493251dee6d66ed65c', 'hermes_cli/process_ledger_lock.py': 'c9f60f58098590bc909697257255a0c6e6251f7a', 'hermes_cli/startup_hold.py': '36edb05bc1e39bec8c9691db74162c28811b8697', 'hermes_cli/startup_hold_exec.py': 'f7a6ea24602bb6f47664183be11e234365d44b51', 'hermes_cli/startup_hold_reboot.py': '095fe12ff17075aaba41b31376536db47c39f166', 'hermes_cli/startup_hold_reconcile.py': '33d259257bb2714a60f8afa20f2dd355853540fd', 'hermes_cli/startup_hold_writers.py': '5b55a57e5fd01c1af930aaca255169a670dea3f6', 'hermes_cli/update_lock.py': 'b3e14c0544c5e9e8893be58bcbe8d80d4ae4f2f3', 'hermes_cli/update_lock_payload.py': '49c3ac024358cf2b94af0c94343febb04315ae05', 'hermes_cli/version_info.py': '80dbc4fb832689f073c8a72df2748291de738939', 'hermes_platform/host/boot_identity.py': 'a2618cb7d30327291b95410645565200c9a298a9', 'model_tools.py': '6283ff5ac92196f77eb9e10bada9b3e4f962db45', 'tools/registry.py': '599e7e633e2276ec70543102ab5e639fa09ab2e7', 'toolsets.py': 'c1b85af96650aa08ae0eb01c69262b9b6abaaea1', 'tui_gateway/contracts/canonical.py': '6a3b9c093f2cef7d78181ca9cf8f414c369cb6ee'}
+          runtime_witnesses = ['agent/agent_init.py', 'agent/agent_init_context_values.py', 'agent/agent_init_fallback.py', 'agent/agent_init_ollama.py', 'agent/agent_runtime_helpers.py', 'agent/auxiliary_client.py', 'agent/auxiliary_client_messages.py', 'agent/image_routing.py', 'agent/kanban_stop.py', 'agent/local_text_policy.py', 'agent/managed_request_budget.py', 'agent/managed_worker.py', 'agent/model_metadata.py', 'agent/model_metadata_http.py', 'agent/model_metadata_names.py', 'agent/reasoning_params.py', 'agent/route_binding.py', 'agent/safe_worker_policy.py', 'agent/system_prompt.py', 'agent/tool_executor.py', 'agent/tool_executor_arguments.py', 'agent/turn_finalizer.py', 'cron/occurrences.py', 'gateway/drain_startup.py', 'gateway/session_kanban.py', 'gateway/session_kanban_restriction.py', 'gateway/session_kanban_route.py', 'gateway/session_kanban_text_result.py', 'gateway/session_managed_worker.py', 'gateway/session_worker_construct.py', 'gateway/status_inline_source.py', 'hermes_bootstrap.py', 'hermes_cli/gateway_kanban_window.py', 'hermes_cli/kanban_execution_budget.py', 'hermes_cli/kanban_parser.py', 'hermes_cli/kanban_project_create.py', 'hermes_cli/kanban_project_link.py', 'hermes_cli/kanban_task_binding.py', 'hermes_cli/kanban_task_revision.py', 'hermes_cli/models_local.py', 'hermes_cli/process_identity.py', 'hermes_cli/process_ledger_lock.py', 'hermes_cli/startup_hold.py', 'hermes_cli/startup_hold_exec.py', 'hermes_cli/startup_hold_reboot.py', 'hermes_cli/startup_hold_reconcile.py', 'hermes_cli/startup_hold_writers.py', 'hermes_cli/update_lock.py', 'hermes_cli/update_lock_payload.py', 'hermes_cli/version_info.py', 'hermes_platform/host/boot_identity.py', 'model_tools.py', 'tools/registry.py', 'toolsets.py', 'tui_gateway/contracts/canonical.py']
+          generated_contract_build_inputs = ['apps/shared/src/gateway-contract.generated.ts', 'apps/shared/src/gateway-contract.openrpc.json']
+          source_inputs_sha256 = {}
+          for relative, expected in expected_source_git_blobs.items():
+              raw = (root / relative).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+              assert actual == expected, relative
+              source_inputs_sha256[relative] = hashlib.sha256(raw).hexdigest()
+          embedded_source_sha256 = {relative: source_inputs_sha256[relative] for relative in runtime_witnesses}
+          for relative, expected in embedded_source_sha256.items():
+              assert digest(payload / runtime['repoDir'] / relative) == expected, relative
+          expected_launcher_input_blobs = {'scripts/build/launchers.py': 'c7afcfc34d66dae9637bb4f1c3e605afff917c45', 'scripts/build/inputs.py': '3de8b1fa9b6e4812a24445a4dc6007a018d59ba9', 'pyproject.toml': 'cb0239a6d71e46095176c16cf7d8b7fc77e7e202'}
+          launcher_generation_inputs_sha256 = {}
+          for relative, expected in expected_launcher_input_blobs.items():
+              raw = (root / relative).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+              assert actual == expected, relative
+              launcher_generation_inputs_sha256[relative] = hashlib.sha256(raw).hexdigest()
+          launcher_source = root / 'scripts/build/launchers.py'
+          selected = [node for node in ast.parse(launcher_source.read_bytes()).body
+                      if isinstance(node, ast.FunctionDef) and node.name == 'posix_launcher']
+          assert len(selected) == 1
+          namespace = dict(Path=Path)
+          exec(compile(ast.Module(body=selected, type_ignores=[]), str(launcher_source), 'exec'), namespace)
+          entries = tomllib.loads((root / 'pyproject.toml').read_text())['project']['scripts']
+          assert set(entries) == set(runtime['commands']) == {'hermes', 'hermes-agent', 'hermes-acp'}
+          generated_launchers = {}
+          for name, entry in entries.items():
+              relative = runtime['commands'][name]
+              path = payload / relative
+              assert not path.is_symlink() and path.is_file() and path.stat().st_nlink == 1
+              assert path.resolve().is_relative_to(payload.resolve())
+              assert stat.S_IMODE(path.stat().st_mode) == 0o755
+              expected = namespace['posix_launcher'](name, entry, python=runtime['storePython'],
+                  repo=runtime['repoDir'], site=runtime['sitePackages'], target=manifest['target']).encode()
+              assert path.read_bytes() == expected, name
+              generated_launchers[name] = {'relative': relative, 'sha256': digest(path), 'mode': '0755'}
+          assert not (payload / runtime['repoDir'] / '.hermes-update.lock').exists()
+          verification = command('codesign', '--verify', '--deep', '--strict', '--verbose=2', str(app))
+          signature = command('codesign', '-d', '--verbose=4', str(app))
+          assert 'Signature=adhoc' in signature and 'Authority=' not in signature, signature
+          (evidence / 'codesign-verification.txt').write_text(verification + '\n')
+          (evidence / 'codesign-identity.txt').write_text(signature + '\n')
+          artifacts = sorted(release.glob('sealed-candidate/*.zip'))
+          assert len(artifacts) == 1, [str(p) for p in artifacts]
+          with zipfile.ZipFile(artifacts[0]) as archive:
+              assert archive.testzip() is None
+              packaged_witnesses = ['Contents/Resources/install-stamp.json',
+                  'Contents/Resources/agent-payload/manifest.json']
+              packaged_witnesses += ['Contents/Resources/agent-payload/' + runtime['repoDir'] + '/' + p
+                                     for p in runtime_witnesses]
+              packaged_witnesses += ['Contents/Resources/agent-payload/' + v['relative']
+                                     for v in generated_launchers.values()]
+              for relative in packaged_witnesses:
+                  members = [p for p in archive.namelist() if p == app.name + '/' + relative]
+                  assert len(members) == 1, members
+                  assert archive.read(members[0]) == (app / relative).read_bytes()
+          files = {str(p.relative_to(root)): {'bytes': p.stat().st_size, 'sha256': digest(p)}
+                   for p in [*artifacts, stamp_file, resources / 'app.asar', payload / 'manifest.json',
+                             root / 'pm/lock.json', root / 'uv.lock', root / 'package-lock.json']}
+          receipt = {'schema': 1, 'source_commit': os.environ['TARGET_COMMIT'],
+                     'source_tree': command('git', 'rev-parse', 'HEAD^{tree}'),
+                     'embedded_source_sha256': embedded_source_sha256,
+                     'source_input_git_blobs': expected_source_git_blobs,
+                     'launcher_generation_input_git_blobs': expected_launcher_input_blobs,
+                     'launcher_generation_inputs_sha256': launcher_generation_inputs_sha256,
+                     'generated_launchers': generated_launchers,
+                     'source_inputs_sha256': source_inputs_sha256,
+                     'generated_contract_build_inputs_sha256': {relative: source_inputs_sha256[relative] for relative in generated_contract_build_inputs},
+                     'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                     'host': command('sw_vers'), 'architectures': architectures,
+                     'embedded_python_architectures': python_architectures,
+                     'app': str(app.relative_to(root)), 'stamp': stamp, 'files': files,
+                     'signing_class': 'ad-hoc', 'signing_credentials_used': False, 'notarized': False,
+                     'signing_identity_lookup': 'empty disposable hosted-runner keychain',
+                     'application_launched': False, 'installed_on_user_host': False,
+                     'production_adoption_authorized': False}
+          (evidence / 'candidate-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          print(json.dumps(receipt, indent=2))
+          PY
+
+      - name: Upload installable archive and validation receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        id: ci-timings-html
         with:
-          path: ci-timings-report.html
-          archive: false
+          name: mac-arm64-candidate-afa09df3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/desktop/release/sealed-candidate/*.zip
+            ${{ runner.temp }}/delivery-evidence/candidate-receipt.json
+            ${{ runner.temp }}/delivery-evidence/artifact-sealing.json
+            ${{ runner.temp }}/delivery-evidence/codesign-*.txt
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 14
 
-      - name: Build linked review status
-        if: hashFiles('ci-timings.json') != ''
-        env:
-          CI_TIMINGS_REPORT_URL: ${{ steps.ci-timings-html.outputs.artifact-url }}
-        run: |
-          python3 scripts/ci/timings_report.py \
-            --from-json ci-timings.json \
-            --baseline ci-timings-baseline.json \
-            --review-status-out review-status.json \
-            --review-status-only
-
-      - name: Upload review status
-        if: hashFiles('review-status.json') != ''
-        continue-on-error: true
+      - name: Upload build diagnostics
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: review-status-ci-timings
-          path: review-status.json
+          name: mac-candidate-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/delivery-evidence
+          if-no-files-found: warn
           retention-days: 14
 
-      - name: Output summary
-        env:
-          REPORT_URL: ${{ steps.ci-timings-html.outputs.artifact-url}}
+      - name: Record unverified package identity after a failure
+        if: ${{ failure() && !cancelled() }}
+        shell: bash
         run: |
-          {
-            echo "# CI Timing report"
-            echo "[View the full interactive report]($REPORT_URL)"
-          } >> "$GITHUB_STEP_SUMMARY"
-          cat ci-timings-summary.md >> "$GITHUB_STEP_SUMMARY"
+          python3 -I -S -B - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          rows = []
+          for path in sorted(Path('apps/desktop/release').glob('*.zip')):
+              with path.open('rb') as stream:
+                  sha = hashlib.file_digest(stream, 'sha256').hexdigest()
+              rows.append({'path': str(path), 'bytes': path.stat().st_size, 'sha256': sha})
+          output = Path(os.environ['RUNNER_TEMP']) / 'unverified-artifact-receipt.json'
+          signatures = []
+          for app in Path('apps/desktop/release').glob('mac-arm64/*.app'):
+              for arguments in (['--verify', '--deep', '--strict', '--verbose=2'], ['-d', '--verbose=4']):
+                  result = subprocess.run(['codesign', *arguments, str(app)], capture_output=True, text=True, check=False)
+                  signatures.append({'app': str(app), 'arguments': arguments, 'exit_code': result.returncode,
+                                     'stdout': result.stdout, 'stderr': result.stderr})
+          output.write_text(json.dumps({'source_commit': os.environ['TARGET_COMMIT'],
+              'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'verified': False, 'installation_authorized': False, 'files': rows,
+              'signature_diagnostics': signatures}, indent=2) + '\n')
+          PY
 
-      - name: Save baseline cache (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          # Degraded runs (API rate-limited) produce no ci-timings.json —
-          # skip rather than fail, and never cache an empty baseline.
-          if [ -f ci-timings.json ]; then
-            cp ci-timings.json ci-timings-baseline.json
-          else
-            echo "No timings JSON this run — skipping baseline update"
-          fi
-
-      - name: Upload baseline to cache (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('ci-timings-baseline.json') != ''
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Quarantine unverified archive after a failure
+        if: ${{ failure() && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          path: ci-timings-baseline.json
-          key: ci-timings-baseline-${{ github.run_id }}
+          name: UNVERIFIED-mac-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/desktop/release/*.zip
+            ${{ runner.temp }}/unverified-artifact-receipt.json
+          if-no-files-found: warn
+          retention-days: 14
