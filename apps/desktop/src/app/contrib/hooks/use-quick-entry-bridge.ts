@@ -113,7 +113,7 @@ export function useQuickEntryBridge({ submitText, submitTextToNewSession }: Quic
         }
 
         acknowledged = true
-        window.hermesDesktop?.quickEntry.ackSubmit(correlationId, result)
+        window.hermesDesktop?.quickEntry?.ackSubmit(correlationId, result)
       }
 
       let acceptedIdentity: null | QuickEntryAcceptedIdentity = null

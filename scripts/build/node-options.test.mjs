@@ -93,3 +93,41 @@ test('real npm retains config precedence, inherited options and quoted preload',
   writeFileSync(f.env.npm_config_globalconfig, '')
   check('--stack-trace-limit=11')
 })
+
+
+test('renderer-only preparation disables lifecycle work and cannot qualify a native install', t => {
+  const f = fixture(t)
+  const app = join(f.source, 'apps/desktop/package.json')
+  writeFileSync(app, JSON.stringify({ name: 'fixture-desktop',
+    optionalDependencies: { 'get-windows': '9.3.0' }, devDependencies: { electron: '42.0.0' } }))
+  rmSync(join(f.source, 'scripts/build/get-windows-compiler.cjs'))
+  f.env.npm_config_ignore_scripts = f.env.NPM_CONFIG_IGNORE_SCRIPTS = 'false'
+  fakeNpm(f, String.raw`import { mkdirSync, writeFileSync } from 'node:fs';
+if (process.argv[2] === 'config') process.stdout.write('null\n');
+else {
+  mkdirSync('node_modules', { recursive: true });
+  writeFileSync('node_modules/.package-lock.json', JSON.stringify({ packages: {} }));
+}`)
+  mkdirSync(join(f.source, 'node_modules'), { recursive: true })
+  const receipt = join(f.source, 'node_modules/.hermes-node-deps')
+  const nativeReceipt = receipt + '.native-toolchain'
+  writeFileSync(nativeReceipt, 'old native receipt')
+  const options = { source: f.source, workspaces: ['apps/desktop'], env: f.env, reuse: true }
+  prepareNodeDependencies({ ...options, native: false })
+  assert.ok(existsSync(receipt))
+  assert.equal(existsSync(nativeReceipt), false)
+  const calls = () => readFileSync(f.env.PROBE_CALLS, 'utf8').trim().split('\n').map(JSON.parse)
+  assert.equal(calls().length, 1)
+  assert.equal(calls()[0][0], 'ci')
+  assert.ok(calls()[0].includes('--ignore-scripts'), 'argv must override inherited npm config')
+  assert.ok(!calls()[0].some(arg => arg.startsWith('--node-options=')))
+  prepareNodeDependencies({ ...options, native: false, install: false })
+  assert.equal(calls().length, 1, 'a complete browser-only tree can reuse its own receipt')
+  assert.throws(() => prepareNodeDependencies({ ...options, native: false, nativeToolchain: {} }),
+    /renderer-only.*native toolchain/)
+  assert.equal(calls().length, 1, 'a renderer-only tree cannot issue native-toolchain evidence')
+  writeFileSync(join(f.source, 'scripts/build/get-windows-compiler.cjs'), '// native preparation input')
+  assert.throws(() => prepareNodeDependencies({ ...options, install: false }), /stale or missing/)
+  assert.deepEqual(calls().slice(1), [['config', 'get', 'node-options']],
+    'native preparation retains its probe and never trusts a renderer-only receipt')
+})

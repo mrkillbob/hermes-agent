@@ -55,7 +55,7 @@ def index_entries(prompt: Any) -> dict[str, str]:
     entries: dict[str, str] = {}
     for line in match.group(1).splitlines() if match else ():
         if line.strip().startswith("- ") and (name := _row_name(line)):
-            entries.setdefault(name, line.rstrip())
+            entries.setdefault(name, _ROW + line.strip()[2:])
         elif names_only := _NAMES_ONLY_RE.search(line):
             for name in filter(None, (n.strip() for n in names_only.group(1).split(","))):
                 entries.setdefault(name, "")
@@ -68,7 +68,7 @@ def _render(added: dict[str, str], removed: set[str]) -> str:
     parts = [_NOTE_PREFIX]
     names = sorted(name for name in added if name != _OMITTED_KEY)
     if names:
-        parts += [_ADDED_HEAD, *(added[name] or f"{_ROW}{name}" for name in names)]
+        parts += [_ADDED_HEAD, *(_ROW + (added[name].lstrip() or f"- {name}")[2:] for name in names)]
     if _OMITTED_KEY in added:
         parts.append(_OMITTED_NOTICE)
     if removed:

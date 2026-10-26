@@ -455,7 +455,7 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
         # launch route folds in: it holds while the profile still targets this, and a later profile edit
         # supersedes it. Without it the first turn's followed route replaces the pick.
         config.setdefault('model', {})['selection_profile'] = list(profile_target(config))
-    _apply_launch_overrides(params, config)
+    _apply_launch_overrides(params, config, ignore_user_config=ignore_user_config)
     # The posture is opt-in (``session.create`` only) and needs a folder the client named: the daemon's own
     # directory (the fallback above) is no workspace, and ``tool`` is a third-party integration. An explicit
     # pick wins anyway; skipping it here also spares the probe.
@@ -541,25 +541,51 @@ def _with_entry_pick(params, config):
     built-in in raw provider resolution, so the bare spelling would route, and be frozen, as a
     different provider than the entry the profile runs (#140107). Only the held entry's bare key
     is that entry (Desktop's guard). A keyed entry's display name is not; a keyless legacy
-    ``custom_providers:`` entry's is (``configured_entry_key``). Other picks stay as they came.
+    ``custom_providers:`` entry's is (``configured_entry_key``). A bare ``custom`` pick is the billing
+    class a client echoed from the runtime, not a route: on a bare ``custom`` profile with an endpoint
+    it is that profile's route unless it picks another endpoint, or another entry lists a model that
+    is not the profile's default; otherwise it names the configured entry serving its endpoint/model
+    (the profile's own first), else (no endpoint picked) the profile's own entry. A launch key for an
+    entry the model alone chose is refused. Other picks stay as they came.
     """
     from gateway.session_route_identity import configured_entry_key, profile_route_identity
     picked = params.get('provider')
     if not isinstance(picked, str):
         return params
     identity = profile_route_identity(config)
+    if picked.strip().lower() == 'custom':
+        from hermes_cli.runtime_provider_custom import _route_key, routed_custom_identity
+        url, model = params.get('base_url'), str(params.get('model') or '')
+        own_url = _route_key(model_route(config.get('model'))[1])
+        if identity == 'custom' and own_url and (
+                _route_key(url) == own_url if url is not None
+                else model.strip().lower() == profile_target(config)[0].lower()
+                or not routed_custom_identity(None, model, config)):
+            return params
+        held = identity if identity.startswith('custom:') else None
+        healed = routed_custom_identity(url, model, config, held=held) or (
+            identity if identity.startswith('custom:') and url is None else None)
+        if healed and healed != identity and url is None and 'api_key' in params:
+            # The model alone chose this entry: a launch key the user gave is never sent to a host they did not name.
+            _refuse('api_key', f'{healed} was chosen by model; name it with --provider or --base-url to use a launch key')
+        return {**params, 'provider': healed} if healed else params
     if identity == 'auto' or picked.strip().lower() != (configured_entry_key(identity, config) or None):
         return params
     return {**params, 'provider': identity}
 
 
-def _apply_launch_overrides(params, config):
+def _apply_launch_overrides(params, config, *, ignore_user_config=False):
     """Validate the explicit model/agent launch overrides and fold them into *config*."""
     from urllib.parse import urlsplit
     from hermes_cli.config import resolve_turn_limit
     from hermes_constants import parse_reasoning_effort
-    params = _with_entry_pick(_without_auto_pick(params), config)
-    picks_profile_entry = 'provider' in params and _keeps_profile_route(params['provider'], config)
+    params = _without_auto_pick(params)
+    # A bypass snapshot has code defaults and explicit picks, no profile route to match. Importing
+    # its resolver discovers provider catalogs and probes the home, violating that isolation.
+    if not ignore_user_config:
+        params = _with_entry_pick(params, config)
+    picks_profile_entry = (not ignore_user_config and 'provider' in params
+                           and _keeps_profile_route(params['provider'], config))
     if 'provider' in params and not picks_profile_entry:
         model = config.setdefault('model', {})
         # A provider pick is a route change: the profile's endpoint, wire protocol and
@@ -1032,7 +1058,7 @@ def _serving_local_desktop_within(scope):
 def policy_for_source(runner, source):
     from gateway.session_local import LocalSessionAdapter
     from gateway.config import Platform
-    if source.platform != Platform.LOCAL:
+    if source is None or source.platform != Platform.LOCAL:  # None: a history mount, which runs nothing
         return None
     adapter = runner._adapter_for_source(source)
     if isinstance(adapter, LocalSessionAdapter) and adapter.authorize_source(source):

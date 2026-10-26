@@ -28,6 +28,7 @@ def _gate(monkeypatch):
 
     monkeypatch.setattr("tools.connectors.gateway.config.guest_identity_pending", lambda: True)
     monkeypatch.setattr("hermes_cli.anon_auth.ensure_portal_identity", forbidden_setup)
+    monkeypatch.setattr("tools.connectors.managed.ensure_guest_identity", lambda: None)
     yield
     live.reset_for_tests()
     assert setup_calls == []

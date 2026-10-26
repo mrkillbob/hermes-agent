@@ -28,7 +28,7 @@
   },
   "peerDependencies": {
     "ink-text-input": "6.0.0",
-    "react": "19.2.7"
+    "react": "19.3.0"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "0.1.3",

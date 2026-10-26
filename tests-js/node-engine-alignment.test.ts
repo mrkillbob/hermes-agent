@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 
-// semver ships no declarations in this lock; type the two library calls used here.
-const semver: { valid(version: string): string | null; satisfies(version: string, range: string): boolean } = require('semver')
+// semver ships no declarations in this lock; type the library calls used here.
+const semver: { valid(version: string): string | null; satisfies(version: string, range: string): boolean; subset(subRange: string, superRange: string): boolean } = require('semver')
 import { test } from 'vitest'
 
 interface Engines { node?: string; npm?: string }
@@ -28,8 +28,8 @@ function nodeRange(manifest: Manifest): string {
 }
 
 test.each([
-  ['22.22.2', true], ['22.23.1', true], ['24.15.0', true], ['24.18.2', true], ['26.0.0', true],
-  ['22.21.1', false], ['22.22.0', false], ['22.22.1', false], ['24.11.0', false], ['24.14.9', false], ['23.0.0', false], ['24.0.0', false], ['24.10.9', false], ['25.2.1', false], ['26.0.0-rc.1', false],
+  ['26.0.0', true], ['26.12.1', true], ['27.0.0', true],
+  ['22.22.0', false], ['22.23.1', false], ['24.11.0', false], ['24.18.2', false], ['25.2.1', false], ['26.0.0-rc.1', false],
 ] as const)('workspace Node policy for %s is %s', (version: string, accepted: boolean): void => {
   for (const manifest of [root, desktop]) {
     assert.equal(semver.satisfies(version, nodeRange(manifest)), accepted)
@@ -69,6 +69,9 @@ test('lockfile workspace engine mirrors match their manifests', (): void => {
 test('source-build compiler engine contract agrees with the workspace minimums', (): void => {
   const compiler = lock.packages['node_modules/node-gyp']
   assert.ok(compiler, 'source compiler must be present in the locked graph')
-  assert.equal(nodeRange(compiler), nodeRange(root))
-  assert.equal(nodeRange(compiler), nodeRange(desktop))
+
+  for (const workspace of [root, desktop]) {
+    assert.ok(semver.subset(nodeRange(workspace), nodeRange(compiler)),
+      'the compiler must support every Node version the workspace admits')
+  }
 })

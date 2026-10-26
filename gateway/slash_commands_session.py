@@ -200,38 +200,41 @@ class GatewaySessionCommandsMixin:
         session_key = self._session_key_for_source(source)
         await self._hm_stop_owner_turn(session_key)  # idle and confirmed resets too (N53)
         old_entry = self.session_store._entries.get(session_key)
-        try:
-            new_entry = await self.async_session_store.reset_session(
-                session_key, conversation_kind="interactive"
-            )
-        except ConversationWorktreeError as exc:
-            return f"conversation worktree setup failed: {exc}"
-        self._invalidate_session_run_generation(session_key, reason="session_reset")
-        # Evict the running-agent slot now that the generation is bumped: the in-flight run's own
-        # guarded release (old generation) returns False and would leave a zombie slot that silently
-        # drops all later messages. Idempotent, so the run's finally calling it again is harmless.
-        self._release_running_agent_state(session_key)
-        # Snapshot the old entry so on_session_finalize can report the expiring session id.
-        # Evict the running-agent slot now that the generation is bumped. The in-flight run's own guarded
-        # release (run_generation=old) will return False and leave its dead agent behind; clearing here
-        # keeps the slot from becoming a zombie that silently drops all later messages (#28686). Idempotent,
-        # so the run's finally calling it again is harmless.
-        await self._cleanup_old_agent_for_reset(session_key)
-        self._evict_cached_agent(session_key)
-        # Conversation boundary: ALL conversation-scoped per-session state + security state in one
-        # funnel call (see _CONVERSATION_SCOPED_STATE in gateway/run.py).
-        self._clear_conversation_scope(session_key, reason="session_reset")
-        # In-flight async delegations end WITH the conversation: once the id rotates their
-        # completions have no live owner. Expire by durable id, routing key as legacy fallback.
-        with contextlib.suppress(Exception):
-            from tools.async_delegation import interrupt_for_session
-            interrupt_for_session(session_key=session_key, reason="session_reset",
-                                  parent_session_id=str(getattr(old_entry, "session_id", "") or ""))
-        _reset_process_scoped_tool_state()
-
         _old_sid = old_entry.session_id if old_entry else None
-        from gateway.session_automation import move_route_wakes
-        await move_route_wakes(self, session_key, _old_sid)  # main #114456: a parked wake survives /new
+        from gateway.session_automation import move_route_wakes, route_owner_lock
+        # Validate the replacement before clearing conversation state, while keeping the old
+        # owner's drain fenced until cleanup and its queued automation wakes have moved.
+        async with route_owner_lock(self, _old_sid):
+            try:
+                new_entry = await self.async_session_store.reset_session(
+                    session_key, conversation_kind="interactive"
+                )
+            except ConversationWorktreeError as exc:
+                return f"conversation worktree setup failed: {exc}"
+            self._invalidate_session_run_generation(session_key, reason="session_reset")
+            # Evict the running-agent slot now that the generation is bumped: the in-flight run's own
+            # guarded release (old generation) returns False and would leave a zombie slot that silently
+            # drops all later messages. Idempotent, so the run's finally calling it again is harmless.
+            self._release_running_agent_state(session_key)
+            # Snapshot the old entry so on_session_finalize can report the expiring session id.
+            # Evict the running-agent slot now that the generation is bumped. The in-flight run's own guarded
+            # release (run_generation=old) will return False and leave its dead agent behind; clearing here
+            # keeps the slot from becoming a zombie that silently drops all later messages (#28686). Idempotent,
+            # so the run's finally calling it again is harmless.
+            await self._cleanup_old_agent_for_reset(session_key)
+            self._evict_cached_agent(session_key)
+            # Conversation boundary: ALL conversation-scoped per-session state + security state in one
+            # funnel call (see _CONVERSATION_SCOPED_STATE in gateway/run.py).
+            self._clear_conversation_scope(session_key, reason="session_reset")
+            # In-flight async delegations end WITH the conversation: once the id rotates their
+            # completions have no live owner. Expire by durable id, routing key as legacy fallback.
+            with contextlib.suppress(Exception):
+                from tools.async_delegation import interrupt_for_session
+                interrupt_for_session(session_key=session_key, reason="session_reset",
+                                      parent_session_id=str(getattr(old_entry, "session_id", "") or ""))
+            _reset_process_scoped_tool_state()
+
+            await move_route_wakes(self, session_key, _old_sid)
         await self._fire_session_reset_hooks(source, session_key, _old_sid,
                                              new_entry.session_id if new_entry else None)
         # Scoped to the profile serving this source so a multiplexed /new banner reports the

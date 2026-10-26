@@ -414,6 +414,8 @@ class GatewayAdapterLifecycleMixin:
                 )
                 self._ensure_reconnect_watcher_running()
                 return
+            if self._park_last_fatal_platform(adapter):
+                return
             self._exit_reason = adapter.fatal_error_message or "All messaging adapters disconnected"
             if adapter.fatal_error_retryable:
                 self._exit_with_failure = True
@@ -1367,6 +1369,9 @@ class GatewayAdapterLifecycleMixin:
                 owner_origin=owner_origin, incoming_origin=incoming_origin,
             ) or self._refuse_duplicate_claim(listener_claim, claimed, profile_name, platform, "listener"):
                 continue
+            # The profile owns this bot from here on, connected or not: cron and the delivery drain read
+            # ownership here from another thread, never from the live map a fatal error rewrites.
+            self._record_profile_bot_platform(profile_name, platform)
             self._configure_profile_adapter(adapter, profile_name, platform)
             try:
                 with _profile_runtime_scope(profile_home, hydrate_secrets=False):
@@ -1391,6 +1396,13 @@ class GatewayAdapterLifecycleMixin:
             connected += 1
             logger.info("✓ %s connected (profile: %s)", platform.value, profile_name)
         return connected
+
+    def _record_profile_bot_platform(self, profile_name: str, platform: Platform) -> None:
+        """Keep bot ownership stable when the live adapter map changes after a fatal error."""
+        bot_platforms = getattr(self, "_profile_bot_platforms", None)
+        if bot_platforms is None:
+            bot_platforms = self._profile_bot_platforms = {}
+        bot_platforms.setdefault(profile_name, set()).add(platform)
 
     def _wire_adapter_handlers(
         self, adapter: BasePlatformAdapter, *, message_handler=None, fatal_error_handler=None,

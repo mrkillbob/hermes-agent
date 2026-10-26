@@ -11,8 +11,9 @@ import pytest
 from gateway.session_contract import Principal, SessionRef, Submission
 
 CHILD = """import json, os, sys, threading, psutil
+from hermes_cli.process_identity import worker_birth
 me = psutil.Process()
-print(json.dumps({'type':'hello', 'pid':me.pid, 'birth':me.create_time(),
+print(json.dumps({'type':'hello', 'pid':me.pid, 'birth':worker_birth(me),
                   'ancestors':[p.pid for p in me.parents()[:3]]}), flush=True)
 sys.stdin.buffer.readline()
 if sys.argv[1] in ('finished_output', 'finished_clean'):

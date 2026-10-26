@@ -88,6 +88,8 @@ def test_startup_hold_cannot_arm_claim_or_admit_methods(home):
     connection = SimpleNamespace(authority=SimpleNamespace(runner=runner), native_owner=True)
     for method in ['kanban.run', 'prompt.submit', 'worker.adopt', 'worker.persist', 'session.interrupt']:
         assert not drain_kanban.method_allowed(connection, method, {}), method
+    for mode in ('safe_mode', 'ignore_user_config'):
+        assert not drain_kanban.method_allowed(connection, 'session.create', {mode: True})
     for method in ['ping', 'runtime.describe']:
         assert drain_kanban.method_allowed(connection, method, {})
 

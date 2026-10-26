@@ -228,9 +228,23 @@ export function verifyDesktopWindowsBinding(source, { env = process.env, platfor
   if (result.status !== 0) throw new Error(`Required get-windows binding could not load: ${result.stderr || result.stdout}`)
 }
 
+// Only browser compilation opts out. Its receipt must never certify native lifecycle outputs.
+function desktopPreparationMode(source, selected, native, nativeToolchain) {
+  if (!native) {
+    if (nativeToolchain !== undefined) throw new Error('A renderer-only install cannot certify a native toolchain')
+    return { prepareElectron: false, preload: undefined, lifecycleArgs: ['--ignore-scripts'] }
+  }
+  return {
+    prepareElectron: selected.includes('apps/desktop')
+      && Boolean(JSON.parse(readFileSync(join(source, 'apps/desktop/package.json'), 'utf8')).devDependencies?.electron),
+    preload: desktopCompilerPreload(source, selected),
+    lifecycleArgs: [],
+  }
+}
+
 /** Install the full requested workspace union in one strict, locked operation. */
 export function prepareNodeDependencies({ source, workspaces, env = process.env, reuse = false, install = true, nativeToolchain,
-  nodeOptionsProbeTimeoutMs }) {
+  nodeOptionsProbeTimeoutMs, native = true }) {
   source = resolve(source)
   if (!Array.isArray(workspaces) || workspaces.length === 0) {
     throw new Error('Select at least one workspace; implicit all-workspace installation is not allowed')
@@ -247,8 +261,7 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env,
     }
     return path
   }))].sort()
-  const prepareElectron = selected.includes('apps/desktop')
-    && Boolean(JSON.parse(readFileSync(join(source, 'apps/desktop/package.json'), 'utf8')).devDependencies?.electron)
+  const { prepareElectron, preload, lifecycleArgs } = desktopPreparationMode(source, selected, native, nativeToolchain)
   const [node, npm] = npmCommand({ env })
   const npmVersion = npmManifestVersion(npm) ?? execFileSync(
     node, [npm, '--version'], { cwd: source, env, encoding: 'utf8' }).trim()
@@ -257,10 +270,10 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env,
     const range = manifest.engines?.[name]
     if (range && !satisfies(version, range)) throw new Error(`${name} ${version} violates ${range}`)
   }
-  const preload = desktopCompilerPreload(source, selected)
   const nodeOptions = preload ? installNodeOptions(node, npm, source, env, preload, nodeOptionsProbeTimeoutMs) : undefined
   const args = ['ci', '--no-audit', '--no-fund', '--engine-strict', '--include=dev',
     '--include=optional', '--include-workspace-root=true',
+    ...lifecycleArgs,
     ...selected.flatMap(workspace => ['--workspace', workspace]),
     ...(nodeOptions === undefined ? [] : [`--node-options=${nodeOptions}`]),
   ]
@@ -274,7 +287,7 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env,
   const nativeKey = nativeToolchain === undefined ? undefined : JSON.stringify(nativeToolchain)
   const hiddenLock = join(source, 'node_modules/.package-lock.json')
   const inputs = createHash('sha256').update(JSON.stringify({
-    node: process.versions.node, npm: npmVersion, platform: process.platform, arch: process.arch, args,
+    node: process.versions.node, npm: npmVersion, platform: process.platform, arch: process.arch, native, args,
     // npm names are case-insensitive; Windows Python uppercases inherited keys.
     config: Object.entries(env).filter(([key]) => /^npm_config_/i.test(key) && !/^npm_config_(cache|offline|prefer_offline)$/i.test(key))
       .map(([key, value]) => [key.toLowerCase(), value]).sort(),

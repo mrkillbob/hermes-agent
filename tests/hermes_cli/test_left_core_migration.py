@@ -408,3 +408,19 @@ def test_mcp_serve_is_never_installed_automatically(tmp_path):
     assert lcm.migrate_home(home, install=lambda name: installs.append(name) or {"ok": True},
                             say=lambda _m: None) == []
     assert installs == []
+
+
+def test_retained_bundled_provider_is_not_migrated_before_catalog_admission(tmp_path, monkeypatch):
+    """A configured bundled provider keeps its owner and opt-in state during a mixed source sync."""
+    from hermes_cli.plugins_cmd import _find_plugin_entry
+
+    home = _home(tmp_path, config="plugins:\n  enabled: [observability/langfuse]\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    before = (home / "config.yaml").read_bytes()
+    entry = _find_plugin_entry("observability/langfuse")
+    assert entry is not None and entry[3] == "bundled"
+    installs = []
+    assert lcm.migrate_home(home, install=lambda name: installs.append(name) or {"ok": True},
+                            say=lambda _m: None) == []
+    assert installs == []
+    assert (home / "config.yaml").read_bytes() == before
