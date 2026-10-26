@@ -41,12 +41,23 @@ def _correct(case, **changes):
     from hermes_cli.kanban_task_binding import BindingExpectation, correct_task_binding
 
     home, roots, _old, new, task_id, row = case
+    expected = changes.pop("expected", None)
+    if expected is None:
+        expected = BindingExpectation.from_task(row, project_root=str(roots[0]), revision=_revision(case))
     args = dict(source_board="alpha", task_id=task_id, target_project_id=new,
-                expected=BindingExpectation.from_task(row, project_root=str(roots[0])),
+                expected=expected,
                 target_root=str(roots[1]), reason="Verified source ownership correction",
                 backup_path=str(home / "before.tar.gz"))
     args.update(changes)
     return correct_task_binding(**args)
+
+
+def _revision(case):
+    from hermes_cli.kanban_task_revision import task_revision
+    from hermes_cli.kanban_transfer import _selected_task_rows
+
+    with connect_closing(board="alpha") as conn:
+        return task_revision("alpha", case[4], _selected_task_rows(conn, [case[4]]))
 
 
 def test_correction_preserves_id_hold_history_and_backup(binding_case):
@@ -147,7 +158,8 @@ def test_same_board_binding_correction_preserves_existing_history(binding_case):
     with projects_db.connect_closing() as registry:
         projects_db.update_project(registry, old, board_slug="old-board")
     kb.create_board("old-board", project_id=old)
-    expected = BindingExpectation.from_task(row, project_root=str(roots[0]), board_project_id=new)
+    expected = BindingExpectation.from_task(row, project_root=str(roots[0]), board_project_id=new,
+                                            revision=_revision(binding_case))
     _correct(binding_case, expected=expected)
     with connect_closing(board="alpha") as conn:
         assert kb.get_task(conn, task_id).project_id == new
@@ -278,7 +290,8 @@ def _same_board_expectation(case):
         projects_db.update_project(registry, new, board_slug="alpha")
         projects_db.update_project(registry, old, board_slug="old-board")
     kb.create_board("old-board", project_id=old)
-    return BindingExpectation.from_task(row, project_root=str(roots[0]), board_project_id=new)
+    return BindingExpectation.from_task(row, project_root=str(roots[0]), board_project_id=new,
+                                        revision=_revision(case))
 
 
 def test_same_board_export_race_refuses_new_workspace_user(binding_case, monkeypatch):
