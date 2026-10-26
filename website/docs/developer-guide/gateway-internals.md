@@ -893,6 +893,30 @@ card. `hermes gateway drain status` reports its hold ID and `armed: false`.
 It cannot be armed, claimed, nested with another protected hold, or used for a
 one-card dispatch exception.
 
+`hermes gateway drain reconcile` performs an ESTOP-required, read-only legacy
+history assessment under the startup admission mutex and exclusive writer
+references. It returns fixed category counts and the SHA256 of the exact ledger
+bytes, with `mode: assessment_only` and `admission_granted: false`. No argv,
+home, PID, source path or receipt body is returned. Changed, malformed,
+nonregular, linked or oversized ledgers refuse; the command never prunes,
+quarantines, replaces or writes the ledger, marker or startup journal.
+
+An accepted reference covers only its exact departed writer incarnation. A
+parent reference does not cover helpers, and PID reuse, reboot, an empty current
+process tree or an operator's observed departure cannot produce descendant
+closure. Uncovered dead rows remain `closure_required`; uncertain identities
+remain `unknown`, and live identities remain `busy`. Repeating the assessment
+creates no evidence or admission capability. A future retirement operation still
+requires a separately reviewed producer-backed descendant-closure contract bound
+to the exact home, source, ledger bytes, entry identities and boot incarnation,
+with crash recovery and cross-process ledger serialization. This assessment does
+not implement that operation and cannot unblock uncovered legacy history.
+
+Plain startup writer refusals transport only the known
+`startup_hold_writers_busy`, `startup_hold_writers_unknown`,
+`startup_hold_requires_pause` and `startup_hold_ledger_changed` codes. Arbitrary
+exception text remains redacted as `kanban_window_refused`; exit status stays 6.
+
 Start the native owner explicitly with `hermes gateway run`. It reports
 `state=draining, drain_reason=startup_hold`; its authenticated native connection
 allows only `ping` and `runtime.describe`, with no session-creation capability.

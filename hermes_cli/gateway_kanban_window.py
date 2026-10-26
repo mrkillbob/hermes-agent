@@ -84,8 +84,30 @@ def _hold(_args):
     return status()
 
 
+def _reconcile(_args):
+    from hermes_cli.startup_hold_reconcile import assess
+    return assess()
+
+
+_STARTUP_REFUSALS = frozenset({
+    'startup_hold_writers_busy', 'startup_hold_writers_unknown',
+    'startup_hold_requires_pause', 'startup_hold_ledger_changed',
+})
+
+
+def _refusal_reason(exc):
+    reason = getattr(exc, 'reason', None)
+    if reason is not None:
+        return reason
+    # Only exact, explicitly public codes may cross the plain RuntimeError seam.
+    if (type(exc) is RuntimeError and len(exc.args) == 1
+            and isinstance(exc.args[0], str) and exc.args[0] in _STARTUP_REFUSALS):
+        return exc.args[0]
+    return 'kanban_window_refused'
+
+
 def execute(args):
-    actions = {'hold': _hold, 'begin': _begin, 'arm': _arm, 'status': lambda _: _status(), 'cancel': _cancel, 'restore': _restore}
+    actions = {'reconcile': _reconcile, 'hold': _hold, 'begin': _begin, 'arm': _arm, 'status': lambda _: _status(), 'cancel': _cancel, 'restore': _restore}
     return actions[args.drain_action](args)
 
 
@@ -93,7 +115,7 @@ def cmd_gateway_drain(args):
     try:
         payload = execute(args)
     except (RuntimeError, OSError, ValueError, sqlite3.Error) as exc:
-        print(json.dumps({'error': getattr(exc, 'reason', 'kanban_window_refused')}))
+        print(json.dumps({'error': _refusal_reason(exc)}))
         raise SystemExit(6) from exc
     print(json.dumps(payload, sort_keys=True))
 
@@ -105,6 +127,7 @@ def add_parser(subparsers):
     begin.add_argument('--task-id', required=True)
     begin.add_argument('--board', default='default')
     begin.add_argument('--seconds', type=int, default=900)
+    actions.add_parser('reconcile', help='Under ESTOP, assess legacy closure debt without changing the ledger')
     actions.add_parser('hold', help='Under ESTOP, hold native startup without selecting or admitting any task')
     actions.add_parser('status', help='Read the hold and grant without exposing the prior marker')
     for action in ('arm', 'cancel'):
