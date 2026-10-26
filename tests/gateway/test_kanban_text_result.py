@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 
-def fixture_claim(tmp_path, monkeypatch):
+def fixture_claim(tmp_path, monkeypatch, phase='ready'):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
@@ -17,7 +17,10 @@ def fixture_claim(tmp_path, monkeypatch):
     kb.create_board('owned')
     with closing(connect(board='owned')) as conn:
         tid = kb.create_task(conn, title='Public text control', assignee='default')
-        task = kb.claim_task(conn, tid)
+        if phase == 'review':
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
+        task = kb.claim_review_task(conn, tid) if phase == 'review' else kb.claim_task(conn, tid)
         with kb.write_txn(conn):
             kb._append_event(conn, tid, 'worker_bound', {'pid':123, 'claim_lock':task.claim_lock}, run_id=task.current_run_id)
             kb._append_event(conn, tid, 'owner_admitted', {'session_id':'owned-session'}, run_id=task.current_run_id)

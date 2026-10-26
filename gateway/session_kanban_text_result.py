@@ -39,6 +39,7 @@ def settle_text_result(policy, scope, result):
         if _already_parked(conn, context, receipt):
             return result
         metadata = _require_claim(conn, context, scope)
+        source_status = kb._retry_status_for_run(conn, context['task_id'], context['run_id'])
         conn.execute("UPDATE tasks SET status='blocked', claim_lock=NULL, claim_expires=NULL, "
                      "worker_pid=NULL, block_kind='needs_input' WHERE id=?", (context['task_id'],))
         run_id = kb._end_run(conn, context['task_id'], outcome=_OUTCOME, status='blocked',
@@ -47,7 +48,7 @@ def settle_text_result(policy, scope, result):
         kb._append_event(conn, context['task_id'], _OUTCOME, receipt, run_id=run_id)
         # The canonical sticky block prevents recompute_ready from retrying text-only work.
         kb._append_event(conn, context['task_id'], 'blocked',
-            {'kind': 'needs_input', 'reason': _OUTCOME, 'source_status': 'running'}, run_id=run_id)
+            {'kind': 'needs_input', 'reason': _OUTCOME, 'source_status': source_status}, run_id=run_id)
     return result
 
 
