@@ -156,7 +156,92 @@ def test_uncertain_gate_never_self_heals_or_mutates_app(tmp_path, damage):
     before = _inventory(app)
     assert update_lock.checkout_lock_held(root)
     assert update_lock._acquire_checkout(root) is not None
+    if damage == 'replaced_gate':
+        assert not gate.exists(), 'lost custody must not recreate a gate with a reusable inode'
     assert _inventory(app) == before
+
+
+def test_receipt_racing_exclusive_creation_cannot_rebind_reused_identity(tmp_path, monkeypatch):
+    from hermes_cli import update_lock_payload
+
+    _, root = _payload(tmp_path)
+    gate = update_lock.checkout_lock_path(root)
+    receipt = gate.with_name(gate.name + '.identity')
+    real_open = os.open
+    created = []
+
+    def racing_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == gate and flags & os.O_EXCL:
+            created.append(fd)
+            found = os.fstat(fd)
+            # Even a receipt naming this exact inode cannot authorize our replacement.
+            receipt.write_bytes(update_lock_payload.identity(root)
+                                + f'{found.st_dev}:{found.st_ino}\n'.encode())
+        return fd
+
+    monkeypatch.setattr(os, 'open', racing_open)
+    assert update_lock._acquire_checkout(root) is not None
+    assert update_lock._HELD is None
+    assert len(created) == 1
+    with pytest.raises(OSError):
+        os.fstat(created[0])
+    assert gate.is_file() and receipt.is_file(), 'refusal never unlinks shared custody evidence'
+
+
+@pytest.mark.parametrize('kind', ['corrupt', 'dangling', 'directory', 'unreadable'])
+def test_missing_gate_with_uncertain_receipt_is_not_recreated(tmp_path, monkeypatch, kind):
+    _, root = _payload(tmp_path)
+    gate = update_lock.checkout_lock_path(root)
+    receipt = gate.with_name(gate.name + '.identity')
+    if kind == 'corrupt':
+        receipt.write_text('not a receipt')
+    elif kind == 'dangling':
+        receipt.symlink_to(tmp_path / 'absent')
+    elif kind == 'directory':
+        receipt.mkdir()
+    else:
+        real_lstat = Path.lstat
+        def guarded_lstat(path):
+            if path == receipt:
+                raise PermissionError('fixture uncertain receipt')
+            return real_lstat(path)
+        monkeypatch.setattr(Path, 'lstat', guarded_lstat)
+    assert update_lock._acquire_checkout(root) is not None
+    assert not gate.exists()
+
+
+@pytest.mark.parametrize('race', ['creator', 'creator_then_unlink', 'readonly_then_unlink', 'readonly'])
+def test_sealed_existing_open_and_creator_races_never_recreate(tmp_path, monkeypatch, race):
+    _, root = _payload(tmp_path)
+    gate = update_lock.checkout_lock_path(root)
+    if race.startswith('readonly'):
+        assert update_lock._acquire_checkout(root) is None
+        update_lock._release_checkout()
+    real_open = os.open
+    creations = []
+
+    def racing_open(path, flags, *args, **kwargs):
+        if Path(path) == gate:
+            if flags & os.O_EXCL:
+                creations.append(1)
+                fd = real_open(path, flags, *args, **kwargs)
+                os.close(fd)
+                if race == 'creator_then_unlink':
+                    gate.unlink()
+                raise FileExistsError('fixture creator won')
+            if race.startswith('readonly') and flags & os.O_RDWR:
+                raise PermissionError('fixture readonly gate')
+            if race == 'readonly_then_unlink':
+                raise FileNotFoundError('fixture gate lost during readonly fallback')
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'open', racing_open)
+    refused = update_lock._acquire_checkout(root)
+    assert (refused is None) == (race in {'creator', 'readonly'})
+    assert len(creations) == (1 if race.startswith('creator') else 0)
+    if race == 'creator_then_unlink':
+        assert not gate.exists()
 
 
 @pytest.mark.parametrize('damage', ['missing', 'malformed', 'wrong_repo', 'stamp_mismatch'])
@@ -299,3 +384,59 @@ def test_sealed_shell_without_external_tools_never_falls_back_free(tmp_path, ali
     assert result.stderr == ''
     assert result.stdout.splitlines() == [str(update_lock.checkout_lock_path(root)), 'held']
     assert not (root / '.hermes-update.lock').exists()
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('exit_code', [1, 2, 3])
+@pytest.mark.parametrize('layout', ['zip', 'git', 'empty_git', 'invalid_git'])
+def test_checkout_path_reports_its_own_status_in_failure_exit_trap(tmp_path, exit_code, layout):
+    root = tmp_path / 'checkout with spaces'
+    root.mkdir()
+    if layout == 'git':
+        (root / '.git').mkdir()
+    elif layout != 'zip':
+        (root / '.git').write_text('' if layout == 'empty_git' else 'not a git pointer')
+    script = Path(update_lock.__file__).resolve().parents[1] / 'scripts/desktop-update/marker.sh'
+    program = r'''source "$1"
+cleanup() {
+    named="$(checkout_lock_path)"; resolved=$?
+    printf '%s\n%s\n' "$resolved" "$named"
+    if checkout_lock_held; then echo held; else echo free; fi
+}
+trap cleanup EXIT
+exit "$2"
+'''
+    result = subprocess.run(['bash', '-c', program, 'probe', str(script), str(exit_code)],
+                            env=dict(os.environ, INSTALL_ROOT=str(root)), capture_output=True,
+                            text=True, timeout=20, check=False)
+    assert result.returncode == exit_code
+    assert result.stdout.splitlines() == ['0', str(update_lock.checkout_lock_path(root)), 'free']
+    assert result.stderr == ''
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('exit_code', [1, 2, 3])
+@pytest.mark.parametrize('state', ['free', 'held', 'invalid'])
+def test_sealed_probe_keeps_its_verdict_in_failure_exit_trap(tmp_path, exit_code, state):
+    _, root = _payload(tmp_path)
+    if state == 'held':
+        assert update_lock._acquire_checkout(root) is None
+    elif state == 'invalid':
+        (root.parent / 'manifest.json').write_text('{}')
+    script = Path(update_lock.__file__).resolve().parents[1] / 'scripts/desktop-update/marker.sh'
+    program = r'''source "$1"
+cleanup() {
+    named="$(checkout_lock_path)"; resolved=$?
+    printf '%s\n%s\n' "$resolved" "$named"
+    if checkout_lock_held; then echo held; else echo free; fi
+}
+trap cleanup EXIT
+exit "$2"
+'''
+    result = subprocess.run(['bash', '-c', program, 'probe', str(script), str(exit_code)],
+                            env=dict(os.environ, INSTALL_ROOT=str(root)), capture_output=True,
+                            text=True, timeout=20, check=False)
+    assert result.returncode == exit_code
+    assert result.stdout.splitlines() == ['0', str(update_lock.checkout_lock_path(root)),
+                                          'free' if state == 'free' else 'held']
+    assert result.stderr == ''

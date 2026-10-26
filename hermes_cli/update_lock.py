@@ -1122,7 +1122,14 @@ def _acquire_checkout(install_root: Path) -> UpdateHolder | None:
             return None
     except OSError as exc:
         return UpdateHolder(pid=0, age_seconds=0.0, reason=str(exc))
-    fd, writable = _open_lock_file(path)
+    try:
+        if _sealed_checkout_app(install_root):
+            from hermes_cli.update_lock_payload import open_gate
+            fd, writable = open_gate(install_root)
+        else:
+            fd, writable = _open_lock_file(path)
+    except OSError as exc:
+        return UpdateHolder(pid=0, age_seconds=0.0, reason=str(exc))
     if fd is None:
         return UpdateHolder(pid=0, age_seconds=0.0, reason=f"{path} is not writable ({writable}); the update "
                             "locks the checkout there, in its git directory, which git must write too")

@@ -22,14 +22,6 @@ async function stop(child: ChildProcess) {
   await exited
 }
 
-function fixtureText(file: string): string | null {
-  try {
-    return fs.readFileSync(file, 'utf8').slice(0, 4096)
-  } catch {
-    return null
-  }
-}
-
 test.skipIf(process.platform === 'win32').each(['legacy', 'protocol-2'])(
   '%s POSIX producer receipt survives heartbeat and a newly opened gate',
   async mode => {
@@ -53,7 +45,6 @@ test.skipIf(process.platform === 'win32').each(['legacy', 'protocol-2'])(
     const child = spawn(
       'bash',
       [
-        '-x', // Retain the exact stalled shell phase in bounded fixture-only diagnostics.
         script,
         '--daemonized',
         '--install-root',
@@ -85,8 +76,7 @@ test.skipIf(process.platform === 'win32').each(['legacy', 'protocol-2'])(
     child.stderr!.on('data', chunk => {
       output += chunk
     })
-    // Keep the existing overall deadline, but retain phase evidence before timeout cleanup.
-    const exited = once(child, 'exit', { signal: AbortSignal.timeout(20_000) }).catch(error => error)
+    const exited = once(child, 'exit')
 
     // The hand-off hands the marker to a custodian that outlives it, so an old Desktop never
     // reads a dead owner; the log names that custodian together with this hand-off's pid.
@@ -131,15 +121,7 @@ test.skipIf(process.platform === 'win32').each(['legacy', 'protocol-2'])(
 
       assert.equal(await reopenedGate(), true)
       await stop(desktop)
-      const outcome = await exited
-      const diagnostic = () => JSON.stringify({
-        phase: 'await-handoff-exit', exitCode: child.exitCode, signalCode: child.signalCode,
-        marker: fixtureText(markerPath(home)),
-        result: fixtureText(handoffResultPath(home)),
-        output: output.slice(-6000)
-      })
-      assert.ok(Array.isArray(outcome), `${String(outcome)}\n${diagnostic()}`)
-      const [code] = outcome
+      const [code] = await exited
       assert.equal(code, 3, output)
       const receipt = JSON.parse(fs.readFileSync(handoffResultPath(home), 'utf8'))
       assert.equal(receipt.started_at, startedAt)

@@ -531,20 +531,21 @@ sealed_checkout_app() {
 }
 
 checkout_lock_path() {
+  # Cleanup must not inherit the failed updater's saved EXIT-trap status.
   local root="$INSTALL_ROOT" dot="$INSTALL_ROOT/.git" gitdir line common app
   if app="$(sealed_checkout_app)"; then
-    printf '%s/.%s.hermes-update.lock\n' "${app%/*}" "${app##*/}"; return
+    printf '%s/.%s.hermes-update.lock\n' "${app%/*}" "${app##*/}"; return $?
   fi
   if [ -d "$dot" ]; then
     gitdir="$dot"
   elif [ -f "$dot" ]; then
-    IFS= read -r line < "$dot" || [ -n "$line" ] || { printf '%s\n' "$root/.hermes-update.lock"; return; }
+    IFS= read -r line < "$dot" || [ -n "$line" ] || { printf '%s\n' "$root/.hermes-update.lock"; return $?; }
     line="${line#$'\357\273\277'}"; marker_line "$line"; line="$LINE"
-    case "$line" in gitdir:*) ;; *) printf '%s\n' "$root/.hermes-update.lock"; return ;; esac
+    case "$line" in gitdir:*) ;; *) printf '%s\n' "$root/.hermes-update.lock"; return $? ;; esac
     marker_line "${line#gitdir:}"; gitdir="$LINE"
     case "$gitdir" in /*) ;; *) gitdir="$root/$gitdir" ;; esac
   else
-    printf '%s\n' "$root/.hermes-update.lock"; return
+    printf '%s\n' "$root/.hermes-update.lock"; return $?
   fi
   if [ -f "$gitdir/commondir" ]; then
     IFS= read -r common < "$gitdir/commondir" || [ -n "$common" ]
@@ -552,6 +553,7 @@ checkout_lock_path() {
     case "$common" in /*) gitdir="$common" ;; '') ;; *) gitdir="$gitdir/$common" ;; esac
   fi
   printf '%s\n' "$gitdir/hermes-update.lock"
+  return $?
 }
 
 checkout_lock_held() { # 0 iff some process holds the checkout kernel lock right now
@@ -580,7 +582,7 @@ except Exception:
     sys.exit(2)
 sys.exit(0 if held else 1)
 ' "$code_root" "$INSTALL_ROOT"
-    [ "$?" -ne 1 ]; return
+    case "$?" in 1) return 1 ;; *) return 0 ;; esac
   fi
   local path rc tool="$MARKER_LOCK_TOOL_FORCED"
   path="$(checkout_lock_path)" || return 0

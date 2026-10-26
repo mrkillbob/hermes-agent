@@ -33,6 +33,49 @@ def lock_path(source: Path) -> Path | None:
     return None if app is None else app.parent / ('.' + app.name + '.hermes-update.lock')
 
 
+
+def open_gate(source: Path) -> tuple[int, bool]:
+    """Never recreate lost custody behind an existing receipt, even if an inode is reused."""
+    gate = lock_path(source)
+    if gate is None:
+        _refuse()
+    flags = getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    receipt = gate.with_name(gate.name + '.identity')
+
+    def receipt_present():
+        try:
+            receipt.lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
+    def existing():
+        try:
+            return os.open(gate, os.O_RDWR | flags), True
+        except PermissionError:
+            try:
+                return os.open(gate, os.O_RDONLY | flags), False
+            except OSError:
+                _refuse()  # Failed read-only fallback cannot become permission to create.
+
+    try:
+        return existing()
+    except FileNotFoundError:
+        if receipt_present():
+            _refuse()
+    try:
+        fd = os.open(gate, os.O_RDWR | os.O_CREAT | os.O_EXCL | flags, 0o644)
+    except FileExistsError:
+        return existing()  # Another creator won; never fall back to recreating its gate.
+    try:
+        if receipt_present():
+            _refuse()  # An old receipt cannot qualify a newly created, possibly reused inode.
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, True
+
+
 def _refuse():
     raise OSError(errno.EINVAL, 'sealed checkout identity unavailable or changed')
 
