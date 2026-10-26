@@ -253,7 +253,7 @@ test.skipIf(process.platform === 'win32').each(['argv', 'stdin'] as const)('remo
     const executable = path.join(payload, 'bin', 'hermes-native')
     writeFileSync(executable, 'fixture only; never executed')
     const marker = path.join(temp, 'home', '.hermes-update-in-progress')
-    const inventory = () => ['', ...readdirSync(app, { recursive: true })].sort().map(relative => {
+    const inventory = () => ['', ...readdirSync(app, { recursive: true, encoding: 'utf8' })].sort().map(relative => {
       const file = path.join(app, relative)
       const stat = lstatSync(file)
       return [relative, stat.mode, stat.isFile() ? createHash('sha256').update(readFileSync(file)).digest('hex') : null]
