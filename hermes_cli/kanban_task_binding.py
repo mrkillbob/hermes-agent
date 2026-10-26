@@ -17,6 +17,7 @@ from hermes_cli import kanban_db as kb, kanban_db_connect as kbc, projects_db
 from hermes_cli.kanban_db_boards import board_ownership_lock
 from hermes_cli import kanban_db_workspace as workspace
 from hermes_cli.kanban_worktree_policy import project_worktree_path
+from hermes_cli.kanban_task_revision import require_task_revision
 from hermes_cli.sqlite_util import write_txn
 
 # A correction proves physical repository/ref ownership, never a caller-selected
@@ -34,15 +35,20 @@ _BINDING_FIELDS = ("project_id", "workspace_kind", "workspace_path", "branch_nam
 
 @dataclass(frozen=True)
 class BindingExpectation:
-    """Exact old fields and registered root, supplied by the reviewed caller."""
+    """Exact fields/root and the complete selected-row revision reviewed by the caller.
+
+    Build ``revision`` with ``kanban_task_revision.task_revision`` from the
+    reviewed board/task snapshot. A matching revision never clears a hold.
+    """
     values: tuple
     project_root: str
     board_project_id: str
+    revision: str | None = None
 
     @classmethod
-    def from_task(cls, task, *, project_root: str, board_project_id=None):
+    def from_task(cls, task, *, project_root: str, board_project_id=None, revision=None):
         return cls(tuple(task[key] for key in _BINDING_FIELDS), project_root,
-                   board_project_id or task["project_id"])
+                   board_project_id or task["project_id"], revision)
 
 
 @dataclass(frozen=True)
@@ -323,6 +329,8 @@ def correct_task_binding(*, source_board, task_id, target_project_id, expected: 
     ``target_directory`` is an operator-only same-project local-only correction to
     an existing isolated directory; it never releases a card or changes creation policy.
     Explicit Git namespace overrides must be unset before either correction mode.
+    Field-only expectations are insufficient: ``expected.revision`` must bind
+    the reviewed content and history, including existing refusal records.
     """
     # Presence matters: Git also interprets explicitly empty namespace values.
     if any(key in os.environ for key in _GIT_NAMESPACE_OVERRIDES):
@@ -363,6 +371,7 @@ def correct_task_binding(*, source_board, task_id, target_project_id, expected: 
             if source_board == destination and workspace._workspace_in_use_by_other(conn, task_id, path):
                 raise ValueError("destination workspace belongs to another card")
             snapshot = transfer._selected_task_rows(conn, [task_id])
+            require_task_revision(expected.revision, source_board or kb.DEFAULT_BOARD, task_id, snapshot)
         if source_board != destination:
             _verify_workspace_availability(source_board, destination, snapshot, projection)
         # Portable board export intentionally scrubs machine-local bindings. Keep

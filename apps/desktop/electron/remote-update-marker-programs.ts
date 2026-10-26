@@ -125,6 +125,8 @@ def marker_verdict(raw):
  * probes checkout custody without creating the marker mutex when there is no marker.
  */
 export const REMOTE_MARKER_GATE_PY = `${REMOTE_MARKER_JUDGE_PY}
+# A different host Python must not compile caches into signed checkout resources.
+sys.dont_write_bytecode=True
 import fcntl,json,subprocess
 marker=sys.argv[1]
 payload=sys.argv[2] if len(sys.argv)>2 and sys.argv[2] else None

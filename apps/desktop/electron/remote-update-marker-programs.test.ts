@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { execFile as execFileCallback, spawn, spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -133,9 +134,11 @@ function deadMarker(marker: string) {
   writeFileSync(marker, `${exited.pid}\n${Math.floor(Date.now() / 1000)}\n`)
 }
 
-async function gate(args: string[]) {
+async function gate(args: string[], stdin = false, env = process.env) {
   try {
-    const { stdout, stderr } = await execFile('python3', ['-c', REMOTE_MARKER_GATE_PY, ...args])
+    const running = execFile('python3', stdin ? ['-', ...args] : ['-c', REMOTE_MARKER_GATE_PY, ...args], { env })
+    if (stdin) running.child.stdin!.end(REMOTE_MARKER_GATE_PY)
+    const { stdout, stderr } = await running
 
     return { code: 0, stdout: stdout.trim(), stderr: stderr.trim() }
   } catch (error: any) {
@@ -226,7 +229,7 @@ test.skipIf(process.platform === 'win32')('the remote judge reads ps lstart in U
   }
 })
 
-test.skipIf(process.platform === 'win32')('remote namespaced payload probes custody even without a marker', async () => {
+test.skipIf(process.platform === 'win32').each(['argv', 'stdin'] as const)('remote %s namespaced payload preserves sealed resources while probing custody', async entry => {
   const temp = mkdtempSync(path.join(os.tmpdir(), 'hermes-sealed-remote-'))
   try {
     const app = path.join(temp, 'Hermes.app')
@@ -250,12 +253,29 @@ test.skipIf(process.platform === 'win32')('remote namespaced payload probes cust
     const executable = path.join(payload, 'bin', 'hermes-native')
     writeFileSync(executable, 'fixture only; never executed')
     const marker = path.join(temp, 'home', '.hermes-update-in-progress')
-    const probe = async () => (await execFile('python3', ['-I', '-S', '-B', '-c',
-      REMOTE_MARKER_GATE_PY, marker, '', executable])).stdout.trim()
+    const inventory = () => ['', ...readdirSync(app, { recursive: true })].sort().map(relative => {
+      const file = path.join(app, relative)
+      const stat = lstatSync(file)
+      return [relative, stat.mode, stat.isFile() ? createHash('sha256').update(readFileSync(file)).digest('hex') : null]
+    })
+    let expected = inventory()
+    const env = { ...process.env }
+    delete env.PYTHONDONTWRITEBYTECODE
+    delete env.PYTHONPYCACHEPREFIX
+    const invoke = async (body = '') => {
+      const result = await gate([marker, body, executable], entry === 'stdin', env)
+      assert.deepEqual(inventory(), expected, 'remote custody checks must not modify sealed resources')
+      return result
+    }
+    const probe = async () => {
+      const result = await invoke()
+      assert.equal(result.code, 0)
+      return result.stdout
+    }
     assert.equal(await probe(), 'CLEAR')
     assert.equal(existsSync(path.dirname(marker)), false, 'read-only probe creates no home or marker mutex')
     const refusedLaunch = async () => {
-      const result = await gate([marker, 'echo PAYLOAD-RAN', executable])
+      const result = await invoke('echo PAYLOAD-RAN')
       assert.deepEqual(result, { code: 75, stdout: '', stderr: 'HELD' })
     }
     await withCheckoutLockHeld(path.join(temp, '.Hermes.app.hermes-update.lock'), async () => {
@@ -263,6 +283,7 @@ test.skipIf(process.platform === 'win32')('remote namespaced payload probes cust
       await refusedLaunch()
     })
     unlinkSync(manifest)
+    expected = inventory()
     assert.equal(await probe(), 'HELD')
     await refusedLaunch()
     assert.equal(existsSync(path.join(root, '.hermes-update.lock')), false)
