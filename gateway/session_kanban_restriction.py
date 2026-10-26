@@ -4,7 +4,7 @@ from hermes_state_runtime import RuntimeStoreError
 
 
 def validate_restriction(params):
-    if 'execution_budget' not in params:
+    if params.get('execution_budget') is None:
         return False
     try:
         budget = validate_budget(params['execution_budget'])
