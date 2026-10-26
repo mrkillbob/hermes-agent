@@ -21,6 +21,7 @@ def test_invalid_routed_endpoint_refuses_before_claim_read(tmp_path, monkeypatch
         actor=SimpleNamespace(profile_id='profile', capabilities={'session:create'}))
     params = {'board': 'default', 'task_id': 't_control', 'run_id': 1,
               'claim_lock': 'claim', 'db': str(path),
+              'execution_budget': dict(wall_seconds=60, output_bytes=8192, requests=1, local_text_only=True),
               'route': {'provider': provider, 'model': 'public-model',
                         'reasoning': 'none', 'base_url': endpoint}}
     def must_not_open(*args, **kwargs):
@@ -34,13 +35,15 @@ def test_invalid_routed_endpoint_refuses_before_claim_read(tmp_path, monkeypatch
 
 @pytest.mark.parametrize('route', [
     {}, {'provider': 'llamacpp', 'model': 'public-model', 'reasoning': 'none', 'base_url': 'http://127.0.0.1:8000/v1'},
+    {'provider': 'llamacpp', 'model': 'public-model', 'reasoning': 'none', 'base_url': None},
     {'provider': 'ollama', 'model': 'public-model', 'reasoning': None, 'base_url': 'http://localhost:11434'},
     {'provider': 'llama.cpp', 'model': 'public-model', 'reasoning': 'low', 'base_url': 'http://[::1]:8000/v1'},
 ])
 def test_explicit_loopback_route_preserves_model_and_effort(route, tmp_path, monkeypatch):
     from gateway.session_kanban_route import validate_local_worker_route
     original = dict(route)
-    validate_local_worker_route(route)
+    if not route or route.get('base_url') is not None:
+        validate_local_worker_route(route)
     assert route == original
     from contextlib import closing
     from gateway.session_kanban import build_kanban_policy, retry_matches_frozen_claim

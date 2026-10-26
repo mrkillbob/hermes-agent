@@ -30,9 +30,10 @@ def build_kanban_policy(connection, params, config):
             or type(params['run_id']) is not int):
         raise RuntimeStoreError('invalid_params')
     from gateway.session_kanban_route import validate_local_worker_route
-    validate_local_worker_route(route)
     from gateway.session_kanban_restriction import validate_restriction, policy_inputs, worker_toolsets, build_claim_policy
     restricted = validate_restriction(params)
+    if restricted:
+        validate_local_worker_route(route)
     try:
         board = kb._require_slug(params['board'])
         path = Path(params['db']).resolve(strict=True) if 'db' in params else kb.kanban_db_path(board=board).resolve()
@@ -90,9 +91,11 @@ def retry_matches_frozen_claim(params, context):
     """A resend of an admitted attempt may carry the same optional db/route and nothing else new."""
     params = {k: v for k, v in params.items() if k != 'execution_budget' or v is not None}
     from gateway.session_kanban_route import validate_local_worker_route
+    from gateway.session_kanban_restriction import validate_restriction
     try:
-        validate_local_worker_route(params.get('route', {}))
-        validate_local_worker_route(context.get('route', {}))
+        if validate_restriction(context) or validate_restriction(params):
+            validate_local_worker_route(params.get('route', {}))
+            validate_local_worker_route(context.get('route', {}))
     except RuntimeStoreError:
         return False
     if 'execution_budget' in params:
@@ -402,6 +405,8 @@ def worker_exit_code(path, params):
 
 def _startup_task_context(agent, context):
     """The bound admission's title/body is the remote assignment, not its private history."""
+    if (context.get('execution_budget') or {}).get('local_text_only') is True:
+        return context['goal_text'] + '\nReturn only text. The owner retains your output for explicit human acceptance; do not call tools.'
     from agent.remote_task_context import owned_remote_task
     if not owned_remote_task(agent):
         return context['context']
@@ -424,6 +429,8 @@ def _startup_task_context(agent, context):
 
 def _run_task_turns(agent, frame, history, context):
     task_context = _startup_task_context(agent, context)
+    if (context.get('execution_budget') or {}).get('local_text_only') is True:
+        return agent.run_conversation(task_context, conversation_history=history)
     from agent.skill_commands import build_preloaded_skills_prompt
     skills, loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
     if missing and not loaded:
