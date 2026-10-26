@@ -250,7 +250,7 @@ describe.skipIf(process.platform === 'win32')('checkout lock path mirrors marker
       updateMechanism: 'external', runtime }))
     const alias = path.join(temp, 'alias')
     fs.symlinkSync(root, alias, 'dir')
-    const expected = path.join(temp, '.Hermes.app.hermes-update.lock')
+    const expected = path.join(fs.realpathSync(temp), '.Hermes.app.hermes-update.lock')
     assert.equal(checkoutLockPath(alias, false), expected)
     assert.equal(path.resolve(scriptPath(alias)), path.resolve(expected))
     assert.equal(checkoutLockMayBeHeld(alias, false), true, 'ask the authoritative reader')
