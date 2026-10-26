@@ -43,9 +43,9 @@ def resolve_project_link(
     if project_obj is None and project_source_task_id:
         raise ValueError("worker project cannot be resolved from its profile or parent task")
     if project_obj is None:
-        # Unresolvable id/slug: drop the link (never a dangling reference,
-        # never a crash) and create an ordinary scratch task.
-        return None, None, None, workspace_kind
+        # A supplied or board-inherited scope must survive creation. Registry
+        # absence/read failure is not permission to create an unbound task.
+        raise ValueError("project cannot be resolved from its registry")
     # Canonicalise (a slug may have been passed) and anchor the worktree
     # under the project's primary repo.
     if workspace_kind == "scratch" and project_obj.primary_path:
