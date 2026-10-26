@@ -234,7 +234,7 @@ def test_reservation_survives_a_boot_time_reanchor_on_linux(tmp_path, monkeypatc
         assert psutil.Process(process.pid).create_time() != reported  # the re-anchor is real
         db.create_session('owned', 'cli')
         epoch = begin_runtime_epoch(db, instance_id='owner')
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None)
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda *, session_id=None: None)
         admitted = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='input', payload={})
         claim_session_input(db, epoch=epoch, session_id='owned')
         kwargs = dict(admission_id=admitted['admission_id'], process=process, principal_id='human')

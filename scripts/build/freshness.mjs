@@ -37,6 +37,7 @@ const tuiInputs = [
 const webappInputs = [
   'apps/desktop', 'apps/shared', 'package.json', 'package-lock.json', '.npmrc', 'pm/lock.json',
   'scripts/build/webapp.mjs', 'scripts/build/node-deps.mjs', 'scripts/build/frontend-common.mjs',
+  'scripts/build/get-windows-compiler.cjs',
   'scripts/build/freshness.mjs',
 ]
 

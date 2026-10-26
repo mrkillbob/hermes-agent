@@ -93,7 +93,8 @@ def test_wedged_worker_is_abandoned_with_a_retryable_timeout(wedged, caplog):
     assert not caller.is_alive(), "the call never ended: the same wedged attempt was re-killed forever"
     assert isinstance(outcome.get("error"), TimeoutError), outcome
     assert _ABANDONED in str(outcome["error"])
-    assert _log_count(caplog, "Stream stale for") == 3  # _STALE_ABANDON_KILLS
+    assert _log_count(caplog, "Stream stale for") == 1  # one actual cancellation
+    assert _log_count(caplog, "still has not unwound") == 2  # remaining abandonment windows
     assert _log_count(caplog, "abandoning the request") == 1
     assert wedged._consecutive_stale_streams == 1, "one wedged attempt must still count once"
 
@@ -211,7 +212,8 @@ def test_wedged_inline_call_stops_reporting_activity(wedged, monkeypatch, caplog
         heartbeat_touches = len(touches) - before
 
     assert caller.is_alive(), "an inline call runs on the caller's thread and is not abandoned"
-    assert kills > 3
+    assert kills == 1
+    assert _log_count(caplog, "still has not unwound") >= 3
     assert len(stale_touches) == 2, f"kills past the limit still reported activity: {stale_touches}"
     # Every activity path counts (the reconnect notice touches activity too), not only the kill's own touch.
     assert after_hold == [], f"activity was still reported during the hold: {after_hold}"

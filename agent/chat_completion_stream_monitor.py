@@ -150,7 +150,7 @@ class StreamingWaitMonitor:
             cancelled_current = (self.stream_attempt_state["current"] == attempt_id
                                  and attempt_id in self.stream_attempt_state["cancelled"])
         if cancelled_current:
-            logger.warning("Stream stale for %.0fs after cancellation; worker still has not unwound (attempt=%s).",
+            logger.warning("Cancelled stream still has not unwound after %.0fs (attempt=%s).",
                            elapsed, attempt_id)
             self._rearm_or_abandon_after_kill(elapsed, expected_attempt_id=attempt_id)
 

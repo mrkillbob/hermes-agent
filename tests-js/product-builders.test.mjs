@@ -410,10 +410,13 @@ test('the Webapp receipt certifies its checkout inputs, not the workspace it com
   const workspace = path.join(base, 'workspace')
   const out = path.join(source, 'apps/desktop/dist-webapp')
   webappSource(source)
+  put(source, 'scripts/build/get-windows-compiler.cjs', '// protected compiler input')
   // Only the private workspace has installed dependencies.
   dependency(workspace, '', 'vite')
   const build = async () => {
     mirrorWebappInputs(source, workspace)
+    expect(readFileSync(path.join(workspace, 'scripts/build/get-windows-compiler.cjs'), 'utf8'))
+      .toBe(readFileSync(path.join(source, 'scripts/build/get-windows-compiler.cjs'), 'utf8'))
     await buildWebapp({ source, workspace, out })
   }
   const current = () => productCurrent({ source, product: 'webapp', out })
@@ -432,6 +435,7 @@ test('the Webapp receipt certifies its checkout inputs, not the workspace it com
     ['.npmrc', 'engine-strict=false\n'],
     ['pm/lock.json', '{}'],
     ['scripts/build/webapp.mjs', '// compiler changed'],
+    ['scripts/build/get-windows-compiler.cjs', '// protected compiler changed'],
   ]) {
     put(source, input, content)
     expect(current(), input).toBe(false)
@@ -460,6 +464,7 @@ test('Webapp builds install privately and never disturb the native Desktop insta
     installs.push(options.install)
     expect(options.source).toBe(workspace)
     expect(options.env.npm_config_ignore_scripts).toBe('true')
+    expect(options.native).toBe(false)
     // npm ci validates the whole locked graph, not only the compiled workspaces.
     expect(existsSync(path.join(workspace, 'web/package.json'))).toBe(true)
     if (!existsSync(path.join(workspace, 'node_modules/vite'))) dependency(workspace, '', 'vite')

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 
-// semver ships no declarations in this lock; type the two library calls used here.
-const semver: { valid(version: string): string | null; satisfies(version: string, range: string): boolean } = require('semver')
+// semver ships no declarations in this lock; type the library calls used here.
+const semver: { valid(version: string): string | null; satisfies(version: string, range: string): boolean; subset(subRange: string, superRange: string): boolean } = require('semver')
 import { test } from 'vitest'
 
 interface Engines { node?: string; npm?: string }
@@ -69,6 +69,9 @@ test('lockfile workspace engine mirrors match their manifests', (): void => {
 test('source-build compiler engine contract agrees with the workspace minimums', (): void => {
   const compiler = lock.packages['node_modules/node-gyp']
   assert.ok(compiler, 'source compiler must be present in the locked graph')
-  assert.equal(nodeRange(compiler), nodeRange(root))
-  assert.equal(nodeRange(compiler), nodeRange(desktop))
+
+  for (const workspace of [root, desktop]) {
+    assert.ok(semver.subset(nodeRange(workspace), nodeRange(compiler)),
+      'the compiler must support every Node version the workspace admits')
+  }
 })

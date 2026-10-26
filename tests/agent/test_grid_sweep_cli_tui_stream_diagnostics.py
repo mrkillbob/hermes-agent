@@ -108,7 +108,7 @@ def test_stream_stall_warning_kept_in_result_but_delta_gated():
     call.agent = agent
     call.result = {"error": RuntimeError("connection dropped"), "partial_tool_names": ["read_file"]}
 
-    stub = call._partial_stream_stub()
+    stub = call._partial_stream_stub(call.result["error"])
 
     content = stub.choices[0].message.content
     assert "action was not executed" in content

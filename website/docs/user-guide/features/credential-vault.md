@@ -65,6 +65,9 @@ A manager item that lists several websites (say `amazon.co.uk`,
 `www.amazon.co.uk` and `eu.account.amazon.com`) fills on each of those exact
 origins; nothing is inferred beyond the URLs saved on the item.
 
+If a manager CLI is outside your `PATH`, set `vault.onepassword.binary_path` or
+`vault.bitwarden.binary_path` to its executable's absolute path in `config.yaml`.
+
 Prefer not to use a detected manager? `hermes vault sources --disable bitwarden`,
 or the switch in **Settings → Passwords & Logins**.
 

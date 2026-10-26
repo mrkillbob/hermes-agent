@@ -48,6 +48,9 @@ describe('QuickEntryApp', () => {
         onLateResult: (correlationId, result) => onLate?.({ correlationId, result })
       })
       const api = window.hermesDesktop.quickEntry
+      if (!api) {
+        throw new Error('Quick-entry test fixture must provide the native API')
+      }
       vi.mocked(api.onLateResult).mockImplementation(callback => {
         onLate = callback as never
         return vi.fn()

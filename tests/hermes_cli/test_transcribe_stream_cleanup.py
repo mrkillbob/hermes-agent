@@ -20,7 +20,7 @@ def test_non_object_first_frame_cancels_session(monkeypatch, frame):
         def cancel(self):
             cancelled.set()
 
-    monkeypatch.setattr(audio_router, "_ws_auth_ok", lambda ws: True)
+    monkeypatch.setattr(audio_router, "_ws_auth_ok", lambda ws, *, socket: True)
     monkeypatch.setattr(audio_router, "_ws_request_is_allowed", lambda ws: True)
 
     def _open(on_partial):

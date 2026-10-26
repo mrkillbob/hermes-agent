@@ -19,7 +19,7 @@ from agent.llm_egress_firewall import (
 _BUILTINS = {
     'skill_manage': ('skill_manager_tool.py', 'SKILL_MANAGE_SCHEMA', ('YAML',)),
     'write_file': ('file_tools.py', 'WRITE_FILE_SCHEMA', ('EXISTING',)),
-    'delegate_task': ('delegate_tool.py', '_DESCRIPTION_HEAD', ('YOUR', 'TURN')),
+    'delegate_task': ('delegate_tool.py', '_DESCRIPTION_DELIVERY', ('YOUR', 'TURN')),
     'tool_search': ('tool_search.py', '_CONNECTIONS_HINT', ('connectors__',)),
 }
 

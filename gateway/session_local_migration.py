@@ -70,7 +70,21 @@ def resolve_local_target(authority, actor, sid):
     return adopt_legacy_session(authority, actor, row)
 
 
-def legacy_launch_params(row):
+def _legacy_placeholder_route(route, params, config):
+    """An endpointless custom placeholder inherits the profile unless its model names an entry."""
+    if route.get('provider') != 'custom' or 'base_url' in route:
+        return route
+    from gateway.session_policy import _with_entry_pick
+    picked = _with_entry_pick({**params, 'provider': 'custom'}, config or {})['provider']
+    # The missing endpoint's saved wire mode cannot override the profile or a resolved entry.
+    route.pop('api_mode', None)
+    route.pop('provider')
+    if picked.startswith('custom:'):
+        route['provider'] = picked
+    return route
+
+
+def legacy_launch_params(row, config=None):
     """``(create params, api_mode)`` a legacy row resumes on.
 
     The old local surfaces persisted their effective route and runtime choices in
@@ -92,11 +106,7 @@ def legacy_launch_params(row):
         # an endpoint left without a provider is a custom route, never one to pair with the
         # profile's provider.
         route.setdefault('provider', 'custom')
-    if route.get('provider') == 'custom' and 'base_url' not in route:
-        # Initial old local rows saved this placeholder before a turn supplied a billing URL.
-        # Without any saved endpoint it names no route; inherit the profile's route, key and wire mode.
-        route.pop('provider')
-        route.pop('api_mode', None)
+    route = _legacy_placeholder_route(route, params, config)
     if row['source'] == 'acp' and 'cwd' not in params and Path(str(saved.get('cwd') or '')).is_absolute():
         params['cwd'] = saved['cwd']
     params.update({key: route[key] for key in ('provider', 'base_url') if key in route})
@@ -254,10 +264,10 @@ def adopt_legacy_session(authority, actor, row):
 
     request_id = 'legacy:' + row['id']
     sid = row['id']
-    params, api_mode = legacy_launch_params(row)
+    config = _load_gateway_config()
+    params, api_mode = legacy_launch_params(row, config)
     params['source'] = LEGACY_CREATION_SOURCES.get(row['source'], row['source'])
     private = {}
-    config = _load_gateway_config()
     params, api_mode = legacy_bot_chat_launch(row, params, api_mode, config)
     model_cfg = config.get('model')
     if isinstance(model_cfg, dict) and ('provider' in params or 'base_url' in params):

@@ -212,13 +212,13 @@ def test_intake_factory_passes_only_ordinary_bot_identity(tmp_path):
 
 
 def test_host_explicit_deny_wins_over_enabled_list():
-    from hermes_cli.plugins_discovery import gate_manifest
+    from hermes_cli.plugins_discovery import IN_BOTH_LISTS, gate_manifest
     from hermes_cli.plugins_manifest import PluginManifest
 
     manifest = PluginManifest(name="github-pr-feedback", source="user")
     verdict = gate_manifest(manifest, {"github-pr-feedback"}, {"github-pr-feedback"})
     assert verdict.action == "placeholder" and not verdict.enabled
-    assert verdict.error == "disabled via config"
+    assert verdict.error == IN_BOTH_LISTS
 
 
 def test_complete_legacy_identity_lookup_is_exact_and_head_independent():

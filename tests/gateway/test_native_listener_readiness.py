@@ -59,14 +59,17 @@ def native_listener(monkeypatch):
 
     listener, server = Listener(), Server()
     config = SimpleNamespace(loaded=True, loaded_app=None, lifespan_class=lambda value: None)
-    boundary = SimpleNamespace(_dashboard_public_hosts=lambda: (), listener_auth_required=lambda *args: False)
+    boundary = SimpleNamespace(_dashboard_public_hosts=lambda: (), listener_auth_required=lambda *args: False,
+                               public_hosts_engage_gate=lambda hosts: False, public_url_hosts=lambda url: frozenset(),
+                               should_require_auth=lambda host: False)
     lifecycle = SimpleNamespace(build_listener_server=lambda *args, **kwargs: (config, server))
     monkeypatch.delitem(sys.modules, "hermes_cli.web_server", raising=False)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_boundary", boundary)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_lifecycle", lifecycle)
     monkeypatch.setattr(run_api, "socket", SimpleNamespace(
-        SOCK_STREAM=1, getaddrinfo=lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 0))],
+        AF_INET6=run_api.socket.AF_INET6, SOCK_STREAM=1, getaddrinfo=lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 0))],
         socket=lambda *args: listener))
+    monkeypatch.setattr(run_api, "_listener_socket", lambda *args, **kwargs: listener)
     monkeypatch.setattr(run_api, "_ACTIVE_RUNNER", None)
     return SimpleNamespace(loaded=loaded, listener=listener, server=server, runner=SimpleNamespace())
 

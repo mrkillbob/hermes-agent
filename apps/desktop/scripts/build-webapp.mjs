@@ -45,7 +45,7 @@ export async function buildSourceWebapp({
   mkdirSync(workspace, { recursive: true })
   mirrorWebappInputs(source, workspace)
   prepare({
-    source: workspace, workspaces: ['apps/desktop'], reuse: true, install,
+    source: workspace, workspaces: ['apps/desktop'], reuse: true, install, native: false,
     env: { ...process.env, npm_config_ignore_scripts: 'true' },
   })
   return buildWebapp({ source, workspace, out: join(source, 'apps/desktop/dist-webapp') })
