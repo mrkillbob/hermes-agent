@@ -186,6 +186,10 @@ def bind_worker_policy(frame):
     also bind the safe / ignore-user-config policy.
     """
     from agent.managed_request_budget import bind_worker_request_budget
+    from agent.local_text_policy import restricted_policy
+    restricted = restricted_policy(frame['policy'])
+    if restricted and (frame['safe_mode'] is not True or frame['ignore_user_config'] is not True):
+        raise ValueError('invalid_local_text_policy')
     bind_worker_request_budget(frame)
     config = json.loads(frame['policy']['config_json'])
     if not frame['ignore_user_config']:
@@ -193,7 +197,9 @@ def bind_worker_policy(frame):
         _bind_worker_config(config)
         return
     from agent.safe_worker_policy import _bind_safe_worker_policy
-    _bind_safe_worker_policy(safe_mode=frame['safe_mode'], ignore_user_config=True, config=config)
+    restriction = {'local_text_only': True} if restricted else {}
+    _bind_safe_worker_policy(safe_mode=frame['safe_mode'], ignore_user_config=True,
+                             config=config, **restriction)
 
 
 class WorkerChannel:
@@ -347,6 +353,9 @@ def discover_profile_mcp(policy):
     """The owner's MCP registry never crosses into this fresh interpreter; connect the profile's
     configured servers here, filtered to the frozen toolset selection, before tool discovery snapshots
     agent.tools. Safe mode keeps its deliberate no-MCP policy (discover_mcp_tools returns [])."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return
     from tools.mcp_oauth import suppress_interactive_oauth
     from tools.mcp_tool_discovery import discover_mcp_tools
     with suppress_interactive_oauth():
@@ -397,8 +406,10 @@ def execute(frame, channel):
     bind_worker_context(frame)
     # Background processes a previous admission of this session started outlive that worker
     # (F24); adopt them so process_manage in this turn can poll and kill them.
-    from tools.process_registry import process_registry
-    process_registry.recover_from_checkpoint()
+    from agent.local_text_policy import local_text_only
+    if not local_text_only():
+        from tools.process_registry import process_registry
+        process_registry.recover_from_checkpoint()
     # Store construction binds the delegation ledger before tool discovery.
     from gateway.session_policy import restore_policy, policy_scope, register_worker_hooks
     policy = restore_policy(frame['policy'])

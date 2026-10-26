@@ -42,6 +42,8 @@ from agent.codex_headers import (
 from agent.codex_runtime import _codex_event_has_content
 from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
 from agent import auxiliary_client_latency as _latency
+from agent.local_text_policy import require_auxiliary_allowed, require_client_allowed
+from agent.auxiliary_client_messages import _coerce_llm_message, _message_field
 
 # `openai.OpenAI` is imported lazily (~240 ms cold); `OpenAI` below is a proxy
 # so in-module calls, `auxiliary_client.OpenAI` reads and
@@ -201,6 +203,7 @@ def _openai_http_client_kwargs(base_url: Optional[str], *, async_mode: bool = Fa
 
 
 def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
+    require_client_allowed()
     if _aux_probe_active():
         # Availability probe: resolved credentials/base_url are the answer.
         return _AuxProbeClientStub(api_key=api_key, base_url=base_url)
@@ -2654,6 +2657,7 @@ def _dispatch_auxiliary_request(
 @contextlib.contextmanager
 def _relay_aux_call_scope(args: tuple, kwargs: dict):
     """Bind a fresh relay call context for one auxiliary call; mark it failed on any exception."""
+    require_auxiliary_allowed()
     task = args[0] if args else kwargs.get("task")
     token = _RELAY_AUX_CALL_CONTEXT.set({
         "task": str(task or "unknown"),
@@ -2733,6 +2737,7 @@ def _relay_sync_completion(
     client: Any, kwargs: dict[str, Any], *, provider: str | None = None,
     api_mode: str | None = None, create: Callable[[dict[str, Any]], Any] | None = None,
 ) -> Any:
+    require_auxiliary_allowed()
     from agent.auxiliary_wire import prepare_chat_messages, relay_chat_metadata
 
     kwargs = prepare_chat_messages(client, kwargs)
@@ -2777,6 +2782,7 @@ async def _relay_async_completion(
     client: Any, kwargs: dict[str, Any], *, provider: str | None = None,
     api_mode: str | None = None, create: Callable[[dict[str, Any]], Any] | None = None,
 ) -> Any:
+    require_auxiliary_allowed()
     from agent.auxiliary_wire import prepare_chat_messages, relay_chat_metadata
 
     kwargs = prepare_chat_messages(client, kwargs)
@@ -2821,6 +2827,7 @@ async def _relay_async_completion(
 def _relay_sync_stream(
     client: Any, kwargs: dict[str, Any], *, provider: str | None = None, api_mode: str | None = None
 ) -> Any:
+    require_auxiliary_allowed()
     from agent.auxiliary_wire import prepare_chat_messages, relay_chat_metadata
 
     kwargs = prepare_chat_messages(client, kwargs)
@@ -5592,6 +5599,7 @@ def resolve_provider_client(
     (full auto-detection chain). ``model=None`` → provider's default aux model. ``raw_codex`` → bare OpenAI
     client for ``responses.stream()`` callers. ``api_mode`` forces "codex_responses"/"chat_completions"/
     "anthropic_messages" instead of auto-detect. Returns (client, resolved_model) or (None, None)."""
+    require_client_allowed()
     _validate_proxy_env_urls()
     # Keep the pre-alias name so a custom_providers entry named like a built-in alias
     # (e.g. "kimi" → "kimi-coding") is still reachable via the named-custom branch.
@@ -5672,6 +5680,7 @@ def resolve_provider_client(
 
 def get_text_auxiliary_client(task: str = "", *, main_runtime: Optional[dict[str, Any]] = None) -> tuple[Optional[OpenAI], Optional[str]]:
     """Return (client, default_model_slug) for text-only aux tasks; ``task`` selects auxiliary.<task> overrides."""
+    require_auxiliary_allowed()
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
     return resolve_provider_client(
         provider, model=model, explicit_base_url=base_url, explicit_api_key=api_key,
@@ -8392,27 +8401,6 @@ def _call_llm_impl(
         if result is _RERAISE_ORIGINAL:
             raise
         return result
-
-
-def _coerce_llm_message(response):
-    """Pull a message (dict, object, or str) out of a response-or-message value: dict-shaped
-    responses/bare messages (compression, proxies) and ChatCompletion objects; MagicMock
-    ``reasoning_*`` attrs are deliberately not strings."""
-    if response is None or isinstance(response, str):
-        return response
-    if isinstance(response, dict):
-        if "choices" not in response:
-            return response
-        choices = response.get("choices") or []
-    else:
-        choices = getattr(response, "choices", None)
-        if not choices:
-            return response
-    return _message_field(choices[0], "message") if choices else None
-
-
-def _message_field(msg, name):
-    return msg.get(name) if isinstance(msg, dict) else getattr(msg, name, None)
 
 
 def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = None) -> str:

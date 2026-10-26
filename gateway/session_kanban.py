@@ -14,7 +14,6 @@ from hermes_state_runtime import RuntimeStoreError
 def build_kanban_policy(connection, params, config):
     from hermes_cli import kanban_db as kb
     from hermes_cli.profiles import resolve_profile_env
-    from gateway.session_policy import build_policy
     authority, actor = connection.authority, connection.actor
     if not connection.native_owner or 'session:create' not in actor.capabilities:
         raise RuntimeStoreError('permission_denied')
@@ -30,12 +29,11 @@ def build_kanban_policy(connection, params, config):
             or any(not isinstance(params[k], str) or not params[k] for k in ('board', 'task_id', 'claim_lock'))
             or type(params['run_id']) is not int):
         raise RuntimeStoreError('invalid_params')
-    if 'execution_budget' in params:
-        from hermes_cli.kanban_execution_budget import validate_budget
-        try:
-            validate_budget(params['execution_budget'])
-        except ValueError as exc:
-            raise RuntimeStoreError('invalid_params') from exc
+    from gateway.session_kanban_route import validate_local_worker_route
+    from gateway.session_kanban_restriction import validate_restriction, policy_inputs, worker_toolsets, build_claim_policy
+    restricted = validate_restriction(params)
+    if restricted:
+        validate_local_worker_route(route)
     try:
         board = kb._require_slug(params['board'])
         path = Path(params['db']).resolve(strict=True) if 'db' in params else kb.kanban_db_path(board=board).resolve()
@@ -61,7 +59,7 @@ def build_kanban_policy(connection, params, config):
     except (ValueError, OSError, sqlite3.Error) as exc:
         raise RuntimeStoreError('invalid_kanban_claim') from exc
     cwd = task.workspace_path
-    params_policy = {'source': 'cli', 'cwd': cwd}
+    params_policy = policy_inputs(task, restricted)
     # The dispatcher's resolved local route (local-first / explicit local pin) beats the card's own columns.
     for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort),
                         ('base_url', None)):
@@ -71,7 +69,7 @@ def build_kanban_policy(connection, params, config):
     if 'execution_budget' in params:
         params_policy['run_budget'] = params['execution_budget']['wall_seconds']
     private = {}
-    policy = build_policy(params_policy, config, private_secrets=private)
+    policy = build_claim_policy(params_policy, config, private, restricted)
     if policy.model is None:
         from gateway.run import _resolve_gateway_model
         policy = replace(policy, model=_resolve_gateway_model(policy.config()))
@@ -84,16 +82,22 @@ def build_kanban_policy(connection, params, config):
     request = json.loads(policy.request_json)
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
     # A routed (local-only) worker never runs code_execution, as the CLI worker's --toolsets omitted it.
-    toolsets = set(policy.toolsets) | {'kanban'}
-    if route:
-        toolsets.discard('code_execution')
-    return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(toolsets)),
+    toolsets = worker_toolsets(policy, route, restricted)
+    return replace(policy, source='kanban', platform='cli', toolsets=toolsets,
                    request_json=json.dumps(request, sort_keys=True), kanban_json=json.dumps(context)), private
 
 
 def retry_matches_frozen_claim(params, context):
     """A resend of an admitted attempt may carry the same optional db/route and nothing else new."""
     params = {k: v for k, v in params.items() if k != 'execution_budget' or v is not None}
+    from gateway.session_kanban_route import validate_local_worker_route
+    from gateway.session_kanban_restriction import validate_restriction
+    try:
+        if validate_restriction(context) or validate_restriction(params):
+            validate_local_worker_route(params.get('route', {}))
+            validate_local_worker_route(context.get('route', {}))
+    except RuntimeStoreError:
+        return False
     if 'execution_budget' in params:
         from hermes_cli.kanban_execution_budget import validate_budget
         try:
@@ -142,7 +146,8 @@ async def _run_task(connection, params):
         from gateway.session_local_recovery import restore_local_session
         ref = restore_local_session(authority, sid)
     else:
-        policy, private = build_kanban_policy(connection, params, _load_gateway_config())
+        from gateway.session_kanban_restriction import claim_config
+        policy, private = build_kanban_policy(connection, params, claim_config(params, _load_gateway_config))
         ref = create_local_session(authority, connection.actor, {'request_id': request_id},
                                    trusted_policy=policy, trusted_secrets=private)
     from hermes_cli.kanban_db_connect import connect_closing
@@ -400,6 +405,8 @@ def worker_exit_code(path, params):
 
 def _startup_task_context(agent, context):
     """The bound admission's title/body is the remote assignment, not its private history."""
+    if (context.get('execution_budget') or {}).get('local_text_only') is True:
+        return context['goal_text'] + '\nReturn only text. The owner retains your output for explicit human acceptance; do not call tools.'
     from agent.remote_task_context import owned_remote_task
     if not owned_remote_task(agent):
         return context['context']
@@ -422,6 +429,8 @@ def _startup_task_context(agent, context):
 
 def _run_task_turns(agent, frame, history, context):
     task_context = _startup_task_context(agent, context)
+    if (context.get('execution_budget') or {}).get('local_text_only') is True:
+        return agent.run_conversation(task_context, conversation_history=history)
     from agent.skill_commands import build_preloaded_skills_prompt
     skills, loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
     if missing and not loaded:

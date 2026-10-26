@@ -778,6 +778,9 @@ def _post_workspace_parts(agent: Any, *, remote_kanban: bool = False) -> list[st
     """Local context gets environment, bot-mode and platform hints. Owned remote
     tasks get only generated workspace guidance, without ambient profile prose.
     """
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return []
     if remote_kanban:
         return [
             "Work only in the current task workspace and use relative paths. "

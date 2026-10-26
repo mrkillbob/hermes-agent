@@ -674,6 +674,8 @@ async def execute_managed(authority, ref, row, policy):
                 with suppress(subprocess.TimeoutExpired):
                     await asyncio.to_thread(process.wait, 10)
                 accepted = _with_stop_cause(accepted, worker)
+                from gateway.session_kanban_text_result import settle_text_result
+                accepted = await tracked_write(authority, partial(settle_text_result, policy, scope, accepted))
                 # Like in-process execution, settlement belongs to the drain's stream lock.
                 authority.pending_results[row['admission_id']] = {
                     'result': {**accepted, 'local_viewer': True}, 'usage': usage,

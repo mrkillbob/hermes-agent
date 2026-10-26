@@ -24,6 +24,8 @@ def resolve_verify(base_url: str = ""):
 
 @contextmanager
 def stream(url: str, *, headers=None, params=None, timeout=10.0, verify=None):
+    from agent.local_text_policy import require_metadata_allowed
+    require_metadata_allowed()
     import httpx
     from hermes_cli.urllib_security import url_origin
 

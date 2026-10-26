@@ -32,6 +32,7 @@ from agent.display import (
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
 from agent.pruned_tool_arguments import _context_pruned_argument_paths
+from agent.tool_executor_arguments import _parse_tool_arguments
 from agent.interrupt_control import _REASON_USER_INTERRUPT, interrupt_skip_wording
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.onboarding import observe_tool_result as observe_onboarding_result
@@ -169,20 +170,6 @@ def _authorization_gate_lock_timeout() -> float:
 class _BatchAbandoned(BaseException):
     """Raised inside a worker when the batch was abandoned before dispatch; a BaseException
     so ``except Exception`` handlers in the middleware chain can't swallow it."""
-
-
-def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict, Optional[str]]:
-    """Parse model-emitted arguments without repairing or coercing them."""
-    try:
-        arguments = json.loads(raw_arguments)
-    except (json.JSONDecodeError, TypeError):
-        arguments = None
-    if isinstance(arguments, dict):
-        return arguments, None
-    return {}, json.dumps(
-        {"error": "Invalid tool arguments", "message": "Tool arguments must be a valid JSON object; tool was not executed."},
-        ensure_ascii=False,
-    )
 
 
 def _resolve_concurrent_tool_timeout() -> float | None:
@@ -1620,6 +1607,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     """Execute tool calls concurrently; results are appended in original call order.
     ``finalize=False`` skips end-of-batch budget enforcement and /steer injection (the
     segmented dispatcher owns turn-end work)."""
+    from agent.local_text_policy import require_tools_allowed
+    require_tools_allowed()
     tool_calls = assistant_message.tool_calls
     num_tools = len(tool_calls)
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
@@ -1897,6 +1886,8 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
 
 
 def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0, *, finalize: bool = True) -> None:
+    from agent.local_text_policy import require_tools_allowed
+    require_tools_allowed()
     from types import SimpleNamespace
     from agent.terminal_approval_batch import terminal_approval_batch, terminal_approval_runs
     for calls in terminal_approval_runs(agent, assistant_message.tool_calls):
@@ -1912,6 +1903,8 @@ def _execute_tool_calls_sequential(agent, assistant_message, messages: list, eff
     """Execute tool calls sequentially (single calls or interactive tools). ``finalize=False``
     skips end-of-batch budget enforcement and /steer injection (the segmented dispatcher
     owns turn-end work)."""
+    from agent.local_text_policy import require_tools_allowed
+    require_tools_allowed()
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
     tool_calls = assistant_message.tool_calls
 
@@ -1972,6 +1965,8 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
     boundaries exactly as fully-sequential execution. Turn-end work (budget + /steer) runs
     once here (segments run with ``finalize=False``); each segment executor checks the
     interrupt flag up front, so an interrupt drains later segments with one result per call."""
+    from agent.local_text_policy import require_tools_allowed
+    require_tools_allowed()
     from types import SimpleNamespace
 
     if segments is None:

@@ -4885,6 +4885,7 @@ export interface KanbanExecutionBudget {
   wall_seconds: number
   output_bytes: number
   requests: number
+  local_text_only?: true | null
 }
 export interface KanbanRunResult {
   session_id: string

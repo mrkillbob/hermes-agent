@@ -21443,6 +21443,19 @@
           "requests": {
             "title": "Requests",
             "type": "integer"
+          },
+          "local_text_only": {
+            "anyOf": [
+              {
+                "const": true,
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Local Text Only"
           }
         },
         "required": [

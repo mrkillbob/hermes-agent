@@ -123,6 +123,9 @@ def discover_builtin_tools(tools_dir: Optional[Path] = None) -> list[str]:
     per-file AST scan costs ~145 ms over ~100 files, so verdicts are memoized on disk keyed
     by ``(mtime_ns, size)``; a mismatch or corrupt cache re-scans that file. The write is
     best-effort and atomic, so concurrent processes race harmlessly."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return []
     from agent.safe_worker_policy import safe_worker_enabled
     if safe_worker_enabled():
         # Toolset filtering happens AFTER import. Keep the troubleshooting worker's
@@ -939,6 +942,8 @@ class ToolRegistry:
         self, name: str, args: dict, *, scope: Optional[str] = None, **kwargs) -> str | dict:
         """Execute a tool handler by name: async handlers bridged via ``_run_async()``,
         results normalized, every exception returned as ``{"error": ...}``."""
+        from agent.local_text_policy import require_tools_allowed
+        require_tools_allowed()
         entry = self.get_entry(name, scope=scope)
         if not entry:
             return tool_error(f"Unknown tool: {name}")

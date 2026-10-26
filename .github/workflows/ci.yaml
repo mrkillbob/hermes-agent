@@ -1,4 +1,4 @@
-name: Pinned merged3591bfbf Mac delivery candidate
+name: Pinned merged4a1f86c8 Mac delivery candidate
 
 # Artifact-only preparation branch. This does not replace main's CI or publish a release.
 on:
@@ -12,13 +12,13 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 180
     env:
-      TARGET_COMMIT: 3591bfbfddd8900e0b0cdeaf900d088d71fd8cfc
+      TARGET_COMMIT: 4a1f86c8a881dc593f8775645c72d8914a2bdd72
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       HERMES_BUNDLE_ENV_JSON: '{}'
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
-          ref: 3591bfbfddd8900e0b0cdeaf900d088d71fd8cfc
+          ref: 4a1f86c8a881dc593f8775645c72d8914a2bdd72
           fetch-depth: 1
           persist-credentials: false
 
@@ -27,7 +27,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
-          test "$(git rev-parse HEAD^{tree})" = "22fb75615a59e01ec7e63bff4eac0be422509cba"
+          test "$(git rev-parse HEAD^{tree})" = "fafe98cae5313f96f61d0da8dd73146f8b375529"
           test -z "$(git status --porcelain --untracked-files=all)"
           test "$(uname -s)" = Darwin
           test "$(uname -m)" = arm64
@@ -132,7 +132,7 @@ jobs:
               payload = app / "Contents/Resources/agent-payload"
               stamp = json.loads((app / "Contents/Resources/install-stamp.json").read_text())
               manifest = json.loads((payload / "manifest.json").read_text())
-              target = "3591bfbfddd8900e0b0cdeaf900d088d71fd8cfc"
+              target = "4a1f86c8a881dc593f8775645c72d8914a2bdd72"
               if (stamp.get("commit") != target or stamp.get("dirty") is not False
                       or stamp.get("payload") != "bundled" or manifest.get("ref") != target
                       or manifest.get("target") != "darwin-arm64"):
@@ -187,7 +187,7 @@ jobs:
               if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
                   raise SystemExit("native ARM64 Mac required")
               head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-              if head != "3591bfbfddd8900e0b0cdeaf900d088d71fd8cfc":
+              if head != "4a1f86c8a881dc593f8775645c72d8914a2bdd72":
                   raise SystemExit("final accepted source pin required")
               apps = list((repo / "apps/desktop/release/mac-arm64").glob("*.app"))
               if len(apps) != 1:
@@ -209,7 +209,7 @@ jobs:
           app=(apps/desktop/release/mac-arm64/*.app)
           test "${#app[@]}" -eq 1
           ditto -c -k --keepParent --sequesterRsrc --zlibCompressionLevel 1 \
-            "${app[0]}" apps/desktop/release/sealed-candidate/Hermes-3591bfbf-arm64-adhoc.zip
+            "${app[0]}" apps/desktop/release/sealed-candidate/Hermes-4a1f86c8-arm64-adhoc.zip
 
       - name: Verify the packaged app and record immutable delivery identity
         shell: bash
@@ -259,9 +259,17 @@ jobs:
           assert 'arm64' in python_architectures, python_architectures
           embedded_stamp = payload / runtime['repoDir'] / 'install-stamp.json'
           assert json.loads(embedded_stamp.read_text()) == stamp
-          embedded_source_sha256 = {'hermes_cli/update_lock.py': '25f914278965e9064c291ab7a92ccab7b374803f46a977dc26b0fb71e1dbe281', 'hermes_cli/update_lock_payload.py': '7656b4742a0a3509318753ff2b014d285c44f5975c6296234030d57fa8a45cfb', 'hermes_cli/startup_hold.py': 'e93140f4cfc6b2a74d107392b52f5914f44b798d375681c1905a1bb14aa823fc', 'hermes_cli/kanban_task_binding.py': '06164dbfb938aef80768699193416aff8cee54a29d8c114c2a123849bf9d74e9', 'hermes_cli/kanban_task_revision.py': '730076f5c9a20f53f93df6ce822e50b3caa5eed8068663760de7fde46f94226b'}
+          expected_source_git_blobs = {'agent/agent_init.py': 'c1db6fc2ff2fd5c4c57550b3de59c2e6b6baea0a', 'agent/agent_init_context_values.py': 'c66e6e6f3d15d15e85a98209ee1b123892dcd4c6', 'agent/agent_init_fallback.py': '2ffef5265d06731dcc53e98a930e8833d03d45a7', 'agent/agent_init_ollama.py': '8f30dda3d47b477d0f839c717b7f8e52bf716647', 'agent/agent_runtime_helpers.py': 'f8c2bae4357aa1c60707d49328929fb90d29b525', 'agent/auxiliary_client.py': 'f64ae9f11d7a9e6e03046da51b94106ec1908ed8', 'agent/auxiliary_client_messages.py': '950736e289036f6ba8eabdcbc7adfa6560cb3416', 'agent/image_routing.py': '6a614beb2bc67808067e4da7e57283b968e50459', 'agent/kanban_stop.py': 'c22da4296848c0d8115a645e3e5c2a190fb236c5', 'agent/local_text_policy.py': '487fe0afb3a28a84fc63cd18ad97fd3796525b6f', 'agent/managed_request_budget.py': 'e40ab4ac6c1ff99dc4c6791fc99194e2c109a2c5', 'agent/managed_worker.py': 'f375e303f63213b5d22f7d85800ce4f1b806cff6', 'agent/model_metadata.py': '2421a52b7525df86c3703acdaafbb5d6a9535025', 'agent/model_metadata_http.py': '6e20f88f67f837976cbbafdb79334c874c13e98f', 'agent/model_metadata_names.py': '3a13c0eea0a1fcf98495c6e286ca2f0d412130af', 'agent/reasoning_params.py': '665f12ab95be8948ce6f2e6ed718b936bae8d179', 'agent/route_binding.py': '97e348fc21f6cde4083c48917ad0592e9a74510d', 'agent/safe_worker_policy.py': '72189f373172a618d3698292b07db77eeca0389e', 'agent/system_prompt.py': '125d324c50e30d60786c08b1bc6845b6b801d951', 'agent/tool_executor.py': 'd5fc0a59b601b5fa08dc199cefb1b74eb3a9873f', 'agent/tool_executor_arguments.py': 'cde11358e3d29c99aefa727d5317fb890da9ecec', 'agent/turn_finalizer.py': 'ab15ebf37f82816b42f64e6a30c50751380e286e', 'gateway/session_kanban.py': '3c44d920293e8a2305a08d7eb39d46d18c687e69', 'gateway/session_kanban_restriction.py': '7e47c0bc5e561d3bf7d2a0febfb7a78b08a6703b', 'gateway/session_kanban_route.py': 'b915588b4f136897d0972ebf9be7fd31ce035b3b', 'gateway/session_kanban_text_result.py': '5ddde3da9e0b322c8b5c7713b8713bdcc66ee8ad', 'gateway/session_managed_worker.py': 'a4b6ea07bca896ec734c74306ec4e8126d76926f', 'gateway/session_worker_construct.py': 'f250df3d1e842cda0da022a055a2466fe66c7679', 'hermes_cli/kanban_execution_budget.py': 'db3e0df4814540c5045dd2a8a3ab4677b14c04f6', 'hermes_cli/kanban_parser.py': '7b2c7e83aee6de59dfadf265ecca12eeae47f711', 'hermes_cli/models_local.py': '2259d18fd12c4cf3687f18c48ae39f67ff1be69e', 'model_tools.py': '6283ff5ac92196f77eb9e10bada9b3e4f962db45', 'tools/registry.py': '599e7e633e2276ec70543102ab5e639fa09ab2e7', 'toolsets.py': 'c1b85af96650aa08ae0eb01c69262b9b6abaaea1', 'tui_gateway/contracts/canonical.py': '6a3b9c093f2cef7d78181ca9cf8f414c369cb6ee', 'hermes_cli/startup_hold.py': '369b946df1c608f88892d34fcdb0bb31a47c0667', 'hermes_cli/startup_hold_exec.py': 'f7a6ea24602bb6f47664183be11e234365d44b51', 'gateway/drain_startup.py': '7a43113590dfd19f3ab01aa224ff1fe18f881dc3', 'gateway/status_inline_source.py': '5ae4e45fe4da2561405e2df856c4609d5c67b7ea', 'hermes_bootstrap.py': 'e51b81f85341f2747842c08054ca4875fc2049e5', 'cron/occurrences.py': '90f140c8f02afc1579922b9a3d87445c7c1694e6', 'hermes_cli/update_lock.py': 'b3e14c0544c5e9e8893be58bcbe8d80d4ae4f2f3', 'hermes_cli/update_lock_payload.py': '49c3ac024358cf2b94af0c94343febb04315ae05', 'hermes_cli/kanban_task_binding.py': '47a0636d4c2575212156c8e5b630d18cfdce7db8', 'hermes_cli/kanban_task_revision.py': '9abb4a2b14101ed3a535befdc8ad2086fb95c750', 'apps/shared/src/gateway-contract.generated.ts': 'b345cafdf3f3470069e96e37afb0f8b1b7b8a3ad', 'apps/shared/src/gateway-contract.openrpc.json': '7ace21b9636c0a8f487fb33ebeba58957660660c'}
+          runtime_witnesses = ['agent/agent_init.py', 'agent/agent_init_context_values.py', 'agent/agent_init_fallback.py', 'agent/agent_init_ollama.py', 'agent/agent_runtime_helpers.py', 'agent/auxiliary_client.py', 'agent/auxiliary_client_messages.py', 'agent/image_routing.py', 'agent/kanban_stop.py', 'agent/local_text_policy.py', 'agent/managed_request_budget.py', 'agent/managed_worker.py', 'agent/model_metadata.py', 'agent/model_metadata_http.py', 'agent/model_metadata_names.py', 'agent/reasoning_params.py', 'agent/route_binding.py', 'agent/safe_worker_policy.py', 'agent/system_prompt.py', 'agent/tool_executor.py', 'agent/tool_executor_arguments.py', 'agent/turn_finalizer.py', 'cron/occurrences.py', 'gateway/drain_startup.py', 'gateway/session_kanban.py', 'gateway/session_kanban_restriction.py', 'gateway/session_kanban_route.py', 'gateway/session_kanban_text_result.py', 'gateway/session_managed_worker.py', 'gateway/session_worker_construct.py', 'gateway/status_inline_source.py', 'hermes_bootstrap.py', 'hermes_cli/kanban_execution_budget.py', 'hermes_cli/kanban_parser.py', 'hermes_cli/kanban_task_binding.py', 'hermes_cli/kanban_task_revision.py', 'hermes_cli/models_local.py', 'hermes_cli/startup_hold.py', 'hermes_cli/startup_hold_exec.py', 'hermes_cli/update_lock.py', 'hermes_cli/update_lock_payload.py', 'model_tools.py', 'tools/registry.py', 'toolsets.py', 'tui_gateway/contracts/canonical.py']
+          generated_contract_build_inputs = ['apps/shared/src/gateway-contract.generated.ts', 'apps/shared/src/gateway-contract.openrpc.json']
+          source_inputs_sha256 = {}
+          for relative, expected in expected_source_git_blobs.items():
+              raw = (root / relative).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+              assert actual == expected, relative
+              source_inputs_sha256[relative] = hashlib.sha256(raw).hexdigest()
+          embedded_source_sha256 = {relative: source_inputs_sha256[relative] for relative in runtime_witnesses}
           for relative, expected in embedded_source_sha256.items():
-              assert digest(root / relative) == expected, relative
               assert digest(payload / runtime['repoDir'] / relative) == expected, relative
           assert not (payload / runtime['repoDir'] / '.hermes-update.lock').exists()
           verification = command('codesign', '--verify', '--deep', '--strict', '--verbose=2', str(app))
@@ -284,6 +292,9 @@ jobs:
           receipt = {'schema': 1, 'source_commit': os.environ['TARGET_COMMIT'],
                      'source_tree': command('git', 'rev-parse', 'HEAD^{tree}'),
                      'embedded_source_sha256': embedded_source_sha256,
+                     'source_input_git_blobs': expected_source_git_blobs,
+                     'source_inputs_sha256': source_inputs_sha256,
+                     'generated_contract_build_inputs_sha256': {relative: source_inputs_sha256[relative] for relative in generated_contract_build_inputs},
                      'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
                      'host': command('sw_vers'), 'architectures': architectures,
                      'embedded_python_architectures': python_architectures,
@@ -299,7 +310,7 @@ jobs:
       - name: Upload installable archive and validation receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mac-arm64-candidate-3591bfbf-${{ github.run_id }}-${{ github.run_attempt }}
+          name: mac-arm64-candidate-4a1f86c8-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             apps/desktop/release/sealed-candidate/*.zip
             ${{ runner.temp }}/delivery-evidence/candidate-receipt.json

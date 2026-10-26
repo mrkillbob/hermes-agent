@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 
 from agent.context_compressor import ContextCompressor
 from agent.agent_init_fallback import _fallback_entries, _init_fallback_chain, recompute_init_fallback_api_mode
+from agent.agent_init_context_values import _compressor_max_tokens
 from agent.agent_init_params import _CALLBACK_PARAMS, _GATEWAY_IDENTITY_PARAMS, _PASSTHROUGH_PARAMS
 from agent.agent_runtime_helpers import _ra
 from agent.iteration_budget import IterationBudget, normalize_budget_warning_ratio
@@ -831,8 +832,10 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
     already bound and there is no OpenAI client to construct.
     """
     from agent.auxiliary_client import resolve_provider_client
-    _routed_client, _ = resolve_provider_client(
-        agent.provider or "auto", model=agent.model, raw_codex=True)
+    from agent.local_text_policy import primary_client_scope
+    with primary_client_scope():
+        _routed_client, _ = resolve_provider_client(
+            agent.provider or "auto", model=agent.model, raw_codex=True)
     if _routed_client is not None:
         from hermes_cli.providers import is_actual_route, normalize_provider
         effective_provider = getattr(_routed_client, "_hermes_aux_effective_provider", "")
@@ -1091,6 +1094,14 @@ def _requires_direct_kanban_tools(agent) -> bool:
 
 
 def _load_tools(agent, enabled_toolsets, disabled_toolsets):
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        agent.enabled_toolsets, agent.disabled_toolsets = [], []
+        agent._configured_disabled_toolsets = disabled_toolsets
+        agent.tools, agent.valid_tool_names = [], set()
+        agent._tool_snapshot_generation, agent._delegation_backend = -1, None
+        agent._kanban_worker_guidance = ''
+        return
     direct_worker_tools = _requires_direct_kanban_tools(agent)
     if direct_worker_tools:
         disabled_toolsets = list(disabled_toolsets or [])
@@ -1424,6 +1435,8 @@ def _apply_agent_section(agent, _agent_cfg):
         "environment_probe", "bot_mode_protocol",
     ):
         setattr(agent, f"_{_key}", bool(_agent_section.get(_key, True)))
+    from agent.local_text_policy import environment_probe_enabled
+    agent._environment_probe = environment_probe_enabled(agent)
     # Warm the probe (~0.5s of subprocesses) off-thread so the first prompt build finds it cached.
     if agent._environment_probe:
         with suppress(Exception):
@@ -1948,24 +1961,6 @@ def _select_context_engine(_agent_cfg):
             "Context engine '%s' not found — falling back to built-in compressor", _engine_name
         )
     return _selected_engine
-
-
-def _compressor_max_tokens(agent):
-    """``agent.max_tokens``, or the native-Gemini adapter default when unset: generateContent
-    still sends maxOutputTokens=65,535 and the threshold is pct×(window − max_tokens), so
-    reserving 0 let the provider 400 before compaction fired."""
-    if agent.max_tokens is not None:
-        return agent.max_tokens
-    with suppress(Exception):
-        from agent.gemini_native_adapter import (
-            GEMINI_DEFAULT_MAX_OUTPUT_TOKENS, is_native_gemini_base_url
-        )
-        _gemini_provider = str(agent.provider or "").strip().lower() in {
-            "gemini", "google", "google-gemini", "google-ai-studio",
-        }
-        if _gemini_provider or is_native_gemini_base_url(agent.base_url):
-            return GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
-    return None
 
 
 def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_context_length, session_db):

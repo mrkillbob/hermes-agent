@@ -40,6 +40,9 @@ def _looks_like_local_ollama(base_url: str) -> bool:
 def _cached_probe(agent, cache_attr: str, probe, unknown, definitive):
     """``probe(model, base_url, api_key)`` once per (model, base_url); ``unknown`` is what a raising probe
     yields, ``definitive(value)`` decides permanent vs 60s TTL."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return unknown
     cache = getattr(agent, cache_attr, None)
     if cache is None:
         cache = {}
