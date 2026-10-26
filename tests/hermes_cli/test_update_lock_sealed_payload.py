@@ -88,16 +88,31 @@ def _child(root, code, **kwargs):
                             text=True, **kwargs)
 
 
-def test_foreign_home_contender_cannot_enter_same_canonical_app(tmp_path, monkeypatch):
+def test_foreign_home_contender_cannot_enter_same_canonical_app(tmp_path):
+    from tests.waiting import wait_until
+
     _, root = _payload(tmp_path)
     alias = tmp_path / 'alias'
     alias.symlink_to(root, target_is_directory=True)
-    assert update_lock._acquire_checkout(root) is None
-    env = dict(os.environ, HERMES_HOME=str(tmp_path / 'foreign' / 'profiles' / 'work'))
-    child = _child(alias, 'print(update_lock._acquire_checkout(root) is not None)', env=env)
-    out, err = child.communicate(timeout=20)
-    assert child.returncode == 0, err
-    assert out.strip() == 'True'
+    ready = tmp_path / 'owner-ready'
+    owner = _child(root, 'assert update_lock._acquire_checkout(root) is None;'
+                   f'Path({str(ready)!r}).touch();sys.stdin.readline();'
+                   'update_lock._release_checkout()')
+    contender = None
+    try:
+        wait_until(ready.exists, timeout=20, what='sibling owner acquired custody')
+        env = dict(os.environ, HERMES_HOME=str(tmp_path / 'foreign' / 'profiles' / 'work'))
+        contender = _child(alias, 'print(update_lock._acquire_checkout(root) is not None)', env=env)
+        out, err = contender.communicate(timeout=20)
+        assert contender.returncode == 0, err
+        assert out.strip() == 'True'
+        _, err = owner.communicate('release\n', timeout=20)
+        assert owner.returncode == 0, err
+    finally:
+        for child in (owner, contender):
+            if child is not None and child.poll() is None:
+                child.kill()
+                child.wait()
 
 
 @pytest.mark.platforms('posix')
