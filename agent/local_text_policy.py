@@ -54,6 +54,11 @@ def require_tools_allowed():
         raise LocalTextRestriction('local_text_tools_denied')
 
 
+def require_metadata_allowed():
+    if local_text_only():
+        raise LocalTextRestriction('local_text_metadata_denied')
+
+
 def environment_probe_enabled(agent):
     return not local_text_only() and getattr(agent, '_environment_probe', True)
 

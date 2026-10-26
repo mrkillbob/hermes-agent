@@ -1980,8 +1980,6 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
         _validate_proxy_env_urls,
     )
     from agent.ssl_verify import resolve_httpx_verify
-    # Treat client_kwargs as read-only: callers pass agent._client_kwargs, and in-place mutation
-    # leaks into later requests (a torn-down httpx transport got reused).
     # Callers pass agent._client_kwargs (or shallow copies of it) in; any in-place mutation leaks back into
     # the stored dict and is reused on subsequent requests. #10933 hit this by injecting an httpx.Client
     # transport that was torn down after the first request, so the next request wrapped a closed transport
@@ -2084,7 +2082,8 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     )
     # ``process_bootstrap.OpenAI`` is a lazy SDK proxy; resolved at call time so tests can patch it.
     from agent import process_bootstrap
-    client = process_bootstrap.OpenAI(**client_kwargs)
+    from agent.managed_request_budget import prepare_provider_client
+    client = prepare_provider_client(process_bootstrap.OpenAI(**client_kwargs))
     # Routing proxies name the deployment they served in a response header (#54864).
     from agent.served_model import install_served_model_capture
     install_served_model_capture(agent, client)

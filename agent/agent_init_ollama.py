@@ -7,6 +7,7 @@ from agent.model_metadata import is_local_endpoint, query_ollama_num_ctx
 
 
 def _configure_ollama_num_ctx(agent, _model_cfg, _config_context_length):
+    from agent.local_text_policy import local_text_only
     # Ollama defaults num_ctx to 2048, so detect the max window and send num_ctx per request.
     # model.ollama_num_ctx overrides; model.context_length caps the detected value (VRAM).
     agent._ollama_num_ctx: int | None = None
@@ -16,7 +17,7 @@ def _configure_ollama_num_ctx(agent, _model_cfg, _config_context_length):
             agent._ollama_num_ctx = int(_override)
         except (TypeError, ValueError):
             _ra().logger.debug("Invalid ollama_num_ctx config value: %r", _override)
-    if agent._ollama_num_ctx is None and agent.base_url and is_local_endpoint(agent.base_url):
+    if agent._ollama_num_ctx is None and agent.base_url and is_local_endpoint(agent.base_url) and not local_text_only():
         try:
             # api_key may be a callable (Entra token provider); detection needs a string.
             _key = agent.api_key if isinstance(agent.api_key, str) else ""

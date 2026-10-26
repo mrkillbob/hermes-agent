@@ -590,6 +590,9 @@ def ollama_model_supports_thinking(
     """Tri-state: True if an Ollama (Cloud or local) model advertises ``thinking`` in native
     ``/api/show`` ``capabilities`` (authoritative; OpenAI-compat ``/v1/models`` omits it), False
     when the probe succeeded without it, None when it failed (caller treats as "don't emit")."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return None
     import httpx
 
     server_url = (base_url or "").strip().rstrip("/")

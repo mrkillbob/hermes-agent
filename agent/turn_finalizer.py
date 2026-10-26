@@ -48,6 +48,9 @@ def _record_kanban_budget_exhausted(
     kanban_task: str, api_call_count: int, max_iterations: int, logger: logging.Logger
 ) -> None:
     """Park exhausted work for narrower scope instead of restarting the same exploration."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return
     try:
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_connect as _kbc
@@ -84,6 +87,9 @@ def _record_kanban_guardrail_halt(
     and retries it as a protocol violation.  Route the halt through the normal
     failure circuit instead, preserving bounded retries and the task override.
     """
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return
     import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
     tool_name = str(getattr(decision, "tool_name", "") or "unknown")
     code = str(getattr(decision, "code", "") or "tool_guardrail_halt")
@@ -171,6 +177,10 @@ def _resolve_budget_fallback(
 ) -> tuple[Any, Any, bool, Any]:
     """Iteration-budget exhaustion. Returns ``(final_response, _turn_exit_reason,
     preserved_verification_fallback, interrupted)``"""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        # The exact owner settles this bounded result; no legacy board write or summary call.
+        return final_response, _turn_exit_reason, False, interrupted
     _guardrail_decision = getattr(agent, "_tool_guardrail_halt_decision", None)
     if _guardrail_decision is not None:
         # A controlled tool-loop halt is terminal; record it only for the dispatcher-owned worker.
