@@ -23,6 +23,7 @@ def environment(tmp_path, monkeypatch):
     monkeypatch.setattr(drain_startup, '_checkout_root', lambda: home)
     monkeypatch.setattr(reboot, '_native_identity', lambda: dict(_BEFORE))
     monkeypatch.setattr(reboot, '_source_binding', lambda: dict(path='source-fixture', sha256='a' * 64))
+    monkeypatch.setattr(reboot, '_native_volume', lambda fd: '55555555-5555-4555-8555-555555555555', raising=False)
     (home / 'ESTOP').touch()
     entries = [dict(pid=100 + index, create_time=100.25 + index, purpose='mcp-helper',
                     install='0fcc25fdfa9e', spawner_pid=50, spawner_create=50.25,
@@ -64,6 +65,17 @@ def test_same_boot_cannot_admit_but_new_kernel_can_hold_and_restore(environment,
     next_value = drain_startup.begin()
     drain_startup.restore(hold_id=next_value['hold_id'])
     assert ledger.read_bytes() == before
+
+
+def test_new_checkpoint_accepts_only_device_remapping_after_native_boot(environment):
+    from hermes_cli import startup_hold_reboot as reboot
+    home, entries = environment
+    prepare(environment)
+    record = json.loads((home / '.startup-legacy-reboot.json').read_bytes())
+    binding, _ = reboot._binding()
+    binding['root']['device'] += 1
+    binding['ledger']['version'][0] += 1
+    assert reboot.validate(record, binding, entries, _AFTER) == frozenset(record['entries'])
 
 
 @pytest.mark.parametrize('field', ['host', 'source', 'root', 'ledger', 'entry', 'install', 'spawner', 'schema'])
@@ -377,3 +389,97 @@ def test_spent_checkpoint_still_rejects_malformed_history(environment, field, va
     with pytest.raises(RuntimeError, match='startup_hold_reboot_unavailable'):
         drain_startup.begin()
     assert not (home / '.startup-hold.json').exists()
+
+
+@pytest.mark.parametrize('changed', ['volume', 'root-inode', 'root-device-only', 'ledger-device-only',
+    'ledger-inode', 'ledger-mtime', 'ledger-ctime', 'ledger-links', 'ledger-bytes', 'source', 'host',
+    'volume-zero', 'volume-malformed', 'volume-missing'])
+def test_schema2_remapping_keeps_all_other_bindings_exact(environment, changed):
+    from hermes_cli import startup_hold_reboot as reboot
+    home, entries = environment
+    prepare(environment)
+    record = json.loads((home / '.startup-legacy-reboot.json').read_bytes())
+    binding, _ = reboot._binding()
+    identity = dict(_AFTER)
+    binding['root']['device'] += 1
+    binding['ledger']['version'][0] += 1
+    if changed == 'volume':
+        binding['volume'] = '66666666-6666-4666-8666-666666666666'
+    elif changed == 'root-inode':
+        binding['root']['inode'] += 1
+    elif changed == 'root-device-only':
+        binding['root']['device'] += 1
+    elif changed == 'ledger-device-only':
+        binding['ledger']['version'][0] += 1
+    elif changed.startswith('ledger-') and changed != 'ledger-bytes':
+        binding['ledger']['version'][{'ledger-inode': 1, 'ledger-mtime': 3,
+            'ledger-ctime': 4, 'ledger-links': 5}[changed]] += 1
+    elif changed == 'ledger-bytes':
+        binding['ledger']['sha256'] = 'b' * 64
+    elif changed == 'source':
+        binding['source']['sha256'] = 'b' * 64
+    elif changed == 'host':
+        identity['host'] = '66666666-6666-4666-8666-666666666666'
+    elif changed == 'volume-zero':
+        binding['volume'] = '00000000-0000-0000-0000-000000000000'
+    elif changed == 'volume-malformed':
+        binding['volume'] = []
+    else:
+        del binding['volume']
+    with pytest.raises(RuntimeError, match='startup_hold_reboot_unavailable'):
+        reboot.validate(record, binding, entries, identity)
+
+
+def test_schema1_remains_strict_and_cannot_gain_volume_identity_retroactively(environment):
+    from hermes_cli import startup_hold_reboot as reboot
+    home, entries = environment
+    prepare(environment)
+    record = json.loads((home / '.startup-legacy-reboot.json').read_bytes())
+    record['schema'] = 1
+    with pytest.raises(RuntimeError, match='startup_hold_reboot_unavailable'):
+        reboot.validate(record, reboot._binding()[0], entries, _AFTER)
+    del record['binding']['volume']
+    binding, _ = reboot._binding(schema=1)
+    assert reboot.validate(record, binding, entries, _AFTER) == frozenset(record['entries'])
+    binding['root']['device'] += 1
+    binding['ledger']['version'][0] += 1
+    with pytest.raises(RuntimeError, match='startup_hold_reboot_unavailable'):
+        reboot.validate(record, binding, entries, _AFTER)
+
+
+def test_schema2_does_not_accept_same_boot_even_if_device_changes(environment):
+    from hermes_cli import startup_hold_reboot as reboot
+    home, entries = environment
+    prepare(environment)
+    record = json.loads((home / '.startup-legacy-reboot.json').read_bytes())
+    binding, _ = reboot._binding()
+    binding['root']['device'] += 1
+    binding['ledger']['version'][0] += 1
+    with pytest.raises(RuntimeError, match='startup_hold_reboot_required'):
+        reboot.validate(record, binding, entries, _BEFORE)
+
+
+@pytest.mark.parametrize('fault', ['unsupported', 'different-volume', 'ledger-replaced', 'root-replaced'])
+def test_native_volume_capture_refuses_uncertainty_and_current_object_races(environment, monkeypatch, fault):
+    from hermes_cli import startup_hold_reboot as reboot
+    home, _ = environment
+    calls = []
+    def volume(fd):
+        calls.append(fd)
+        if fault == 'unsupported':
+            raise OSError('unsupported native fixture')
+        if len(calls) == 2:
+            if fault == 'different-volume':
+                return '66666666-6666-4666-8666-666666666666'
+            if fault == 'ledger-replaced':
+                replacement = home / 'replacement'
+                replacement.write_bytes((home / 'spawn-ledger.json').read_bytes())
+                os.replace(replacement, home / 'spawn-ledger.json')
+            elif fault == 'root-replaced':
+                home.rename(home.with_name('previous-home'))
+                home.mkdir()
+        return '55555555-5555-4555-8555-555555555555'
+    monkeypatch.setattr(reboot, '_native_volume', volume)
+    with pytest.raises((RuntimeError, OSError)):
+        prepare(environment)
+    assert not (home / '.startup-legacy-reboot.json').exists()
