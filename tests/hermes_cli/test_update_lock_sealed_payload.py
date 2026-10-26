@@ -277,3 +277,25 @@ def test_source_marker_probe_delegates_free_held_and_invalid_sealed_identity(tmp
     (root.parent / 'manifest.json').unlink()
     assert probe() == 'held'
     assert not (root / '.hermes-update.lock').exists()
+
+
+@pytest.mark.platforms('posix')
+@pytest.mark.parametrize('aliased', [False, True])
+def test_sealed_shell_without_external_tools_never_falls_back_free(tmp_path, aliased):
+    _, root = _payload(tmp_path)
+    selected = root
+    if aliased:
+        selected = tmp_path / 'source-alias'
+        selected.symlink_to(root, target_is_directory=True)
+    empty = tmp_path / 'empty-path'
+    empty.mkdir()
+    script = Path(update_lock.__file__).resolve().parents[1] / 'scripts/desktop-update/marker.sh'
+    result = subprocess.run(['bash', '-c',
+        'source "$1"; PATH="$2"; checkout_lock_path; '
+        'if checkout_lock_held; then echo held; else echo free; fi',
+        'probe', str(script), str(empty)], env=dict(os.environ, INSTALL_ROOT=str(selected)),
+        capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0
+    assert result.stderr == ''
+    assert result.stdout.splitlines() == [str(update_lock.checkout_lock_path(root)), 'held']
+    assert not (root / '.hermes-update.lock').exists()

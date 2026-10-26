@@ -518,17 +518,22 @@ marker_release_locked() { # A7 rule 5 / corpus "release"
 sealed_checkout_app() {
   local root payload resources contents app
   root="$(cd -P "$INSTALL_ROOT" 2>/dev/null && pwd)" || root="$INSTALL_ROOT"
-  payload="$(dirname "$root")"; resources="$(dirname "$payload")"
-  contents="$(dirname "$resources")"; app="$(dirname "$contents")"
-  [ "$(basename "$payload")" = agent-payload ] && [ "$(basename "$resources")" = Resources ] &&
-    [ "$(basename "$contents")" = Contents ] || return 1
+  case "$root" in /*) ;; *) root="${PWD%/}/$root" ;; esac
+  root="${root%/}"
+  payload="${root%/*}"
+  [ "${payload##*/}" = agent-payload ] || return 1
+  resources="${payload%/*}"
+  [ "${resources##*/}" = Resources ] || return 1
+  contents="${resources%/*}"
+  [ "${contents##*/}" = Contents ] || return 1
+  app="${contents%/*}"
   case "$app" in *.app) printf '%s\n' "$app" ;; *) return 1 ;; esac
 }
 
 checkout_lock_path() {
   local root="$INSTALL_ROOT" dot="$INSTALL_ROOT/.git" gitdir line common app
   if app="$(sealed_checkout_app)"; then
-    printf '%s/.%s.hermes-update.lock\n' "$(dirname "$app")" "$(basename "$app")"; return
+    printf '%s/.%s.hermes-update.lock\n' "${app%/*}" "${app##*/}"; return
   fi
   if [ -d "$dot" ]; then
     gitdir="$dot"
@@ -560,8 +565,9 @@ checkout_lock_held() { # 0 iff some process holds the checkout kernel lock right
   # owned after `sudo hermes update`): held -- fail closed like the Desktop's
   # own probe (checkout_held): reclaim needs a provably free checkout.
   if sealed_checkout_app >/dev/null; then
-    local code_root
-    code_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || return 0
+    local code_root script_dir="${BASH_SOURCE[0]%/*}"
+    [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+    code_root="$(cd "$script_dir/../.." && pwd)" || return 0
     command -v python3 >/dev/null 2>&1 || return 0
     python3 -I -S -B -c '
 import sys
