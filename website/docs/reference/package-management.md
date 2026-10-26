@@ -651,6 +651,16 @@ under the same gate and only while all recorded output identities still match an
 related activity remains. A surviving child leaves the failed output for an existing
 eligible cleanup pass; this adds no periodic collection or new retention threshold.
 
+Prospective reboot controllers can explicitly request native local-volume lifetime
+identities when creating a fresh domain and coordination namespace. This opt-in
+version2 protocol binds filesystem UUID and inode for the domain, activity directory
+and held gate; full current descriptor/path/device checks remain exact. Later
+readers and collectors recognize that protocol under the same kernel gate. Version1
+domains, unqualified state, preexisting ambiguous namespaces, unknown protocols and
+mixed activity records are never upgraded or rebound. Unsupported native volume
+facts refuse. Default PM acquisition retains version1 behavior. The lifetime
+protocol supplies resource custody, not process-departure or reboot authority.
+
 This covers participating launchers, not arbitrary raw interpreter invocations,
 detached uncooperative descendants or global tool-store collection. Mixed older
 launchers and legacy state are not retroactively qualified. Windows lifetime handles

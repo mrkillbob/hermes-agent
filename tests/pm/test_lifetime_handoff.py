@@ -46,11 +46,11 @@ with activity(Path(state), generation=Path(state)/'generation') as owned:
 '''
 
 
-def _surviving_child(tmp_path, mode, seam="spawn"):
+def _surviving_child(tmp_path, mode, seam="spawn", *, stable_identity=False):
     from pm.lifetime import activity, gate
 
     domain = tmp_path / "state"
-    with activity(domain, create=True):
+    with activity(domain, create=True, stable_identity=stable_identity):
         (domain / "generation").mkdir()
     ready, release, done = (tmp_path / name for name in ("ready", "release", "done"))
     supervisor = subprocess.Popen([sys.executable, "-c", _SUPERVISOR, str(domain),
@@ -82,6 +82,12 @@ def _surviving_child(tmp_path, mode, seam="spawn"):
 @pytest.mark.parametrize("mode", ["exit", "terminate"])
 def test_posix_child_reference_survives_supervisor_loss(tmp_path, mode):
     _surviving_child(tmp_path, mode)
+
+
+@pytest.mark.platforms('macos')
+@pytest.mark.parametrize('mode', ['exit', 'terminate'])
+def test_native_volume_child_reference_survives_supervisor_loss(tmp_path, mode):
+    _surviving_child(tmp_path, mode, stable_identity=True)
 
 
 @pytest.mark.platforms("windows")

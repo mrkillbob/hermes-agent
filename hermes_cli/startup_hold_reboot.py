@@ -368,7 +368,17 @@ def prepare(*, ledger_sha256, entry_sha256, install, spawner):
     from hermes_cli import startup_hold
     from hermes_cli.startup_hold_writers import refuse_live_writers
     _paused()
-    with _checkout_custody(), _dispatch_host_admission_lock(strict=True) as acquired:
+    path = get_default_hermes_root() / _FILENAME
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        # Refusal only: retain writer-debt precedence without creating PM state.
+        with startup_hold.writer_exclusion():
+            refuse_live_writers()
+            raise FileExistsError('prospective checkpoint already exists')
+    with _checkout_custody(stable_identity=True), _dispatch_host_admission_lock(strict=True) as acquired:
         if not acquired:
             raise RuntimeError('startup_hold_dispatch_busy')
         with startup_hold.admission_gate(), startup_hold.writer_exclusion(), _marker_lock(), _quiescent_profiles(), ledger_gate():

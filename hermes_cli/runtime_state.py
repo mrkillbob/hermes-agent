@@ -37,7 +37,8 @@ INSTALL_LOCK_TIMEOUT_SECONDS = 10.0
 # A lease file younger than this is never a prune candidate: its creator may still sit between
 # ``O_CREAT|O_EXCL`` and ``flock`` (two syscalls; the window is microseconds, the margin generous).
 @contextmanager
-def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_SECONDS):
+def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_SECONDS,
+                 stable_identity=False):
     """Acquire lifetime protection and the install mutex within one wait budget.
 
     Raises LifetimeUnavailable if registration times out: an unregistered reader
@@ -56,7 +57,7 @@ def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_
     def remaining():
         return None if deadline is None else max(0.0, deadline - time.monotonic())
 
-    with activity(state, create=True, deadline=deadline):
+    with activity(state, create=True, deadline=deadline, stable_identity=stable_identity):
         with _install_mutex(state, timeout=remaining()) as held:
             yield held
 

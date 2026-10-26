@@ -24,6 +24,13 @@ def environment(tmp_path, monkeypatch):
     monkeypatch.setattr(reboot, '_native_identity', lambda: dict(_BEFORE))
     monkeypatch.setattr(reboot, '_source_binding', lambda: dict(path='source-fixture', sha256='a' * 64))
     monkeypatch.setattr(reboot, '_native_volume', lambda fd: '55555555-5555-4555-8555-555555555555', raising=False)
+    from hermes_platform.host import volume_identity
+    monkeypatch.setattr(volume_identity, 'local_volume_identity',
+                        lambda fd: '55555555-5555-4555-8555-555555555555')
+    monkeypatch.setattr(volume_identity, 'local_file_identity',
+                        lambda fd: ['55555555-5555-4555-8555-555555555555', os.fstat(fd).st_ino])
+    monkeypatch.setattr(volume_identity, 'local_directory_identity',
+                        lambda path: ['55555555-5555-4555-8555-555555555555', path.lstat().st_ino])
     (home / 'ESTOP').touch()
     entries = [dict(pid=100 + index, create_time=100.25 + index, purpose='mcp-helper',
                     install='0fcc25fdfa9e', spawner_pid=50, spawner_create=50.25,
