@@ -8,10 +8,28 @@ import json
 import math
 import os
 import stat
+import sys
 
 from hermes_constants import get_default_hermes_root
 
 _LIMIT = 4_194_304
+
+
+def _version(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_nlink)
+
+
+def _read_complete(fd):
+    chunks = []
+    remaining = _LIMIT + 1
+    while remaining:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            return b''.join(chunks)
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raise RuntimeError('startup_hold_writers_unknown')
 
 
 def ledger_snapshot():
@@ -34,8 +52,10 @@ def ledger_snapshot():
                 or not stat.S_ISREG(named.st_mode)
                 or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
             raise RuntimeError('startup_hold_writers_unknown')
-        raw = os.read(fd, _LIMIT + 1)
-        if len(raw) > _LIMIT:
+        raw = _read_complete(fd)
+        if (_version(opened) != _version(os.fstat(fd))
+                or _version(opened) != _version(path.lstat())
+                or len(raw) != opened.st_size):
             raise RuntimeError('startup_hold_writers_unknown')
         entries = json.loads(raw.decode('utf-8-sig'))
     except (OSError, ValueError, UnicodeError):
@@ -51,14 +71,17 @@ def entry_state(entry, covered):
     """Only exact existing writer coverage is accepted, never spawner ancestry."""
     from hermes_cli.startup_hold_writers import _same_root
     from hermes_cli.process_identity import _pid_alive_matches
-    if entry.get('purpose') not in {'serve', 'dashboard', 'mcp-helper'}:
+    purpose = entry.get('purpose')
+    if not isinstance(purpose, str):
+        return 'unknown'
+    if purpose not in {'serve', 'dashboard', 'mcp-helper'}:
         return 'unrelated'
     home = entry.get('hermes_home')
     if home and not _same_root(home):
         return 'foreign'
     pid, birth = entry.get('pid'), entry.get('create_time')
     if (type(pid) is not int or pid <= 0 or type(birth) not in (int, float)
-            or not math.isfinite(birth) or birth <= 0):
+            or birth <= 0 or birth > sys.float_info.max or not math.isfinite(birth)):
         return 'unknown'
     live = _pid_alive_matches(pid, birth, strict=True)
     if live is not False:

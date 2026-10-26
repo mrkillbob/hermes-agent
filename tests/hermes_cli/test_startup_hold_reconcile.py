@@ -54,7 +54,7 @@ def test_parent_or_other_incarnation_cannot_cover_helper(home, monkeypatch, iden
     assert reconcile.entry_state(row(), {identity}) == 'closure_required'
 
 
-@pytest.mark.parametrize('birth', [None, float('nan'), float('inf'), -1, True, '123.25'])
+@pytest.mark.parametrize('birth', [None, float('nan'), float('inf'), -1, True, '123.25', 10**1000])
 def test_ambiguous_identity_is_never_covered(home, birth):
     from hermes_cli.startup_hold_reconcile import entry_state
     entry = row()
@@ -183,3 +183,34 @@ def test_failed_live_census_never_returns_an_assessment(home, monkeypatch):
     monkeypatch.setattr(dashboard_procs, '_iter_process_table', unavailable)
     with pytest.raises(RuntimeError, match='startup_hold_writers_unknown'):
         reconcile.assess()
+
+
+@pytest.mark.parametrize('purpose', [[], {}, None, 1])
+def test_malformed_purpose_is_bounded_unknown(home, purpose):
+    from hermes_cli.startup_hold_reconcile import entry_state
+    entry = row()
+    entry['purpose'] = purpose
+    assert entry_state(entry, ()) == 'unknown'
+
+
+def test_short_reads_do_not_accept_valid_prefix(home, monkeypatch):
+    from hermes_cli import startup_hold_reconcile as reconcile
+    save(home, [row()])
+    original = os.read
+    monkeypatch.setattr(reconcile.os, 'read', lambda fd, size: original(fd, min(size, 2)))
+    digest, entries = reconcile.ledger_snapshot()
+    assert entries == [row()]
+    assert digest == hashlib.sha256((home / 'spawn-ledger.json').read_bytes()).hexdigest()
+
+
+def test_concurrent_write_during_snapshot_refuses(home, monkeypatch):
+    from hermes_cli import startup_hold_reconcile as reconcile
+    save(home, [row()])
+    original = reconcile._read_complete
+    def changed(fd):
+        raw = original(fd)
+        save(home, [])
+        return raw
+    monkeypatch.setattr(reconcile, '_read_complete', changed)
+    with pytest.raises(RuntimeError, match='startup_hold_writers_unknown'):
+        reconcile.ledger_snapshot()
