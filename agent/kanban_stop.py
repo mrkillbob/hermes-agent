@@ -81,6 +81,9 @@ def kanban_stop_nudge_enabled() -> bool:
     """On when ``HERMES_KANBAN_TASK`` is set for the dispatcher-owned worker, unless
     ``HERMES_KANBAN_STOP_NUDGE`` disables it. In-process delegate_task children and cron runs
     inherit the env var but own no board task and carry no kanban toolset."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return False
     if (os.environ.get("HERMES_KANBAN_STOP_NUDGE") or "").strip().lower() in {"0", "false", "no", "off"}:
         return False
     return bool(owned_kanban_task())
@@ -103,6 +106,9 @@ def kanban_shutdown_drain_requested() -> bool:
 
 def pause_current_kanban_run(*, reason: str = "dispatcher shutdown") -> bool:
     """Release this worker's active run so the card can be resumed later."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return False
     task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
     raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
     claim_lock = (os.environ.get("HERMES_KANBAN_CLAIM_LOCK") or "").strip()

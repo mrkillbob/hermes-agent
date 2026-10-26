@@ -482,6 +482,9 @@ def agent_tool_surface(agent: Any, tools: list[dict[str, Any]]) -> list[dict[str
     """*tools* as *agent* carries them: :func:`agent_tool_drops` removed and, in a one-shot session, the
     one-shot schema variants (``agent.oneshot_footprint.oneshot_tool_schemas``). Applied to FRESH definitions (load,
     MCP refresh) before any merge: a pinned or carried entry keeps the bytes already sent."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return []
     from agent.oneshot_footprint import agent_is_oneshot, oneshot_tool_schemas
     drops = agent_tool_drops(agent)
     tools = [tool for tool in tools if (tool.get("function") or {}).get("name") not in drops] if drops else list(tools)

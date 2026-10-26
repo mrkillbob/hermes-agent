@@ -13,6 +13,9 @@ KEYS = frozenset({'fallback_model', 'ephemeral_system_prompt', 'prefill_messages
 
 def construct_inputs(authority, policy, chat_id):
     """Owner side, per turn (off the owner loop: config reads)."""
+    from agent.local_text_policy import restricted_policy
+    if restricted_policy(policy):
+        return {'fallback_model': {}, 'ephemeral_system_prompt': None, 'prefill_messages': None}
     from gateway.session_authorities import owner_scope
     with owner_scope(authority):
         return {'fallback_model': _fallback_chain(authority, policy),
@@ -134,11 +137,17 @@ def construct_kwargs(frame):
     """Child side: the validated ``AIAgent`` keyword arguments; a frame without the object
     (older owner) constructs exactly as before."""
     inputs = json.loads(frame['policy'].get('request_json') or '{}').get('construct_v1')
+    from agent.local_text_policy import restricted_policy
+    restricted = restricted_policy(frame['policy'])
     if inputs is None:
+        if restricted:
+            raise ValueError('invalid_managed_worker_bootstrap')
         return {}
     if (not isinstance(inputs, dict) or set(inputs) != KEYS
-            or not _dict_list(inputs['fallback_model']) or not _dict_list(inputs['prefill_messages'])
+            or not ((restricted and inputs['fallback_model'] == {}) or _dict_list(inputs['fallback_model'])) or not _dict_list(inputs['prefill_messages'])
             or not isinstance(inputs['ephemeral_system_prompt'], (str, type(None)))):
+        raise ValueError('invalid_managed_worker_bootstrap')
+    if restricted and inputs != {'fallback_model': {}, 'ephemeral_system_prompt': None, 'prefill_messages': None}:
         raise ValueError('invalid_managed_worker_bootstrap')
     return dict(inputs)
 
@@ -202,6 +211,11 @@ def worker_route(policy, construct):
     ``construct_v1`` chain (an ordinary session's refreshed profile fallbacks) when it was sent,
     the frozen snapshot's otherwise (older owner)."""
     frozen, model = policy.effective()
+    from agent.local_text_policy import restricted_policy
+    if restricted_policy(policy):
+        from gateway.session_kanban_route import validate_local_worker_route
+        validate_local_worker_route({'provider':policy.provider,'model':model,'base_url':policy.base_url})
+        return {'api_key':'no-key-required','base_url':policy.base_url,'api_mode':'chat_completions'}
     if 'fallback_model' in construct:
         frozen = {**frozen, 'fallback_providers': construct['fallback_model'] or [], 'fallback_model': None}
     runtime, fallback_entry = route_runtime(policy, frozen, model, construct['api_key'])

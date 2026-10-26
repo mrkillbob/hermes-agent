@@ -20,7 +20,8 @@ def bind_route_entry(agent: Any, entry: dict[str, Any], provider: str, model: st
     """Swap ``agent`` onto ``entry`` (a fallback-chain-shaped dict). Returns ``(old_model,
     old_provider)``, or None when the provider has no usable client. Sets ``_fallback_activated``
     so the next turn's ``restore_primary_runtime`` reverts it; raises on a failed swap."""
-    if os.environ.get("HERMES_KANBAN_LOCAL_ONLY") == "1":
+    from agent.local_text_policy import local_text_only
+    if local_text_only() or os.environ.get("HERMES_KANBAN_LOCAL_ONLY") == "1":
         return None
     from agent.auxiliary_client import resolve_provider_client
     from agent.chat_completion_helpers import (

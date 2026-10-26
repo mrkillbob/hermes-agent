@@ -361,6 +361,9 @@ def _lookup_supports_vision(
     if not provider or not model:
         return None
 
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return None
     for label, probe in _VISION_PROBES:
         try:
             verdict = probe(provider, model, cfg)

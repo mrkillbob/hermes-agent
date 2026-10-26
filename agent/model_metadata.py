@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 import hermes_yaml as yaml
 
 from agent import model_metadata_http
+from agent.local_text_policy import local_text_only
+from agent.model_metadata_names import _model_id_matches, _normalize_model_version
 from agent.model_metadata_cache import _write_context_cache, locked_context_cache
 from agent.model_metadata_llamacpp import llamacpp_context
 
@@ -718,6 +720,8 @@ def _localhost_to_ipv4(url: str) -> str:
 
 def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
     """Probe known endpoints: "ollama", "lm-studio", "vllm", "llamacpp", or None (TTL-cached)."""
+    if local_text_only():
+        return None
     import httpx
     # IPv4-resolve BEFORE deriving server/LM Studio URLs and the cache lookup, so localhost and 127.0.0.1 share a cache entry.
     normalized = _localhost_to_ipv4(_normalize_base_url(base_url))
@@ -1404,13 +1408,10 @@ def is_output_cap_error(error_msg: str) -> bool:
     )
 
 
-def _model_id_matches(candidate_id: str, lookup_model: str) -> bool:
-    """Exact match, or ``publisher/slug`` (LM Studio native ids) whose slug equals the configured name."""
-    return candidate_id == lookup_model or ("/" in candidate_id and candidate_id.rsplit("/", 1)[1] == lookup_model)
-
-
 def _ollama_show(server_url: str, api_key: str, bare_model: str, timeout: float = 3.0, *, note_blackhole: bool = False) -> Optional[dict[str, Any]]:
     """Ollama ``/api/show`` JSON for ``bare_model``, or None on any failure (``note_blackhole``: connect timeouts condemn the host)."""
+    if local_text_only():
+        return None
     import httpx
     try:
         with httpx.Client(timeout=timeout, headers=_auth_headers(api_key), verify=model_metadata_http.resolve_verify(server_url)) as client:
@@ -1590,6 +1591,8 @@ def _openai_models_list_context(client, server_url: str, model: str) -> Optional
 
 def _query_local_context_length_uncached(model: str, base_url: str, api_key: str = "") -> Optional[int]:
     """Query a local server for the model's context length."""
+    if local_text_only():
+        return None
     import httpx
     model = _strip_provider_prefix(model)
     server_url = _server_root(base_url)
@@ -1626,11 +1629,6 @@ def _query_local_context_length_uncached(model: str, base_url: str, api_key: str
     except Exception as exc:
         _note_if_connect_timeout(exc, server_url)
     return None
-
-
-def _normalize_model_version(model: str) -> str:
-    """Dots -> dashes so Nous ids (claude-opus-4-6) compare with OpenRouter's (claude-opus-4.6)."""
-    return model.replace(".", "-")
 
 
 def _query_anthropic_context_length(model: str, base_url: str, api_key: Any) -> Optional[int]:

@@ -434,6 +434,7 @@ class KanbanExecutionBudget(Params):
     wall_seconds: int
     output_bytes: int
     requests: int
+    local_text_only: Literal[True] | None = None
 
 
 class KanbanRunParams(Params):
