@@ -59,8 +59,8 @@ def _derived_version(
 
 
 def _git_probe(command):
-    from hermes_cli.startup_hold import active
-    if not active():
+    from hermes_cli.startup_hold import defer_maintenance
+    if not defer_maintenance():
         return command, None
     import os
     return ([command[0], '-c', 'core.fsmonitor=false', *command[1:]],

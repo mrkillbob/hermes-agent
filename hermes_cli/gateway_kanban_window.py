@@ -84,6 +84,12 @@ def _hold(_args):
     return status()
 
 
+def _prepare_reboot(args):
+    from hermes_cli.startup_hold_reboot import prepare
+    return prepare(ledger_sha256=args.ledger_sha256, entry_sha256=args.entry_sha256,
+                   install=args.install_id, spawner=[args.spawner_pid, args.spawner_birth])
+
+
 def _reconcile(_args):
     from hermes_cli.startup_hold_reconcile import assess
     return assess()
@@ -92,6 +98,7 @@ def _reconcile(_args):
 _STARTUP_REFUSALS = frozenset({
     'startup_hold_writers_busy', 'startup_hold_writers_unknown',
     'startup_hold_requires_pause', 'startup_hold_ledger_changed',
+    'startup_hold_reboot_required', 'startup_hold_reboot_unavailable',
 })
 
 
@@ -107,7 +114,7 @@ def _refusal_reason(exc):
 
 
 def execute(args):
-    actions = {'reconcile': _reconcile, 'hold': _hold, 'begin': _begin, 'arm': _arm, 'status': lambda _: _status(), 'cancel': _cancel, 'restore': _restore}
+    actions = {'prepare-reboot-reconcile': _prepare_reboot, 'reconcile': _reconcile, 'hold': _hold, 'begin': _begin, 'arm': _arm, 'status': lambda _: _status(), 'cancel': _cancel, 'restore': _restore}
     return actions[args.drain_action](args)
 
 
@@ -127,6 +134,12 @@ def add_parser(subparsers):
     begin.add_argument('--task-id', required=True)
     begin.add_argument('--board', default='default')
     begin.add_argument('--seconds', type=int, default=900)
+    prepare = actions.add_parser('prepare-reboot-reconcile', help='Under ESTOP, checkpoint exact legacy rows for a future full host reboot')
+    prepare.add_argument('--ledger-sha256', required=True)
+    prepare.add_argument('--entry-sha256', action='append', required=True)
+    prepare.add_argument('--install-id', required=True)
+    prepare.add_argument('--spawner-pid', type=int, required=True)
+    prepare.add_argument('--spawner-birth', type=float, required=True)
     actions.add_parser('reconcile', help='Under ESTOP, assess legacy closure debt without changing the ledger')
     actions.add_parser('hold', help='Under ESTOP, hold native startup without selecting or admitting any task')
     actions.add_parser('status', help='Read the hold and grant without exposing the prior marker')

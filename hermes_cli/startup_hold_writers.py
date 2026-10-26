@@ -34,7 +34,7 @@ def refuse_live_writers():
             raise RuntimeError('startup_hold_writers_busy')
 
 
-def refuse_legacy_writers(*, covered=()):
+def refuse_legacy_writers(*, covered=(), retired=frozenset()):
     from hermes_cli.startup_hold_reconcile import ledger_snapshot, entry_state
     refuse_live_writers()
     _, entries = ledger_snapshot()
@@ -42,5 +42,9 @@ def refuse_legacy_writers(*, covered=()):
         state = entry_state(entry, covered)
         if state == 'busy':
             raise RuntimeError('startup_hold_writers_busy')
+        if state == 'closure_required' and retired:
+            from hermes_cli.startup_hold_reboot import _hash
+            if _hash(entry) in retired:
+                continue
         if state in {'unknown', 'closure_required'}:
             raise RuntimeError('startup_hold_writers_unknown')

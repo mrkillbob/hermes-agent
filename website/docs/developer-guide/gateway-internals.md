@@ -978,3 +978,65 @@ reserve before PM/env work or profile ownership. Abrupt departures, unavailable
 process inventories and opaque helper descendants retain uncertainty rather than
 being retired from PID death alone. Such debt requires separate verified operator
 reconciliation; deleting records is not part of this command.
+
+### Prospective local reboot reconciliation
+
+`gateway drain prepare-reboot-reconcile` is an explicit, ESTOP-required operator
+write, separate from the read-only `reconcile` assessment. It never reboots,
+starts a gateway, clears ESTOP, creates a writer-exit receipt, or changes the spawn
+ledger. Its required inputs are an exact ledger SHA256, one or more full-entry
+SHA256 selectors, the exact legacy install ID and spawner PID/birth. There is no
+wildcard retirement. Preparation refuses live/unknown relevant ledger identities,
+live native owners, existing unsettled writer references, and custody contention.
+
+The checkpoint binds canonical home/owner/inode, declared production source and
+input fingerprints, exact ledger bytes/inode/version, full selected row hashes,
+local host identity, and the kernel session observed during preparation. Source
+fingerprinting includes production Python/shell/PowerShell/TOML sources and the
+lock/entry inputs; excluded test, environment and build trees are not fingerprinted.
+Runtime and dependency artifact provenance remain separate qualification gates.
+Traversal errors, included directory links, nonregular files, and incomplete or
+unstable reads refuse rather than producing a partial fingerprint.
+
+The initial implementation supports native Darwin identities only. It reads
+`kern.bootsessionuuid`, which [XNU exposes read-only](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c), and the direct host-UUID syscall,
+avoiding [the public wrapper's callback fallback](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/gethostuuid.c).
+There is no uptime, epoch-time, environment-variable or gateway-PID fallback.
+A changed session on the same local kernel host proves local processes from the
+recorded session have departed, including detached/reparented descendants. This
+is a prospective kernel boundary, not a reconstructed historical shutdown receipt.
+Remote workers, external backends, shared network homes, cloned host identities,
+process-snapshot restoration and privileged/kernel compromise are outside this
+proof. It grants no clearance for those systems. Sleep, logout, app restart and
+an unchanged boot session do not satisfy it.
+
+After an independently authorized full host reboot, the normal hold/restore
+transaction can exempt only the exact selected departed helper rows. It retains
+checkout/runtime, dispatch, admission, writer, marker, profile, ledger and
+checkpoint custody through publication and rechecks the proof. Changed source,
+home, host, ledger or row bindings refuse. Other live, ambiguous or uncovered
+history still blocks; unsettled writer references remain blocking even after a
+reboot. The ledger gate also serializes maintained registrations, with a bounded
+five-second wait for ordinary writers and fail-fast acquisition for controls.
+Uncoordinated old producers must remain stopped; the operator must preserve
+supervisor and startup suppression across the reboot.
+
+A real held native owner's ordinary registration may prune departed entries and
+replace the ledger. If every selected full-row hash is then absent, the checkpoint
+returns **no exemption** and the ordinary current-row guard governs restoration,
+including after a later controller/source change. An expired checkpoint supplies
+no kernel-closure or other authority in that later context.
+If a changed ledger still contains any selected row, it refuses. Reconciliation
+itself never writes or prunes the ledger. Repeated validation of unchanged old
+history on later boot sessions is permitted; it is not a single-use or universal
+filesystem-rollback detector.
+
+Checkpoint creation is exclusive, mode0600, and uses complete writes plus strict
+file and parent-directory fsync. A `preparing` or malformed checkpoint is unusable
+and blocks retries; no automatic cleanup or overwrite occurs. Only `committed`
+records are usable. Loss of acknowledgement after commitment can leave a valid
+checkpoint: inspect its exact bytes/state before any retry rather than assuming
+failure meant absence. A successful preparation returns a checkpoint ID, count
+and `admission_granted:false`, without host IDs, paths or ledger contents.
+Production preparation, reboot, control-file cleanup and later native acceptance
+all require an exact operator procedure and their own authorization.

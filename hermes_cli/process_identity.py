@@ -359,32 +359,39 @@ def _new_entry(
 def _append_entry(entry: LedgerEntry) -> bool:
     """Prune dead entries and append ``entry`` — the ONLY ledger write path.
 
-    Serialized under ``_LEDGER_LOCK`` with an atomic tmp+replace; no writer touches the file
+    Serialized under the thread and cross-process ledger locks with an atomic tmp+replace; no writer touches the file
     outside this function.
 
     See #91660.
     """
+    from hermes_cli.process_ledger_lock import ledger_gate
+
     path = _ledger_path()
-    with _LEDGER_LOCK:
-        entries = _read_ledger_or_quarantine(path) or []
-        # Drop malformed entries, our own stale entry, and provably dead pids.
-        pruned = [
-            e for e in entries
-            if isinstance(e.get("pid"), int)
-            and e["pid"] != entry.pid
-            and _pid_alive_matches(e["pid"], e.get("create_time")) is not False
-        ]
-        pruned.append(asdict(entry))
-        try:
-            from hermes_constants import mkdir_under_hermes_home
-            mkdir_under_hermes_home(path.parent)
-            # argv may carry surrogate-escaped bytes (non-UTF-8 paths); ensure_ascii keeps the
-            # utf-8 text handle from raising UnicodeEncodeError (a ValueError, not an OSError).
-            atomic_json_write(path, pruned, mode=0o600, ensure_ascii=True)
-            return True
-        except OSError:
-            logger.debug("spawn ledger write failed", exc_info=True)
-            return False
+    try:
+        with _LEDGER_LOCK, ledger_gate(wait=True):
+            entries = _read_ledger_or_quarantine(path) or []
+            # Drop malformed entries, our own stale entry, and provably dead pids.
+            pruned = [
+                e for e in entries
+                if isinstance(e.get("pid"), int)
+                and e["pid"] != entry.pid
+                and _pid_alive_matches(e["pid"], e.get("create_time")) is not False
+            ]
+            pruned.append(asdict(entry))
+            try:
+                from hermes_constants import mkdir_under_hermes_home
+                mkdir_under_hermes_home(path.parent)
+                # argv may carry surrogate-escaped bytes (non-UTF-8 paths); ensure_ascii keeps the
+                # utf-8 text handle from raising UnicodeEncodeError (a ValueError, not an OSError).
+                atomic_json_write(path, pruned, mode=0o600, ensure_ascii=True)
+                return True
+            except OSError:
+                logger.debug("spawn ledger write failed", exc_info=True)
+                return False
+
+    except OSError:
+        logger.debug("spawn ledger custody unavailable", exc_info=True)
+        return False
 
 
 def register_child(pid: int, purpose: str, *, project_root: Optional[Path] = None) -> bool:
