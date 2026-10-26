@@ -1,4 +1,4 @@
-"""Strict creation serializes retirement, without changing ordinary project linking."""
+"""Strict creation serializes retirement; ordinary creation retains project scope."""
 import sqlite3
 
 import pytest
@@ -62,7 +62,7 @@ def test_strict_creation_holds_registry_writer_lock_through_real_insert(project_
         assert projects_db.archive_project(conn, project)
 
 
-def test_ordinary_creation_preserves_archived_and_missing_project_behavior(project_home):
+def test_ordinary_creation_preserves_archived_scope_and_refuses_missing_project(project_home):
     from hermes_cli.kanban_project_create import create_task
 
     home, project = project_home
@@ -70,9 +70,10 @@ def test_ordinary_creation_preserves_archived_and_missing_project_behavior(proje
         projects_db.archive_project(registry, project)
     with connect_closing(home / 'board.db') as conn:
         archived = create_task(conn, title='Legacy archived', project_id=project)
-        missing = create_task(conn, title='Legacy missing', project_id='p_missing')
         assert kanban_db.get_task(conn, archived).project_id == project
-        assert kanban_db.get_task(conn, missing).project_id is None
+        with pytest.raises(ValueError, match='project'):
+            create_task(conn, title='Missing', project_id='p_missing')
+        assert [task.id for task in kanban_db.list_tasks(conn)] == [archived]
 
 
 def test_strict_dedup_does_not_accept_task_bound_to_another_project(project_home):
