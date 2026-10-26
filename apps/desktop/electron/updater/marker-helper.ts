@@ -18,7 +18,7 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import * as path from 'node:path'
 
 import { resolveUpdateScriptHandoff } from '../updater-process'
@@ -239,7 +239,32 @@ function scriptLine(text: string, isWindows: boolean): string {
  * `<git common dir>/hermes-update.lock`, else `<root>/.hermes-update.lock`.
  * Throws when `.git` or `commondir` exists but cannot be read.
  */
+/** Package identity is qualified by Python under custody; in-place source maintenance refuses. */
+function sealedCheckoutApp(updateRoot: string): string | null {
+  let root = path.resolve(updateRoot)
+
+  try {
+    root = realpathSync(root)
+  } catch {
+    // Retain lexical layout recognition when a package is missing or unreadable.
+  }
+
+  const payload = path.dirname(root)
+  const resources = path.dirname(payload)
+  const contents = path.dirname(resources)
+  const app = path.dirname(contents)
+
+  return path.basename(payload) === 'agent-payload' && path.basename(resources) === 'Resources' &&
+    path.basename(contents) === 'Contents' && app.endsWith('.app') ? app : null
+}
+
 export function checkoutLockPath(updateRoot: string, isWindows: boolean): string {
+  const app = sealedCheckoutApp(updateRoot)
+
+  if (app) {
+    return path.join(path.dirname(app), `.${path.basename(app)}.hermes-update.lock`)
+  }
+
   const dot = path.join(updateRoot, '.git')
   const plain = path.join(updateRoot, '.hermes-update.lock')
   const kind = statSync(dot, { throwIfNoEntry: false })
@@ -282,6 +307,9 @@ export function checkoutLockPath(updateRoot: string, isWindows: boolean): string
  * `.git`, a stat error other than "missing") asks the script.
  */
 export function checkoutLockMayBeHeld(updateRoot: string, isWindows: boolean): boolean {
+  if (sealedCheckoutApp(updateRoot)) {
+    return true
+  }
   try {
     return statSync(checkoutLockPath(updateRoot, isWindows), { throwIfNoEntry: false })?.isFile() ?? false
   } catch (error) {

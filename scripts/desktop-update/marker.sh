@@ -513,18 +513,39 @@ marker_release_locked() { # A7 rule 5 / corpus "release"
 }
 
 # ── the checkout lock (hermes_cli/update_lock.py::checkout_lock_path) ────────
+# Sealed native code is updated by its external steward. These source-update readers
+# delegate sealed identity qualification to the shared stdlib-only reader.
+sealed_checkout_app() {
+  local root payload resources contents app
+  root="$(cd -P "$INSTALL_ROOT" 2>/dev/null && pwd)" || root="$INSTALL_ROOT"
+  case "$root" in /*) ;; *) root="${PWD%/}/$root" ;; esac
+  root="${root%/}"
+  payload="${root%/*}"
+  [ "${payload##*/}" = agent-payload ] || return 1
+  resources="${payload%/*}"
+  [ "${resources##*/}" = Resources ] || return 1
+  contents="${resources%/*}"
+  [ "${contents##*/}" = Contents ] || return 1
+  app="${contents%/*}"
+  case "$app" in *.app) printf '%s\n' "$app" ;; *) return 1 ;; esac
+}
+
 checkout_lock_path() {
-  local root="$INSTALL_ROOT" dot="$INSTALL_ROOT/.git" gitdir line common
+  # Cleanup must not inherit the failed updater's saved EXIT-trap status.
+  local root="$INSTALL_ROOT" dot="$INSTALL_ROOT/.git" gitdir line common app
+  if app="$(sealed_checkout_app)"; then
+    printf '%s/.%s.hermes-update.lock\n' "${app%/*}" "${app##*/}"; return $?
+  fi
   if [ -d "$dot" ]; then
     gitdir="$dot"
   elif [ -f "$dot" ]; then
-    IFS= read -r line < "$dot" || [ -n "$line" ] || { printf '%s\n' "$root/.hermes-update.lock"; return; }
+    IFS= read -r line < "$dot" || [ -n "$line" ] || { printf '%s\n' "$root/.hermes-update.lock"; return $?; }
     line="${line#$'\357\273\277'}"; marker_line "$line"; line="$LINE"
-    case "$line" in gitdir:*) ;; *) printf '%s\n' "$root/.hermes-update.lock"; return ;; esac
+    case "$line" in gitdir:*) ;; *) printf '%s\n' "$root/.hermes-update.lock"; return $? ;; esac
     marker_line "${line#gitdir:}"; gitdir="$LINE"
     case "$gitdir" in /*) ;; *) gitdir="$root/$gitdir" ;; esac
   else
-    printf '%s\n' "$root/.hermes-update.lock"; return
+    printf '%s\n' "$root/.hermes-update.lock"; return $?
   fi
   if [ -f "$gitdir/commondir" ]; then
     IFS= read -r common < "$gitdir/commondir" || [ -n "$common" ]
@@ -532,6 +553,7 @@ checkout_lock_path() {
     case "$common" in /*) gitdir="$common" ;; '') ;; *) gitdir="$gitdir/$common" ;; esac
   fi
   printf '%s\n' "$gitdir/hermes-update.lock"
+  return $?
 }
 
 checkout_lock_held() { # 0 iff some process holds the checkout kernel lock right now
@@ -544,8 +566,26 @@ checkout_lock_held() { # 0 iff some process holds the checkout kernel lock right
   # our close. No tool, or a lock file that exists but cannot be opened (root-
   # owned after `sudo hermes update`): held -- fail closed like the Desktop's
   # own probe (checkout_held): reclaim needs a provably free checkout.
+  if sealed_checkout_app >/dev/null; then
+    local code_root script_dir="${BASH_SOURCE[0]%/*}"
+    [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
+    code_root="$(cd "$script_dir/../.." && pwd)" || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 -I -S -B -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+try:
+    from hermes_cli.update_lock import checkout_lock_held
+    held = checkout_lock_held(Path(sys.argv[2]))
+except Exception:
+    sys.exit(2)
+sys.exit(0 if held else 1)
+' "$code_root" "$INSTALL_ROOT"
+    case "$?" in 1) return 1 ;; *) return 0 ;; esac
+  fi
   local path rc tool="$MARKER_LOCK_TOOL_FORCED"
-  path="$(checkout_lock_path)"
+  path="$(checkout_lock_path)" || return 0
   [ -f "$path" ] || return 1
   if [ -z "$tool" ]; then
     if command -v perl >/dev/null 2>&1; then tool=perl

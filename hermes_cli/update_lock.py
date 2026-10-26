@@ -12,7 +12,7 @@ Two artifacts, one authority each:
   An owner is live while its pid is alive and its creation time still matches: never by age
   (the 20-minute ceiling only ages out v1 markers, which carry no creation time).
 * The checkout lock ``<git common dir>/hermes-update.lock`` (``<install root>/.hermes-update.lock``
-  for a ZIP install with no ``.git``) — a kernel lock (flock / msvcrt) that ``hermes update``
+  for a ZIP install with no ``.git``; a sidecar beside a sealed native app) — a kernel lock (flock / msvcrt) that ``hermes update``
   holds for its whole process tree, so two updates of one checkout started from different
   homes exclude each other and a killed updater whose completion child still runs keeps the
   checkout locked until that child exits. In the git dir it is never a worktree file: no
@@ -132,8 +132,25 @@ def _git_common_dir(root: Path) -> Path | None:
     return Path(os.path.normpath(gitdir))
 
 
+def _sealed_checkout_app(root: Path) -> bool:
+    # Keep Git/ZIP frozen recovery dependency-closed: import package qualification only
+    # for a known sealed layout, independently of whether its manifest is readable.
+    parts = root.resolve().parts
+    return (len(parts) >= 5 and parts[-2:-1] == ('agent-payload',)
+            and parts[-3] == 'Resources' and parts[-4] == 'Contents' and parts[-5].endswith('.app'))
+
+
+def _verify_sealed_checkout(root: Path, fd=None, *, create=False) -> None:
+    if _sealed_checkout_app(root):
+        from hermes_cli.update_lock_payload import verify
+        verify(root, fd, create=create)
+
+
 def checkout_lock_path(install_root: Path | str | None = None) -> Path:
     root = Path(install_root or _default_install_root())
+    if _sealed_checkout_app(root):
+        from hermes_cli.update_lock_payload import lock_path
+        return lock_path(root)
     common = _git_common_dir(root)
     return root / CHECKOUT_LOCK_NAME if common is None else common / GIT_CHECKOUT_LOCK_NAME
 
@@ -1075,7 +1092,8 @@ def _open_lock_file(path: Path) -> tuple[int | None, object]:
     write (left root-owned by a ``sudo hermes update``: the kernel lock works on a read-only fd,
     contract A5; POSIX only — a Windows owner needs its record); ``(None, reason)`` when neither opens."""
     # Never follow a link planted at the name: the holder record is written into this file.
-    binary = getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    binary = (getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+              | getattr(os, "O_NONBLOCK", 0))
     try:
         return os.open(path, os.O_RDWR | os.O_CREAT | binary, 0o644), True
     except PermissionError as exc:
@@ -1092,14 +1110,26 @@ def _acquire_checkout(install_root: Path) -> UpdateHolder | None:
     """Take (or join, when inherited) the checkout lock; the refusal holder, else ``None``."""
     global _HELD
     path = checkout_lock_path(install_root)
-    if _HELD is not None and _HELD["path"] == str(path):
-        _HELD["depth"] += 1
-        return None
-    inherited = _inherited_lock_fd(path)
-    if inherited is not None:
-        _HELD = {"path": str(path), "fd": inherited, "owned": False, "depth": 1}
-        return None
-    fd, writable = _open_lock_file(path)
+    try:
+        if _HELD is not None and _HELD["path"] == str(path):
+            _verify_sealed_checkout(install_root, _HELD["fd"])
+            _HELD["depth"] += 1
+            return None
+        inherited = _inherited_lock_fd(path)
+        if inherited is not None:
+            _verify_sealed_checkout(install_root, inherited)
+            _HELD = {"path": str(path), "fd": inherited, "owned": False, "depth": 1}
+            return None
+    except OSError as exc:
+        return UpdateHolder(pid=0, age_seconds=0.0, reason=str(exc))
+    try:
+        if _sealed_checkout_app(install_root):
+            from hermes_cli.update_lock_payload import open_gate
+            fd, writable = open_gate(install_root)
+        else:
+            fd, writable = _open_lock_file(path)
+    except OSError as exc:
+        return UpdateHolder(pid=0, age_seconds=0.0, reason=str(exc))
     if fd is None:
         return UpdateHolder(pid=0, age_seconds=0.0, reason=f"{path} is not writable ({writable}); the update "
                             "locks the checkout there, in its git directory, which git must write too")
@@ -1135,6 +1165,7 @@ def _acquire_checkout(install_root: Path) -> UpdateHolder | None:
             os.close(fd)
             return UpdateHolder(pid=0, age_seconds=0.0,
                                 reason=f"{path} is read-only; delete it or fix its permissions")
+        _verify_sealed_checkout(install_root, fd, create=True)
         if writable is True:
             record = f"{os.getpid()}\n{int(time.time())}\n{_identity_line()}\n".encode()
             os.lseek(fd, 0, os.SEEK_SET)
@@ -1337,20 +1368,35 @@ def checkout_lock_held(install_root: Path | str | None = None) -> bool:
     runs unguarded there as designed."""
     if holds_checkout_lock(install_root):
         return True
-    path = checkout_lock_path(install_root)
+    root = Path(install_root or _default_install_root())
+    sealed = _sealed_checkout_app(root)
+    path = checkout_lock_path(root)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if sealed:
+        flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        fd = os.open(path, flags)
     except FileNotFoundError:
+        try:
+            _verify_sealed_checkout(Path(install_root or _default_install_root()))
+        except OSError:
+            return True
         return False
     except OSError:
         return True
     try:
+        if sealed:
+            opened, named = os.fstat(fd), path.lstat()
+            if (not S_ISREG(named.st_mode) or named.st_nlink != 1
+                    or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+                return True
         if not _try_lock(fd):
             return True
+        _verify_sealed_checkout(Path(install_root or _default_install_root()), fd)
         _unlock(fd)
         return False
     except OSError:
-        return False
+        return _sealed_checkout_app(Path(install_root or _default_install_root()))
     finally:
         os.close(fd)
 
