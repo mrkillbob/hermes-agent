@@ -114,7 +114,7 @@ def _command(argv):
 def defer_maintenance(argv=None):
     command = _command(sys.argv[1:] if argv is None else argv)
     return (active() or command[:2] == ['gateway', 'ensure']
-            or command[:3] == ['gateway', 'drain', 'hold']
+            or command[:3] in (['gateway', 'drain', 'hold'], ['gateway', 'drain', 'reconcile'])
             or (command[:3] == ['gateway', 'drain', 'restore'] and '--hold-id' in command))
 
 
@@ -122,7 +122,7 @@ def enter_boot(project_root, argv):
     """Latch before any startup effects; unsupported held commands refuse without repair."""
     held = active()
     command = _command(argv)
-    administrative = (command[:3] == ['gateway', 'drain', 'hold']
+    administrative = (command[:3] in (['gateway', 'drain', 'hold'], ['gateway', 'drain', 'reconcile'])
                       or (command[:3] == ['gateway', 'drain', 'restore'] and '--hold-id' in command))
     if not held and not administrative and command[:2] != ['gateway', 'ensure']:
         return False
