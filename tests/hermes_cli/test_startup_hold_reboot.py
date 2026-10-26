@@ -320,3 +320,60 @@ def test_source_traversal_error_is_not_silently_omitted(tmp_path, monkeypatch):
     monkeypatch.setattr(reboot.os, 'walk', failed_walk)
     with pytest.raises(RuntimeError, match='startup_hold_reboot_unavailable'):
         reboot._source_binding()
+
+
+@pytest.mark.parametrize('changed', ['source', 'host', 'same-boot'])
+def test_spent_checkpoint_supplies_no_authority_across_later_controller_contexts(environment, monkeypatch, changed):
+    from hermes_cli import process_identity, startup_hold_reboot as reboot
+    from gateway import drain_startup
+    prepare(environment)
+    monkeypatch.setattr(reboot, '_native_identity', lambda: dict(_AFTER))
+    value = drain_startup.begin()
+    assert process_identity.register_self('gateway')
+    if changed == 'source':
+        monkeypatch.setattr(reboot, '_source_binding', lambda: dict(path='new-controller-fixture', sha256='b' * 64))
+    elif changed == 'host':
+        monkeypatch.setattr(reboot, '_native_identity', lambda: dict(_AFTER, host='44444444-4444-4444-8444-444444444444'))
+    else:
+        monkeypatch.setattr(reboot, '_native_identity', lambda: dict(_BEFORE))
+    with drain_startup._transaction():
+        pass
+    drain_startup.restore(hold_id=value['hold_id'])
+
+
+@pytest.mark.parametrize('live,expected', [(False, 'unknown'), (None, 'unknown'), (True, 'busy')])
+def test_spent_foreign_checkpoint_never_exempts_new_legacy_debt(environment, monkeypatch, live, expected):
+    from hermes_cli import process_identity, startup_hold_reboot as reboot
+    from gateway import drain_startup
+    home, _ = environment
+    prepare(environment)
+    replacement = dict(pid=999, create_time=999.25, purpose='mcp-helper')
+    (home / 'spawn-ledger.json').write_text(json.dumps([replacement]))
+    monkeypatch.setattr(reboot, '_source_binding', lambda: dict(path='new-controller-fixture', sha256='b' * 64))
+    monkeypatch.setattr(process_identity, '_pid_alive_matches', lambda *args, **kwargs: live)
+    with pytest.raises(RuntimeError, match='startup_hold_writers_' + expected):
+        drain_startup.begin()
+    assert not (home / '.startup-hold.json').exists()
+
+
+@pytest.mark.parametrize('field,value', [
+    ('host', {}), ('host', '00000000-0000-0000-0000-000000000000'),
+    ('root', None), ('source', []), ('ledger', {}), ('entries', ['a' * 64] * 2),
+    ('entries', ['a' * 64] * 33), ('install', None), ('spawner', [True, 1]),
+])
+def test_spent_checkpoint_still_rejects_malformed_history(environment, field, value):
+    from hermes_cli import startup_hold_reboot as reboot
+    from gateway import drain_startup
+    home, _ = environment
+    prepare(environment)
+    path = home / '.startup-legacy-reboot.json'
+    record = json.loads(path.read_bytes())
+    if field in {'root', 'source', 'ledger'}:
+        record['binding'][field] = value
+    else:
+        record[field] = value
+    path.write_text(json.dumps(record))
+    (home / 'spawn-ledger.json').write_text('[]')
+    with pytest.raises(RuntimeError, match='startup_hold_reboot_unavailable'):
+        drain_startup.begin()
+    assert not (home / '.startup-hold.json').exists()

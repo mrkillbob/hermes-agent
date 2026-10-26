@@ -102,9 +102,7 @@ def _binding():
                 source=_source_binding(), ledger=dict(sha256=digest, version=list(_version(after)))), entries
 
 
-def _selected(entries, hashes, install, spawner):
-    from hermes_cli.process_identity import _pid_alive_matches
-    from hermes_cli.startup_hold_reconcile import entry_state
+def _selector_shape(hashes, install, spawner):
     if (not isinstance(hashes, list) or not 1 <= len(hashes) <= 32
             or any(not _digest(value) for value in hashes) or len(set(hashes)) != len(hashes)
             or not isinstance(install, str) or len(install) != 12
@@ -114,6 +112,12 @@ def _selected(entries, hashes, install, spawner):
             or type(spawner[1]) not in (int, float) or not 0 < spawner[1] < 1e20
             or not math.isfinite(spawner[1])):
         _refuse()
+
+
+def _selected(entries, hashes, install, spawner):
+    from hermes_cli.process_identity import _pid_alive_matches
+    from hermes_cli.startup_hold_reconcile import entry_state
+    _selector_shape(hashes, install, spawner)
     selected = [entry for entry in entries if _hash(entry) in hashes]
     if len(selected) != len(hashes) or _pid_alive_matches(*spawner, strict=True) is not False:
         _refuse()
@@ -139,6 +143,24 @@ def _paused():
         raise RuntimeError('startup_hold_requires_pause')
 
 
+def _historical_binding_shape(binding):
+    if set(binding) != {'root', 'source', 'ledger'}:
+        _refuse()
+    root, source, ledger = (binding[key] for key in ('root', 'source', 'ledger'))
+    if (not isinstance(root, dict) or set(root) != {'path', 'device', 'inode', 'uid'}
+            or not isinstance(root['path'], str) or not root['path']
+            or any(type(root[key]) is not int or root[key] < 0 for key in ('device', 'inode', 'uid'))
+            or root['inode'] == 0
+            or not isinstance(source, dict) or set(source) != {'path', 'sha256'}
+            or not isinstance(source['path'], str) or not source['path'] or not _digest(source['sha256'])
+            or not isinstance(ledger, dict) or set(ledger) != {'sha256', 'version'}
+            or not _digest(ledger['sha256']) or not isinstance(ledger['version'], list)
+            or len(ledger['version']) != 6
+            or any(type(value) is not int or value < 0 for value in ledger['version'])
+            or ledger['version'][1] == 0 or ledger['version'][5] != 1):
+        _refuse()
+
+
 def validate(record, binding, entries, identity):
     """Pure bindings plus strict current liveness; inputs are acquired under custody."""
     if (not isinstance(record, dict) or set(record) != {'schema', 'kind', 'id', 'binding',
@@ -146,26 +168,29 @@ def validate(record, binding, entries, identity):
             or type(record.get('schema')) is not int or record['schema'] != 1
             or record['kind'] != 'prospective_local_reboot' or record['phase'] != 'committed'
             or not isinstance(record['binding'], dict)
-            or set(record['binding']) != set(binding)
-            or any(record['binding'][key] != binding[key] for key in ('root', 'source'))
-            or record['host'] != identity['host']):
+            or set(record['binding']) != set(binding)):
         _refuse()
+    _historical_binding_shape(record['binding'])
+    _selector_shape(record['entries'], record['install'], record['spawner'])
     try:
-        if (uuid.UUID(record['id']).hex != record['id'] or (uuid.UUID(record['boot_before']).int == 0
+        if (uuid.UUID(record['host']).int == 0 or str(uuid.UUID(record['host'])) != record['host']
+                or uuid.UUID(record['id']).int == 0 or uuid.UUID(record['id']).hex != record['id'] or (uuid.UUID(record['boot_before']).int == 0
                 or str(uuid.UUID(record['boot_before'])) != record['boot_before'])):
             _refuse()
     except (ValueError, TypeError, AttributeError):
         _refuse()
-    if record['boot_before'] == identity['boot']:
-        raise RuntimeError('startup_hold_reboot_required')
     if record['binding']['ledger'] != binding['ledger']:
         hashes = record['entries']
-        if (not isinstance(hashes, list) or not hashes or any(not _digest(value) for value in hashes)
-                or any(_hash(entry) in hashes for entry in entries)):
+        if any(_hash(entry) in hashes for entry in entries):
             _refuse()
-        # Normal real-owner registration may have removed ALL old selected rows.
-        # Grant no exemption; every current row still passes the ordinary guard.
+        # All selected rows are gone: this checkpoint supplies NO authority.
+        # A later controller/host must still pass every ordinary current guard.
         return frozenset()
+    if (any(record['binding'][key] != binding[key] for key in ('root', 'source'))
+            or record['host'] != identity['host']):
+        _refuse()
+    if record['boot_before'] == identity['boot']:
+        raise RuntimeError('startup_hold_reboot_required')
     return _selected(entries, record['entries'], record['install'], record['spawner'])
 
 

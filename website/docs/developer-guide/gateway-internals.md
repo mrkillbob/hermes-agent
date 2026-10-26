@@ -1023,7 +1023,9 @@ supervisor and startup suppression across the reboot.
 
 A real held native owner's ordinary registration may prune departed entries and
 replace the ledger. If every selected full-row hash is then absent, the checkpoint
-returns **no exemption** and the ordinary current-row guard governs restoration.
+returns **no exemption** and the ordinary current-row guard governs restoration,
+including after a later controller/source change. An expired checkpoint supplies
+no kernel-closure or other authority in that later context.
 If a changed ledger still contains any selected row, it refuses. Reconciliation
 itself never writes or prunes the ledger. Repeated validation of unchanged old
 history on later boot sessions is permitted; it is not a single-use or universal
