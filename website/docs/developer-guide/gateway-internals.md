@@ -998,6 +998,22 @@ Runtime and dependency artifact provenance remain separate qualification gates.
 Traversal errors, included directory links, nonregular files, and incomplete or
 unstable reads refuse rather than producing a partial fingerprint.
 
+New schema2 checkpoints also bind the nonzero local filesystem UUID, acquired
+with Darwin `fgetattrlist` from both the held home and ledger descriptors. Both
+must describe the same local filesystem. Current descriptor/path device and inode
+checks remain exact; only historical cross-boot device numbers may differ when
+the UUID and every other binding agree. This permits normal mount renumbering,
+not volume replacement. Unsupported attributes, network filesystems and changed
+inodes or ledger metadata refuse. Existing schema1 records keep their original
+strict device checks; they are never migrated, backdated or rebound.
+
+A separately qualified external schema2 controller may manage hold and restore
+around an older runtime with the same journal/marker/writer protocol. That
+runtime must perform genuine owner registration under the normal ledger lock;
+the controller never prunes on its behalf. The older runtime must not be used
+to interpret a schema2 checkpoint. Source acceptance, controller custody and
+runtime artifact acceptance remain separate.
+
 The initial implementation supports native Darwin identities only. It reads
 `kern.bootsessionuuid`, which [XNU exposes read-only](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c), and the direct host-UUID syscall,
 avoiding [the public wrapper's callback fallback](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/gethostuuid.c).

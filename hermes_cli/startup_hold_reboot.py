@@ -48,6 +48,14 @@ def _uid():
     return getuid()
 
 
+def _native_volume(fd):
+    from hermes_platform.host.volume_identity import local_volume_identity
+    try:
+        return local_volume_identity(fd)
+    except (OSError, ValueError, UnicodeError, AttributeError):
+        _refuse()
+
+
 def _source_file_hash(path):
     from hermes_cli.startup_hold_reconcile import _read_complete, _version
     fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
@@ -86,8 +94,10 @@ def _source_binding():
     return dict(path=str(root), sha256=_hash(hashes))
 
 
-def _binding():
+def _binding(schema=2):
     from hermes_cli.startup_hold_reconcile import ledger_snapshot, _version
+    if type(schema) is not int or schema not in (1, 2):
+        _refuse()
     root = get_default_hermes_root().resolve()
     path = root / 'spawn-ledger.json'
     before = path.lstat()
@@ -98,8 +108,34 @@ def _binding():
             or info.st_uid != _uid() or info.st_mode & 0o022
             or after.st_uid != _uid() or after.st_mode & 0o022):
         _refuse()
-    return dict(root=dict(path=str(root), device=info.st_dev, inode=info.st_ino, uid=_uid()),
-                source=_source_binding(), ledger=dict(sha256=digest, version=list(_version(after)))), entries
+    binding = dict(root=dict(path=str(root), device=info.st_dev, inode=info.st_ino, uid=_uid()),
+                   source=_source_binding(), ledger=dict(sha256=digest, version=list(_version(after))))
+    if schema == 2:
+        binding['volume'] = _volume_binding(root, path, info, after)
+    return binding, entries
+
+
+def _volume_binding(root, path, info, ledger):
+    from hermes_cli.startup_hold_reconcile import _version
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        ledger_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            volume = _native_volume(root_fd)
+            if (volume != _native_volume(ledger_fd) or info.st_dev != ledger.st_dev
+                    or _version(os.fstat(ledger_fd)) != _version(ledger)
+                    or _version(path.lstat()) != _version(ledger)):
+                _refuse()
+            # Preserve full device/inode equality WITHIN this acquisition.
+            for current in (os.fstat(root_fd), root.lstat()):
+                if ((current.st_dev, current.st_ino, current.st_uid, current.st_mode)
+                        != (info.st_dev, info.st_ino, info.st_uid, info.st_mode)):
+                    _refuse()
+            return volume
+        finally:
+            os.close(ledger_fd)
+    finally:
+        os.close(root_fd)
 
 
 def _selector_shape(hashes, install, spawner):
@@ -143,8 +179,9 @@ def _paused():
         raise RuntimeError('startup_hold_requires_pause')
 
 
-def _historical_binding_shape(binding):
-    if set(binding) != {'root', 'source', 'ledger'}:
+def _historical_binding_shape(binding, schema):
+    keys = {'root', 'source', 'ledger'} | ({'volume'} if schema == 2 else set())
+    if set(binding) != keys:
         _refuse()
     root, source, ledger = (binding[key] for key in ('root', 'source', 'ledger'))
     if (not isinstance(root, dict) or set(root) != {'path', 'device', 'inode', 'uid'}
@@ -159,18 +196,36 @@ def _historical_binding_shape(binding):
             or any(type(value) is not int or value < 0 for value in ledger['version'])
             or ledger['version'][1] == 0 or ledger['version'][5] != 1):
         _refuse()
+    if schema == 2:
+        try:
+            if (not uuid.UUID(binding['volume']).int
+                    or str(uuid.UUID(binding['volume'])) != binding['volume']
+                    or root['device'] != ledger['version'][0]):
+                _refuse()
+        except (ValueError, TypeError, AttributeError):
+            _refuse()
+
+
+def _cross_boot_bindings(binding, schema):
+    """Only schema2 replaces historical mount device numbers; never current checks."""
+    if schema == 1:
+        return binding
+    return dict(root={key: value for key, value in binding['root'].items() if key != 'device'},
+                source=binding['source'], volume=binding['volume'],
+                ledger=dict(sha256=binding['ledger']['sha256'], version=binding['ledger']['version'][1:]))
 
 
 def validate(record, binding, entries, identity):
     """Pure bindings plus strict current liveness; inputs are acquired under custody."""
     if (not isinstance(record, dict) or set(record) != {'schema', 'kind', 'id', 'binding',
             'host', 'boot_before', 'entries', 'install', 'spawner', 'phase'}
-            or type(record.get('schema')) is not int or record['schema'] != 1
+            or type(record.get('schema')) is not int or record['schema'] not in (1, 2)
             or record['kind'] != 'prospective_local_reboot' or record['phase'] != 'committed'
             or not isinstance(record['binding'], dict)
             or set(record['binding']) != set(binding)):
         _refuse()
-    _historical_binding_shape(record['binding'])
+    _historical_binding_shape(record['binding'], record['schema'])
+    _historical_binding_shape(binding, record['schema'])
     _selector_shape(record['entries'], record['install'], record['spawner'])
     try:
         if (uuid.UUID(record['host']).int == 0 or str(uuid.UUID(record['host'])) != record['host']
@@ -179,14 +234,16 @@ def validate(record, binding, entries, identity):
             _refuse()
     except (ValueError, TypeError, AttributeError):
         _refuse()
-    if record['binding']['ledger'] != binding['ledger']:
+    previous = _cross_boot_bindings(record['binding'], record['schema'])
+    current = _cross_boot_bindings(binding, record['schema'])
+    if previous['ledger'] != current['ledger']:
         hashes = record['entries']
         if any(_hash(entry) in hashes for entry in entries):
             _refuse()
         # All selected rows are gone: this checkpoint supplies NO authority.
         # A later controller/host must still pass every ordinary current guard.
         return frozenset()
-    if (any(record['binding'][key] != binding[key] for key in ('root', 'source'))
+    if (previous != current
             or record['host'] != identity['host']):
         _refuse()
     if record['boot_before'] == identity['boot']:
@@ -206,7 +263,7 @@ class _Proof:
         from hermes_cli.startup_hold_writers import refuse_live_writers
         _paused()
         refuse_live_writers()
-        binding, entries = _binding()
+        binding, entries = _binding(schema=self.record.get('schema'))
         if (_version(os.fstat(self.fd)) != self.version
                 or _version((get_default_hermes_root() / _FILENAME).lstat()) != self.version):
             _refuse()
@@ -322,7 +379,7 @@ def prepare(*, ledger_sha256, entry_sha256, install, spawner):
                 _refuse()
             _refuse_uncertain(entries)
             _selected(entries, entry_sha256, install, spawner)
-            record = dict(schema=1, kind='prospective_local_reboot', id=uuid.uuid4().hex,
+            record = dict(schema=2, kind='prospective_local_reboot', id=uuid.uuid4().hex,
                           binding=binding, host=identity['host'], boot_before=identity['boot'],
                           entries=entry_sha256, install=install, spawner=spawner)
             _paused()
