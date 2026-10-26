@@ -70,7 +70,7 @@ def payload_tree(tmp_path: Path):
                      "pm/environments.py", "pm/filesystem.py",
                      "pm/lifetime.py", "pm/lifetime_handles.py", "pm/lifetime_cleanup.py",
                      "hermes_cli/runtime_state.py",
-                     "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py",
+                     "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py", "hermes_cli/startup_hold.py",
                      # prepare_launch returns early for a fixture repo (no .git), but the bootstrap
                      # imports these two before it can tell.
                      "hermes_cli/venv_sync.py", "hermes_cli/steward.py"):

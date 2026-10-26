@@ -536,6 +536,10 @@ class AuthorityConnection:
 
     async def describe(self, ref, params):
         await self.ping(ref, params)
+        from hermes_cli.startup_hold import active
+        if active(self.authority.runner):
+            from gateway.drain_startup import describe
+            return describe(self.authority)
         from gateway.session_policy import CREATE_FIELDS, SURFACES
         from gateway.session_skin import resolved_skin
         return {'instance_id': self.authority.instance_id, 'profile_id': self.authority.profile_id,

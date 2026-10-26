@@ -165,7 +165,7 @@ _CONFIG_LOCK = threading.RLock()
 # path -> last successfully loaded (expanded) config; served after a parse failure so a
 # mid-edit broken YAML never silently drops user overrides (e.g. approvals.deny rules).
 _LAST_EXPANDED_CONFIG_BY_PATH: dict[str, Any] = {}
-# path -> (user_mtime_ns, user_size, managed_mtime_ns, managed_size, merged, env_ref_snapshot).
+# path -> (*user_signature, *managed_signature, maintenance_mode, merged, env_ref_snapshot).
 # load_config() returns a deepcopy of the cached value while the signature matches (skips
 # safe_load + merge + normalize + expand, ~13 ms). Writers use the config writer seam (fresh inode
 # -> new mtime_ns) so no explicit invalidation is needed. The managed-file signature is folded
@@ -1255,6 +1255,9 @@ def warn_deprecated_cwd_env_vars() -> None:
     """Warn if MESSAGING_CWD / TERMINAL_CWD is set in .env (canonical: terminal.cwd in config.yaml).
     Reads the file rather than ``os.environ`` because runtime bridges and session restoration
     legitimately set ``TERMINAL_CWD``."""
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return
     try:
         env_map = load_env()
     except Exception:
@@ -2374,26 +2377,6 @@ def apply_terminal_config_to_env(
     return target
 
 
-def _load_config_cache_sig(config_path: Path) -> tuple[Optional[tuple[int, int, int, int]], Optional[tuple[int, ...]]]:
-    """Return ``(user_sig, cache_sig)`` for ``_LOAD_CONFIG_CACHE``.
-    The managed config file's signature is folded in ((0, 0, 0, 0) = none) so editing it invalidates
-    the merged result. ``cache_sig`` is None only when neither file exists (nothing to cache on)."""
-    try:
-        st = config_path.stat()
-        user_sig: Optional[tuple[int, int, int, int]] = file_signature(st)
-    except FileNotFoundError:
-        user_sig = None
-    managed_dir = managed_scope.get_managed_dir()
-    try:
-        mst = (managed_dir / "config.yaml").stat() if managed_dir else None
-        managed_sig = file_signature(mst) if mst else (0, 0, 0, 0)
-    except OSError:
-        managed_sig = (0, 0, 0, 0)
-    if user_sig is None and managed_sig == (0, 0, 0, 0):
-        return None, None
-    return user_sig, (*(user_sig or (0, 0, 0, 0)), *managed_sig)
-
-
 def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: Exception) -> Optional[dict[str, Any]]:
     """Warn about a parse failure and return the last-known-good config, or None (-> defaults).
     A parse failure must not silently replace the effective config with defaults — that drops
@@ -2430,7 +2413,7 @@ def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: 
     if cache_sig is not None:
         # Cache under the failed file's signature (empty env snapshot: always valid) so repeated
         # loads don't re-parse the fallback; fixing the file changes the signature and reloads
-        # normally, and a read error is re-probed on every hit (_load_config_cache_hit).
+        # normally; config_load._load_config_cache_hit re-probes read errors on every hit.
         _LOAD_CONFIG_CACHE[path_key] = (*cache_sig, lkg_copy, {})
     return lkg_copy
 
@@ -2453,32 +2436,12 @@ def _merge_managed_overlay(expanded: dict[str, Any]) -> tuple[dict[str, Any], An
     return _deep_merge(expanded, _expand_env_vars(managed_normalized)), managed_config
 
 
-def _load_config_cache_hit(path_key: str, cache_sig: Any) -> Optional[dict[str, Any]]:
-    """Lookup: the cached expanded config for ``path_key`` if its signature equals
-    ``cache_sig`` AND every ``${VAR}`` it was expanded against still has the same value, else
-    ``None``. Signatures matching is not enough: a load before load_hermes_dotenv() would otherwise
-    pin unexpanded literals (e.g. auxiliary.<task>.api_key) for the process lifetime (#58514).
-    Shared by the lock-free fast path and the locked re-check of ``_load_config_impl``."""
-    cached = _LOAD_CONFIG_CACHE.get(path_key)
-    if cached is None or cache_sig is None or cached[:8] != cache_sig:
-        return None
-    hit = cached[8]
-    if isinstance(hit, FailedConfigRead) and isinstance(hit.read_error, OSError):
-        # A read error (EMFILE/EIO/sharing violation) can clear without touching the file's
-        # signature: serve the fallback only while the file still cannot be read.
-        try:
-            with open(path_key, "rb") as f:
-                f.read()
-            return None
-        except OSError:
-            return hit
-    env_snapshot = cached[9] if len(cached) > 9 else {}
-    if all(_env_ref_lookup(k) == v for k, v in env_snapshot.items()):
-        return hit
-    return None
-
 
 def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
+    from hermes_cli.config_load import (
+        _load_config_cache_hit, _load_config_cache_sig, _initialize_home_for_read, record_good_config,
+    )
+
     snapshot = _worker_config_snapshot()
     if snapshot is not None:
         return _deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot)
@@ -2501,7 +2464,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
         pass
 
     with _CONFIG_LOCK:
-        ensure_hermes_home()
+        _initialize_home_for_read()
         config_path = get_config_path()
         path_key = str(config_path)
 
@@ -2532,8 +2495,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
                 # A copy of the file that just parsed is what a FRESH process falls back to when the
                 # next edit breaks the YAML (see _last_known_good_fallback). backup_config() skips
                 # byte-identical repeats and keeps a bounded count, so steady-state loads cost one stat.
-                from hermes_cli.config_backups import backup_config
-                backup_config(config_path, "good")
+                record_good_config(config_path)
             except Exception as e:
                 lkg_copy = _last_known_good_fallback(config_path, path_key, cache_sig, e)
                 if lkg_copy is not None:
@@ -3992,6 +3954,9 @@ def config_command(args):
 def _inject_profile_env_vars() -> None:
     """Expose env_vars of every ``auth_type="api_key"`` provider in providers/ via OPTIONAL_ENV_VARS
     without editing this file."""
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return
     try:
         from providers import list_providers
         for _pp in list_providers():

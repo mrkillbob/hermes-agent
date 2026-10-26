@@ -936,6 +936,11 @@ class GatewayStartupMixin:
             self._gateway_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._gateway_loop = None
+        from hermes_cli.startup_hold import active
+        if active(self):
+            from hermes_startup_watchdog import disarm_startup_watchdog
+            disarm_startup_watchdog()
+            return
         if self._gateway_loop is not None:
             self._start_loop_liveness_guards(self._gateway_loop)
             # Loop live: the loop-liveness watchdog takes over from the startup watchdog. Disarm even
@@ -1682,7 +1687,8 @@ class GatewayStartupMixin:
         await self._start_log_startup_environment()
         if await self._abort_startup_if_shutdown_requested():
             return True
-        if self._start_check_access_policy():
+        from hermes_cli.startup_hold import active
+        if not active(self) and self._start_check_access_policy():
             return True
         from gateway.drain_kanban import held
         if held(self):

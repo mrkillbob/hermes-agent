@@ -357,6 +357,8 @@ _UPDATE_DEPENDENCIES = (
     "hermes_cli/memory_provider_migration.py",
     "hermes_cli/left_core_migration.py",  # source_build migrates plugins that left core
     "hermes_cli/maintenance_policy.py",  # update recovery and source-build maintenance decisions
+    "hermes_cli/startup_hold.py",  # early hold gates launch completion and maintenance
+    "hermes_cli/startup_hold_exec.py",  # planned interpreter re-entry retains startup custody
     "hermes_cli/config_version_stamp.py",  # post_update converts legacy AGENT_BROWSER_* before stamping
     "hermes_cli/web_build_limits.py",  # source_build caps the dashboard Node build
     "hermes_cli/desktop_console.py",
@@ -364,6 +366,7 @@ _UPDATE_DEPENDENCIES = (
     "hermes_cli/gui_uninstall.py",
     "hermes_cli/linux_desktop_entry.py",
     "hermes_cli/config_effective.py",  # source_releases reads the profile-scoped update feed
+    "hermes_cli/config_load.py",  # effective config cache and deferred read maintenance
     "hermes_cli/github_api.py",  # source_check's release lookup
     "hermes_cli/build_info.py",
     "hermes_cli/image_provenance.py",

@@ -696,6 +696,9 @@ class SessionDB(
         malformed sqlite_master), generation stamp."""
         # Never materialize a deleted/archived named profile's home: a multiplexer or Desktop backend
         # still holding the profile's route would otherwise re-scaffold it on the next turn (#94590).
+        from hermes_cli.startup_hold import active
+        if active() and self.db_path.exists() and has_invalid_sqlite_header_preopen(self.db_path):
+            raise RuntimeError('startup_hold: database recovery requires a separate operator action')
         mkdir_under_hermes_home(self.db_path.parent)
         try:
             # Serialize zero-byte check, quarantine, connect and schema commit so concurrent
@@ -725,7 +728,7 @@ class SessionDB(
         except sqlite3.DatabaseError as exc:
             # A malformed schema fails on the very first statement (before _init_schema), so the
             # FTS-rebuild layer never sees it: repair sqlite_master in place (backup first), reopen once.
-            if not is_malformed_schema_error(exc) or not _claim_repair_attempt(self.db_path):
+            if active() or not is_malformed_schema_error(exc) or not _claim_repair_attempt(self.db_path):
                 raise
             logger.error(
                 "state.db schema is malformed (%s) — attempting automatic "

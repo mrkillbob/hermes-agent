@@ -24,6 +24,7 @@ from hermes_dir_acl import make_user_dir
 
 from gateway.status_inline_source import (
     command_line_runs_inline_source,
+    command_line_tokens,
     inline_bootstrap_argv,
     inline_source_flag_index,
 )
@@ -544,12 +545,7 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
     argv since ``_apply_profile_override`` removes them before argparse."""
     if not command:
         return None
-    try:
-        raw_tokens = shlex.split(command, posix=False)
-    except ValueError:
-        raw_tokens = command.split()
-    # Strip surrounding quotes, normalize slashes + case per token.
-    cased_tokens = [t.strip("\"'").replace("\\", "/") for t in raw_tokens]
+    cased_tokens = command_line_tokens(command)
     tokens = [t.lower() for t in cased_tokens]
     if not tokens:
         return None
@@ -675,7 +671,8 @@ def _profile_name_for_home(profile_home: Path) -> Optional[str]:
 def profile_flag_value(command: str) -> Optional[str]:
     """Lowercased ``-p``/``--profile`` argument of a case-preserved command line (a bootstrap's interpreter
     ``-P`` is no ``-p``, #127865), or None. Token equality: ``-p ops`` must not claim ``-p ops-2``."""
-    tokens = [t.lower() for t in inline_bootstrap_argv(command.split()) or command.split()]
+    tokens = command_line_tokens(command)
+    tokens = [t.lower() for t in inline_bootstrap_argv(tokens) or tokens]
     for i, tok in enumerate(tokens):
         if tok.startswith("--profile="):
             return tok.partition("=")[2]

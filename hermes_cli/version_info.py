@@ -58,10 +58,20 @@ def _derived_version(
     return base_version
 
 
+def _git_probe(command):
+    from hermes_cli.startup_hold import active
+    if not active():
+        return command, None
+    import os
+    return ([command[0], '-c', 'core.fsmonitor=false', *command[1:]],
+            {**os.environ, 'GIT_NO_LAZY_FETCH': '1', 'GIT_OPTIONAL_LOCKS': '0'})
+
+
 def _run_git(repo_dir: Path, *args: str) -> str | None:
+    command, probe_env = _git_probe(['git', *args])
     try:
         result = subprocess.run(
-            ["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3, cwd=str(repo_dir),
+            command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3, cwd=str(repo_dir), env=probe_env,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -238,12 +248,13 @@ def _git_version_info(repo_dir: Path, *, include_untracked: bool = False) -> Ver
         status_command = ["git", "--no-optional-locks", "status", "--porcelain"]
         if not include_untracked:
             status_command.append("-uno")
+        status_command, probe_env = _git_probe(status_command)
         dirty_result = subprocess.run(
             status_command,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
             timeout=3,
-            cwd=str(repo_dir),
+            cwd=str(repo_dir), env=probe_env,
             check=False,
         )
         dirty = dirty_result.returncode == 0 and bool((dirty_result.stdout or "").strip())

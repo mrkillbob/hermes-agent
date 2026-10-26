@@ -123,6 +123,8 @@ class PluginHost:
                 return self._channel  # type: ignore[return-value]
             self._stopping = False
             argv = self._argv()
+            from hermes_cli.startup_hold import mark_uncertain_children
+            mark_uncertain_children()
             proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, env=self._env(), cwd=str(self._home),
                                     bufsize=0)

@@ -549,7 +549,92 @@ def _settle_interrupted_update() -> None:
         recovery.relaunch_after_restore()
 
 
-_settle_interrupted_update()
+def _startup_hold_defers_early_recovery() -> bool:
+    """Read only stdlib state before the torn-tree recovery closure can be imported.
+
+    Root bootstrap files survive a ZIP swap; package helpers/constants may not.
+    Conservatively checking both the native root and explicit profile ancestors
+    prevents a damaged checkout from repairing through an existing hold.
+    """
+    import json
+    from pathlib import Path
+    import stat
+
+    command = sys.argv[1:]
+    if any(command[index:index + 2] == ['gateway', 'ensure'] for index in range(len(command) - 1)):
+        return True
+    for index in range(len(command) - 2):
+        if command[index:index + 3] == ['gateway', 'drain', 'hold']:
+            return True
+        if command[index:index + 3] == ['gateway', 'drain', 'restore'] and '--hold-id' in command:
+            return True
+    suffix = os.environ.get('HERMES_DATA_DIR_SUFFIX', '')
+    if sys.platform == 'win32':
+        base = Path(os.environ.get('LOCALAPPDATA', '').strip() or Path.home() / 'AppData' / 'Local')
+        native = base / ('hermes' + suffix)
+    else:
+        native = Path.home() / ('.hermes' + suffix)
+    homes = {native}
+    raw = os.environ.get('HERMES_HOME', '').strip()
+    if raw:
+        lexical = Path(os.path.expanduser(os.path.expandvars(raw)))
+        resolved = lexical.resolve()
+        homes = {native} if resolved.is_relative_to(native.resolve()) else {lexical, resolved}
+        if lexical.parent.name == 'profiles':
+            homes.add(lexical.parent.parent)
+    for home in homes:
+        try:
+            (home / '.startup-hold.json').lstat()
+            return True
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return True
+        path = home / '.drain_request.json'
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
+        except FileNotFoundError:
+            if path.is_symlink():
+                return True
+            continue
+        except OSError:
+            return True
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return True
+            raw_marker = os.read(fd, 1_048_577)
+            body = json.loads(raw_marker.decode('utf-8-sig'))
+            if len(raw_marker) > 1_048_576 or not isinstance(body, dict) or not body or 'startup_hold' in body:
+                return True
+        except (OSError, ValueError, UnicodeError):
+            return True
+        finally:
+            os.close(fd)
+    return False
+
+
+_defer_startup_recovery = _startup_hold_defers_early_recovery()
+if not _defer_startup_recovery:
+    _settle_interrupted_update()
+
+_legacy_post_swap = _legacy_post_swap_invocation(sys.argv[1:])
+if _legacy_post_swap is not None:
+    if _defer_startup_recovery:
+        raise SystemExit("startup_hold: legacy update continuation is held")
+    # This continuation exists precisely because the replacement tree may not
+    # run under the old release's dependency graph. Take it over before PM
+    # activation, launch preparation, or argparse imports any of that graph.
+    from hermes_cli.update_handoff import _continue_legacy_post_swap
+
+    _handoff_path, _argv_tail = _legacy_post_swap
+    raise SystemExit(_continue_legacy_post_swap(_handoff_path, argv_tail=_argv_tail))
+
+from hermes_cli import startup_hold as _startup_hold_policy
+if hasattr(sys, '_hermes_startup_writer_handoff'):
+    from hermes_cli.startup_hold_exec import adopt_process_writer
+    adopt_process_writer()
+_startup_hold_policy.enter_boot(_root, sys.argv[1:])
+_startup_hold_policy.register_process_writer(sys.argv[1:])
 
 
 def _pin_launcher_home() -> None:
@@ -565,15 +650,7 @@ def _pin_launcher_home() -> None:
 
 _pin_launcher_home()
 
-_legacy_post_swap = _legacy_post_swap_invocation(sys.argv[1:])
-if _legacy_post_swap is not None:
-    # This continuation exists precisely because the replacement tree may not
-    # run under the old release's dependency graph. Take it over before PM
-    # activation, launch preparation, or argparse imports any of that graph.
-    from hermes_cli.update_handoff import _continue_legacy_post_swap
 
-    _handoff_path, _argv_tail = _legacy_post_swap
-    raise SystemExit(_continue_legacy_post_swap(_handoff_path, argv_tail=_argv_tail))
 
 
 class RelaunchExit(SystemExit):
@@ -604,7 +681,9 @@ if not _pm_repair:
                 import subprocess
 
                 raise RelaunchExit(subprocess.call(_command))
-            os.execv(str(_launch_python), _command)
+            from hermes_cli.startup_hold_exec import writer_exec_handoff
+            with writer_exec_handoff(_command) as _exec_command:
+                os.execv(str(_launch_python), _exec_command)
     except Exception as exc:
         if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
             print(f"hermes: {message}", file=sys.stderr)
@@ -617,8 +696,11 @@ if not _pm_repair:
               "running with the previous dependencies — run `hermes update` to finish it",
               file=sys.stderr)
     try:
-        recover_if_needed(_root)
-        activate_dependencies(_root)
+        if _startup_hold_policy.defer_maintenance():
+            activate_dependencies(_root, allow_recovery=False)
+        else:
+            recover_if_needed(_root)
+            activate_dependencies(_root)
     except (RuntimeError, OSError) as exc:
         if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
             print(f"hermes: {message}", file=sys.stderr)

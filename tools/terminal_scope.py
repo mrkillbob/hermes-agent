@@ -204,6 +204,9 @@ def _resolve_scope_cwd_placeholder(scope: dict[str, str]) -> None:
 def install_profile_terminal_scope(
     hermes_home: Any, *, env_overlay: Optional[dict[str, str]] = None) -> Token:
     """Build AND install a profile's policy; on failure install the refusal scope. Never raises."""
+    from hermes_cli.startup_hold import active
+    if active():
+        return set_terminal_scope(TerminalPolicyRefusal('startup_hold'))
     try:
         return set_terminal_scope(build_profile_terminal_scope(hermes_home, env_overlay=env_overlay))
     except TerminalPolicyUnavailable as exc:

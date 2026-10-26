@@ -81,7 +81,8 @@ def test_historical_payload_maps_to_takeover_request_schema(tmp_path, desktop, r
 
 
 @pytest.mark.live_system_guard_bypass
-def test_shipped_post_swap_argv_enters_takeover_before_current_cli(tmp_path):
+@pytest.mark.parametrize("held", [False, True])
+def test_shipped_post_swap_argv_enters_takeover_before_current_cli(tmp_path, held):
     """The 2026.9.21 updater starts HEAD as ``hermes update <flags> --post-swap FILE``.
 
     That command must reach the historical takeover before current launch preparation or
@@ -121,6 +122,9 @@ def test_shipped_post_swap_argv_enters_takeover_before_current_cli(tmp_path):
         "receipt": {"update_id": "old-correlation", "outcome": "running"},
     }
     handoff.write_text(json.dumps(payload), encoding="utf-8")
+    original_handoff = handoff.read_bytes()
+    if held:
+        (home / ".startup-hold.json").write_text("{}", encoding="utf-8")
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("HERMES_", "PYTHON", "UV_"))}
     env.update(HOME=str(home), HERMES_HOME=str(home))
@@ -130,8 +134,13 @@ def test_shipped_post_swap_argv_enters_takeover_before_current_cli(tmp_path):
         cwd=root, env=env, capture_output=True, text=True, timeout=30,
         check=False,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert not handoff.exists()
+    if held:
+        assert result.returncode != 0
+        assert "startup_hold: legacy update continuation is held" in result.stderr
+        assert handoff.read_bytes() == original_handoff
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not handoff.exists()
 
 
 @pytest.mark.parametrize("status", [0, 7])

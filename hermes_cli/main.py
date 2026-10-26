@@ -25,7 +25,12 @@ except ModuleNotFoundError as exc:
 # dir, so if IT can't import nothing in hermes_cli can.
 from hermes_cli import _early_recovery as _early_recovery_mod
 
-if _early_recovery_mod.restore_interrupted_pull():
+from pathlib import Path as _StartupPath
+import sys as _startup_sys
+from hermes_cli import startup_hold as _startup_hold_policy
+
+_startup_hold_policy.enter_boot(_StartupPath(__file__).resolve().parents[1], _startup_sys.argv[1:])
+if not _startup_hold_policy.defer_maintenance() and _early_recovery_mod.restore_interrupted_pull():
     _early_recovery_mod.relaunch_after_restore()
 
 # Windows: neutralize CPython's ``platform._syscmd_ver`` before anything else
@@ -183,27 +188,6 @@ def _run_and_exit_oneshot(
         # The hard exit is the safety boundary for #43055.
         _exit_after_oneshot(rc)
 
-
-def _warn_if_unsupervised_pid1(pid: int | None = None) -> None:
-    """Warn when this process is PID 1 with nothing above it to reap orphans.
-
-    The official image's ENTRYPOINT (``docker/entrypoint-dispatch.sh`` -> s6-overlay's
-    ``/init``) is the reaper for orphaned grandchildren (browser tooling, MCP servers, shell
-    children). A Compose service that overrides ``entrypoint:`` to invoke hermes directly makes
-    hermes itself PID 1 — nothing then ``wait()``s on those orphans and they accumulate as
-    zombies without bound (#111577). Outside a container a user process is never PID 1, so
-    this is quiet everywhere else; it mirrors the dispatcher's own non-PID-1 warning.
-    """
-    if (pid if pid is not None else os.getpid()) != 1:
-        return
-    print(
-        "[hermes] WARNING: this process is PID 1 with no init above it "
-        "(entrypoint override?). Orphaned child processes will not be "
-        "reaped and will accumulate as zombies. Use the image's default "
-        "ENTRYPOINT (docker/entrypoint-dispatch.sh) instead of overriding "
-        "it, or run with `docker run --init` / `init: true` in Compose.",
-        file=sys.stderr,
-    )
 
 
 def _set_process_title() -> None:
@@ -700,7 +684,7 @@ if sys.argv[1:2] == ["pm"]:
 # resolving in every new terminal (venv\Scripts itself must stay off PATH — it shadows the user's
 # ``python``, #83797). Costs a few stat calls when healthy; gates fail toward inaction so source checkouts
 # are untouched.
-if sys.platform == "win32":
+if sys.platform == "win32" and not _startup_hold_policy.defer_maintenance():
     try:
         from hermes_cli import _install_repair as _install_repair_mod
 
@@ -730,7 +714,8 @@ try:
     from hermes_cli.config_effective import load_user_config_effective as _load_effective_early
 
     _cfg_path = get_hermes_home() / "config.yaml"
-    if _cfg_path.exists():
+    from hermes_cli.startup_hold import defer_maintenance as _defer_startup_maintenance
+    if _cfg_path.exists() and not _defer_startup_maintenance():
         _early_cfg_raw = _load_effective_early(_cfg_path)
         if "HERMES_REDACT_SECRETS" not in os.environ:
             _early_sec_cfg = _early_cfg_raw.get("security", {})
@@ -2879,6 +2864,8 @@ def _chat_runs_at_gateway(args) -> bool:
 
 def _prepare_agent_startup(args) -> None:
     """Discover plugins/MCP/hooks for commands that can run an agent turn."""
+    if _startup_hold_policy.defer_maintenance():
+        return
     # --yolo chokepoint: HERMES_YOLO_MODE must be set before any discovery
     # below imports tools.approval, which freezes _YOLO_MODE_FROZEN at import.
     # main() sets it earlier too, but other launchers (Termux fast-CLI) reach
@@ -3453,6 +3440,7 @@ def _default_to_chat(args) -> None:
 def main():
     """Main entry point for hermes CLI."""
     _set_process_title()
+    from hermes_cli.main_process import _warn_if_unsupervised_pid1
     _warn_if_unsupervised_pid1()
     _advertise_agent_env()
 
@@ -3484,7 +3472,9 @@ def main():
 
     # Checkout changed since last launch → sweep stale __pycache__ once so no
     # process resolves fresh source against old bytecode. Never raises.
-    _sweep_stale_bytecode_if_checkout_changed()
+    from hermes_cli.startup_hold import defer_maintenance
+    if not defer_maintenance():
+        _sweep_stale_bytecode_if_checkout_changed()
 
     _recover_update_debts_on_startup()  # owed fleet restarts, gateways a killed update paused
 

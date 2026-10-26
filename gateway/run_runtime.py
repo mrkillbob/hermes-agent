@@ -507,6 +507,14 @@ async def start_gateway_runtime_api(runner):
     # The bootstrap registered these before its control socket answered; a runner started without it
     # (an embedded gateway) gets them here, before the listener's slow start.
     register_control_verbs(runner, home)
+    from hermes_cli.startup_hold import active, REASON as STARTUP_REASON
+    if active(runner):
+        # A targetless held boot exposes only native discovery/control on the private ephemeral
+        # listener. Do not inspect Webapp settings, bind its configured address or touch credentials.
+        runner.webapp_status = {"state": "unavailable", "url": None, "reason": STARTUP_REASON}
+        runner.session_api = await run_api.start_gateway_api(runner)
+        runner.session_runtime_descriptor['api_origin'] = runner.session_api.api_origin
+        return
     host, port, webapp, unusable = listener_plan(home)
     # A webapp: block that asks for the Webapp but cannot be used is reported with its reason.
     runner.webapp_status = ({"state": "unavailable", "url": None, "reason": unusable} if unusable
@@ -629,7 +637,8 @@ def publish_gateway_runtime_ready(runner):
         'session-authority-v1', 'durable-admission-v1', 'event-replay-v1'])
     from gateway.drain_kanban import held, REASON
     if held(runner):
-        descriptor.update(state='draining', drain_reason=REASON)
+        from hermes_cli.startup_hold import active, REASON as STARTUP_REASON
+        descriptor.update(state='draining', drain_reason=STARTUP_REASON if active(runner) else REASON)
     else:
         from gateway.session_hosted_service import start_ready_hosted_services
         start_ready_hosted_services(runner)
@@ -708,7 +717,8 @@ async def settle_gateway_runtime(runner, budget=None, reason=None):
     # Work settled above. ACP has no per-session destroy,
     # so the stop is the end of every ACP session nobody is viewing (#118216).
     from gateway.session_acp_lifecycle import end_idle_acp_sessions
-    for authority in _authorities(runner):
+    from hermes_cli.startup_hold import active
+    for authority in (() if active(runner) else _authorities(runner)):
         try:
             end_idle_acp_sessions(authority)
         except Exception:

@@ -248,3 +248,26 @@ def _print_host_hint() -> None:
     if pid is not None and record is not None and record.pid == pid:
         print(f"  PID {pid} is the host gateway serving this profile; stopping it would take every "
               f"served profile offline. Stop the host instead: hermes gateway stop --all")
+
+
+def _print_unfolded_gateway_note(owner) -> None:
+    """Detect-and-converge: name the per-profile gateways `--all` no longer sweeps, never kill them."""
+    from hermes_cli import gateway as gw
+    try:
+        others = [pid for pid in gw.find_gateway_pids(all_profiles=True) if pid != owner.pid]
+    except Exception:
+        return
+    if not others:
+        return
+    print(f"  {len(others)} per-profile gateway process(es) still run beside it "
+          f"(PIDs: {', '.join(str(p) for p in others)}).")
+    print("  They were left running; fold them in with: hermes gateway migrate --multiplex")
+
+
+def _status_host_kind() -> str:
+    from hermes_cli.gateway import is_termux, is_wsl, is_windows
+    if is_termux():
+        return "termux"
+    if is_wsl():
+        return "wsl"
+    return "windows" if is_windows() else "other"

@@ -424,5 +424,15 @@ def register_control_verbs(runner, home, server=None, *, links_checked: bool | N
                 "sign_in_gate": bool(getattr(web.app.state, "auth_required", False)),
                 "connections_closed": ended.get("sockets", 0)}
 
-    server.private_handlers.update({
-        "webapp-status": webapp_status, "webapp-launch": webapp_launch, "webapp-sign-out": webapp_sign_out})
+    def hold_guard(handler):
+        def guarded(params, peer):
+            from hermes_cli.startup_hold import active, REASON as STARTUP_REASON
+            if active(runner):
+                raise RuntimeError(STARTUP_REASON)
+            return handler(params, peer)
+        return guarded
+
+    # These private verbs bypass drain_kanban.control_handlers. Guard every request, including
+    # the bootstrap socket's first one, before bundle/config inspection or credential rotation.
+    server.private_handlers.update({verb: hold_guard(handler) for verb, handler in {
+        "webapp-status": webapp_status, "webapp-launch": webapp_launch, "webapp-sign-out": webapp_sign_out}.items()})

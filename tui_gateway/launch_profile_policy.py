@@ -161,6 +161,9 @@ def owner_secret_scope(home: str | Path) -> dict[str, str]:
     per-home binding point (routed gateway turns, cron fires, kanban ticks) builds through here, so
     the launch profile keeps its env-only credentials when a single-profile gateway starts
     multiplexing in place."""
+    from hermes_cli.startup_hold import active
+    if active():
+        return {}
     from agent.secret_scope import _is_process_home, build_profile_secret_scope
     if _is_process_home(Path(home)):
         return launch_secret_scope(home)

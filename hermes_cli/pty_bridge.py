@@ -151,6 +151,8 @@ class PtyBridge:
         # (xterm.js never drops frames, so under the dashboard that repaint was a visible flash on
         # every OS app-switch).
         spawn_env[PTY_HOST_ENV] = PTY_HOST_DASHBOARD
+        from hermes_cli.startup_hold import mark_uncertain_children
+        mark_uncertain_children()
         proc = ptyprocess.PtyProcess.spawn(list(argv), cwd=cwd, env=spawn_env, dimensions=(rows, cols))  # type: ignore[union-attr]
         try:
             return cls(proc)

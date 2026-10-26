@@ -165,12 +165,13 @@ def test_unreadable_config_serves_one_cached_fallback_until_it_reads(home, monke
     config_mod._LOAD_CONFIG_CACHE.clear()
     config_mod._LAST_EXPANDED_CONFIG_BY_PATH.clear()
     blocked, rebuilds, real_backup = [True], [], config_backups.load_newest_good_backup
+    real_open = builtins.open
 
     def guarded_open(file, *args, **kwargs):
         if blocked[0] and str(file) == str(path):
             raise OSError(errno.EMFILE, "Too many open files")
-        return builtins.open(file, *args, **kwargs)
-    monkeypatch.setattr(config_mod, "open", guarded_open, raising=False)
+        return real_open(file, *args, **kwargs)
+    monkeypatch.setattr(builtins, "open", guarded_open)
     monkeypatch.setattr(config_backups, "load_newest_good_backup", lambda p: rebuilds.append(p) or real_backup(p))
 
     for _ in range(5):

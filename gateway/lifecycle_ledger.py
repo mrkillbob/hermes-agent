@@ -413,6 +413,9 @@ def mark_exited(exit_code: Optional[int] = None, reason: str = "graceful_shutdow
     the replacement claims it before the old process finishes teardown and must not
     be clobbered.  ``pid=None`` / malformed sentinels have unknown ownership → left alone.
     """
+    from hermes_cli.startup_hold import active
+    if active():
+        return
     try:
         sentinel = _read_json(get_lifecycle_sentinel_path(home))
         if sentinel is not None and sentinel.get("pid") != os.getpid():
