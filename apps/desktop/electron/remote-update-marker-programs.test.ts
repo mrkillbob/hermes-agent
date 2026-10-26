@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import { execFile as execFileCallback, spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -137,7 +137,9 @@ function deadMarker(marker: string) {
 async function gate(args: string[], stdin = false, env = process.env) {
   try {
     const running = execFile('python3', stdin ? ['-', ...args] : ['-c', REMOTE_MARKER_GATE_PY, ...args], { env })
-    if (stdin) running.child.stdin!.end(REMOTE_MARKER_GATE_PY)
+    if (stdin) {
+      running.child.stdin!.end(REMOTE_MARKER_GATE_PY)
+    }
     const { stdout, stderr } = await running
 
     return { code: 0, stdout: stdout.trim(), stderr: stderr.trim() }
