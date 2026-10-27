@@ -1687,7 +1687,7 @@ class TestSharedBoardPaths:
                 captured["env"] = kwargs.get("env", {})
                 self.pid = 4242
 
-        monkeypatch.setattr("subprocess.Popen", _FakePopen)
+        monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", _FakePopen)
 
         task = kb.Task(
             id="t_dispatch_env",
@@ -2210,7 +2210,7 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
             captured["env"] = kwargs.get("env", {})
             self.pid = 4242
 
-    monkeypatch.setattr("subprocess.Popen", _FakePopen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", _FakePopen)
 
     task = kb.Task(
         id="t_import_root", title="x", body=None, assignee="coder", status="ready",

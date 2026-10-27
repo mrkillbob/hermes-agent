@@ -153,7 +153,7 @@ def test_spawn_resolves_claimed_task_policy(
         kwargs["stdout"].close()
         return SimpleNamespace(pid=4245)
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
     kbd._default_spawn(task, str(workspace))
     assert captured["cmd"] == [sys.executable, "-m", "hermes_cli.kanban_worker_client"]
     assert captured["env"]["HERMES_HOME"] == str(profile)

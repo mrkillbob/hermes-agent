@@ -58,7 +58,7 @@ def _capture_spawn_env(kb, monkeypatch, workspace: str) -> dict:
         captured["cwd"] = kwargs.get("cwd")
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
     kbd._default_spawn(_make_task(kb), workspace)
     return captured
 
@@ -129,7 +129,7 @@ def test_worker_spawn_rejects_malformed_profile_config(monkeypatch, tmp_path):
     def forbidden_popen(*args, **kwargs):
         raise AssertionError("malformed profile reached subprocess spawn")
 
-    monkeypatch.setattr(subprocess, "Popen", forbidden_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", forbidden_popen)
 
     with pytest.raises(ValueError, match="invalid profile config"):
         kbd._default_spawn(_make_task(kb), str(workspace))

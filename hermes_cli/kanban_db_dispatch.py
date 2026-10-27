@@ -2807,8 +2807,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
     from hermes_cli.kanban_worker_log import worker_log_capacity_guard
     with worker_log_capacity_guard():
         log_f = _open_worker_log(task, board)
+    from hermes_cli.kanban_worker_spawn import spawn_worker
     try:
-        proc = subprocess.Popen(
+        proc = spawn_worker(
             cmd,
             cwd=workspace if os.path.isdir(workspace) else None,
             stdin=subprocess.DEVNULL,
@@ -2824,8 +2825,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
             "`hermes` executable not found on PATH. "
             "Install Hermes Agent or activate its venv before running the kanban dispatcher."
         )
-    # Intentionally NOT closing log_f: the child keeps writing after return;
-    # the OS-level FD stays open in the child until it exits.
+    # The spawned child owns its duplicated log descriptors.
     if _kb._IS_WINDOWS:
         _live_worker_procs[proc.pid] = proc
     return proc.pid
