@@ -15,6 +15,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence
 
+from agent.llm_egress_request_diagnostics import (
+    PUBLIC_EGRESS_DENIAL_REASON_CODES as _LOCAL_EGRESS_REASON_CODES,
+)
+
 logger = logging.getLogger(__name__)
 
 # Synthetic code for the OpenAI SDK rejecting a provider's SSE ``data:`` field
@@ -1007,25 +1011,6 @@ def _by_status(c: _Ctx) -> Optional[Verdict]:
 
 # Only canonical, metadata-only local denial messages may survive an RPC wrapper.
 # This is a diagnostic taxonomy, not a policy permission list.
-_LOCAL_EGRESS_REASON_CODES = frozenset({
-    'base64_payload', 'exact_secret_detected', 'exact_secret_scan_failed',
-    'grant_binding_mismatch', 'invalid_anthropic_thinking_replay',
-    'invalid_codex_reasoning_replay', 'invalid_display_path', 'invalid_generated_context_key',
-    'invalid_generated_context_segment', 'invalid_literal_segment', 'invalid_request_key',
-    'invalid_source_grant', 'invalid_source_presentation', 'invalid_source_segment',
-    'invalid_tool_syntax_segment', 'invalid_typed_request_root', 'missing_request_identity',
-    'non_finite_number', 'payload_digest_mismatch', 'policy_denied', 'policy_digest_mismatch',
-    'private_absolute_path', 'private_path_scan_failed', 'receipt_unavailable',
-    'redaction_failed', 'request_identity_mismatch', 'sanitized_bytes_exceeded',
-    'sanitized_segment_bytes_exceeded', 'sanitized_segment_forbidden', 'secret_detected',
-    'sensitive_path', 'serialization_failed', 'serialized_bytes_exceeded',
-    'source_bytes_in_literal', 'source_bytes_in_sanitized_segment', 'source_grant_unbound',
-    'source_hash_mismatch', 'source_path_not_canonical', 'source_policy_unavailable',
-    'source_range_mismatch', 'source_segment_grant_mismatch', 'source_segment_not_text',
-    'source_unavailable', 'static_literal_not_allowed', 'token_cap_exceeded',
-    'typed_request_required', 'unknown_destination', 'untrusted_provenance',
-    'untyped_request_value'
-})
 
 
 def _local_egress_denial(c: _Ctx) -> Optional[Verdict]:

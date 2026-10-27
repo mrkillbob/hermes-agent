@@ -3,68 +3,15 @@ from __future__ import annotations
 import os
 import re
 from hermes_cli import kanban_db as kb
+from agent.llm_egress_request_diagnostics import (
+    PUBLIC_EGRESS_DENIAL_REASON_CODES as _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS,
+)
 
 _PROVIDER_EGRESS_BLOCK_RE = re.compile(
     r"LLM\s+egress\s+blocked\s*:\s*([A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*)",
     re.IGNORECASE,
 )
 
-_KNOWN_PROVIDER_EGRESS_BLOCK_REASONS = frozenset(
-    {
-        "base64_payload",
-        "base64_scan_failed",
-        "exact_secret_detected",
-        "exact_secret_scan_failed",
-        "grant_binding_mismatch",
-        "invalid_anthropic_thinking_replay",
-        "invalid_codex_reasoning_replay",
-        "invalid_display_path",
-        "invalid_generated_context_key",
-        "invalid_generated_context_segment",
-        "invalid_literal_segment",
-        "invalid_request_key",
-        "invalid_source_grant",
-        "invalid_source_presentation",
-        "invalid_source_segment",
-        "invalid_tool_syntax_segment",
-        "invalid_typed_request_root",
-        "missing_request_identity",
-        "non_finite_number",
-        "payload_digest_mismatch",
-        "private_absolute_path",
-        "private_path_scan_failed",
-        "policy_digest_mismatch",
-        "receipt_unavailable",
-        "redaction_failed",
-        "request_identity_mismatch",
-        "sanitized_bytes_exceeded",
-        "sanitized_segment_bytes_exceeded",
-        "sanitized_segment_forbidden",
-        "secret_detected",
-        "sensitive_path",
-        "serialized_bytes_exceeded",
-        "serialization_failed",
-        "source_bytes_in_literal",
-        "source_bytes_in_sanitized_segment",
-        "source_hash_mismatch",
-        "source_grant_unbound",
-        "source_path_not_canonical",
-        "source_policy_unavailable",
-        "source_range_mismatch",
-        "source_segment_grant_mismatch",
-        "source_segment_not_text",
-        "source_unavailable",
-        "static_literal_not_allowed",
-        "token_cap_exceeded",
-        "typed_request_required",
-        "unknown_destination",
-        "untrusted_provenance",
-        "unsupported_remote_task_transport",
-        "unverified_remote_task_context",
-        "unverified_remote_task_history",
-        "untyped_request_value",
-    }
-)
 
 _PROVIDER_UNSUPPORTED_THINKING_RE = re.compile(
     r"(?:does\s+not\s+support\s+thinking|thinking\s+is\s+not\s+supported|unsupported\s+thinking)",
