@@ -50,14 +50,15 @@ def resolve_worktree_base(
         except Exception:
             return False
 
-    def _fetch_head_age_for_branch(branch: str) -> float | None:
+    def _fetch_head_age_for_branch(remote: str, branch: str, ref: str) -> float | None:
         """Age of the most recent fetch that actually refreshed *branch*, or None.
 
         ``FETCH_HEAD`` is repo-wide: a plain ``git fetch <remote> <branch>`` overwrites it with
         only the ref(s) named in THAT invocation, so its mtime alone is a false-fresh signal
         whenever unrelated fetch activity (a different branch, a different remote) touched it
         more recently than we last fetched the branch we actually care about. Require the
-        content to mention this branch, not just a recent mtime.
+        final entry to name this remote and branch and match the current ref. The final-entry
+        check also refuses an older matching row retained by ``git fetch --append``.
         """
         try:
             result = _git(["rev-parse", "--git-path", "FETCH_HEAD"])
@@ -68,14 +69,26 @@ def resolve_worktree_base(
                 fetch_head = Path(repo_root) / fetch_head
             if not fetch_head.exists():
                 return None
-            if f"'{branch}'" not in fetch_head.read_text(encoding="utf-8-sig", errors="replace"):
+            lines = fetch_head.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+            if not lines:
+                return None
+            fetched_sha, _, description = lines[-1].split("\t", 2)
+            remote_url = _git(["remote", "get-url", remote])
+            if remote_url.returncode != 0:
+                return None
+            # Git's FETCH_HEAD description drops a trailing .git from the URL.
+            expected = f"branch '{branch}' of {remote_url.stdout.strip().removesuffix('.git')}"
+            if description != expected:
+                return None
+            current = _git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"])
+            if current.returncode != 0 or current.stdout.strip() != fetched_sha:
                 return None
             return max(0.0, time.time() - fetch_head.stat().st_mtime)
         except Exception:
             return None
 
     def _refresh(remote: str, branch: str, ref: str) -> tuple[str, str]:
-        age = _fetch_head_age_for_branch(branch)
+        age = _fetch_head_age_for_branch(remote, branch, ref)
         if age is not None and age < freshness_window and _ref_exists(ref):
             return ref, f"{ref} (fetched {int(age)}s ago)"
         try:
