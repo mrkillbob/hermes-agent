@@ -100,7 +100,7 @@ def test_allocator_base_normalization_preserves_assignment(tmp_path, monkeypatch
     ref, sha = "refs/heads/main", "a" * 40
     # This test isolates DB assignment semantics; real Git evidence is covered by
     # test_kanban_worktree_base_assignment's disposable repository.
-    monkeypatch.setattr(workspace, "_read_worktree_base", lambda *a: (ref, sha, True))
+    monkeypatch.setattr(workspace, "_read_worktree_base", lambda *a, **k: (ref, sha, True))
     stored = (" \t", " \n") if existing == "whitespace" else (f" {ref} ", f" {sha.upper()} ")
     with connect_closing(board="base-normalization") as conn:
         task_id = kb.create_task(conn, title="Synthetic base evidence", assignee="default",

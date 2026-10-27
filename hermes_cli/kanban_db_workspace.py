@@ -966,7 +966,9 @@ def persist_dispatch_workspace(
 ) -> None:
     """Persist one assignment atomically only while the captured attempt owns it."""
     branch = resolved_branch_name or (task.branch_name or "").strip() or f"wt/{task.id}"
-    evidence = _read_worktree_base(workspace, branch) if task.workspace_kind == "worktree" else None
+    prior_base = ((task.workspace_base_ref or "").strip(),
+                  (task.workspace_base_sha or "").strip().lower()) if task.workspace_kind == "worktree" else None
+    evidence = _read_worktree_base(workspace, branch, prior_base=prior_base) if prior_base is not None else None
     with _kb.write_txn(conn):
         row = conn.execute(
             "SELECT workspace_base_ref, workspace_base_sha FROM tasks WHERE id=? "
@@ -975,6 +977,11 @@ def persist_dispatch_workspace(
         ).fetchone()
         if row is None:
             raise DispatchWorkspaceOwnershipChanged("prepared Kanban attempt no longer owns the task")
+        if prior_base is not None and any(prior_base):
+            current_base = ((row["workspace_base_ref"] or "").strip(),
+                            (row["workspace_base_sha"] or "").strip().lower())
+            if current_base != prior_base:
+                raise DispatchWorkspaceOwnershipChanged("assignment base changed during preparation")
         values = {"workspace_path": str(workspace)}
         if evidence is not None:
             ref, sha, valid = evidence
@@ -1059,22 +1066,50 @@ def set_branch_name(conn: sqlite3.Connection, task_id: str, branch_name: str) ->
     _set_task_column(conn, task_id, "branch_name", str(branch_name))
 
 
-def _read_worktree_base(workspace: Path, branch_name: str) -> tuple[str, str, bool]:
+def _retained_worktree_base(workspace, branch_name, prior_base, base_ref, base_sha):
+    """Bridge absent Git keys only with the task's previously recorded assignment pair."""
+    ref, sha = prior_base or (None, None)
+    ref, sha = (ref or "").strip(), (sha or "").strip().lower()
+    if not ref or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise RuntimeError("prior Kanban assignment base is unavailable")
+    if any(result.returncode not in (0, 1)
+           or (result.returncode == 1 and (result.stdout.strip() or result.stderr.strip()))
+           for result in (base_ref, base_sha)):
+        raise RuntimeError("Git base evidence is unavailable")
+    if ((base_ref.returncode == 0 and base_ref.stdout.strip() != ref)
+            or (base_sha.returncode == 0 and base_sha.stdout.strip().lower() != sha)):
+        raise RuntimeError("Git base evidence conflicts with the retained assignment")
+    _require_worktree_root(workspace)
+    if not _is_linked_worktree_checkout(workspace) or _git_current_branch(workspace) != branch_name:
+        raise RuntimeError("retained assignment requires its matching linked worktree")
+    return ref, sha
+
+
+def _read_worktree_base(
+    workspace: Path, branch_name: str, *, prior_base=None,
+) -> tuple[str, str, bool]:
     prefix = f"branch.{branch_name}.hermes-kanban-base"
     base_ref = _git(workspace, "config", "--get", prefix + "-ref", timeout=20)
     base_sha = _git(workspace, "config", "--get", prefix + "-sha", timeout=20)
-    sha = base_sha.stdout.strip().lower()
-    if (
-        base_ref.returncode != 0
-        or base_sha.returncode != 0
-        or not re.fullmatch(r"[0-9a-f]{40}", sha)
-    ):
-        raise RuntimeError(f"assigned Kanban worktree base is unavailable for {branch_name}")
-    ref = base_ref.stdout.strip()
+    retained = base_ref.returncode != 0 or base_sha.returncode != 0
+    if retained:
+        ref, sha = _retained_worktree_base(workspace, branch_name, prior_base, base_ref, base_sha)
+    else:
+        ref, sha = base_ref.stdout.strip(), base_sha.stdout.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise RuntimeError(f"assigned Kanban worktree base is unavailable for {branch_name}")
     resolved = _git(
         workspace, "rev-parse", "--verify", "--end-of-options", sha + "^{commit}", timeout=20,
     )
-    return ref, sha, resolved.returncode == 0 and resolved.stdout.strip().lower() == sha
+    valid = resolved.returncode == 0 and resolved.stdout.strip().lower() == sha
+    if retained:
+        if not valid:
+            raise RuntimeError("retained assignment commit is unavailable")
+        # Verify the known prior SHA; never derive an assignment base from history.
+        ancestry = _git(workspace, "merge-base", "--is-ancestor", sha, "HEAD", timeout=20)
+        if ancestry.returncode != 0:
+            raise RuntimeError("worktree history does not retain the recorded assignment base")
+    return ref, sha, valid
 
 
 def _validate_worktree_base(task_id, row, ref, sha, valid) -> bool:
