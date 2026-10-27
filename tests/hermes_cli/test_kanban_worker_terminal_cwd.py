@@ -13,6 +13,7 @@ Pinning ``TERMINAL_CWD`` to the workspace fixes both.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import os
 import sys
@@ -221,6 +222,23 @@ def test_control_callback_imports_dispatcher_source_from_unrelated_workspace(
         "PYTHONPATH": os.pathsep.join(dependency_paths),
     }
     bind_worker_environment(env, str(workspace))
+    user_home = tmp_path / "user-home"
+    user_home.mkdir()
+    hermes_home = user_home / ".hermes"
+    hermes_home.mkdir()
+    # This explicit env replaces the runner's isolated env, so pin both roots.
+    env.update(HOME=str(user_home), USERPROFILE=str(user_home), HERMES_HOME=str(hermes_home))
+    real_run = subprocess.run
+
+    def isolated_run(*args, **kwargs):
+        # Reject a leaking fixture before any CLI startup maintenance can run.
+        child_env = kwargs["env"]
+        assert child_env.get("HOME") == str(user_home), "CLI probe needs isolated HOME"
+        assert child_env.get("USERPROFILE") == str(user_home), "CLI probe needs isolated USERPROFILE"
+        assert child_env.get("HERMES_HOME") == str(hermes_home), "CLI probe needs isolated HERMES_HOME"
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", isolated_run)
     result = subprocess.run(
         [env["HERMES_KANBAN_HERMES_PYTHON"], "-P", "-m", "hermes_cli.main", "--help"],
         cwd=workspace,
@@ -259,7 +277,9 @@ def test_control_callback_imports_dispatcher_source_from_unrelated_workspace(
             env["HERMES_KANBAN_HERMES_PYTHON"],
             "-P",
             "-c",
-            "import hermes_cli; print(hermes_cli.__file__)",
+            "import hermes_cli,json,os,pathlib; print(json.dumps({"
+            "'source':hermes_cli.__file__,'home':str(pathlib.Path.home()),"
+            "'hermes_home':os.environ['HERMES_HOME']}))",
         ],
         cwd=workspace,
         env=env,
@@ -268,6 +288,8 @@ def test_control_callback_imports_dispatcher_source_from_unrelated_workspace(
         timeout=10, check=False,
     )
     assert owner.returncode == 0, owner.stderr
-    assert owner.stdout.strip() == str(
-        Path(__file__).resolve().parents[2] / "hermes_cli/__init__.py"
-    )
+    assert json.loads(owner.stdout) == {
+        "source": str(Path(__file__).resolve().parents[2] / "hermes_cli/__init__.py"),
+        "home": str(user_home),
+        "hermes_home": str(hermes_home),
+    }
