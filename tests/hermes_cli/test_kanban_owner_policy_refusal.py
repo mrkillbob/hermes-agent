@@ -4,9 +4,12 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from agent.error_classifier import FailoverReason, classify_api_error
+from agent.llm_egress_firewall import EgressBlocked
 from gateway import session_kanban
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as dispatch
@@ -43,15 +46,31 @@ def finish(monkeypatch, context, result):
 
 @pytest.mark.parametrize('reason_code', [
     'base64_payload',
+    'base64_scan_failed',
+    'invalid_native_metadata_reference',
+    'invalid_preview_presentation',
+    'invalid_preview_proof',
+    'policy_denied',
     'unverified_remote_task_context',
     'unverified_remote_task_history',
     'unsupported_remote_task_transport',
 ])
-def test_owner_policy_refusal_blocks_original_task_on_first_attempt(attempt, monkeypatch, reason_code):
+@pytest.mark.parametrize('wrapped', [False, True])
+def test_owner_policy_refusal_blocks_original_task_on_first_attempt(
+    attempt, monkeypatch, reason_code, wrapped,
+):
     conn, task, context = attempt
     reply = 'Hermes blocked this request under its local privacy policy. Reason codes: ' + reason_code
-    finish(monkeypatch, context, {'failed': True, 'failure_reason': 'egress_policy_blocked',
-           'failure_retryable': False, 'egress_reason_codes': [reason_code], 'final_response': reply})
+    error = (RuntimeError('LLM egress blocked: ' + reason_code) if wrapped
+             else EgressBlocked(SimpleNamespace(reason_codes=(reason_code,))))
+    classified = classify_api_error(error)
+    assert classified.reason == FailoverReason.egress_policy_blocked
+    assert not any((classified.retryable, classified.should_fallback,
+                    classified.should_rotate_credential, classified.should_compress))
+    finish(monkeypatch, context, {'failed': True, 'failure_reason': classified.reason.value,
+           'failure_retryable': classified.retryable,
+           'egress_reason_codes': list(classified.error_context['egress_reason_codes']),
+           'final_response': reply})
     # Owner workers have neither the CLI's initialization banner nor its raw exception text.
     kb.worker_log_path(task.id).parent.mkdir(parents=True, exist_ok=True)
     kb.worker_log_path(task.id).write_text(reply)
@@ -60,6 +79,10 @@ def test_owner_policy_refusal_blocks_original_task_on_first_attempt(attempt, mon
     assert current.status == 'blocked'
     assert (current.assignee, current.body, current.model_override) == ('worker', 'Original scope', 'approved-model')
     assert current.last_failure_error == 'provider egress blocked: LLM egress blocked: ' + reason_code
+    blocks = [event for event in kb.list_events(conn, task.id) if event.kind == 'gave_up']
+    assert blocks[-1].payload['local_privacy_denial'] is True
+    assert blocks[-1].payload['egress_reason_codes'] == [reason_code]
+    assert blocks[-1].payload['sticky'] is True
     assert not any(event.kind == 'routed_to_repair_profile' for event in kb.list_events(conn, task.id))
 
 
@@ -170,3 +193,35 @@ def test_owner_policy_metadata_keeps_only_public_reason_codes(attempt, monkeypat
     assert persisted['egress_reason_codes'] == ['base64_payload']
     dispatch.detect_crashed_workers(conn)
     assert kb.get_task(conn, task.id).last_failure_error == 'provider egress blocked: LLM egress blocked: base64_payload'
+
+
+@pytest.mark.parametrize('raw_codes,expected', [
+    (('SYNTHETIC_UNTRUSTED_SENTINEL',), ['policy_denied']),
+    (('base64_scan_failed', 'SYNTHETIC_UNTRUSTED_SENTINEL'), ['base64_scan_failed']),
+])
+def test_unknown_policy_codes_are_scrubbed_without_releasing_hold(
+    attempt, monkeypatch, raw_codes, expected,
+):
+    conn, task, context = attempt
+    classified = classify_api_error(EgressBlocked(SimpleNamespace(reason_codes=raw_codes)))
+    assert classified.reason == FailoverReason.egress_policy_blocked
+    assert classified.error_context['egress_reason_codes'] == tuple(expected)
+    assert not any((classified.retryable, classified.should_fallback,
+                    classified.should_rotate_credential, classified.should_compress))
+    finish(monkeypatch, context, {'failed': True, 'failure_reason': classified.reason.value,
+           'failure_retryable': classified.retryable,
+           'egress_reason_codes': list(classified.error_context['egress_reason_codes']),
+           'final_response': 'Synthetic policy refusal'})
+    dispatch.detect_crashed_workers(conn)
+    current = kb.get_task(conn, task.id)
+    assert current.status == 'blocked'
+    assert current.consecutive_failures == 1
+    assert (current.assignee, current.body, current.model_override) == (
+        'worker', 'Original scope', 'approved-model',
+    )
+    blocks = [event for event in kb.list_events(conn, task.id) if event.kind == 'gave_up']
+    assert blocks[-1].payload['local_privacy_denial'] is True
+    assert blocks[-1].payload['egress_reason_codes'] == expected
+    assert blocks[-1].payload['sticky'] is True
+    assert 'SYNTHETIC_UNTRUSTED_SENTINEL' not in json.dumps(blocks[-1].payload)
+    assert not any(event.kind == 'routed_to_repair_profile' for event in kb.list_events(conn, task.id))
