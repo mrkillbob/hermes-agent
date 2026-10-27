@@ -6,7 +6,12 @@ from hermes_cli.kanban_db_connect import connect_closing
 from hermes_cli.kanban_task_revision import task_revision
 from hermes_cli.kanban_transfer import _selected_task_rows
 from hermes_cli.kanban_source_supersession import archive_source_supersession
-from tests.hermes_cli.test_kanban_source_supersession import case, decision
+from tests.hermes_cli.test_kanban_source_supersession import _make_case, decision
+
+
+@pytest.fixture
+def case(tmp_path, monkeypatch):
+    return _make_case(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize('overrides', [

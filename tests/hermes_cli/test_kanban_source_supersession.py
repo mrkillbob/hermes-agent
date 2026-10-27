@@ -10,8 +10,7 @@ from hermes_cli.kanban_transfer import _selected_task_rows
 from hermes_cli.kanban_source_supersession import archive_source_supersession
 
 
-@pytest.fixture
-def case(tmp_path, monkeypatch):
+def _make_case(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'home'))
     monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path / 'home'))
     for name in ('HERMES_KANBAN_DB', 'HERMES_KANBAN_BOARD'):
@@ -24,6 +23,11 @@ def case(tmp_path, monkeypatch):
             conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (tid,))
         kb.add_comment(conn, tid, 'reviewer', 'Retained source evidence')
     return tid
+
+
+@pytest.fixture
+def case(tmp_path, monkeypatch):
+    return _make_case(tmp_path, monkeypatch)
 
 
 def decision():
