@@ -183,6 +183,11 @@ def _archived_board_db_files(archive_root: Path) -> list[Path]:
         marker = directory / "board.json"
         database = directory / "kanban.db"
         if not marker.is_file() or not database.is_file():
+            from hermes_cli.kanban_archive_quarantine import admits_opaque_store
+
+            if admits_opaque_store(directory):
+                archived.append(database)
+                continue
             raise OSError("archived board entry is missing its marker or database")
         try:
             slug = _kb._require_slug(_read_archived_board_marker(marker))
