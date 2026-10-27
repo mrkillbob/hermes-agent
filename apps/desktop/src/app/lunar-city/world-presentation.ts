@@ -1,3 +1,9 @@
+/**
+ * Scene and NPC animationTags are display-only metadata, not asset clip bindings.
+ * Their vocabulary may include narrative/cosmetic semantics absent from asset manifests.
+ * No asset availability filter or synthetic clip fallback belongs in this layer.
+ * Playback selection remains the separate NpcActivityState contract in world-animation.ts.
+ */
 import type {
   WorldActionKind,
   WorldCondition,
@@ -27,6 +33,7 @@ export interface NpcActivity {
   actor: WorldSourceRef
   personality: NpcPersonality
   state: NpcActivityState
+  /** Display-only scene semantics; these tags do not select or guarantee asset clips. */
   animationTags: string[]
   target?: WorldSourceRef
   groundedDialogue?: string
@@ -35,6 +42,7 @@ export interface NpcActivity {
 export interface WorldPresentation {
   sceneTag: string
   scope: WorldScope
+  /** Display-only scene semantics; these tags do not select or guarantee asset clips. */
   animationTags: string[]
   npcActivities: NpcActivity[]
   participants: WorldSourceRef[]
@@ -43,6 +51,7 @@ export interface WorldPresentation {
 }
 
 interface SceneSpec {
+  /** Display-only scene semantics; these tags do not select or guarantee asset clips. */
   animationTags: string[]
   cameraBeat?: string
   intensity: 0 | 1 | 2 | 3
@@ -284,7 +293,7 @@ const SCENES: Record<string, SceneSpec> = {
 }
 
 const FALLBACK_SCENE: SceneSpec = {
-  animationTags: ['alert', 'fallback.generic'],
+  animationTags: ['alert'],
   intensity: 1,
   npcState: 'inspecting',
   sceneTag: 'alert.unclassified'
@@ -313,16 +322,6 @@ function sceneFor(event: WorldEvent): SceneSpec {
   }
 
   return base
-}
-
-function animationTagsFor(tags: readonly string[], assetTags: ReadonlySet<string>): string[] {
-  if (assetTags.size === 0) {
-    return [...tags]
-  }
-
-  const resolved = tags.filter(tag => assetTags.has(tag))
-
-  return resolved.length === tags.length ? resolved : [...resolved, 'fallback.generic']
 }
 
 function uniqueRefs(refs: readonly WorldSourceRef[]): WorldSourceRef[] {
@@ -405,11 +404,10 @@ export function resolveNpcActivity(
 
 export function resolveWorldPresentation(
   event: WorldEvent,
-  conditions: readonly WorldCondition[],
-  assetTags: ReadonlySet<string> = new Set()
+  conditions: readonly WorldCondition[]
 ): WorldPresentation {
   const spec = sceneFor(event)
-  const tags = animationTagsFor(spec.animationTags, assetTags)
+  const tags = [...spec.animationTags]
 
   const related = conditions
     .filter(condition => condition.sourceRef?.taskId && condition.sourceRef.taskId === event.sourceRef?.taskId)
