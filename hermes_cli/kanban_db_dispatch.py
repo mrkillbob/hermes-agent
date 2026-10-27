@@ -1088,6 +1088,7 @@ class _DeadWorker:
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
+    recovery_fence: Optional[tuple[Optional[int], str, int, Optional[str]]] = None
 
     @property
     def run_outcome(self) -> str:
@@ -1139,7 +1140,7 @@ def _classify_dead_worker_exit(
         if logged is not None:
             kind, code = _exit_code_kind(logged)
     if task_id:
-        from hermes_cli.kanban_provider_errors import _provider_terminal_error_text, owner_terminal_error
+        from hermes_cli.kanban_provider_errors import _provider_terminal_error_text, owner_terminal_error, bounded_egress_reason_codes
         terminal = owner_terminal_error(owner_result) if owner_result is not None else _provider_terminal_error_text(task_id)
         if terminal is not None:
             error, failure_class = terminal
@@ -1147,7 +1148,11 @@ def _classify_dead_worker_exit(
                 kind, code, error, "needs_attention",
                 {"pid": pid, "claimer": claimer, "exit_code": code,
                  "failure_class": failure_class, "terminal_provider": True,
-                 **({"privacy_reason": error} if failure_class == "provider_egress_blocked" else {})},
+                 **({"privacy_reason": error, "egress_reason_codes": bounded_egress_reason_codes(
+                     owner_result.get('egress_reason_codes') if owner_result is not None
+                     and owner_result.get('failure_class') == 'provider_egress_blocked'
+                     else error.rsplit('LLM egress blocked:', 1)[-1].strip().split(','))}
+                    if failure_class == "provider_egress_blocked" else {})},
                 terminal_provider=True,
             )
     if kind == "clean_exit":
@@ -1285,6 +1290,12 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 sweep.rate_limited.append(row["id"])
             else:
                 sweep.crashed.append(row["id"])
+                dead.recovery_fence = (
+                    conn.execute('SELECT MAX(id) FROM task_runs WHERE task_id=?', (row['id'],)).fetchone()[0],
+                    retry_status,
+                    conn.execute('SELECT consecutive_failures FROM tasks WHERE id=?', (row['id'],)).fetchone()[0],
+                    row['assignee'],
+                )
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
     return sweep
 
@@ -1361,6 +1372,7 @@ def _record_task_failure(
     infrastructure: bool = False,
     expected_run_id: Optional[int] = None,
     expected_claim_lock: Optional[str] = None,
+    expected_recovery: Optional[tuple[Optional[int], str, int, Optional[str]]] = None,
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
@@ -1384,6 +1396,9 @@ def _record_task_failure(
         failure_limit = DEFAULT_FAILURE_LIMIT
     error = error[:500]
     with _kb.write_txn(conn):
+        from hermes_cli.kanban_db_recovery import recovery_fence_matches
+        if not recovery_fence_matches(conn, task_id, expected_recovery):
+            return False
         row = conn.execute(
             "SELECT consecutive_failures, status, max_retries, current_run_id, claim_lock "
             "FROM tasks WHERE id = ?", (task_id,),
@@ -1549,110 +1564,10 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
 def check_respawn_guard(
     conn: sqlite3.Connection, task_id: str, *, lane: Optional[str] = None,
 ) -> Optional[str]:
-    """Return a guard reason if ``task_id`` should NOT be re-spawned, else None.
+    """Check deterministic completed-attempt ordering and the existing lane guards."""
+    from hermes_cli.kanban_db_recovery import check_respawn_guard as guard
+    return guard(conn, task_id, lane=lane)
 
-    Called per ready/review row before any claim attempt. Priority order:
-    ``"infrastructure_cooldown"`` (latest run is a ``spawn_failed`` the host
-    refused — no restart-safe scope — within the cooldown; never counted),
-    ``"rate_limit_cooldown"`` (latest run ``rate_limited`` within the cooldown;
-    checked BEFORE ``blocker_auth`` because the requeue stamps a quota-flavored
-    ``last_failure_error`` that would otherwise park the task forever — that
-    path never increments ``consecutive_failures``), ``"blocker_auth"``
-    (quota/auth pattern; the breaker still trips eventually), then for the
-    ready lane only ``"recent_success"`` (completed run within the window, unless
-    a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
-    (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
-    handoff event followed the comment: the named profile must work on that
-    PR). The review lane skips the last two: they are the *inputs* to a review
-    handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
-    passes own those.
-    """
-    row = conn.execute(
-        "SELECT last_failure_error, status FROM tasks WHERE id = ?",
-        (task_id,),
-    ).fetchone()
-    if row is None:
-        return None
-
-    lane = lane or (_kb._retry_status_for_run(conn, task_id) if row["status"] == "running" else row["status"])
-
-    now = int(time.time())
-
-    # 1. Rate-limit cooldown — see docstring for why this precedes blocker_auth.
-    #    LATEST run only: a newer crash/completion supersedes the rate-limit run.
-    #    An infrastructure spawn refusal (#114720) shares the cooldown: the host
-    #    condition is not the card's, so it retries forever, spaced, and never
-    #    reaches the breaker.
-    rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
-    latest_run = conn.execute(
-        "SELECT outcome, ended_at, metadata FROM task_runs "
-        "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY ended_at DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
-    infrastructure_failure = (
-        latest_run is not None and latest_run["outcome"] == "spawn_failed"
-        and _kb._json_dict(latest_run["metadata"]).get("infrastructure")
-    )
-    if infrastructure_failure and rl_cooldown > 0:
-        ended_at = _kb._to_epoch(latest_run["ended_at"])
-        if ended_at is not None and (now - ended_at) < rl_cooldown:
-            return "infrastructure_cooldown"
-    if latest_run is not None and latest_run["outcome"] == "rate_limited":
-        if rl_cooldown <= 0:
-            # Cooldown disabled — respawn immediately, skipping blocker_auth so
-            # the stamped rate-limit text doesn't re-trap the task.
-            return None
-        ended_at = _kb._to_epoch(latest_run["ended_at"])
-        if ended_at is not None and (now - ended_at) < rl_cooldown:
-            return "rate_limit_cooldown"
-        # Cooldown elapsed — return early so blocker_auth doesn't catch the
-        # stamped rate-limit text; this path intentionally retries forever
-        # (spaced by the cooldown) until quota returns or a real run supersedes it.
-        return None
-
-    # 2. Quota / auth blocker: retrying immediately will not help.  A plain
-    # crash is different: its persisted error includes the worker's last
-    # captured output, which is context rather than a diagnosis and may contain
-    # benign commands such as ``claude auth status`` (#117097).
-    err = _kb._lossy_text(row["last_failure_error"])
-    latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and not infrastructure_failure and _RESPAWN_BLOCKER_RE.search(err):
-        return "blocker_auth"
-
-    # Review-lane spawns stop here: a recent completed run and a fresh PR URL
-    # are the canonical *inputs* to a review handoff, not duplicate-work signals.
-    if lane == "review":
-        return None
-
-    # 3. Completed run within guard window. Exception: an explicit re-queue
-    #    AFTER that success (done→ready drag, re-promotion, unblock, reclaim) is
-    #    a deliberate "run it again" — otherwise a manual done→ready would sit
-    #    silently held until the window elapses.
-    success = max((t for t, _ in _rows_since(
-        conn, "task_runs", task_id, now - _RESPAWN_GUARD_SUCCESS_WINDOW, "AND outcome = 'completed'")), default=None)
-    if success is not None and not any(_rows_since(
-            conn, "task_events", task_id, success, "AND kind IN ('status', 'promoted', 'unblocked', 'reclaimed')")):
-        return "recent_success"
-
-    # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
-    #    Exception: a handoff AFTER the newest PR comment (operator reassign,
-    #    reviewer changes_requested, review reopen) names the profile that must
-    #    now work on THAT PR — a closer or the implementer finishing it, not a
-    #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
-    #    so the worker that opened the PR is still not re-spawned against it.
-    pr_times = [t for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
-                                          cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
-                if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
-    if pr_times:
-        # Strictly after: a same-second tie stays guarded (fail closed).
-        if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
-                conn, "task_events", task_id, max(pr_times),
-                "AND kind IN ('unblocked', 'reclaimed', 'promoted', 'review_reopened', 'changes_requested', 'assigned')", cols=", kind, payload", strict=True)):
-            return None
-        return "active_pr"
-
-    return None
 
 
 _GUARD_TIME_COLS = {"task_runs": "ended_at", "task_events": "created_at", "task_comments": "created_at"}
