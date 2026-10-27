@@ -126,26 +126,27 @@ def _provider_terminal_error_text(task_id: str) -> tuple[str, str] | None:
     return _terminal_error_from_text(tail)
 
 
+def bounded_egress_reason_codes(value: object) -> list[str]:
+    """Only typed public allowlisted codes may survive into recovery metadata."""
+    codes = value if isinstance(value, (list, tuple)) else ()
+    return list(dict.fromkeys(code for code in codes
+                             if isinstance(code, str) and code in _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS))
+
+
 def owner_failure_fields(result: object) -> dict:
     """Persist only the owner's typed policy verdict and bounded public reason codes."""
     if (not isinstance(result, dict) or result.get('interrupted')
             or result.get('failure_reason') != 'egress_policy_blocked'
             or not (result.get('failed') or result.get('partial') or result.get('completed') is False)):
         return {}
-    codes = result.get('egress_reason_codes')
-    codes = codes if isinstance(codes, (list, tuple)) else ()
-    reasons = list(dict.fromkeys(code for code in codes
-                                if isinstance(code, str) and code in _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS))
+    reasons = bounded_egress_reason_codes(result.get('egress_reason_codes'))
     return {'failure_class': 'provider_egress_blocked', 'egress_reason_codes': reasons}
 
 
 def owner_terminal_error(result: dict) -> tuple[str, str] | None:
     """An exact-attempt result dominates append-only output from older attempts."""
     if result.get('failure_class') == 'provider_egress_blocked':
-        codes = result.get('egress_reason_codes')
-        codes = codes if isinstance(codes, (list, tuple)) else ()
-        reasons = tuple(dict.fromkeys(code for code in codes
-                                     if isinstance(code, str) and code in _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS))
+        reasons = bounded_egress_reason_codes(result.get('egress_reason_codes'))
         reason = ','.join(reasons) or 'policy_denied'
         return f'provider egress blocked: LLM egress blocked: {reason}', 'provider_egress_blocked'
     output = result.get('last_output')

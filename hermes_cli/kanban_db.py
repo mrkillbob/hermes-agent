@@ -3901,92 +3901,15 @@ def block_task(
 
 
 def route_worker_block_to_orchestrator(
-    conn: sqlite3.Connection,
-    task_id: str,
-    *,
-    reason: Optional[str] = None,
+    conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
+    expected_recovery: Optional[tuple[Optional[int], str, int, Optional[str]]] = None,
 ) -> tuple[bool, Optional[str], Optional[str]]:
-    """Route an unresolved worker handoff through the intake router.
+    """Route a worker handoff while preserving the exact current/reclaimed owner."""
+    from hermes_cli.kanban_db_recovery import route_worker_block_to_orchestrator as route
+    return route(conn, task_id, reason=reason, expected_run_id=expected_run_id,
+                 expected_recovery=expected_recovery)
 
-    ``blocked`` is not a worker workflow state: it strands work until an
-    operator intervenes. A worker that cannot finish is handed to a deterministic
-    repair profile. The legacy ``task-orchestrator`` name is treated as a router
-    alias and never remains a worker owner; unknown scope stays in triage under
-    the canonical intake-router assignee.
-    """
-    with write_txn(conn):
-        row = conn.execute(
-            "SELECT status, assignee, current_run_id, title, body, idempotency_key FROM tasks WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-        if row is None or row["status"] not in {"running", "ready"}:
-            return False, None, None
-        current_run_id = _row_get(row, "current_run_id")
-        if expected_run_id is not None and int(current_run_id or -1) != int(expected_run_id):
-            return False, None, None
-        from hermes_cli.kanban_repair_routing import repair_profile_for_task
-        specialist = repair_profile_for_task(row["title"], row["body"])
-        already_router = row["assignee"] in {
-            "task-orchestrator", "task-intake-router", "intake-router",
-        }
-        same_specialist = specialist is not None and specialist == row["assignee"]
-        target_assignee = "task-intake-router" if same_specialist else (
-            specialist or "task-intake-router"
-        )
-        # A specialist's first failed attempt must not strand the card in the
-        # human-only triage column. Give the intake router one bounded chance
-        # to re-read the producer-owned assignment and choose a safe recovery
-        # path; only an unknown scope (or a router that still cannot classify
-        # it) belongs in triage.
-        if already_router and specialist is None:
-            new_status, new_assignee = "triage", "task-intake-router"
-        elif same_specialist:
-            new_status, new_assignee = "ready", "task-intake-router"
-        else:
-            new_status = "ready" if _parents_satisfied(conn, task_id) else "todo"
-            new_assignee = target_assignee
-        try:
-            _validate_pr_task_assignee_authority(
-                title=row["title"], body=row["body"], idempotency_key=row["idempotency_key"],
-                assignee=new_assignee, initial_status=new_status,
-            )
-        except ValueError:
-            return False, None, None
-        cur = conn.execute(
-            "UPDATE tasks SET status = ?, assignee = ?, claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
-            "block_kind = NULL, block_recurrences = 0 "
-            "WHERE id = ? AND status IN ('running', 'ready')",
-            (new_status, new_assignee, task_id),
-        )
-        if cur.rowcount != 1:
-            return False, None, None
-        run_id = _end_or_synthesize_run(
-            conn,
-            task_id,
-            outcome="routed_to_repair_profile",
-            status="routed",
-            summary=reason,
-            metadata={"from_assignee": row["assignee"], "to_assignee": new_assignee,
-                      "landed_status": new_status},
-            synthesize=True,
-        )
-        _append_event(
-            conn,
-            task_id,
-            "routed_to_repair_profile",
-            {
-                "reason": reason,
-                "from_assignee": row["assignee"],
-                "to_assignee": new_assignee,
-                "status": new_status,
-            },
-            run_id=run_id,
-        )
-        landed = get_task(conn, task_id)
-    notify_task_updated(conn, task_id, ("status", "assignee"))
-    return True, landed.status if landed else new_status, landed.assignee if landed else new_assignee
 
 
 def _route_block(

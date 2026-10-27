@@ -81,6 +81,67 @@ def test_correction_preserves_id_hold_history_and_backup(binding_case):
         assert json.loads(event[0])["old_binding"]["workspace_path"] == original["workspace_path"]
 
 
+@pytest.mark.platforms("posix")
+def test_exact_recovery_correction_does_not_export_unrelated_logs(binding_case, monkeypatch):
+    from hermes_cli import kanban_transfer as transfer
+
+    def refuse_export(*args, **kwargs):
+        pytest.fail("single-card correction must not export the whole board")
+
+    monkeypatch.setattr(transfer, "export_board", refuse_export)
+    result = _correct(binding_case, exact_recovery=True)
+    recovery = Path(result["recovery_backup"])
+    assert result["backup"] == str(recovery)
+    assert result["backup_format"] == "exact-source-sqlite"
+    assert recovery.stat().st_mode & 0o777 == 0o600
+    assert not (binding_case[0] / "before.tar.gz").exists()
+    with sqlite3.connect(recovery) as saved:
+        assert saved.execute("SELECT status FROM tasks WHERE id=?", (binding_case[4],)).fetchone()[0] == "triage"
+    with connect_closing(board="beta") as conn:
+        row = conn.execute("SELECT status,project_id,consecutive_failures,body FROM tasks WHERE id=?", (binding_case[4],)).fetchone()
+        assert tuple(row) == ("triage", binding_case[3], 2, binding_case[5]["body"])
+
+
+@pytest.mark.parametrize("change", ["mode", "row", "symlink"])
+@pytest.mark.platforms("posix")
+def test_exact_recovery_refuses_unqualified_backup(binding_case, monkeypatch, change):
+    from hermes_cli import kanban_task_binding as binding
+
+    original = binding._private_recovery_snapshot
+
+    def altered(source, recovery):
+        original(source, recovery)
+        if change == "mode":
+            recovery.chmod(0o644)
+        elif change == "row":
+            with sqlite3.connect(recovery) as conn:
+                conn.execute("UPDATE tasks SET body='changed'")
+        else:
+            other = recovery.with_suffix(".other")
+            recovery.rename(other)
+            recovery.symlink_to(other)
+
+    monkeypatch.setattr(binding, "_private_recovery_snapshot", altered)
+    with pytest.raises(ValueError):
+        _correct(binding_case, exact_recovery=True)
+    with connect_closing(board="alpha") as conn:
+        assert kb.get_task(conn, binding_case[4]) is not None
+    with connect_closing(board="beta") as conn:
+        assert kb.get_task(conn, binding_case[4]) is None
+
+
+@pytest.mark.platforms("windows")
+def test_exact_recovery_refuses_before_backup_on_unsupported_host(binding_case, monkeypatch):
+    from hermes_cli import kanban_task_binding as binding
+
+    def refuse_backup(*args, **kwargs):
+        pytest.fail("unsupported mode must refuse before backup creation")
+
+    monkeypatch.setattr(binding, "_private_recovery_snapshot", refuse_backup)
+    with pytest.raises(ValueError, match="POSIX"):
+        _correct(binding_case, exact_recovery=True)
+
+
 @pytest.mark.parametrize("column,value", [
     ("status", "ready"), ("claim_lock", "held"), ("current_run_id", 99), ("worker_pid", 123),
 ])

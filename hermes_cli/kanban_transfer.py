@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
 import sqlite3
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -331,8 +333,42 @@ def _append_transfer_events(conn, task_ids, source, destination, binding):
         kb._append_event(conn, task_id, "board_merged", {"source_board": source, "destination_board": destination})
 
 
+def _recovery_file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _merge_recovery(source, backup_path, task_ids, binding, binding_source, recovery):
+    """Explicit single-card binding mode reuses its verified exact private DB backup."""
+    if recovery is None:
+        return export_board(source, backup_path, include_attachments=True, include_logs=True)
+    if os.name != "posix":
+        raise ValueError("exact private binding recovery requires POSIX ownership")
+    path = Path(recovery)
+    if (binding is None or binding_source is None or task_ids is None or len(task_ids) != 1
+            or path != Path(str(backup_path) + ".source.sqlite3") or not path.is_absolute()
+            or path.resolve() != path or path == kb.kanban_db_path(source).resolve()):
+        raise ValueError("exact binding recovery identity is unqualified")
+    owner_uid = os.getuid() if hasattr(os, "getuid") else None
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as held:
+        before = os.fstat(held.fileno())
+        if (not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_uid != owner_uid or before.st_nlink != 1):
+            raise ValueError("exact binding recovery must be a private owned regular file")
+        with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as saved:
+            saved.row_factory = sqlite3.Row
+            if _selected_task_rows(saved, task_ids) != binding_source:
+                raise ValueError("exact binding recovery rows changed")
+        identity = _recovery_file_identity(before)
+        if (_recovery_file_identity(os.fstat(held.fileno())) != identity
+                or _recovery_file_identity(path.stat(follow_symlinks=False)) != identity):
+            raise ValueError("exact binding recovery identity changed")
+    return {"archive": str(path)}
+
+
 def merge_board(source: str, destination: str, backup_path: str, *, task_ids: list[str] | None = None,
-                binding=None, binding_source=None) -> dict[str, Any]:
+                binding=None, binding_source=None, binding_recovery=None) -> dict[str, Any]:
     """Copy every task and its history into an existing board, then verify it.
 
     Source rows are pruned only after full verification under both boards' write
@@ -346,7 +382,7 @@ def merge_board(source: str, destination: str, backup_path: str, *, task_ids: li
     for slug in (source, destination):
         if not kb.board_exists(slug):
             raise ValueError(f"board {slug!r} does not exist")
-    archive = export_board(source, backup_path, include_attachments=True, include_logs=True)
+    archive = _merge_recovery(source, backup_path, task_ids, binding, binding_source, binding_recovery)
     source_path = kb.kanban_db_path(source)
     with contextlib.ExitStack() as cleanup, tempfile.TemporaryDirectory(prefix="hermes-kanban-merge-") as temp_dir:
         snapshot_path = Path(temp_dir) / "source.sqlite3"
