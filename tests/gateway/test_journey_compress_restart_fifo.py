@@ -69,7 +69,7 @@ class CompactingModel(BaseHTTPRequestHandler):
             pass
 
 
-def _assert_compacted_retention(wire, tail_case, name):
+def _assert_compacted_retention(wire, tail_case, name, tail_marker):
     messages = json.loads(wire)
     turns = [str(m.get('content', '')) for m in messages]
     users = [str(m.get('content', '')) for m in messages if m.get('role') == 'user']
@@ -78,22 +78,24 @@ def _assert_compacted_retention(wire, tail_case, name):
     assert any(t.startswith('PRESSURE_0 ') for t in users), name
     assert not any(t.startswith('ACK_PRESSURE_0 ') for t in assistants), name
     if tail_case == 'bounded-legacy':
-        assert 'SUMMARY_RETAINED_FACTS' in wire and not any(t.startswith('PRESSURE_1 ') for t in turns), name
+        assert 'SUMMARY_RETAINED_FACTS' in wire and not any(t.startswith(tail_marker) for t in turns), name
     else:
-        assert any(t.startswith('PRESSURE_1 ') for t in users), name
+        assert any(t.startswith(tail_marker) for t in users), name
 
 
-def test_retention_assertions_reject_resurrection_and_tail_loss():
+@pytest.mark.parametrize("tail_index", [1, 2])
+def test_retention_assertions_reject_resurrection_and_tail_loss(tail_index):
+    tail_marker = f"PRESSURE_{tail_index} "
     lean = [{'role': 'user', 'content': 'PRESSURE_0 protected'},
-            {'role': 'assistant', 'content': 'SUMMARY_RETAINED_FACTS mentions PRESSURE_1 and ACK_PRESSURE_0'},
-            {'role': 'user', 'content': 'PRESSURE_1 retained tail'}]
-    _assert_compacted_retention(json.dumps(lean), 'default-lean', 'valid lean')
+            {'role': 'assistant', 'content': f'SUMMARY_RETAINED_FACTS mentions {tail_marker}and ACK_PRESSURE_0'},
+            {'role': 'user', 'content': tail_marker + 'retained tail'}]
+    _assert_compacted_retention(json.dumps(lean), 'default-lean', 'valid lean', tail_marker)
     legacy = lean[:-1]
-    _assert_compacted_retention(json.dumps(legacy), 'bounded-legacy', 'valid legacy')
+    _assert_compacted_retention(json.dumps(legacy), 'bounded-legacy', 'valid legacy', tail_marker)
     for messages, mode in ((lean + [{'role': 'assistant', 'content': 'ACK_PRESSURE_0 resurrected'}], 'default-lean'),
                            (lean[1:], 'default-lean'), (legacy, 'default-lean'), (lean, 'bounded-legacy')):
         with pytest.raises(AssertionError):
-            _assert_compacted_retention(json.dumps(messages), mode, 'negative control')
+            _assert_compacted_retention(json.dumps(messages), mode, 'negative control', tail_marker)
 
 
 @pytest.mark.platforms('linux')
@@ -167,6 +169,12 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
             else:
                 raise AssertionError('automatic compression never published')
             compacting = params
+            # Prompt overhead can shift the automatic trigger. With this fixture's
+            # fixed message sizes, lean's 6K budget/9K soft ceiling keeps the user
+            # two turns back; bounded legacy evicts it. This is not a fixed turn ID.
+            compacting_index = int(compacting['input_id'].removeprefix('pressure-'))
+            assert compacting_index >= 3, 'fixture requires two complete non-head turns'
+            before['tail_marker'] = f'PRESSURE_{compacting_index - 2} '
             children = rows('SELECT id FROM sessions WHERE parent_session_id=?', (sid,))
             assert len(children) == 1, children
             receipts = {compacting['input_id']: accepted['admission_id']}
@@ -190,7 +198,7 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
             # Establish the actual token-tail premise before testing restart preservation.
             _assert_compacted_retention(json.dumps([{'role': role, 'content': content}
                                                    for _, role, content in before['compacted']]),
-                                        tail_case, 'pre-restart fixture premise')
+                                        tail_case, 'pre-restart fixture premise', before['tail_marker'])
             peer.release.set()
         assert all(executed(name) == 0 for name in FOLLOWERS), [r['text'] for r in peer.requests]
 
@@ -229,8 +237,8 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
         assert executed(compacting['text'][:12]) == before['compacting_requests'], 'compacted turn replayed'
         for name in FOLLOWERS:
             wire = next(r['wire'] for r in peer.requests if r['text'] == name)
-            # Default lean retains PRESSURE_1; bounded legacy evicts it. Neither resurrects ACK_PRESSURE_0.
-            _assert_compacted_retention(wire, tail_case, name)
+            # Assert the same recent-tail identity before and after restart; never resurrect ACK_PRESSURE_0.
+            _assert_compacted_retention(wire, tail_case, name, before['tail_marker'])
         settled = admissions()
         assert {r['target_session_id'] for r in settled} == {sid}
         assert [r['request_id'] for r in settled][-3:] == list(FOLLOWERS)

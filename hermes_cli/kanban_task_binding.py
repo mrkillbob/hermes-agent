@@ -7,7 +7,7 @@ Otherwise an independently provisioned, verified task worktree is required first
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import os
 import subprocess
 from pathlib import Path
@@ -18,6 +18,7 @@ from hermes_cli.kanban_db_boards import board_ownership_lock
 from hermes_cli import kanban_db_workspace as workspace
 from hermes_cli.kanban_worktree_policy import project_worktree_path
 from hermes_cli.kanban_task_revision import require_task_revision
+from hermes_cli.kanban_default_shadow import EmptyDefaultShadow
 from hermes_cli.sqlite_util import write_txn
 
 # A correction proves physical repository/ref ownership, never a caller-selected
@@ -64,6 +65,7 @@ class BindingProjection:
     branch_name: str | None
     payload: dict
     target_project: projects_db.Project
+    default_shadow: EmptyDefaultShadow | None = field(default=None, kw_only=True)
 
     def apply(self, task):
         if dict(task) != self.original:
@@ -84,6 +86,8 @@ class BindingProjection:
         """Exclude only a counterpart already verified in the locked destination."""
         from hermes_cli.kanban_db_connect import _main_db_file
 
+        if self.default_shadow is not None:
+            self.default_shadow.proves_empty(self.default_shadow.path)
         task_id = self.original["id"]
         key = workspace._path_key(Path(self.workspace_path).resolve())
         if (workspace._conn_uses_path(src, task_id, key)
@@ -91,6 +95,8 @@ class BindingProjection:
             raise ValueError("destination workspace belongs to another card")
         destination_file = Path(_main_db_file(dst)).resolve()
         for db_file in workspace._sibling_board_db_files(src):
+            if self.default_shadow is not None and self.default_shadow.proves_empty(db_file):
+                continue
             if db_file.resolve() != destination_file and workspace._other_board_uses_path(db_file, task_id, key):
                 raise ValueError("destination workspace belongs to another board's card")
 
@@ -357,8 +363,12 @@ def correct_task_binding(*, source_board, task_id, target_project_id, expected: 
         raise ValueError("exact recovery is limited to single-card cross-board correction")
     old_board = old_record.board_slug
     with ExitStack() as locks:
-        for board in sorted({source_board, destination, old_board}):
-            locks.enter_context(board_ownership_lock(board))
+        ownership = {}
+        for board in sorted({source_board, destination, old_board, kb.DEFAULT_BOARD}):
+            ownership[board] = locks.enter_context(board_ownership_lock(board))
+        from hermes_cli.kanban_default_shadow import guarded_default_shadow
+
+        shadow = locks.enter_context(guarded_default_shadow(ownership[kb.DEFAULT_BOARD]))
         registry = locks.enter_context(projects_db.connect_closing())
         locks.enter_context(write_txn(registry))
         old_record = projects_db.get_project(registry, expected.values[0])
@@ -374,6 +384,7 @@ def correct_task_binding(*, source_board, task_id, target_project_id, expected: 
             task = _safe_task(conn, task_id, expected)
             projection = _binding_projection(
                 conn, task, old, target, source_board, destination, reason, target_directory)
+            projection = replace(projection, default_shadow=shadow)
             path = Path(projection.workspace_path)
             if source_board == destination and workspace._workspace_in_use_by_other(conn, task_id, path):
                 raise ValueError("destination workspace belongs to another card")
