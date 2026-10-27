@@ -112,3 +112,49 @@ def test_refuse_without_changes(case, monkeypatch, change):
         with pytest.raises(PermissionError if change == 'delegated' else ValueError):
             apply(conn, case, **kwargs)
         assert _selected_task_rows(conn, [case]) == before
+
+
+def test_real_preparation_failures_preserve_spawn_failed_and_breaker_runs(case, monkeypatch):
+    from hermes_cli.kanban_db_dispatch import _record_task_failure
+    with connect_closing(board='source-review') as conn:
+        tid = kb.create_task(conn, title='Synthetic accepted source after preparation failures',
+                             initial_status='todo', assignee='task-intake-router', board='source-review')
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+        for attempt in range(2):
+            claimed = kb.claim_task(conn, tid, claimer=f'synthetic-owner-{attempt}', board='source-review')
+            assert claimed is not None
+            tripped = _record_task_failure(conn, tid, 'synthetic preparation failure',
+                outcome='spawn_failed', failure_limit=2, release_claim=True, end_run=True,
+                expected_run_id=claimed.current_run_id, expected_claim_lock=claimed.claim_lock)
+            assert tripped is (attempt == 1)
+        before = _selected_task_rows(conn, [tid])
+        assert [run['status'] for run in before['task_runs']] == ['spawn_failed', 'gave_up']
+        assert all(type(run['ended_at']) is int and run['ended_at'] > 0 for run in before['task_runs'])
+        assert before['tasks'][0]['consecutive_failures'] == 2
+        assert not kb._has_sticky_block(conn, tid)
+        def forbidden(*args, **kwargs):
+            pytest.fail('source resolution changed settled failure evidence or invoked cleanup')
+        for name in ('_end_run', '_clear_failure_counter', '_cleanup_workspace', 'recompute_ready'):
+            monkeypatch.setattr(kb, name, forbidden)
+        assert apply(conn, tid)
+        after = _selected_task_rows(conn, [tid])
+        assert after['tasks'] == [{**before['tasks'][0], 'status': 'archived'}]
+        for table in before.keys() - {'tasks', 'task_events'}:
+            assert after[table] == before[table]
+        assert after['task_events'][:-1] == before['task_events']
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                apply(conn, tid)
+            assert _selected_task_rows(conn, [tid]) == after
+
+
+@pytest.mark.parametrize('status', ['spawn_failed', 'gave_up'])
+def test_preparation_status_without_end_remains_ineligible(case, status):
+    with connect_closing(board='source-review') as conn:
+        with kb.write_txn(conn):
+            conn.execute('UPDATE task_runs SET status=?,ended_at=NULL WHERE task_id=?', (status, case))
+        before = _selected_task_rows(conn, [case])
+        with pytest.raises(ValueError, match='unfinished or unknown run history'):
+            apply(conn, case)
+        assert _selected_task_rows(conn, [case]) == before

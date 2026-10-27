@@ -15,8 +15,11 @@ from hermes_cli.kanban_source_supersession import SourceSupersessionEvidence
 from hermes_cli.kanban_task_revision import require_task_revision
 from hermes_cli.kanban_transfer import _selected_task_rows
 
+# Failure accounting ends preparation runs with outcome-as-status, including the
+# budget trip; these are settled failures, not active claims or successful work.
 _TERMINAL_RUNS = frozenset(('done', 'completed', 'blocked', 'crashed', 'timed_out',
-                           'failed', 'released', 'paused', 'reclaimed', 'cancelled'))
+                           'failed', 'released', 'paused', 'reclaimed', 'cancelled',
+                           'spawn_failed', 'gave_up'))
 
 
 def _require_settled_source(rows):
