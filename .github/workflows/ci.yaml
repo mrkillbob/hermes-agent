@@ -1,4 +1,4 @@
-name: CI421 focused FIFO reproduction
+name: CI421 focused FIFO qualification
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   fifo:
-    name: Exact ${{ matrix.case }} FIFO reproduction
+    name: Exact ${{ matrix.case }} FIFO qualification
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -36,8 +36,10 @@ jobs:
       - name: Verify fixture identity and add bounded synthetic diagnostics
         env:
           EXPECTED_SOURCE: ${{ matrix.commit }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           "$HERMES_PYTHON" -B - <<'PY'
+          import base64
           import hashlib
           import os
           from pathlib import Path
@@ -48,10 +50,15 @@ jobs:
           data = path.read_bytes()
           blob = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
           assert blob == '8a36865de19b36f30a1901e23020751d89c99d67', blob
+
+          encoded = subprocess.check_output(['gh', 'api', 'repos/mrkillbob/hermes-agent/git/blobs/203d784e02a0bfb91a53318d6ca5904c04c9c3d6', '--jq', '.content'], text=True)
+          fixed = base64.b64decode(encoded)
+          fixed_blob = hashlib.sha1(b'blob '+str(len(fixed)).encode()+b'\0'+fixed).hexdigest()
+          assert fixed_blob == '203d784e02a0bfb91a53318d6ca5904c04c9c3d6', fixed_blob
           needle = "            before['compacted'] = transcript(before['child'])"
           diagnostic = '''
                       print('FIFO_PRECONDITION', json.dumps({
-                          'compacting_input': compacting['input_id'],
+                          'tail_case': tail_case, 'compacting_input': compacting['input_id'],
                           'child_pressure_markers': [f'PRESSURE_{i}' for i in range(12) if any(
                               str(c).startswith(f'PRESSURE_{i} ') for _, role, c in before['compacted'] if role == 'user')],
                           'child_roles_and_sizes': [(role, len(str(c))) for _, role, c in before['compacted']],
@@ -62,14 +69,14 @@ jobs:
           '''
           # Only diagnostics change; the failing retention assertion stays byte-identical.
           import textwrap
-          source = data.decode()
+          source = fixed.decode()
           assert source.count(needle) == 1
           source = source.replace(needle, needle+'\n'+textwrap.indent(textwrap.dedent(diagnostic).strip(), ' '*12))
           assert "assert 'SUMMARY_RETAINED_FACTS' in wire and not any(t.startswith('PRESSURE_1 ') for t in turns), name" in source
           path.write_text(source)
-          print('FIFO_PROBE_SOURCE', os.environ['EXPECTED_SOURCE'], 'fixture_blob', blob)
+          print('FIFO_QUALIFIED_SOURCE', os.environ['EXPECTED_SOURCE'], 'original_fixture_blob', blob, 'fixed_fixture_blob', fixed_blob)
           PY
-      - name: Reproduce original assertions without retries
+      - name: Qualify all four Linux journeys without retries
         run: scripts/run_tests.sh tests/gateway/test_journey_compress_restart_fifo.py -j 1 -v --tb=short
         env:
           HERMES_TEST_FILE_RETRIES: '0'
