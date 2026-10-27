@@ -2259,7 +2259,8 @@ def _dispatch_lane_task(
         from tools.process_registry import RestartSafeScopeUnavailable
 
         # No restart-safe scope means no card ran: preserve its retry budget (#114720).
-        infrastructure = isinstance(exc, RestartSafeScopeUnavailable)
+        from hermes_cli.kanban_worker_log import WorkerLogCapacityRefused
+        infrastructure = isinstance(exc, (RestartSafeScopeUnavailable, WorkerLogCapacityRefused))
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
         if _record_task_failure(
@@ -2644,10 +2645,7 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
 
 
 def _open_worker_log(task: Task, board: Optional[str]):
-    """Append-mode per-task log (a re-run on unblock appends, never overwrites),
-    rotated first. Anchored at the board root (not the shared kanban root) so
-    `hermes kanban log` reads its own file and boards sharing task ids don't
-    collide."""
+    """Rotate then append the task's board-scoped log, preserving prior attempts."""
     log_dir = _kb.worker_logs_dir(board=board)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{task.id}.log"
@@ -2806,7 +2804,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
     cmd = _restart_safe_worker_argv(task, cmd)
     from tools.process_registry import systemd_user_bus_env
     env = systemd_user_bus_env(env)
-    log_f = _open_worker_log(task, board)
+    from hermes_cli.kanban_worker_log import worker_log_capacity_guard
+    with worker_log_capacity_guard():
+        log_f = _open_worker_log(task, board)
     try:
         proc = subprocess.Popen(
             cmd,

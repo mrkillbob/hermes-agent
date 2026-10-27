@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 from pathlib import Path
 from typing import Optional
 
@@ -62,3 +63,18 @@ def rotate_worker_log(
         log_path.rename(_rotated_log_path(log_path, 1))
     except OSError:
         pass
+
+
+class WorkerLogCapacityRefused(RuntimeError):
+    """Managed log setup refused before a worker process could be created."""
+
+
+@contextlib.contextmanager
+def worker_log_capacity_guard():
+    """Mark only real host-capacity errors from pre-launch worker-log setup."""
+    try:
+        yield
+    except OSError as exc:
+        if exc.errno not in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
+            raise
+        raise WorkerLogCapacityRefused(str(exc)) from exc
