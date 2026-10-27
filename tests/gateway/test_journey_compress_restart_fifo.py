@@ -69,9 +69,37 @@ class CompactingModel(BaseHTTPRequestHandler):
             pass
 
 
+def _assert_compacted_retention(wire, tail_case, name):
+    messages = json.loads(wire)
+    turns = [str(m.get('content', '')) for m in messages]
+    users = [str(m.get('content', '')) for m in messages if m.get('role') == 'user']
+    assistants = [str(m.get('content', '')) for m in messages if m.get('role') == 'assistant']
+    assert 'SUMMARY_RETAINED_FACTS' in wire, name
+    assert any(t.startswith('PRESSURE_0 ') for t in users), name
+    assert not any(t.startswith('ACK_PRESSURE_0 ') for t in assistants), name
+    if tail_case == 'bounded-legacy':
+        assert 'SUMMARY_RETAINED_FACTS' in wire and not any(t.startswith('PRESSURE_1 ') for t in turns), name
+    else:
+        assert any(t.startswith('PRESSURE_1 ') for t in users), name
+
+
+def test_retention_assertions_reject_resurrection_and_tail_loss():
+    lean = [{'role': 'user', 'content': 'PRESSURE_0 protected'},
+            {'role': 'assistant', 'content': 'SUMMARY_RETAINED_FACTS mentions PRESSURE_1 and ACK_PRESSURE_0'},
+            {'role': 'user', 'content': 'PRESSURE_1 retained tail'}]
+    _assert_compacted_retention(json.dumps(lean), 'default-lean', 'valid lean')
+    legacy = lean[:-1]
+    _assert_compacted_retention(json.dumps(legacy), 'bounded-legacy', 'valid legacy')
+    for messages, mode in ((lean + [{'role': 'assistant', 'content': 'ACK_PRESSURE_0 resurrected'}], 'default-lean'),
+                           (lean[1:], 'default-lean'), (legacy, 'default-lean'), (lean, 'bounded-legacy')):
+        with pytest.raises(AssertionError):
+            _assert_compacted_retention(json.dumps(messages), mode, 'negative control')
+
+
 @pytest.mark.platforms('linux')
 @pytest.mark.parametrize('restart', ['graceful', 'crash'])
-def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_path, restart):
+@pytest.mark.parametrize('tail_case', ['default-lean', 'bounded-legacy'])
+def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_path, restart, tail_case):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700)
@@ -88,7 +116,8 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
         'auxiliary': {'title_generation': {'enabled': False},
                       'compression': {'provider': 'custom', 'model': 'summary', 'base_url': url}},
         'compression': {'protect_first_n': 1, 'protect_last_n': 2, 'threshold_tokens': 12000,
-                        'threshold': 0.5, 'in_place': False},
+                        'threshold': 0.5, 'in_place': False,
+                        **({'tail_mode': 'legacy', 'target_ratio': 0.10} if tail_case == 'bounded-legacy' else {})},
         'platform_toolsets': {'cli': []}}))
     (home / 'models_dev_cache.json').write_text(json.dumps({'custom': {'id': 'custom', 'models': {
         name: {'id': name, 'name': name, 'limit': {'context': 64000 if name == 'original' else 1000000,
@@ -158,6 +187,10 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
             await asyncio.to_thread(owner.wait, 60)
             before['stopped'] = {r['request_id']: (r['status'], r['outcome']) for r in admissions()}
             before['compacted'] = transcript(before['child'])
+            # Establish the actual token-tail premise before testing restart preservation.
+            _assert_compacted_retention(json.dumps([{'role': role, 'content': content}
+                                                   for _, role, content in before['compacted']]),
+                                        tail_case, 'pre-restart fixture premise')
             peer.release.set()
         assert all(executed(name) == 0 for name in FOLLOWERS), [r['text'] for r in peer.requests]
 
@@ -196,9 +229,8 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
         assert executed(compacting['text'][:12]) == before['compacting_requests'], 'compacted turn replayed'
         for name in FOLLOWERS:
             wire = next(r['wire'] for r in peer.requests if r['text'] == name)
-            # protect_first_n keeps PRESSURE_0 verbatim; the compacted middle is only inside the summary.
-            turns = [str(m.get('content', '')) for m in json.loads(wire)]
-            assert 'SUMMARY_RETAINED_FACTS' in wire and not any(t.startswith('PRESSURE_1 ') for t in turns), name
+            # Default lean retains PRESSURE_1; bounded legacy evicts it. Neither resurrects ACK_PRESSURE_0.
+            _assert_compacted_retention(wire, tail_case, name)
         settled = admissions()
         assert {r['target_session_id'] for r in settled} == {sid}
         assert [r['request_id'] for r in settled][-3:] == list(FOLLOWERS)

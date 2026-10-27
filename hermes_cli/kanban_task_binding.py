@@ -256,7 +256,7 @@ def _verify_workspace_availability(source, destination, snapshot, projection):
         projection.verify_workspace_users(src, dst, retained_copy=bool(copied["tasks"]))
 
 
-def _private_recovery_snapshot(source, recovery):
+def _private_recovery_snapshot(source, recovery, *, max_bytes=None):
     """Publish a complete owner-only snapshot atomically, without replacing a path."""
     from hermes_cli import kanban_transfer as transfer
 
@@ -264,7 +264,10 @@ def _private_recovery_snapshot(source, recovery):
         snapshot = Path(staging) / "source.sqlite3"
         snapshot_fd = os.open(snapshot, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.close(snapshot_fd)
-        transfer._snapshot_db(source, snapshot)
+        if max_bytes is None:
+            transfer._snapshot_db(source, snapshot)
+        else:
+            transfer._budgeted_snapshot_db(source, snapshot, max_bytes)
         # Hard-link publication refuses an existing file or symlink atomically.
         # The private staging directory prevents replacing SQLite's open target.
         os.link(snapshot, recovery)
@@ -320,7 +323,7 @@ def _destination(task, project):
 
 
 def correct_task_binding(*, source_board, task_id, target_project_id, expected: BindingExpectation,
-                         target_root, reason, backup_path, target_directory=None):
+                         target_root, reason, backup_path, target_directory=None, exact_recovery=False):
     """Preserve a card and its holds; never claim, promote, materialize, or clean it.
 
     Metadata ownership locks precede the registry writer reservation, matching audit
@@ -335,6 +338,8 @@ def correct_task_binding(*, source_board, task_id, target_project_id, expected: 
     # Presence matters: Git also interprets explicitly empty namespace values.
     if any(key in os.environ for key in _GIT_NAMESPACE_OVERRIDES):
         raise ValueError("binding correction refuses inherited Git namespace")
+    if exact_recovery and os.name != "posix":
+        raise ValueError("exact private binding recovery requires POSIX ownership")
     from hermes_cli import kanban_transfer as transfer
 
     if not reason.strip() or not backup_path or not expected.values[0]:
@@ -348,6 +353,8 @@ def correct_task_binding(*, source_board, task_id, target_project_id, expected: 
     if target is None or not target.board_slug or old_record is None or not old_record.board_slug:
         raise ValueError("both projects require canonical registered boards")
     destination = target.board_slug
+    if exact_recovery and (source_board == destination or target_directory is not None):
+        raise ValueError("exact recovery is limited to single-card cross-board correction")
     old_board = old_record.board_slug
     with ExitStack() as locks:
         for board in sorted({source_board, destination, old_board}):
@@ -377,7 +384,8 @@ def correct_task_binding(*, source_board, task_id, target_project_id, expected: 
         # Portable board export intentionally scrubs machine-local bindings. Keep
         # a separate exact local snapshot before replacing those bindings.
         recovery = Path(str(backup_path) + ".source.sqlite3")
-        _private_recovery_snapshot(kb.kanban_db_path(source_board), recovery)
+        _private_recovery_snapshot(kb.kanban_db_path(source_board), recovery,
+                                   max_bytes=16 * 1024 * 1024 if exact_recovery else None)
         import sqlite3
         from contextlib import closing
         with closing(sqlite3.connect(recovery)) as saved:
@@ -386,8 +394,10 @@ def correct_task_binding(*, source_board, task_id, target_project_id, expected: 
                 raise ValueError("source changed during recovery backup; correction refused")
         if source_board != destination:
             result = transfer.merge_board(source_board, destination, backup_path, task_ids=[task_id],
-                                          binding=projection, binding_source=snapshot)
-            return {**result, "recovery_backup": str(recovery)}
+                                          binding=projection, binding_source=snapshot,
+                                          binding_recovery=recovery if exact_recovery else None)
+            return {**result, "recovery_backup": str(recovery),
+                    "backup_format": "exact-source-sqlite" if exact_recovery else "portable-board-archive"}
         backup = transfer.export_board(source_board, backup_path, include_attachments=True, include_logs=True)
         with kbc.connect_closing(board=source_board) as conn, kb.write_txn(conn):
             if transfer._selected_task_rows(conn, [task_id]) != snapshot:
