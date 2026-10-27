@@ -199,6 +199,20 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
     return entries
 
 
+def _require_archive_identity(directory: Path, slug: str) -> None:
+    """Do not publish an archive that the workspace ownership census will refuse."""
+    from hermes_cli.kanban_db_workspace import _read_archived_board_marker
+
+    try:
+        database = directory / "kanban.db"
+        if directory.is_symlink() or database.is_symlink() or not database.is_file():
+            raise ValueError("non-regular board directory or database")
+        if _kb._require_slug(_read_archived_board_marker(directory / "board.json")) != slug:
+            raise ValueError("board marker does not match directory")
+    except (OSError, UnicodeError, ValueError, TypeError):
+        raise ValueError("archive requires a stable matching board identity and regular database") from None
+
+
 def remove_board(slug: str, *, archive: bool = True) -> dict:
     """Archive (to ``boards/_archived/<slug>-<ts>/``) or delete a board;
     ``default`` cannot be removed. Returns ``{"slug", "action", "new_path"}``."""
@@ -217,6 +231,8 @@ def _remove_board(slug: str, *, archive: bool = True) -> dict:
     d = _kb.board_dir(normed)
     if not d.exists():
         raise ValueError(f"board {normed!r} does not exist")
+    if archive:
+        _require_archive_identity(d, normed)
 
     # If the user removed the currently-active board, revert to default.
     if _kb.get_current_board() == normed:
