@@ -109,8 +109,8 @@ def test_exact_recovery_refuses_unqualified_backup(binding_case, monkeypatch, ch
 
     original = binding._private_recovery_snapshot
 
-    def altered(source, recovery):
-        original(source, recovery)
+    def altered(source, recovery, **options):
+        original(source, recovery, **options)
         if change == "mode":
             recovery.chmod(0o644)
         elif change == "row":

@@ -185,6 +185,25 @@ def _snapshot_db(source: Path, target: Path) -> None:
         src.backup(dst)
 
 
+def _budgeted_snapshot_db(source: Path, target: Path, max_bytes: int) -> None:
+    """Bound the logical DB, including WAL pages, in the same read snapshot copied."""
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("recovery snapshot requires a positive byte budget")
+    with contextlib.closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as src:
+        src.execute("BEGIN")
+        try:
+            pages = src.execute("PRAGMA page_count").fetchone()[0]
+            page_size = src.execute("PRAGMA page_size").fetchone()[0]
+            if pages * page_size > max_bytes:
+                raise ValueError("recovery snapshot exceeds approved byte budget")
+            with contextlib.closing(sqlite3.connect(str(target))) as dst:
+                src.backup(dst)
+            if target.stat().st_size > max_bytes:
+                raise ValueError("recovery snapshot exceeded approved byte budget")
+        finally:
+            src.rollback()
+
+
 def _scrub_local_state(conn: sqlite3.Connection) -> None:
     """Strip machine-local runtime state (claims, PIDs, and above all the
     gateway chat ids subscribed to task events). Caller owns the transaction.

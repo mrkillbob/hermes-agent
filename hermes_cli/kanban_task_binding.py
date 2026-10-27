@@ -256,7 +256,7 @@ def _verify_workspace_availability(source, destination, snapshot, projection):
         projection.verify_workspace_users(src, dst, retained_copy=bool(copied["tasks"]))
 
 
-def _private_recovery_snapshot(source, recovery):
+def _private_recovery_snapshot(source, recovery, *, max_bytes=None):
     """Publish a complete owner-only snapshot atomically, without replacing a path."""
     from hermes_cli import kanban_transfer as transfer
 
@@ -264,7 +264,10 @@ def _private_recovery_snapshot(source, recovery):
         snapshot = Path(staging) / "source.sqlite3"
         snapshot_fd = os.open(snapshot, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.close(snapshot_fd)
-        transfer._snapshot_db(source, snapshot)
+        if max_bytes is None:
+            transfer._snapshot_db(source, snapshot)
+        else:
+            transfer._budgeted_snapshot_db(source, snapshot, max_bytes)
         # Hard-link publication refuses an existing file or symlink atomically.
         # The private staging directory prevents replacing SQLite's open target.
         os.link(snapshot, recovery)
@@ -381,7 +384,8 @@ def correct_task_binding(*, source_board, task_id, target_project_id, expected: 
         # Portable board export intentionally scrubs machine-local bindings. Keep
         # a separate exact local snapshot before replacing those bindings.
         recovery = Path(str(backup_path) + ".source.sqlite3")
-        _private_recovery_snapshot(kb.kanban_db_path(source_board), recovery)
+        _private_recovery_snapshot(kb.kanban_db_path(source_board), recovery,
+                                   max_bytes=16 * 1024 * 1024 if exact_recovery else None)
         import sqlite3
         from contextlib import closing
         with closing(sqlite3.connect(recovery)) as saved:
