@@ -2120,8 +2120,7 @@ def _dispatch_lane_task(
     other_running_rows: list[dict[str, Any]],
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
-    Returns True when a spawn slot was consumed (real or ``dry_run``); every
-    skip is recorded on ``result``.
+    Return True for a consumed spawn slot (real or dry-run); record skips on ``result``.
     """
     task_id = row["id"]
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
@@ -2186,6 +2185,7 @@ def _dispatch_lane_task(
         if _record_task_failure(
             conn, claimed.id, f"workspace: {exc}",
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
+            expected_run_id=claimed.current_run_id, expected_claim_lock=claimed.claim_lock,
             infrastructure=isinstance(exc, OSError) and exc.errno in (
                 errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC),
             ),
@@ -2261,8 +2261,7 @@ def _dispatch_lane_task(
             return True
         from tools.process_registry import RestartSafeScopeUnavailable
 
-        # The host refused the spawn (no restart-safe scope): nothing about the
-        # card ran, so it must not spend the card's retry budget (#114720).
+        # No restart-safe scope means no card ran: preserve its retry budget (#114720).
         infrastructure = isinstance(exc, RestartSafeScopeUnavailable)
         if infrastructure:
             _kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s", claimed.id, exc)
@@ -2270,6 +2269,7 @@ def _dispatch_lane_task(
             conn, claimed.id, str(exc),
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
             infrastructure=infrastructure,
+            expected_run_id=claimed.current_run_id, expected_claim_lock=claimed.claim_lock,
         ):
             result.auto_blocked.append(claimed.id)
         return False
