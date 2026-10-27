@@ -82,6 +82,7 @@ def dispatch(monkeypatch, tmp_path):
         raise OSError("network disabled in test")
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
     monkeypatch.setattr(os, "system", fail_spawn)
     monkeypatch.setattr(os, "posix_spawn", fail_spawn, raising=False)
     monkeypatch.setattr("socket.socket.connect", record_connect)

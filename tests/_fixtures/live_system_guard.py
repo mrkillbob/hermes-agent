@@ -472,6 +472,12 @@ def _live_system_guard(request, monkeypatch):
 
     monkeypatch.setattr(_subprocess, "run", _wrap_subprocess("run", real_run))
     monkeypatch.setattr(_subprocess, "Popen", _wrap_popen())
+    # The Darwin managed launch bypasses Popen, so enforce the same policy
+    # at its native leaf, including direct callers, before libc is reached.
+    from hermes_platform import darwin_spawn
+    monkeypatch.setattr(
+        darwin_spawn, "spawn_detached", _wrap_subprocess("posix_spawn", darwin_spawn.spawn_detached),
+    )
     monkeypatch.setattr(_subprocess, "call", _wrap_subprocess("call", real_call))
     monkeypatch.setattr(
         _subprocess, "check_call", _wrap_subprocess("check_call", real_check_call)

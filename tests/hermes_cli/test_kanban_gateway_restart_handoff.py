@@ -71,7 +71,7 @@ def test_managed_gateway_worker_is_spawned_in_restart_safe_scope(
     monkeypatch.setenv("INVOCATION_ID", "managed-gateway-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-cross-profile")
     monkeypatch.setattr("agent.secret_scope.is_multiplex_active", lambda: True)
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
     monkeypatch.setattr("tools.process_registry._is_supervised_gateway_process", lambda: True)
     monkeypatch.setattr("tools.process_registry._systemd_run_user_scope_available", lambda: True)
     monkeypatch.setattr("tools.process_registry._worker_memory_max_bytes", lambda: 536_870_912)
@@ -100,7 +100,7 @@ def test_managed_gateway_worker_spawn_fails_closed_without_scope(
     workspace, task = worker_setup
     popen_calls: list[list[str]] = []
     monkeypatch.setenv("INVOCATION_ID", "managed-gateway-test")
-    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: popen_calls.append(list(cmd)))
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", lambda cmd, **kwargs: popen_calls.append(list(cmd)))
     monkeypatch.setattr("tools.process_registry._is_supervised_gateway_process", lambda: True)
     monkeypatch.setattr("tools.process_registry._systemd_run_user_scope_available", lambda: False)
 
@@ -118,7 +118,7 @@ def test_managed_gateway_scope_builder_fails_closed_if_binary_disappears(
     monkeypatch.setattr("tools.process_registry._is_supervised_gateway_process", lambda: True)
     monkeypatch.setattr("tools.process_registry._systemd_run_user_scope_available", lambda: True)
     monkeypatch.setattr("shutil.which", lambda _name: None)
-    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("unsafe direct spawn"))
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", lambda *_args, **_kwargs: pytest.fail("unsafe direct spawn"))
 
     with pytest.raises(RuntimeError, match="restart-safe systemd scope"):
         kbd._default_spawn(task, str(workspace))
@@ -135,7 +135,7 @@ def test_standalone_dispatcher_keeps_direct_worker_spawn(
 
     # Standalone = no systemd unit at all (CI runners inherit INVOCATION_ID).
     monkeypatch.delenv("INVOCATION_ID", raising=False)
-    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: captured_cmd.extend(cmd) or FakeProc())
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", lambda cmd, **kwargs: captured_cmd.extend(cmd) or FakeProc())
     monkeypatch.setattr("tools.process_registry._is_supervised_gateway_process", lambda: False)
     monkeypatch.setattr(
         "tools.process_registry._systemd_run_user_scope_available",
@@ -164,7 +164,7 @@ def test_oneshot_unit_dispatcher_scope_wraps_or_warns_never_dooms_silently(
     class FakeProc:
         pid = 4243
 
-    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kwargs: spawned.append(list(cmd)) or FakeProc())
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", lambda cmd, **kwargs: spawned.append(list(cmd)) or FakeProc())
     monkeypatch.setenv("INVOCATION_ID", "oneshot-dispatch-timer")
     monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: False)
     monkeypatch.setattr(process_registry, "_systemd_run_user_scope_available", lambda: True)

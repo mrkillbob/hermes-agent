@@ -308,7 +308,7 @@ class TestWorkerSpawnEnv:
             captured["env"] = kwargs.get("env", {})
             return FakeProc()
 
-        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
         kb.create_board("spawntest")
 
         task = kb.Task(

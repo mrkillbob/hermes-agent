@@ -855,7 +855,7 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
         captured["env"] = kwargs.get("env", {})
         return FakeProc()
 
-    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
 
     conn = kbc.connect()
     try:

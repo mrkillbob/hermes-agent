@@ -126,7 +126,7 @@ fallback_model:
         captured["env"] = dict(kwargs.get("env") or {})
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
 
     task = kb.Task(
         id="t_explicit_local_spawn",
@@ -187,7 +187,7 @@ def test_default_spawn_bridges_process_local_provider_into_profile_worker(
         captured["env"] = dict(kwargs.get("env") or {})
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
     task = kb.Task(
         id="t_profile_local_provider",
         title="profile local provider",
@@ -254,7 +254,7 @@ fallback_model:
         captured["env"] = dict(kwargs.get("env") or {})
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
 
     task = kb.Task(
         id="t_explicit_remote_spawn",
@@ -311,7 +311,7 @@ def test_default_spawn_pins_project_virtualenv_for_worker_commands(
         captured["env"] = dict(kwargs["env"])
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
     task = Task(
         id="t_project_venv",
         title="project venv",

@@ -71,7 +71,7 @@ agent:
         captured["cwd"] = kwargs.get("cwd")
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -110,7 +110,7 @@ def test_default_spawn_does_not_pass_mutable_launch_overrides(monkeypatch, tmp_p
         captured["cmd"] = list(cmd)
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -152,7 +152,7 @@ def test_default_spawn_resolves_env_passthrough_under_multiplex(monkeypatch, tmp
         captured["env"] = dict(kwargs.get("env") or {})
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
