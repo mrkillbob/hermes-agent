@@ -2102,6 +2102,23 @@ def dispatch_once(
     return result
 
 
+def _persist_dispatch_attempt(conn, claimed, workspace, branch_name, failure_limit, result):
+    try:
+        _kbw.persist_dispatch_workspace(conn, claimed, workspace, branch_name)
+    except _kbw.DispatchWorkspaceOwnershipChanged:
+        return False
+    except Exception as exc:  # health: allow BLE001 -- persist failures are retained in fenced task/run events below
+        if _record_task_failure(
+            conn, claimed.id, f"workspace: {exc}",
+            outcome="spawn_failed", failure_limit=failure_limit,
+            release_claim=True, end_run=True,
+            expected_run_id=claimed.current_run_id, expected_claim_lock=claimed.claim_lock,
+        ):
+            result.auto_blocked.append(claimed.id)
+        return False
+    return True
+
+
 def _dispatch_lane_task(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -2206,29 +2223,9 @@ def _dispatch_lane_task(
         if str(Path(owner["workspace_path"]).resolve()) == physical_workspace:
             result.workspace_collisions.append((claimed.id, owner["id"], physical_workspace))
             # Contention is a scheduling delay, not a failed worker attempt.
-            with _kb.write_txn(conn):
-                retry_status = _kb._retry_status_for_run(conn, claimed.id)
-                conn.execute(
-                    "UPDATE tasks SET status=?, claim_lock=NULL, claim_expires=NULL, "
-                    "worker_pid=NULL WHERE id=? AND status='running'",
-                    (retry_status, claimed.id),
-                )
-                payload = {"owner": owner["id"], "workspace": physical_workspace}
-                run_id = _kb._end_run(
-                    conn, claimed.id, outcome="workspace_deferred", metadata=payload,
-                )
-                _kb._append_event(conn, claimed.id, "workspace_deferred", payload, run_id=run_id)
+            _kbw.defer_dispatch_workspace(conn, claimed, owner["id"], physical_workspace)
             return False
-    try:
-        _kbw.persist_dispatch_workspace(conn, claimed, workspace, resolved_branch_name)
-    except Exception as exc:
-        if _record_task_failure(
-            conn, claimed.id, f"workspace: {exc}",
-            outcome="spawn_failed", failure_limit=failure_limit,
-            release_claim=True, end_run=True,
-            expected_run_id=claimed.current_run_id, expected_claim_lock=claimed.claim_lock,
-        ):
-            result.auto_blocked.append(claimed.id)
+    if not _persist_dispatch_attempt(conn, claimed, workspace, resolved_branch_name, failure_limit, result):
         return False
     _kbw._maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
     if lane == "review":
