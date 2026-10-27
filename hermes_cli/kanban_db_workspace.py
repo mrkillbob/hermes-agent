@@ -957,15 +957,52 @@ def resolve_dispatch_workspace(task: Task, *, board: Optional[str] = None) -> tu
     return resolve_workspace(task, board=board), None
 
 
+class DispatchWorkspaceOwnershipChanged(RuntimeError):
+    """The prepared attempt no longer owns the task; dispatch must stop."""
+
+
 def persist_dispatch_workspace(
     conn: sqlite3.Connection, task: Task, workspace: Path, resolved_branch_name: Optional[str],
 ) -> None:
-    """Persist the resolved assignment before a dispatcher releases its worker."""
-    set_workspace_path(conn, task.id, str(workspace))
-    if task.workspace_kind == "worktree":
-        branch = resolved_branch_name or (task.branch_name or "").strip() or f"wt/{task.id}"
-        set_branch_name(conn, task.id, branch)
-        set_worktree_base(conn, task.id, workspace, branch)
+    """Persist one assignment atomically only while the captured attempt owns it."""
+    branch = resolved_branch_name or (task.branch_name or "").strip() or f"wt/{task.id}"
+    evidence = _read_worktree_base(workspace, branch) if task.workspace_kind == "worktree" else None
+    with _kb.write_txn(conn):
+        row = conn.execute(
+            "SELECT workspace_base_ref, workspace_base_sha FROM tasks WHERE id=? "
+            "AND status='running' AND current_run_id=? AND claim_lock=?",
+            (task.id, task.current_run_id, task.claim_lock),
+        ).fetchone()
+        if row is None:
+            raise DispatchWorkspaceOwnershipChanged("prepared Kanban attempt no longer owns the task")
+        values = {"workspace_path": str(workspace)}
+        if evidence is not None:
+            ref, sha, valid = evidence
+            assigned = _validate_worktree_base(task.id, row, ref, sha, valid)
+            values["branch_name"] = branch
+            if not assigned:
+                values.update(workspace_base_ref=ref, workspace_base_sha=sha)
+        conn.execute(
+            "UPDATE tasks SET " + ", ".join(f"{key}=?" for key in values) + " WHERE id=?",
+            (*values.values(), task.id),
+        )
+
+
+def defer_dispatch_workspace(conn, task, owner_id: str, workspace: str) -> bool:
+    """Record collision deferral without releasing replacement ownership."""
+    with _kb.write_txn(conn):
+        retry_status = _kb._retry_status_for_run(conn, task.id, task.current_run_id)
+        updated = conn.execute(
+            "UPDATE tasks SET status=?, claim_lock=NULL, claim_expires=NULL, worker_pid=NULL "
+            "WHERE id=? AND status='running' AND current_run_id=? AND claim_lock=?",
+            (retry_status, task.id, task.current_run_id, task.claim_lock),
+        )
+        if updated.rowcount != 1:
+            return False
+        payload = {"owner": owner_id, "workspace": workspace}
+        run_id = _kb._end_run(conn, task.id, outcome="workspace_deferred", metadata=payload)
+        _kb._append_event(conn, task.id, "workspace_deferred", payload, run_id=run_id)
+    return True
 
 
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
@@ -1022,10 +1059,7 @@ def set_branch_name(conn: sqlite3.Connection, task_id: str, branch_name: str) ->
     _set_task_column(conn, task_id, "branch_name", str(branch_name))
 
 
-def set_worktree_base(
-    conn: sqlite3.Connection, task_id: str, workspace: Path, branch_name: str,
-) -> None:
-    """Copy allocator-owned base evidence into the control-plane task row."""
+def _read_worktree_base(workspace: Path, branch_name: str) -> tuple[str, str, bool]:
     prefix = f"branch.{branch_name}.hermes-kanban-base"
     base_ref = _git(workspace, "config", "--get", prefix + "-ref", timeout=20)
     base_sha = _git(workspace, "config", "--get", prefix + "-sha", timeout=20)
@@ -1040,6 +1074,26 @@ def set_worktree_base(
     resolved = _git(
         workspace, "rev-parse", "--verify", "--end-of-options", sha + "^{commit}", timeout=20,
     )
+    return ref, sha, resolved.returncode == 0 and resolved.stdout.strip().lower() == sha
+
+
+def _validate_worktree_base(task_id, row, ref, sha, valid) -> bool:
+    assigned_ref = (row["workspace_base_ref"] or "").strip()
+    assigned_sha = (row["workspace_base_sha"] or "").strip().lower()
+    if assigned_ref or assigned_sha:
+        if assigned_ref == ref and assigned_sha == sha:
+            return True
+        raise RuntimeError(f"assigned Kanban worktree base cannot change for task {task_id}")
+    if not ref or not valid:
+        raise RuntimeError("assigned Kanban worktree base is not a commit")
+    return False
+
+
+def set_worktree_base(
+    conn: sqlite3.Connection, task_id: str, workspace: Path, branch_name: str,
+) -> None:
+    """Copy allocator-owned base evidence into the control-plane task row."""
+    ref, sha, valid = _read_worktree_base(workspace, branch_name)
     with _kb.write_txn(conn):
         row = conn.execute(
             "SELECT workspace_base_ref, workspace_base_sha FROM tasks WHERE id = ?",
@@ -1047,16 +1101,8 @@ def set_worktree_base(
         ).fetchone()
         if row is None:
             raise RuntimeError(f"Kanban task {task_id} does not exist")
-        assigned_ref = (row["workspace_base_ref"] or "").strip()
-        assigned_sha = (row["workspace_base_sha"] or "").strip().lower()
-        if assigned_ref or assigned_sha:
-            if assigned_ref == ref and assigned_sha == sha:
-                return
-            raise RuntimeError(
-                f"assigned Kanban worktree base cannot change for task {task_id}"
-            )
-        if not ref or resolved.returncode != 0 or resolved.stdout.strip().lower() != sha:
-            raise RuntimeError(f"assigned Kanban worktree base is not a commit for {branch_name}")
+        if _validate_worktree_base(task_id, row, ref, sha, valid):
+            return
         conn.execute(
             "UPDATE tasks SET workspace_base_ref = ?, workspace_base_sha = ? WHERE id = ?",
             (ref, sha, task_id),
