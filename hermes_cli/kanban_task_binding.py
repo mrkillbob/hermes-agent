@@ -18,6 +18,7 @@ from hermes_cli.kanban_db_boards import board_ownership_lock
 from hermes_cli import kanban_db_workspace as workspace
 from hermes_cli.kanban_worktree_policy import project_worktree_path
 from hermes_cli.kanban_task_revision import require_task_revision
+from hermes_cli.kanban_default_shadow import EmptyDefaultShadow
 from hermes_cli.sqlite_util import write_txn
 
 # A correction proves physical repository/ref ownership, never a caller-selected
@@ -64,7 +65,7 @@ class BindingProjection:
     branch_name: str | None
     payload: dict
     target_project: projects_db.Project
-    default_shadow: object = field(default=None, kw_only=True)
+    default_shadow: EmptyDefaultShadow | None = field(default=None, kw_only=True)
 
     def apply(self, task):
         if dict(task) != self.original:
