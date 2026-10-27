@@ -270,8 +270,54 @@ def _retire_agent(cli) -> None:
     cli.agent = None
 
 
+class SkillPreloadPending(TimeoutError):
+    """The shared skill preload has not reached a completed result yet."""
+
+
 class CLIAgentSetupMixin:
     """Agent construction + session-resume display methods for ``HermesCLI``."""
+
+    def finalize_preloaded_skills(self) -> None:
+        """Join the background --skills preload and fold it into the prompt (idempotent).
+
+        Raises ``SkillPreloadPending`` while explicit or auto-load skills are still loading;
+        ``ValueError`` when every explicitly requested skill was unknown.
+        """
+        from cli import logger
+
+        if getattr(self, "_preload_skills_finalized", False):
+            return
+        thread = getattr(self, "_preload_skills_thread", None)
+        if thread is None:
+            self._preload_skills_finalized = True
+            return
+        thread.join(timeout=120)
+        if thread.is_alive():
+            raise SkillPreloadPending("Skill preload did not finish before the startup deadline")
+        err = getattr(self, "_preload_skills_error", None)
+        if err is not None:
+            raise err
+        auto_result = getattr(self, "_auto_load_skills_result", None)
+        if auto_result and auto_result[2]:
+            logger.warning("skills.auto_load: skill(s) not found or disabled, skipped: %s", ", ".join(auto_result[2]))
+        # auto_load names first, then explicit -s names that were not already pinned.
+        self.preloaded_skills = list(auto_result[1]) if auto_result else []
+        result = getattr(self, "_preload_skills_result", None)
+        if not result:
+            self._preload_skills_finalized = True
+            return
+        skills_prompt, loaded_skills, missing_skills = result
+        if missing_skills:
+            from agent.skill_commands import format_missing_skills
+            # A typo'd name must not crash a kanban worker; only a fully-missing set fails loudly.
+            if not loaded_skills:
+                raise ValueError(format_missing_skills(missing_skills))
+            logger.warning("Skipping %s. Continuing with: %s. List available skills with `hermes skills list`.",
+                           format_missing_skills(missing_skills), ", ".join(loaded_skills))
+        if skills_prompt:
+            self.system_prompt = "\n\n".join(p for p in (self.system_prompt, skills_prompt) if p).strip()
+        self.preloaded_skills += [name for name in loaded_skills if name not in self.preloaded_skills]
+        self._preload_skills_finalized = True
 
     def _ensure_runtime_credentials(self) -> bool:
         """Re-resolve provider credentials before agent use so key rotation / token
@@ -664,13 +710,17 @@ class CLIAgentSetupMixin:
         """Build the agent on first use; when resuming, restore history from SQLite.
         Returns True on success."""
         from cli import ChatConsole, _cprint, logger
-        from hermes_cli.gateway_agent import GatewayAgent as AIAgent  # the gateway runs the turn
         if self.agent is not None:
             return True
 
         # Join the background preloaded-skills load (--skills/-s) BEFORE the agent
         # snapshots self.system_prompt below. No-op when nothing was requested.
-        self.finalize_preloaded_skills()
+        try:
+            self.finalize_preloaded_skills()
+        except SkillPreloadPending:
+            ChatConsole().print("[yellow]Skill loading is still in progress. Please try again.[/]")
+            return False
+        from hermes_cli.gateway_agent import GatewayAgent as AIAgent  # the gateway runs the turn
         # No deferred plugin discovery either: the gateway that runs the turn loads the plugins (PLG-7).
         self._install_tool_callbacks()
         if not self._ensure_runtime_credentials():
