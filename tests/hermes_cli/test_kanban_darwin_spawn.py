@@ -308,6 +308,24 @@ def test_native_api_unavailability_never_falls_back_to_fork(tmp_path, monkeypatc
     assert caught.value.errno == errno.ENOSYS
 
 
+@pytest.mark.parametrize("entry", ["worker", "native"])
+def test_native_launch_keeps_live_system_guard_before_libc(tmp_path, monkeypatch, entry):
+    from hermes_cli.kanban_worker_spawn import spawn_worker
+    from hermes_platform import darwin_spawn as native
+
+    def forbidden():
+        pytest.fail("live-system guard must refuse before touching native creation")
+
+    monkeypatch.setattr(native, "_native_api", forbidden)
+    argv = [sys.executable, "-m", "hermes_cli.main", "gateway", "start"]
+    with (tmp_path / "log").open("ab") as log, pytest.raises(RuntimeError, match="live-system guard"):
+        if entry == "worker":
+            spawn_worker(argv, cwd=str(tmp_path), stdin=subprocess.DEVNULL, stdout=log,
+                         stderr=subprocess.STDOUT, env={}, start_new_session=True, creationflags=0)
+        else:
+            native.spawn_detached(argv, cwd=str(tmp_path), env={}, log_fd=log.fileno())
+
+
 def test_native_preserves_blocked_signal_mask(tmp_path):
     # Isolate parent mask manipulation from pytest and its timeout machinery.
     result = tmp_path / "mask.json"
