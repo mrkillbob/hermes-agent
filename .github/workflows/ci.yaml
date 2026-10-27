@@ -1,4 +1,4 @@
-name: CI421 focused FIFO qualification
+name: CI428 focused FIFO diagnosis
 
 on:
   workflow_dispatch:
@@ -15,10 +15,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - case: base-bb136
-            commit: bb1361898487224024e6ad989f3e734cce930c82
-          - case: candidate-f6ed
-            commit: f6ed416559fc4452d98f643a82c13c2e78be986e
+          - case: base-5db2
+            commit: 5db2ba58cca697c2c90ea995fc0012f197ce6166
+          - case: candidate-c6a6
+            commit: c6a644bd4c3fd9412c4cc755bb22b05a8e524db0
     steps:
       - name: Checkout exact source
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -36,10 +36,8 @@ jobs:
       - name: Verify fixture identity and add bounded synthetic diagnostics
         env:
           EXPECTED_SOURCE: ${{ matrix.commit }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           "$HERMES_PYTHON" -B - <<'PY'
-          import base64
           import hashlib
           import os
           from pathlib import Path
@@ -49,15 +47,18 @@ jobs:
           path = Path('tests/gateway/test_journey_compress_restart_fifo.py')
           data = path.read_bytes()
           blob = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
-          assert blob == '8a36865de19b36f30a1901e23020751d89c99d67', blob
+          assert blob == '203d784e02a0bfb91a53318d6ca5904c04c9c3d6', blob
 
-          encoded = subprocess.check_output(['gh', 'api', 'repos/mrkillbob/hermes-agent/git/blobs/203d784e02a0bfb91a53318d6ca5904c04c9c3d6', '--jq', '.content'], text=True)
-          fixed = base64.b64decode(encoded)
-          fixed_blob = hashlib.sha1(b'blob '+str(len(fixed)).encode()+b'\0'+fixed).hexdigest()
-          assert fixed_blob == '203d784e02a0bfb91a53318d6ca5904c04c9c3d6', fixed_blob
+          fixed = data
+          fixed_blob = blob
           needle = "            before['compacted'] = transcript(before['child'])"
           diagnostic = '''
+                      from agent.context_compressor import _estimate_msg_budget_tokens
+                      from agent.context_compressor_tail import lean_tail_budget
+                      original_rows = rows('SELECT role,content FROM messages WHERE session_id=? ORDER BY id', (sid,))
                       print('FIFO_PRECONDITION', json.dumps({
+                          'root_roles_sizes_tokens': [(r['role'], len(str(r['content'])), _estimate_msg_budget_tokens(r)) for r in original_rows],
+                          'configured_lean_tail_budget': lean_tail_budget(64000, 12000),
                           'tail_case': tail_case, 'compacting_input': compacting['input_id'],
                           'child_pressure_markers': [f'PRESSURE_{i}' for i in range(12) if any(
                               str(c).startswith(f'PRESSURE_{i} ') for _, role, c in before['compacted'] if role == 'user')],
