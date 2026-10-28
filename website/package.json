@@ -36,7 +36,7 @@
     "@docusaurus/tsconfig": "3.10.2",
     "@docusaurus/types": "3.10.2",
     "typescript": "6.0.3",
-    "@svgr/plugin-svgo": "file:vendor/svgr-plugin-svgo-8.1.0-local-328eb35d8276.tgz"
+    "@svgr/plugin-svgo": "file:vendor/svgr-plugin-svgo"
   },
   "overrides": {
     "fast-uri": "3.1.9",

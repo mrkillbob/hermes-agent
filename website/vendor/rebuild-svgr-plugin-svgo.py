@@ -1,10 +1,9 @@
-"""Rebuild the private local SVGR artifact from the authentic published archive.
+"""Reproduce the private local SVGR directory from the authentic published archive.
 
-Usage: python rebuild-svgr-plugin-svgo.py /path/to/plugin-svgo-8.1.0.tgz
+Usage: python rebuild-svgr-plugin-svgo.py /external/original.tgz /external/new-directory
 No network, package execution, installation hooks, or version substitution.
 """
 import base64
-import gzip
 import hashlib
 import io
 import json
@@ -34,20 +33,10 @@ assert manifest.pop('gitHead') == provenance['original_git_head']
 manifest['private'] = True
 files['package.json'] = (json.dumps(manifest, indent=2) + '\n').encode()
 assert {name: hashlib.sha256(data).hexdigest() for name, data in files.items()} == provenance['files']
-buffer = io.BytesIO()
-with gzip.GzipFile(fileobj=buffer, mode='wb', mtime=0, filename='') as compressed:
-    with tarfile.open(fileobj=compressed, mode='w', format=tarfile.PAX_FORMAT) as tar:
-        for name, data in sorted(files.items()):
-            item = tarfile.TarInfo('package/' + name)
-            item.size = len(data)
-            item.mtime = 0
-            item.uid = item.gid = 0
-            item.uname = item.gname = ''
-            item.mode = 0o644
-            tar.addfile(item, io.BytesIO(data))
-output = buffer.getvalue()
-assert hashlib.sha256(output).hexdigest() == provenance['local_sha256']
-assert 'sha512-' + base64.b64encode(hashlib.sha512(output).digest()).decode() == provenance['local_integrity']
-target = root / provenance['local_artifact']
-target.write_bytes(output)
-print(target.name + ': reproduced exact artifact and integrity')
+target = Path(sys.argv[2])
+target.mkdir(parents=True, exist_ok=False)
+for name, data in sorted(files.items()):
+    destination = target / name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(data)
+print(str(target) + ': reproduced exact directory and per-file hashes')
