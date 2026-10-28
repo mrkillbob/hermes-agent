@@ -47,7 +47,7 @@
     "js-yaml": "4.3.2",
     "dompurify": "3.4.17",
     "katex": "0.18.4",
-    "qs": "6.16.0",
+    "qs": "6.16.1",
     "mermaid": "11.16.1",
     "image-size": "npm:@nous-research/image-size@2.0.3",
     "tar": "7.5.22",
