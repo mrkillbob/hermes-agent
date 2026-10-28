@@ -923,7 +923,7 @@ def _prompt_submit_context(rid, session: dict, params: dict):
     if raw_turn_author is not None:
         from tools.bot_relay import DeliveryAuthor
         if not isinstance(raw_turn_author, DeliveryAuthor):
-            return None, None, None, False, _err(
+            return None, None, None, None, False, _err(
                 rid, 4124, "turn author may only be supplied by the in-process relay")
         turn_author = dict(raw_turn_author.author)
     hosted_task = params.get("_hosted_task")

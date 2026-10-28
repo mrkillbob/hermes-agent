@@ -421,6 +421,8 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
     ``{user_id, provider}`` recorded at WS-upgrade auth, stored as ``WSTransport.auth_identity`` (the only identity
     authority for session ownership and relay authorship); callers that omit it (harnesses, embedded TUI child) get None."""
     peer, transport = _ws_peer_label(ws), None
+    from hermes_cli.startup_hold import active as startup_hold_active
+    startup_held = startup_hold_active()
     authority_connection = None
     messages = parse_errors = dispatch_crashes = send_failures = 0
     disconnect_reason = "not_connected"
@@ -630,7 +632,8 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         await (ws.accept(subprotocol=subprotocol) if subprotocol else ws.accept())
         disconnect_reason = "connected"
         # Mark the client attached before the (possibly slow) ready/skin setup so scale-to-zero sees it.
-        _note_dashboard_client_activity(force=True)
+        if not startup_held:
+            _note_dashboard_client_activity(force=True)
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
         transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer, auth_identity=auth_identity)
@@ -647,7 +650,7 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
                 **({"session_authority": True} if authority_connection is not None else {}),
             }},
         })
-        if ready_ok:
+        if ready_ok and not startup_held:
             # Live-apply skins Hermes activates mid-conversation, and track this peer for session-less
             # global broadcasts write_json can't route.
             server._ensure_skin_watcher()
@@ -659,7 +662,8 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         # Cross-backend liveness: a heartbeat row lets the startup orphan sweep tell "live but idle
         # backend" from "truly orphaned". Idempotent and once-per-process, like the orphan sweep (the
         # desktop app and web dashboard reach the agent via this sidecar, not entry.main()).
-        _start_backend_liveness()
+        if not startup_held:
+            _start_backend_liveness()
         if not ready_ok:
             disconnect_reason = "ready_send_failed"
             send_failures += 1
@@ -670,7 +674,8 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
         while True:
             try:
                 raw = await _unless_dispatch_failed(ws.receive_text())
-                _note_dashboard_client_activity()
+                if not startup_held:
+                    _note_dashboard_client_activity()
             except _SendFailed:
                 raise
             except _WebSocketDisconnect as exc:

@@ -936,7 +936,7 @@ def _local_host_hints() -> list[str]:
     # The model reaches for the system temp dir by reflex (tmpfs on most Linux hosts, fills RAM);
     # naming Hermes' scratch dir here is what makes the TMPDIR export a habit rather than a hidden default.
     try:
-        host_lines.append(f"Scratch directory: {get_scratch_dir()} (TMPDIR points here; write temporary files "
+        host_lines.append(f"Scratch directory: {get_scratch_dir(prune=False)} (TMPDIR points here; write temporary files "
                           "and probes there, never under the system temp dir; entries idle for 24h are pruned)")
     except OSError:
         pass

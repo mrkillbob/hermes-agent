@@ -169,8 +169,10 @@ def _ws_orphan_setting(env_var: str, cfg_key: str, default: float) -> float:
     if raw is None or not str(raw).strip():
         raw = None
         with contextlib.suppress(Exception):
-            from hermes_cli.config import load_config
-            raw = (load_config().get("dashboard") or {}).get(cfg_key)
+            from hermes_cli.startup_hold import active as startup_hold_active
+            if not startup_hold_active():
+                from hermes_cli.config import load_config
+                raw = (load_config().get("dashboard") or {}).get(cfg_key)
     with contextlib.suppress(ValueError, TypeError):
         return max(0.0, float(raw) if raw is not None else default)
     return max(0.0, default)

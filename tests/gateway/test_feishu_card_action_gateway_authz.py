@@ -60,8 +60,8 @@ def _make_adapter(*, allowed=(), admins=()) -> FeishuAdapter:
     adapter._loop.is_closed = MagicMock(return_value=False)
     adapter._allowed_group_users = set(allowed)
     adapter._admins = set(admins)
-    adapter._approval_state[1] = {"session_key": "sess-1", "message_id": "msg-1", "chat_id": "oc_group"}
-    adapter._update_prompt_state[2] = {"session_key": "sess-2", "message_id": "msg-2", "chat_id": "oc_group"}
+    adapter._approval_state[1] = {"session_key": "agent:default:feishu:dm:oc_group", "message_id": "msg-1", "chat_id": "oc_group"}
+    adapter._update_prompt_state[2] = {"session_key": "agent:default:feishu:dm:oc_group", "message_id": "msg-2", "chat_id": "oc_group"}
     return adapter
 
 
@@ -139,7 +139,7 @@ class TestNoFeishuAllowlist:
 
         assert response.card is not None
         submit.assert_called_once()
-        assert check.seen == [("ou_requester", "group", "oc_group")]
+        assert check.seen == [("ou_requester", "dm", "oc_group")]
 
     def test_gateway_check_uses_tenant_user_id_when_present(self):
         """The principal matches SessionSource.user_id: tenant user_id, else open_id."""
@@ -151,7 +151,7 @@ class TestNoFeishuAllowlist:
             response = adapter._on_card_action_trigger(_approval_click("ou_x", user_id="u_tenant"))
 
         assert response.card is not None
-        assert check.seen == [("u_tenant", "group", "oc_group")]
+        assert check.seen == [("u_tenant", "dm", "oc_group")]
 
     @pytest.mark.asyncio
     async def test_loop_side_recheck_refuses_unauthorized(self):
@@ -174,7 +174,7 @@ class TestNoFeishuAllowlist:
                 1, "once", "Alice", open_id="ou_x", chat_id="oc_group", user_id="u_tenant",
             )
 
-        resolve.assert_called_once_with("sess-1", "once")
+        resolve.assert_called_once_with("agent:default:feishu:dm:oc_group", "once")
 
     @pytest.mark.asyncio
     async def test_non_approval_card_action_still_routes(self):
@@ -260,7 +260,7 @@ class TestFeishuAllowlistMatchesEveryOperatorId:
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as resolve:
             await adapter._resolve_approval(1, "once", "Alice", open_id="ou_x", chat_id="oc_group", **click_ids)
 
-        resolve.assert_called_once_with("sess-1", "once")
+        resolve.assert_called_once_with("agent:default:feishu:dm:oc_group", "once")
 
     @pytest.mark.asyncio
     async def test_update_prompt_recheck_matches_tenant_user_id(self, tmp_path, monkeypatch):

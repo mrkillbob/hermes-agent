@@ -39,6 +39,7 @@ def _agent(provider="openrouter"):
         _ollama_num_ctx=None, openrouter_min_coding_score=None,
         _get_transport=lambda: transport, _is_qwen_portal=lambda: False,
         _is_openrouter_url=lambda: True, _supports_reasoning_extra_body=lambda: False,
+        _reasoning_endpoint_profile=lambda: None,
         _prepare_messages_for_non_vision_model=lambda messages: messages,
         _resolved_api_call_timeout=lambda: 30, _max_tokens_param=lambda value: {"max_tokens": value},
     )

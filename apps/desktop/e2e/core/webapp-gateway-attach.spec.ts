@@ -56,8 +56,8 @@ const A = (n: number) => `A${n}-webapp${nonce}`
 const AI = (n: number) => `A${n}i-webapp${nonce}`
 
 const PYTHON = process.env.HERMES_E2E_PYTHON || 'python3'
-/** The browser's sign-in on a loopback Webapp: the gateway's session credential. */
-const BROWSER_LOGIN = 'auth:v1:["session-token","","legacy-token-owner"]'
+/** Browser sign-in shares the local gateway owner's admission identity. */
+const BROWSER_LOGIN = process.platform === 'linux' ? `uid:${process.getuid!()}` : ''
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {

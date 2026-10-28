@@ -310,6 +310,9 @@ def bound_registry_key() -> tuple[str, int]:
     Key for per-home memos of profile-derived answers: each profile home has its own plugins, and
     any registration (a plugin installed while the process runs) moves the generation.
     """
+    from hermes_cli.startup_hold import active
+    if active():
+        return _bound_home_layer()[2], _REGISTRY_GENERATION
     if not _discovered:
         _discover_providers()
     layer, home, key = _bound_home_layer()
@@ -329,11 +332,12 @@ def profile_for_host(url: str, *, metadata: bool = False) -> ProviderProfile | N
     ``$HERMES_HOME`` plugin installed after import (or in another profile) is seen; memoized per
     (home, host) until the registry changes, because wire paths ask on every request.
     """
+    from hermes_cli.startup_hold import active
     from agent.safe_worker_policy import safe_worker_enabled
     from utils import base_url_hostname
 
     host = base_url_hostname(url) if url else ""
-    if not host or safe_worker_enabled():
+    if not host or active() or safe_worker_enabled():
         return None
     if not _discovered:
         _discover_providers()

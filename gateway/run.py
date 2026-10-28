@@ -2140,7 +2140,8 @@ def _load_bridge_config(config_path: Path) -> dict:
 
 _config_path = _hermes_home / 'config.yaml'
 _cfg: dict = {}
-if config_exists(_config_path):
+from hermes_cli.startup_hold import defer_maintenance as _defer_startup_config_bridge
+if not _defer_startup_config_bridge() and config_exists(_config_path):
     try:
         _cfg = _load_bridge_config(_config_path)
         _bridge_config_to_env(_cfg)
@@ -2163,11 +2164,12 @@ try:
 except Exception as _bootstrap_exc:
     print(f"  Warning: IPv4 preference application failed: {_bootstrap_exc}", file=sys.stderr)
 
-try:
-    from hermes_cli.config import print_config_warnings
-    print_config_warnings()
-except Exception as _bootstrap_exc:
-    print(f"  Warning: config validation failed: {_bootstrap_exc}", file=sys.stderr)
+if not _defer_startup_config_bridge():
+    try:
+        from hermes_cli.config import print_config_warnings
+        print_config_warnings()
+    except Exception as _bootstrap_exc:
+        print(f"  Warning: config validation failed: {_bootstrap_exc}", file=sys.stderr)
 
 try:
     from hermes_cli.config import warn_deprecated_cwd_env_vars
@@ -4862,7 +4864,9 @@ def _claim_host_gateway_role(force: bool = False) -> None:
 
     # The host lock can be free after a standalone owner exits while a coexisting
     # multiplexer remains live. Its per-home channel still governs our opt-out.
-    if not force:
+    from hermes_cli.startup_hold import active as _startup_hold_active
+    startup_held = _startup_hold_active()
+    if not force and not startup_held:
         from gateway.host_attach import REFUSE, standalone_attach_decision
         decision = standalone_attach_decision(get_hermes_home(), None)
         if decision is not None and decision.outcome == REFUSE:
@@ -4902,6 +4906,10 @@ def _claim_host_gateway_role(force: bool = False) -> None:
         logger.warning("--force: starting a second gateway although %s owns this host.",
                        hr.describe(owner) if owner else "another process")
         return
+    if startup_held:
+        # A held boot cannot inspect profile config or attach to an existing host;
+        # losing the atomic lock is sufficient to refuse this second gateway.
+        _refuse_second_host_gateway(owner)
     from gateway.host_attach import (
         ATTACH_CHANNEL_WAIT_S, START, host_gateway, launched_by_other_tenant, standalone_attach_decision,
     )

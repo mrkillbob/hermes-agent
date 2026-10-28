@@ -159,7 +159,8 @@ def _start_gateway_configure_logging(verbosity: Optional[int]) -> None:
 
         log_startup_security_warnings(hermes_home=_hermes_home, config=_best_effort(_raw_cfg))
 
-    _best_effort(_security_audit, "Startup security audit failed (non-fatal): %s")
+    if not active():
+        _best_effort(_security_audit, "Startup security audit failed (non-fatal): %s")
 
     # Optional stderr handler from -v/-q: None (quiet) = none; 0 = WARNING; 1 = INFO; 2+ = DEBUG.
     if verbosity is not None:

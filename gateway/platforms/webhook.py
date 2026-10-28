@@ -470,6 +470,14 @@ class WebhookAdapter(BasePlatformAdapter):
             self._dynamic_permissions_stat = permission_key
             self._dynamic_permissions_retry_at = now + _PERMISSION_RETRY_SECONDS
             restrict_credential_file_permissions(subs_path, file_stat=st)
+            # A successful repair changes ctime/mode. Cache the version after that repair so
+            # the next request does not reparse unchanged routes, while a failed read still
+            # gets its bounded retry below. A replacement during repair gets a new stat key.
+            try:
+                stat_key = file_cache_version(subs_path, subs_path.stat())
+            except OSError as e:
+                logger.error("[webhook] Failed to read dynamic routes: %s", e)
+                return
         if stat_key == self._dynamic_routes_stat and not (self._dynamic_routes_read_failed and permission_due):
             return  # No change
         try:

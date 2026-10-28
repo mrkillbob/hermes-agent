@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _copy_fixture_source(source: Path) -> None:
-    for name in ("pm", "hermes_cli", "hermes_platform"):
+    for name in ("pm", "hermes_cli", "hermes_platform", "providers"):
         shutil.copytree(ROOT / name, source / name, ignore=shutil.ignore_patterns("__pycache__"))
     for name in ("utils.py", "hermes_constants.py", "hermes_dir_acl.py", "hermes_yaml.py", "hermes_bootstrap.py",
                  "setup-hermes.sh", "hermes_state_dbfile.py", "hermes_state_holders.py", "hermes_state_errors.py", "hermes_state_file_identity.py"):
@@ -38,6 +38,13 @@ def _copy_fixture_source(source: Path) -> None:
     (source / "gateway").mkdir()
     for name in ("__init__.py", "config.py", "config_loader.py", "shutdown_watchdog.py", "restart.py"):
         shutil.copy2(ROOT / "gateway" / name, source / "gateway" / name)
+    (source / "cron").mkdir()
+    # This fixture reads cron's pure config helper, not scheduler/delivery loops or worker boot.
+    (source / "cron" / "__init__.py").write_text("", encoding="utf-8")
+    for name in ("env_settings.py", "scheduler_preflight.py"):
+        shutil.copy2(ROOT / "cron" / name, source / "cron" / name)
+    for name in ("scheduler.py", "scheduler_delivery.py"):
+        (source / "cron" / name).write_text("", encoding="utf-8")
     (source / "locales").mkdir()
     shutil.copy2(ROOT / "locales/en.yaml", source / "locales/en.yaml")
 

@@ -13,9 +13,9 @@ phases), ... Module-level helpers live in topical siblings that `cli.py` re-expo
 light mode, markdown, `_cprint`, panel wrap), `cli_terminal_input.py` (file drops, paste/Enter-key
 sequences, CPR guards), `cli_shutdown.py` (exit watchdog, cleanup steps, one-shot finalize),
 `cli_single_query.py` (`-q` runner, exit codes, kanban loops), `cli_auto_maintenance.py` (state-db/checkpoint maintenance).
-Moved bodies late-bind cli-level names via `from cli import ...` at call time, so patch seams on the
-`cli` facade still intercept them; mutable module state (`_cleanup_done`, `_OUTPUT_HISTORY`,
-`_LIGHT_MODE_CACHE`, ...) and every `global`-writing function stay in `cli.py`. **Rich** renders banner/panels; **prompt_toolkit**
+Moved bodies import `cli` names at call time, so facade patches still intercept; mutable state
+(`_cleanup_done`, `_OUTPUT_HISTORY`, `_LIGHT_MODE_CACHE`, ...) and `global` writers stay in
+`cli.py`. **Rich** renders banner/panels; **prompt_toolkit**
 handles input + autocomplete; `KawaiiSpinner` (`agent/display.py`) animates API calls and prints
 the `┊` activity feed. `load_cli_config()` in `cli.py` merges CLI defaults + user YAML.
 
@@ -90,13 +90,14 @@ set/get/unset <NAME>` route any bare name registered in `OPTIONAL_ENV_VARS` / `_
 - **One writer seam.** Every write of a `config.yaml` (main or profile) goes through
   `hermes_cli.config.atomic_config_write` (refuses deletion by omission) or the explicit
   `atomic_config_replace` full-state path (→ `utils.atomic_roundtrip_yaml_save`, ruamel
-  round-trip): formatting survives, and the fail-closed unreadable-file guard runs first. Deliberate `pop()`/unset/migration paths use `atomic_config_replace`; additive
+  round-trip): formatting survives, with fail-closed read checks first. Deliberate
+  `pop()`/unset/migration paths use `atomic_config_replace`; additive
   writers stay on `atomic_config_write`. Never call
   `atomic_yaml_write` / `yaml.dump` / `yaml.safe_dump` on a config path — `scripts/check_config_yaml_writers.py`
   (CI lint) rejects it, and `tests/hermes_cli/test_config_yaml_comment_preservation.py` guards each
   path (#92554). The commented example blocks are appended only when the file is created.
-- **Reads** too go only through `config_backend.py`; see `developer-guide/config-backend.md`.
-  In daemon, RPC and tick code catch `ConfigBackendUnavailable` explicitly: it is a `SystemExit`, so `except Exception` won't stop it.
+- **Reads:** use `config_backend.py` (details: `developer-guide/config-backend.md`).
+  Catch `ConfigBackendUnavailable` in daemon/RPC/ticks; it subclasses `SystemExit`, not `Exception`.
 - **Three loaders — know which you're in:** `load_cli_config()` (CLI, `cli.py`); `load_config()`
   (`hermes tools/setup`, most subcommands, `hermes_cli/config.py`, merges `DEFAULT_CONFIG`);
   `hermes_cli/config_effective.py::load_user_config_effective()` (gateway runtime via

@@ -1023,6 +1023,10 @@ def _add_rotating_handler(
 def _read_logging_config():
     """Best-effort read of ``logging.*`` from config.yaml."""
     try:
+        # Native held boot must not load a profile's .env merely to configure logging.
+        from hermes_cli.startup_hold import active as startup_hold_active
+        if startup_hold_active():
+            return (None, None, None)
         # Prefer the shared effective-config cache (managed overlay included, so an administrator
         # can pin logging.*) so this reuses hermes_cli.main's early parse (one config.yaml parse
         # per process); fall back to a direct parse for bare hermes_logging consumers.

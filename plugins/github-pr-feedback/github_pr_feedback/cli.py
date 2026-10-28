@@ -80,7 +80,6 @@ from .worktree_capacity import WorktreeCapacityRejected, control_capacity_admiss
 try:
     from hermes_constants import get_default_hermes_root
 except ImportError:
-
     def get_default_hermes_root() -> Path:
         configured = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
         return (

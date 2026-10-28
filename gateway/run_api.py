@@ -227,7 +227,9 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0, w
         raise RuntimeError("gateway API already started")
     public_url = _listener_public_url(webapp)
     if public_url is None:
-        trusted = _dashboard_public_hosts()
+        from hermes_cli.startup_hold import active as startup_hold_active
+        # The held listener is private/ephemeral; public Webapp settings are not consulted.
+        trusted = frozenset() if startup_hold_active(runner) else _dashboard_public_hosts()
         auth_required = listener_auth_required(host, trusted)
     else:
         # What web_server._configure_auth_gate decides for a listener that declares its public URL.

@@ -2258,7 +2258,9 @@ class FeishuAdapter(BasePlatformAdapter):
             return False
         principal = str(user_id or "").strip() or normalized
         verdict = self._is_sender_authorized(principal, "dm", str(chat_id or "") or None)
-        return verdict is not False
+        # A card click changes approval state; an absent or failed gateway check is unknown,
+        # not an authorization for that side effect.
+        return verdict is True
 
     @staticmethod
     def _card_response(card_data: Optional[dict[str, Any]] = None) -> Any:

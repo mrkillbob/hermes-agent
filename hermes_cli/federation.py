@@ -681,6 +681,14 @@ def _write_role_config(profile_dir: Path, role: FederationRole, manifest: Federa
     atomic_yaml_write(path, config, sort_keys=False)
 
 
+def _require_file_backend_for_seed() -> None:
+    """Profile seeding snapshots and writes local files, never a remote user layer."""
+    from hermes_cli.config_backend import supports_file_tooling
+
+    if not supports_file_tooling():
+        raise RuntimeError("federation profile seeding requires a local config file backend")
+
+
 def seed_federation(
     manifest: FederationManifest,
     *,
@@ -726,9 +734,7 @@ def seed_federation(
     if not apply:
         return result
 
-    from hermes_cli.config_backend import supports_file_tooling
-    if not supports_file_tooling():
-        raise RuntimeError("federation profile seeding requires a local config file backend")
+    _require_file_backend_for_seed()
 
     if create_profile is None:
         from hermes_cli.profiles import create_profile as create_profile_fn

@@ -18,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
 from utils import atomic_json_write
@@ -678,14 +678,14 @@ class CopilotCredentialsMixin:
             entry.base_url = enterprise_base_url
         return api_token
 
-    def seed_pool_credentials(self, *, is_suppressed: Callable[[str], bool],
-                              explicitly_configured: Callable[[], bool]) -> list[dict]:
+    def seed_pool_credentials(self, *, suppressed_sources: frozenset[str],
+                              explicitly_configured: bool) -> list[dict]:
         # Tokens are resolved dynamically via env vars or `gh auth token`; they don't live in the
         # auth store. All-sources gate BEFORE any work: resolve_copilot_token() shells out and the
         # exchange retries 3x with backoff (~35s worst case); a user who suppressed every copilot
         # source must not pay that on every pool load.
         try:
-            if all(is_suppressed(s) for s in _POOL_SOURCES):
+            if all(s in suppressed_sources for s in _POOL_SOURCES):
                 return []
             token, source = resolve_copilot_token()
             if not token:
@@ -693,9 +693,9 @@ class CopilotCredentialsMixin:
             # Exact match: a substring test would classify GH_TOKEN/GITHUB_TOKEN as gh_cli and
             # bypass a user's per-env-var suppression.
             source_name = "gh_cli" if source == "gh auth token" else f"env:{source}"
-            if is_suppressed(source_name):  # per-source gate BEFORE the network exchange
+            if source_name in suppressed_sources:  # per-source gate BEFORE the network exchange
                 return []
-            if not explicitly_configured():
+            if not explicitly_configured:
                 # Only discovered here (ambient gh CLI login), not selected anywhere: no model is
                 # routed to it, so the exchange — and its degradation warning on every pool load —
                 # buys nothing (#114740). Seed the raw token; selecting copilot re-seeds and exchanges.
