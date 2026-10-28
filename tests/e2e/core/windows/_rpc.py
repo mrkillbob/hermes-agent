@@ -17,11 +17,27 @@ from tests.e2e.core.windows._helpers import TURN_TIMEOUT, WinHome
 
 READY_TIMEOUT = 120.0
 
+# Test-child diagnostics only: retain the actual entry module and its assertions,
+# but dump stacks before the 180s turn deadline hides a stalled build's phase.
+_DIAGNOSTIC_ENTRY = """\
+import faulthandler
+import os
+import runpy
+import sys
+sys.path[0] = os.getcwd()
+faulthandler.dump_traceback_later(120)
+try:
+    runpy.run_module('tui_gateway.entry', run_name='__main__', alter_sys=True)
+finally:
+    faulthandler.cancel_dump_traceback_later()
+"""
+
 
 class StdioGateway:
-    def __init__(self, home: WinHome) -> None:
+    def __init__(self, home: WinHome, *, request_count: Callable[[], int] | None = None) -> None:
+        self._request_count = request_count
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "tui_gateway.entry"], cwd=home.project, env=home.env(),
+            [sys.executable, "-c", _DIAGNOSTIC_ENTRY], cwd=home.project, env=home.env(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self._frames: queue.Queue[bytes | None] = queue.Queue()
@@ -95,8 +111,17 @@ class StdioGateway:
             if time.monotonic() > deadline:
                 raise AssertionError(
                     f"no {etype!r} within {timeout}s; saw {[e.get('type') for e in self.events][-20:]}\n"
-                    f"{self.stderr[-2000:]}")
+                    f"{self._timeout_diagnostics()}")
             self._pump(0.25)
+
+    def _timeout_diagnostics(self) -> str:
+        notices = [
+            {k: str((ev.get("payload") or {})[k])[:80]
+             for k in ("key", "kind", "level", "code") if k in (ev.get("payload") or {})}
+            for ev in self.events if ev.get("type") == "notification.show"
+        ]
+        count = self._request_count() if self._request_count is not None else "unavailable"
+        return f"notifications={notices[-4:]}; fake_provider_requests={count}\n{self.stderr[-24000:]}"
 
     def turn(self, text: str) -> str:
         self.wait_event("gateway.ready", timeout=READY_TIMEOUT)

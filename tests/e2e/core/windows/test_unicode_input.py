@@ -67,7 +67,7 @@ def test_tui_gateway_utf8_frames_reach_wire(tmp_path: Path) -> None:
     tag = nonce("TUI")
     with FakeLLMServer([Text(f"{REPLY} {tag}")]) as srv:
         home = make_home(tmp_path, srv.base_url)
-        gw = StdioGateway(home)
+        gw = StdioGateway(home, request_count=lambda: len(srv.main_requests()))
         try:
             answer = gw.turn(f"{TEXT} {tag}")
         finally:

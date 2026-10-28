@@ -97,7 +97,7 @@ def test_folder_reference_header_uses_one_separator(tmp_path: Path) -> None:
         nested = home.project / "pkg" / "sub"
         nested.mkdir(parents=True)
         (nested / "a.py").write_text(f"# {body}\nx = 1\n", encoding="utf-8")
-        gw = StdioGateway(home)
+        gw = StdioGateway(home, request_count=lambda: len(srv.main_requests()))
         try:
             gw.turn("Review @folder:pkg/sub")
         finally:
