@@ -27,6 +27,14 @@ import { frUpdateChannel } from './fr_update_channel'
 import { introFr } from './intro-fr'
 
 export const frOverrides = {
+  lunarCityInventory: {
+    title: "Inventaire des sessions connectées",
+    description: "Lit jusqu’à 100 sessions enregistrées visibles de la source déjà connectée. L’activité et la position dans le monde sont indisponibles.",
+    read: "Lire les sessions connectées",
+    reading: "Lecture…",
+    unavailable: "Inventaire indisponible. Aucune session n’a été ouverte.",
+    count: count => `Sessions renvoyées dans cette fenêtre : ${count}. Activité inconnue.`
+  },
   sharedMetrics: frSharedMetrics,
   firstRun: frFirstRun,
   intro: introFr,

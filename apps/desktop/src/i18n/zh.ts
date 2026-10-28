@@ -26,6 +26,14 @@ import { zhThemePicker } from './zh_theme_picker'
 import { zhUpdateChannel } from './zh_update_channel'
 
 export const zhOverrides = {
+  lunarCityInventory: {
+    title: "已连接会话清单",
+    description: "从已连接的来源读取最多100个可见的已保存会话。活动状态和世界位置不可用。",
+    read: "读取已连接会话",
+    reading: "正在读取…",
+    unavailable: "会话清单不可用。未打开任何会话。",
+    count: count => `本次返回的会话数：${count}。活动状态未知。`
+  },
   catalog: zhCatalog,
   externalOpenFailed: {
     title: '无法打开此链接',
