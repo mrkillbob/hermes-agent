@@ -27,6 +27,14 @@ import { esUpdateChannel } from './es_update_channel'
 import { introEs } from './intro-es'
 
 export const esOverrides = {
+  lunarCityInventory: {
+    title: "Inventario de sesiones conectadas",
+    description: "Lee hasta 100 sesiones guardadas visibles de la fuente ya conectada. La actividad y la ubicación en el mundo no están disponibles.",
+    read: "Leer sesiones conectadas",
+    reading: "Leyendo…",
+    unavailable: "Inventario no disponible. No se abrió ninguna sesión.",
+    count: count => `Sesiones devueltas en esta consulta: ${count}. Actividad desconocida.`
+  },
   sharedMetrics: esSharedMetrics,
   firstRun: esFirstRun,
   intro: introEs,

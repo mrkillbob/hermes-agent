@@ -33,6 +33,14 @@ import { enUpdateChannel } from './en_update_channel'
 import type { Translations } from './types'
 
 export const en: Translations = {
+  lunarCityInventory: {
+    title: "Attached session inventory",
+    description: "Reads up to 100 visible stored sessions from the already connected source. Activity and world location are unavailable.",
+    read: "Read attached sessions",
+    reading: "Reading…",
+    unavailable: "Inventory unavailable. No sessions were opened.",
+    count: count => `Sessions returned in this window: ${count}. Activity unknown.`
+  },
   externalOpenFailed: enExternalOpenFailed,
   sharedMetrics: enSharedMetrics,
   appTour: enAppTour,

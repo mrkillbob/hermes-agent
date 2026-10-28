@@ -88,6 +88,14 @@ interface ModeOptionCopy {
 }
 
 export interface Translations extends NoticeTranslations {
+  lunarCityInventory: {
+    title: string
+    description: string
+    read: string
+    reading: string
+    unavailable: string
+    count: (count: number) => string
+  }
   /** Shared-metrics consent: first-run dialog + Settings › Safety toggles. */
   sharedMetrics: SharedMetricsTranslations
   appTour: AppTourTranslations
