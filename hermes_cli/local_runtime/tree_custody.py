@@ -27,8 +27,10 @@ def reserve_uncontained_tree(path: Path) -> dict:
               "owner_pid": os.getpid()}
     try:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as exc:
-        raise RuntimeError("local runtime tree custody is unverified; replacement refused") from exc
+    except FileExistsError:
+        from hermes_cli.local_runtime.reconciliation import replace_retired_record
+        replace_retired_record(path, intent)
+        return intent
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         json.dump(intent, stream)
         stream.flush()
