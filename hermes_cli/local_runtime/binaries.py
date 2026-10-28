@@ -117,6 +117,11 @@ def _installed(candidates: tuple[str, ...], allow_outdated: bool) -> Engine | No
 def installed_engine(backend: str = "auto", *, allow_outdated: bool = True) -> Engine | None:
     """Boot may retain a prior PM pin and moves a pre-PM engine into PM's store once; it never downloads."""
     if sys.platform == 'darwin':
+        # Metadata-only absence is conclusive before vendor/adoption probes can run.
+        # Auto must consider every backend, not infer availability from an unprobed vendor.
+        choices = tuple(BACKEND_PACKAGES) if backend == 'auto' else _candidates(backend, None, pm.current_target())
+        if _installed(choices, allow_outdated) is None and not any(_legacy_installs(c) for c in choices):
+            return None
         from hermes_cli.local_runtime.generation_evidence import reserve_for_engine_probe
 
         reserve_for_engine_probe()

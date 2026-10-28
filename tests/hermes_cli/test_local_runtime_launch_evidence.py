@@ -445,6 +445,104 @@ def test_owned_engine_probe_reserves_before_child_and_binds_both_state_writes(tm
 
 
 @pytest.mark.platforms('macos')
+@pytest.mark.parametrize('backend', ['metal', 'cpu', 'auto'])
+def test_missing_engine_leaves_no_generation_and_later_install_can_boot(tmp_path, monkeypatch, backend):
+    root = tmp_path / 'runtime'
+    root.mkdir()
+    for module in (bootstrap, binaries):
+        monkeypatch.setattr(module, 'runtimes_root', lambda: root)
+    monkeypatch.setattr(bootstrap, '_BOOT_OWNER', object())
+    monkeypatch.setattr(bootstrap, '_SUPERVISOR', None)
+    monkeypatch.setattr(binaries.pm, 'current_target', lambda: 'darwin-aarch64')
+    monkeypatch.setattr(binaries, '_installed', lambda *a: None)
+    monkeypatch.setattr(binaries, '_legacy_installs', lambda *a: [])
+    monkeypatch.setattr(bootstrap, '_detect_gpu_vendor', lambda: pytest.fail('absent engine reached native probe'))
+    with bootstrap._cross_process_boot_lock(timeout_s=0) as acquired:
+        assert acquired
+        assert binaries.installed_engine(backend) is None
+        assert not list(root.glob('.generation-*'))
+        monkeypatch.setattr(binaries, '_installed', lambda *a: binaries.Engine('cpu', 'fixture', root / 'engine'))
+        monkeypatch.setattr(bootstrap, '_detect_gpu_vendor', lambda: None)
+        monkeypatch.setattr(reconciliation, '_native_identity', lambda: {
+            'host': '11111111-1111-4111-8111-111111111111',
+            'boot': '22222222-2222-4222-8222-222222222222'})
+        monkeypatch.setattr(reconciliation, '_volume_identity', lambda fd: '33333333-3333-4333-8333-333333333333')
+        assert binaries.installed_engine(backend).tag == 'fixture'
+        assert generation_evidence.current_boot_ticket(root)
+        assert (root / '.generation-current.json').exists()
+
+
+@pytest.mark.platforms('macos')
+def test_legacy_candidate_still_reserves_before_probe(tmp_path, monkeypatch):
+    root = tmp_path / 'runtime'
+    root.mkdir()
+    for module in (bootstrap, binaries):
+        monkeypatch.setattr(module, 'runtimes_root', lambda: root)
+    monkeypatch.setattr(bootstrap, '_BOOT_OWNER', object())
+    monkeypatch.setattr(bootstrap, '_SUPERVISOR', None)
+    monkeypatch.setattr(binaries, '_installed', lambda *a: None)
+    monkeypatch.setattr(binaries, '_legacy_installs', lambda *a: [('fixture', root, {})])
+    monkeypatch.setattr(reconciliation, '_native_identity', lambda: {
+        'host': '11111111-1111-4111-8111-111111111111',
+        'boot': '22222222-2222-4222-8222-222222222222'})
+    monkeypatch.setattr(reconciliation, '_volume_identity', lambda fd: '33333333-3333-4333-8333-333333333333')
+    def probe():
+        assert (root / '.generation-current.json').exists()
+        raise OSError('synthetic interrupted probe')
+    monkeypatch.setattr(bootstrap, '_detect_gpu_vendor', probe)
+    with bootstrap._cross_process_boot_lock(timeout_s=0) as acquired:
+        assert acquired
+        with pytest.raises(OSError, match='synthetic interrupted probe'):
+            binaries.installed_engine('auto')
+        assert (root / '.generation-current.json').exists()
+
+
+@pytest.mark.platforms('macos')
+@pytest.mark.parametrize('copy_context', [False, True])
+def test_other_thread_engine_lookup_during_boot_does_not_reserve(tmp_path, monkeypatch, copy_context):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import copy_context as snapshot_context
+
+    root = tmp_path / 'runtime'
+    root.mkdir()
+    for module in (bootstrap, binaries):
+        monkeypatch.setattr(module, 'runtimes_root', lambda: root)
+    monkeypatch.setattr(bootstrap, '_BOOT_OWNER', object())
+    monkeypatch.setattr(bootstrap, '_SUPERVISOR', None)
+    monkeypatch.setattr(binaries.pm, 'current_target', lambda: 'fixture-target')
+    monkeypatch.setattr(binaries, '_candidates', lambda *a: ('cpu',))
+    monkeypatch.setattr(binaries, '_installed', lambda *a: binaries.Engine('cpu', 'fixture', root / 'engine'))
+    with bootstrap._cross_process_boot_lock(timeout_s=0) as acquired:
+        assert acquired
+        def lookup():
+            assert generation_evidence.current_boot_ticket(root) is None
+            return binaries.installed_engine('cpu').tag
+        context = snapshot_context()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(context.run, lookup) if copy_context else pool.submit(lookup)
+            assert future.result() == 'fixture'
+        assert not list(root.glob('.generation-*'))
+
+
+@pytest.mark.platforms('macos')
+def test_owned_boot_context_with_replaced_lock_still_refuses(tmp_path, monkeypatch):
+    root = tmp_path / 'runtime'
+    root.mkdir()
+    monkeypatch.setattr(binaries, 'runtimes_root', lambda: root)
+    monkeypatch.setattr(bootstrap, 'runtimes_root', lambda: root)
+    monkeypatch.setattr(bootstrap, '_BOOT_OWNER', object())
+    monkeypatch.setattr(bootstrap, '_SUPERVISOR', None)
+    monkeypatch.setattr(binaries, '_installed', lambda *a: binaries.Engine('cpu', 'fixture', root / 'engine'))
+    with bootstrap._cross_process_boot_lock(timeout_s=0) as acquired:
+        assert acquired
+        (root / 'boot.lock').unlink()
+        (root / 'boot.lock').touch()
+        with pytest.raises(RuntimeError, match='runtime_lock_required'):
+            binaries.installed_engine('cpu')
+        assert not list(root.glob('.generation-*'))
+
+
+@pytest.mark.platforms('macos')
 def test_engine_probe_without_boot_owner_does_not_create_generation(tmp_path, monkeypatch):
     root = tmp_path / 'runtime'
     root.mkdir()

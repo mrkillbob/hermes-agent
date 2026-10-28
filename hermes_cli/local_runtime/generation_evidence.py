@@ -8,11 +8,19 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import threading
 
 from hermes_cli.local_runtime import reconciliation_io as io
 from hermes_cli.local_runtime.runtime_lock import require_owned
 
 _BOOT_TICKET = ContextVar('local_runtime_generation_ticket', default=None)
+
+
+def _in_owned_boot_context():
+    from hermes_cli.local_runtime.runtime_lock import _HELD
+
+    held = _HELD.get()
+    return held is not None and held[:2] == (os.getpid(), threading.get_ident())
 
 
 def _source_identity():
@@ -59,7 +67,8 @@ def reserve_for_engine_probe():
     from hermes_cli.local_runtime import bootstrap, reconciliation
     from hermes_cli.local_runtime.binaries import runtimes_root
 
-    if bootstrap._BOOT_OWNER is None or bootstrap._SUPERVISOR is not None:
+    if (bootstrap._BOOT_OWNER is None or bootstrap._SUPERVISOR is not None or
+            not _in_owned_boot_context()):
         return
     root = runtimes_root()
     require_owned(root / 'server.json')
@@ -73,7 +82,7 @@ def current_boot_ticket(root):
     """Only the lock-owning boot thread may hand its reservation to the supervisor."""
     from hermes_cli.local_runtime import bootstrap
 
-    if bootstrap._BOOT_OWNER is None:
+    if bootstrap._BOOT_OWNER is None or not _in_owned_boot_context():
         return None
     require_owned(Path(root) / 'server.json')
     saved = _BOOT_TICKET.get()
