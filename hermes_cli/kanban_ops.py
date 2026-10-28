@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
 
+from hermes_yaml import YAMLError
+
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
@@ -125,6 +127,18 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return _poll_loop(args.interval, tick)
 
 
+def _cli_dispatch_limits(args):
+    from hermes_cli.kanban_dispatch_tick import configured_dispatch_kwargs
+
+    limits = configured_dispatch_kwargs()
+    # Explicit flags override configured defaults, even when equal to old defaults.
+    for key, flag in (("max_spawn", "max"), ("failure_limit", "failure_limit")):
+        value = getattr(args, flag, None)
+        if value is not None:
+            limits[key] = value
+    return limits
+
+
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     from hermes_cli.kanban_dispatch_tick import normalize_task_ids
 
@@ -136,12 +150,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         return _err(f"kanban dispatch: {exc}", 2)
     # Honour the same kanban.* limits and default_assignee as the gateway dispatch path.
     try:
-        from hermes_cli.kanban_dispatch_tick import configured_dispatch_kwargs
-        limits = configured_dispatch_kwargs()
-        # CLI --max is the more explicit signal, so it wins over kanban.max_spawn.
-        cli_max = getattr(args, "max", None)
-        if cli_max is not None:
-            limits["max_spawn"] = cli_max
+        limits = _cli_dispatch_limits(args)
     except Exception as exc:
         if getattr(args, "json", False):
             _print_json({"error": type(exc).__name__, "status": "config_unavailable"})
@@ -155,7 +164,6 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             task_ids=task_ids,
             **({"execution_budget": budget} if budget is not None else {}),
-            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
             **limits,
         )
     if getattr(args, "json", False):
@@ -256,6 +264,15 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     if not getattr(args, "force", False):
         return _err(_DAEMON_DEPRECATED, 2)
 
+    try:
+        failure_limit = getattr(args, "failure_limit", None)
+        if failure_limit is None:
+            from hermes_cli.kanban_dispatch_config import load_dispatch_section
+            from hermes_cli.kanban_worker_logs import positive_int
+            failure_limit = positive_int(load_dispatch_section().get("failure_limit"), kbd.DEFAULT_FAILURE_LIMIT)
+    except (OSError, TypeError, ValueError, YAMLError) as exc:
+        return _err(f"kanban daemon: configuration unavailable ({type(exc).__name__})", 1)
+
     # Init before printing "started" so the DB path is right and init errors
     # surface immediately.
     kb.init_db()
@@ -334,7 +351,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         kbd.run_daemon(
             interval=args.interval,
             max_spawn=args.max,
-            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
+            failure_limit=failure_limit,
             on_tick=_on_tick,
         )
     finally:
