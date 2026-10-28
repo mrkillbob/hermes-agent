@@ -37,7 +37,7 @@ pymeshlab==2025.7.post1
 pyyaml==6.0.3
 referencing==0.37.0
 regex==2026.7.19
-rembg==2.0.81
+rembg==2.0.82
 requests==2.34.2
 rpds-py==2026.6.3
 safetensors==0.8.0
