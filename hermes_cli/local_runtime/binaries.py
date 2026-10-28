@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -115,6 +116,10 @@ def _installed(candidates: tuple[str, ...], allow_outdated: bool) -> Engine | No
 
 def installed_engine(backend: str = "auto", *, allow_outdated: bool = True) -> Engine | None:
     """Boot may retain a prior PM pin and moves a pre-PM engine into PM's store once; it never downloads."""
+    if sys.platform == 'darwin':
+        from hermes_cli.local_runtime.generation_evidence import reserve_for_engine_probe
+
+        reserve_for_engine_probe()
     vendor = None
     if backend == "auto":
         from hermes_cli.local_runtime.bootstrap import _detect_gpu_vendor

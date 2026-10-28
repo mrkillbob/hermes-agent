@@ -13,7 +13,7 @@ import pytest
 from hermes_cli.local_runtime import bootstrap, recovery, supervisor, tree_custody
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("linux")
 def test_spawn_intent_is_exclusive_and_survives_uncertain_spawn(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "runtimes_root", lambda: tmp_path)
     monkeypatch.setattr(supervisor, "_direct_io_args", lambda exe: ())
@@ -51,7 +51,7 @@ def test_spawn_intent_is_exclusive_and_survives_uncertain_spawn(tmp_path, monkey
         sup.stop()
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("linux")
 def test_state_reservation_failure_prevents_native_spawn(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "runtimes_root", lambda: tmp_path)
     monkeypatch.setattr(supervisor, "_direct_io_args", lambda exe: ())

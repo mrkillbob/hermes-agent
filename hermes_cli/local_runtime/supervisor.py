@@ -18,6 +18,7 @@ import os
 import secrets
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -146,6 +147,11 @@ class LlamaServerSupervisor:
         self._watchdog: threading.Thread | None = None
         self._log_handle = None
         self._spawn_intent: dict | None = None
+        self._generation_ticket: str | None = None
+        if sys.platform == 'darwin':
+            from hermes_cli.local_runtime.generation_evidence import current_boot_ticket
+
+            self._generation_ticket = current_boot_ticket(runtimes_root())
         self._idle_since: dict[str, float] = {}
         # Launch budget the preset file was last planned against (bootstrap.refit_idle_presets).
         self._refit_usable: int | None = None
@@ -180,11 +186,30 @@ class LlamaServerSupervisor:
     def _spawn(self) -> None:
         # A prior Job close authorizes no new attempt that may fail mid-spawn.
         self._owned_job_closed = False
-        if os.name != "nt":
-            from hermes_cli.local_runtime.tree_custody import reserve_uncontained_tree
+        if sys.platform == 'darwin' and self._generation_ticket is None:
+            from hermes_cli.local_runtime import generation_evidence as evidence
+            from hermes_cli.local_runtime import reconciliation
 
+            root = state_path().parent
+            evidence.require_owned(root / 'server.json')
+            self._generation_ticket = evidence.reserve(
+                root, evidence._predecessor(root), reconciliation._native_identity,
+                reconciliation._volume_identity)
+            evidence.authorize(root, self._generation_ticket,
+                               reconciliation._native_identity, reconciliation._volume_identity)
+        if os.name != "nt":
             # This also precedes the executable's --help capability probe.
-            self._spawn_intent = reserve_uncontained_tree(state_path())
+            if self._generation_ticket is not None:
+                from hermes_cli.local_runtime import generation_evidence as evidence
+                from hermes_cli.local_runtime import reconciliation
+
+                self._spawn_intent = evidence.publish_intent(
+                    state_path().parent, self._generation_ticket,
+                    reconciliation._native_identity, reconciliation._volume_identity)
+            else:
+                from hermes_cli.local_runtime.tree_custody import reserve_uncontained_tree
+
+                self._spawn_intent = reserve_uncontained_tree(state_path())
         exe = self.binary
         cmd = [
             str(exe),
@@ -262,7 +287,19 @@ class LlamaServerSupervisor:
             self._state.update(self._spawn_intent)
         from hermes_constants import mkdir_under_hermes_home
         mkdir_under_hermes_home(path.parent)
-        atomic_json_write(path, self._state, mode=0o600, fsync_dir=os.name != "nt")
+        if self._generation_ticket is not None:
+            from hermes_cli.local_runtime import generation_evidence as evidence
+            from hermes_cli.local_runtime import reconciliation
+
+            raw = json.dumps(self._state, indent=2, ensure_ascii=True, allow_nan=False).encode()
+            evidence.bind_publication(path.parent, self._generation_ticket, raw,
+                                      reconciliation._native_identity, reconciliation._volume_identity)
+            atomic_json_write(path, self._state, mode=0o600, fsync_dir=True,
+                              ensure_ascii=True, allow_nan=False)
+            evidence.verify_current_publication(path.parent, self._generation_ticket, raw, 2,
+                                                reconciliation._native_identity, reconciliation._volume_identity)
+        else:
+            atomic_json_write(path, self._state, mode=0o600, fsync_dir=os.name != "nt")
 
     def _wait_health(self, timeout_s: int, *, cancel_event=None) -> None:
         deadline = time.monotonic() + timeout_s
