@@ -34,10 +34,12 @@ finally:
 
 
 class StdioGateway:
-    def __init__(self, home: WinHome, *, request_count: Callable[[], int] | None = None) -> None:
+    def __init__(self, home: WinHome, *, request_count: Callable[[], int] | None = None,
+                 diagnostic: bool = False) -> None:
         self._request_count = request_count
+        launch = ["-c", _DIAGNOSTIC_ENTRY] if diagnostic else ["-m", "tui_gateway.entry"]
         self.proc = subprocess.Popen(
-            [sys.executable, "-c", _DIAGNOSTIC_ENTRY], cwd=home.project, env=home.env(),
+            [sys.executable, *launch], cwd=home.project, env=home.env(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self._frames: queue.Queue[bytes | None] = queue.Queue()

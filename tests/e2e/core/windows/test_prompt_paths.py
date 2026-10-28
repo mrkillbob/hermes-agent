@@ -90,14 +90,15 @@ def test_agents_chain_labels_are_os_independent(tmp_path: Path) -> None:
                f"AGENTS.md chain headings are not the portable spelling: {headings}")
 
 
-def test_folder_reference_header_uses_one_separator(tmp_path: Path) -> None:
+@pytest.mark.parametrize("diagnostic", [False, True], ids=["module", "traceback"])
+def test_folder_reference_header_uses_one_separator(tmp_path: Path, diagnostic: bool) -> None:
     body = nonce("FOLDER-FILE")
     with FakeLLMServer([Text("done")]) as srv:
         home = make_home(tmp_path, srv.base_url)
         nested = home.project / "pkg" / "sub"
         nested.mkdir(parents=True)
         (nested / "a.py").write_text(f"# {body}\nx = 1\n", encoding="utf-8")
-        gw = StdioGateway(home, request_count=lambda: len(srv.main_requests()))
+        gw = StdioGateway(home, request_count=lambda: len(srv.main_requests()), diagnostic=diagnostic)
         try:
             gw.turn("Review @folder:pkg/sub")
         finally:

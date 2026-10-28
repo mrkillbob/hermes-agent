@@ -7,12 +7,17 @@ import pytest
 from tests.e2e.core.windows import _rpc
 
 
-def _child_argv(monkeypatch, tmp_path):
+def _child_argv(monkeypatch, tmp_path, *, diagnostic=False):
     captured = []
     monkeypatch.setattr(_rpc.subprocess, "Popen", lambda argv, **kwargs: captured.append(argv))
     monkeypatch.setattr(_rpc.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None))
-    _rpc.StdioGateway(SimpleNamespace(project=tmp_path, env=dict))
+    kwargs = {"diagnostic": True} if diagnostic else {}
+    _rpc.StdioGateway(SimpleNamespace(project=tmp_path, env=dict), **kwargs)
     return captured[0]
+
+
+def test_default_child_retains_the_exact_module_launch(monkeypatch, tmp_path):
+    assert _child_argv(monkeypatch, tmp_path)[1:] == ["-m", "tui_gateway.entry"]
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -21,7 +26,7 @@ def test_child_stack_timer_surrounds_the_real_entry_module(monkeypatch, tmp_path
     import runpy
     import sys
 
-    argv = _child_argv(monkeypatch, tmp_path)
+    argv = _child_argv(monkeypatch, tmp_path, diagnostic=True)
     assert argv[1] == "-c", "the test child lacks a pre-timeout traceback timer"
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "path", ["", *sys.path[1:]])

@@ -63,11 +63,12 @@ def test_chat_q_non_ascii_reply_printed_intact(tmp_path: Path) -> None:
     assert f"{REPLY} {tag}" in res.stdout, f"reply printed with its non-ASCII mangled: {res.stdout[-500:]!r}"
 
 
-def test_tui_gateway_utf8_frames_reach_wire(tmp_path: Path) -> None:
+@pytest.mark.parametrize("diagnostic", [False, True], ids=["module", "traceback"])
+def test_tui_gateway_utf8_frames_reach_wire(tmp_path: Path, diagnostic: bool) -> None:
     tag = nonce("TUI")
     with FakeLLMServer([Text(f"{REPLY} {tag}")]) as srv:
         home = make_home(tmp_path, srv.base_url)
-        gw = StdioGateway(home, request_count=lambda: len(srv.main_requests()))
+        gw = StdioGateway(home, request_count=lambda: len(srv.main_requests()), diagnostic=diagnostic)
         try:
             answer = gw.turn(f"{TEXT} {tag}")
         finally:
