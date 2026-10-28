@@ -19,7 +19,8 @@ def test_initial_administrative_git_probe_disables_hooks_and_lazy_fetch(tmp_path
     calls = []
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
-        return subprocess.CompletedProcess(argv, 0, stdout='fixture-head\n', stderr='')
+        kwargs['stdout'].write(b'fixture-head\n')
+        return subprocess.CompletedProcess(argv, 0)
     monkeypatch.setattr(version_info.subprocess, 'run', run)
     assert version_info._run_git(tmp_path, 'rev-parse', 'HEAD') == 'fixture-head'
     argv, options = calls[0]

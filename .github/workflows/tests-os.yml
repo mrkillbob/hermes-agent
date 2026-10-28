@@ -206,11 +206,8 @@ jobs:
           # Any non-zero exit propagates red: real test failures, or the
           # runner's own zero-run guard (every file filtered to empty by
           # ``-m`` — "must never pass without running its OS's tests").
-          echo "native-test phase: path separator"
           SEPARATOR="$(python -c 'import os, sys; sys.stdout.write(os.pathsep)')"
-          echo "native-test phase: file list"
           FILES="$(tr -d '\r' < "$LIST" | paste -sd "$SEPARATOR" -)"
-          echo "native-test phase: canonical runner"
           scripts/run_tests.sh --files "$FILES" -- \
             ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
             -m "platforms and not integration" \
