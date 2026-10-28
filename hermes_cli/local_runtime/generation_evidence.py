@@ -11,6 +11,7 @@ import stat
 import threading
 
 from hermes_cli.local_runtime import reconciliation_io as io
+from hermes_cli.local_runtime import generation_history as history
 from hermes_cli.local_runtime.runtime_lock import require_owned
 
 _BOOT_TICKET = ContextVar('local_runtime_generation_ticket', default=None)
@@ -26,7 +27,7 @@ def _in_owned_boot_context():
 def _source_identity():
     root = Path(__file__).parent
     names = ('generation_evidence.py', 'binaries.py', 'supervisor.py', 'processes.py',
-             'hardware.py', 'devices.py')
+             'hardware.py', 'devices.py', 'generation_history.py')
     hashes = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in names}
     hashes['utils.py'] = hashlib.sha256((root.parent.parent / 'utils.py').read_bytes()).hexdigest()
     return dict(base=io.source_identity(), prospective=hashlib.sha256(io.encoded(hashes)).hexdigest())
@@ -152,9 +153,9 @@ def verify_current_publication(root, ticket, raw, step, native_identity, volume_
     path = root / 'server.json'
     directory = root / ('.generation-' + ticket)
     require_owned(path)
-    if step not in (1, 2) or set(root.glob('.generation-*')) != {
-            directory, root / '.generation-current.json'}:
+    if step not in (1, 2):
         raise RuntimeError('generation_link_ambiguous')
+    history.assert_layout(root, ticket, volume_identity)
     io.private_directory(directory)
     reservation_raw, current = io.read_json(directory / 'reservation.json')
     expected = dict(schema=1, ticket=ticket,
@@ -163,7 +164,7 @@ def verify_current_publication(root, ticket, raw, step, native_identity, volume_
     authorization_raw, authorization = io.read_json(directory / 'authorized.json')
     chain = _publications(directory, ticket, expected['reservation_sha256'],
                           current.get('predecessor_sha256'))
-    if (current.get('schema') != 1 or current.get('ticket') != ticket or
+    if (current.get('schema') not in (1, 2) or current.get('ticket') != ticket or
             link != expected or authorization != expected or
             current['binding'] != _root(root, volume_identity) or
             current['identity'] != io.boot_identity(native_identity()) or
@@ -217,22 +218,33 @@ def reserve(root, predecessor_sha256, native_identity, volume_identity):
     binding = _root(root, volume_identity)
     if predecessor_sha256 != _predecessor(root):
         raise RuntimeError('predecessor_changed')
+    prior_raw, prior = None, None
     if list(root.glob('.generation-*')):
-        raise RuntimeError('prior_generation_requires_inspection')
+        try:
+            prior_raw, prior = history.predecessor(root, native_identity, volume_identity)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise RuntimeError('prior_generation_requires_inspection') from exc
     identity = io.boot_identity(native_identity())
     ticket = secrets.token_hex(16)
     directory = root / ('.generation-' + ticket)
     directory.mkdir(mode=0o700)
     io.sync_directory(root)
-    reservation = dict(schema=1, ticket=ticket, predecessor_sha256=predecessor_sha256,
+    reservation = dict(schema=2 if prior else 1, ticket=ticket, predecessor_sha256=predecessor_sha256,
                        binding=binding, identity=identity, source=_source_identity())
+    if prior is not None:
+        reservation['prior_generation'] = prior
+        io.exclusive_write(directory / 'predecessor-link.json', prior_raw)
     data = io.encoded(reservation)
     io.exclusive_write(directory / 'reservation.json', data)
     if (binding != _root(root, volume_identity) or identity != io.boot_identity(native_identity()) or
             predecessor_sha256 != _predecessor(root)):
         raise RuntimeError('generation_facts_changed')
     link = dict(schema=1, ticket=ticket, reservation_sha256=hashlib.sha256(data).hexdigest())
-    io.exclusive_write(root / '.generation-current.json', io.encoded(link))
+    if prior is None:
+        io.exclusive_write(root / '.generation-current.json', io.encoded(link))
+    else:
+        history.replace_link(root, ticket, io.encoded(link), prior_raw, native_identity, volume_identity)
+        history.assert_layout(root, ticket, volume_identity)
     return ticket
 
 
@@ -245,13 +257,12 @@ def authorize(root, ticket, native_identity, volume_identity):
 
     def validate():
         require_owned(root / 'server.json')
-        if set(root.glob('.generation-*')) != {directory, root / '.generation-current.json'}:
-            raise RuntimeError('generation_link_ambiguous')
+        history.assert_layout(root, ticket, volume_identity)
         io.private_directory(directory)
         _, link = io.read_json(root / '.generation-current.json')
         raw, reservation = io.read_json(directory / 'reservation.json')
         if (link != dict(schema=1, ticket=ticket, reservation_sha256=hashlib.sha256(raw).hexdigest()) or
-                reservation.get('schema') != 1 or reservation.get('ticket') != ticket or
+                reservation.get('schema') not in (1, 2) or reservation.get('ticket') != ticket or
                 reservation.get('binding') != _root(root, volume_identity) or
                 reservation.get('identity') != io.boot_identity(native_identity()) or
                 reservation.get('source') != _source_identity() or
@@ -279,8 +290,7 @@ def bind_publication(root, ticket, intended, native_identity, volume_identity):
 
     def validate():
         require_owned(root / 'server.json')
-        if set(root.glob('.generation-*')) != {directory, root / '.generation-current.json'}:
-            raise RuntimeError('generation_link_ambiguous')
+        history.assert_layout(root, ticket, volume_identity)
         io.private_directory(directory)
         link_raw, link = io.read_json(root / '.generation-current.json')
         raw, reservation = io.read_json(directory / 'reservation.json')
@@ -289,7 +299,7 @@ def bind_publication(root, ticket, intended, native_identity, volume_identity):
         chain = _publications(directory, ticket, hashlib.sha256(raw).hexdigest(),
                               reservation.get('predecessor_sha256'))
         previous_state = chain[-1][2]['intended_sha256'] if chain else reservation.get('predecessor_sha256')
-        if (link != expected or authorization != expected or reservation.get('schema') != 1 or
+        if (link != expected or authorization != expected or reservation.get('schema') not in (1, 2) or
                 reservation.get('ticket') != ticket or reservation.get('binding') != _root(root, volume_identity) or
                 reservation.get('identity') != io.boot_identity(native_identity()) or
                 reservation.get('source') != _source_identity() or
@@ -338,8 +348,7 @@ def verify_interrupted(root, ticket, native_identity, volume_identity):
     if not isinstance(ticket, str) or not re.fullmatch('[0-9a-f]{32}', ticket):
         raise RuntimeError('generation_ticket_invalid')
     directory = root / ('.generation-' + ticket)
-    if set(root.glob('.generation-*')) != {directory, root / '.generation-current.json'}:
-        raise RuntimeError('generation_link_ambiguous')
+    history.assert_layout(root, ticket, volume_identity)
     io.private_directory(directory)
     link_raw, link = io.read_json(root / '.generation-current.json')
     raw, reservation = io.read_json(directory / 'reservation.json')
@@ -350,7 +359,7 @@ def verify_interrupted(root, ticket, native_identity, volume_identity):
                           reservation.get('predecessor_sha256'))
     allowed_states = {reservation.get('predecessor_sha256')}
     allowed_states.update(value['intended_sha256'] for _, _, value in chain)
-    if (link != expected or auth != expected or reservation.get('schema') != 1 or
+    if (link != expected or auth != expected or reservation.get('schema') not in (1, 2) or
             reservation.get('ticket') != ticket or reservation.get('binding') != _root(root, volume_identity) or
             reservation.get('source') != _source_identity() or
             predecessor not in allowed_states):
