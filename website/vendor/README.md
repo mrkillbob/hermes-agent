@@ -16,10 +16,11 @@ The existing application Docker context exclusion for the website stays in place
 
 To reproduce all six files, obtain the authentic public archive from
 `https://registry.npmjs.org/@svgr/plugin-svgo/-/plugin-svgo-8.1.0.tgz`
-outside the checkout, then choose a new external output directory:
+outside the checkout, then choose a new external output directory. Replace the
+two uppercase placeholders with those external paths:
 
 ```sh
-python rebuild-svgr-plugin-svgo.py /tmp/plugin-svgo-8.1.0.tgz /tmp/rebuilt-svgr-plugin-svgo
+python rebuild-svgr-plugin-svgo.py ORIGINAL_ARCHIVE_PATH NEW_EXTERNAL_DIRECTORY
 ```
 
 The script verifies the original SHA-512 integrity and every resulting file hash
