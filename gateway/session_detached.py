@@ -150,7 +150,7 @@ def live_root_held(runner, root_session_id: str) -> bool:
             try:
                 if str(authority.logical_owner(session_id)) == root_session_id:
                     return True
-            except Exception:
+            except Exception:  # health: allow BLE001 -- uncertain owner must retain the root lease
                 return True  # a failed ownership read cannot prove a root unreferenced
     return False
 

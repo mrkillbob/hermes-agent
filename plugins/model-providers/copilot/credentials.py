@@ -170,7 +170,7 @@ def copilot_device_code_login(
     try:
         device_data = _post_form(f"https://{domain}/login/device/code",
                                  {"client_id": COPILOT_OAUTH_CLIENT_ID, "scope": "read:user"}, 15)
-    except Exception as exc:
+    except (OSError, ValueError, UnicodeError) as exc:
         logger.error("Failed to initiate device authorization: %s", exc)
         print(f"  ✗ Failed to start device authorization: {exc}")
         return None
@@ -200,7 +200,7 @@ def copilot_device_code_login(
                 continue
             print(".", end="", flush=True)
             continue
-        except Exception:
+        except (OSError, ValueError, UnicodeError):
             print(".", end="", flush=True)
             continue
         if result.get("access_token"):
@@ -280,7 +280,7 @@ def _read_jwt_store(path: Path) -> Optional[dict]:
             return None
         loaded = json.loads(path.read_text(encoding="utf-8-sig"))
         return loaded if isinstance(loaded, dict) else None
-    except Exception as exc:
+    except (OSError, ValueError, UnicodeError) as exc:
         logger.debug("Failed to read persisted Copilot JWT store: %s", exc)
         return None
 
@@ -290,7 +290,7 @@ def _jwt_disk_path() -> Optional[Path]:
     try:
         from hermes_constants import get_hermes_home
         return Path(get_hermes_home()) / _JWT_DISK_FILENAME
-    except Exception:
+    except Exception:  # health: allow BLE001 -- profile-home uncertainty disables disk cache
         return None
 
 
@@ -301,7 +301,7 @@ def _with_jwt_store(verb: str, op):
         return None
     try:
         return op(path, _read_jwt_store(path))
-    except Exception as exc:
+    except Exception as exc:  # health: allow BLE001 -- arbitrary cache op failure cannot block auth
         logger.debug("Failed to %s Copilot JWT: %s", verb, exc)
         return None
 
@@ -364,7 +364,7 @@ def _urlopen_bounded(req, timeout: float):
     def _worker() -> None:
         try:
             resp = urllib.request.urlopen(req, timeout=timeout)
-        except BaseException as exc:  # re-raised on the caller's thread
+        except BaseException as exc:  # health: allow BLE001 -- transport every worker failure to caller
             box["exc"] = exc
             return
         if abandoned.is_set():  # caller already timed out — release the socket
@@ -401,7 +401,7 @@ def _fetch_exchange_with_retry(req, timeout: float, fp: str) -> dict:
                 data = json.loads(resp.read().decode())
             _exchange_failure_cache.pop(fp, None)
             return data
-        except Exception as exc:
+        except Exception as exc:  # health: allow BLE001 -- network/parse failures enter bounded retry
             last_exc = exc
             status = getattr(exc, "code", None) or getattr(exc, "status", None)
             permanent_failure = status in _EXCHANGE_PERMANENT_HTTP_STATUSES
@@ -504,7 +504,7 @@ def get_copilot_api_token(raw_token: str) -> tuple[str, Optional[str]]:
     try:
         api_token, _, base_url = exchange_copilot_token(raw_token)
         return api_token, base_url
-    except Exception as exc:
+    except ValueError as exc:
         logger.debug("Copilot token exchange failed, using raw token: %s", exc)
         return raw_token, None
 

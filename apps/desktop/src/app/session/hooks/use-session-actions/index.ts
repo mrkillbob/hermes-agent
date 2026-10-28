@@ -115,6 +115,7 @@ import {
   type SessionProfileRoute
 } from '@/store/session-request-router'
 import {
+  $sessionTiles,
   closeSessionTile,
   dropSessionState,
   focusOpenSession,
@@ -274,6 +275,31 @@ function applyStoredUsage(stored: { input_tokens?: number | null; output_tokens?
   const output = stored.output_tokens || 0
 
   setCurrentUsage(current => ({ ...current, input, output, total: input + output }))
+}
+
+// A recycled runtime id can point at another session after a pooled gateway restart.
+// Reject and purge the cross-wired cache before a resume paints its transcript.
+function takeWarmSessionCache(
+  storedSessionId: string,
+  runtimeIdByStoredSessionId: Map<string, string>,
+  sessionStateByRuntimeId: Map<string, ClientSessionState>
+): { runtimeId: string; state: ClientSessionState } | null {
+  const runtimeId = runtimeIdByStoredSessionId.get(storedSessionId)
+  const state = runtimeId ? sessionStateByRuntimeId.get(runtimeId) : undefined
+
+  if (!runtimeId || !state) {
+    return null
+  }
+
+  if (state.storedSessionId !== storedSessionId) {
+    runtimeIdByStoredSessionId.delete(storedSessionId)
+    sessionStateByRuntimeId.delete(runtimeId)
+    dropSessionState(runtimeId)
+
+    return null
+  }
+
+  return { runtimeId, state }
 }
 
 interface FreshSessionDraftOptions {
@@ -1250,33 +1276,11 @@ export function useSessionActions({
 
       clearResumeLatches(storedSessionId)
 
-      // A warm cache entry is only trustworthy when it still BELONGS to the
-      // session being resumed. A pooled profile backend that gets idle-reaped
-      // and respawned (pruneSecondaryGateways) re-mints runtime ids, so a
-      // recycled id can resolve to a live-but-DIFFERENT session's cache entry.
-      // The session.activate 404 guard below only catches a fully-DEAD id — a
-      // recycled-live id 200s, so an unchecked hit paints the wrong transcript
-      // under the current route (the "open chat A, chat B loads" bug). On a
-      // mismatch the mapping is cross-wired: purge both sides and report a miss
-      // so the caller falls through to a full resume that rebinds a correct id.
-      const takeWarmCache = (): { runtimeId: string; state: ClientSessionState } | null => {
-        const runtimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
-        const state = runtimeId ? sessionStateByRuntimeIdRef.current.get(runtimeId) : undefined
-
-        if (!runtimeId || !state) {
-          return null
-        }
-
-        if (state.storedSessionId !== storedSessionId) {
-          runtimeIdByStoredSessionIdRef.current.delete(storedSessionId)
-          sessionStateByRuntimeIdRef.current.delete(runtimeId)
-          dropSessionState(runtimeId)
-
-          return null
-        }
-
-        return { runtimeId, state }
-      }
+      const takeWarmCache = () => takeWarmSessionCache(
+        storedSessionId,
+        runtimeIdByStoredSessionIdRef.current,
+        sessionStateByRuntimeIdRef.current
+      )
 
       // The selection moved above, but a warm runtime is only (re)bound after
       // the awaits below. Until then the foreground may stay on a runtime only

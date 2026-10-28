@@ -62,7 +62,6 @@ import { Input } from "@nous-research/ui/ui/components/input";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
-import { errorMessage } from "@/lib/api-error";
 import { installedHubEntry } from "@/lib/skill-hub-installed";
 
 /* ------------------------------------------------------------------ */

@@ -59,7 +59,7 @@ def _validate_web_backends(config: dict[str, Any], issues: list[ConfigIssue]) ->
         return
     try:
         from tools.tool_backend_helpers import removed_backend_note
-    except Exception:
+    except ImportError:
         return
     seen: set = set()
     for _key in ("backend", "search_backend", "extract_backend"):

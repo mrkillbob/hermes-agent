@@ -1240,8 +1240,6 @@ class SessionStore(
     ) -> Optional[dict[str, Any]]:
         """Create a candidate outside the lock and publish it only if the key is still vacant;
         returns ``create_session`` kwargs when the candidate won."""
-        from gateway.session_identity import transport_profile_of
-
         session_id = _new_session_id(now)
         candidate = SessionEntry(
             session_key=session_key, session_id=session_id, created_at=now, updated_at=now,

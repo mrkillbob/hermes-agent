@@ -2,6 +2,7 @@ import { isStableOpen, reconnectBackoffDelayMs } from '@hermes/shared'
 
 import type { HermesConnection } from '@/global'
 import { hostHas } from '@/lib/host-capabilities'
+import { isBrowserHostedDesktop } from '@/lib/platform'
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 
 import {
