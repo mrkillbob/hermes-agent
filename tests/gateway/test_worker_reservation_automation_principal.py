@@ -28,7 +28,8 @@ def reserved(tmp_path):
     try:
         db.create_session('owned', 'cli')
         epoch = begin_runtime_epoch(db, instance_id='owner')
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None,
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path),
+                                    _require_admission_open=lambda *, session_id: None,
                                     wake_after_worker=lambda session_id: None)
         admitted = admit_session_input(db, epoch=epoch, principal_id=AUTOMATION, session_id='owned',
                                        request_id='bot:dm', payload={})

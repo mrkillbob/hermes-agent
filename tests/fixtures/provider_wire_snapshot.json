@@ -4783,6 +4783,169 @@
    ]
   }
  },
+ "copilot": {
+  "api_mode": "codex_responses",
+  "base_url": "https://api.githubcopilot.com",
+  "high": {
+   "input": [
+    {
+     "content": "list files",
+     "role": "user",
+     "type": "message"
+    },
+    {
+     "arguments": "{\"command\": \"ls\"}",
+     "call_id": "call_1",
+     "name": "terminal",
+     "type": "function_call"
+    },
+    {
+     "call_id": "call_1",
+     "output": "a.txt\nb.txt",
+     "type": "function_call_output"
+    },
+    {
+     "content": "thanks, now summarize",
+     "role": "user",
+     "type": "message"
+    }
+   ],
+   "instructions": "You are a test agent.",
+   "model": "gpt-5.4",
+   "parallel_tool_calls": true,
+   "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+   },
+   "store": false,
+   "timeout": 1800.0,
+   "tool_choice": "auto",
+   "tools": [
+    {
+     "description": "Run a shell command.",
+     "name": "terminal",
+     "parameters": {
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ],
+      "type": "object"
+     },
+     "strict": false,
+     "type": "function"
+    }
+   ]
+  },
+  "model": "gpt-5.4",
+  "off": {
+   "input": [
+    {
+     "content": "list files",
+     "role": "user",
+     "type": "message"
+    },
+    {
+     "arguments": "{\"command\": \"ls\"}",
+     "call_id": "call_1",
+     "name": "terminal",
+     "type": "function_call"
+    },
+    {
+     "call_id": "call_1",
+     "output": "a.txt\nb.txt",
+     "type": "function_call_output"
+    },
+    {
+     "content": "thanks, now summarize",
+     "role": "user",
+     "type": "message"
+    }
+   ],
+   "instructions": "You are a test agent.",
+   "model": "gpt-5.4",
+   "parallel_tool_calls": true,
+   "store": false,
+   "timeout": 1800.0,
+   "tool_choice": "auto",
+   "tools": [
+    {
+     "description": "Run a shell command.",
+     "name": "terminal",
+     "parameters": {
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ],
+      "type": "object"
+     },
+     "strict": false,
+     "type": "function"
+    }
+   ]
+  },
+  "unset": {
+   "input": [
+    {
+     "content": "list files",
+     "role": "user",
+     "type": "message"
+    },
+    {
+     "arguments": "{\"command\": \"ls\"}",
+     "call_id": "call_1",
+     "name": "terminal",
+     "type": "function_call"
+    },
+    {
+     "call_id": "call_1",
+     "output": "a.txt\nb.txt",
+     "type": "function_call_output"
+    },
+    {
+     "content": "thanks, now summarize",
+     "role": "user",
+     "type": "message"
+    }
+   ],
+   "instructions": "You are a test agent.",
+   "model": "gpt-5.4",
+   "parallel_tool_calls": true,
+   "reasoning": {
+    "effort": "medium",
+    "summary": "auto"
+   },
+   "store": false,
+   "timeout": 1800.0,
+   "tool_choice": "auto",
+   "tools": [
+    {
+     "description": "Run a shell command.",
+     "name": "terminal",
+     "parameters": {
+      "properties": {
+       "command": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "command"
+      ],
+      "type": "object"
+     },
+     "strict": false,
+     "type": "function"
+    }
+   ]
+  }
+ },
  "custom": {
   "api_mode": "chat_completions",
   "base_url": "http://127.0.0.1:8080/v1",
