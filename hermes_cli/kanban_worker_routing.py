@@ -21,7 +21,8 @@ def prepare_worker_route(task, profile_home, env):
     route = _resolve_explicit_local_task_route(task)
     if route is None and not task.model_override and _kanban_local_first_enabled():
         path = Path(profile_home) / "config.yaml" if profile_home else None
-        config = read_user_config_raw(path) if path and path.is_file() else None
+        from hermes_cli.config_backend import config_exists
+        config = read_user_config_raw(path) if path and config_exists(path) else None
         route = _resolve_local_first_route(config)
     if route is None:
         return task

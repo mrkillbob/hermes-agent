@@ -247,7 +247,7 @@ def test_local_privacy_denial_ends_once_without_fallback_or_outage_copy(wrapped)
 
     verdict = settle_unrecovered_error(
         Agent(), api_error=error, classified=classified,
-        _retry=SimpleNamespace(restart_with_redirected_messages=False),
+        _retry=SimpleNamespace(restart_with_redirected_messages=False, provider_stale_refresh_attempted=False),
         status_code=None, error_msg=str(error), is_context_length_error=False,
         is_rate_limited=False, _is_zai_coding_overload=False, _provider="nous", _base="",
         _model="model", messages=[], api_messages=[], api_kwargs=None,

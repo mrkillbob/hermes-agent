@@ -833,7 +833,8 @@ def _configured_worktree_base(repo_root: Path) -> Optional[str]:
     from hermes_cli.config import read_user_config_raw
 
     config_path = _kb.kanban_home() / "config.yaml"
-    if not config_path.is_file():
+    from hermes_cli.config_backend import config_exists
+    if not config_exists(config_path):
         return None
     config = read_user_config_raw(config_path) or {}
     refs = (config.get("kanban") or {}).get("worktree_base_refs", {})

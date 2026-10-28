@@ -28,7 +28,7 @@ from agent.skill_utils import (
     skill_matches_platform, skill_matches_platform_list,
 )
 from tools.threat_patterns import scan_for_threats as _scan_for_threats
-from utils import atomic_json_write, file_signature
+from utils import atomic_json_write, file_cache_version
 
 logger = logging.getLogger(__name__)
 
@@ -936,7 +936,7 @@ def _local_host_hints() -> list[str]:
     # The model reaches for the system temp dir by reflex (tmpfs on most Linux hosts, fills RAM);
     # naming Hermes' scratch dir here is what makes the TMPDIR export a habit rather than a hidden default.
     try:
-        host_lines.append(f"Scratch directory: {get_scratch_dir()} (TMPDIR points here; write temporary files "
+        host_lines.append(f"Scratch directory: {get_scratch_dir(prune=False)} (TMPDIR points here; write temporary files "
                           "and probes there, never under the system temp dir; entries idle for 24h are pruned)")
     except OSError:
         pass
@@ -1131,7 +1131,7 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
             try:
                 if filename in files:
                     st = os.stat(path)
-                    manifest[path[prefix_len:]] = list(file_signature(st))
+                    manifest[path[prefix_len:]] = list(file_cache_version(path, st, always_digest=True))
             except OSError:
                 pass
     return manifest

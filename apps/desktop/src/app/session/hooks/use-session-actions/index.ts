@@ -1,4 +1,4 @@
-import { mergeUsage } from '@hermes/shared'
+import { mergeUsage, randomUuid } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 import type { NavigateFunction } from 'react-router'
@@ -23,7 +23,6 @@ import { useI18n } from '@/i18n'
 import {
   type ChatMessage,
   preserveLocalAssistantErrors,
-  QUESTION_CARD_TOOLS,
   restorePendingClarifyToolCall,
   settlePendingClarifyToolCall,
   stripPendingClarifyProjectionForCache,
@@ -90,6 +89,7 @@ import {
   setMessages,
   setNewChatWorkspaceTarget,
   setResumeFailedSessionId,
+  setResumeReattachSessionId,
   setSelectedStoredSessionId,
   setSessionOwnerHint,
   setSessionStartedAt,
@@ -115,6 +115,7 @@ import {
   type SessionProfileRoute
 } from '@/store/session-request-router'
 import {
+  $sessionTiles,
   closeSessionTile,
   dropSessionState,
   focusOpenSession,
@@ -136,7 +137,6 @@ import { dropTranscriptTail, dropTranscriptTailEverywhere, saveTranscriptTail } 
 import { isWatchWindow } from '@/store/windows'
 import type {
   SessionCreateResponse,
-  SessionMessage,
   SessionMessagesResponse,
   SessionResumeResult,
   UsageStats
@@ -162,9 +162,19 @@ import { provisionalTranscriptPaint, transcriptRestScope } from './provisional-t
 import { captureReconnectTurn, reconnectTranscriptPrefetch } from './reconnect-transcript'
 import { rememberedOwnerForResume } from './remembered-owner'
 import { restorePendingApproval } from './restore-pending-approval'
-import { pendingClarifyToolPayload, restorePendingClarifyFromSnapshot } from './restore-pending-clarify'
+import {
+  pendingClarifyToolPayload,
+  restorePendingClarifyFromSnapshot,
+  withoutEarlyClarifyProjection
+} from './restore-pending-clarify'
 import { projectPendingConnection, restorePendingConnectionFromSnapshot } from './restore-pending-connection'
-import { preparePrimarySessionResume } from './resume-entry'
+import {
+  type GraftedTranscriptPage,
+  graftTranscriptPage,
+  prefetchServesResume,
+  rereadPageAfterResumeBarrier
+} from './resume-barrier-reread'
+import { clearResumeLatches, clearResumeToasts, notifyResumeFailed, type ResumeAttemptOptions } from './resume-latches'
 import {
   ambientResumeConnectionId,
   openResumeGateway,
@@ -172,7 +182,14 @@ import {
   rememberResolvedResumeOwner,
   resolveResumeOwner
 } from './resume-owner'
-import { backgroundRuntimeOptions, runtimeOwner } from './runtime-owner'
+import {
+  livePromptStreamId,
+  liveTurnSettledDuringResume,
+  reconcileAuthoritativeChatMessages,
+  reconcileAuthoritativeMessages,
+  resumedStreamTarget
+} from './resume-reconcile'
+import { backgroundRuntimeOptions, runtimeOwner, runtimeOwnerProfile } from './runtime-owner'
 import { createGatewaySession, desktopSessionCreateParams } from './session-create-request'
 import {
   createPersistedDisplayTranscriptProvenance,
@@ -195,7 +212,6 @@ import {
   patchSessionWorkspace,
   preserveEquivalentTranscript,
   preserveLocalPendingTurnMessages,
-  reconcileDurableHistory,
   removeRepresentedLocalLiveProjection,
   resolveResumedBusy,
   resolveSessionProfile,
@@ -261,37 +277,29 @@ function applyStoredUsage(stored: { input_tokens?: number | null; output_tokens?
   setCurrentUsage(current => ({ ...current, input, output, total: input + output }))
 }
 
-function reconcileAuthoritativeChatMessages(
-  authoritativeMessages: ChatMessage[],
-  previousMessages: ChatMessage[],
-  liveProjection?: Pick<SessionResumeResult, 'inflight' | 'queued' | 'session_id'>,
-  sourceRows?: SessionMessage[]
-): ChatMessage[] {
-  if (liveProjection && sourceRows) {
-    const reconciled = reconcilePersistedLiveTurn(authoritativeMessages, previousMessages, sourceRows, liveProjection)
+// A recycled runtime id can point at another session after a pooled gateway restart.
+// Reject and purge the cross-wired cache before a resume paints its transcript.
+function takeWarmSessionCache(
+  storedSessionId: string,
+  runtimeIdByStoredSessionId: Map<string, string>,
+  sessionStateByRuntimeId: Map<string, ClientSessionState>
+): { runtimeId: string; state: ClientSessionState } | null {
+  const runtimeId = runtimeIdByStoredSessionId.get(storedSessionId)
+  const state = runtimeId ? sessionStateByRuntimeId.get(runtimeId) : undefined
 
-    if (reconciled) {
-      return reconciled
-    }
+  if (!runtimeId || !state) {
+    return null
   }
 
-  return reconcileDurableHistory(
-    liveProjection ? appendLiveSessionProjection(authoritativeMessages, liveProjection) : authoritativeMessages,
-    previousMessages
-  )
-}
+  if (state.storedSessionId !== storedSessionId) {
+    runtimeIdByStoredSessionId.delete(storedSessionId)
+    sessionStateByRuntimeId.delete(runtimeId)
+    dropSessionState(runtimeId)
 
-function reconcileAuthoritativeMessages(
-  authoritativeMessages: SessionResumeResult['messages'],
-  previousMessages: ChatMessage[],
-  liveProjection?: Pick<SessionResumeResult, 'inflight' | 'queued' | 'session_id'>
-): ChatMessage[] {
-  return reconcileAuthoritativeChatMessages(
-    toChatMessages(authoritativeMessages),
-    previousMessages,
-    liveProjection,
-    authoritativeMessages
-  )
+    return null
+  }
+
+  return { runtimeId, state }
 }
 
 interface FreshSessionDraftOptions {
@@ -299,48 +307,6 @@ interface FreshSessionDraftOptions {
   replaceRoute?: boolean
   rotateFreshDraftKey?: boolean
   workspaceTarget?: NewChatWorkspaceTarget
-}
-
-/** Drop the pre-hydration request-id row without copying the other messages.
- *  A copied clarify row looks like a concurrent edit and hydration keeps both. */
-function withoutEarlyClarifyProjection(messages: ChatMessage[], requestId: string): ChatMessage[] {
-  let changed = false
-  const next: ChatMessage[] = []
-
-  for (const message of messages) {
-    const parts = message.parts.filter(
-      part =>
-        !(
-          part.type === 'tool-call' &&
-          QUESTION_CARD_TOOLS.has(part.toolName) &&
-          part.result === undefined &&
-          part.toolCallId === requestId
-        )
-    )
-
-    if (parts.length === message.parts.length) {
-      next.push(message)
-
-      continue
-    }
-
-    changed = true
-
-    if (parts.length > 0) {
-      next.push({ ...message, parts })
-    }
-  }
-
-  return changed ? next : messages
-}
-
-/** Session-state patch for a restored blocking prompt row; the first non-null projection is used. */
-function livePromptStreamId(
-  ...projections: ({ streamId: string } | null)[]
-): { awaitingResponse: false; sawAssistantPayload: true; streamId: string } | Record<string, never> {
-  const live = projections.find(Boolean)
-
-  return live ? { awaitingResponse: false, sawAssistantPayload: true, streamId: live.streamId } : {}
 }
 
 function normalizeNewChatWorkspaceTarget(target: NewChatWorkspaceTarget): NewChatWorkspaceTarget {
@@ -650,7 +616,7 @@ export function useSessionActions({
     async (preview: string | null = null, createOverrides?: SessionCreateOverrides): Promise<string | null> => {
       const startingStoredSessionId = selectedStoredSessionIdRef.current
       const startingRouteToken = getRouteToken()
-      const createIntent = (createIntentRef.current ??= crypto.randomUUID())
+      const createIntent = (createIntentRef.current ??= randomUuid())
 
       creatingSessionRef.current = true
 
@@ -1081,8 +1047,15 @@ export function useSessionActions({
           ...(legacyOwnerProfile ? { ownerProfile: legacyOwnerProfile } : {})
         }
 
+        // The default folder belongs to the profile the session is created in.
+        // A dialled route names it: the Bot Mode "+" aims at the bot's profile
+        // while requestedProfile still holds the window's.
         const cwd =
-          options?.cwd === null ? '' : typeof options?.cwd === 'string' ? options.cwd.trim() : resolveNewSessionCwd()
+          options?.cwd === null
+            ? ''
+            : typeof options?.cwd === 'string'
+              ? options.cwd.trim()
+              : resolveNewSessionCwd(runtimeOwnerProfile(capturedRoute, requestedProfile))
 
         // #52589 provenance for the tile path: an explicitly-passed cwd is a
         // deliberate workspace pick; a resolved default is inherited.
@@ -1116,7 +1089,7 @@ export function useSessionActions({
             options?.route === null || defaultTarget?.route === null,
             workspaceScope.workspaceMode !== 'bots'
           )),
-          request_id: crypto.randomUUID()
+          request_id: randomUuid()
         }
 
         // Same lease chain as createBackendSessionForSend: owner socket held
@@ -1231,7 +1204,7 @@ export function useSessionActions({
       storedSessionId: string,
       replaceRoute = false,
       capturedOwner?: SessionProfileRoute,
-      options?: { authoritativeSnapshot?: boolean }
+      options?: ResumeAttemptOptions
     ) => {
       // Delete/archive tombstones the durable id before the route flips, and
       // requestSessionResume already refuses to queue for a doomed id. This is
@@ -1283,40 +1256,31 @@ export function useSessionActions({
       // ref here is also what use-route-resume's self-heal assumes ("set
       // synchronously at resume entry").
       setFreshDraftReady(false)
-      clearNotifications()
+      clearResumeToasts(options)
       resetViewSync()
       setSelectedStoredSessionId(storedSessionId)
       selectedStoredSessionIdRef.current = storedSessionId
 
-      preparePrimarySessionResume(storedSessionId)
-
-      // A warm cache entry is only trustworthy when it still BELONGS to the
-      // session being resumed. A pooled profile backend that gets idle-reaped
-      // and respawned (pruneSecondaryGateways) re-mints runtime ids, so a
-      // recycled id can resolve to a live-but-DIFFERENT session's cache entry.
-      // The session.activate 404 guard below only catches a fully-DEAD id — a
-      // recycled-live id 200s, so an unchecked hit paints the wrong transcript
-      // under the current route (the "open chat A, chat B loads" bug). On a
-      // mismatch the mapping is cross-wired: purge both sides and report a miss
-      // so the caller falls through to a full resume that rebinds a correct id.
-      const takeWarmCache = (): { runtimeId: string; state: ClientSessionState } | null => {
-        const runtimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
-        const state = runtimeId ? sessionStateByRuntimeIdRef.current.get(runtimeId) : undefined
-
-        if (!runtimeId || !state) {
-          return null
-        }
-
-        if (state.storedSessionId !== storedSessionId) {
-          runtimeIdByStoredSessionIdRef.current.delete(storedSessionId)
-          sessionStateByRuntimeIdRef.current.delete(runtimeId)
-          dropSessionState(runtimeId)
-
-          return null
-        }
-
-        return { runtimeId, state }
+      // A session is EITHER the main thread OR a tile — never both. openSessionTile
+      // enforces this from the tile side (it refuses to tile the selected session);
+      // this enforces it from the main side. Loading an existing session into main
+      // (cold-start restore, a pasted/⌘K route, a notification jump) while it's also
+      // an open tile would paint the same transcript twice — the workspace pane from
+      // the route and the tile pane in parallel, both fighting one runtime. Drop the
+      // now-redundant tile so main owns it. Runs before the async awaits below (and
+      // before the selection listener homes focus) so the tile is gone the same tick
+      // the route takes over; the warm cache/runtime binding survives for main to reuse.
+      if ($sessionTiles.get().some(t => t.storedSessionId === storedSessionId)) {
+        closeSessionTile(storedSessionId)
       }
+
+      clearResumeLatches(storedSessionId)
+
+      const takeWarmCache = () => takeWarmSessionCache(
+        storedSessionId,
+        runtimeIdByStoredSessionIdRef.current,
+        sessionStateByRuntimeIdRef.current
+      )
 
       // The selection moved above, but a warm runtime is only (re)bound after
       // the awaits below. Until then the foreground may stay on a runtime only
@@ -1510,7 +1474,7 @@ export function useSessionActions({
           }
 
           setFreshDraftReady(false)
-          clearNotifications()
+          clearResumeToasts(options)
           setSelectedStoredSessionId(storedSessionId)
           selectedStoredSessionIdRef.current = storedSessionId
           setActiveSessionId(cachedRuntimeId)
@@ -1998,7 +1962,7 @@ export function useSessionActions({
       busyRef.current = false
       setBusy(false)
       setAwaitingResponse(false)
-      clearNotifications()
+      clearResumeToasts(options)
       setSelectedStoredSessionId(storedSessionId)
       selectedStoredSessionIdRef.current = storedSessionId
       const runtimeStartedAt = Date.now()
@@ -2038,6 +2002,7 @@ export function useSessionActions({
         let prefetchApplied = false
         let prefetchedStoredSessionId: string | null = null
         let prefetchedTranscriptMessages: ChatMessage[] | null = null
+        let prefetchedPage: GraftedTranscriptPage | null = null
 
         // Freeze known runtimes before dispatch; first-seen runtimes retain their ACK merge baseline.
         const resumeRuntimeBaselines = new Map([...sessionStateByRuntimeIdRef.current].map(([id, state]) => [id, state.messages]))
@@ -2113,18 +2078,9 @@ export function useSessionActions({
             : viewMessagesForReconcile()
 
           // Tail page + previously backfilled prefix (same-session re-resume).
-          // A long turn can push every rendered row off the newest page; read
-          // older pages until they overlap so the graft keeps earlier history.
-          const prefetchedTail = await extendRefreshPageToOverlap(
-            toChatMessages(prefetchedResult.messages),
-            previousMessages,
-            olderPageReader(storedSessionId, sessionRestScope, prefetchedResult)
-          )
-
-          const graftedPrefetch = graftRefreshedTailOntoBackfill(prefetchedTail, previousMessages)
-
-          prefetchedTranscriptMessages = graftedPrefetch
-          localSnapshot = reconcileAuthoritativeChatMessages(graftedPrefetch, previousMessages)
+          prefetchedPage = await graftTranscriptPage(prefetchedResult, previousMessages, storedSessionId, sessionRestScope)
+          prefetchedTranscriptMessages = prefetchedPage.transcript
+          localSnapshot = prefetchedPage.snapshot
           prefetchApplied = true
           prefetchedStoredSessionId = prefetchedResult.session_id || storedSessionId
 
@@ -2136,26 +2092,31 @@ export function useSessionActions({
 
         const resumed = await resumePromise
 
+        const reread = await rereadPageAfterResumeBarrier(resumed, prefetchedPage, storedSessionId, sessionRestScope)
+
+        if (reread) {
+          ;({ page: prefetchedResult, snapshot: localSnapshot, transcript: prefetchedTranscriptMessages } = reread)
+        }
+
         if (!isCurrentResume()) {
           return
         }
 
         const currentMessages = viewMessagesForReconcile()
 
-        // Keep the local snapshot when resume would only reshuffle runtime
-        // projection. When the REST prefetch already hydrated the transcript,
-        // skip converting/reconciling the resume payload entirely — on a
-        // 1000+-message session that second conversion plus the deep
-        // equivalence compare costs over a second of main-thread time.
-        const resumedStoredSessionId = resumed.session_key || resumed.resumed
-
-        const prefetchMatchesResumedSession =
-          !prefetchedStoredSessionId || !resumedStoredSessionId || prefetchedStoredSessionId === resumedStoredSessionId
+        // A current prefetch skips converting the resume payload (over a second
+        // on a 1000+-message session); a page older than the resume snapshot
+        // (it lacks a durable row the resume carries) yields to that snapshot.
+        const prefetchMatchesResumedSession = prefetchServesResume(prefetchedStoredSessionId, resumed, prefetchedResult)
 
         const hasLiveProjection = Boolean(resumed.inflight || resumed.queued)
 
         const preferredMessages = (() => {
-          if (options?.authoritativeSnapshot && resumed.messages.length === 0 && !hasLiveProjection) {
+          // A reply the live stream settled during the RPC is newer than this snapshot (resume-reconcile.ts).
+          if (
+            (options?.authoritativeSnapshot && resumed.messages.length === 0 && !hasLiveProjection) ||
+            liveTurnSettledDuringResume(resumed, resumeStartedAt, resumedSameSelectedSession)
+          ) {
             return currentMessages
           }
 
@@ -2390,7 +2351,14 @@ export function useSessionActions({
             ...livePromptStreamId(pendingConnectionProjection, pendingClarifyProjection),
             ...(clearedClarifyProjection
               ? {
-                  streamId: resumedRunning ? (clearedClarifyProjection.streamId ?? state.streamId) : null
+                  streamId: resumedRunning
+                    ? resumedStreamTarget(visibleMessagesForView, resumed.session_id, [
+                        clearedClarifyProjection.streamId,
+                        pendingConnectionProjection?.streamId,
+                        state.streamId,
+                        inFlightRecovery.streamId
+                      ])
+                    : null
                 }
               : {})
           }),
@@ -2575,9 +2543,13 @@ export function useSessionActions({
           // once retries exhaust, blank that visible transcript behind the
           // exhausted-state error overlay (a regression vs. plain fallback success).
           setResumeFailedSessionId(storedSessionId)
+        } else {
+          // Readable, but detached: a turn still running there never streams
+          // in. Re-attach quietly (use-resume-reattach), no error overlay.
+          setResumeReattachSessionId(storedSessionId)
         }
 
-        notifyError(err, copy.resumeFailed)
+        notifyResumeFailed(err, copy.resumeFailed, storedSessionId, options)
       } finally {
         displayRead.release()
 

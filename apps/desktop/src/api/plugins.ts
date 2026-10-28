@@ -1,6 +1,7 @@
 import { isStableOpen, reconnectBackoffDelayMs } from '@hermes/shared'
 
 import type { HermesConnection } from '@/global'
+import { hostHas } from '@/lib/host-capabilities'
 import { isBrowserHostedDesktop } from '@/lib/platform'
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 
@@ -274,9 +275,9 @@ export function pluginSocket(
       return retry(dial, false)
     }
 
-    // No pinned bridge or descriptor, or OAuth cookie auth (WS tickets are single-use,
-    // core-managed): stay on the polling fallback rather than half-working.
-    if (stale() || !connection || connection.authMode === 'oauth' || isBrowserHostedDesktop()) {
+    // A missing descriptor, cookie auth, or a host without URL-token auth uses polling.
+    if (stale() || !connection || connection.authMode === 'oauth' ||
+        isBrowserHostedDesktop() || !hostHas('urlTokenAuth')) {
       return
     }
 

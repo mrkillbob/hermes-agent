@@ -471,6 +471,9 @@ def _baseline_key() -> str:
 def load_permanent_allowlist() -> set:
     """Load ``command_allowlist`` from config and sync it into the approval state
     so is_approved() honors 'always' choices from previous sessions."""
+    from hermes_cli.startup_hold import active as startup_hold_active
+    if startup_hold_active():
+        return set()
     try:
         patterns = _read_permanent_allowlist()
         load_permanent(patterns)

@@ -24,8 +24,13 @@ def bind_authorities(monkeypatch, authorities):
 
 @pytest.mark.asyncio
 async def test_prepared_watcher_keeps_readiness_without_entering_profile_scope(monkeypatch):
+    from gateway import hosted_rooms_gateway_import
+
     authorities = [SimpleNamespace(hosted_room_service=Service()) for _ in range(3)]
     bind_authorities(monkeypatch, authorities)
+    ready_imports = []
+    monkeypatch.setattr(hosted_rooms_gateway_import, 'import_after_ready',
+                        lambda served: ready_imports.append(tuple(served)))
 
     def forbidden_scope(authority):
         raise AssertionError('prepared watcher must not load profile credentials')
@@ -38,17 +43,18 @@ async def test_prepared_watcher_keeps_readiness_without_entering_profile_scope(m
     runner.session_runtime_descriptor['state'] = 'ready'
     await hosted.ensure_hosted_service(runner)
     assert all(a.hosted_room_service.starts == 1 for a in authorities)
+    assert ready_imports == [tuple(authorities)]
     runner._draining = True
     await hosted.ensure_hosted_service(runner)
     assert all(a.hosted_room_service.starts == 1 for a in authorities)
 
 
 @pytest.mark.asyncio
-async def test_late_authority_and_missing_transport_prepare_in_exact_owner_scope(monkeypatch):
-    from gateway import session_hosted_transport
+async def test_late_authority_and_missing_transport_prepare_in_exact_owner_scope(monkeypatch, tmp_path):
+    from gateway import hosted_rooms_gateway_import, session_hosted_transport
 
     ready = SimpleNamespace(profile_id='ready', hosted_room_service=Service())
-    missing = SimpleNamespace(profile_id='missing')
+    missing = SimpleNamespace(profile_id='missing', db=SimpleNamespace(db_path=tmp_path / 'state.db'), epoch=1)
     transport_only = SimpleNamespace(profile_id='transport', hosted_room_service=Service(False))
     authorities = [ready, missing, transport_only]
     bind_authorities(monkeypatch, authorities)
@@ -81,13 +87,24 @@ async def test_late_authority_and_missing_transport_prepare_in_exact_owner_scope
     monkeypatch.setattr(hosted, 'owner_scope', scope)
     monkeypatch.setattr(hosted, 'CanonicalHostedRoomService', create)
     monkeypatch.setattr(session_hosted_transport, 'install_hosted_transport', install)
+    imports = []
+
+    def import_standalone(path, *, runtime_epoch):
+        assert current == [missing]
+        imports.append((path, runtime_epoch))
+        return 0
+
+    monkeypatch.setattr(hosted_rooms_gateway_import, 'import_standalone_rooms', import_standalone)
+    monkeypatch.setattr(hosted_rooms_gateway_import, 'import_after_ready', lambda served: None)
     runner = SimpleNamespace(session_runtime_descriptor={'state': 'ready'}, _draining=False,
                              session_control_server=object())
     await hosted.ensure_hosted_service(runner)
     assert entries == ['missing', 'transport']
     assert installs == ['missing', 'transport']
+    assert imports == [(tmp_path / 'state.db', 1)]
     assert all(a.hosted_room_service.starts == 1 for a in authorities)
     await hosted.ensure_hosted_service(runner)
     assert entries == ['missing', 'transport']
     assert installs == ['missing', 'transport']
+    assert imports == [(tmp_path / 'state.db', 1)]
     assert all(a.hosted_room_service.starts == 2 for a in authorities)

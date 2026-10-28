@@ -146,6 +146,8 @@ def test_event_post_distinguishes_missing_request_id_from_explicit_null(monkeypa
     monkeypatch.setattr(event_return, 'dispatch', lambda *args: seen.append(args[3]))
 
     class Security:
+        def localhost_only(self):
+            return False
         def authenticate(self, _authorization, _client_ip):
             return 'peer'
         def is_trusted_peer(self, _identity):

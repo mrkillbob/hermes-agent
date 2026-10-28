@@ -1,4 +1,5 @@
-"""Held config reads retain effective settings without unrelated home maintenance."""
+"""Held config reads avoid unrelated home maintenance and database tuning."""
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ def snapshot(home):
 
 
 @pytest.mark.parametrize('legacy_soul', [False, True])
-def test_held_session_database_keeps_settings_and_home_maintenance_untouched(homes, legacy_soul):
+def test_held_session_database_keeps_home_maintenance_and_tuning_untouched(homes, legacy_soul):
     home, _ = homes
     from hermes_cli.default_soul import _SCAFFOLD_HEAD, _SCAFFOLD_TAIL, is_legacy_template_soul
     from hermes_state import SessionDB
@@ -50,11 +51,14 @@ def test_held_session_database_keeps_settings_and_home_maintenance_untouched(hom
     backups.mkdir(parents=True)
     for index in range(7):
         (backups / f'config.yaml.good.2000010{index}').write_text(f'old: {index}\n', encoding='utf-8')
+    with sqlite3.connect(':memory:') as untouched:
+        sqlite_defaults = {pragma: untouched.execute(f'PRAGMA {pragma}').fetchone()[0]
+                           for pragma in ('cache_size', 'temp_store')}
     before = snapshot(home)
     db = SessionDB(home / 'state.db')
     try:
         for pragma, expected in [('journal_mode', 'delete'), ('synchronous', 2),
-                                 ('cache_size', -1234), ('temp_store', 2)]:
+                                 *sqlite_defaults.items()]:
             assert db._conn.execute(f'PRAGMA {pragma}').fetchone()[0] == expected
     finally:
         db.close()

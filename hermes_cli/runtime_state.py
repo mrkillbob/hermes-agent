@@ -22,6 +22,7 @@ from pm.filesystem import (
     durable_write_bytes as _atomic_bytes,
     file_digest as _digest,
     lock_fd as _lock,
+    lock_path,
     read_bytes_or_none as _bytes,
 )
 
@@ -53,10 +54,8 @@ def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_
 
     deadline = None if timeout is None else time.monotonic() + timeout
     state = install_state_dir(project)
-
     def remaining():
         return None if deadline is None else max(0.0, deadline - time.monotonic())
-
     with activity(state, create=True, deadline=deadline, stable_identity=stable_identity):
         with _install_mutex(state, timeout=remaining()) as held:
             yield held
@@ -64,16 +63,14 @@ def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_
 
 @contextmanager
 def _install_mutex(state: Path, *, timeout=INSTALL_LOCK_TIMEOUT_SECONDS):
-    """Internal mutex only; maintenance already owns the outside-state gate."""
-    state.mkdir(parents=True, exist_ok=True)
-    fd = os.open(state / ".install.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    """Internal mutex; maintenance already owns the outside-state gate."""
+    lock = state / ".install.lock"
+    fd = lock_path(lock, timeout=timeout, create_dir=True)
+    if fd is None:
+        LOG.warning("dependency lock still held after %ss; continuing without it (%s)", timeout, lock)
+        yield False
+        return
     try:
-        if not _lock(fd, wait=True, timeout=timeout):
-            LOG.warning(
-                "dependency lock still held after %ss; continuing without it (%s)",
-                timeout, state / ".install.lock")
-            yield False
-            return
         yield True
     finally:
         os.close(fd)

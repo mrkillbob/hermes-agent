@@ -12,6 +12,9 @@ _registry = HandlerRegistry()
 
 
 def resolve_skin() -> dict:
+    from hermes_cli.startup_hold import active as startup_hold_active
+    if startup_hold_active():
+        return {}
     return skin_payload(_load_cfg())
 
 

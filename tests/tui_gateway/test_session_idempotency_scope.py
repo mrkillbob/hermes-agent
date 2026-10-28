@@ -128,7 +128,9 @@ def test_live_branch_operation_parent_and_caller_isolation(sandbox):
     assert len({one["session_id"], two["session_id"], whole["session_id"], bob["session_id"]}) == 4
     assert two["parent"] == p2["stored_session_id"]
     assert whole["messages_omitted"] and "messages" not in whole
-    assert server._session_auth_user_id(server._sessions[bob["session_id"]]) == "basic:alice"
+    assert server._session_auth_user_id(server._sessions[bob["session_id"]]) == (
+        server._session_auth_user_id(server._sessions[p1["session_id"]])
+    )
 
 
 @pytest.mark.parametrize("field,value", [("profile_home", "foreign"), ("auth_user_id", "basic:bob"), ("parent_session_id", "foreign")])

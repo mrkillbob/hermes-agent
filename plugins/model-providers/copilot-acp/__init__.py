@@ -11,13 +11,27 @@ from typing import Any
 from providers import register_provider
 from providers.base import ProviderProfile
 
+from .auth_rows import AUTH_ROW_FIELDS
+from .catalog import acp_picker_catalog, clear_session_memo
+from .picker import PICKER_FIELDS
+from .setup import SETUP_FIELDS
+
 
 class CopilotACPProfile(ProviderProfile):
     """GitHub Copilot ACP — external process, no REST models endpoint."""
 
+    def external_auth_evidence(self) -> tuple[bool, str | None] | None:
+        """The Copilot CLI's token stores, read without spawning it; None (binary check) without the
+        copilot plugin that owns the token rules."""
+        try:
+            from plugins.model_providers.copilot.credentials import copilot_cli_auth_evidence
+        except ImportError:
+            return None
+        return copilot_cli_auth_evidence()
+
     def create_client(self, **client_kwargs: Any) -> Any:
         """Build the ACP stdio shim rather than an HTTP client."""
-        from agent.copilot_acp_client import CopilotACPClient
+        from .client import CopilotACPClient
 
         return CopilotACPClient(**client_kwargs)
 
@@ -46,6 +60,23 @@ class CopilotACPProfile(ProviderProfile):
             # timeout — the base fetch_models contract is "None if the fetch failed".
             return None
 
+    def live_context_length(self, model: str, *, api_key: str = "", base_url: str = "") -> int | None:
+        """Same account catalog as the HTTP ``copilot`` provider (lane L4 seam)."""
+        from providers import get_provider_profile
+
+        copilot = get_provider_profile("copilot")
+        return copilot.live_context_length(model, api_key=api_key, base_url=base_url) if copilot else None
+
+    def invalidate_catalog_cache(self) -> None:
+        clear_session_memo()
+
+    def normalize_model_id(self, model: str, *, api_key: str = "") -> str | None:
+        """Copilot id space; the ACP marker key never reaches the HTTP catalog."""
+        from providers import get_provider_profile
+
+        copilot = get_provider_profile("copilot")
+        return copilot.normalize_model_id(model) if copilot else None
+
 
 copilot_acp = CopilotACPProfile(
     name="copilot-acp", aliases=("github-copilot-acp", "copilot-acp-agent"),
@@ -59,6 +90,8 @@ copilot_acp = CopilotACPProfile(
     process_args=("--acp", "--stdio"),
     process_command_env_vars=("HERMES_COPILOT_ACP_COMMAND", "COPILOT_CLI_PATH"),
     process_args_env_var="HERMES_COPILOT_ACP_ARGS",
+    picker_catalog=acp_picker_catalog, static_models=("copilot-acp",),
+    **SETUP_FIELDS, **PICKER_FIELDS, **AUTH_ROW_FIELDS,
 )
 
 register_provider(copilot_acp)

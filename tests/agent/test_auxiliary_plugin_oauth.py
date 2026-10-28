@@ -24,7 +24,7 @@ def test_registry_oauth_route_uses_profile_client_and_own_credential(monkeypatch
 
     name = "fixture-oauth"
     profile = Profile(name=name, auth_type=auth_type, base_url="https://fixture.invalid/v1")
-    monkeypatch.setitem(auth.PROVIDER_REGISTRY, name, SimpleNamespace(auth_type=auth_type))
+    monkeypatch.setitem(auth.PROVIDER_REGISTRY, name, SimpleNamespace(id=name, auth_type=auth_type))
     monkeypatch.setattr(providers, "get_provider_profile", lambda provider: profile if provider == name else None)
     pool_calls = []
 
@@ -58,7 +58,7 @@ def test_failed_oauth_profile_hook_leaves_the_route_unavailable(monkeypatch, cap
 
     name = "fixture-failed-oauth"
     profile = Profile(name=name, auth_type="oauth_external", base_url="https://fixture.invalid/v1")
-    monkeypatch.setitem(auth.PROVIDER_REGISTRY, name, SimpleNamespace(auth_type="oauth_external"))
+    monkeypatch.setitem(auth.PROVIDER_REGISTRY, name, SimpleNamespace(id=name, auth_type="oauth_external"))
     monkeypatch.setattr(providers, "get_provider_profile", lambda provider: profile if provider == name else None)
     req = SimpleNamespace(provider=name, model="fixture-model", explicit_api_key=" session-token ",
                           explicit_base_url="https://session.invalid/v1", async_mode=False)

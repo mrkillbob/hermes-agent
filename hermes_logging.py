@@ -1023,6 +1023,10 @@ def _add_rotating_handler(
 def _read_logging_config():
     """Best-effort read of ``logging.*`` from config.yaml."""
     try:
+        # Native held boot must not load a profile's .env merely to configure logging.
+        from hermes_cli.startup_hold import active as startup_hold_active
+        if startup_hold_active():
+            return (None, None, None)
         # Prefer the shared effective-config cache (managed overlay included, so an administrator
         # can pin logging.*) so this reuses hermes_cli.main's early parse (one config.yaml parse
         # per process); fall back to a direct parse for bare hermes_logging consumers.
@@ -1030,12 +1034,9 @@ def _read_logging_config():
             from hermes_cli.config_effective import load_user_config_effective
             cfg = load_user_config_effective(get_config_path())
         except Exception:
-            from utils import fast_safe_load
+            from hermes_cli.config_backend import config_exists, read_config_doc
             config_path = get_config_path()
-            cfg = {}
-            if config_path.exists():
-                with open(config_path, "r", encoding="utf-8-sig") as f:
-                    cfg = fast_safe_load(f) or {}
+            cfg = (read_config_doc(config_path) or {}) if config_exists(config_path) else {}
         if not cfg:
             return (None, None, None)
         log_cfg = cfg.get("logging", {})
