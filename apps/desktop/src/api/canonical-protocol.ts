@@ -2,6 +2,7 @@
 // existing protocol; unsupported explicit semantics fail before network admission.
 
 import { randomUuid } from '@hermes/shared'
+
 import { acceptExecutionEvent, type ExecutionStampedEvent } from '@/lib/execution-authority'
 
 export const CANONICAL_GATEWAY_PROTOCOL = 'hermes-gateway-v1'

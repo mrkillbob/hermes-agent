@@ -362,3 +362,58 @@ class TestReaderGate:
             encoding="utf-8")
         with patch.object(guard, "ROOT", tmp_path):
             assert guard.scan_file(good) == []
+
+
+def test_non_file_backend_cache_tracks_version_without_local_yaml(tmp_path, monkeypatch):
+    """Remote-style backend versions are the cache authority, even without config.yaml."""
+    from hermes_cli import config as cfg, config_effective
+
+    class MemoryBackend(cb.FileBackend):
+        name = "memory-test"
+
+        def __init__(self):
+            self.revision = 1
+            self.doc = {"display": {"personality": "remote-v1"}}
+
+        def version(self, home):
+            return (self.revision,)
+
+        def cache_version(self, home, version):
+            return version
+
+        def read_user_doc(self, home):
+            return self.doc.copy()
+
+        def exists(self, home):
+            return True
+
+        def supports_file_tooling(self):
+            return False
+
+        def honors_managed_config(self):
+            return False
+
+    home = tmp_path / "profile"
+    home.mkdir()
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / "config.yaml").write_text(
+        "display:\n  personality: local-managed\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    backend = MemoryBackend()
+    monkeypatch.setattr(cb, "get_config_backend", lambda: backend)
+    cfg._LOAD_CONFIG_CACHE.clear()
+    cfg._RAW_CONFIG_CACHE.clear()
+    config_effective._EFFECTIVE_CACHE.clear()
+    assert not (home / "config.yaml").exists()
+
+    assert cfg.load_config()["display"]["personality"] == "remote-v1"
+    assert config_effective.load_user_config_effective()["display"]["personality"] == "remote-v1"
+    assert cfg.read_raw_config()["display"]["personality"] == "remote-v1"
+
+    backend.revision = 2
+    backend.doc = {"display": {"personality": "remote-v2"}}
+    assert cfg.load_config()["display"]["personality"] == "remote-v2"
+    assert config_effective.load_user_config_effective()["display"]["personality"] == "remote-v2"
+    assert cfg.read_raw_config()["display"]["personality"] == "remote-v2"

@@ -44,7 +44,7 @@ from hermes_constants import (
     apply_secure_dir_policy, get_managed_system)
 # Re-export from hermes_constants — canonical definition lives there.
 from hermes_constants import get_hermes_home, get_process_hermes_home
-from utils import atomic_replace, fast_safe_load, file_cache_version, file_signature, mkstemp_beside
+from utils import atomic_replace, fast_safe_load, file_signature, mkstemp_beside
 from hermes_cli.config_issues import ConfigIssue, _issue
 from hermes_cli.config_backend import (
     ConfigWriteError, config_cache_version, config_destination, config_exists, config_version,
@@ -2328,24 +2328,6 @@ def apply_terminal_config_to_env(
         if (should_override and cfg_key in explicit_keys) or env_var not in target:
             target[env_var] = _terminal_env_value(value)
     return target
-
-
-def _load_config_cache_sig(config_path: Path) -> tuple[Optional[tuple[Any, ...]], Optional[tuple[Any, ...]]]:
-    """Return ``(user_sig, cache_sig)`` for ``_LOAD_CONFIG_CACHE`` (racy-clean guarded, see ``config_cache_version``).
-    The managed config file's signature is folded in (zeros = none) so editing it invalidates
-    the merged result. ``cache_sig`` is None only when neither file exists (nothing to cache on)."""
-    try:
-        user_sig: Optional[tuple[Any, ...]] = config_cache_version(config_path)
-    except FileNotFoundError:
-        user_sig = None
-    managed_dir = managed_scope.get_managed_dir()
-    try:
-        managed_sig = file_cache_version(managed_dir / "config.yaml") if managed_dir else (0, 0, 0, 0, "")  # config-reader: ok — managed overlay
-    except OSError:
-        managed_sig = (0, 0, 0, 0, "")
-    if user_sig is None and managed_sig == (0, 0, 0, 0, ""):
-        return None, None
-    return user_sig, (*(user_sig or (0, 0, 0, 0, "")), *managed_sig)
 
 
 def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: Exception) -> Optional[dict[str, Any]]:

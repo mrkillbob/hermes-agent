@@ -805,7 +805,7 @@ def kill_process_tree(proc: subprocess.Popen, *, signal_group: bool = True, grac
             else:
                 if leads_group:
                     try:
-                        os.killpg(proc.pid, _signal.SIGKILL)
+                        os.killpg(proc.pid, _signal.SIGKILL)  # windows-footgun: ok — guarded by `not IS_WINDOWS`
                     except ProcessLookupError:
                         pass
                 return
