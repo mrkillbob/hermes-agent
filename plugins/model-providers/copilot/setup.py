@@ -21,12 +21,12 @@ _DEVICE_ERRORS = {"expired_token": ("expired", "Device code expired. Please try 
 def _copilot_model_list(live_ids) -> list:
     """Live GitHub Copilot ids, or the curated fallback with a warning."""
     from hermes_cli.model_setup_flows_common import _say
-    from hermes_cli.models import _PROVIDER_MODELS
+    from hermes_cli.models import static_catalog
     if live_ids:
         model_list = [model_id for model_id in live_ids if model_id]
         print(f"  Found {len(model_list)} model(s) from GitHub Copilot")
         return model_list
-    model_list = _PROVIDER_MODELS.get("copilot", [])
+    model_list = static_catalog("copilot")
     if model_list:
         _say("  ⚠ Could not auto-detect models from GitHub Copilot — showing defaults.",
              '    Use "Enter custom model name" if you do not see your model.')
