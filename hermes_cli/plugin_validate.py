@@ -379,10 +379,15 @@ def _run_capability_probe(
         proc = None
         process_group = None
         job = None
+        # Probe this source tree's provider contracts without trusting the cwd.
+        repo_root = str(Path(__file__).resolve().parents[1])
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (repo_root, env.get("PYTHONPATH", "")) if p)
+        python, *options = probe[0] if probe else [sys.executable]
         try:
             proc, job = spawn_server(
                 [
-                    *(probe[0] if probe else [sys.executable]),
+                    # -P: ``-c`` would put the user's cwd ahead of Hermes and the plugin's imports.
+                    python, "-P", *options,
                     "-c",
                     _PROBE_SCRIPT,
                     str(plugin_dir),

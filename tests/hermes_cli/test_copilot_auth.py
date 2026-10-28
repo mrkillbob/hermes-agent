@@ -194,3 +194,29 @@ class TestEnvVarOrder:
         assert "COPILOT_GITHUB_TOKEN" in copilot.api_key_env_vars
         # COPILOT_GITHUB_TOKEN should be first
         assert copilot.api_key_env_vars[0] == "COPILOT_GITHUB_TOKEN"
+
+
+def test_bundled_profile_rate_limited_poll(monkeypatch, capsys):
+    """The source-profile port retains the fork's OAuth rate-limit response."""
+    from importlib import import_module
+
+    import providers
+
+    assert providers.get_provider_profile("copilot") is not None
+    credentials = import_module("plugins.model_providers.copilot.credentials")
+    response = type(
+        "Response", (),
+        {"read": lambda self: b'{"device_code":"device","user_code":"CODE","interval":1}',
+         "__enter__": lambda self: self, "__exit__": lambda self, *_: None},
+    )()
+    rate_limited = HTTPError(
+        "https://github.com/login/oauth/access_token", 429, "Too Many Requests",
+        {"Retry-After": "120"}, BytesIO(b'{"error":"slow_down"}'),
+    )
+    monotonic_values = iter((0.0, 0.0, 301.0))
+    monkeypatch.setattr(credentials.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(credentials.time, "sleep", lambda _: None)
+    with patch("urllib.request.urlopen", side_effect=[response, rate_limited]) as urlopen:
+        assert credentials.copilot_device_code_login() is None
+    assert urlopen.call_count == 2
+    assert "rate limited" in capsys.readouterr().out.lower()

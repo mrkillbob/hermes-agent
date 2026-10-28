@@ -14,6 +14,7 @@ import logging
 import time
 import urllib.request
 
+
 LLAMACPP_ALIASES = frozenset({"llamacpp", "llama.cpp", "llama-cpp"})
 
 

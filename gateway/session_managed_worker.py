@@ -15,7 +15,7 @@ import sys
 import time
 
 from agent.managed_worker import accept_result, encode_frame, read_frame
-from gateway.session_worker_reservation import reserve_admission_worker
+from gateway.session_worker_reservation import owner_worker_subject, reserve_admission_worker
 from hermes_state_runtime import RuntimeStoreError
 
 # The interpreter only imports psutil before it introduces itself; a child silent this long
@@ -632,7 +632,8 @@ async def execute_managed(authority, ref, row, policy):
         from gateway.session_runtime_workers import tracked_write
         scope, reservation_error = await budget.reserve(worker, tracked_write(authority,
             partial(reserve_admission_worker, authority, admission_id=row['admission_id'],
-                    process=process, principal_id=row['principal_id'], hello=hello)))
+                    process=process, principal_id=row['principal_id'], hello=hello,
+                    worker_subject=owner_worker_subject())))
         budget.check(reservation_error)
         worker.worker = (scope['pid'], scope['birth'])
         # The child reads nothing else until the exact reservation has committed.

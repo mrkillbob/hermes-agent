@@ -10,6 +10,7 @@ import time
 import uuid
 
 from hermes_cli._subprocess_compat import windows_detach_popen_kwargs, _WINDOWS_GATEWAY_BREAKAWAY_ENV
+from hermes_cli.gateway_launchd_runtime import GatewayJob, start_gateway_job
 from hermes_cli.gateway_runtime_service import RuntimeStartError, remaining
 
 
@@ -36,7 +37,7 @@ DAEMON_STRIPPED_ENV = (
 
 
 def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: bool = False,
-                            force: bool = False) -> subprocess.Popen:
+                            force: bool = False) -> subprocess.Popen | GatewayJob:
     """Request a daemon, not readiness. Refuse Windows no-breakaway fallback.
 
     No --replace, persistence, login changes, elevation, shell, or inherited stdio.
@@ -76,6 +77,10 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
     launch_options = windows_detach_popen_kwargs()
     logs = home / "logs"
     logs.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":  # LAN access must outlive the app that asked for the gateway
+        if job := start_gateway_job(command, env=env, cwd=root, log_path=logs / "gateway-stdio.log",
+                                    deadline=deadline):
+            return job
     try:
         with (logs / "gateway-stdio.log").open("ab", buffering=0) as output:
             remaining(deadline)

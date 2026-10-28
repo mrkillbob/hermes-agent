@@ -439,12 +439,15 @@ class WebhookAdapter(BasePlatformAdapter):
         """Reload agent-created subscriptions when the file's stat identity changes.
 
         Runs on every POST before auth, so it never takes the CLI writer lock: writers publish via
-        atomic rename, which also gives the file a new inode, so a restored mtime cannot hide a change.
+        atomic rename, which also gives the file a new inode, so a restored mtime cannot hide a change;
+        ``file_cache_version`` also catches a same-tick same-size edit made in place (a hand edit).
         """
         from hermes_constants import get_hermes_home
+        from utils import file_cache_version
         subs_path = get_hermes_home() / _DYNAMIC_ROUTES_FILENAME
         try:
             st = subs_path.stat()
+            stat_key = file_cache_version(subs_path, st)
         except FileNotFoundError:
             if self._dynamic_routes:
                 self._dynamic_routes, self._routes = {}, dict(self._static_routes)
@@ -454,19 +457,19 @@ class WebhookAdapter(BasePlatformAdapter):
             self._dynamic_permissions_stat = None
             self._dynamic_permissions_retry_at = 0.0
             return
+        except OSError as e:
+            logger.error("[webhook] Failed to read dynamic routes: %s", e)
+            return
         from utils import restrict_credential_file_permissions
-        # Repair before the content fast path so mode-only broadening is noticed. Cache failures
-        # too: unchanged read-only stores must not produce a chmod/warning on every pre-auth POST.
+        # Repair before the content fast path; cache failed repairs for a bounded retry.
         permission_key = (subs_path, st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size,
                           st.st_mode, st.st_ctime_ns, st.st_uid, st.st_gid)
         now = time.monotonic()
         permission_due = permission_key != self._dynamic_permissions_stat or now >= self._dynamic_permissions_retry_at
         if permission_due:
             self._dynamic_permissions_stat = permission_key
-            # A bounded retry lets an unchanged store recover after a read-only mount becomes writable.
             self._dynamic_permissions_retry_at = now + _PERMISSION_RETRY_SECONDS
             restrict_credential_file_permissions(subs_path, file_stat=st)
-        stat_key = (st.st_mtime_ns, st.st_size, st.st_ino)
         if stat_key == self._dynamic_routes_stat and not (self._dynamic_routes_read_failed and permission_due):
             return  # No change
         try:

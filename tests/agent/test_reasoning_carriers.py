@@ -1,7 +1,6 @@
-"""Gemini text-turn signatures and Copilot reasoning carriers survive capture and reach only their route."""
+"""Gemini text-turn signatures survive capture and reach only their route."""
 
 import copy
-from types import SimpleNamespace
 
 from openai.types.chat import ChatCompletion
 

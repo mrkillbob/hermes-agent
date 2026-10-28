@@ -794,6 +794,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     config = native_config(config, replace=replace, force=force)
     # Set here (not at import) so incidental gateway.run imports from CLI code don't poison it.
     os.environ["HERMES_EXEC_ASK"] = "1"
+    from hermes_cli.update_proxy_env import restore_user_proxy_env
+    restore_user_proxy_env()  # a gateway an update restarted keeps the user's proxy env, not the update's
     _start_gateway_resolve_terminal_cwd()
 
     from hermes_cli.resource_limits import apply_nofile_soft_limit
@@ -856,10 +858,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         if not held():
             await asyncio.to_thread(recover_left_core_at_gateway_start)  # before the runner loads platform config
 
-        runner = GatewayRunner(resolved_config)
-        from gateway.drain_kanban import latch
-        latch(runner)  # before any runtime mailbox/session recovery
-        from gateway.run_runtime import initialize_gateway_runtime
+        from gateway.run_runtime import initialize_gateway_runtime, pin_launch_store, unpin_launch_store
+        _launch_store_pin = await asyncio.to_thread(pin_launch_store)
+        try:
+            runner = GatewayRunner(resolved_config)
+            from gateway.drain_kanban import latch
+            latch(runner)  # before any runtime mailbox/session recovery
+        finally:
+            unpin_launch_store(_launch_store_pin)
         await initialize_gateway_runtime(runner)
         # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
         # land in its own logs/. Must run after the runner resolved (possibly None) config and setup_logging.

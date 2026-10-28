@@ -31,8 +31,15 @@ class LocalSessionAdapter(BasePlatformAdapter):
         self.sources = {}
         self.policies = {}
 
+    @staticmethod
+    def _source_key(source):
+        # A conversation its chat moved past keeps the chat's id, which every other one of that chat
+        # shares: its own key names it (gateway/session_detached.py).
+        from gateway.session_detached import detached_route_of
+        return detached_route_of(source) or source.chat_id
+
     def authorize_source(self, source):
-        saved = self.sources.get(source.chat_id)
+        saved = self.sources.get(self._source_key(source))
         if saved is None:
             return False
         original, identity = saved
@@ -44,10 +51,9 @@ class LocalSessionAdapter(BasePlatformAdapter):
         return source.platform, source.chat_id, source.user_id, source.profile, source.chat_type
 
     def register_source(self, source):
-        # Names this adapter as the source's transport so ``_adapter_for_source`` resolves a served
-        # secondary's session here, not to the launch profile's LOCAL adapter (which has no policy for it).
+        # The served secondary resolves to this adapter, not the launch profile adapter.
         source._transport_adapter_ref = weakref.ref(self)
-        self.sources[source.chat_id] = source, self._identity(source)
+        self.sources[self._source_key(source)] = source, self._identity(source)
 
     async def connect(self, *, is_reconnect=False):
         return True
