@@ -27,6 +27,14 @@ import { defineLocale, type TranslationOverrides } from './define-locale'
 import { introDe } from './intro-de'
 
 export const deOverrides = {
+  lunarCityInventory: {
+    title: "Bestand verbundener Sitzungen",
+    description: "Liest bis zu 100 sichtbare gespeicherte Sitzungen aus der bereits verbundenen Quelle. Aktivität und Position in der Welt sind nicht verfügbar.",
+    read: "Verbundene Sitzungen lesen",
+    reading: "Wird gelesen…",
+    unavailable: "Bestand nicht verfügbar. Es wurden keine Sitzungen geöffnet.",
+    count: count => `In diesem Fenster zurückgegebene Sitzungen: ${count}. Aktivität unbekannt.`
+  },
   sharedMetrics: deSharedMetrics,
   firstRun: deFirstRun,
   intro: introDe,

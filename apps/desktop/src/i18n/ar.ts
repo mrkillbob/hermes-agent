@@ -13,6 +13,14 @@ import { arSettings } from './ar_settings'
 import { defineLocale, type TranslationOverrides } from './define-locale'
 
 export const arOverrides = {
+  lunarCityInventory: {
+    title: "قائمة الجلسات المتصلة",
+    description: "تقرأ ما يصل إلى 100 جلسة محفوظة ظاهرة من المصدر المتصل بالفعل. النشاط والموقع في العالم غير متاحين.",
+    read: "قراءة الجلسات المتصلة",
+    reading: "جارٍ القراءة…",
+    unavailable: "القائمة غير متاحة. لم تُفتح أي جلسة.",
+    count: count => `عدد الجلسات في هذه النتيجة: ${count}. النشاط غير معروف.`
+  },
 
   catalog: {
     add: 'إضافة',
