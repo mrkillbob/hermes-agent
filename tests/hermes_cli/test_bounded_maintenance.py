@@ -16,7 +16,6 @@ def homes(tmp_path, monkeypatch):
     default.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(default))
     monkeypatch.setattr(lcm, "_attempted", set())
-    monkeypatch.setattr(lcm, "_undelivered", {})
     return default
 
 

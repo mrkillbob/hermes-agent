@@ -229,13 +229,13 @@ export function verifyDesktopWindowsBinding(source, { env = process.env, platfor
 }
 
 // Only browser compilation opts out. Its receipt must never certify native lifecycle outputs.
-function desktopPreparationMode(source, selected, native, nativeToolchain) {
+function desktopPreparationMode(source, selected, native, nativeToolchain, electron) {
   if (!native) {
     if (nativeToolchain !== undefined) throw new Error('A renderer-only install cannot certify a native toolchain')
     return { prepareElectron: false, preload: undefined, lifecycleArgs: ['--ignore-scripts'] }
   }
   return {
-    prepareElectron: selected.includes('apps/desktop')
+    prepareElectron: electron && selected.includes('apps/desktop')
       && Boolean(JSON.parse(readFileSync(join(source, 'apps/desktop/package.json'), 'utf8')).devDependencies?.electron),
     preload: desktopCompilerPreload(source, selected),
     lifecycleArgs: [],
@@ -244,7 +244,7 @@ function desktopPreparationMode(source, selected, native, nativeToolchain) {
 
 /** Install the full requested workspace union in one strict, locked operation. */
 export function prepareNodeDependencies({ source, workspaces, env = process.env, reuse = false, install = true, nativeToolchain,
-  nodeOptionsProbeTimeoutMs, native = true }) {
+  nodeOptionsProbeTimeoutMs, native = true, electron = true }) {
   source = resolve(source)
   if (!Array.isArray(workspaces) || workspaces.length === 0) {
     throw new Error('Select at least one workspace; implicit all-workspace installation is not allowed')
@@ -261,7 +261,7 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env,
     }
     return path
   }))].sort()
-  const { prepareElectron, preload, lifecycleArgs } = desktopPreparationMode(source, selected, native, nativeToolchain)
+  const { prepareElectron, preload, lifecycleArgs } = desktopPreparationMode(source, selected, native, nativeToolchain, electron)
   const [node, npm] = npmCommand({ env })
   const npmVersion = npmManifestVersion(npm) ?? execFileSync(
     node, [npm, '--version'], { cwd: source, env, encoding: 'utf8' }).trim()

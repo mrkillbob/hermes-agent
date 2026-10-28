@@ -49,10 +49,11 @@ import {
 } from './collapse-duplicate-final'
 import { useGatewayEventHandler } from './gateway-event'
 import { handleServerRequest as dispatchServerRequest } from './gateway-event/server-requests'
-import { extendInterruptedReply } from './interrupted-reply'
+import { bindStoppedTurnReceipt, extendInterruptedReply } from './interrupted-reply'
 import { isPersistedInterimCompletion } from './persisted-completion'
 import { bindReceiptUserRows } from './receipt-user-rows'
 import { currentResponseParts, mergeCurrentResponseText } from './response-parts'
+import { admitSegmentDelta, admitSegmentSeal, type SegmentCursor, type SegmentStamp } from './segment-identity'
 import { completionErrorText, delegateTaskPayloads, MAX_STREAM_FLUSH_GAP_MS, STREAM_DELTA_FLUSH_MS } from './utils'
 
 interface MessageStreamOptions {
@@ -301,6 +302,9 @@ export function useMessageStream({
   const nativeSubagentSessionsRef = useRef<Set<string>>(new Set())
   // Turns that auto-compacted: skip post-turn hydrate so live scrollback survives.
   const compactedTurnRef = useRef<Set<string>>(new Set())
+  // Per session: how far the live turn's stamped reply has been applied, so a
+  // re-sent delta or seal upserts instead of painting a second copy.
+  const segmentCursorsRef = useRef<Map<string, SegmentCursor>>(new Map())
   // Last session we applied a session.info cwd for — lets us tell an agent
   // relocating the SAME session (follow it) from a session switch (don't yank).
   const lastCwdInfoSessionRef = useRef<null | string>(null)
@@ -517,9 +521,15 @@ export function useMessageStream({
   }, [flushQueuedDeltas])
 
   const appendAssistantDelta = useCallback(
-    (sessionId: string, delta: string, occurredAt?: number) => {
+    (sessionId: string, delta: string, occurredAt?: number, stamp?: null | SegmentStamp) => {
       if (!delta) {
         return
+      }
+
+      if (stamp) {
+        const admitted = admitSegmentDelta(segmentCursorsRef.current.get(sessionId), stamp, delta)
+        segmentCursorsRef.current.set(sessionId, admitted.cursor)
+        delta = admitted.text
       }
 
       queueDelta(sessionId, 'assistant', delta, occurredAt)
@@ -628,7 +638,17 @@ export function useMessageStream({
   )
 
   const finalizeInterimAssistantMessage = useCallback(
-    (sessionId: string, text: string, occurredAt = Date.now() / 1000) => {
+    (sessionId: string, text: string, occurredAt = Date.now() / 1000, stamp?: null | SegmentStamp) => {
+      if (stamp) {
+        const admitted = admitSegmentSeal(segmentCursorsRef.current.get(sessionId), stamp)
+        segmentCursorsRef.current.set(sessionId, admitted.cursor)
+
+        // A copy of a seal this turn already applied: its bubble is on screen.
+        if (!admitted.fresh) {
+          return
+        }
+      }
+
       updateSessionState(sessionId, state => {
         if (state.interrupted) {
           return state
@@ -757,8 +777,10 @@ export function useMessageStream({
         if (state.interrupted) {
           return {
             ...state,
-            messages:
+            messages: bindStoppedTurnReceipt(
               status === 'interrupted' ? extendInterruptedReply(state.messages, text, occurredAt) : state.messages,
+              persistedTurn
+            ),
             awaitingResponse: false,
             busy: false,
             needsInput: false,

@@ -98,7 +98,11 @@ def test_native_boot_stays_held_through_marker_loss_and_restart(tmp_path, monkey
             try:
                 descriptor = await_held(child, home, log)
                 assert descriptor['state'] == 'draining', descriptor
-                asyncio.run(observation_only(home, descriptor))
+                try:
+                    asyncio.run(observation_only(home, descriptor))
+                except Exception:
+                    effect = home / 'forbidden-effect'
+                    pytest.fail(effect.read_text() if effect.exists() else f'held peer exited {child.poll()}')
                 if remove_marker:
                     marker.unlink()
                 assert control(home, 'identify')['state'] == 'draining'

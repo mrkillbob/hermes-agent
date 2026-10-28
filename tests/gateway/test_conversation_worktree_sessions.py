@@ -742,7 +742,7 @@ async def test_production_factory_new_failure_preserves_all_old_gateway_state(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("policy_enabled", [False, True])
 async def test_first_cli_handoff_reuses_verified_workspace_without_binding_claim(
-    tmp_path, manager, policy_enabled
+    tmp_path, manager, policy_enabled, monkeypatch
 ):
     """Default interactive creation would claim a second root and lose CLI cwd."""
     from gateway.run import GatewayRunner
@@ -782,6 +782,13 @@ async def test_first_cli_handoff_reuses_verified_workspace_without_binding_claim
         return "handoff ready"
 
     runner._handle_message = capture_handoff
+
+    # This fixture's DB is deliberately only a root-binding stub. The upstream
+    # conversation-head lookup is covered by the real-DB route tests elsewhere.
+    async def same_head(_runner, session_id):
+        return None, None, session_id
+
+    monkeypatch.setattr("gateway.session_route_recovery.conversation_head", same_head)
 
     await runner._process_handoff(
         {

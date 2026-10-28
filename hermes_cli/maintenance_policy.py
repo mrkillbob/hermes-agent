@@ -7,22 +7,27 @@ from pathlib import Path
 def maintenance_policy(home: Path, name: str, choices: tuple[str, ...]) -> str:
     """Validate the home before a config fallback can grant automatic maintenance."""
     from hermes_cli.config import load_config_readonly, validate_user_config_file
+    from hermes_cli.config_backend import FileBackend, config_version, get_config_backend
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
     from hermes_cli.managed_scope import get_managed_dir
 
-    paths = [home / "config.yaml"]
-    managed = get_managed_dir()
-    if managed is not None:
-        paths.append(managed / "config.yaml")
-    for path in paths:
-        try:
-            path.stat()
-        except FileNotFoundError:
-            continue
-        validate_user_config_file(path)
     token = set_hermes_home_override(home)
     try:
+        paths = [home / "config.yaml"]
+        managed = get_managed_dir()
+        if managed is not None and get_config_backend().honors_managed_config():
+            paths.append(managed / "config.yaml")
+        for path in paths:
+            local_file = managed is not None and path.parent == managed
+            try:
+                if local_file:
+                    FileBackend.version_path(path)
+                else:
+                    config_version(path)
+            except FileNotFoundError:
+                continue
+            validate_user_config_file(path, local_file=local_file)
         updates = load_config_readonly().get("updates", {})
     finally:
         reset_hermes_home_override(token)

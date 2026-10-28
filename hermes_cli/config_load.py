@@ -18,32 +18,38 @@ def _initialize_home_for_read():
 def record_good_config(config_path: Path):
     """Only ordinary successful reads create, migrate or prune config snapshots."""
     from hermes_cli.startup_hold import defer_maintenance
-    if not defer_maintenance():
+    from hermes_cli.config_backend import supports_file_tooling
+    if supports_file_tooling() and not defer_maintenance():
         from hermes_cli.config_backups import backup_config
         backup_config(config_path, "good")
 
 
-def _load_config_cache_sig(config_path: Path) -> tuple[Optional[tuple[int, int, int, int]], Optional[tuple[int, ...]]]:
-    """Return ``(user_sig, cache_sig)`` for ``cfg._LOAD_CONFIG_CACHE``.
-    The managed signature and maintenance mode are folded in so either change invalidates
-    the merged result. ``cache_sig`` is None only when neither file exists (nothing to cache on)."""
+def _load_config_cache_sig(config_path: Path) -> tuple[Optional[tuple[Any, ...]], Optional[tuple[Any, ...]]]:
+    """Backend-aware user signature plus the applicable managed overlay and maintenance mode.
+
+    The user signature uses the same opaque backend cache version as ``read_raw_config``;
+    local-file racy digests and remote etags must never be mixed with a stat-only key.
+    """
     from hermes_cli import config as cfg
 
     try:
-        st = config_path.stat()
-        user_sig: Optional[tuple[int, int, int, int]] = cfg.file_signature(st)
+        user_sig: Optional[tuple[Any, ...]] = cfg.config_cache_version(config_path)
     except FileNotFoundError:
         user_sig = None
-    managed_dir = cfg.managed_scope.get_managed_dir()
+    from hermes_cli.config_backend import get_config_backend
+    from utils import file_cache_version
+    managed_dir = (cfg.managed_scope.get_managed_dir()
+                   if get_config_backend().honors_managed_config() else None)
+    empty_managed = (0, 0, 0, 0, "")
     try:
-        mst = (managed_dir / "config.yaml").stat() if managed_dir else None
-        managed_sig = cfg.file_signature(mst) if mst else (0, 0, 0, 0)
+        managed_sig = (file_cache_version(managed_dir / "config.yaml")
+                       if managed_dir else empty_managed)  # config-reader: ok — managed overlay
     except OSError:
-        managed_sig = (0, 0, 0, 0)
-    if user_sig is None and managed_sig == (0, 0, 0, 0):
+        managed_sig = empty_managed
+    if user_sig is None and managed_sig == empty_managed:
         return None, None
     from hermes_cli.startup_hold import defer_maintenance
-    return user_sig, (*(user_sig or (0, 0, 0, 0)), *managed_sig, defer_maintenance())
+    return user_sig, (*(user_sig or empty_managed), *managed_sig, defer_maintenance())
 
 
 def _load_config_cache_hit(path_key: str, cache_sig: Any) -> Optional[dict[str, Any]]:
@@ -62,8 +68,7 @@ def _load_config_cache_hit(path_key: str, cache_sig: Any) -> Optional[dict[str, 
         # A read error (EMFILE/EIO/sharing violation) can clear without touching the file's
         # signature: serve the fallback only while the file still cannot be read.
         try:
-            with open(path_key, "rb") as f:
-                f.read()
+            cfg.probe_config_readable(Path(path_key))
             return None
         except OSError:
             return hit

@@ -31,7 +31,7 @@ from typing import Any, Iterable, Optional
 
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
-from utils import atomic_json_write
+from utils import atomic_json_write, unlink_files_older_than
 
 _log = logging.getLogger(__name__)
 
@@ -5008,14 +5008,7 @@ def gc_worker_logs(*, older_than_seconds: int = 30 * 24 * 3600, board: Optional[
     log_dir = worker_logs_dir(board=board)
     if not log_dir.exists():
         return 0
-    cutoff = time.time() - older_than_seconds
-    removed = 0
-    for p in log_dir.iterdir():
-        with contextlib.suppress(OSError):
-            if p.is_file() and p.stat().st_mtime < cutoff:
-                p.unlink()
-                removed += 1
-    return removed
+    return unlink_files_older_than(log_dir, "*", older_than_seconds)
 
 
 # --- Worker log accessor ---
@@ -5067,7 +5060,7 @@ def list_profiles_on_disk() -> list[str]:
         names.add("default")
     if profiles_dir.is_dir():
         try:
-            names.update(e.name for e in profiles_dir.iterdir() if e.is_dir() and (e / "config.yaml").is_file())
+            names.update(e.name for e in profiles_dir.iterdir() if e.is_dir() and (e / "config.yaml").is_file())  # config-reader: ok — profile directory discovery marker
         except OSError:
             pass
     return sorted(names)

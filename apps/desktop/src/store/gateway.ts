@@ -14,6 +14,7 @@ import { canonicalOwnerProfile } from '@/api/canonical-protocol'
 import type { HermesConnection } from '@/global'
 import { HermesGateway, setApiRequestConnection } from '@/hermes'
 import { translateNow } from '@/i18n'
+import { UnservedProfileError } from '@/lib/browser-served-profiles'
 import {
   decideLivenessForceClose,
   LIVENESS_PROBE_TIMEOUT_MS,
@@ -22,16 +23,20 @@ import {
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { traceIdentityChange } from '@/lib/identity-trace'
 import { isPermanentLocalGatewayEnsureError } from '@/lib/local-gateway-ensure-failure'
+import { initialGatewayProfile } from '@/lib/platform'
 import {
   isTimeoutError,
   RECONNECT_ATTEMPT_TIMEOUT_MS,
   SOURCE_SWITCH_DIAL_TIMEOUT_MS,
   withTimeout
 } from '@/lib/with-timeout'
+import { $gatewayActivationEpoch } from '@/store/gateway-activation-epoch'
+import { isMissingConnectionError, isMissingProfileError } from '@/store/gateway-dial-failures'
 import { notifyError, RECOVERY_ACTIONS } from '@/store/notifications'
 import { markNativeNotifyBaseline } from '@/store/notify-baseline'
 import { setConnection, setGatewayState } from '@/store/session'
 import { stampSecondaryProfileOwner } from '@/store/session-event-provenance'
+export { useGatewayActivationEpoch } from '@/store/gateway-activation-epoch'
 
 // ── Multi-profile gateway routing ──────────────────────────────────────────
 // Concurrent sessions across profiles need concurrent sockets: the renderer's
@@ -223,7 +228,6 @@ interface GatewayRegistryState {
   primaryConnectionMode: 'local' | 'remote' | null
   primaryProfile: string
   activeKey: string
-  activationEpoch: number
   secondaries: Map<string, Secondary>
   // Auth rejection outlives the disposable socket, including background request leases.
   reauthFailures: Map<string, { connectionId: string | null; error: Error }>
@@ -250,9 +254,8 @@ function createRegistryState(): GatewayRegistryState {
     primaryGateway: null,
     primaryConnectionId: null,
     primaryConnectionMode: null,
-    primaryProfile: 'default',
-    activeKey: 'default',
-    activationEpoch: 0,
+    primaryProfile: initialGatewayProfile(),
+    activeKey: initialGatewayProfile(),
     secondaries: new Map<string, Secondary>(),
     reauthFailures: new Map(),
     dialFailures: new Map(),
@@ -270,7 +273,7 @@ function createRegistryState(): GatewayRegistryState {
     // the split-brain where an eviction re-pointed activeKey at the primary
     // while the profile atom kept naming the evicted bot routed every
     // "loki" session.resume to the default backend (#89206 wake failures).
-    $activeProfile: atom<string>('default')
+    $activeProfile: atom<string>(initialGatewayProfile())
   }
 }
 
@@ -556,7 +559,7 @@ export function isActivePrimary(): boolean {
 
 /** Changes on every active route selection, including same-profile source swaps. */
 export function gatewayActivationEpoch(): number {
-  return Number.isFinite(g.activationEpoch) ? g.activationEpoch : 0
+  return Number.isFinite($gatewayActivationEpoch.get()) ? $gatewayActivationEpoch.get() : 0
 }
 
 export function activeGateway(): HermesGateway | null {
@@ -662,9 +665,9 @@ function setActive(profile: string): void {
 }
 
 function beginGatewayActivation(): number {
-  g.activationEpoch = gatewayActivationEpoch() + 1
+  $gatewayActivationEpoch.set(gatewayActivationEpoch() + 1)
 
-  return g.activationEpoch
+  return $gatewayActivationEpoch.get()
 }
 
 function applyActive(profile: string, activationEpoch: number): boolean {
@@ -879,6 +882,12 @@ async function openSecondary(entry: Secondary): Promise<void> {
       clearTimer(entry)
     }
 
+    // Parked here, where every dial lands, so not even the first scheduled redial runs.
+    if (error instanceof UnservedProfileError) {
+      entry.wantOpen = false
+      clearTimer(entry)
+    }
+
     throw error
   } finally {
     if (entry.connectPromise === pending) {
@@ -1065,25 +1074,6 @@ async function reconnectSecondary(entry: Secondary): Promise<void> {
   }
 }
 
-// Electron's getConnectionFor rejects with `No connection with id "…"` when
-// the registry entry is gone. That is a permanent condition for the scoped
-// socket, unlike transient transport errors.
-function isMissingConnectionError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? '')
-
-  return message.includes('No connection with id')
-}
-
-// Electron's spawn guard (assertLocalProfileCanStart) rejects with these when
-// the profile's directory is gone or its DELETE is still in flight. For a
-// renderer socket that condition is permanent: the backend it reconnects to
-// can never come back, and every retry hammers the guard (#88769).
-function isMissingProfileError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? '')
-
-  return message.includes('no longer exists') || message.includes('is being deleted')
-}
-
 function createSecondary(profile: string, connectionId: null | string = null): Secondary {
   const gateway = new HermesGateway()
   const scope = registryBackendScopeKey(connectionId, profile)
@@ -1168,7 +1158,7 @@ function createSecondary(profile: string, connectionId: null | string = null): S
 // the second dial fails (tunnel/token are per-backend) and the closed socket
 // poisons the active gateway with "not connected" even though the primary is
 // open right next to it.
-async function sharedPrimaryRoute(profile: string): Promise<boolean> {
+export async function sharedPrimaryRoute(profile: string): Promise<boolean> {
   const desktop = window.hermesDesktop
 
   if (!desktop) {

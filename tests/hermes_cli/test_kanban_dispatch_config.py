@@ -145,3 +145,20 @@ def test_malformed_managed_config_cannot_silently_drop_its_caps(tmp_path, monkey
     monkeypatch.setattr("hermes_cli.managed_scope.get_managed_dir", lambda: managed)
     with pytest.raises(yaml.YAMLError):
         configured_dispatch_kwargs()
+
+
+def test_remote_backend_ignores_local_managed_config_validation(tmp_path, monkeypatch):
+    from hermes_cli.kanban_dispatch_config import load_dispatch_section
+
+    home, managed = tmp_path / "home", tmp_path / "managed"
+    home.mkdir()
+    managed.mkdir()
+    (managed / "config.yaml").write_text("kanban: [unterminated\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr("hermes_cli.managed_scope.get_managed_dir", lambda: managed)
+    monkeypatch.setattr("hermes_cli.config_backend.get_config_backend",
+                        lambda: type("RemoteBackend", (), {"honors_managed_config": lambda self: False})())
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"kanban": {"max_spawn": 2}})
+    monkeypatch.setattr("hermes_cli.kanban_dispatch_config.strict_shared_config", lambda section: section)
+
+    assert load_dispatch_section()["max_spawn"] == 2

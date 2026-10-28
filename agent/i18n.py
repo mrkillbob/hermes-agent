@@ -180,6 +180,9 @@ def _config_language_cached(hermes_home: str) -> str | None:
     """``display.language`` from config.yaml, read once per profile home (``t()`` is a hot path).
     Keyed by home so a multiplexed gateway serving several profiles doesn't freeze the first
     profile's language for every other profile."""
+    from hermes_cli.startup_hold import active as startup_hold_active
+    if startup_hold_active():
+        return None
     try:
         from hermes_cli.config import load_config_readonly
         lang = (load_config_readonly().get("display") or {}).get("language")
