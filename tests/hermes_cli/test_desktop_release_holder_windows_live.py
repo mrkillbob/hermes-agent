@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import subprocess
 import sys
 import time
@@ -97,7 +98,30 @@ def test_a_consent_given_for_another_run_closes_nothing_and_is_used_up(swap_fixt
     assert (live_root / "Hermes.exe").read_text(encoding="utf-8") == "old"
 
 
-def test_consented_retry_closes_exactly_the_holder_and_promotes(swap_fixture, capsys, monkeypatch):
+def _assert_helper_family_exited(tree, output):
+    reported_closed = {
+        int(pid) for line in output.splitlines() if "Closed with your consent:" in line
+        for pid in re.findall(r"\(pid (\d+),", line)
+    }
+    named = {int(pid) for pid in re.findall(r"\(pid (\d+),", output)}
+    assert reported_closed, "the successful retry must report the exact holders it closed"
+    # A reported closed holder must already be gone; never excuse a production
+    # closure error by waiting. Other captured launcher/guardian descendants may
+    # finish asynchronously after their child or parent has exited.
+    assert not [p.pid for p in tree if p.pid in reported_closed and p.is_running()], (
+        "a holder reported closed is still running"
+    )
+    births = {p.pid: p.create_time() for p in tree}  # cached by the pre-swap consent capture
+    _, alive = psutil.wait_procs(tree, timeout=10)
+    survivors = [p for p in alive if p.is_running()]
+    assert not survivors, [
+        {"pid": p.pid, "start_time": births[p.pid], "named_holder": p.pid in named,
+         "reported_closed": p.pid in reported_closed} for p in survivors
+    ]
+
+
+@pytest.mark.parametrize("_repeat", range(3))
+def test_consented_retry_closes_exactly_the_holder_and_promotes(swap_fixture, capsys, monkeypatch, _repeat):
     desktop_dir, staging, live_root, helper = swap_fixture
     consent, tree = _consent_for_run(desktop_dir, helper, "desktop-retry-1")
     monkeypatch.setenv("HERMES_UPDATE_CORRELATION_ID", "desktop-retry-1")  # windows.ps1 exports its run id
@@ -107,10 +131,11 @@ def test_consented_retry_closes_exactly_the_holder_and_promotes(swap_fixture, ca
     assert error == ""
     assert promoted == live_root / "Hermes.exe"
     assert promoted.read_text(encoding="utf-8") == "new"
+    output = capsys.readouterr().out
+    _assert_helper_family_exited(tree, output)
     assert helper.wait(10) is not None
-    assert not [p.pid for p in tree if p.is_running()]
     assert not consent.exists(), "a consent covers one retry only"
-    assert "Closed with your consent: " in capsys.readouterr().out
+    assert "Closed with your consent: " in output
 
 
 def test_a_partial_close_reports_only_the_holder_still_in_the_way(swap_fixture, tmp_path, capsys, monkeypatch):
@@ -147,7 +172,10 @@ def test_a_partial_close_reports_only_the_holder_still_in_the_way(swap_fixture, 
         protected.wait(10)
 
 
-def test_a_program_in_a_sibling_unpacked_folder_is_neither_named_nor_closed(swap_fixture, tmp_path, capsys, monkeypatch):
+@pytest.mark.parametrize("_repeat", range(3))
+def test_a_program_in_a_sibling_unpacked_folder_is_neither_named_nor_closed(
+    swap_fixture, tmp_path, capsys, monkeypatch, _repeat,
+):
     """Review fold 1: only release/win-unpacked is renamed. A program whose working folder is a
     sibling (a stale win-arm64-unpacked) does not block it, so even a consent naming it must not
     close it, and the failure lines must not offer it."""
@@ -171,10 +199,11 @@ def test_a_program_in_a_sibling_unpacked_folder_is_neither_named_nor_closed(swap
         promoted, error = _promote(desktop_dir, staging)
 
         assert error == "" and promoted == live_root / "Hermes.exe"
+        output = capsys.readouterr().out
+        _assert_helper_family_exited(tree, output)
         assert helper.wait(10) is not None
-        assert not [p.pid for p in tree if p.is_running()]
         assert all(p.is_running() for p in sibling_tree), "closed a program that never held the renamed folder"
-        assert f"pid {sibling.pid}" not in capsys.readouterr().out
+        assert f"pid {sibling.pid}" not in output
     finally:
         for proc in sibling_tree:
             with contextlib.suppress(psutil.NoSuchProcess):

@@ -12,7 +12,9 @@ Resolution order:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,17 +69,46 @@ def _git_probe(command):
             {**os.environ, 'GIT_NO_LAZY_FETCH': '1', 'GIT_OPTIONAL_LOCKS': '0'})
 
 
+# Metadata only: reject oversized output rather than cache a truncated identity.
+_MAX_GIT_PROBE_OUTPUT = 1024 * 1024
+
+
+def _git_output(repo_dir: Path, command: list[str], probe_env: dict | None,
+                *, presence_only: bool = False) -> tuple[int, str]:
+    # On Windows, run(capture_output=True) drains its reader threads WITHOUT a
+    # timeout after killing a timed-out parent. A descendant retaining either
+    # pipe can therefore strand session readiness indefinitely. Regular-file
+    # capture needs no pipe reader, and these probes never require RPC stdin.
+    with tempfile.TemporaryFile() as output:
+        result = subprocess.run(
+            command, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+            timeout=3, cwd=str(repo_dir), env=probe_env, check=False,
+        )
+        output.flush()
+        size = os.fstat(output.fileno()).st_size
+        if result.returncode != 0:
+            return result.returncode, ""
+        # Status needs only output presence. A large dirty tree must not be
+        # mistaken for clean because its path list exceeds the identity cap.
+        if presence_only:
+            return result.returncode, "present" if size else ""
+        if size > _MAX_GIT_PROBE_OUTPUT:
+            return result.returncode, ""
+        output.seek(0)
+        raw = output.read(size)  # finite snapshot: a retained writer cannot extend this read
+        if len(raw) != size or os.fstat(output.fileno()).st_size != size:
+            return result.returncode, ""
+    return result.returncode, raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _run_git(repo_dir: Path, *args: str) -> str | None:
     command, probe_env = _git_probe(['git', *args])
     try:
-        result = subprocess.run(
-            command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3, cwd=str(repo_dir), env=probe_env,
-            check=False,
-        )
+        returncode, stdout = _git_output(repo_dir, command, probe_env)
     except (OSError, subprocess.SubprocessError):
         return None
-    value = (result.stdout or "").strip()
-    return value if result.returncode == 0 and value else None
+    value = stdout.strip()
+    return value if returncode == 0 and value else None
 
 
 def _resolve_repo_dir() -> Path | None:
@@ -249,15 +280,8 @@ def _git_version_info(repo_dir: Path, *, include_untracked: bool = False) -> Ver
         if not include_untracked:
             status_command.append("-uno")
         status_command, probe_env = _git_probe(status_command)
-        dirty_result = subprocess.run(
-            status_command,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=3,
-            cwd=str(repo_dir), env=probe_env,
-            check=False,
-        )
-        dirty = dirty_result.returncode == 0 and bool((dirty_result.stdout or "").strip())
+        returncode, stdout = _git_output(repo_dir, status_command, probe_env, presence_only=True)
+        dirty = returncode == 0 and bool(stdout.strip())
     except (OSError, subprocess.SubprocessError):
         dirty = False
 
