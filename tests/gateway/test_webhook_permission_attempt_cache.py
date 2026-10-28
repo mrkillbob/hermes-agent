@@ -61,11 +61,11 @@ def test_permission_repair_tracks_mode_replacement_deletion_and_home(tmp_path, m
     adapter = _adapter()
     adapter._reload_dynamic_routes()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    snapshot = adapter._routes
+    snapshot = dict(adapter._routes)
     path.chmod(0o644)
     adapter._reload_dynamic_routes()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert adapter._routes is snapshot
+    assert adapter._routes == snapshot
 
     before = path.stat()
     replacement = tmp_path / "replacement.json"

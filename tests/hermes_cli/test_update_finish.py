@@ -44,7 +44,7 @@ def completion(tmp_path, monkeypatch):
     # in the working checkout is modified, even by import-time self-heals.
     for path in ROOT.glob("*.py"):
         shutil.copy2(path, source / path.name)
-    for name in ("hermes_cli", "hermes_platform", "pm", "agent", "gateway", "tools", "cron"):
+    for name in ("hermes_cli", "hermes_platform", "pm", "agent", "gateway", "tools", "cron", "providers"):
         shutil.copytree(ROOT / name, source / name,
                         ignore=shutil.ignore_patterns("__pycache__", "web_dist", "tui_dist"))
     shutil.copytree(ROOT / "scripts/build", source / "scripts/build",
@@ -198,6 +198,9 @@ def completion(tmp_path, monkeypatch):
                     macos_tcc_anchor.ensure_tcc_anchor = lambda: None
                     maint._print_post_update_notices_and_self_heals = lambda: None
                     maint._sync_profiles_after_update = lambda: None
+                    # A detached git writer would outlive the test in its deleted tmp checkout.
+                    from hermes_cli import git_commit_graph
+                    git_commit_graph.spawn_commit_graph_refresh = lambda root: False
                     maint._print_bundled_skills_sync_report = lambda: None
                     fleet_verify._print_legacy_units_warning = lambda: None
                     maint._refresh_dashboard_after_update = lambda **kwargs: None

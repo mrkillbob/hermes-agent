@@ -157,6 +157,9 @@ def _database_has_content(conn: sqlite3.Connection) -> bool:
 def resolve_journal_mode() -> str:
     """The configured ``database.journal_mode`` (``wal`` default; ``delete`` for filesystems without WAL-safe
     durability: macOS virtiofs, NFS, SMB). Invalid values fail safe to ``wal``."""
+    from hermes_cli.startup_hold import active as startup_hold_active
+    if startup_hold_active():
+        return "wal"  # held boot cannot read profile config; apply_wal_with_fallback forbids transitions
     try:
         from hermes_cli.config import load_config_readonly
         database = (load_config_readonly() or {}).get("database", {})
@@ -251,6 +254,18 @@ def _verify_configured_delete(actual: str) -> str:
     return actual
 
 
+def _held_journal_mode(conn: sqlite3.Connection, require_wal: bool) -> str:
+    """Observe a held database without changing its journal mode or tuning pragmas."""
+    current_mode = _on_disk_journal_mode(conn)
+    if current_mode == "wal":
+        return "wal"
+    if require_wal:
+        raise WalUnsupportedError("startup hold cannot establish required WAL mode")
+    if current_mode == "delete":
+        return "delete"
+    raise sqlite3.OperationalError("startup hold cannot verify the on-disk journal mode")
+
+
 def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.db", require_wal: bool = False) -> str:
     """Set ``journal_mode=WAL`` on ``conn``, falling back to DELETE on failure.
 
@@ -274,6 +289,12 @@ def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.
     still documents the WAL-reset bug as real through 3.51.2 with serious consequences. Until a fixed
     runtime is delivered, keep new databases out of WAL.
     """
+    from hermes_cli.startup_hold import active as startup_hold_active
+    if startup_hold_active():
+        # A held boot may observe an existing database, but must not change its journal mode
+        # or apply tuning pragmas. This also protects DELETE files on fixed SQLite builds.
+        return _held_journal_mode(conn, require_wal)
+
     config_module = sys.modules.get("hermes_cli.config")
     if getattr(getattr(config_module, "__spec__", None), "_initializing", False):
         config_module = None
@@ -670,6 +691,9 @@ def apply_database_pragmas(conn: sqlite3.Connection, *, db_label: str = "state.d
     (pages), ``journal_size_limit`` (bytes), ``synchronous`` (unset leaves the compile-time default, which differs
     between bundled/distro/Homebrew builds). Best-effort: failures are ignored so DB init never breaks on a
     malformed section. Applied to ALL connection types: writer, read_only, WAL readers."""
+    from hermes_cli.startup_hold import active as startup_hold_active
+    if startup_hold_active():
+        return
     try:
         from hermes_cli.config import cfg_get, load_config_readonly  # local: avoids a circular import
         cfg = load_config_readonly()

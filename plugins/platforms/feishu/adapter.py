@@ -2235,26 +2235,32 @@ class FeishuAdapter(BasePlatformAdapter):
         return True
 
     def _is_interactive_operator_authorized(
-        self, open_id: str, *, session_key: str = "", chat_id: str = "",
+        self, open_id: str, *, session_key: str = "", user_id: str = "", union_id: str = "", chat_id: str = "",
     ) -> bool:
-        """Return whether this card-action operator may answer this prompt."""
+        """Authorize card actions within the fork group policy and inbound DM gate."""
         normalized = str(open_id or "").strip()
         if not normalized:
             return False
         allowed_ids = set(self._admins) | set(self._allowed_group_users)
-        if "*" in allowed_ids or normalized in allowed_ids:
+        operator_ids = {normalized, str(user_id or "").strip(), str(union_id or "").strip()} - {""}
+        if "*" in allowed_ids or bool(operator_ids & allowed_ids):
             return True
-
-        # The empty-global-allowlist pairing mode is intentionally permissive for
-        # direct messages only. Group cards require an explicit operator grant.
+        if allowed_ids:
+            return False
         parts = str(session_key or "").split(":", 4)
         is_feishu_session = len(parts) >= 4 and parts[0] == "agent" and parts[2] == "feishu"
         chat_type = parts[3] if is_feishu_session else ""
         if chat_type in {"group", "thread", "forum"}:
             rule = self._group_rules.get(str(chat_id or ""))
-            if rule and rule.policy == "allowlist":
-                return "*" in rule.allowlist or normalized in rule.allowlist
-        return not allowed_ids and chat_type == "dm"
+            return bool(rule and rule.policy == "allowlist" and
+                        ("*" in rule.allowlist or bool(operator_ids & set(rule.allowlist))))
+        if chat_type != "dm":
+            return False
+        principal = str(user_id or "").strip() or normalized
+        verdict = self._is_sender_authorized(principal, "dm", str(chat_id or "") or None)
+        # A card click changes approval state; an absent or failed gateway check is unknown,
+        # not an authorization for that side effect.
+        return verdict is True
 
     @staticmethod
     def _card_response(card_data: Optional[dict[str, Any]] = None) -> Any:
@@ -2271,27 +2277,30 @@ class FeishuAdapter(BasePlatformAdapter):
 
     def _validate_card_action(
         self, *, event: Any, state: dict[str, str], label: str, ident: Any,
-    ) -> Optional[tuple[str, str, str]]:
+    ) -> Optional[tuple[str, str, str, str, str]]:
         """Shared operator/chat checks for approval + update-prompt clicks.
 
-        Returns ``(open_id, callback_chat_id, user_name)`` or None (already logged).
+        Returns ``(open_id, callback_chat_id, user_name, user_id, union_id)`` or None (already logged).
         """
         operator = getattr(event, "operator", None)
         open_id = str(getattr(operator, "open_id", "") or "")
+        user_id = str(getattr(operator, "user_id", "") or "")
+        union_id = str(getattr(operator, "union_id", "") or "")
+        callback_chat_id = str(getattr(getattr(event, "context", None), "open_chat_id", "") or "")
         expected_chat_id = str(state.get("chat_id", "") or "")
         if not self._is_interactive_operator_authorized(
-            open_id, session_key=state.get("session_key", ""), chat_id=expected_chat_id,
+            open_id, session_key=state.get("session_key", ""), user_id=user_id, union_id=union_id,
+            chat_id=expected_chat_id or callback_chat_id,
         ):
             logger.warning("[Feishu] Unauthorized %s click by %s", label, open_id or "<unknown>")
             return None
-        callback_chat_id = str(getattr(getattr(event, "context", None), "open_chat_id", "") or "")
         if callback_chat_id and expected_chat_id and callback_chat_id != expected_chat_id:
             logger.warning(
                 "[Feishu] %s callback chat mismatch for %s (expected=%s, got=%s)",
                 label.capitalize(), ident, expected_chat_id, callback_chat_id,
             )
             return None
-        return open_id, callback_chat_id, self._get_cached_sender_name(open_id) or open_id
+        return open_id, callback_chat_id, self._get_cached_sender_name(open_id) or open_id, user_id, union_id
 
     def _handle_approval_card_action(self, *, event: Any, action_value: dict[str, Any], loop: Any) -> Any:
         """Schedule approval resolution and build the synchronous callback response."""
@@ -2307,9 +2316,10 @@ class FeishuAdapter(BasePlatformAdapter):
         checked = self._validate_card_action(event=event, state=state, label="approval", ident=approval_id)
         if checked is None:
             return self._card_response()
-        open_id, chat_id, user_name = checked
+        open_id, chat_id, user_name, user_id, union_id = checked
         coro = self._resolve_approval(
             approval_id=approval_id, choice=choice, user_name=user_name, open_id=open_id, chat_id=chat_id,
+            user_id=user_id, union_id=union_id,
         )
         if not self._submit_on_loop(loop, coro):
             return self._card_response()
@@ -2332,15 +2342,17 @@ class FeishuAdapter(BasePlatformAdapter):
         checked = self._validate_card_action(event=event, state=state, label="update prompt", ident=prompt_id)
         if checked is None:
             return self._card_response()
-        open_id, chat_id, user_name = checked
-        coro = self._resolve_update_prompt(prompt_id, answer, user_name, open_id=open_id, chat_id=chat_id)
+        open_id, chat_id, user_name, user_id, union_id = checked
+        coro = self._resolve_update_prompt(
+            prompt_id, answer, user_name, open_id=open_id, chat_id=chat_id, user_id=user_id, union_id=union_id,
+        )
         if not self._submit_on_loop(loop, coro):
             return self._card_response()
         return self._card_response(self._build_resolved_update_prompt_card(answer=answer, user_name=user_name))
 
     def _pop_validated_prompt_state(
         self, *, states: dict[int, dict[str, str]], ident: Any, label: str, open_id: str, chat_id: str,
-        unauthorized_fmt: str, operator_repr: str,
+        unauthorized_fmt: str, operator_repr: str, user_id: str = "", union_id: str = "",
     ) -> Optional[dict[str, str]]:
         """Re-validate on the loop thread (state may have changed since the callback) and pop."""
         state = states.get(ident)
@@ -2349,7 +2361,8 @@ class FeishuAdapter(BasePlatformAdapter):
             return None
         expected_chat_id = str(state.get("chat_id", "") or "")
         if not self._is_interactive_operator_authorized(
-            open_id, session_key=state.get("session_key", ""), chat_id=expected_chat_id,
+            open_id, session_key=state.get("session_key", ""), user_id=user_id, union_id=union_id,
+            chat_id=expected_chat_id or chat_id,
         ):
             logger.warning(unauthorized_fmt, operator_repr, ident)
             return None
@@ -2363,12 +2376,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
     async def _resolve_approval(
         self, approval_id: Any, choice: str, user_name: str, *, open_id: str = "", chat_id: str = "",
+        user_id: str = "", union_id: str = "",
     ) -> None:
         """Pop approval state and unblock the waiting agent thread."""
         state = self._pop_validated_prompt_state(
             states=self._approval_state, ident=approval_id, label="Approval", open_id=open_id, chat_id=chat_id,
             unauthorized_fmt="[Feishu] Unauthorized approval click by %s for approval %s",
-            operator_repr=open_id or "<unknown>",
+            operator_repr=open_id or "<unknown>", user_id=user_id, union_id=union_id,
         )
         if not state:
             return
@@ -2397,12 +2411,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
     async def _resolve_update_prompt(
         self, prompt_id: Any, answer: str, user_name: str, *, open_id: str = "", chat_id: str = "",
+        user_id: str = "", union_id: str = "",
     ) -> None:
         """Persist an update prompt answer for the detached update process."""
         state = self._pop_validated_prompt_state(
             states=self._update_prompt_state, ident=prompt_id, label="Update prompt", open_id=open_id,
             chat_id=chat_id, unauthorized_fmt="[Feishu] Unauthorized update prompt click by %s for prompt %s",
-            operator_repr=open_id,
+            operator_repr=open_id, user_id=user_id, union_id=union_id,
         )
         if not state:
             return

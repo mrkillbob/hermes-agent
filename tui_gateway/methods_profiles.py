@@ -789,11 +789,14 @@ def _configure_cfg_sections(profile_dir, params, applied) -> None:
                 # These sections are the editor's complete desired state, including
                 # removal of legacy MCP disabled flags. Consent remains additive.
                 _write_raw_config_values(updates, replace_sections=True)
-                for key in ("skills", "toolsets", "mcp_servers"):
-                    if (key == "skills" and isinstance(params.get("disabled_skills"), list)) or \
-                       (key == "toolsets" and isinstance(params.get("enabled_toolsets"), list)) or \
-                       (key == "mcp_servers" and want_mcp):
-                        applied[key] = True
+                from hermes_cli.config import read_user_config_raw
+                landed = read_user_config_raw() or {}
+                for path, expected in updates.items():
+                    actual = landed
+                    for part in path:
+                        actual = actual.get(part) if isinstance(actual, dict) else None
+                    label = {"skills": "skills", "tools": "toolsets", "mcp_servers": "mcp_servers"}[path[0]]
+                    applied[label] = actual == expected
             except (Exception, SystemExit):
                 # _write_raw_config_values() raises SystemExit (not Exception) when a
                 # requested key is pinned by managed scope -- must still be caught here

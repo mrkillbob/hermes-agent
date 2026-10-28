@@ -21,7 +21,7 @@ witness = home / 'forbidden-effect'
 
 
 def refuse(effect):
-    witness.write_text(effect + ': ' + ' > '.join(frame.name for frame in traceback.extract_stack(limit=16)), encoding='utf-8')
+    witness.write_text(effect + ': ' + ' > '.join(frame.name for frame in traceback.extract_stack(limit=32)), encoding='utf-8')
     os._exit(85)
 
 
