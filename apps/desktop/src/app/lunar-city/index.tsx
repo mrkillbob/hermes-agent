@@ -12,6 +12,8 @@ import { $connection } from '@/store/session'
 
 import { createRegisteredKanbanCitySource } from './adapters/kanban'
 import { startLunarCityReconciler } from './adapters/reconciler'
+import { AttachedSessionInventory } from './attached-session-panel'
+import type { InventoryOwner } from './attached-session-read'
 import { LunarCityCommandRuntime } from './command-runtime'
 import { AlertsPanel } from './components/alerts-panel'
 import { CameraControls } from './components/camera-controls'
@@ -144,6 +146,7 @@ function LunarCityHudStatus({ rendererStatus }: { rendererStatus: RendererStatus
 }
 
 interface LunarCityOperationsProps {
+  inventoryOwner?: InventoryOwner
   manifest: WorldManifestV2 | undefined
   worldRef: { current: LunarCityWorldHandle | undefined }
   getCameraOrder(): readonly EntityKey[]
@@ -160,6 +163,7 @@ interface LunarCityOperationsProps {
  * high-frequency world publications never re-render the route or canvas.
  */
 function LunarCityOperations({
+  inventoryOwner,
   manifest,
   worldRef,
   getCameraOrder,
@@ -189,6 +193,7 @@ function LunarCityOperations({
       </p>
       <QualityControl onTierChange={onQualityChange} rendererStatus={rendererStatus} tier={qualityTier} />
       <SourceHealthPanel sources={snapshot.sources} />
+      {inventoryOwner ? <AttachedSessionInventory owner={inventoryOwner} /> : null}
       <AlertsPanel onSelectEntity={onSelect} snapshot={snapshot} />
       <ProjectCompoundsPanel onSelectEntity={onSelect} report={projectReport} snapshot={snapshot} />
       <WorkerLife onSelect={onSelect} selectedEntityKey={selectedEntityKey} snapshot={snapshot} worldRef={worldRef} />
@@ -841,11 +846,12 @@ export function LunarCity({ onOpenEntitySession, onOpenFullChat, onOpenMemoryGra
 
           {operationsReady ? (
             <LunarCityOperations
-        getCameraOrder={() => {
+              getCameraOrder={() => {
                 const world = worldHandleRef.current
 
                 return typeof world?.getEntityCameraOrder === 'function' ? world.getEntityCameraOrder() : []
               }}
+        inventoryOwner={kanbanScope}
         manifest={worldManifest}
               onQualityChange={changeQuality}
               onSelect={selectEntity}

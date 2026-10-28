@@ -14,6 +14,14 @@ import { zhHantFirstRun } from './zh-hant_first_run'
 import { zhHantSettings } from './zh-hant_settings'
 
 export const zhHantOverrides = {
+  lunarCityInventory: {
+    title: "已連線工作階段清單",
+    description: "從已連線的來源讀取最多100個可見的已儲存工作階段。活動狀態及世界位置無法取得。",
+    read: "讀取已連線工作階段",
+    reading: "讀取中…",
+    unavailable: "無法取得清單。未開啟任何工作階段。",
+    count: count => `本次傳回的工作階段數：${count}。活動狀態不明。`
+  },
 
   catalog: {
     add: '新增',

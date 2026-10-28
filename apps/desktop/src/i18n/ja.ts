@@ -26,6 +26,14 @@ import { jaThemePicker } from './ja_theme_picker'
 import { jaUpdateChannel } from './ja_update_channel'
 
 export const jaOverrides = {
+  lunarCityInventory: {
+    title: "接続中のセッション一覧",
+    description: "接続済みのソースから、表示可能な保存済みセッションを最大100件読み取ります。活動状況とワールド内の位置は取得できません。",
+    read: "接続中のセッションを読み取る",
+    reading: "読み取り中…",
+    unavailable: "一覧を取得できません。セッションは開かれていません。",
+    count: count => `今回取得したセッション数：${count}。活動状況は不明です。`
+  },
   catalog: jaCatalog,
   connectors: jaConnectors.connectors,
   externalOpenFailed: {

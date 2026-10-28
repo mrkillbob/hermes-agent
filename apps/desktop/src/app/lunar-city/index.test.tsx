@@ -3,6 +3,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { Profiler } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import type { HermesConnection } from '@/global'
+import * as gatewayInventory from '@/store/gateway'
+import { $activeGatewayProfile } from '@/store/profile'
+import { $connection } from '@/store/session'
 import type * as SessionRequestRouter from '@/store/session-request-router'
 
 import { entityKey } from './identity'
@@ -767,5 +771,126 @@ describe('LunarCity', () => {
       kind: 'focus'
     })
     expect(screen.getByRole('status', { name: 'Camera position' }).textContent).toContain('duplicate leader')
+  })
+})
+
+describe('Lunar City attached inventory interaction', () => {
+  function fixture(pending = false) {
+    const priorConnection = $connection.get(),
+      priorProfile = $activeGatewayProfile.get()
+
+    let finish!: (value: unknown) => void
+
+    const request = vi.fn(
+      (_method: string, _params: Record<string, unknown>, _timeout: number, _signal?: AbortSignal): Promise<unknown> =>
+        pending
+          ? new Promise(resolve => {
+              finish = resolve
+            })
+          : Promise.resolve({ sessions: [{ id: 'visible-stored', title: 'private-title', preview: 'private-text' }] })
+    )
+
+    const transport = { connectionState: 'open', request } as unknown as NonNullable<
+      ReturnType<typeof gatewayInventory.activeGateway>
+    >
+
+    const routeId = vi.spyOn(gatewayInventory, 'activeGatewayConnectionId').mockReturnValue('source-a')
+
+    const spies = [
+      routeId,
+      vi.spyOn(gatewayInventory, 'activeGateway').mockReturnValue(transport),
+      vi.spyOn(gatewayInventory, 'activeGatewayProfileKey').mockReturnValue('research'),
+      vi.spyOn(gatewayInventory, 'gatewayActivationEpoch').mockReturnValue(1)
+    ]
+
+    const descriptor = (id: string): HermesConnection => ({
+      baseUrl: '',
+      isFullscreen: false,
+      mode: 'remote',
+      nativeOverlayWidth: 0,
+      token: '',
+      wsUrl: '',
+      logs: [],
+      windowButtonPosition: null,
+      connectionId: id
+    })
+
+    const forbiddenFetch = vi.fn(() => {
+      throw new Error('Unexpected network in source fixture')
+    })
+
+    vi.stubGlobal('fetch', forbiddenFetch)
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        constructor() {
+          throw new Error('Unexpected socket in source fixture')
+        }
+      }
+    )
+    $connection.set(descriptor('source-a'))
+    $activeGatewayProfile.set('research')
+
+    return {
+      request,
+      forbiddenFetch,
+      complete: (value: unknown) => finish(value),
+      switchSource: () => {
+        routeId.mockReturnValue('source-b')
+        $connection.set(descriptor('source-b'))
+      },
+      restore: () => {
+        cleanup()
+        spies.forEach(spy => spy.mockRestore())
+        $connection.set(priorConnection)
+        $activeGatewayProfile.set(priorProfile)
+      }
+    }
+  }
+
+  it('offers an explicit inventory read from the actual city without activating a session', async () => {
+    const f = fixture()
+
+    try {
+      render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+      await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
+      expect(f.request).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: 'Read attached sessions' }))
+      await screen.findByText('visible-stored')
+      expect(f.request).toHaveBeenCalledExactlyOnceWith(
+        'session.list',
+        { profile: 'research', limit: 100, include_hidden: false },
+        5000,
+        expect.any(AbortSignal)
+      )
+      expect(screen.queryByText('private-title')).toBeNull()
+      expect(screen.queryByText('private-text')).toBeNull()
+      expect(screen.getByText(/Activity unknown/)).toBeTruthy()
+      expect(resolveLeaderSession).not.toHaveBeenCalled()
+      expect(requestForSessionProfile).not.toHaveBeenCalled()
+      expect(f.forbiddenFetch).not.toHaveBeenCalled()
+    } finally {
+      f.restore()
+    }
+  })
+
+  it('clears a pending old-owner inventory when the actual city source changes', async () => {
+    const f = fixture(true)
+
+    try {
+      render(<LunarCity onOpenMemoryGraph={vi.fn()} />)
+      await waitFor(() => expect(screen.getByLabelText('Interactive 3D Lunar City').dataset.worldStatus).toBe('ready'))
+      fireEvent.click(screen.getByRole('button', { name: 'Read attached sessions' }))
+      const signal = f.request.mock.calls[0][3]!
+      act(() => f.switchSource())
+      expect(signal.aborted).toBe(true)
+      await act(async () => f.complete({ sessions: [{ id: 'old-owner-private' }] }))
+      expect(screen.queryByText('old-owner-private')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Read attached sessions' }).hasAttribute('disabled')).toBe(false)
+      expect(f.request).toHaveBeenCalledTimes(1)
+      expect(f.forbiddenFetch).not.toHaveBeenCalled()
+    } finally {
+      f.restore()
+    }
   })
 })

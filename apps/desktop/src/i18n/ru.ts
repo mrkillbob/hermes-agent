@@ -24,6 +24,14 @@ import { ruThemePicker } from './ru_theme_picker'
 import { ruUpdateChannel } from './ru_update_channel'
 
 export const ruOverrides = {
+  lunarCityInventory: {
+    title: "Список подключённых сессий",
+    description: "Читает до 100 видимых сохранённых сессий из уже подключённого источника. Активность и положение в мире недоступны.",
+    read: "Прочитать подключённые сессии",
+    reading: "Чтение…",
+    unavailable: "Список недоступен. Ни одна сессия не открыта.",
+    count: count => `Сессий в этом результате: ${count}. Активность неизвестна.`
+  },
   catalog: ruCatalog,
   connectors: ruConnectors.connectors,
   sharedMetrics: ruSharedMetrics,
