@@ -254,6 +254,18 @@ def _verify_configured_delete(actual: str) -> str:
     return actual
 
 
+def _held_journal_mode(conn: sqlite3.Connection, require_wal: bool) -> str:
+    """Observe a held database without changing its journal mode or tuning pragmas."""
+    current_mode = _on_disk_journal_mode(conn)
+    if current_mode == "wal":
+        return "wal"
+    if require_wal:
+        raise WalUnsupportedError("startup hold cannot establish required WAL mode")
+    if current_mode == "delete":
+        return "delete"
+    raise sqlite3.OperationalError("startup hold cannot verify the on-disk journal mode")
+
+
 def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.db", require_wal: bool = False) -> str:
     """Set ``journal_mode=WAL`` on ``conn``, falling back to DELETE on failure.
 
@@ -281,14 +293,7 @@ def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.
     if startup_hold_active():
         # A held boot may observe an existing database, but must not change its journal mode
         # or apply tuning pragmas. This also protects DELETE files on fixed SQLite builds.
-        current_mode = _on_disk_journal_mode(conn)
-        if current_mode == "wal":
-            return "wal"
-        if require_wal:
-            raise WalUnsupportedError("startup hold cannot establish required WAL mode")
-        if current_mode == "delete":
-            return "delete"
-        raise sqlite3.OperationalError("startup hold cannot verify the on-disk journal mode")
+        return _held_journal_mode(conn, require_wal)
 
     config_module = sys.modules.get("hermes_cli.config")
     if getattr(getattr(config_module, "__spec__", None), "_initializing", False):
