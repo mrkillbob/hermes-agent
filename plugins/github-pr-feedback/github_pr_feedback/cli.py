@@ -328,7 +328,8 @@ class DoctorProbe:
             return False
         if assignee == "default":
             return self._hermes_root.is_dir()
-        return (self._hermes_root / "profiles" / assignee / "config.yaml").is_file()
+        from hermes_cli.config_backend import config_exists
+        return config_exists(self._hermes_root / "profiles" / assignee / "config.yaml")
 
     def _ledger_access(self, path: Path) -> bool:
         try:

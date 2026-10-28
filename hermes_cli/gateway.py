@@ -4146,7 +4146,8 @@ def named_profile_served_by_running_multiplexer(profile_name: str | None = None)
         from gateway.config import _env_multiplex_profiles_override
         cfg_path = default_root / "config.yaml"
         cfg = {}
-        if cfg_path.exists():
+        from hermes_cli.config_backend import config_exists
+        if config_exists(cfg_path):
             from hermes_cli.config import read_user_config_raw
             cfg = read_user_config_raw(cfg_path)
 
@@ -4154,7 +4155,7 @@ def named_profile_served_by_running_multiplexer(profile_name: str | None = None)
         if env_multiplex is False:
             return False
         if env_multiplex is not True:
-            if not cfg_path.exists():
+            if not config_exists(cfg_path):
                 return False
             if not (cfg.get("multiplex_profiles") or (cfg.get("gateway", {}) or {}).get("multiplex_profiles")):
                 return False

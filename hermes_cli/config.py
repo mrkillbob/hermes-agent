@@ -2028,11 +2028,15 @@ def read_user_config_raw(config_path: Optional[Path] = None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def validate_user_config_file(config_path: Path) -> None:
+def validate_user_config_file(config_path: Path, *, local_file: bool = False) -> None:
     """Validate a config file's raw YAML syntax and mapping root without loading behavior."""
     try:
-        with open(config_path, encoding="utf-8-sig") as f:
-            data = fast_safe_load(f)
+        if local_file:
+            # The managed overlay is an explicit local file even with a remote user backend.
+            from hermes_cli.config_backend import FileBackend
+            data = FileBackend.read_path(config_path)
+        else:
+            data = read_config_doc(config_path)
     except FileNotFoundError:
         return
     if data is not None and not isinstance(data, dict):

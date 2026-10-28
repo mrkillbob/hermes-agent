@@ -89,8 +89,9 @@ def load_dispatch_section():
     from hermes_constants import get_default_hermes_root
 
     managed = get_managed_dir()
-    if managed is not None:
-        validate_user_config_file(managed / "config.yaml")
+    from hermes_cli.config_backend import get_config_backend
+    if managed is not None and get_config_backend().honors_managed_config():
+        validate_user_config_file(managed / "config.yaml", local_file=True)
     section = validated_section(load_config(), required=True)
     if get_config_path().resolve() != (get_default_hermes_root() / "config.yaml").resolve():
         # Defaults are not profile overrides of an installation-root host cap.

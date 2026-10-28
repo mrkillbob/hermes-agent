@@ -726,6 +726,10 @@ def seed_federation(
     if not apply:
         return result
 
+    from hermes_cli.config_backend import supports_file_tooling
+    if not supports_file_tooling():
+        raise RuntimeError("federation profile seeding requires a local config file backend")
+
     if create_profile is None:
         from hermes_cli.profiles import create_profile as create_profile_fn
 
@@ -802,7 +806,7 @@ def seed_federation(
                 config_path = profile_dir / "config.yaml"
                 _snapshots: list[tuple[Path, bytes | None]] = []
                 for snap_path in (config_path, identity_path):
-                    _snapshots.append((snap_path, snap_path.read_bytes() if snap_path.is_file() else None))
+                    _snapshots.append((snap_path, snap_path.read_bytes() if snap_path.is_file() else None))  # config-reader: ok — explicit local-file rollback after the file-tooling guard
                 try:
                     _write_role_config(profile_dir, role, manifest)
                     _write_role_identity(

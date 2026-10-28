@@ -532,7 +532,8 @@ def _config_platform_tokens(config_path: Path) -> dict[str, str]:
 
 def _platform_enabled_in_config(config_path: Path, platform_id: str) -> bool:
     """Whether a platform is explicitly enabled in either accepted config nesting."""
-    if not config_path.is_file():
+    from hermes_cli.config_backend import config_exists
+    if not config_exists(config_path):
         return False
     from hermes_cli.config import read_user_config_raw
     raw = read_user_config_raw(config_path)
