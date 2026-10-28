@@ -20,7 +20,15 @@ bootstrap._generate_presets = lambda *args, **kwargs: None
 bootstrap._admitted_models_max = lambda directory, count, engine_tag=None: count
 bootstrap._start_idle_sweeper = lambda sup: None
 supervisor._stable_port = lambda: 12345
-binaries.installed_engine = lambda backend: binaries.Engine(backend, 'fixture', Path(sys.executable))
+def fixture_engine(backend):
+    if sys.platform == 'darwin':
+        from hermes_cli.local_runtime.generation_evidence import reserve_for_engine_probe
+
+        reserve_for_engine_probe()
+    return binaries.Engine(backend, 'fixture', Path(sys.executable))
+
+
+binaries.installed_engine = fixture_engine
 
 
 def write(name, value):
@@ -35,9 +43,16 @@ class PythonRouter(real_supervisor):
         from hermes_cli.local_runtime.processes import spawn_server
 
         if os.name != 'nt':
-            from hermes_cli.local_runtime.tree_custody import reserve_uncontained_tree
+            if self._generation_ticket is not None:
+                from hermes_cli.local_runtime import generation_evidence, reconciliation
 
-            self._spawn_intent = reserve_uncontained_tree(supervisor.state_path())
+                self._spawn_intent = generation_evidence.publish_intent(
+                    supervisor.state_path().parent, self._generation_ticket,
+                    reconciliation._native_identity, reconciliation._volume_identity)
+            else:
+                from hermes_cli.local_runtime.tree_custody import reserve_uncontained_tree
+
+                self._spawn_intent = reserve_uncontained_tree(supervisor.state_path())
         self.proc, self._job = spawn_server(
             [sys.executable, '-c', 'import threading; threading.Event().wait(90)'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
