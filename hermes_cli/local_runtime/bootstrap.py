@@ -190,6 +190,9 @@ def _incumbent_allows_boot() -> bool:
     state = read_state()
     if not state:
         return not state_path().exists()  # an unreadable record is not evidence of absence
+    from hermes_cli.local_runtime.reconciliation import retirement_matches
+    if retirement_matches(state_path()):
+        return True
     if not _valid_pid(state.get('pid')):
         # Pre-spawn custody intents intentionally have no router PID/birth yet.
         logger.error("Recorded local runtime has no verified router; replacement refused")
@@ -439,7 +442,9 @@ def _cross_process_boot_lock(timeout_s: float = 130.0, *, cancel_event=None):
                 cancel_event.wait(0.2)
             acquired = _try_lock_boot_fd(fd)
         try:
-            yield True
+            from hermes_cli.local_runtime.runtime_lock import mark_owned
+            with mark_owned(fd):
+                yield True
         finally:
             with suppress(OSError):
                 _unlock_boot_fd(fd)
