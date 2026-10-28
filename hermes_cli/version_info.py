@@ -73,7 +73,8 @@ def _git_probe(command):
 _MAX_GIT_PROBE_OUTPUT = 1024 * 1024
 
 
-def _git_output(repo_dir: Path, command: list[str], probe_env: dict | None) -> tuple[int, str]:
+def _git_output(repo_dir: Path, command: list[str], probe_env: dict | None,
+                *, presence_only: bool = False) -> tuple[int, str]:
     # On Windows, run(capture_output=True) drains its reader threads WITHOUT a
     # timeout after killing a timed-out parent. A descendant retaining either
     # pipe can therefore strand session readiness indefinitely. Regular-file
@@ -85,7 +86,13 @@ def _git_output(repo_dir: Path, command: list[str], probe_env: dict | None) -> t
         )
         output.flush()
         size = os.fstat(output.fileno()).st_size
-        if result.returncode != 0 or size > _MAX_GIT_PROBE_OUTPUT:
+        if result.returncode != 0:
+            return result.returncode, ""
+        # Status needs only output presence. A large dirty tree must not be
+        # mistaken for clean because its path list exceeds the identity cap.
+        if presence_only:
+            return result.returncode, "present" if size else ""
+        if size > _MAX_GIT_PROBE_OUTPUT:
             return result.returncode, ""
         output.seek(0)
         raw = output.read(size)  # finite snapshot: a retained writer cannot extend this read
@@ -273,7 +280,7 @@ def _git_version_info(repo_dir: Path, *, include_untracked: bool = False) -> Ver
         if not include_untracked:
             status_command.append("-uno")
         status_command, probe_env = _git_probe(status_command)
-        returncode, stdout = _git_output(repo_dir, status_command, probe_env)
+        returncode, stdout = _git_output(repo_dir, status_command, probe_env, presence_only=True)
         dirty = returncode == 0 and bool(stdout.strip())
     except (OSError, subprocess.SubprocessError):
         dirty = False

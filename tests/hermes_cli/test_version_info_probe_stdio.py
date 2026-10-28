@@ -56,7 +56,8 @@ def test_git_unavailable_or_timeout_remains_unknown(monkeypatch, tmp_path, error
 
 
 @pytest.mark.parametrize("returncode", [0, 1])
-def test_dirty_probe_uses_the_same_bounded_stdio(monkeypatch, tmp_path, returncode):
+@pytest.mark.parametrize("large", [False, True], ids=["small", "large"])
+def test_dirty_probe_uses_the_same_bounded_stdio(monkeypatch, tmp_path, returncode, large):
     def git(_root, *args):
         return {"rev-parse": "abcdef123", "branch": "main", "log": "123", "tag": "v1.0.0",
                 "rev-list": "0"}.get(args[0])
@@ -65,7 +66,7 @@ def test_dirty_probe_uses_the_same_bounded_stdio(monkeypatch, tmp_path, returnco
     monkeypatch.setattr(version_info, "_git_probe", lambda command: (command, None))
 
     def run(command, **options):
-        _noninteractive_output(options).write(b" M tracked.py\n")
+        _noninteractive_output(options).write(b" M tracked.py\n" * (100_000 if large else 1))
         assert command == ["git", "--no-optional-locks", "status", "--porcelain", "-uno"]
         return subprocess.CompletedProcess(command, returncode)
 
@@ -129,6 +130,7 @@ def test_snapshot_size_mismatch_cannot_publish_partial_identity(monkeypatch, tmp
 
 
 @pytest.mark.parametrize("slow_parent", [False, True])
+@pytest.mark.platforms("windows", "macos", "linux")
 def test_probe_does_not_drain_a_descendant_retained_output_handle(monkeypatch, tmp_path, slow_parent):
     ready, stop, closed = (tmp_path / name for name in ("ready", "stop", "closed"))
     child = """\
