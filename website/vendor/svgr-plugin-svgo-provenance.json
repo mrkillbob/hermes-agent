@@ -1,0 +1,20 @@
+{
+  "status": "unreleased local metadata-only rebuild; not an upstream fixed version",
+  "original_package": "@svgr/plugin-svgo",
+  "original_version": "8.1.0",
+  "original_git_head": "772592e042be5063e782bfb8711d024b2fefc6b8",
+  "original_integrity": "sha512-Ywtl837OGO9pTLIN/onoWLmDQ4zFUycI1g76vuKGEz6evR/ZTJlJuz3G/fIkb6OVBJ2g0o6CGJzaEjfmEo3AHA==",
+  "change": "Remove unused deepmerge dependency; mark local rebuild private and omit publication gitHead because this is not the original published artifact. All executable/type/map/license/README bytes unchanged.",
+  "local_artifact": "svgr-plugin-svgo-8.1.0-local-328eb35d8276.tgz",
+  "local_integrity": "sha512-DSDSz8Q1DXJxTeoQs3iuIZqqVZRUd+ZodVLT+KFOJTg5/WNBWmaYr3kuBLHPXvHP03Nzjh9U8LCbQrtZuq8FNg==",
+  "local_sha256": "328eb35d8276c7c8b46a8a9b07fe9e8a9bb44b5059922cfa3722f8a8d7cd2649",
+  "files": {
+    "LICENSE": "7bc7d9d513d14b0951dfd29718d6bdc434545c11621bead0909f625f0e135326",
+    "README.md": "08d1e93b540744ce1acfa246b984e8dac6a308fa93a11db7a73621cfe4f5d522",
+    "dist/index.d.ts": "7bc8cfe8d679541e14679f1b0510bf498247e30d38cd4b36f80ffb25934b5006",
+    "dist/index.js": "4a9a9511fdeee0ecf9ed25837b44f1c8b82b3a069bd9a34247077ff5034b9078",
+    "dist/index.js.map": "6f155a164e271db4d6b37ca50b072c1ebdae30241403b425bfd837d9716367bf",
+    "package.json": "39926012d0a357ca0cd3ac9288c052632c5a8434e75c3f4aaacd541bcfdb3b5a"
+  },
+  "publication_or_runtime_adoption": false
+}
