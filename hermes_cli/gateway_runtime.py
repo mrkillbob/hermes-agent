@@ -337,20 +337,33 @@ def _update_fenced(homes) -> bool:
     """
     import time
     from hermes_cli import update_lock
+    from hermes_cli.update_lock_diagnostics import record_fence
 
-    for fence_home in homes:
+    for home_index, fence_home in enumerate(homes):
         path = fence_home / update_lock.MARKER_NAME
+        read_step = "read"
         try:
             raw = path.read_bytes()
             if not raw:
                 # An exclusive first publish in flight (contract A3), not yet a dead claim.
-                if time.time() - path.stat().st_mtime < update_lock.EMPTY_MARKER_GRACE_SECONDS:
+                read_step = "stat"
+                age = time.time() - path.stat().st_mtime
+                if age < update_lock.EMPTY_MARKER_GRACE_SECONDS:
+                    record_fence("empty_marker_in_flight", home_index, marker={
+                        "empty_age_seconds": age, "empty_grace_seconds": update_lock.EMPTY_MARKER_GRACE_SECONDS})
                     return True
         except FileNotFoundError:
             continue
-        except OSError:
+        except OSError as error:
+            record_fence("marker_stat_error" if read_step == "stat" else "marker_read_error",
+                         home_index, error=error)
             return True
-        if update_lock.judge_marker(raw)[0] in {"live", "ours"} or update_lock.checkout_lock_held():
+        marker, checkout = {}, {}
+        if update_lock.judge_marker(raw, observation=marker)[0] in {"live", "ours"}:
+            record_fence("marker_live", home_index, marker=marker)
+            return True
+        if update_lock.checkout_lock_held(observation=checkout):
+            record_fence("checkout_held", home_index, marker=marker, checkout=checkout)
             return True
     return False
 

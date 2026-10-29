@@ -248,15 +248,25 @@ def process_tree(pid: int) -> list[Any]:
         return []
 
 
-def kill_tree(procs: Iterable[Any]) -> None:
+def kill_tree(procs: Iterable[Any], *, observe=None) -> None:
     """Test cleanup only: hard-kill whatever this test spawned that is still alive."""
     import psutil
 
+    def note(proc, phase, error=None):
+        if observe is not None:
+            try:
+                observe(proc, phase, error)
+            except Exception:  # health: allow BLE001 -- A diagnostic observer cannot replace cleanup outcomes.
+                pass
+
     for p in procs:
+        note(p, "kill_requested")
         try:
             p.kill()
-        except psutil.Error:
-            pass
+        except psutil.Error as error:
+            note(p, "kill_error", error)
+        else:
+            note(p, "kill_returned")
 
 
 def _under(path: str, root: str) -> bool:
