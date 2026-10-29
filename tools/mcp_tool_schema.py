@@ -9,6 +9,7 @@ import re
 from typing import Any, List
 from tools.ansi_strip import strip_unicode_tags
 from tools.mcp_tool_common import mcp_field
+from tools.threat_patterns import MAX_SCAN_CHARS, scan_for_threats
 
 logger = logging.getLogger("tools.mcp_tool")
 
@@ -17,7 +18,6 @@ logger = logging.getLogger("tools.mcp_tool")
 _MCP_INJECTION_PATTERNS = [
     (re.compile(pattern, re.IGNORECASE), reason)
     for pattern, reason in (
-        (r"ignore\s+(all\s+)?previous\s+instructions", "prompt override attempt ('ignore previous instructions')"),
         (r"you\s+are\s+now\s+a", "identity override attempt ('you are now a...')"),
         (r"your\s+new\s+(task|role|instructions?)\s+(is|are)", "task override attempt"),
         (r"system\s*:\s*", "system prompt injection attempt"),
@@ -34,7 +34,12 @@ def _scan_mcp_description(server_name: str, tool_name: str, description: str) ->
     clean) and logs a warning when any match."""
     if not description:
         return []
-    findings = [reason for pattern, reason in _MCP_INJECTION_PATTERNS if pattern.search(description)]
+    # Share the maintained bounded-filler rule without broadening MCP's other warning rules.
+    # Cap every scan; the original description still reaches schema conversion unchanged.
+    scanned = description[:MAX_SCAN_CHARS]
+    findings = (["prompt override attempt ('ignore previous instructions')"]
+                if "prompt_injection" in scan_for_threats(scanned, scope="all") else [])
+    findings.extend(reason for pattern, reason in _MCP_INJECTION_PATTERNS if pattern.search(scanned))
     if findings:
         logger.warning("MCP server '%s' tool '%s': suspicious description content — %s. Description: %.200s",
                        server_name, tool_name, "; ".join(findings), description)
