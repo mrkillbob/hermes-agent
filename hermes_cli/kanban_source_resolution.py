@@ -11,6 +11,7 @@ from pathlib import Path
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli.kanban_source_history import require_historical_heartbeat
 from hermes_cli.kanban_source_supersession import SourceSupersessionEvidence
 from hermes_cli.kanban_task_revision import require_task_revision
 from hermes_cli.kanban_transfer import _selected_task_rows
@@ -25,7 +26,7 @@ _TERMINAL_RUNS = frozenset(('done', 'completed', 'blocked', 'crashed', 'timed_ou
 def _require_settled_source(rows):
     task = rows['tasks'][0]
     ownership = ('claim_lock', 'claim_expires', 'worker_pid', 'worker_started_at',
-                 'current_run_id', 'last_heartbeat_at')
+                 'current_run_id')
     contracts = ('workflow_template_id', 'current_step_key', 'block_kind')
     if (task['status'] != 'blocked' or any(task.get(key) is not None for key in ownership)
             or any(task.get(key) for key in contracts) or rows['task_links']
@@ -47,6 +48,8 @@ def _require_settled_source(rows):
             if (not isinstance(value, dict) or value.get('sticky') or value.get('local_privacy_denial')
                     or value.get('failure_class') == 'provider_egress_blocked'):
                 raise ValueError('source resolution preserves policy holds')
+    if task.get('last_heartbeat_at') is not None:
+        require_historical_heartbeat(rows, _TERMINAL_RUNS, int(kb.time.time()))
 
 
 def archive_resolved_source_task(conn, task_id, *, board, expected_revision, evidence):
