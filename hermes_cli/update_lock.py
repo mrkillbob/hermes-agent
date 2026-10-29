@@ -652,7 +652,7 @@ def _parse_marker(raw: bytes, *, mtime: float | None = None) -> _Marker:
     )
 
 
-def judge_marker(raw: bytes, world: _World | None = None) -> tuple[str, int | None, str | None]:
+def judge_marker(raw: bytes, world: _World | None = None, *, observation: dict | None = None) -> tuple[str, int | None, str | None]:
     """``(verdict, owner, run)`` of marker bytes — the shared corpus' judge contract.
 
     verdict: ``malformed`` | ``dead`` | ``ours`` (a live identity is this incarnation) | ``live``;
@@ -660,14 +660,22 @@ def judge_marker(raw: bytes, world: _World | None = None) -> tuple[str, int | No
     """
     w = world or _real_world()
     marker = _parse_marker(raw)
+    def finish(value):
+        return value
+    if observation is not None:
+        try:
+            from hermes_cli.update_lock_diagnostics import observe_marker
+            w, finish = observe_marker(marker, w, observation)
+        except Exception:  # health: allow BLE001 -- Diagnostics must preserve the original marker judge.
+            return judge_marker(raw, w)  # Reuse the original world; no second process-table snapshot.
     if marker.started_at is None:
-        return "malformed", None, None
+        return finish(("malformed", None, None))
     owner = marker.live_pid(w)
     if owner is None:
-        return "dead", None, marker.run
+        return finish(("dead", None, marker.run))
     ours = (marker.pid == w.pid and marker.owner_live(w)) \
         or (marker.delegate_pid == w.pid and marker.delegate_live(w))
-    return ("ours" if ours else "live"), owner, marker.run
+    return finish((("ours" if ours else "live"), owner, marker.run))
 
 
 def _release_decision(raw: bytes, world: _World | None = None) -> tuple[str, bytes | None]:
@@ -996,34 +1004,85 @@ _HELD: dict | None = None
 _JOBS: list = []
 
 
-def _try_lock(fd: int) -> bool:
+def _observe_lock_result(observation, result, reason, error=None):
+    if observation is not None:
+        try:
+            from hermes_cli.update_lock_diagnostics import checkout_result
+            checkout_result(observation, result, reason, error)
+        except Exception:  # health: allow BLE001 -- Failed evidence cannot alter the existing lock operation.
+            return result
+    return result
+
+
+def _observe_lock_attempt(observation, arm, result, detail=None, error=None):
+    if observation is not None:
+        try:
+            from hermes_cli.update_lock_diagnostics import lock_attempt
+            lock_attempt(observation, arm, result, detail, error)
+        except Exception:  # health: allow BLE001 -- Preserve the original lock result or exception.
+            return result
+    return result
+
+
+def _try_byte_lock(fd, offset, lease_slots, *, lock_bytes, unlock, observation=None):
+    """Byte-range protocol with supplied I/O; the Windows adapter supplies the real operations."""
+    def attempt(position, count, arm):
+        detail = {} if observation is not None else None
+        try:
+            locked = (lock_bytes(fd, position, count, observation=detail) if detail is not None
+                      else lock_bytes(fd, position, count))
+        except OSError as error:
+            _observe_lock_attempt(observation, arm, "raised", detail, error)
+            raise
+        return _observe_lock_attempt(observation, arm, locked, detail)
+
+    if not attempt(offset, 1, "windows_primary"):
+        return False
+    if not attempt(offset + 1, lease_slots, "windows_leases"):
+        unlock(fd)
+        return False
+    unlock(fd, offset + 1, lease_slots)
+    return True
+
+
+def _try_lock(fd: int, *, observation=None) -> bool:
     if sys.platform == "win32":
-        if not _lock_bytes(fd, _WINDOWS_LOCK_OFFSET):
-            return False
-        if not _lock_bytes(fd, _WINDOWS_LOCK_OFFSET + 1, _LEASE_SLOTS):  # a dead owner's leased child
-            _unlock(fd)
-            return False
-        _unlock(fd, _WINDOWS_LOCK_OFFSET + 1, _LEASE_SLOTS)
-        return True
+        return _try_byte_lock(fd, _WINDOWS_LOCK_OFFSET, _LEASE_SLOTS,
+                              lock_bytes=_lock_bytes, unlock=_unlock, observation=observation)
     import fcntl
 
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    except BlockingIOError as error:
+        _observe_lock_attempt(observation, "posix_flock", False, error=error)
         return False
+    except OSError as error:
+        _observe_lock_attempt(observation, "posix_flock", "raised", error=error)
+        raise
+    _observe_lock_attempt(observation, "posix_flock", True)
     return True
 
 
-def _lock_bytes(fd: int, offset: int, count: int = 1) -> bool:
+def _attempt_byte_lock(fd, offset, count, *, seek, locking, mode, observation=None):
+    """Observe the original seek/locking calls without interpreting every OSError as contention."""
+    try:
+        seek(fd, offset, os.SEEK_SET)
+    except OSError as error:
+        _observe_lock_result(observation, False, "seek_error", error)
+        raise
+    try:
+        locking(fd, mode, count)
+    except OSError as error:
+        return _observe_lock_result(observation, False, "locking_error", error)
+    return _observe_lock_result(observation, True, "byte_acquired")
+
+
+def _lock_bytes(fd: int, offset: int, count: int = 1, *, observation=None) -> bool:
     """Windows: lock ``count`` bytes at ``offset`` without waiting (fails if any is held)."""
     import msvcrt
 
-    os.lseek(fd, offset, os.SEEK_SET)
-    try:
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, count)
-    except OSError:
-        return False
-    return True
+    return _attempt_byte_lock(fd, offset, count, seek=os.lseek, locking=msvcrt.locking,
+                              mode=msvcrt.LK_NBLCK, observation=observation)
 
 
 def _unlock(fd: int, offset: int = _WINDOWS_LOCK_OFFSET, count: int = 1) -> None:
@@ -1354,7 +1413,7 @@ def update_in_progress(install_root: Path | str | None = None) -> bool:
     return read_live_update(install_root=install_root) is not None or checkout_lock_held(install_root)
 
 
-def checkout_lock_held(install_root: Path | str | None = None) -> bool:
+def checkout_lock_held(install_root: Path | str | None = None, *, observation: dict | None = None) -> bool:
     """True while some process (this one included) holds the checkout kernel lock.
 
     A probe takes the lock for the microseconds of one try and drops it (closing the fd), the
@@ -1366,8 +1425,11 @@ def checkout_lock_held(install_root: Path | str | None = None) -> bool:
     launch the others would park. A lock call that fails outright (ENOLCK on NFS without lockd,
     EOPNOTSUPP on some SMB shares) means nothing can hold it: free, so the interrupted-pull repair
     runs unguarded there as designed."""
+    def result(held, reason, error=None):
+        return _observe_lock_result(observation, held, reason, error)
+
     if holds_checkout_lock(install_root):
-        return True
+        return result(True, "owned")
     root = Path(install_root or _default_install_root())
     sealed = _sealed_checkout_app(root)
     path = checkout_lock_path(root)
@@ -1379,24 +1441,26 @@ def checkout_lock_held(install_root: Path | str | None = None) -> bool:
     except FileNotFoundError:
         try:
             _verify_sealed_checkout(Path(install_root or _default_install_root()))
-        except OSError:
-            return True
-        return False
-    except OSError:
-        return True
+        except OSError as error:
+            return result(True, "sealed_missing_invalid", error)
+        return result(False, "missing")
+    except OSError as error:
+        return result(True, "open_error", error)
     try:
         if sealed:
             opened, named = os.fstat(fd), path.lstat()
             if (not S_ISREG(named.st_mode) or named.st_nlink != 1
                     or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
-                return True
-        if not _try_lock(fd):
-            return True
+                return result(True, "sealed_identity_invalid")
+        locked = _try_lock(fd, observation=observation) if observation is not None else _try_lock(fd)
+        if not locked:
+            return result(True, "lock_rejected")
         _verify_sealed_checkout(Path(install_root or _default_install_root()), fd)
         _unlock(fd)
-        return False
-    except OSError:
-        return _sealed_checkout_app(Path(install_root or _default_install_root()))
+        return result(False, "free")
+    except OSError as error:
+        held = _sealed_checkout_app(Path(install_root or _default_install_root()))
+        return result(held, "probe_error", error)
     finally:
         os.close(fd)
 

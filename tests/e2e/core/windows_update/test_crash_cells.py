@@ -92,6 +92,7 @@ from tests.e2e.core.windows_update._machine import (
     taskkill_tree,
 )
 from tests.fakes.fake_llm_provider import FakeLLMServer
+from tests.e2e.core.windows_update._process_evidence import record_root, root_observation
 
 pytestmark = [pytest.mark.platforms("windows"), pytest.mark.integration,
               pytest.mark.live_system_guard_bypass, REQUIRES_OPT_IN]
@@ -366,8 +367,15 @@ def _kill_when(machine, proc, label: str, point, target: str) -> str:
         if seen:
             # A persistent point (HEAD at the target) also holds after a clean exit: only an
             # update still running when taskkill found it was interrupted there.
-            killed = taskkill_tree(proc.pid) if proc.poll() is None else None
-            proc.wait(timeout=60)
+            running = proc.poll() is None
+            request = root_observation(proc, "root_kill_requested") if running else None
+            killed = taskkill_tree(proc.pid) if running else None
+            try:
+                code = proc.wait(timeout=60)
+            except BaseException as error:
+                record_root(machine, proc, "root_wait_error", error=error, request=request)
+                raise
+            record_root(machine, proc, "root_wait_returned", returncode=code, request=request)
             machine.kill_owned()  # stragglers that left the tree (detached helpers)
             if not _kill_delivered(killed, proc.pid):
                 raise AssertionError(fail_with(

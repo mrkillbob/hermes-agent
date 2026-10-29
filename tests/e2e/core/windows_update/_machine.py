@@ -65,6 +65,7 @@ from tests.e2e.core.windows._helpers import (
 )
 from tests.fakes.fake_llm_provider import write_hermes_home
 from tests.e2e.core.windows_update._command_evidence import CommandEvidence
+from tests.e2e.core.windows_update._process_evidence import CleanupEvidence, note_identity, note_unclassified
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 OPT_IN_ENV = "HERMES_E2E_WINDOWS_INSTALL"
@@ -569,7 +570,7 @@ class Machine:
 
     # -- diagnostics ----------------------------------------------------------
 
-    def owned_processes(self) -> list[Any]:
+    def owned_processes(self, *, observation=None) -> list[Any]:
         """Live processes of this machine: exe/cwd/argv under its root, or its HERMES_HOME."""
         import psutil
 
@@ -579,15 +580,20 @@ class Machine:
         owned = []
         for proc in psutil.process_iter():
             try:
-                if proc.pid == me or proc.create_time() < self.started - 1.0:
+                if proc.pid == me:
+                    continue
+                birth = proc.create_time()
+                if birth < self.started - 1.0:
                     continue
                 env = {k.upper(): v for k, v in proc.environ().items()}
                 hh = os.path.normcase(os.path.normpath(env.get("HERMES_HOME", "") or "-"))
                 blob = os.path.normcase(" ".join([proc.exe() or "", proc.cwd() or "", *proc.cmdline()]))
-            except (psutil.Error, OSError):
+            except (psutil.Error, OSError) as error:
+                note_unclassified(observation, error)
                 continue
             if hh == home or any(root in blob for root in roots):
                 owned.append(proc)
+                note_identity(observation, proc, birth)
         return owned
 
     def evidence(self) -> str:
@@ -616,10 +622,19 @@ class Machine:
 
     def kill_owned(self) -> None:
         """Hard-stop every live process of this machine (end of a gateway phase, teardown)."""
-        kill_tree(self.owned_processes())
-        for proc in self._spawned:
-            if proc.poll() is None:
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=60, check=False)
+        scan = {}
+        owned = self.owned_processes(observation=scan)
+        evidence = CleanupEvidence(self.root / "transcripts" / "process-cleanup.jsonl", scan)
+        try:
+            kill_tree(owned, observe=evidence.observe)
+            for proc in self._spawned:
+                code = proc.poll()
+                evidence.tracked(proc, "tracked_poll", code)
+                if code is None:
+                    result = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=60, check=False)
+                    evidence.tracked(proc, "tracked_taskkill_returned", result.returncode)
+        finally:
+            evidence.finish()
 
     def teardown(self) -> None:
         self.kill_owned()
