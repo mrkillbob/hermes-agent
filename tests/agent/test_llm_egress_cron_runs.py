@@ -43,6 +43,24 @@ def test_exact_runs_result_reaches_sender(tmp_path, monkeypatch, direct):
     assert json.loads(sent["messages"][1]["content"]) == RESULT
 
 
+@pytest.mark.parametrize("direct", [False, True])
+def test_runs_for_base64_shaped_kebab_job_name_reaches_sender(tmp_path, monkeypatch, direct):
+    # hermes-upstream-sync is rejected by the free-text sanitizer by chance; it is a plain
+    # job name, and the call bytes must reach the sender exactly as the model wrote them.
+    arguments = {"action": "runs", "job_id": "hermes-upstream-sync"}
+    body = request(direct=direct, arguments=arguments)
+    expected = body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+    sent = dispatch(tmp_path, monkeypatch, body)
+    assert sent["messages"][0]["tool_calls"][0]["function"]["arguments"] == expected
+    assert json.loads(sent["messages"][1]["content"]) == RESULT
+
+
+@pytest.mark.parametrize("job_id", ["c2VjcmV0LXBheWxvYWQ=", "aGVybWVzLXVwc3RyZWFt", "Zm9vYmFyYmF6cXV4"])
+def test_encoded_value_as_job_id_stays_blocked(tmp_path, monkeypatch, job_id):
+    with pytest.raises(EgressBlocked):
+        dispatch(tmp_path, monkeypatch, request(arguments={"action": "runs", "job_id": job_id}))
+
+
 @pytest.mark.parametrize(
     "result",
     [

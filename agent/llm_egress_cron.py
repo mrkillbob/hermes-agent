@@ -13,6 +13,8 @@ from hashlib import sha256
 from typing import Any, Mapping
 
 from agent.llm_egress_firewall import (
+    _contains_canonical_base64,
+    _generated_context_text_for_base64_scan,
     GeneratedContextSegment,
     OutboundText,
     SanitizedSegment,
@@ -68,11 +70,11 @@ def _runs_arguments(args: Any) -> bool:
         return False
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", args["job_id"]):
         return False
-    try:
-        validate_sanitized_text(args["job_id"], max_bytes=256)
-    except (TypeError, ValueError):
-        return False
-    return True
+    # The call is admitted as generated context (see ``_project_runs_arguments``), so
+    # the id gets that lane's scan: bounded kebab/snake atoms pass, encoded values do not.
+    return not _contains_canonical_base64(
+        _generated_context_text_for_base64_scan(args["job_id"])
+    )
 
 
 def _arguments_kind(args: Any) -> str | None:
@@ -192,6 +194,42 @@ def _runs_projection(content: Any) -> str | None:
 _PROJECTIONS = {"list": _inventory_projection, "runs": _runs_projection}
 
 
+def _project_runs_arguments(
+    message: Mapping[str, Any], typed_message: Any, runs_ids: set[str]
+) -> Any:
+    """Re-type the arguments of exact runs calls as the generated context they are.
+
+    The bytes sent are the model's own, unchanged; only their scan lane moves from
+    free-text sanitizing (which rejects some kebab ids by chance) to generated context.
+    """
+    raw_calls, typed_calls = message.get("tool_calls"), (
+        typed_message.get("tool_calls") if isinstance(typed_message, Mapping) else None
+    )
+    if not isinstance(raw_calls, list) or not isinstance(typed_calls, list):
+        return typed_message
+    if len(raw_calls) != len(typed_calls):
+        return typed_message
+    rewritten = list(typed_calls)
+    for position, (raw, typed) in enumerate(zip(raw_calls, typed_calls)):
+        function = raw.get("function") if isinstance(raw, Mapping) else None
+        typed_function = typed.get("function") if isinstance(typed, Mapping) else None
+        if (
+            raw.get("id") not in runs_ids
+            or not isinstance(function, Mapping)
+            or not isinstance(function.get("arguments"), str)
+            or not isinstance(typed_function, Mapping)
+        ):
+            continue
+        rewritten[position] = {
+            **typed,
+            "function": {
+                **typed_function,
+                "arguments": GeneratedContextSegment(function["arguments"]),
+            },
+        }
+    return {**typed_message, "tool_calls": rewritten}
+
+
 def project_cron_list(
     body: Mapping[str, Any],
     typed_body: Mapping[str, Any],
@@ -237,6 +275,9 @@ def project_cron_list(
                     call_id = call.get("id")
                     if isinstance(call_id, str) and call_id:
                         preceding[call_id] = kind
+            runs_ids = {c for c, k in preceding.items() if k == "runs" and call_counts[c] == 1}
+            if runs_ids:
+                output[index] = _project_runs_arguments(message, output[index], runs_ids)
             continue
         call_id = message.get("tool_call_id")
         typed_message = typed_messages[index]
