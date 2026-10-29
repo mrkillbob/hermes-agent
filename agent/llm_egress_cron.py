@@ -61,27 +61,49 @@ def _inventory_arguments(args: Any) -> bool:
     return True
 
 
-def _is_inventory_call(call: Mapping[str, Any]) -> bool:
+def _runs_arguments(args: Any) -> bool:
+    if not isinstance(args, dict) or args.get("action") != "runs":
+        return False
+    if set(args) != {"action", "job_id"} or not isinstance(args["job_id"], str):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", args["job_id"]):
+        return False
+    try:
+        validate_sanitized_text(args["job_id"], max_bytes=256)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _arguments_kind(args: Any) -> str | None:
+    if _inventory_arguments(args):
+        return "list"
+    return "runs" if _runs_arguments(args) else None
+
+
+def _cron_call_kind(call: Mapping[str, Any]) -> str | None:
+    """``"list"`` or ``"runs"`` for an exact cron read call, else ``None``."""
     function = call.get("function")
     if call.get("type") != "function" or not isinstance(function, Mapping):
-        return False
+        return None
     if set(function) != {"name", "arguments"}:
-        return False
+        return None
     args = _json_object(function.get("arguments"))
     if function.get("name") == "cronjob_manage":
-        return _inventory_arguments(args)
+        return _arguments_kind(args)
     if function.get("name") != "tool_call" or not isinstance(args, dict):
-        return False
+        return None
     calls = args.get("calls")
     if set(args) != {"calls"} or not isinstance(calls, list) or len(calls) != 1:
-        return False
+        return None
     nested = calls[0]
-    return (
+    if (
         isinstance(nested, dict)
         and set(nested) == {"name", "arguments"}
         and nested.get("name") == "cronjob_manage"
-        and _inventory_arguments(nested.get("arguments"))
-    )
+    ):
+        return _arguments_kind(nested.get("arguments"))
+    return None
 
 
 def _bound_untrusted_result(typed: Any, content: Any) -> bool:
@@ -134,6 +156,42 @@ def _inventory_projection(content: Any) -> str | None:
     return json.dumps(projected, separators=(",", ":"))
 
 
+def _runs_projection(content: Any) -> str | None:
+    """Re-emit a strictly validated ``action="runs"`` result: statuses and stamps only."""
+    from tools.cronjob_runs import RUN_STAMP, RUN_STATUSES, RUNS_LIMIT
+
+    result = _json_object(content)
+    if result is None or set(result) != {"success", "count", "runs"}:
+        return None
+    count, runs = result["count"], result["runs"]
+    if (
+        result["success"] is not True
+        or type(count) is not int
+        or not isinstance(runs, list)
+        or count != len(runs)
+        or count > RUNS_LIMIT
+    ):
+        return None
+    projected = []
+    for run in runs:
+        if not isinstance(run, dict) or not {"status", "claimed_at"} <= set(run):
+            return None
+        if set(run) - {"status", "claimed_at", "finished_at"}:
+            return None
+        if run["status"] not in RUN_STATUSES:
+            return None
+        stamps = [run[key] for key in ("claimed_at", "finished_at") if key in run]
+        if any(not isinstance(v, str) or not RUN_STAMP.fullmatch(v) for v in stamps):
+            return None
+        projected.append(dict(run))
+    return json.dumps(
+        {"success": True, "count": count, "runs": projected}, separators=(",", ":")
+    )
+
+
+_PROJECTIONS = {"list": _inventory_projection, "runs": _runs_projection}
+
+
 def project_cron_list(
     body: Mapping[str, Any],
     typed_body: Mapping[str, Any],
@@ -166,7 +224,7 @@ def project_cron_list(
             message.get("tool_call_id"), str
         ):
             result_counts[message["tool_call_id"]] += 1
-    preceding: set[str] = set()
+    preceding: dict[str, str] = {}
     output = list(typed_messages)
     for index, message in enumerate(messages):
         if not isinstance(message, Mapping):
@@ -174,10 +232,11 @@ def project_cron_list(
         if message.get("role") == "assistant":
             calls = message.get("tool_calls")
             for call in calls if isinstance(calls, list) else ():
-                if isinstance(call, Mapping) and _is_inventory_call(call):
+                kind = _cron_call_kind(call) if isinstance(call, Mapping) else None
+                if kind is not None:
                     call_id = call.get("id")
                     if isinstance(call_id, str) and call_id:
-                        preceding.add(call_id)
+                        preceding[call_id] = kind
             continue
         call_id = message.get("tool_call_id")
         typed_message = typed_messages[index]
@@ -197,7 +256,7 @@ def project_cron_list(
             )
         ):
             continue
-        projection = _inventory_projection(message.get("content"))
+        projection = _PROJECTIONS[preceding[call_id]](message.get("content"))
         if projection is not None:
             output[index] = {
                 **typed_message,
