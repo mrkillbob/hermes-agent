@@ -28,3 +28,13 @@ def bind_agent(agent, policy):
             or (existing is not None and existing is not policy)):
         raise RuntimeError('diagnostic_session_mismatch')
     agent._diagnostic_reference_policy = policy
+
+
+def lifecycle_export_messages(agent, messages):
+    """A retained seal outlives turn scope; extraction must not archive its context.
+
+    No transcript selection or acknowledgment is inferred. Keep cleanup hooks
+    running with empty context, including after a session-id change. Ordinary
+    sessions keep the original object and their existing extraction behavior.
+    """
+    return [] if retained_policy(agent) is not None else messages
