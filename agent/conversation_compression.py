@@ -34,6 +34,7 @@ from agent.context_compressor_summary import _accepts_keyword_argument
 from agent.context_engine import automatic_compaction_status_message, sanitize_memory_context
 from agent.conversation_compression_codex import _compress_context_via_codex_app_server
 from agent.conversation_compression_deadline import resolve_context_compression_timeouts
+from agent.conversation_compression_rejection import _strip_marker_for_comparison, warn_no_progress
 from agent.conversation_compression_telemetry import (
     _emit_aborted_attempt_telemetry, _emit_blocked_attempt_telemetry, _emit_bypassed_attempt_telemetry,
     _emit_compression_attempt_telemetry, _record_committed_attempt_effect, _snapshot_compression_effect_input,
@@ -78,16 +79,6 @@ COMPACTION_STATUS = f"🗜️ {COMPACTION_STATUS_MARKER} — summarizing earlier
 COMPACTION_HEARTBEAT_STATUS = f"🗜️ {COMPACTION_STATUS_MARKER} — still summarizing earlier conversation so I can continue..."
 
 COMPACTION_DONE_STATUS = "✓ Context compaction complete — continuing turn..."
-
-def _strip_marker_for_comparison(msgs: Any) -> Any:
-    """Copy ``msgs`` with the ``_db_persisted`` marker removed for no-op comparison.
-    Live dicts carry the marker while ``compress()`` output is swept, so a raw ``==`` would misclassify an
-    identical no-op copy as progress. Non-list inputs and non-dict entries pass through unchanged."""
-    from agent.context_compressor import _DB_PERSISTED_MARKER
-    if not isinstance(msgs, list):
-        return msgs
-    return [{k: v for k, v in m.items() if k != _DB_PERSISTED_MARKER} if isinstance(m, dict) else m for m in msgs]
-
 
 def _emit_compaction_done(agent: Any) -> None:
     """Emit the structured terminal edge for a started compaction."""
@@ -3439,6 +3430,7 @@ def _candidate_rejected(
             if callable(_recorder := getattr(agent.context_compressor, "_record_structural_no_op", None)):
                 _recorder("compaction returned the transcript unchanged (no_progress)")
         _emit_aborted_attempt_telemetry(agent, attempt.started_at, "no_progress", attempt.seed)
+        warn_no_progress(agent)
         return True
     if not compressed:
         logger.error(

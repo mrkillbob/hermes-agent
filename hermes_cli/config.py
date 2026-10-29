@@ -1523,7 +1523,7 @@ def _env_ref_lookup(name: str) -> Optional[str]:
     return _get_secret(name)
 
 
-def _env_expand_match(m: re.Match) -> str:
+def _env_expand_match(m: re.Match, *, lookup=None) -> str:
     """Expand one ``${VAR}`` (legacy bare name) or ``${env:VAR}`` (Cursor-style SecretRef).
     Other SecretRef sources (``file:``, ``bitwarden:``, ``vault:``...) are NOT resolved here:
     external backends inject their values into the environment at startup (the ``secrets:``
@@ -1540,7 +1540,7 @@ def _env_expand_match(m: re.Match) -> str:
                 "startup, so reference the variable as ${env:NAME} instead",
                 raw, inner.split(":", 1)[0])
         return raw  # non-env source, or empty ``${env:}``
-    val = _env_ref_lookup(name)
+    val = (_env_ref_lookup if lookup is None else lookup)(name)
     if val is not None:
         return val
     if inner.startswith("env:"):
@@ -1565,14 +1565,14 @@ def _env_ref_var_name(ref: str) -> Optional[str]:
     return ref
 
 
-def _expand_env_vars(obj):
-    """Recursively expand ``${VAR}`` / ``${env:VAR}`` in string values (keys/non-strings untouched)."""
+def _expand_env_vars(obj, *, lookup=None):
+    """Expand config refs recursively; optional lookup binds metadata without changing the environment."""
     if isinstance(obj, str):
-        return _ENV_REF_RE.sub(_env_expand_match, obj)
+        return _ENV_REF_RE.sub(lambda match: _env_expand_match(match, lookup=lookup), obj)
     if isinstance(obj, dict):
-        return {k: _expand_env_vars(v) for k, v in obj.items()}
+        return {k: _expand_env_vars(v, lookup=lookup) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_expand_env_vars(item) for item in obj]
+        return [_expand_env_vars(item, lookup=lookup) for item in obj]
     return obj
 
 

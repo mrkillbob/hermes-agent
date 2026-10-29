@@ -67,6 +67,12 @@ def _provision_test_profiles(home: Path) -> None:
         profile_home = home / "profiles" / profile
         profile_home.mkdir(parents=True)
         (profile_home / "config.yaml").write_text("# test profile identity\n", encoding="utf-8")
+        skill = profile_home / "skills" / "exampleproject-worktree-navigation"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: exampleproject-worktree-navigation\ndescription: synthetic navigation fixture\n---\nFixture.\n",
+            encoding="utf-8",
+        )
 
 
 def _registry(db_path: Path) -> CapabilityRegistry:

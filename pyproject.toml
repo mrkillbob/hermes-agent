@@ -624,8 +624,8 @@ environments = ["python_version >= '3.14'"]
 constraint-dependencies = [
   # Keep both torch and huggingface-hub above the filelock advisory range.
   "filelock>=4.2.1,<5",
-  # PTB's optional webhooks server must include the request-parser fixes.
-  "tornado>=6.5.9,<7",
+  # PTB's optional webhooks server needs the header-folding and chunked-body fixes.
+  "tornado>=6.6,<7",
   # GHSA-54p9-h82j-f925: release item-set operands after union/subtraction.
   "multidict==6.9.1",
 ]

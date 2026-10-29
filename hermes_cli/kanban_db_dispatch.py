@@ -352,8 +352,8 @@ def _pid_alive(pid: Optional[int]) -> bool:
                 timeout=1,
                 check=False,
             )
-            if proc.returncode != 0:
-                return False
+            if proc.returncode != 0:  # A failed ps is inconclusive; recheck for exit.
+                return _pid_exists(int(pid))
             if "Z" in (proc.stdout or "").strip():
                 return False
         except (OSError, subprocess.SubprocessError, TimeoutError):

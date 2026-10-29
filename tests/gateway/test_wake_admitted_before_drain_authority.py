@@ -18,13 +18,13 @@ WAKE = "[Kanban task completed] t_1"
 
 
 class Hold:
-    """Keeps the human turn running until ``finish`` is set."""
+    """Keeps a fixture turn running until ``finish`` is set."""
 
     def __init__(self):
         self.running, self.finish = asyncio.Event(), asyncio.Event()
 
 
-async def authority_route(monkeypatch, instance_id, executed, hold=None):
+async def authority_route(monkeypatch, instance_id, executed, hold=None, wake_hold=None):
     from gateway.config import GatewayConfig, Platform, PlatformConfig
     from gateway.platforms.base import SendResult
     from gateway.run import GatewayRunner
@@ -50,6 +50,9 @@ async def authority_route(monkeypatch, instance_id, executed, hold=None):
         if hold is not None and event.text == "A":
             hold.running.set()
             await hold.finish.wait()
+        if wake_hold is not None and event.text == WAKE:
+            wake_hold.running.set()
+            await wake_hold.finish.wait()
         captured = execution_result.get()
         if captured is not None:
             captured["result"] = {"final_response": "reply " + event.text, "messages": []}
@@ -79,7 +82,8 @@ async def test_authority_route_runs_a_wake_receipted_before_drain_once_after_res
     from gateway.wake import deliver_wake
 
     executed, hold = [], Hold() if busy else None
-    runner, adapter, authority, source = await authority_route(monkeypatch, "owner", executed, hold)
+    wake_hold = None if busy else Hold()
+    runner, adapter, authority, source = await authority_route(monkeypatch, "owner", executed, hold, wake_hold)
     await adapter.handle_message(MessageEvent(text="A", source=source, message_id="A"))
     if hold is not None:
         await asyncio.wait_for(hold.running.wait(), 10)
@@ -89,9 +93,19 @@ async def test_authority_route_runs_a_wake_receipted_before_drain_once_after_res
             what="the human turn to settle",
         )
     await asyncio.wait_for(deliver_wake(adapter, text=WAKE, source=source), 10)  # receipt: no retry
-    runner._draining = True  # /restart begins before the wake's turn is claimed
+    if wake_hold is not None:
+        await asyncio.wait_for(wake_hold.running.wait(), 10)
+    runner._draining = True  # busy: queued wake; idle: wake already claimed by this owner
     if hold is not None:
         hold.finish.set()
+    if wake_hold is not None:
+        wake_hold.finish.set()
+        # Admission is not completion: settle this owner's claimed wake before
+        # starting successor recovery over the same durable session.
+        await async_wait_until(
+            lambda: admissions(runner, authority, source)[-1] == ("automation", "terminal", "completed"),
+            what="the owner's pre-drain wake to settle",
+        )
     await async_wait_until(
         lambda: admissions(runner, authority, source)[0] == ("messaging", "terminal", "completed"),
         what="the human turn to settle",

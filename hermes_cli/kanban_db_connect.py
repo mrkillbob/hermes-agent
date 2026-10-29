@@ -686,16 +686,20 @@ def _schema_is_present(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
-def _open_configured(path: Path, under_lock, *, existing_only: bool = False) -> tuple[sqlite3.Connection, Any]:
+def _open_configured(path: Path, under_lock, *, existing_only: bool = False,
+                     require_schema: bool = False) -> tuple[sqlite3.Connection, Any]:
     """Open ``path`` with the kanban PRAGMA set, then run ``under_lock(conn)``.
     WAL activation and ``under_lock`` share the ``_INIT_LOCK`` critical section:
     WAL setup can take an exclusive lock while SQLite creates sidecars for a
     fresh DB, and concurrent gateway startup threads must not race before
-    ``_INITIALIZED_PATHS`` is populated. Closed if anything raises."""
+    ``_INITIALIZED_PATHS`` is populated. ``require_schema`` refuses empty files
+    before WAL setup can initialize their header. Closed if anything raises."""
     conn = _sqlite_connect(path, existing_only=True) if existing_only else _sqlite_connect(path)
     try:
         conn.row_factory = sqlite3.Row
         conn.text_factory = _kb._lossy_text
+        if require_schema and not _schema_is_present(conn):
+            raise ValueError('an existing initialized Kanban board is required')
         with _INIT_LOCK:
             # WAL doesn't work on network filesystems; the helper falls back to
             # DELETE with one ERROR log (see hermes_state_wal._WAL_INCOMPAT_MARKERS).
