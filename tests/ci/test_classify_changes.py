@@ -374,6 +374,10 @@ CASES = {
         ["tests/e2e/core/sqlite/test_torture.py"],
         _lanes(python=True, python_prod=False, scan=True, e2e=True),
     ),
+    "Telegram webhook fixture → messaging-equipped e2e": (
+        ["tests/plugins/test_telegram_webhook_http_compatibility.py"],
+        _lanes(python=True, python_prod=False, scan=True, e2e=True),
+    ),
     "state db → e2e": (["hermes_state_wal.py"], _lanes(python=True, scan=True, e2e=True)),
     "upgrade suite → e2e_upgrade, not e2e": (
         ["tests/e2e/core/upgrade/pm/test_pm_lifecycle.py"],
