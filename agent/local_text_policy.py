@@ -17,6 +17,12 @@ def local_text_only():
     return _restricted.get() or local_text_worker_enabled()
 
 
+def observer_hooks_suppressed():
+    """Optional observers must not receive restricted turn payloads or discover plugins."""
+    from agent.safe_worker_policy import safe_worker_enabled
+    return safe_worker_enabled() or local_text_only()
+
+
 @contextmanager
 def local_text_scope(enabled):
     token = _restricted.set(enabled is True or _restricted.get())

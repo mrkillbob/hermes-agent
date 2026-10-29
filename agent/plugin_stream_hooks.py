@@ -15,6 +15,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from agent.local_text_policy import observer_hooks_suppressed
 from hermes_cli.middleware import OBSERVER_SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,8 @@ def _worker(dispatcher: _ConsumerDispatcher) -> None:
 
 
 def _registered_callbacks(hook_name: str) -> tuple[Callable[..., Any], ...]:
+    if observer_hooks_suppressed():
+        return ()
     try:
         from hermes_cli import plugins
         return plugins.iter_hook_callbacks(hook_name)
@@ -132,6 +135,8 @@ def _dispatchers_for(hook_name: str) -> list[_ConsumerDispatcher]:
 
 def enqueue_plugin_stream_hook(hook_name: str, **payload: Any) -> bool:
     """Queue an observer hook for each consumer without running plugin code inline."""
+    if observer_hooks_suppressed():
+        return False
     queued = False
     item = (contextvars.copy_context(), dict(payload))
     for dispatcher in _dispatchers_for(hook_name):
@@ -158,6 +163,8 @@ def stream_reasoning_deltas_enabled() -> bool:
 
     Read-only scalar lookup: skips ``load_config()``'s deepcopy. Callers on the token path
     should still cache the result per stream (``_fire_reasoning_delta`` does)."""
+    if observer_hooks_suppressed():
+        return False
     try:
         from hermes_cli import config as config_mod
         config = config_mod.load_config_readonly()
