@@ -2,6 +2,7 @@
 import hashlib
 import importlib
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Barrier
@@ -101,6 +102,7 @@ def test_accepted_artifact_changes_only_status_and_one_digest_event(case, monkey
     'late_comment', 'revision', 'board', 'card', 'acceptance_revision',
     'artifact', 'provenance', 'missing_input', 'mutable_artifact', 'oversize',
     'empty_provenance', 'bad_digest', 'bad_reviewer', 'delegated', 'event_failure', 'edited_comment',
+    'invalid_composition',
 ])
 def test_artifact_disposition_refuses_stale_unbound_or_unaccepted_evidence(case, monkeypatch, change):
     api = _api()
@@ -123,6 +125,7 @@ def test_artifact_disposition_refuses_stale_unbound_or_unaccepted_evidence(case,
             'mutable_artifact': {'artifact': bytearray(ARTIFACT)},
             'oversize': {'artifact': b'x' * (1024 * 1024 + 1)},
             'empty_provenance': {'provenance': b''},
+            'invalid_composition': {'allow_nested': 1},
         }
         if change == 'late_comment':
             with connect_closing(board=BOARD) as other:
@@ -177,6 +180,91 @@ def test_competing_acceptances_archive_exactly_once(case):
         after = _selected_task_rows(conn, [case])
         assert after['tasks'] == [dict(before['tasks'][0], status='archived')]
         assert len(after['task_events']) == len(before['task_events']) + 1
+
+
+@pytest.mark.parametrize('finish', ['commit', 'rollback'])
+def test_explicit_composition_keeps_storage_preflight_and_mutation_atomic(case, finish):
+    api = _api()
+    with connect_closing(board=BOARD) as conn:
+        before = _selected_task_rows(conn, [case])
+        decision = _decision(api, case, task_revision(BOARD, case, before))
+        try:
+            with kb.write_txn(conn):
+                # The operator can now qualify the whole store while holding
+                # the same writer reservation used for the selected mutation.
+                assert conn.execute("SELECT count(*) FROM tasks WHERE status='running'").fetchone()[0] == 0
+                assert _apply(api, conn, case, decision, allow_nested=True)
+                assert conn.in_transaction
+                if finish == 'rollback':
+                    raise RuntimeError('Synthetic postflight failure before outer commit')
+        except RuntimeError:
+            if finish != 'rollback':
+                raise
+        after = _selected_task_rows(conn, [case])
+        if finish == 'rollback':
+            assert after == before
+        else:
+            assert after['tasks'] == [dict(before['tasks'][0], status='archived')]
+            assert len(after['task_events']) == len(before['task_events']) + 1
+
+
+def test_nested_artifact_disposition_requires_explicit_opt_in(case):
+    api = _api()
+    with connect_closing(board=BOARD) as conn:
+        before = _selected_task_rows(conn, [case])
+        decision = _decision(api, case, task_revision(BOARD, case, before))
+        with kb.write_txn(conn):
+            with pytest.raises(RuntimeError, match='Nested composition'):
+                _apply(api, conn, case, decision)
+        assert _selected_task_rows(conn, [case]) == before
+
+
+def test_existing_artifact_connection_never_initializes_schema(case, monkeypatch):
+    api = _api()
+    from hermes_cli import kanban_db_connect as kbc
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('Artifact connection invoked the normal schema initializer')
+
+    monkeypatch.setattr(kbc, '_migrate_add_optional_columns', forbidden)
+    with api.existing_artifact_connection(board=BOARD) as conn:
+        before = list(conn.execute("SELECT name,sql FROM sqlite_master ORDER BY name"))
+        assert kb.get_task(conn, case).status == 'triage'
+        assert list(conn.execute("SELECT name,sql FROM sqlite_master ORDER BY name")) == before
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute('SELECT 1')
+
+
+@pytest.mark.parametrize('existing', ['missing', 'empty', 'partial'])
+def test_artifact_connection_preserves_missing_empty_and_partial_databases(tmp_path, monkeypatch, existing):
+    api = _api()
+    home = tmp_path / 'isolated'
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(home))
+    for name in ('HERMES_KANBAN_DB', 'HERMES_KANBAN_BOARD'):
+        monkeypatch.delenv(name, raising=False)
+    database = kb.kanban_db_path(board='default')
+    if existing == 'missing':
+        with pytest.raises(ValueError):
+            with api.existing_artifact_connection(board='default'):
+                pytest.fail('Missing board was opened')
+        assert not home.exists()
+        return
+    database.parent.mkdir(parents=True)
+    if existing == 'empty':
+        database.write_bytes(b'')
+        with pytest.raises(ValueError):
+            with api.existing_artifact_connection(board='default'):
+                pytest.fail('Empty board was initialized')
+        assert database.read_bytes() == b''
+        return
+    with sqlite3.connect(database) as fixture:
+        fixture.execute('CREATE TABLE tasks(id TEXT PRIMARY KEY,status TEXT)')
+        fixture.execute("INSERT INTO tasks VALUES('t_00000001','triage')")
+    with api.existing_artifact_connection(board='default') as conn:
+        assert [row['name'] for row in conn.execute('PRAGMA table_info(tasks)')] == ['id', 'status']
+        assert [tuple(row) for row in conn.execute('SELECT * FROM tasks')] == [('t_00000001', 'triage')]
+        assert [row['name'] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")] == ['tasks']
 
 
 _OWNER_FIELDS = ('claim_lock', 'claim_expires', 'worker_pid', 'worker_started_at',

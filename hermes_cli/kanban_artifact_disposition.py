@@ -7,6 +7,7 @@ No worker, HTTP endpoint or automatic classifier exposes this operation.
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 import hashlib
 import json
@@ -22,6 +23,26 @@ from hermes_cli.kanban_transfer import _selected_task_rows
 _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
 _IDENTIFIER = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z')
 _MAX_BYTES = 1024 * 1024
+
+
+@contextlib.contextmanager
+def existing_artifact_connection(*, board):
+    """Open a canonical existing board with normal tracked connection settings.
+
+    No creation, migration, quarantine, schema repair or initialized-cache
+    assertion occurs. The operator must qualify the full schema, triggers and
+    quiescence under its guarded writer transaction before calling archival.
+    Ordinary SQLite WAL/SHM bookkeeping remains possible.
+    """
+    board = kb._require_slug(board)
+    path = kb.kanban_db_path(board=board)
+    kb._assert_not_delegated_child_mutation(path)
+    if not path.is_file():
+        raise ValueError('an existing initialized Kanban board is required')
+    conn, _ = kbc._open_configured(path, kbc._schema_is_present,
+                                  existing_only=True, require_schema=True)
+    with contextlib.closing(conn):
+        yield conn
 
 
 @dataclass(frozen=True)
@@ -58,15 +79,19 @@ def _require_bytes(value, expected):
 
 
 def archive_accepted_artifact(conn, task_id, *, board, expected_revision, evidence,
-                              artifact: bytes, provenance: bytes):
+                              artifact: bytes, provenance: bytes, allow_nested: bool = False):
     """Archive accepted intake with one digest-only event and no completion hooks.
 
     Missing-input stops do not qualify as completed deliverables here. This path
     refuses links, runs, active ownership and holds rather than releasing them.
     The caller retains the accepted artifact and provenance; neither body nor
     filesystem path is copied into the board's audit event.
+
+    An operator may explicitly compose this side-effect-free primitive inside
+    its own guarded transaction to keep store-wide preflight atomic. Its success
+    then releases only a savepoint; durability requires the outer commit.
     """
-    if type(evidence) is not ArtifactAcceptance:
+    if type(evidence) is not ArtifactAcceptance or type(allow_nested) is not bool:
         raise ValueError('explicit artifact acceptance is required')
     payload = evidence.payload()
     board = kb._require_slug(board)
@@ -77,7 +102,7 @@ def archive_accepted_artifact(conn, task_id, *, board, expected_revision, eviden
     actual = kbc._main_db_file(conn)
     if actual is None or Path(actual).resolve() != kb.kanban_db_path(board=board).resolve():
         raise ValueError('artifact disposition connection does not match canonical board')
-    with kb.write_txn(conn):
+    with kb.write_txn(conn, allow_nested=allow_nested):
         rows = _selected_task_rows(conn, [task_id])
         require_task_revision(expected_revision, board, task_id, rows)
         _require_inactive_intake(rows)
