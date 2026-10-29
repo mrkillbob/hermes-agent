@@ -6,11 +6,12 @@ import re
 
 
 def expand_metadata_path(entry: str, destination: dict[str, str], *, windows: bool,
-                         config_expand=None) -> str:
+                         config_expand=None, env_lookup=None) -> str:
     """Keep native variable/quote syntax; inserted destination values are literal.
 
     The caller supplies structural worker fields only, never profile secrets.
-    Other variables retain the host path module's ordinary expansion behavior.
+    Other variables use the supplied profile lookup when present, otherwise the
+    host path module. Complete config references can reuse its canonical parser.
     """
     pattern = (r"'[^']*'?|%(%|[^%]*%?)|\$(\$|[-\w]+|\{[^}]*\}?)"
                if windows else r"\$(\w+|\{[^}]*\}?)")
@@ -32,6 +33,11 @@ def expand_metadata_path(entry: str, destination: dict[str, str], *, windows: bo
                 return token
             name = name[1:-1]
         key = name.upper() if windows else name
-        return destination[key] if key in destination else native(token)
+        if key in destination:
+            return destination[key]
+        if env_lookup is not None:
+            value = env_lookup(name)
+            return token if value is None else value
+        return native(token)
 
     return re.sub(pattern, replace, entry, flags=re.ASCII)

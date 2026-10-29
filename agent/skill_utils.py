@@ -305,7 +305,8 @@ def _expand_path(entry: str) -> Path:
             return destination[key] if key in destination else _env_ref_lookup(name)
 
         expanded = expand_metadata_path(entry, destination, windows=os.name == "nt",
-                                        config_expand=lambda token: _expand_env_vars(token, lookup=lookup))
+                                        config_expand=lambda token: _expand_env_vars(token, lookup=lookup),
+                                        env_lookup=lookup)
         return Path(os.path.expanduser(expanded))
     return Path(os.path.expanduser(os.path.expandvars(entry)))
 

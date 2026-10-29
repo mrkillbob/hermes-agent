@@ -531,6 +531,7 @@ def test_config_env_reference_preserves_literal_destination_value(board, tmp_pat
     skill_at(root)
     monkeypatch.setenv("SHARED_SKILLS", str(root))
     monkeypatch.setenv("SECOND", "must-not-expand")
+    (profile / ".env").write_text(f"SHARED_SKILLS={root}\n", encoding="utf-8")
     settings = {"model": "synthetic-unused", "skills": {"create_dir": "${ env:SHARED_SKILLS }"}}
     if managed:
         managed_dir = tmp_path / "managed"
@@ -566,6 +567,7 @@ def test_config_references_in_disabled_rules_remain_effective(board, tmp_path, m
     conn, profile = board
     skill_at(profile / "skills", "plain-synthetic")
     monkeypatch.setenv("SYNTHETIC_DISABLED", "plain-synthetic")
+    (profile / ".env").write_text("SYNTHETIC_DISABLED=plain-synthetic\n", encoding="utf-8")
     settings = {"model": "synthetic-unused", "skills": {"disabled": [reference]}}
     if managed:
         managed_dir = tmp_path / "managed"
@@ -577,3 +579,70 @@ def test_config_references_in_disabled_rules_remain_effective(board, tmp_path, m
         atomic_config_write(profile / "config.yaml", settings)
     with pytest.raises(ValueError, match="unavailable"):
         create(conn, "synthetic-worker", ["plain-synthetic"])
+
+
+@pytest.mark.parametrize("operation", ["create", "assign"])
+@pytest.mark.parametrize("reference", ["${SYNTHETIC_PATH}", "${env:SYNTHETIC_PATH}", "$SYNTHETIC_PATH"])
+@pytest.mark.parametrize("creator_has_value", [False, True])
+def test_destination_profile_references_do_not_borrow_creator_scope(
+    board, monkeypatch, operation, reference, creator_has_value,
+):
+    from agent.secret_scope import (current_secret_scope, current_secret_scope_home,
+                                    reset_multiplex_context, reset_secret_scope,
+                                    set_multiplex_context, set_secret_scope)
+    conn, profile = board
+    root = profile / "owned-extra"
+    skill_at(root)
+    (profile / ".env").write_text(f"SYNTHETIC_PATH={root}\n", encoding="utf-8")
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
+        "create_dir": reference}})
+    monkeypatch.setenv("SYNTHETIC_PATH", str(profile.parent.parent / "wrong-process"))
+    creator = {"SYNTHETIC_PATH": str(profile.parent.parent / "wrong-scope")} if creator_has_value else {}
+    creator_home = str(profile.parent.parent)
+    tid = create(conn, "external-control-plane", ["synthetic-shared"]) if operation == "assign" else None
+    context_token = set_multiplex_context(True)
+    scope_token = set_secret_scope(creator, profile_home=creator_home)
+    try:
+        if operation == "create":
+            assert create(conn, "synthetic-worker", ["synthetic-shared"])
+        else:
+            assert kb.assign_task(conn, tid, "synthetic-worker")
+    finally:
+        assert current_secret_scope() == creator
+        assert current_secret_scope_home() == creator_home
+        reset_secret_scope(scope_token)
+        reset_multiplex_context(context_token)
+
+
+@pytest.mark.parametrize("operation", ["create", "assign"])
+def test_missing_destination_reference_refuses_and_restores_all_scopes(board, monkeypatch, operation):
+    from agent.runtime_cwd import scoped_session_cwd
+    from agent.secret_scope import (current_secret_scope, reset_multiplex_context, reset_secret_scope,
+                                    set_multiplex_context, set_secret_scope)
+    from hermes_constants import get_hermes_home
+
+    conn, profile = board
+    root = profile / "creator-only"
+    skill_at(root)
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
+        "create_dir": "${env:SYNTHETIC_MISSING}"}})
+    creator = {"SYNTHETIC_MISSING": str(root)}
+    monkeypatch.setenv("SYNTHETIC_MISSING", str(root))
+    tid = create(conn, "external-control-plane", ["synthetic-shared"]) if operation == "assign" else None
+    before = [list(conn.execute(f"SELECT * FROM {table}")) for table in ("tasks", "task_events")]
+    original_home, original_cwd = get_hermes_home(), scoped_session_cwd()
+    context_token = set_multiplex_context(True)
+    scope_token = set_secret_scope(creator, profile_home=str(profile.parent.parent))
+    try:
+        with pytest.raises(ValueError, match="unavailable"):
+            if operation == "create":
+                create(conn, "synthetic-worker", ["synthetic-shared"])
+            else:
+                kb.assign_task(conn, tid, "synthetic-worker")
+        assert current_secret_scope() == creator
+        assert get_hermes_home() == original_home
+        assert scoped_session_cwd() == original_cwd
+        assert [list(conn.execute(f"SELECT * FROM {table}")) for table in ("tasks", "task_events")] == before
+    finally:
+        reset_secret_scope(scope_token)
+        reset_multiplex_context(context_token)

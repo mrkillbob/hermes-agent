@@ -549,18 +549,24 @@ def load_env_file(env_path: Path) -> dict[str, str]:
     return secrets
 
 
-def build_profile_secret_scope(hermes_home: Path) -> dict[str, str]:
+def build_profile_secret_scope(hermes_home: Path, *, include_shared_credentials: bool = True) -> dict[str, str]:
     """Build a profile's secret mapping from shared model keys and its own secrets.
 
-    Named profiles inherit only model-provider credentials from the installation
+    By default, named profiles inherit only model-provider credentials from the installation
     root; their platform, relay, and arbitrary service credentials remain private.
     The profile's own ``.env`` and external secret source are layered afterwards,
     so an explicit profile key wins. Global vars are NOT copied in — ``get_secret``
     reads those from ``os.environ`` — so the scope still contains only credentials
     that are authorized for this profile.
+    Metadata callers can omit shared credentials without discovering providers;
+    local, cached-source and managed composition retain the same precedence.
     """
-    secrets = _shared_model_provider_secrets(Path(hermes_home))
-    secrets.update(_shared_github_automation_secrets(Path(hermes_home)))
+    # Metadata admission needs the profile's path variables, without discovering
+    # provider plugins or reading installation-wide shared credential stores.
+    secrets = {}
+    if include_shared_credentials:
+        secrets = _shared_model_provider_secrets(Path(hermes_home))
+        secrets.update(_shared_github_automation_secrets(Path(hermes_home)))
     secrets.update(load_env_file(Path(hermes_home) / ".env"))
     try:
         from hermes_cli.env_loader import get_secret_source_values

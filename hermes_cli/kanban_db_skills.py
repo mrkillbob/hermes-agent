@@ -140,15 +140,20 @@ def validate_local_task_skills(
     if not profile_exists(assignee):
         return
     from agent.runtime_cwd import reset_session_cwd, set_session_cwd
+    from agent.secret_scope import reset_secret_scope, set_secret_scope
     from agent.skill_utils import get_disabled_skill_names, get_skill_search_roots, skill_metadata_config
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from tools.skills_tool import skill_lookup_path_error
+    from tui_gateway.launch_profile_policy import owner_secret_scope
 
     home = get_profile_dir(assignee)
     cwd = _task_skill_cwd(home, workspace_path, project_repo, project_id, task_id, workspace_kind)
     home_token = set_hermes_home_override(home)
     cwd_token = set_session_cwd(str(cwd))
+    secret_token = None
     try:
+        secret_token = set_secret_scope(
+            owner_secret_scope(home, include_shared_credentials=False), profile_home=str(home))
         config = _assigned_skill_config(home)
         worker_env = {"HERMES_KANBAN_TASK": task_id or "",
                       "HERMES_KANBAN_WORKSPACE": str(Path(workspace_path).expanduser()) if workspace_path else "",
@@ -168,6 +173,8 @@ def validate_local_task_skills(
             if unavailable:
                 raise ValueError("task skills unavailable to assigned profile: " + ", ".join(unavailable))
     finally:
+        if secret_token is not None:
+            reset_secret_scope(secret_token)
         reset_session_cwd(cwd_token)
         reset_hermes_home_override(home_token)
 
