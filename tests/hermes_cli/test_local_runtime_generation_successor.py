@@ -20,7 +20,7 @@ def _write(path, raw):
 
 
 @pytest.fixture
-def case(tmp_path, monkeypatch):
+def case(tmp_path, monkeypatch, request):
     root = tmp_path / 'runtime'
     root.mkdir()
     facts = {'host': '11111111-1111-4111-8111-111111111111',
@@ -40,6 +40,8 @@ def case(tmp_path, monkeypatch):
             g.bind_publication(root, ticket, raw, host, volume)
             _write(root / 'server.json', raw)
     digest = hashlib.sha256(_final(0)).hexdigest()
+    if checkpoint_boot := getattr(request, 'param', None):
+        facts['boot'] = checkpoint_boot
     checkpoint = reconciliation.checkpoint(expected_sha256=digest)
     facts['boot'] = '44444444-4444-4444-8444-444444444444'
     retired = reconciliation.reconcile(expected_sha256=digest, checkpoint_id=checkpoint['checkpoint_id'])
@@ -210,3 +212,102 @@ def test_authenticated_ancestor_damage_refuses_later_publication(case, monkeypat
             g.authorize(root, second, host, volume)
         assert not (child / 'authorized.json').exists()
         assert (root / ('.generation-' + first) / 'publication-2.json').exists()
+
+
+@pytest.mark.platforms('macos')
+@pytest.mark.parametrize('case', [None, '55555555-5555-4555-8555-555555555555'], indirect=True)
+@pytest.mark.parametrize('reserve_later', [False, True])
+def test_checkpoint_boot_is_independent_of_launch_and_successor_boot(case, reserve_later):
+    root, facts, host, volume, first, digest, retired = case
+    if reserve_later:
+        facts['boot'] = '66666666-6666-4666-8666-666666666666'
+    parent_dir = root / ('.generation-' + first)
+    preserved = {path: path.read_bytes() for path in parent_dir.iterdir()}
+    checkpoint_path = root / ('.router-checkpoint-' + digest + '.json')
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    receipt_bytes = Path(retired['receipt_path']).read_bytes()
+
+    second = _advance(root, host, volume, 1)
+
+    assert second != first
+    assert (root / 'server.json').read_bytes() == _final(1)
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert Path(retired['receipt_path']).read_bytes() == receipt_bytes
+    assert Path(retired['recovery_path']).read_bytes() == _final(0)
+    assert all(path.read_bytes() == raw for path, raw in preserved.items())
+
+
+@pytest.mark.platforms('macos')
+@pytest.mark.parametrize('case', ['55555555-5555-4555-8555-555555555555'], indirect=True)
+@pytest.mark.parametrize('fault', ['checkpoint_host', 'receipt_prior', 'retirement_host',
+                                  'retirement_same_boot', 'successor_host',
+                                  'successor_checkpoint_boot', 'successor_launch_boot'])
+def test_historical_identity_relations_refuse_even_with_consistent_hashes(case, fault):
+    root, facts, _, _, first, digest, retired = case
+    parent_dir = root / ('.generation-' + first)
+    _, parent = h.io.read_json(parent_dir / 'reservation.json')
+    checkpoint_path = root / ('.router-checkpoint-' + digest + '.json')
+    _, checkpoint = h.io.read_json(checkpoint_path)
+    receipt_path = Path(retired['receipt_path'])
+    _, receipt = h.io.read_json(receipt_path)
+    child = {'identity': dict(facts)}
+    foreign = '77777777-7777-4777-8777-777777777777'
+    def foreign_checkpoint():
+        checkpoint['identity']['host'] = foreign
+        receipt['prior_identity'] = dict(checkpoint['identity'])
+        receipt['retired_identity']['host'] = foreign
+    changes = {
+        'checkpoint_host': foreign_checkpoint,
+        'receipt_prior': lambda: receipt.update(prior_identity=dict(parent['identity'])),
+        'retirement_host': lambda: receipt['retired_identity'].update(host=foreign),
+        'retirement_same_boot': lambda: receipt['retired_identity'].update(boot=checkpoint['identity']['boot']),
+        'successor_host': lambda: child['identity'].update(host=foreign),
+        'successor_checkpoint_boot': lambda: child['identity'].update(boot=checkpoint['identity']['boot']),
+        'successor_launch_boot': lambda: child['identity'].update(boot=parent['identity']['boot']),
+    }
+    changes[fault]()
+    checkpoint_raw = h.io.encoded(checkpoint)
+    _write(checkpoint_path, checkpoint_raw)
+    receipt['checkpoint_sha256'] = hashlib.sha256(checkpoint_raw).hexdigest()
+    receipt_raw = h.io.encoded(receipt)
+    _write(receipt_path, receipt_raw)
+    reference = {'retirement_sha256': hashlib.sha256(receipt_raw).hexdigest()}
+    link = (root / '.generation-current.json').read_bytes()
+    state = (root / 'server.json').read_bytes()
+    preserved = {path: path.read_bytes() for path in parent_dir.iterdir()}
+
+    with pytest.raises(RuntimeError, match='generation_retirement_unqualified'):
+        h._retired_ancestor(root, digest, reference, parent, child)
+
+    assert (root / '.generation-current.json').read_bytes() == link
+    assert (root / 'server.json').read_bytes() == state
+    assert Path(retired['recovery_path']).read_bytes() == _final(0)
+    assert all(path.read_bytes() == raw for path, raw in preserved.items())
+
+
+@pytest.mark.platforms('macos')
+@pytest.mark.parametrize('case', ['55555555-5555-4555-8555-555555555555'], indirect=True)
+@pytest.mark.parametrize('fault', ['launch_boot', 'checkpoint_boot', 'foreign_host'])
+def test_invalid_successor_identity_refuses_before_link_replacement(case, fault):
+    root, facts, host, volume, first, digest, retired = case
+    changes = {
+        'launch_boot': {'boot': '22222222-2222-4222-8222-222222222222'},
+        'checkpoint_boot': {'boot': '55555555-5555-4555-8555-555555555555'},
+        'foreign_host': {'host': '77777777-7777-4777-8777-777777777777'},
+    }
+    facts.update(changes[fault])
+    link = (root / '.generation-current.json').read_bytes()
+    parent_dir = root / ('.generation-' + first)
+    preserved = {path: path.read_bytes() for path in parent_dir.iterdir()}
+    before = set(root.iterdir())
+
+    with bootstrap._cross_process_boot_lock(timeout_s=0) as acquired:
+        assert acquired
+        with pytest.raises(RuntimeError, match='prior_generation_requires_inspection'):
+            g.reserve(root, digest, host, volume)
+
+    assert set(root.iterdir()) == before
+    assert (root / '.generation-current.json').read_bytes() == link
+    assert (root / 'server.json').read_bytes() == _final(0)
+    assert Path(retired['recovery_path']).read_bytes() == _final(0)
+    assert all(path.read_bytes() == raw for path, raw in preserved.items())

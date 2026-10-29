@@ -28,6 +28,7 @@ def _retired_ancestor(root, state_digest, reference, parent, child):
     checkpoint_raw, checkpoint = io.read_json(root / ('.router-checkpoint-' + state_digest + '.json'))
     binding = checkpoint.get('binding', {})
     prior = io.boot_identity(parent.get('identity'))
+    checkpoint_identity = io.boot_identity(checkpoint.get('identity'))
     retired = io.boot_identity(receipt.get('retired_identity'))
     later = io.boot_identity(child.get('identity'))
     if (receipt.get('schema') != 1 or checkpoint.get('schema') != 1
@@ -37,10 +38,10 @@ def _retired_ancestor(root, state_digest, reference, parent, child):
             or checkpoint.get('source') != receipt['source']
             or receipt.get('original_binding') != binding or binding.get('sha256') != state_digest
             or any(binding.get(k) != parent['binding'][k] for k in parent['binding'])
-            or io.boot_identity(checkpoint.get('identity')) != prior
-            or io.boot_identity(receipt.get('prior_identity')) != prior
-            or retired['host'] != prior['host'] or retired['boot'] == prior['boot']
-            or later['host'] != prior['host'] or later['boot'] == prior['boot']):
+            or checkpoint_identity['host'] != prior['host']
+            or io.boot_identity(receipt.get('prior_identity')) != checkpoint_identity
+            or retired['host'] != checkpoint_identity['host'] or retired['boot'] == checkpoint_identity['boot']
+            or later['host'] != prior['host'] or later['boot'] in {prior['boot'], checkpoint_identity['boot']}):
         raise RuntimeError('generation_retirement_unqualified')
     backup = root / ('.router-recovery-' + checkpoint_id) / 'server.json'
     if receipt.get('recovery_path') != str(backup):
