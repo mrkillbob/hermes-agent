@@ -2,6 +2,9 @@
 Import-light by design: no tool registry, CLI config, or provider resolution."""
 
 import ast
+import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import logging
 import os
@@ -53,6 +56,29 @@ def is_skill_support_path(path, *, root: Optional[Path] = None) -> bool:
 
 
 _yaml_load_fn = None
+_SKILL_METADATA_CONFIG: ContextVar = ContextVar("skill_metadata_config", default=None)
+_SKILL_METADATA_PROJECT: ContextVar = ContextVar("skill_metadata_project", default=None)
+_SKILL_METADATA_WORKER: ContextVar = ContextVar("skill_metadata_worker", default=None)
+
+
+@contextmanager
+def skill_metadata_config(config: dict, *, project_start: Optional[Path] = None,
+                          worker_env: Optional[dict[str, str]] = None):
+    """Explicit profile settings for metadata resolution, never worker policy.
+
+    Cross-profile intake must not borrow its creator's frozen settings. Only
+    skill readers use this scoped copy; config/provider/worker-policy readers
+    retain their original snapshot. No scope escapes the caller's context.
+    """
+    token = _SKILL_METADATA_CONFIG.set({"skills": copy.deepcopy(config.get("skills", {}))})
+    project_token = _SKILL_METADATA_PROJECT.set(project_start)
+    worker_token = _SKILL_METADATA_WORKER.set(dict(worker_env or {}))
+    try:
+        yield
+    finally:
+        _SKILL_METADATA_WORKER.reset(worker_token)
+        _SKILL_METADATA_PROJECT.reset(project_token)
+        _SKILL_METADATA_CONFIG.reset(token)
 
 
 def yaml_load(content: str):
@@ -220,6 +246,9 @@ def _load_raw_config() -> dict[str, Any]:
     from agent.safe_worker_policy import worker_config_snapshot
     from hermes_cli.config_backend import config_exists, read_config_doc
 
+    metadata_config = _SKILL_METADATA_CONFIG.get()
+    if metadata_config is not None:
+        return metadata_config
     snapshot = worker_config_snapshot()
     if snapshot is not None:
         return snapshot
@@ -260,6 +289,25 @@ def _skills_cfg_get(key: str) -> Any:
 
 def _expand_path(entry: str) -> Path:
     """Expand ``~`` and ``${VAR}`` in a config path entry."""
+    worker = _SKILL_METADATA_WORKER.get()
+    if worker is not None:
+        from agent.skill_path_env import expand_metadata_path
+        from hermes_cli.config import _env_ref_lookup, _expand_env_vars
+        from hermes_constants import get_hermes_home
+
+        destination = {key: worker[key] for key in (
+            "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE", "HERMES_KANBAN_WORKSPACES_ROOT",
+        ) if key in worker}
+        destination["HERMES_HOME"] = str(get_hermes_home())
+
+        def lookup(name):
+            key = name.upper() if os.name == "nt" else name
+            return destination[key] if key in destination else _env_ref_lookup(name)
+
+        expanded = expand_metadata_path(entry, destination, windows=os.name == "nt",
+                                        config_expand=lambda token: _expand_env_vars(token, lookup=lookup),
+                                        env_lookup=lookup)
+        return Path(os.path.expanduser(expanded))
     return Path(os.path.expanduser(os.path.expandvars(entry)))
 
 
@@ -350,7 +398,7 @@ def get_external_skills_dirs() -> list[Path]:
     config_path = get_config_path()
     if not config_exists(config_path):
         return []
-    full_key = _config_cache_key(config_path)
+    full_key = _config_cache_key(config_path) if _SKILL_METADATA_CONFIG.get() is None else None
     cache_key = full_key
     cached = _EXTERNAL_DIRS_CACHE.get(cache_key) if cache_key is not None else None
     if cached is not None:
@@ -638,9 +686,11 @@ def is_project_root_trusted(root: Path) -> bool:
         ):
             return True
 
-        task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
-        workspace = os.environ.get("HERMES_KANBAN_WORKSPACE", "").strip()
-        workspaces_root = os.environ.get(
+        source = _SKILL_METADATA_WORKER.get()
+        source = os.environ if source is None else source
+        task_id = source.get("HERMES_KANBAN_TASK", "").strip()
+        workspace = source.get("HERMES_KANBAN_WORKSPACE", "").strip()
+        workspaces_root = source.get(
             "HERMES_KANBAN_WORKSPACES_ROOT", ""
         ).strip()
         if not task_id or task_id != resolved_root.name or not workspace or not workspaces_root:
@@ -680,7 +730,7 @@ def _current_project_root(trusted: bool) -> Optional[Path]:
     """cwd's project root when discovery is on and its trust state == *trusted*."""
     if _skills_cfg_get("project_discovery") is False:
         return None
-    root = find_project_root()
+    root = find_project_root(start=_SKILL_METADATA_PROJECT.get())
     return root if root is not None and is_project_root_trusted(root) == trusted else None
 
 

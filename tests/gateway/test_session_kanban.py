@@ -19,6 +19,9 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch, pr
     monkeypatch.delenv('HERMES_KANBAN_DB', raising=False)
     monkeypatch.delenv('HERMES_DELEGATED_CHILD', raising=False)
     monkeypatch.setattr('hermes_cli.profiles.resolve_profile_env', lambda name: str(tmp_path) if name == 'default' else str(tmp_path / name))
+    skill = tmp_path / 'skills' / 'owned-skill'
+    skill.mkdir(parents=True)
+    (skill / 'SKILL.md').write_text('---\nname: owned-skill\ndescription: synthetic policy fixture\n---\nFixture.\n')
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     (workspace / 'pyproject.toml').write_text('[project]\nname = "task"\n')  # a code worktree

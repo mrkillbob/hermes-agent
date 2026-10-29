@@ -131,7 +131,7 @@ def launch_terminal_env() -> dict[str, str]:
     return {k: v for k, v in capture_launch_env().items() if k.startswith("TERMINAL_")}
 
 
-def launch_secret_scope(launch_home: str | Path) -> dict[str, str]:
+def launch_secret_scope(launch_home: str | Path, *, include_shared_credentials: bool = True) -> dict[str, str]:
     """The launch profile's secret mapping: its ``.env`` + external sources over the launch env
     (systemd / ``op run`` injection survives the fail-closed flip; a secondary never sees it because
     its scope is built from its own files only). Bound for EVERY launch-profile body, multiplexing or
@@ -149,12 +149,13 @@ def launch_secret_scope(launch_home: str | Path) -> dict[str, str]:
     """
     from agent.secret_scope import _is_global_env, build_profile_secret_scope
     scope = {k: v for k, v in _launch_env().items() if not _is_global_env(k)}
-    scope.update(build_profile_secret_scope(Path(launch_home)))
+    options = {} if include_shared_credentials else {"include_shared_credentials": False}
+    scope.update(build_profile_secret_scope(Path(launch_home), **options))
     return scope
 
 
 
-def owner_secret_scope(home: str | Path) -> dict[str, str]:
+def owner_secret_scope(home: str | Path, *, include_shared_credentials: bool = True) -> dict[str, str]:
     """THE secret mapping for a body owned by *home*: ``launch_secret_scope`` when *home* is this
     process's own (its env-only keys from docker ``-e`` / systemd ``Environment=`` / ``op run`` have
     no file to rebuild from), else the profile's own files (``build_profile_secret_scope``). Every
@@ -165,9 +166,10 @@ def owner_secret_scope(home: str | Path) -> dict[str, str]:
     if active():
         return {}
     from agent.secret_scope import _is_process_home, build_profile_secret_scope
+    options = {} if include_shared_credentials else {"include_shared_credentials": False}
     if _is_process_home(Path(home)):
-        return launch_secret_scope(home)
-    return build_profile_secret_scope(Path(home))
+        return launch_secret_scope(home, **options)
+    return build_profile_secret_scope(Path(home), **options)
 
 
 @contextlib.contextmanager
