@@ -227,7 +227,7 @@ class LearningBroker:
                 if selected.status == 'reading':
                     selected.status = 'uncertain'
                 raise
-            except Exception:
+            except Exception:  # health: allow BLE001 -- Bound capture failures without disclosing note data or arbitrary exception text.
                 # Stable refusal only; no path, body, or arbitrary exception text.
                 if selected.status == 'reading':
                     selected.status = 'uncertain'
