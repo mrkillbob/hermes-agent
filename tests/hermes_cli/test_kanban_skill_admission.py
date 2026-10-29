@@ -15,6 +15,7 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(tmp_path / "no-managed-scope"))
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -262,3 +263,180 @@ def test_existing_relative_directory_does_not_use_creator_cwd(board, tmp_path, m
         kb.create_task(conn, title="Relative directory", assignee="synthetic-worker",
                        skills=["synthetic-shared"], workspace_kind="dir", workspace_path=".",
                        board="skills-probe", initial_status="todo")
+
+
+@pytest.mark.parametrize("tier", ["external_dirs", "create_dir", "trusted_project_dirs"])
+def test_assignee_settings_do_not_inherit_creator_worker_snapshot(board, tmp_path, monkeypatch, tier):
+    from agent import safe_worker_policy
+    conn, profile = board
+    root = tmp_path / "assignee-only"
+    workspace = None
+    if tier == "trusted_project_dirs":
+        (root / ".git").mkdir(parents=True)
+        skill_at(root / ".agents" / "skills")
+        workspace = str(root)
+    else:
+        skill_at(root)
+    value = str(root) if tier == "create_dir" else [str(root)]
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {tier: value}})
+    snapshot = {"skills": {}, "agent": {"max_turns": 3}}
+    monkeypatch.setattr(safe_worker_policy, "worker_config_snapshot", lambda: snapshot.copy())
+    assert kb.create_task(conn, title="Cross-profile metadata", assignee="synthetic-worker",
+                          skills=["synthetic-shared"], workspace_kind="dir" if workspace else "scratch",
+                          workspace_path=workspace, board="skills-probe", initial_status="todo")
+    assert safe_worker_policy.worker_config_snapshot() == snapshot
+
+
+@pytest.mark.parametrize("assignee_disabled", [True, False])
+def test_disabled_settings_belong_to_assignee_not_creator_snapshot(board, monkeypatch, assignee_disabled):
+    from agent import safe_worker_policy
+    conn, profile = board
+    skill_at(profile / "skills", "plain-synthetic")
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
+        "disabled": ["plain-synthetic"] if assignee_disabled else []}})
+    creator = {"skills": {"disabled": [] if assignee_disabled else ["plain-synthetic"]}}
+    monkeypatch.setattr(safe_worker_policy, "worker_config_snapshot", lambda: creator.copy())
+    if assignee_disabled:
+        with pytest.raises(ValueError, match="unavailable"):
+            create(conn, "synthetic-worker", ["plain-synthetic"])
+    else:
+        assert create(conn, "synthetic-worker", ["plain-synthetic"])
+    assert safe_worker_policy.worker_config_snapshot() == creator
+
+
+@pytest.mark.parametrize("disabled_platform", ["cli", "telegram"])
+def test_platform_disabled_is_evaluated_for_destination_cli_worker(board, monkeypatch, disabled_platform):
+    conn, profile = board
+    skill_at(profile / "skills", "plain-synthetic")
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
+        "platform_disabled": {disabled_platform: ["plain-synthetic"]}}})
+    monkeypatch.setenv("HERMES_PLATFORM", "telegram")
+    if disabled_platform == "cli":
+        with pytest.raises(ValueError, match="unavailable"):
+            create(conn, "synthetic-worker", ["plain-synthetic"])
+    else:
+        assert create(conn, "synthetic-worker", ["plain-synthetic"])
+
+
+def test_explicit_assignee_metadata_does_not_use_frozen_external_root_cache(board, tmp_path, monkeypatch):
+    from agent import skill_utils
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    conn, profile = board
+    target_root, stale_root = tmp_path / "target", tmp_path / "stale"
+    skill_at(target_root)
+    stale_root.mkdir()
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
+        "external_dirs": [str(target_root)]}})
+    token = set_hermes_home_override(profile)
+    try:
+        key = skill_utils._config_cache_key(profile / "config.yaml")
+    finally:
+        reset_hermes_home_override(token)
+    monkeypatch.setattr(skill_utils, "_EXTERNAL_DIRS_CACHE", {key: [stale_root]})
+    assert create(conn, "synthetic-worker", ["synthetic-shared"])
+    assert skill_utils._EXTERNAL_DIRS_CACHE == {key: [stale_root]}
+
+
+def test_nested_empty_metadata_restores_scope_and_never_replaces_worker_config(board, tmp_path, monkeypatch):
+    from agent import skill_utils, safe_worker_policy
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from hermes_cli.config import load_config_readonly
+    _, profile = board
+    root = tmp_path / "scoped"
+    root.mkdir()
+    creator = {"agent": {"max_turns": 3}, "skills": {"external_dirs": [str(root)]}}
+    monkeypatch.setattr(safe_worker_policy, "worker_config_snapshot", lambda: creator.copy())
+    monkeypatch.setattr(skill_utils, "_EXTERNAL_DIRS_CACHE", {})
+    home = set_hermes_home_override(profile)
+    try:
+        with skill_utils.skill_metadata_config({"skills": {"external_dirs": [str(root)]}}):
+            assert skill_utils.get_external_skills_dirs() == [root]
+            with pytest.raises(RuntimeError):
+                with skill_utils.skill_metadata_config({"skills": {}}):
+                    assert skill_utils.get_external_skills_dirs() == []
+                    assert load_config_readonly()["agent"]["max_turns"] == 3
+                    raise RuntimeError("synthetic refusal")
+            assert skill_utils.get_external_skills_dirs() == [root]
+        assert skill_utils._SKILL_METADATA_CONFIG.get() is None
+        assert safe_worker_policy.worker_config_snapshot() == creator
+    finally:
+        reset_hermes_home_override(home)
+
+
+def test_restricted_worker_does_not_read_an_assignee_config(board, monkeypatch):
+    from agent import safe_worker_policy
+    from hermes_cli import config_backend
+    from hermes_cli.kanban_db_skills import validate_local_task_skills
+    monkeypatch.setattr(safe_worker_policy, "safe_worker_enabled", lambda: True)
+    monkeypatch.setattr(config_backend, "read_config_doc", lambda *a: pytest.fail("restricted config read"))
+    with pytest.raises(ValueError, match="restricted worker"):
+        validate_local_task_skills(["synthetic"], "synthetic-worker")
+
+
+@pytest.mark.parametrize("honors_managed", [True, False])
+def test_managed_cli_disabled_rule_respects_destination_backend(board, tmp_path, monkeypatch, honors_managed):
+    from hermes_cli import config_backend, managed_scope
+    conn, profile = board
+    skill_at(profile / "skills", "plain-synthetic")
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    atomic_config_write(managed / "config.yaml", {"skills": {"platform_disabled": {"cli": ["plain-synthetic"]}}})
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    managed_scope.invalidate_managed_cache()
+    monkeypatch.setattr(config_backend.FileBackend, "honors_managed_config", lambda self: honors_managed)
+    if honors_managed:
+        with pytest.raises(ValueError, match="unavailable"):
+            create(conn, "synthetic-worker", ["plain-synthetic"])
+    else:
+        assert create(conn, "synthetic-worker", ["plain-synthetic"])
+
+
+def test_creator_worker_workspace_fence_does_not_replace_target_metadata_context(board, tmp_path, monkeypatch):
+    from agent.runtime_cwd import resolve_kanban_worker_cwd
+    conn, profile = board
+    target, creator = tmp_path / "target", tmp_path / "creator"
+    (target / ".git").mkdir(parents=True)
+    creator.mkdir()
+    skill_at(target / ".agents" / "skills")
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
+        "trusted_project_dirs": [str(target)]}})
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "creator-task")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(creator))
+    assert resolve_kanban_worker_cwd(str(target)) == str(creator)
+    assert kb.create_task(conn, title="Target metadata", assignee="synthetic-worker",
+                          skills=["synthetic-shared"], workspace_kind="dir", workspace_path=str(target),
+                          board="skills-probe", initial_status="todo")
+    assert resolve_kanban_worker_cwd(str(target)) == str(creator)
+
+
+def test_new_card_does_not_inherit_creator_implicit_project_trust(board, monkeypatch):
+    conn, profile = board
+    root = kb.workspaces_root(board="skills-probe")
+    creator = root / "creator-task"
+    (creator / ".git").mkdir(parents=True)
+    skill_at(creator / ".agents" / "skills")
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
+        "trusted_project_dirs": [str(root.parent)]}})
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "creator-task")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(creator))
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(root))
+    with pytest.raises(ValueError, match="unavailable"):
+        kb.create_task(conn, title="Distinct target", assignee="synthetic-worker",
+                       skills=["synthetic-shared"], workspace_kind="dir", workspace_path=str(creator),
+                       board="skills-probe", initial_status="todo")
+
+
+@pytest.mark.parametrize("tilde", [True, False])
+def test_reassignment_retains_destination_owned_workspace_trust(board, tmp_path, tilde):
+    conn, profile = board
+    tid = create(conn, "external-control-plane", ["synthetic-shared"])
+    root = kb.workspaces_root(board="skills-probe")
+    workspace = root / tid
+    (workspace / ".git").mkdir(parents=True)
+    skill_at(workspace / ".agents" / "skills")
+    spelling = "~/" + workspace.relative_to(tmp_path).as_posix() if tilde else str(workspace)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET workspace_kind='dir', workspace_path=? WHERE id=?", (spelling, tid))
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
+        "trusted_project_dirs": [str(root.parent)]}})
+    assert kb.assign_task(conn, tid, "synthetic-worker")

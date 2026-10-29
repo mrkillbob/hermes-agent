@@ -663,6 +663,13 @@ def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
     import hermes_cli.profiles as profmod
 
     monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    profile = kanban_home / "profiles" / "reviewer"
+    profile.mkdir(parents=True)
+    cfgmod.atomic_config_write(profile / "config.yaml", {})
+    skill = profile / "skills" / "domain-specific-review"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: domain-specific-review\ndescription: synthetic review fixture\n---\nFixture.\n")
     monkeypatch.setattr(
         cfgmod,
         "load_config",

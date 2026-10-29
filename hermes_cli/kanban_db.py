@@ -1535,9 +1535,6 @@ def create_task(
 
     from hermes_cli.kanban_db_skills import validate_local_task_skills
 
-    validate_local_task_skills(skills_list, assignee, workspace_path=workspace_path,
-                               project_repo=project_repo, project_id=project_id)
-
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
         task_id = _new_task_id()
@@ -1555,6 +1552,10 @@ def create_task(
                     if not branch_name:
                         branch_name = _project_branch_name(project_obj, task_id, title)
 
+                validate_local_task_skills(
+                    skills_list, assignee, workspace_path=workspace_path, project_repo=project_repo,
+                    project_id=project_id, task_id=task_id,
+                    workspaces_root=str(workspaces_root(board=_lifecycle_board(conn, board))))
                 conn.execute(
                     """
                     INSERT INTO tasks (
@@ -1865,7 +1866,8 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
 
         validate_local_task_skills(json.loads(row["skills"]) if row["skills"] else None, profile,
                                    workspace_path=row["workspace_path"], project_id=row["project_id"],
-                                   task_id=task_id)
+                                   task_id=task_id,
+                                   workspaces_root=str(workspaces_root(board=_lifecycle_board(conn))))
         if row["assignee"] != profile:
             # The failure streak is per task/profile; a new profile starts fresh.
             conn.execute(
