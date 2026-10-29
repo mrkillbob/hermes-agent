@@ -1,12 +1,14 @@
 """Managed launch preserves direct I/O across engine command-line versions."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-from hermes_cli.local_runtime import supervisor
+from hermes_cli.local_runtime import bootstrap, reconciliation, supervisor
 
 
 @pytest.mark.parametrize("help_text, expected", [
@@ -14,7 +16,9 @@ from hermes_cli.local_runtime import supervisor
     ("-dio, --direct-io  use DirectIO if available", ["-dio"]),
 ])
 def test_spawn_selects_supported_direct_io_option(tmp_path, monkeypatch, help_text, expected):
-    monkeypatch.setattr(supervisor, "runtimes_root", lambda: tmp_path / "runtime")
+    root = tmp_path / "runtime"
+    root.mkdir()
+    monkeypatch.setattr(supervisor, "runtimes_root", lambda: root)
     executable = tmp_path / "engine" / "llama-server"
     probes = []
 
@@ -29,8 +33,19 @@ def test_spawn_selects_supported_direct_io_option(tmp_path, monkeypatch, help_te
     ))
     sup = supervisor.LlamaServerSupervisor(executable, tmp_path / "models", port=19001)
     monkeypatch.setattr(sup, "_write_state", lambda: None)
+    authority = nullcontext()
+    if sys.platform == 'darwin':
+        monkeypatch.setattr(bootstrap, 'runtimes_root', lambda: root)
+        monkeypatch.setattr(reconciliation, '_native_identity', lambda: {
+            'host': '11111111-1111-4111-8111-111111111111',
+            'boot': '22222222-2222-4222-8222-222222222222'})
+        monkeypatch.setattr(reconciliation, '_volume_identity',
+                            lambda fd: '33333333-3333-4333-8333-333333333333')
+        authority = bootstrap._cross_process_boot_lock(timeout_s=0)
     try:
-        sup._spawn()
+        with authority as acquired:
+            assert acquired is not False
+            sup._spawn()
         index = commands[0].index(expected[0])
         assert commands[0][index:index + len(expected)] == expected
         if expected[0] == "--load-mode":
