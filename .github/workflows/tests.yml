@@ -249,7 +249,7 @@ jobs:
             test-durations-e2e-
 
       - name: Run messaging-gated gateway cases
-        # These gateway files drive the REAL Discord/Telegram SDKs and skip when the
+        # These files drive the REAL Discord/Telegram SDKs and skip when the
         # `messaging` extra is absent, which it is in the ordinary `test` slices; this is
         # the only job that installs it. Whole files (run_tests.sh drops ::node selectors),
         # and a skip here is a coverage hole, not a pass: fail on any.
@@ -260,7 +260,8 @@ jobs:
             tests/gateway/test_native_role_reauthorization.py \
             tests/gateway/test_native_telegram_startup_recovery.py \
             tests/gateway/test_native_pause_notice.py \
-            tests/gateway/test_native_reply_crash_recovery.py | tee "$log"
+            tests/gateway/test_native_reply_crash_recovery.py \
+            tests/plugins/test_telegram_webhook_http_compatibility.py | tee "$log"
           summary=$(grep '^=== Summary:' "$log")
           case "$summary" in
             *skipped*) echo "::error::messaging-gated gateway cases skipped: $summary"; exit 1 ;;
