@@ -116,15 +116,25 @@ def test_raw_byte_boundary(scope,size,reason):
 @pytest.mark.parametrize('kind',['final-symlink','directory-symlink','ancestor-symlink','hardlink','directory','fifo'])
 def test_unsafe_filesystem_objects_refuse_without_read(scope,tmp_path,monkeypatch,kind):
     root,p,request=scope;r=request()
-    if kind=='final-symlink':
+    def final_symlink():
         target=tmp_path/'outside.md';target.write_bytes(p.read_bytes());p.unlink();p.symlink_to(target)
-    elif kind=='directory-symlink':
+    def directory_symlink():
         original=p.parent;renamed=original.with_name('preserved');original.rename(renamed);original.symlink_to(renamed,target_is_directory=True)
-    elif kind=='ancestor-symlink':
-        alias=tmp_path/'alias';alias.symlink_to(root,target_is_directory=True);r=replace(r,vault_root=str(alias))
-    elif kind=='hardlink':os.link(p,tmp_path/'extra-link')
-    elif kind=='directory':p.unlink();p.mkdir()
-    else:p.unlink();os.mkfifo(p)
+    def ancestor_symlink():
+        alias=tmp_path/'alias';alias.symlink_to(root,target_is_directory=True)
+        return replace(r,vault_root=str(alias))
+    def hardlink():
+        os.link(p,tmp_path/'extra-link')
+    def directory():
+        p.unlink();p.mkdir()
+    def fifo():
+        p.unlink();os.mkfifo(p)
+    selected={
+        'final-symlink':final_symlink,'directory-symlink':directory_symlink,
+        'ancestor-symlink':ancestor_symlink,'hardlink':hardlink,
+        'directory':directory,'fifo':fifo,
+    }[kind]()
+    if selected is not None:r=selected
     monkeypatch.setattr(os,'read',lambda *_:pytest.fail('unsafe object read'))
     node,d=vault.read_exact_vault_learning(r,authorize=lambda approved:approved==r)
     assert node is None and d.reason_code in {'unsafe_note_path','note_hardlinked','note_not_regular'}
@@ -143,22 +153,35 @@ def test_inconsistent_capture_refuses(scope,monkeypatch,mutation):
     root,p,request=scope;r=request();real=os.read
     def changed_read(fd,n):
         data=real(fd,n)
-        if mutation=='replace-leaf':
+        def replace_leaf():
             replacement=p.with_suffix('.replacement');replacement.write_bytes(p.read_bytes());os.replace(replacement,p)
-        elif mutation=='replace-parent':
+            return data
+        def replace_parent():
             original=p.parent;original.rename(original.with_name('old'));original.mkdir();p.write_bytes(data)
-        elif mutation=='replace-root':
+            return data
+        def replace_root():
             root.rename(root.with_name('old-root'));p.parent.mkdir(parents=True);p.write_bytes(data)
-        elif mutation=='replace-with-symlink':
+            return data
+        def replace_with_symlink():
             other=root.parent/'outside.md';other.write_bytes(data);p.unlink();p.symlink_to(other)
-        elif mutation=='replace-parent-symlink':
+            return data
+        def replace_parent_symlink():
             original=p.parent;old=original.with_name('old');original.rename(old);original.symlink_to(old,target_is_directory=True)
-        elif mutation=='grow':
+            return data
+        def grow():
             with p.open('ab') as f:f.write(b'x')
-        elif mutation=='same-size-write':
+            return data
+        def same_size_write():
             with p.open('r+b') as f:f.seek(-1,2);f.write(b'!')
-        else:return data[:-1]
-        return data
+            return data
+        def short_read():
+            return data[:-1]
+        return {
+            'replace-leaf':replace_leaf,'replace-parent':replace_parent,
+            'replace-root':replace_root,'replace-with-symlink':replace_with_symlink,
+            'replace-parent-symlink':replace_parent_symlink,'grow':grow,
+            'same-size-write':same_size_write,'short-read':short_read,
+        }[mutation]()
     monkeypatch.setattr(os,'read',changed_read)
     node,d=vault.read_exact_vault_learning(r,authorize=lambda approved:approved==r)
     assert node is None and d.reason_code=='note_changed'
