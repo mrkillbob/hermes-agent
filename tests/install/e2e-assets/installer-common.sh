@@ -48,27 +48,33 @@ EOF
   ok "git transport redirected via $cfg; origin reported by $shim/git"
 }
 
-# Print the commit an update ref names. NEXT is not a git ref: it mints a
-# synthetic child of the install commit, so a leg that starts AT HEAD still
-# has an update to take -- the one HEAD's own updater must handle. The child
-# adds one marker file (a real tree diff, not an empty fast-forward) and
-# lives only in the object store: no ref, no worktree change. A local
-# `git clone --bare` copies objects/ wholesale, which is how it reaches
-# serve.git; the drivers assert it arrived.
-resolve_update_ref() {
-  local repo="$1" parent="$2" ref="$3" blob tree
+# NEXT changes an Electron source input, so strict Desktop provenance checks
+# exercise a rebuild. A root-only marker would correctly reuse the old bundle.
+# The private index leaves refs and checkout untouched; new objects reach the bare clone.
+resolve_update_ref() (
+  local repo="$1" parent="$2" ref="$3" blob desktop_blob tree index
   if [ "$ref" != NEXT ]; then
     git -C "$repo" rev-parse "${ref}^{commit}"
     return
   fi
+  set -o pipefail
+  index="$(mktemp -t hermes-e2e-next-index.XXXXXX)" || return
+  trap 'rm -f "$index"' EXIT
+  rm -f "$index"
+  export GIT_INDEX_FILE="$index"
   blob="$(printf 'synthetic next commit for the HEAD -> NEXT install E2E leg\n' \
     | git -C "$repo" hash-object -w --stdin)" || return
-  tree="$( { git -C "$repo" ls-tree -z "$parent"; printf '100644 blob %s\t.hermes-e2e-next\0' "$blob"; } \
-    | git -C "$repo" mktree -z)" || return
+  desktop_blob="$( { git -C "$repo" show "$parent:apps/desktop/electron/app-version.ts" || exit; \
+    printf '\n// Synthetic NEXT Desktop input for install/update E2E.\n'; } \
+    | git -C "$repo" hash-object -w --stdin)" || return
+  git -C "$repo" read-tree "$parent" || return
+  git -C "$repo" update-index --add --cacheinfo "100644,$blob,.hermes-e2e-next" || return
+  git -C "$repo" update-index --cacheinfo "100644,$desktop_blob,apps/desktop/electron/app-version.ts" || return
+  tree="$(git -C "$repo" write-tree)" || return
   GIT_AUTHOR_NAME='Hermes E2E' GIT_AUTHOR_EMAIL='e2e@hermes.invalid' \
     GIT_COMMITTER_NAME='Hermes E2E' GIT_COMMITTER_EMAIL='e2e@hermes.invalid' \
     git -C "$repo" commit-tree "$tree" -p "$parent" -m 'e2e: synthetic next commit'
-}
+)
 
 run_source_installer() {
   local repo="$1" work="$2" logs="$3" ref="$4" label="$5" desktop="${6:-}"

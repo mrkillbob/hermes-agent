@@ -883,33 +883,7 @@ function Stop-HermesAppProcesses([string]$Label) {
 # ----------------------------------------------------------------------------
 # Phase: stage -- serve.git with `main` at OLD (advanced to HEAD by update-gui)
 # ----------------------------------------------------------------------------
-# Mirror of resolve_update_ref's NEXT arm in e2e-assets/installer-common.sh:
-# a synthetic child of $Parent whose tree adds one marker file (a real diff,
-# not an empty fast-forward), written to the object store only -- no ref, no
-# worktree change. A local `clone --bare` copies objects/ wholesale, which is
-# how it reaches serve.git. A throwaway index stands in for mktree so no
-# NUL-delimited stdin has to cross PowerShell's native pipe.
-function New-NextCommit([string]$Repo, [string]$Parent) {
-    $marker = Join-Path $WorkRoot "next-marker.txt"
-    Set-Content -LiteralPath $marker -Encoding ASCII -Value "synthetic next commit for the HEAD -> NEXT install E2E leg"
-    $blob = Invoke-Git @("-C", $Repo, "hash-object", "-w", "--no-filters", $marker)
-    $saved = @{}
-    $vars = @{
-        GIT_INDEX_FILE = (Join-Path $WorkRoot "next.index")
-        GIT_AUTHOR_NAME = "Hermes E2E"; GIT_AUTHOR_EMAIL = "e2e@hermes.invalid"
-        GIT_COMMITTER_NAME = "Hermes E2E"; GIT_COMMITTER_EMAIL = "e2e@hermes.invalid"
-    }
-    foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
-    try {
-        Invoke-Git @("-C", $Repo, "read-tree", $Parent) | Out-Null
-        Invoke-Git @("-C", $Repo, "update-index", "--add", "--cacheinfo", "100644,$blob,.hermes-e2e-next") | Out-Null
-        $tree = Invoke-Git @("-C", $Repo, "write-tree")
-        return Invoke-Git @("-C", $Repo, "commit-tree", $tree, "-p", $Parent, "-m", "e2e: synthetic next commit")
-    } finally {
-        foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
-        Remove-Item -LiteralPath $vars.GIT_INDEX_FILE -Force -ErrorAction SilentlyContinue
-    }
-}
+. (Join-Path $AssetsDir "next-commit.ps1")
 
 function Invoke-PhaseStage {
     Write-Step "STAGE: bare serve repo, main -> OLD (install base)"
