@@ -292,13 +292,21 @@ def _expand_path(entry: str) -> Path:
     worker = _SKILL_METADATA_WORKER.get()
     if worker is not None:
         from agent.skill_path_env import expand_metadata_path
+        from hermes_cli.config import _env_ref_lookup, _expand_env_vars
         from hermes_constants import get_hermes_home
 
         destination = {key: worker[key] for key in (
             "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE", "HERMES_KANBAN_WORKSPACES_ROOT",
         ) if key in worker}
         destination["HERMES_HOME"] = str(get_hermes_home())
-        return Path(os.path.expanduser(expand_metadata_path(entry, destination, windows=os.name == "nt")))
+
+        def lookup(name):
+            key = name.upper() if os.name == "nt" else name
+            return destination[key] if key in destination else _env_ref_lookup(name)
+
+        expanded = expand_metadata_path(entry, destination, windows=os.name == "nt",
+                                        config_expand=lambda token: _expand_env_vars(token, lookup=lookup))
+        return Path(os.path.expanduser(expanded))
     return Path(os.path.expanduser(os.path.expandvars(entry)))
 
 

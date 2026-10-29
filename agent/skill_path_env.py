@@ -5,7 +5,8 @@ import posixpath
 import re
 
 
-def expand_metadata_path(entry: str, destination: dict[str, str], *, windows: bool) -> str:
+def expand_metadata_path(entry: str, destination: dict[str, str], *, windows: bool,
+                         config_expand=None) -> str:
     """Keep native variable/quote syntax; inserted destination values are literal.
 
     The caller supplies structural worker fields only, never profile secrets.
@@ -17,6 +18,8 @@ def expand_metadata_path(entry: str, destination: dict[str, str], *, windows: bo
 
     def replace(match):
         token = match[0]
+        if config_expand is not None and token.startswith("${") and token.endswith("}"):
+            return config_expand(token)
         if token.startswith("'") or token in ("$$", "%%"):
             return native(token)
         name = token[1:]

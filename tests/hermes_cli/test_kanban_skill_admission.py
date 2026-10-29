@@ -492,7 +492,7 @@ def test_external_anchor_refuses_dir_or_ambiguous_mapping(board, tmp_path, kind,
 
 
 @pytest.mark.parametrize("tier", ["create_dir", "external_dirs", "trusted_project_dirs"])
-@pytest.mark.parametrize("reference", ["${HERMES_HOME}", "$HERMES_HOME"])
+@pytest.mark.parametrize("reference", ["${HERMES_HOME}", "$HERMES_HOME", "${env:HERMES_HOME}"])
 @pytest.mark.parametrize("managed", [False, True])
 def test_skill_path_references_expand_for_destination_home(board, monkeypatch, tmp_path, tier, reference, managed):
     from hermes_cli import managed_scope
@@ -521,3 +521,59 @@ def test_skill_path_references_expand_for_destination_home(board, monkeypatch, t
                           skills=["synthetic-shared"], workspace_kind="dir" if workspace else "scratch",
                           workspace_path=workspace, board="skills-probe", initial_status="todo")
     assert __import__("os").environ["HERMES_HOME"] == creator_home
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_config_env_reference_preserves_literal_destination_value(board, tmp_path, monkeypatch, managed):
+    from hermes_cli import managed_scope
+    conn, profile = board
+    root = profile / "extra-$SECOND"
+    skill_at(root)
+    monkeypatch.setenv("SHARED_SKILLS", str(root))
+    monkeypatch.setenv("SECOND", "must-not-expand")
+    settings = {"model": "synthetic-unused", "skills": {"create_dir": "${ env:SHARED_SKILLS }"}}
+    if managed:
+        managed_dir = tmp_path / "managed"
+        managed_dir.mkdir()
+        atomic_config_write(managed_dir / "config.yaml", settings)
+        monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_dir))
+        managed_scope.invalidate_managed_cache()
+    else:
+        atomic_config_write(profile / "config.yaml", settings)
+    assert create(conn, "synthetic-worker", ["synthetic-shared"])
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_metadata_config_references_preserve_bound_scope_isolation(board, monkeypatch, present):
+    from agent.secret_scope import reset_secret_scope, set_secret_scope
+    from agent.skill_utils import _expand_path, skill_metadata_config
+    _, profile = board
+    monkeypatch.setenv("SYNTHETIC_SCOPE_PATH", "/process-only")
+    values = {"SYNTHETIC_SCOPE_PATH": "/bound-synthetic"} if present else {}
+    token = set_secret_scope(values, profile_home=str(profile))
+    try:
+        with skill_metadata_config({}):
+            expected = "/bound-synthetic" if present else "${env:SYNTHETIC_SCOPE_PATH}"
+            assert _expand_path("${env:SYNTHETIC_SCOPE_PATH}") == Path(expected)
+    finally:
+        reset_secret_scope(token)
+
+
+@pytest.mark.parametrize("managed", [False, True])
+@pytest.mark.parametrize("reference", ["${SYNTHETIC_DISABLED}", "${env:SYNTHETIC_DISABLED}"])
+def test_config_references_in_disabled_rules_remain_effective(board, tmp_path, monkeypatch, managed, reference):
+    from hermes_cli import managed_scope
+    conn, profile = board
+    skill_at(profile / "skills", "plain-synthetic")
+    monkeypatch.setenv("SYNTHETIC_DISABLED", "plain-synthetic")
+    settings = {"model": "synthetic-unused", "skills": {"disabled": [reference]}}
+    if managed:
+        managed_dir = tmp_path / "managed"
+        managed_dir.mkdir()
+        atomic_config_write(managed_dir / "config.yaml", settings)
+        monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_dir))
+        managed_scope.invalidate_managed_cache()
+    else:
+        atomic_config_write(profile / "config.yaml", settings)
+    with pytest.raises(ValueError, match="unavailable"):
+        create(conn, "synthetic-worker", ["plain-synthetic"])

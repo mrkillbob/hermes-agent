@@ -115,6 +115,15 @@ class TestLoadCliConfigExpansion:
         assert config["auxiliary"]["vision"]["api_key"] == "${UNSET_CLI_VAR_ABC}"
 
 
+def test_explicit_lookup_recurses_without_reexpanding_inserted_values():
+    values = {"SYNTHETIC": "$SECOND/${env:SECOND}"}
+    original = {"${SYNTHETIC}": ["${env:SYNTHETIC}", {"nested": "${ SYNTHETIC }"}, 7,
+                                "${env:MISSING_SYNTHETIC}", "${vault:SECRET}"]}
+    expanded = _expand_env_vars(original, lookup=values.get)
+    assert expanded == {"${SYNTHETIC}": [values["SYNTHETIC"], {"nested": values["SYNTHETIC"]}, 7,
+                                       "${env:MISSING_SYNTHETIC}", "${vault:SECRET}"]}
+
+
 class TestExpansionUnderProfileScope:
     """``${VAR}`` refs must resolve against the active profile's secret scope,
     not the shared process environment (#84079): under multiplex every

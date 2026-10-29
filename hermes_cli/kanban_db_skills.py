@@ -81,9 +81,23 @@ def _filesystem_skill_available(name: str, roots, disabled: set[str]) -> bool:
     return True
 
 
+def _skill_metadata_layer(settings):
+    from hermes_cli.config import _expand_env_vars
+
+    if not isinstance(settings, dict):
+        return _expand_env_vars(settings)
+    # Paths expand once in the destination resolver; other skill settings use
+    # the normal config reference parser, including disabled-name rules.
+    paths = {key: value for key, value in settings.items()
+             if key in ("create_dir", "external_dirs", "trusted_project_dirs")}
+    expanded = _expand_env_vars({key: value for key, value in settings.items() if key not in paths})
+    expanded.update(paths)
+    return expanded
+
+
 def _assigned_skill_config(home: Path) -> dict:
     from hermes_cli.config_backend import config_exists, read_config_doc
-    from hermes_cli.config import _deep_merge, _expand_env_vars
+    from hermes_cli.config import _deep_merge
     from hermes_cli.managed_scope import load_managed_config
 
     path = home / "config.yaml"
@@ -94,17 +108,12 @@ def _assigned_skill_config(home: Path) -> dict:
         raise ValueError("assigned profile skill settings must be a mapping")
     # The active home is already the destination, including its backend's
     # honors_managed_config contract. This never reads a worker snapshot.
+    if "skills" in config:
+        config["skills"] = _skill_metadata_layer(config["skills"])
     managed = load_managed_config()
-    # Leave managed path expressions raw until the metadata resolver binds the
-    # destination worker. Other managed leaves keep ordinary overlay semantics.
-    managed_skills = managed.get("skills", {})
-    if isinstance(managed_skills, dict):
-        paths = {key: value for key, value in managed_skills.items()
-                 if key in ("create_dir", "external_dirs", "trusted_project_dirs")}
-        expanded = _expand_env_vars({key: value for key, value in managed_skills.items() if key not in paths})
-        expanded.update(paths)
-        return _deep_merge(config, {"skills": expanded})
-    return _deep_merge(config, {"skills": managed_skills})
+    if "skills" not in managed:
+        return config
+    return _deep_merge(config, {"skills": _skill_metadata_layer(managed["skills"])})
 
 
 def validate_local_task_skills(
