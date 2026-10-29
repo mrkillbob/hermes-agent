@@ -41,7 +41,9 @@ jobs:
   diff:
     name: Prompt surface summary
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Full-history checkout has exceeded five minutes on standard hosted runners.
+    # Match history-check.yml so slow fetches can finish before the summary runs.
+    timeout-minutes: 25
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
       review_status: ${{ steps.emit-status.outputs.review_status }}
