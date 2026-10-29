@@ -869,18 +869,25 @@ class AIAgent(
         ``close()`` may both call it)."""
         if getattr(self, "_memory_provider_shutdown", False):
             return
+        from agent.diagnostic_reference_policy import lifecycle_export_messages, retained_policy
+        messages = lifecycle_export_messages(self, messages)
         self._memory_provider_shutdown = True
         if self._memory_manager and self._memory_manager.claim_teardown(session_end=True):
             try:
                 self._memory_manager.on_session_end(messages or [])
             except Exception as e:
-                logger.warning("Memory provider on_session_end failed during shutdown: %s", e, exc_info=True)
+                if retained_policy(self) is not None:
+                    logger.warning("Diagnostic memory extraction failed during shutdown; payload withheld")
+                else:
+                    logger.warning("Memory provider on_session_end failed during shutdown: %s", e, exc_info=True)
             _quietly(lambda: self._memory_manager.shutdown_all())
         _notify_context_engine_session_end(self, messages)
 
     def commit_memory_session(self, messages: list | None = None) -> None:
         """Flush end-of-session extraction on session_id rotation (/new, compression) without tearing providers
         down."""
+        from agent.diagnostic_reference_policy import lifecycle_export_messages
+        messages = lifecycle_export_messages(self, messages)
         if self._memory_manager:
             _quietly(lambda: self._memory_manager.on_session_end(messages or []))
         _notify_context_engine_session_end(self, messages)
