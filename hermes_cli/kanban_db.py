@@ -1428,46 +1428,7 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
-def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str]]:
-    """Strip/dedupe a skills list. Commas are refused (a comma-joined string must
-    not land in one argv slot); toolset names are rejected all at once because
-    agents that confuse the two usually pass several."""
-    if skills is None:
-        return None
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    toolset_typos: list[str] = []
-    for s in skills:
-        if not s:
-            continue
-        name = str(s).strip()
-        if not name:
-            continue
-        if "," in name:
-            raise ValueError(
-                f"skill name cannot contain comma: {name!r} "
-                f"(pass a list of separate names instead of a comma-joined string)"
-            )
-        if name.casefold() in KNOWN_TOOLSET_NAMES:
-            toolset_typos.append(name)
-            continue
-        if name in seen:
-            continue
-        seen.add(name)
-        cleaned.append(name)
-    if toolset_typos:
-        quoted = ", ".join(repr(n) for n in toolset_typos)
-        noun = "is a toolset name" if len(toolset_typos) == 1 else "are toolset names"
-        raise ValueError(
-            f"{quoted} {noun}, not skill name(s). "
-            "Enable toolsets for the assignee's platform with "
-            "`hermes tools enable kanban --platform <platform>` or add "
-            "`kanban` to the appropriate `platform_toolsets.<platform>` entry "
-            "instead of putting toolsets in per-task skills. Skills are named skill bundles "
-            "(e.g. `blogwatcher`, `github-code-review`); toolsets are runtime "
-            "capabilities (e.g. `web`, `browser`, `terminal`)."
-        )
-    return cleaned
+from hermes_cli.kanban_db_skills import _normalize_task_skills
 
 
 def create_task(
@@ -1571,6 +1532,11 @@ def create_task(
         board_default = _board_meta_for(board).get("default_workdir")
         if board_default:
             workspace_path = str(board_default)
+
+    from hermes_cli.kanban_db_skills import validate_local_task_skills
+
+    validate_local_task_skills(skills_list, assignee, workspace_path=workspace_path,
+                               project_repo=project_repo, project_id=project_id)
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
@@ -1877,7 +1843,8 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
     profile = _canonical_assignee(profile)
     with write_txn(conn):
         row = conn.execute(
-            "SELECT status, claim_lock, assignee, title, body, idempotency_key "
+            "SELECT status, claim_lock, assignee, title, body, idempotency_key, "
+            "skills, workspace_path, project_id "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -1894,6 +1861,11 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
                 f"cannot reassign {task_id}: currently running (claimed). "
                 "Wait for completion or reclaim the stale lock first."
             )
+        from hermes_cli.kanban_db_skills import validate_local_task_skills
+
+        validate_local_task_skills(json.loads(row["skills"]) if row["skills"] else None, profile,
+                                   workspace_path=row["workspace_path"], project_id=row["project_id"],
+                                   task_id=task_id)
         if row["assignee"] != profile:
             # The failure streak is per task/profile; a new profile starts fresh.
             conn.execute(
