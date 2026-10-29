@@ -92,6 +92,7 @@ def configured_dispatch_kwargs() -> dict[str, Any]:
 
     section = load_dispatch_section()
     return dict(
+        failure_limit=positive_int(section.get("failure_limit"), dispatch.DEFAULT_FAILURE_LIMIT),
         default_assignee=(section.get("default_assignee") or "").strip() or None,
         max_spawn=positive_int(section.get("max_spawn"), None),
         # Memory-derived default when unset — the same fallback the gateway applies.
