@@ -489,3 +489,35 @@ def test_external_anchor_refuses_dir_or_ambiguous_mapping(board, tmp_path, kind,
         conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(external / tid), tid))
     with pytest.raises(ValueError, match="unavailable" if kind == "dir" else "ambiguous"):
         kb.assign_task(conn, tid, "synthetic-worker")
+
+
+@pytest.mark.parametrize("tier", ["create_dir", "external_dirs", "trusted_project_dirs"])
+@pytest.mark.parametrize("reference", ["${HERMES_HOME}", "$HERMES_HOME"])
+@pytest.mark.parametrize("managed", [False, True])
+def test_skill_path_references_expand_for_destination_home(board, monkeypatch, tmp_path, tier, reference, managed):
+    from hermes_cli import managed_scope
+    conn, profile = board
+    root = profile / "extra"
+    workspace = None
+    if tier == "trusted_project_dirs":
+        (root / ".git").mkdir(parents=True)
+        skill_at(root / ".agents" / "skills")
+        workspace = str(root)
+    else:
+        skill_at(root)
+    configured = reference + "/extra"
+    value = configured if tier == "create_dir" else [configured]
+    if managed:
+        managed_dir = tmp_path / "managed"
+        managed_dir.mkdir()
+        atomic_config_write(managed_dir / "config.yaml", {"skills": {tier: value}})
+        monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_dir))
+        managed_scope.invalidate_managed_cache()
+    else:
+        atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {tier: value}})
+    creator_home = str(profile.parent.parent)
+    assert __import__("os").environ["HERMES_HOME"] == creator_home
+    assert kb.create_task(conn, title="Destination path expansion", assignee="synthetic-worker",
+                          skills=["synthetic-shared"], workspace_kind="dir" if workspace else "scratch",
+                          workspace_path=workspace, board="skills-probe", initial_status="todo")
+    assert __import__("os").environ["HERMES_HOME"] == creator_home

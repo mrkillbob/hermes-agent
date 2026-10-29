@@ -83,7 +83,8 @@ def _filesystem_skill_available(name: str, roots, disabled: set[str]) -> bool:
 
 def _assigned_skill_config(home: Path) -> dict:
     from hermes_cli.config_backend import config_exists, read_config_doc
-    from hermes_cli.managed_scope import apply_managed_overlay
+    from hermes_cli.config import _deep_merge, _expand_env_vars
+    from hermes_cli.managed_scope import load_managed_config
 
     path = home / "config.yaml"
     config = read_config_doc(path) if config_exists(path) else {}
@@ -93,7 +94,17 @@ def _assigned_skill_config(home: Path) -> dict:
         raise ValueError("assigned profile skill settings must be a mapping")
     # The active home is already the destination, including its backend's
     # honors_managed_config contract. This never reads a worker snapshot.
-    return apply_managed_overlay(config)
+    managed = load_managed_config()
+    # Leave managed path expressions raw until the metadata resolver binds the
+    # destination worker. Other managed leaves keep ordinary overlay semantics.
+    managed_skills = managed.get("skills", {})
+    if isinstance(managed_skills, dict):
+        paths = {key: value for key, value in managed_skills.items()
+                 if key in ("create_dir", "external_dirs", "trusted_project_dirs")}
+        expanded = _expand_env_vars({key: value for key, value in managed_skills.items() if key not in paths})
+        expanded.update(paths)
+        return _deep_merge(config, {"skills": expanded})
+    return _deep_merge(config, {"skills": managed_skills})
 
 
 def validate_local_task_skills(
