@@ -56,6 +56,17 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
           persist-credentials: false
+      - name: Capture scanned checkout identity
+        id: source_identity
+        # Keep dependency detection/reporting running even if identity admission fails.
+        # The final evidence gate reports that failure after original reports are retained.
+        continue-on-error: true
+        env:
+          SCANNED_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 -m scripts.build.osv_scan_identity \
+            --source "$GITHUB_WORKSPACE" --repository "$SCANNED_REPOSITORY" \
+            --output "$RUNNER_TEMP/osv-source-identity"
       - name: Run scanner
         uses: google/osv-scanner-action/osv-scanner-action@8dc09193bb540e09b23da07ad7e30bd33bf87018 # v2.3.8
         with:
@@ -103,3 +114,16 @@ jobs:
         uses: github/codeql-action/upload-sarif@cdefb33c0f6224e58673d9004f47f7cb3e328b89 # v4.31.10
         with:
           sarif_file: osv-results.sarif
+      - name: Upload additive source identity evidence
+        if: ${{ !cancelled() && steps.source_identity.outcome == 'success' }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: OSV Scanner source identity
+          path: ${{ runner.temp }}/osv-source-identity/
+          if-no-files-found: error
+          retention-days: 5
+      - name: Require scanned checkout identity evidence
+        if: ${{ !cancelled() && steps.source_identity.outcome == 'failure' }}
+        run: |
+          echo "::error::Source identity admission failed; original dependency reports remain separate evidence."
+          exit 1
