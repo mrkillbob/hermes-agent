@@ -64,6 +64,7 @@ from tools.cronjob_job_args import (
     _validate_context_from_refs,
     _validate_cron_base_url,
     _validate_cron_script_path)
+from tools.cronjob_runs import action_runs
 from tools.registry import registry, tool_error
 
 
@@ -960,6 +961,7 @@ _JOB_ACTIONS = {
     "run": _action_run, "run_now": _action_run, "trigger": _action_run,
     "pause": lambda job, a: _job_state_result(pause_job(job["id"], reason=a["reason"])),
     "resume": lambda job, a: _job_state_result(resume_job(job["id"])),
+    "runs": action_runs,
 }
 
 
@@ -1065,11 +1067,11 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
             "paused_reason": {"type": "string", "description": "Create only: auditable reason; requires paused=true."},
             "action": {
                 "type": "string",
-                "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
+                "description": "One of: create, list, runs, update, pause, resume, remove, run. 'runs' (needs job_id) returns that job's recent execution statuses and timestamps only. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."
             },
             "job_id": {
                 "type": "string",
-                "description": "Required for update/pause/resume/remove/run."
+                "description": "Required for update/pause/resume/remove/run/runs."
             },
             "pinned": {
                 "type": "boolean",
