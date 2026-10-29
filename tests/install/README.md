@@ -36,7 +36,7 @@ These paths are intentionally different.
 
 ### The HEAD -> NEXT column
 
-Every combination also runs from HEAD itself. The driver installs HEAD, then mints NEXT: a synthetic child of HEAD that adds one marker file (`.hermes-e2e-next`). NEXT exists only in the object store, with no ref, and the bare clone carries it into `serve.git`. The driver then moves `main` to NEXT and applies the update method.
+Every combination also runs from HEAD itself. The driver installs HEAD, then mints NEXT: a synthetic child of HEAD that adds the root marker (`.hermes-e2e-next`) and appends a harmless comment to `apps/desktop/electron/app-version.ts`. This changes a real Desktop build input, so the strict NEXT chat probe exercises a newly built app. A root-only change legitimately reuses the old app with its truthful baked commit and is covered separately by the Desktop reuse tests. NEXT exists only in the object store, with no ref, and the bare clone carries it into `serve.git`. The separate native Windows CLI machine fixture retains its root and nested test-tree markers to exercise treeless fetching; it does not claim a Desktop rebuild. The driver then moves `main` to NEXT and applies the update method.
 
 This column tests two things that no tag leg tests:
 
