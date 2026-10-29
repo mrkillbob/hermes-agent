@@ -242,6 +242,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Retain response-store ACL metadata
+        if: always() && matrix.marker == 'windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: response-store-acl-${{ inputs.platform_scope }}-${{ matrix.marker }}-${{ runner.arch }}-${{ matrix.slice || 'all' }}
+          path: ${{ runner.temp }}/response-store-acl-diagnostics/response-store-acl-*.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
         # leaves an untracked or modified file in the checkout is reported here. Runs only when
