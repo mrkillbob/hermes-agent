@@ -5,6 +5,7 @@ import functools
 import json
 import logging
 import sqlite3
+import stat
 import threading
 import time
 from contextlib import closing, suppress
@@ -30,6 +31,19 @@ def connect_response_store(db_path: str) -> sqlite3.Connection:
             _secure_state_db_files(Path(db_path), create_main=True)
         except OSError as exc:
             logger.warning("Could not restrict response store permissions for %s: %s", db_path, exc)
+            # A mount may deny chmod even for already-private files. Preserve that
+            # persistence only when metadata establishes privacy for the whole set;
+            # opening/closing an existing inode here would release SQLite's locks.
+            for suffix in ("", "-wal", "-shm"):
+                candidate = Path(f"{db_path}{suffix}")
+                try:
+                    mode = candidate.lstat().st_mode
+                except FileNotFoundError:
+                    if not suffix:
+                        raise
+                    continue
+                if not stat.S_ISREG(mode) or stat.S_IMODE(mode) & 0o077:
+                    raise PermissionError(f"Response store file is not private: {candidate}") from exc
     return sqlite3.connect(db_path, check_same_thread=False)
 
 
