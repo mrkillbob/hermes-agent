@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Iterable, Optional
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Iterable, Optional
 
 from agent.skill_utils import parse_frontmatter
 from datetime import UTC
@@ -16,6 +16,23 @@ MAX_CATALOG_FILES = 5000
 _AUTHORITIES = {"source-index", "narrative-only"}
 _AGENTS = {"claude", "codex", "hermes", "shared"}
 _KINDS = {"memory", "working-preference", "skill-reference"}
+_CATALOG_ROOT_PARTS = (
+    *(("Memories", agent) for agent in ("Claude", "Codex", "Hermes", "Shared")),
+    *(("Reference", "Agent Skills", agent) for agent in ("Claude", "Codex", "Hermes")),
+)
+
+
+@dataclass(frozen=True)
+class ExactVaultNoteRequest:
+    """Immutable selection that a trusted host policy must authorize in full."""
+
+    vault_root: str
+    root_device: int
+    root_inode: int
+    relative_path: str
+    expected_record_id: str
+    expected_sha256: str
+    max_bytes: int = MAX_NOTE_BYTES
 
 
 @dataclass(frozen=True)
@@ -60,13 +77,13 @@ def _strings(value: object) -> tuple[str, ...]:
     return ()
 
 
-def _timestamp(metadata: dict[str, Any], path: Path) -> Optional[int]:
+def _timestamp(metadata: dict[str, Any], fallback_mtime: float | None) -> Optional[int]:
     for key in ("verified_at", "observed_at", "created_at"):
         value = _text(metadata.get(key))
         if not value:
             continue
         try:
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             parsed = datetime.fromisoformat(value)
             if parsed.tzinfo is None:
@@ -74,17 +91,12 @@ def _timestamp(metadata: dict[str, Any], path: Path) -> Optional[int]:
             return int(parsed.timestamp())
         except (ValueError, OverflowError):
             continue
-    try:
-        return int(path.stat().st_mtime)
-    except OSError:
-        return None
+    return int(fallback_mtime) if fallback_mtime is not None else None
 
 
 def _catalog_roots(vault: Path) -> Iterable[Path]:
-    for agent in ("Claude", "Codex", "Hermes", "Shared"):
-        yield vault / "Memories" / agent
-    for agent in ("Claude", "Codex", "Hermes"):
-        yield vault / "Reference" / "Agent Skills" / agent
+    for parts in _CATALOG_ROOT_PARTS:
+        yield vault.joinpath(*parts)
 
 
 def _sorted_catalog_paths(root: Path, limit: int) -> Iterable[Path]:
@@ -158,8 +170,21 @@ def _node_from_note(
     raw, diagnostic = _read_note(path, vault)
     if raw is None:
         return None, diagnostic
+    node, diagnostic = _node_from_text(raw, _relative_label(path, vault), fallback_title=path.stem)
+    if node is not None and node.timestamp is None:
+        try:
+            node = replace(node, timestamp=int(path.stat().st_mtime))
+        except OSError:
+            pass  # Preserve the catalog's optional pathname fallback.
+    return node, diagnostic
+
+
+def _node_from_text(
+    raw: str, label: str, *, fallback_mtime: float | None = None,
+    fallback_title: str | None = None
+) -> tuple[VaultLearningNode | None, VaultLearningDiagnostic | None]:
+    """Parse captured text without filesystem, config, or catalog access."""
     metadata, body = parse_frontmatter(raw)
-    label = _relative_label(path, vault)
     record_id = _text(metadata.get("record_id"))
     if not record_id:
         return None, VaultLearningDiagnostic("record_id_required", label)
@@ -187,12 +212,13 @@ def _node_from_note(
     return (
         VaultLearningNode(
             record_id=record_id,
-            label=_text(metadata.get("title")) or path.stem,
+            label=_text(metadata.get("title")) or (
+                fallback_title if fallback_title is not None else PurePosixPath(label).stem),
             kind=graph_kind,
             origin_agent=origin_agent,
             area=_text(metadata.get("memory_area")) or "General",
             status=_text(metadata.get("status")) or "unknown",
-            timestamp=_timestamp(metadata, path),
+            timestamp=_timestamp(metadata, fallback_mtime),
             related_record_ids=_strings(metadata.get("related_record_ids")),
             summary=summary,
             execution_status=execution_status or "not-applicable",
@@ -233,3 +259,27 @@ def read_vault_learning(
         seen.add(node.record_id)
         nodes.append(node)
     return nodes, diagnostics
+
+
+
+def read_exact_vault_learning(
+    request: ExactVaultNoteRequest,
+    *,
+    authorize: Callable[[ExactVaultNoteRequest], bool],
+) -> tuple[VaultLearningNode | None, VaultLearningDiagnostic | None]:
+    """Read one approved note without catalog traversal or implicit configuration.
+
+    The application/operator must select a trusted policy and its authenticated
+    principal OUTSIDE note/model/request data. The policy must bind every request
+    field, including root identity, raw SHA256 and byte limit, and return exactly
+    True. There is no default allow or approval token. A caller supplying its own
+    allow callback is not independently authenticated; this in-process contract
+    is not a sandbox against arbitrary or compromised Python callers.
+
+    No HTTP/tool/CLI caller is wired here. The return proves normalized admission
+    of the captured bytes, not live-session/model use or global ID uniqueness.
+    Platforms without safe descriptor operations refuse without a weaker fallback.
+    """
+    from agent.learning_vault_exact import read_exact
+
+    return read_exact(request, authorize=authorize)
