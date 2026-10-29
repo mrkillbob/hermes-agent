@@ -5,8 +5,31 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 
+def _configured_worktree_repo(workspace: Path) -> Optional[Path]:
+    from hermes_cli.config_backend import config_exists, read_config_doc
+    from hermes_cli.kanban_db import kanban_home
+
+    path = kanban_home() / "config.yaml"
+    config = read_config_doc(path) if config_exists(path) else {}
+    roots = ((config or {}).get("kanban") or {}).get("worktree_roots", {})
+    if not isinstance(roots, dict):
+        raise ValueError("kanban.worktree_roots must map repository paths to directories")
+    matches = set()
+    for key, value in roots.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        repo, target = Path(key), Path(value).expanduser()
+        # Forward allocation indexes by the resolved repository spelling.
+        if (repo.is_absolute() and key == str(repo.resolve()) and target.is_absolute()
+                and target.resolve() != repo.resolve() and target.resolve() == workspace.parent.resolve()):
+            matches.add(repo)
+    if len(matches) > 1:
+        raise ValueError("project skill anchor is ambiguous")
+    return next(iter(matches), None)
+
+
 def _task_skill_cwd(home: Path, workspace_path: Optional[str], project_repo: Optional[str],
-                    project_id: Optional[str], task_id: Optional[str]) -> Path:
+                    project_id: Optional[str], task_id: Optional[str], workspace_kind: Optional[str]) -> Path:
     target = Path(project_repo).expanduser() if project_repo else None
     if workspace_path:
         workspace = Path(workspace_path).expanduser()
@@ -16,9 +39,11 @@ def _task_skill_cwd(home: Path, workspace_path: Optional[str], project_repo: Opt
             return workspace
         # A project task's deterministic worktree may not have been allocated
         # yet. Its stored anchor, never the caller's cwd, owns project skills.
-        if (target is None and project_id and task_id and workspace.is_absolute()
-                and workspace.name == task_id and workspace.parent.name == ".worktrees"):
-            target = workspace.parent.parent
+        if (target is None and project_id and task_id and workspace_kind == "worktree"
+                and workspace.name == task_id):
+            target = _configured_worktree_repo(workspace)
+            if target is None:
+                target = workspace.parent.parent if workspace.parent.name == ".worktrees" else workspace
         elif target is None:
             target = workspace
     if target is None:
@@ -75,7 +100,7 @@ def validate_local_task_skills(
     skills: Optional[Sequence[str]], assignee: Optional[str], *,
     workspace_path: Optional[str] = None, project_repo: Optional[str] = None,
     project_id: Optional[str] = None, task_id: Optional[str] = None,
-    workspaces_root: Optional[str] = None,
+    workspaces_root: Optional[str] = None, workspace_kind: Optional[str] = None,
 ) -> None:
     """Refuse unavailable filesystem skills for a known local profile.
 
@@ -100,7 +125,7 @@ def validate_local_task_skills(
     from tools.skills_tool import skill_lookup_path_error
 
     home = get_profile_dir(assignee)
-    cwd = _task_skill_cwd(home, workspace_path, project_repo, project_id, task_id)
+    cwd = _task_skill_cwd(home, workspace_path, project_repo, project_id, task_id, workspace_kind)
     home_token = set_hermes_home_override(home)
     cwd_token = set_session_cwd(str(cwd))
     try:

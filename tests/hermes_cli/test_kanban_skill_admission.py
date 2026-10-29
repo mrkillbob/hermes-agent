@@ -440,3 +440,52 @@ def test_reassignment_retains_destination_owned_workspace_trust(board, tmp_path,
     atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
         "trusted_project_dirs": [str(root.parent)]}})
     assert kb.assign_task(conn, tid, "synthetic-worker")
+
+
+@pytest.mark.parametrize("external_name", ["external-worktrees", ".worktrees"])
+def test_unallocated_configured_external_project_worktree_keeps_repo_anchor(board, tmp_path, external_name):
+    from hermes_cli import projects_db
+    conn, profile = board
+    repo, external = tmp_path / "project", tmp_path / external_name
+    (repo / ".git").mkdir(parents=True)
+    external.mkdir()
+    skill_at(repo / ".agents" / "skills")
+    atomic_config_write(profile.parent.parent / "config.yaml", {"kanban": {
+        "worktree_roots": {str(repo): str(external)}}})
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
+        "trusted_project_dirs": [str(repo)]}})
+    with projects_db.connect_closing() as registry:
+        project = projects_db.create_project(registry, name="Fixture", primary_path=str(repo))
+    tid = kb.create_task(conn, title="External project skill", assignee="external-control-plane",
+                         skills=["synthetic-shared"], project_id=project,
+                         board="skills-probe", initial_status="todo")
+    assert Path(kb.get_task(conn, tid).workspace_path) == external / tid
+    assert not (external / tid).exists()
+    assert kb.assign_task(conn, tid, "synthetic-worker")
+
+
+@pytest.mark.parametrize("kind", ["dir", "worktree"])
+@pytest.mark.parametrize("external_name", ["external", ".worktrees"])
+def test_external_anchor_refuses_dir_or_ambiguous_mapping(board, tmp_path, kind, external_name):
+    from hermes_cli import projects_db
+    conn, profile = board
+    repo, other, external = tmp_path / "project", tmp_path / "other", tmp_path / external_name
+    for path in (repo, other):
+        (path / ".git").mkdir(parents=True)
+        skill_at(path / ".agents" / "skills")
+    external.mkdir()
+    roots = {str(repo): str(external)}
+    if kind == "worktree":
+        roots[str(other)] = str(external)
+    atomic_config_write(profile.parent.parent / "config.yaml", {"kanban": {"worktree_roots": roots}})
+    atomic_config_write(profile / "config.yaml", {"model": "synthetic-unused", "skills": {
+        "trusted_project_dirs": [str(repo), str(other)]}})
+    with projects_db.connect_closing() as registry:
+        project = projects_db.create_project(registry, name="Fixture", primary_path=str(repo))
+    tid = kb.create_task(conn, title="External anchor guard", assignee="external-control-plane",
+                         skills=["synthetic-shared"], project_id=project, workspace_kind=kind,
+                         board="skills-probe", initial_status="todo")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(external / tid), tid))
+    with pytest.raises(ValueError, match="unavailable" if kind == "dir" else "ambiguous"):
+        kb.assign_task(conn, tid, "synthetic-worker")

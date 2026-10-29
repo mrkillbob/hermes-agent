@@ -1554,7 +1554,7 @@ def create_task(
 
                 validate_local_task_skills(
                     skills_list, assignee, workspace_path=workspace_path, project_repo=project_repo,
-                    project_id=project_id, task_id=task_id,
+                    project_id=project_id, task_id=task_id, workspace_kind=workspace_kind,
                     workspaces_root=str(workspaces_root(board=_lifecycle_board(conn, board))))
                 conn.execute(
                     """
@@ -1845,7 +1845,7 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
     with write_txn(conn):
         row = conn.execute(
             "SELECT status, claim_lock, assignee, title, body, idempotency_key, "
-            "skills, workspace_path, project_id "
+            "skills, workspace_path, project_id, workspace_kind "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -1866,7 +1866,7 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
 
         validate_local_task_skills(json.loads(row["skills"]) if row["skills"] else None, profile,
                                    workspace_path=row["workspace_path"], project_id=row["project_id"],
-                                   task_id=task_id,
+                                   task_id=task_id, workspace_kind=row["workspace_kind"],
                                    workspaces_root=str(workspaces_root(board=_lifecycle_board(conn))))
         if row["assignee"] != profile:
             # The failure streak is per task/profile; a new profile starts fresh.
