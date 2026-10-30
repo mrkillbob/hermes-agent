@@ -11,6 +11,7 @@ module-level functions taking ``cli`` and siblings are called as ``HermesCLI.<na
 from __future__ import annotations
 
 import copy
+import contextlib
 import logging
 import sys
 import threading
@@ -29,10 +30,56 @@ logger = logging.getLogger(__name__)
 _RUNTIME_FIELDS = (
     "model", "provider", "requested_provider", "_explicit_api_key", "_explicit_base_url",
     "api_key", "base_url", "api_mode", "reasoning_config")
+_ONE_TURN_FALLBACK_FIELDS = (
+    "_fallback_activated", "_fallback_index", "_provider_fallback_active", "_provider_fallback_route",
+    "_rate_limit_backoff_count", "_rate_limited_until",
+)
 
 
 def _runtime_fields(cli) -> dict:
     return {key: getattr(cli, key, None) for key in _RUNTIME_FIELDS}
+
+
+def _prepare_one_turn_runtime_restore(agent, lease):
+    """Finish existing voice debt before changing preferred snapshot identity."""
+    from agent.primary_runtime_snapshot import RuntimeRecoveryPendingError
+    from agent.voice_turn_route import recover_voice_cleanup
+    if lease.controller.voice_snapshot()[1] is not None and not recover_voice_cleanup(agent, lease):
+        raise RuntimeRecoveryPendingError("voice cleanup must complete before one-turn restoration")
+    voice, debt, _, _, _ = lease.controller.voice_snapshot()
+    if voice is not None or debt is not None or getattr(agent, "_voice_route_state", None) is not None:
+        # An active voice turn is not an instruction to end it. Its owner must queue cleanup.
+        raise RuntimeRecoveryPendingError("active voice runtime still owns one-turn restoration")
+
+
+def _try_one_turn_primary_restore(agent, snapshot, lease, restore_reasoning):
+    from agent.primary_runtime_snapshot import RuntimeRecoveryPendingError, commit_runtime_selection
+    from agent.runtime_mutation import RuntimeMutationBusyError
+    primary = snapshot.get("agent_primary_runtime")
+    if not primary or not hasattr(agent, "_restore_primary_runtime"):
+        return False
+    prior_primary = getattr(agent, "_primary_runtime", None)
+    prior_fallback = getattr(agent, "_fallback_activated", False)
+    prior_cooldown = getattr(agent, "_rate_limited_until", 0)
+    primary_restored = False
+    try:
+        agent._primary_runtime = copy.deepcopy(primary)
+        agent._fallback_activated, agent._rate_limited_until = True, 0
+        if lease.call("restore_primary_runtime", agent._restore_primary_runtime):
+            primary_restored = True
+            if "reasoning_config" in snapshot:
+                restore_reasoning(snapshot["reasoning_config"])
+            commit_runtime_selection(agent, lease)
+            return True
+    except (RuntimeMutationBusyError, RuntimeRecoveryPendingError):
+        raise
+    except Exception:
+        logger.warning("CLI one-turn model restore via primary runtime failed", exc_info=True)
+    finally:
+        if not primary_restored:
+            agent._primary_runtime = prior_primary
+            agent._fallback_activated, agent._rate_limited_until = prior_fallback, prior_cooldown
+    return False
 
 
 def _resolve_cli_reasoning(cli) -> None:
@@ -321,6 +368,19 @@ def _apply_reasoning_after_switch(cli, effort: str, *, persist_global: bool, one
 def _commit_model_switch(
     cli, result, *, persist_global: bool, one_turn: bool = False, picker: bool = False,
     reasoning_effort: str = "") -> None:
+    """Reserve the local agent through installation and deferred-restore receipt binding."""
+    from agent.runtime_mutation import runtime_mutation
+    agent = getattr(cli, "agent", None)
+    reservation = runtime_mutation(agent, "one_turn_restore") if agent is not None else contextlib.nullcontext()
+    with reservation as lease:
+        return _commit_model_switch_reserved(
+            cli, result, persist_global=persist_global, one_turn=one_turn, picker=picker,
+            reasoning_effort=reasoning_effort, lease=lease)
+
+
+def _commit_model_switch_reserved(
+    cli, result, *, persist_global, one_turn=False, picker=False, reasoning_effort="", lease=None,
+):
     """Stage + swap, print the summary, persist (session row unless --once; config on --global).
     ``picker``: tolerate context-resolution errors and label the config write "(--global)"; the
     typed path additionally records the one-turn restore snapshot. ``reasoning_effort`` (from
@@ -337,12 +397,24 @@ def _commit_model_switch(
                     if key not in ("one_turn_reasoning", "one_turn_alias")}
     # ``--once`` must not session.mutate.
     cli._model_switch_one_turn = bool(one_turn)
+    previous_selection = lease.controller.voice_snapshot()[3] if lease is not None else None
     try:
-        staged = cli._stage_and_swap_model(result, old_model)
+        stage = cli._stage_and_swap_model
+        if getattr(stage, "__func__", None) is CLIModelSwitchMixin._stage_and_swap_model:
+            staged = stage(result, old_model, _runtime_lease=lease)
+        else:
+            # Existing lightweight adapters replace the stage operation itself.
+            staged = stage(result, old_model)
     finally:
         cli._model_switch_one_turn = False
     if not staged:
         return
+    if lease is not None and lease.controller.voice_snapshot()[3] == previous_selection:
+        # GatewayAgent and lightweight adapters have no AIAgent switch wrapper. This receipt
+        # tracks only this proxy's local selection; it conveys no remote mutation authority.
+        lease.successful_selection()
+    if snapshot is not None and lease is not None:
+        snapshot["_runtime_selection_token"] = lease.controller.voice_snapshot()[3]
     # A TUI slash worker replays /model on its shadow CLI; the tui_gateway mirror counts the real switch.
     if not getattr(cli, "is_slash_worker", False):
         from hermes_cli.observability.shared_metrics_events import record_model_switch
@@ -702,13 +774,30 @@ class CLIModelSwitchMixin:
             "reasoning_config": copy.deepcopy(getattr(self, "reasoning_config", None)),
             "agent_primary_runtime": copy.deepcopy(
                 getattr(agent, "_primary_runtime", None)
-            ) if agent is not None else None}
+            ) if agent is not None else None,
+            "_runtime_fallback_state": {
+                key: copy.deepcopy(getattr(agent, key)) for key in _ONE_TURN_FALLBACK_FIELDS
+                if agent is not None and hasattr(agent, key)}}
 
     def _restore_model_runtime_snapshot(self, snapshot: dict | None) -> None:
         """Restore a model runtime captured before a one-turn override."""
-        from cli import _cprint, logger
         if not snapshot:
             return
+        from agent.runtime_mutation import RuntimeMutationStaleError, runtime_mutation
+        agent = getattr(self, "agent", None)
+        reservation = runtime_mutation(agent, "one_turn_restore") if agent is not None else contextlib.nullcontext()
+        with reservation as lease:
+            if lease is not None and "_runtime_selection_token" in snapshot:
+                if snapshot["_runtime_selection_token"] != lease.controller.voice_snapshot()[3]:
+                    raise RuntimeMutationStaleError("one-turn restore selection is stale")
+            if lease is not None:
+                _prepare_one_turn_runtime_restore(agent, lease)
+            return CLIModelSwitchMixin._restore_model_runtime_snapshot_reserved(self, snapshot, lease)
+
+    def _restore_model_runtime_snapshot_reserved(self, snapshot, lease) -> None:
+        from cli import _cprint, logger
+        from agent.runtime_mutation import RuntimeMutationBusyError
+        from agent.primary_runtime_snapshot import RuntimeRecoveryPendingError, commit_runtime_selection
         one_turn = _runtime_fields(self)
         for key in _RUNTIME_FIELDS:
             if key in snapshot:
@@ -724,24 +813,22 @@ class CLIModelSwitchMixin:
         if "reasoning_config" in snapshot:
             restore_reasoning(snapshot["reasoning_config"])
         primary = snapshot.get("agent_primary_runtime")
-        if primary and hasattr(agent, "_restore_primary_runtime"):
-            try:
-                agent._primary_runtime = copy.deepcopy(primary)
-                agent._fallback_activated = True
-                agent._rate_limited_until = 0
-                if agent._restore_primary_runtime():
-                    return
-            except Exception:
-                logger.debug("CLI one-turn model restore via primary runtime failed", exc_info=True)
+        if _try_one_turn_primary_restore(agent, snapshot, lease, restore_reasoning):
+            return
         if hasattr(agent, "switch_model"):
             try:
                 # The classic CLI only builds a GatewayAgent (``_init_agent``): its ``once`` / ``restore`` are
                 # named, so a rename fails loudly instead of turning the restore into a session mutate.
-                restored = agent.switch_model(
+                fields = dict(
                     new_model=snapshot.get("model", ""), new_provider=snapshot.get("provider", ""),
                     api_key=snapshot.get("api_key", ""), base_url=snapshot.get("base_url", ""),
                     api_mode=snapshot.get("api_mode", ""),
-                    capabilities=snapshot.get("capabilities"), once=True, restore=True)
+                    capabilities=snapshot.get("capabilities"))
+                if isinstance(agent, GatewayAgent):
+                    fields.update(once=True, restore=True)
+                restored = lease.call("switch_model", agent.switch_model, **fields)
+            except (RuntimeMutationBusyError, RuntimeRecoveryPendingError):
+                raise
             except Exception as exc:  # health: allow BLE001 -- runs in the turn's finally; reported below
                 logger.warning("CLI one-turn model restore failed: %s", exc)
                 restored = exc
@@ -753,9 +840,15 @@ class CLIModelSwitchMixin:
                 notice = t("cli.model.switch_cancelled") if restored is False else t(
                     "cli.model.switch_failed", model=snapshot.get("model", ""), error=restored, old_model=agent.model)
                 _cprint(f"  {notice}")
-                return
+                raise RuntimeRecoveryPendingError("one-turn model restoration remains pending")
             if "reasoning_config" in snapshot:
                 restore_reasoning(snapshot["reasoning_config"])
+            if "agent_primary_runtime" in snapshot and primary is None:
+                agent._primary_runtime = None
+                for key, value in snapshot.get("_runtime_fallback_state", {}).items():
+                    if key in _ONE_TURN_FALLBACK_FIELDS:
+                        setattr(agent, key, copy.deepcopy(value))
+            commit_runtime_selection(agent, lease)
 
     @staticmethod
     def _filter_model_picker_entries(entries: list, query: str) -> list:
@@ -790,7 +883,7 @@ class CLIModelSwitchMixin:
             scroll_offset = selected - visible + 1
         return max(0, min(scroll_offset, n - visible)), visible
 
-    def _stage_and_swap_model(self, result, old_model) -> bool:
+    def _stage_and_swap_model(self, result, old_model, *, _runtime_lease=None) -> bool:
         """Stage ``result`` onto the CLI fields, then swap the live agent in place.
 
         CLI fields are snapshotted first so a failed agent swap rolls the whole CLI back —
@@ -798,6 +891,7 @@ class CLIModelSwitchMixin:
         rolled back. Returns False after printing the failure (a failed switch is a no-op).
         """
         from cli import _cprint
+        from agent.runtime_mutation import RuntimeMutationBusyError
         if self.agent is None and getattr(self, "_gateway_session_open", False) and not self._init_agent():
             # Before the first turn: the stand-in built for that turn reads the gateway session's model,
             # so the switch must commit on the session now; _init_agent printed why it could not.
@@ -828,12 +922,18 @@ class CLIModelSwitchMixin:
                 if getattr(self, "_model_switch_one_turn", False):
                     # The CLI and agent show the resolved model; the admission sends the alias.
                     fields.update(once=True, alias=getattr(result, "resolved_via_alias", "") or "")
-                if self.agent.switch_model(**fields) is False:
+                switched = (_runtime_lease.call("switch_model", self.agent.switch_model, **fields)
+                            if _runtime_lease is not None else self.agent.switch_model(**fields))
+                if switched is False:
                     # Declined at the gateway owner's guard prompt: nothing was committed.
                     for _k, _v in _cli_snapshot.items():
                         setattr(self, _k, _v)
                     _cprint(f"  {t('cli.model.switch_cancelled')}")
                     return False
+            except RuntimeMutationBusyError:
+                for _k, _v in _cli_snapshot.items():
+                    setattr(self, _k, _v)
+                raise
             except Exception as exc:
                 # The agent rolled itself back to the old working model/client. Roll the CLI's own staged
                 # fields back too and abort the rest of the commit (note + success print) so a failed switch

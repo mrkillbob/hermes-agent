@@ -424,7 +424,7 @@ class TestPerProviderReasoningEcho:
         # Simulate: fallback set the flag to False
         agent._reasoning_echo_flag = False
 
-        from agent.agent_runtime_helpers import restore_primary_runtime
+        from agent.primary_runtime_snapshot import restore_primary_runtime
         restore_primary_runtime(agent)
 
         # Flag should be restored from snapshot

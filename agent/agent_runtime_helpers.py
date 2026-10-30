@@ -36,6 +36,7 @@ from agent.message_metadata import MERGED_TURN_PREFIX
 from agent.turn_context import drop_stale_api_content
 from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
 from agent.primary_runtime_snapshot import _build_primary_runtime_snapshot
+from agent.runtime_mutation import compose_runtime_call
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
 logger = logging.getLogger(__name__)
 
@@ -934,7 +935,8 @@ def _is_entitlement_403(agent, status_code, error_context) -> bool:
     return False
 
 
-def _recover_auth_failure(agent, pool, *, status_code, has_retried_429, error_context, api_key_hint, credential_id, rotate_and_swap):
+def _recover_auth_failure(agent, pool, *, status_code, has_retried_429, error_context, api_key_hint,
+                          credential_id, rotate_and_swap, runtime_lease=None):
     if _is_entitlement_403(agent, status_code, error_context):
         _ra().logger.info(
             "Credential %s — entitlement-shaped 403 from %s; "
@@ -969,7 +971,8 @@ def _recover_auth_failure(agent, pool, *, status_code, has_retried_429, error_co
             )
             return False, has_retried_429
     _ra().logger.info("Credential auth failure — refreshed pool entry %s", getattr(refreshed, 'id', '?'))
-    if agent._swap_credential(refreshed) is False:
+    if compose_runtime_call(agent, "swap_credential", agent._swap_credential, refreshed,
+                            runtime_lease=runtime_lease) is False:
         return False, has_retried_429
     return True, has_retried_429
 
@@ -1009,6 +1012,7 @@ def recover_with_credential_pool(
     agent, *, status_code: Optional[int], has_retried_429: bool,
     classified_reason: Optional[FailoverReason] = None,
     error_context: Optional[dict[str, Any]] = None, billing_unverified: bool = False,
+    runtime_lease=None,
 ) -> tuple[bool, bool]:
     """Attempt credential recovery via pool rotation; returns (recovered, has_retried_429).
     Rate limits: retry once, then rotate. Billing: rotate immediately. Auth: refresh before
@@ -1075,7 +1079,8 @@ def recover_with_credential_pool(
             "Credential %s (%s) — rotated to pool entry %s",
             rotate_status, label, getattr(next_entry, "id", "?"),
         )
-        swapped = agent._swap_credential(next_entry) is not False
+        swapped = compose_runtime_call(agent, "swap_credential", agent._swap_credential, next_entry,
+                                       runtime_lease=runtime_lease) is not False
         benched = next((e for e in pool.entries() if e.id == credential_id), None) if credential_id else None
         if (
             swapped
@@ -1126,7 +1131,7 @@ def recover_with_credential_pool(
         return _recover_auth_failure(
             agent, pool, status_code=status_code, has_retried_429=has_retried_429,
             error_context=error_context, api_key_hint=api_key_hint, credential_id=credential_id,
-            rotate_and_swap=_rotate_and_swap,
+            rotate_and_swap=_rotate_and_swap, runtime_lease=runtime_lease,
         )
     return False, has_retried_429
 
@@ -1318,7 +1323,8 @@ def _restore_runtime_capabilities(agent, rt: dict[str, Any]) -> None:
         logger.warning("Ignoring malformed runtime capabilities snapshot")
 
 
-def _rebind_primary_credential_pool(agent, primary_provider, primary_model, matches_primary, load_primary_pool, prefetched_pool, prefetched) -> None:
+def _rebind_primary_credential_pool(agent, primary_provider, primary_model, matches_primary,
+                                    load_primary_pool, prefetched_pool, prefetched, *, runtime_lease=None) -> None:
     """Rebind and re-select the primary credential pool after a fallback turn. A cross-provider
     fallback attaches its own pool, which would trip the provider-mismatch guard on the next
     401/429: reload the primary pool, else clear it. The snapshot api_key may be stale after
@@ -1344,7 +1350,8 @@ def _rebind_primary_credential_pool(agent, primary_provider, primary_model, matc
         # _swap_credential rebuilds the client and reapplies base-url-scoped headers.
         # ``_swap_credential`` rebuilds the OpenAI/Anthropic client, reapplies base-url-scoped headers, and
         # carries the accumulated base_url / OAuth-detection fixes (#33163).
-        agent._swap_credential(entry)
+        compose_runtime_call(agent, "swap_credential", agent._swap_credential, entry,
+                             runtime_lease=runtime_lease)
         logger.info(
             "Restore re-selected pool entry %s (%s)",
             getattr(entry, "id", "?"), getattr(entry, "label", "?"),
@@ -1358,7 +1365,7 @@ def _rebind_primary_credential_pool(agent, primary_provider, primary_model, matc
         )
 
 
-def _revert_credential_rotation(agent) -> None:
+def _revert_credential_rotation(agent, *, runtime_lease=None) -> None:
     """Move a live session back onto the credential a quota bench rotated it off, once the bench
     lifts. New sessions already do this through ``select()``; without it a long-lived (gateway)
     session keeps billing the fallback for its whole life (#114501). Credential-only: the
@@ -1377,7 +1384,8 @@ def _revert_credential_rotation(agent) -> None:
         return
     if entry is None:
         return  # still cooling down; check again next turn
-    if agent._swap_credential(entry) is not False:
+    if compose_runtime_call(agent, "swap_credential", agent._swap_credential, entry,
+                            runtime_lease=runtime_lease) is not False:
         logger.info(
             "Credential %s (%s) available again — reverted pool rotation",
             getattr(entry, "id", "?"), getattr(entry, "label", "?"),
@@ -1421,71 +1429,6 @@ def _primary_quota_reopened_early(agent, primary_provider, primary_model, matche
         return False
 
 
-def restore_primary_runtime(agent) -> bool:
-    """Restore the primary runtime at the start of a new turn so fallback stays turn-scoped
-    (long-lived CLI agents and the gateway's cached agents)."""
-    if not agent._fallback_activated:
-        # Reset the index even without activation: a failed _try_activate_fallback() can strand
-        # _fallback_index past the chain end and silently block future fallbacks (#20465).
-        agent._fallback_index = 0
-        _revert_credential_rotation(agent)
-        return False
-    rt = agent._primary_runtime
-    primary_provider = str((rt or {}).get("provider") or "").strip().lower()
-    primary_model = str((rt or {}).get("model") or "").strip()
-    from agent.fallback_cooldown import _is_entitlement_rejected
-    from hermes_cli.chat_catalog import is_known_non_chat_model
-    if primary_model and (
-        _is_entitlement_rejected(agent, primary_provider, primary_model)
-        or is_known_non_chat_model(primary_model)
-    ):
-        # Unentitled (#106475) or already known non-chat: restoring would announce a recovery
-        # that was never verified and re-fail every turn. Stay on the fallback.
-        return False
-    primary_runtime_base_url = str((rt or {}).get("base_url") or "")
-
-    def _matches_primary(candidate) -> bool:
-        return credential_pool_matches_provider(candidate, primary_provider, base_url=primary_runtime_base_url)
-
-    def _load_primary_pool():
-        """The primary's pool (entry-scoped for a custom entry); None when absent or provider-mismatched."""
-        from agent.custom_entry_pool import load_runtime_pool
-        loaded = load_runtime_pool(primary_provider, primary_runtime_base_url, (rt or {}).get("requested_provider"), rt or {})
-        return loaded if loaded is not None and _matches_primary(loaded) else None
-    if _primary_quota_reopened_early(agent, primary_provider, primary_model, _matches_primary, _load_primary_pool):
-        agent._rate_limited_until = 0
-    if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
-        return False  # primary still in rate-limit cooldown, stay on fallback
-    blocked, prefetched_pool, prefetched = _primary_reset_gate_blocks(
-        agent, rt, primary_provider, primary_runtime_base_url, _matches_primary, _load_primary_pool
-    )
-    if blocked:
-        return False
-    agent._restore_wait_logged = False
-    fallback_route = getattr(agent, "_provider_fallback_route", None)
-    if not (isinstance(fallback_route, (list, tuple)) and len(fallback_route) == 2):
-        fallback_route = (getattr(agent, "model", ""), getattr(agent, "provider", ""))
-    previous_model, previous_provider = (str(v or "unknown") for v in fallback_route)
-    provider_fallback_active = bool(getattr(agent, "_provider_fallback_active", False))
-    try:
-        from agent.route_binding import reinstall_primary_runtime
-        reinstall_primary_runtime(
-            agent, rt, primary_provider, primary_model, _matches_primary, _load_primary_pool, prefetched_pool, prefetched,
-        )
-        logger.info("Primary runtime restored for new turn: %s (%s)", agent.model, agent.provider)
-        agent._provider_fallback_active = False
-        agent._provider_fallback_route = None
-        if provider_fallback_active:
-            # Notification surfaces are best-effort and must never undo a successful restore.
-            with contextlib.suppress(Exception):
-                agent._emit_diagnostic_status(
-                    f"✅ Primary model restored: {agent.model} via {agent.provider}; "
-                    f"fallback {previous_model} via {previous_provider} is no longer active."
-                )
-        return True
-    except Exception as e:
-        logger.warning("Failed to restore primary runtime: %s", e)
-        return False
 
 
 # Transient transport failures worth one more attempt with a rebuilt client / connection pool.
@@ -3613,6 +3556,6 @@ __all__ = [
     "drop_thinking_only_and_merge_users", "dump_api_request_debug", "extract_api_error_context", "extract_reasoning",
     "invoke_tool", "looks_like_codex_intermediate_ack", "plan_cache_sections_for_destination",
     "prompt_caching_disabled_from_config", "recover_with_credential_pool", "repair_message_sequence",
-    "repair_tool_call", "restore_primary_runtime", "sanitize_api_messages", "sanitize_tool_call_arguments",
+    "repair_tool_call", "sanitize_api_messages", "sanitize_tool_call_arguments",
     "strip_think_blocks", "switch_model", "try_recover_primary_transport",
 ]

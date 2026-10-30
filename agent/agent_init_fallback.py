@@ -52,7 +52,7 @@ def recompute_init_fallback_api_mode(agent, fb_client) -> None:
     which silently drops reasoning content (#46527).
     The per-turn path (``try_activate_fallback``) already recomputes via
     ``_fallback_api_mode_resolved``; this keeps init in agreement, and runs before the
-    ``_primary_runtime`` snapshot so ``restore_primary_runtime`` replays the recomputed mode.
+    active-runtime capture. An unresolved preferred route has no restorable primary snapshot.
     A detection failure keeps the primary's mode and never blocks the fallback itself.
     """
     from agent.chat_completion_helpers import _fallback_api_mode_resolved

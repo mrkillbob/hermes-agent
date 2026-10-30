@@ -13,42 +13,103 @@ _registry = HandlerRegistry()
 
 
 _RUNTIME_KEYS = ("model", "provider", "api_key", "base_url", "api_mode")
+_ONE_TURN_FALLBACK_FIELDS = (
+    "_fallback_activated", "_fallback_index", "_provider_fallback_active", "_provider_fallback_route",
+    "_rate_limit_backoff_count", "_rate_limited_until",
+)
 
 
 def _snapshot_agent_model_runtime(agent) -> dict:
     """Capture the current agent model runtime for a one-turn restore."""
-    return {**{k: getattr(agent, k, "") for k in _RUNTIME_KEYS},
-            "reasoning_config": copy.deepcopy(getattr(agent, "reasoning_config", None)),
-            "primary_runtime": copy.deepcopy(getattr(agent, "_primary_runtime", None))}
+    from agent.runtime_mutation import runtime_mutation
+    with runtime_mutation(agent, "one_turn_restore") as lease:
+        return {**{k: getattr(agent, k, "") for k in _RUNTIME_KEYS},
+                "reasoning_config": copy.deepcopy(getattr(agent, "reasoning_config", None)),
+                "primary_runtime": copy.deepcopy(getattr(agent, "_primary_runtime", None)),
+                "_runtime_fallback_state": {
+                    key: copy.deepcopy(getattr(agent, key)) for key in _ONE_TURN_FALLBACK_FIELDS
+                    if hasattr(agent, key)},
+                "_runtime_preimage_token": lease.controller.voice_snapshot()[3]}
 
 
 def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
     """Restore an agent model runtime captured before a one-turn override."""
     if not snapshot or agent is None:
         return
+    from agent.runtime_mutation import RuntimeMutationStaleError, runtime_mutation
+    with runtime_mutation(agent, "one_turn_restore") as lease:
+        if "_runtime_selection_token" in snapshot:
+            if snapshot["_runtime_selection_token"] != lease.controller.voice_snapshot()[3]:
+                raise RuntimeMutationStaleError("one-turn restore selection is stale")
+        _prepare_one_turn_runtime_restore(agent, lease)
+        return _restore_agent_model_runtime_reserved(agent, snapshot, lease)
+
+
+def _prepare_one_turn_runtime_restore(agent, lease):
+    """Drain existing debt without manufacturing a request to end active voice."""
+    from agent.primary_runtime_snapshot import RuntimeRecoveryPendingError
+    from agent.voice_turn_route import recover_voice_cleanup
+    if lease.controller.voice_snapshot()[1] is not None and not recover_voice_cleanup(agent, lease):
+        raise RuntimeRecoveryPendingError("voice cleanup must complete before one-turn restoration")
+    voice, debt, _, _, _ = lease.controller.voice_snapshot()
+    if voice is not None or debt is not None or getattr(agent, "_voice_route_state", None) is not None:
+        raise RuntimeRecoveryPendingError("active voice runtime still owns one-turn restoration")
+
+
+def _try_one_turn_primary_restore(agent, snapshot, lease):
+    from agent.primary_runtime_snapshot import RuntimeRecoveryPendingError, commit_runtime_selection
+    from agent.runtime_mutation import RuntimeMutationBusyError
+    primary = snapshot.get("primary_runtime")
+    if not primary or not hasattr(agent, "_restore_primary_runtime"):
+        return False
+    prior_primary = getattr(agent, "_primary_runtime", None)
+    prior_fallback = getattr(agent, "_fallback_activated", False)
+    prior_cooldown = getattr(agent, "_rate_limited_until", 0)
+    primary_restored = False
+    try:
+        agent._primary_runtime = copy.deepcopy(primary)
+        agent._fallback_activated, agent._rate_limited_until = True, 0
+        if lease.call("restore_primary_runtime", agent._restore_primary_runtime):
+            primary_restored = True
+            if "reasoning_config" in snapshot:
+                agent.reasoning_config = snapshot["reasoning_config"]
+            commit_runtime_selection(agent, lease)
+            return True
+    except (RuntimeMutationBusyError, RuntimeRecoveryPendingError):
+        raise
+    except Exception:
+        logger.debug("TUI one-turn model restore via primary runtime failed", exc_info=True)
+    finally:
+        if not primary_restored:
+            agent._primary_runtime = prior_primary
+            agent._fallback_activated, agent._rate_limited_until = prior_fallback, prior_cooldown
+    return False
+
+
+def _restore_agent_model_runtime_reserved(agent, snapshot, lease):
+    from agent.primary_runtime_snapshot import commit_runtime_selection
     # `/model X --reasoning high --once`: the effort leaves with the model. Set before the
     # runtime restore paths below (primary_runtime may predate a session /reasoning change).
     if "reasoning_config" in snapshot:
         agent.reasoning_config = snapshot["reasoning_config"]
     primary = snapshot.get("primary_runtime")
-    if primary and hasattr(agent, "_restore_primary_runtime"):
-        try:
-            agent._primary_runtime = copy.deepcopy(primary)
-            agent._fallback_activated = True
-            agent._rate_limited_until = 0
-            if agent._restore_primary_runtime():
-                if "reasoning_config" in snapshot:
-                    agent.reasoning_config = snapshot["reasoning_config"]
-                return
-        except Exception:
-            logger.debug("TUI one-turn model restore via primary runtime failed", exc_info=True)
+    if _try_one_turn_primary_restore(agent, snapshot, lease):
+        return
     if hasattr(agent, "switch_model"):
         model, provider, api_key, base_url, api_mode = (snapshot.get(k, "") for k in _RUNTIME_KEYS)
-        agent.switch_model(
+        switched = lease.call("switch_model", agent.switch_model,
             new_model=model, new_provider=provider, api_key=api_key, base_url=base_url,
             api_mode=api_mode, capabilities=snapshot.get("capabilities"))
+        if switched is False:
+            raise ValueError("one-turn model restore declined")
         if "reasoning_config" in snapshot:
             agent.reasoning_config = snapshot["reasoning_config"]
+        if "primary_runtime" in snapshot and primary is None:
+            agent._primary_runtime = None
+            for key, value in snapshot.get("_runtime_fallback_state", {}).items():
+                if key in _ONE_TURN_FALLBACK_FIELDS:
+                    setattr(agent, key, copy.deepcopy(value))
+        commit_runtime_selection(agent, lease)
 
 
 def _profile_runtime_scope_tokens(profile_home, *, hydrate_secrets: bool = True) -> _TurnScopes:
@@ -279,11 +340,26 @@ def _expensive_model_confirm(result, current_base_url: str, current_api_key, age
 
 def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: str, snapshot):
     """Swap the live agent in place, then restart/persist/mark/announce; a failed swap aborts."""
+    from agent.runtime_mutation import runtime_mutation
+    with runtime_mutation(agent, "one_turn_restore") as lease:
+        return _commit_agent_switch_reserved(sid, session, agent, result, current_model, snapshot, lease)
+
+
+def _commit_agent_switch_reserved(sid, session, agent, result, current_model, snapshot, lease):
+    from agent.runtime_mutation import RuntimeMutationBusyError, RuntimeMutationStaleError
+    previous_selection = lease.controller.voice_snapshot()[3]
+    if snapshot is not None and "_runtime_preimage_token" in snapshot:
+        if snapshot["_runtime_preimage_token"] != previous_selection:
+            raise RuntimeMutationStaleError("one-turn selection preimage is stale")
     try:
-        agent.switch_model(
+        switched = lease.call("switch_model", agent.switch_model,
             new_model=result.new_model, new_provider=result.target_provider, api_key=result.api_key,
             base_url=result.base_url, api_mode=result.api_mode,
             capabilities=getattr(result, "runtime_capabilities", None))
+        if switched is False:
+            raise ValueError("model switch declined")
+    except RuntimeMutationBusyError:
+        raise
     except Exception as exc:
         # The in-place swap rolled the agent back and re-raised. Abort the whole commit (worker
         # restart, persist, marker, override, config write) or the session pins a broken model.
@@ -294,6 +370,10 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
         logger.warning("In-place model switch failed for TUI agent: %s", exc)
         raise ValueError(f"Model switch to {result.new_model} failed ({exc}); "
                          f"staying on {getattr(agent, 'model', current_model)}.") from exc
+    if lease.controller.voice_snapshot()[3] == previous_selection:
+        lease.successful_selection()
+    if snapshot is not None:
+        snapshot["_runtime_selection_token"] = lease.controller.voice_snapshot()[3]
     _restart_slash_worker(sid, session)
     _persist_live_session_runtime(session)
     _persist_live_session_system_prompt(session)
