@@ -1,4 +1,4 @@
-"""Operator-reviewed archival of accepted artifact-only, never-dispatched intake.
+"""Operator-reviewed archival of accepted artifact-only deliverables.
 
 The operator must independently establish that the complete brief is fulfilled.
 Hashes bind that acceptance to exact bytes and a complete card revision; they do
@@ -16,6 +16,7 @@ import re
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli.kanban_source_resolution import _require_settled_source
 from hermes_cli.kanban_source_supersession import _require_inactive_intake
 from hermes_cli.kanban_task_revision import require_task_revision
 from hermes_cli.kanban_transfer import _selected_task_rows
@@ -83,19 +84,22 @@ def _require_bytes(value, expected):
 
 
 def archive_accepted_artifact(conn, task_id, *, board, expected_revision, evidence,
-                              artifact: bytes, provenance: bytes, allow_nested: bool = False):
+                              artifact: bytes, provenance: bytes, allow_nested: bool = False,
+                              allow_settled_history: bool = False):
     """Archive accepted intake with one digest-only event and no completion hooks.
 
     Missing-input stops do not qualify as completed deliverables here. This path
-    refuses links, runs, active ownership and holds rather than releasing them.
+    refuses links, active ownership and holds rather than releasing them. An
+    explicit settled-history opt-in preserves qualified Blocked run history.
     The caller retains the accepted artifact and provenance; neither body nor
     filesystem path is copied into the board's audit event.
 
-    An operator may explicitly compose this side-effect-free primitive inside
+    An operator may explicitly compose this bounded mutation inside
     its own guarded transaction to keep store-wide preflight atomic. Its success
     then releases only a savepoint; durability requires the outer commit.
     """
-    if type(evidence) is not ArtifactAcceptance or type(allow_nested) is not bool:
+    if (type(evidence) is not ArtifactAcceptance or type(allow_nested) is not bool
+            or type(allow_settled_history) is not bool):
         raise ValueError('explicit artifact acceptance is required')
     payload = evidence.payload()
     board = kb._require_slug(board)
@@ -109,15 +113,24 @@ def archive_accepted_artifact(conn, task_id, *, board, expected_revision, eviden
     with kb.write_txn(conn, allow_nested=allow_nested):
         rows = _selected_task_rows(conn, [task_id])
         require_task_revision(expected_revision, board, task_id, rows)
-        _require_inactive_intake(rows)
+        if allow_settled_history:
+            _require_settled_source(rows)
+        else:
+            _require_inactive_intake(rows)
         if kb._has_sticky_block(conn, task_id):
             raise ValueError('artifact disposition preserves explicit policy holds')
-        changed = conn.execute("UPDATE tasks SET status='archived' WHERE id=? AND status='triage'", (task_id,))
+        prior_status = 'blocked' if allow_settled_history else 'triage'
+        changed = conn.execute("UPDATE tasks SET status='archived' WHERE id=? AND status=?",
+                               (task_id, prior_status))
         if changed.rowcount != 1:
             raise ValueError('artifact disposition task changed')
-        kb._append_event(conn, task_id, 'archived', {
+        event = {
             **payload, 'scope': 'artifact_only', 'runtime_acceptance_claimed': False,
             'experiment_execution_claimed': False, 'workspace_retained': True,
             'failure_state_preserved': True, 'readiness_recomputed': False,
-        })
+        }
+        if allow_settled_history:
+            event.update(prior_status='blocked', prior_run_count=len(rows['task_runs']),
+                         settled_history_preserved=True)
+        kb._append_event(conn, task_id, 'archived', event)
     return True
