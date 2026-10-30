@@ -131,3 +131,19 @@ def test_missing_models_directory_reports_every_local_model_missing(tmp_path):
     (home / "models").rmdir()
     _profile(home, "p", {"model": {"provider": "llamacpp", "default": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}})
     assert "LOCAL_MODEL_MISSING" in _kinds(audit.audit_home(home, receipts), "p")
+
+
+def test_only_free_nous_models_are_unmetered():
+    assert audit.classify("nous", "x:free") == "free-cloud"
+    assert audit.classify("nous", "hermes-4-405b") == "paid-cloud"
+
+
+def test_split_gguf_counts_only_when_every_part_is_staged(tmp_path):
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "Big-00001-of-00003.gguf").write_bytes(b"")
+    (models / "Big-00003-of-00003.gguf").write_bytes(b"")
+    assert not audit.model_on_disk(models, "Big")
+    (models / "Big-00002-of-00003.gguf").write_bytes(b"")
+    assert audit.model_on_disk(models, "Big")
+    assert not audit.model_on_disk(models, "Bi")

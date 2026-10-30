@@ -12,6 +12,7 @@ receipt. Never writes, never imports Hermes runtime code, never touches the netw
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import sys
 from collections import Counter
@@ -22,10 +23,28 @@ import yaml
 
 LLAMACPP = frozenset({"llamacpp", "llama.cpp", "llama-cpp", "local"})
 OLLAMA = frozenset({"ollama", "ollama-launch"})
-# Metered or subscription-quota providers. ``:free`` Nous/OpenRouter routes are not metered.
-PAID = frozenset({"openai-codex", "openai", "anthropic", "openrouter", "gemini", "xai", "bedrock", "vertex"})
-FREE_CLOUD = frozenset({"nous", "nvidia", "nim"})
+# Metered or subscription-quota providers. Only ``:free`` models (Nous, OpenRouter) are not metered.
+PAID = frozenset({"nous", "openai-codex", "openai", "anthropic", "openrouter", "gemini", "xai", "bedrock", "vertex"})
+FREE_CLOUD = frozenset({"nvidia", "nim"})
 TOOL_HEAVY = frozenset({"computer_use", "browser", "delegation", "code_execution"})
+
+
+# Mirrors hermes_cli/local_runtime/gguf.py SPLIT_PART_RE; this script stays free of runtime imports.
+_SPLIT_FIRST_PART = re.compile(r"-00001-of-(\d{5})\.gguf$")
+
+
+def model_on_disk(models_dir: Path, model: str) -> bool:
+    """A single ``<model>.gguf``, or a split model with every ``-NNNNN-of-MMMMM`` part present."""
+    if (models_dir / f"{model}.gguf").is_file():
+        return True
+    for first in models_dir.glob(f"{re.escape(model)}-00001-of-*.gguf") if models_dir.is_dir() else ():
+        m = _SPLIT_FIRST_PART.search(first.name)
+        if m and all(
+            (models_dir / f"{model}-{i:05d}-of-{m.group(1)}.gguf").is_file()
+            for i in range(2, int(m.group(1)) + 1)
+        ):
+            return True
+    return False
 
 
 def classify(provider: str, model: str) -> str:
@@ -125,7 +144,7 @@ def audit_profile(
         elif r["class"] == "paid-cloud":
             findings.append(f"PAID_ROUTE {tag}")
         elif r["class"] == "local-llamacpp":
-            if not (models_dir / f"{r['model']}.gguf").is_file():
+            if not model_on_disk(models_dir, r["model"]):
                 findings.append(f"LOCAL_MODEL_MISSING {tag}")
             if (r["provider"], r["model"], r["effort"]) not in receipts:
                 findings.append(f"LOCAL_UNQUALIFIED {tag}@{r['effort'] or 'unset'}")
