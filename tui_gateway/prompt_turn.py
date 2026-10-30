@@ -1021,6 +1021,59 @@ def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseExcept
         _emit("error", sid, {"message": str(e)})
 
 
+def _restore_one_turn_after_prompt(sid, session, agent, snapshot):
+    """Retain busy recovery for the owning session; discard only superseded receipts."""
+    from agent.primary_runtime_snapshot import RuntimeRecoveryPendingError
+    from agent.runtime_mutation import RuntimeMutationBusyError, RuntimeMutationStaleError
+    try:
+        _restore_agent_model_runtime(agent, snapshot)
+    except RuntimeMutationStaleError:
+        return
+    except (RuntimeMutationBusyError, RuntimeRecoveryPendingError):
+        if session.get("one_turn_runtime_cleanup") is None:
+            session["one_turn_runtime_cleanup"] = snapshot
+        return
+    except Exception:
+        if session.get("one_turn_runtime_cleanup") is None:
+            session["one_turn_runtime_cleanup"] = snapshot
+        logger.debug("TUI one-turn model restore remains pending", exc_info=True)
+        return
+    try:
+        _restart_slash_worker(sid, session)
+        _persist_live_session_runtime(session)
+        _persist_live_session_system_prompt(session)
+    except Exception:
+        logger.debug("TUI restored runtime publication failed", exc_info=True)
+
+
+def _drain_one_turn_before_prompt(sid, session):
+    """Refuse admission while a completed override still owes runtime cleanup."""
+    snapshot = session.get("one_turn_runtime_cleanup")
+    if snapshot is None:
+        return
+    from agent.primary_runtime_snapshot import RuntimeRecoveryPendingError
+    from agent.runtime_mutation import RuntimeMutationBusyError, RuntimeMutationStaleError
+    agent = session.get("agent")
+    if agent is None:
+        raise RuntimeRecoveryPendingError("one-turn cleanup requires its owning agent before admission")
+    try:
+        _restore_agent_model_runtime(agent, snapshot)
+    except RuntimeMutationStaleError:
+        pass
+    except (RuntimeMutationBusyError, RuntimeRecoveryPendingError) as exc:
+        raise RuntimeRecoveryPendingError("one-turn cleanup must complete before prompt admission") from exc
+    except Exception as exc:
+        raise RuntimeRecoveryPendingError("one-turn cleanup failed before prompt admission") from exc
+    else:
+        _restart_slash_worker(sid, session)
+        _persist_live_session_runtime(session)
+        _persist_live_session_system_prompt(session)
+    if session.get("one_turn_runtime_cleanup") is snapshot:
+        session.pop("one_turn_runtime_cleanup")
+    if session.get("one_turn_runtime_cleanup") is not None:
+        raise RuntimeRecoveryPendingError("newer one-turn cleanup remains pending before admission")
+
+
 def _release_turn_scopes(sid: str, session: dict, st: _TurnRun) -> None:
     """Finally-path, before settlement: drop snapshots, end turn audio, undo a one-turn model, reset scopes (not home)."""
     # Drop both pre-turn history snapshots before asking glibc to return pages (a test
@@ -1036,13 +1089,7 @@ def _release_turn_scopes(sid: str, session: dict, st: _TurnRun) -> None:
     if st.tts_queue is not None:
         st.tts_queue.put(None)  # end-of-text sentinel — flush + finish speaking
     if st.one_turn_restore:
-        try:
-            _restore_agent_model_runtime(st.agent, st.one_turn_restore)
-            _restart_slash_worker(sid, session)
-            _persist_live_session_runtime(session)
-            _persist_live_session_system_prompt(session)
-        except Exception:
-            logger.debug("TUI one-turn model restore failed", exc_info=True)
+        _restore_one_turn_after_prompt(sid, session, st.agent, st.one_turn_restore)
     scopes = st.scopes
     with contextlib.suppress(Exception):
         if scopes.approval is not None:
@@ -1106,6 +1153,9 @@ def _run_prompt_submit(
     queued_prompt_generation: int | None = None,
     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
     turn_author: dict | None = None, report_ownership_refusal: bool = True) -> bool:
+    if session.get("one_turn_runtime_cleanup") is not None:
+        with _session_profile_runtime_scope(session, hydrate_secrets=False):
+            _drain_one_turn_before_prompt(sid, session)
     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
     # the synthesized turns that enter here directly (crash auto-continue, queued-prompt drain,
     # wake-ups) bypass prompt.submit's persist, and a row-less turn is otherwise materialized by
@@ -1154,12 +1204,18 @@ def _run_prompt_submit(
         transport_token = bind_transport(session.get("transport"))
         runtime_session_token = _current_runtime_session_record.set(session)
         st = _TurnRun(
-            session["agent"], session.pop("one_turn_model_restore", None), terminal_callback,
+            session["agent"], None, terminal_callback,
             receipt_committed=terminal_callback is None)
         st.marker_key = _record_turn_marker(session, text, auto_continue=terminal_callback is None,
             notification_category=(display_metadata or {}).get("notification_category"))
         goal_followup = None
         try:
+            # Recheck on the owning worker: cleanup may have been queued after the
+            # dispatcher's pre-admission check. Do not consume an unused --once pick.
+            if session.get("one_turn_runtime_cleanup") is not None:
+                with _session_profile_runtime_scope(session, hydrate_secrets=False):
+                    _drain_one_turn_before_prompt(sid, session)
+            st.one_turn_restore = session.pop("one_turn_model_restore", None)
             prepared = _prepare_turn_input(sid, session, st, text, images)
             if prepared is None:
                 if st.terminal_callback is not None and not st.receipt_attempted:

@@ -447,6 +447,7 @@ def _snapshotted_agent(builder, initial, requested, api_key=ENTRY_KEY):
     from run_agent import AIAgent
 
     built = AIAgent.__new__(AIAgent)
+    built._fallback_activated = False
     built.model, built.provider, built.requested_provider = "m", initial["provider"], requested
     built.base_url, built.api_mode, built.api_key = initial["base_url"], "chat_completions", api_key
     built._client_kwargs = {"api_key": api_key, "base_url": initial["base_url"]}

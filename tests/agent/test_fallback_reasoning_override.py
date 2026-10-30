@@ -62,9 +62,10 @@ class TestFallbackReasoningOverride:
         3. Fallback activates → reasoning re-resolved for fallback model
         4. restore_primary_runtime → reasoning_config restored from snapshot
         """
-        from agent.agent_runtime_helpers import restore_primary_runtime
+        from agent.primary_runtime_snapshot import restore_primary_runtime
 
         agent = MagicMock()
+        agent._runtime_mutation_state = None  # Let the real controller initialize.
         # Simulate: _primary_runtime was captured during /model switch
         agent._primary_runtime = {
             "model": "gemini-flash",

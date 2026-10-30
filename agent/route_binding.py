@@ -137,13 +137,14 @@ def reinstall_runtime_snapshot(agent: Any, rt: dict[str, Any]) -> None:
 
 def reinstall_primary_runtime(
     agent: Any, rt: dict[str, Any], primary_provider: str, primary_model: str, matches_primary,
-    load_primary_pool, prefetched_pool=None, prefetched: bool = False,
+    load_primary_pool, prefetched_pool=None, prefetched: bool = False, *, runtime_lease=None,
 ) -> None:
     """Put ``agent`` back on its ``_primary_runtime`` snapshot ``rt`` and clear the fallback state."""
     from agent.agent_runtime_helpers import _rebind_primary_credential_pool
     reinstall_runtime_snapshot(agent, rt)
     _rebind_primary_credential_pool(
-        agent, primary_provider, primary_model, matches_primary, load_primary_pool, prefetched_pool, prefetched
+        agent, primary_provider, primary_model, matches_primary, load_primary_pool, prefetched_pool, prefetched,
+        runtime_lease=runtime_lease,
     )
     agent._fallback_activated = False
     agent._fallback_index = 0

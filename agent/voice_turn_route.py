@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -131,7 +132,7 @@ def _warn_once(agent: Any, target: dict[str, Any], reason: str) -> None:
              f"using {agent.model}.")
 
 
-def begin_voice_turn_route(agent: Any, messages: list[dict[str, Any]], system_prompt: Any) -> Any:
+def _begin_voice_turn_route(agent: Any, messages: list[dict[str, Any]], system_prompt: Any, lease) -> Any:
     """Bind the voice route for a marked turn; returns the system prompt the turn should send."""
     if not getattr(agent, "_voice_turn_pending", False):
         return system_prompt
@@ -145,6 +146,7 @@ def begin_voice_turn_route(agent: Any, messages: list[dict[str, Any]], system_pr
         return system_prompt
     state: dict[str, Any] = {"reasoning_config": copy.deepcopy(getattr(agent, "reasoning_config", None))}
     agent._voice_route_state = state
+    record = _register_voice(agent, state, lease)
     if target is not None:
         state.update(_capture(agent))
         reason = ""
@@ -160,6 +162,7 @@ def begin_voice_turn_route(agent: Any, messages: list[dict[str, Any]], system_pr
             _reinstall(agent, state)
             _warn_once(agent, target, reason)
             agent._voice_route_state = {"reasoning_config": state["reasoning_config"]}
+            record.state = agent._voice_route_state
             return agent._cached_system_prompt or system_prompt
         from agent.chat_completion_helpers import rewrite_prompt_model_identity
         rewrite_prompt_model_identity(agent, agent.model, agent.provider)
@@ -197,22 +200,177 @@ def session_runtime_view(agent: Any) -> Any:
     return _SessionRuntimeView(agent, state) if state else agent
 
 
-def end_voice_turn_route(agent: Any) -> None:
-    """Undo ``begin_voice_turn_route`` (idempotent; every turn exit calls it)."""
-    state = getattr(agent, "_voice_route_state", None)
-    if not state:
+@dataclass
+class _VoiceRecovery:
+    state: dict[str, Any]
+    revision: int
+    selection_token: str
+    preferred_snapshot: Any
+    explicit_provenance: bool = True
+    floor_recorded: bool = False
+    credential_invalid: bool = False
+
+
+def _register_voice(agent, state, lease, *, explicit=True):
+    controller = lease.controller
+    _, _, revision, selected, _ = controller.voice_snapshot()
+    record = _VoiceRecovery(state, revision, selected, getattr(agent, '_primary_runtime', None), explicit)
+    controller.register_voice(lease, record)
+    return record
+
+
+def _discard_projection(agent, record):
+    if getattr(agent, '_voice_route_state', None) is record.state:
+        agent._voice_route_state = None
+        agent._turn_route_task = ''
+
+
+def _propagate_validated_voice_credential(agent, old_token, new_token):
+    """Update an exact captured native owner after its existing successful refresh.
+
+    This consumes already validated rotation evidence; it never resolves a route
+    or credential. An ambiguous backup holding the revoked token cannot recover.
+    The caller owns the credential-refresh mutation reservation.
+    """
+    from agent.runtime_mutation import runtime_controller
+    from hermes_cli.route_identity import normalize_route_base_url
+
+    controller = runtime_controller(agent)
+    record, _, revision, selected, _ = controller.voice_snapshot()
+    if record is None or record.credential_invalid:
         return
-    agent._voice_route_state = None
-    agent._turn_route_task = ""
+    snapshot = record.state.get('snapshot')
+    if not isinstance(snapshot, dict) or not isinstance(old_token, str) or not old_token:
+        return
+    fields = ('api_key', 'anthropic_api_key', 'compressor_api_key')
+    kwargs = snapshot.get('client_kwargs')
+    matches = lambda value: isinstance(value, str) and value == old_token
+    if not (any(matches(snapshot.get(key)) for key in fields)
+            or isinstance(kwargs, dict) and matches(kwargs.get('api_key'))):
+        return
+    saved_url = snapshot.get('anthropic_base_url')
+    current_url = getattr(agent, '_anthropic_base_url', None)
+    entry = record.state.get('_credential_pool_entry_id')
+    current_entry = getattr(agent, '_credential_pool_entry_id', None)
+    same_entry = entry is current_entry or (
+        isinstance(entry, str) and isinstance(current_entry, str) and entry == current_entry)
+    qualified = (
+        record.explicit_provenance and record.revision == revision and record.selection_token == selected
+        and getattr(agent, '_primary_runtime', None) is record.preferred_snapshot
+        and snapshot.get('provider') == getattr(agent, 'provider', None) == 'anthropic'
+        and snapshot.get('api_mode') == getattr(agent, 'api_mode', None) == 'anthropic_messages'
+        and 'anthropic_base_url' in snapshot
+        and (saved_url is None or isinstance(saved_url, str))
+        and (current_url is None or isinstance(current_url, str))
+        and normalize_route_base_url(saved_url) == normalize_route_base_url(current_url)
+        and '_credential_pool' in record.state and '_credential_pool_entry_id' in record.state
+        and hasattr(agent, '_credential_pool') and hasattr(agent, '_credential_pool_entry_id')
+        and record.state['_credential_pool'] is getattr(agent, '_credential_pool', None)
+        and same_entry and matches(snapshot.get('anthropic_api_key'))
+        and isinstance(new_token, str) and bool(new_token)
+    )
+    if not qualified:
+        record.credential_invalid = True
+        return
+    updated = dict(snapshot)
+    for key in fields:
+        if matches(updated.get(key)):
+            updated[key] = new_token
+    if isinstance(kwargs, dict) and matches(kwargs.get('api_key')):
+        updated['client_kwargs'] = {**kwargs, 'api_key': new_token}
+    updated['is_anthropic_oauth'] = agent._is_anthropic_oauth
+    record.state['snapshot'] = updated
+
+
+def _finish_voice_recovery(agent, record, lease):
+    controller = lease.controller
+    current, _, revision, selected, _ = controller.voice_snapshot()
+    if (current is not record or revision != record.revision or selected != record.selection_token
+            or getattr(agent, '_primary_runtime', None) is not record.preferred_snapshot):
+        controller.finish_voice(record)
+        _discard_projection(agent, record)
+        return True
+    if record.credential_invalid:
+        controller.defer_voice(record)
+        return False
     try:
-        if "snapshot" in state:
-            if getattr(agent, "_reasoning_floor_required", False):
-                # The voice model 400'd on the disable this turn: start the next voice turn at the floor.
+        if 'snapshot' in record.state:
+            if not record.floor_recorded and getattr(agent, '_reasoning_floor_required', False):
                 from agent.auxiliary_reasoning_floor import remember_reasoning_floor
-                remember_reasoning_floor(agent.provider, agent.base_url, {"model": agent.model}, None)
-            _reinstall(agent, state)
+                remember_reasoning_floor(agent.provider, agent.base_url, {'model': agent.model}, None)
+                record.floor_recorded = True
+            _reinstall(agent, record.state)
+        agent.reasoning_config = record.state['reasoning_config']
     except Exception:
-        logger.warning("Voice turn route restore failed; the next turn re-resolves the main runtime",
-                       exc_info=True)
-        agent._fallback_activated = True  # restore_primary_runtime takes it from here
-    agent.reasoning_config = state["reasoning_config"]
+        controller.defer_voice(record)
+        logger.warning('Voice runtime restoration remains pending', exc_info=True)
+        return False
+    controller.finish_voice(record)
+    _discard_projection(agent, record)
+    return True
+
+
+def begin_voice_turn_route(agent: Any, messages: list[dict[str, Any]], system_prompt: Any) -> Any:
+    """Reserve before consuming the voice request or mutating the active route."""
+    if not getattr(agent, '_voice_turn_pending', False):
+        return system_prompt
+    from agent.runtime_mutation import runtime_mutation
+    with runtime_mutation(agent, 'begin_voice_turn_route') as lease:
+        if not getattr(agent, '_voice_turn_pending', False):
+            return system_prompt
+        ticket = lease.controller.begin_voice_setup(lease)
+        try:
+            return _complete_voice_begin(agent, messages, system_prompt, lease)
+        finally:
+            lease.controller.finish_voice_setup(lease, ticket)
+
+
+def _complete_voice_begin(agent, messages, system_prompt, lease):
+    result = _begin_voice_turn_route(agent, messages, system_prompt, lease)
+    record, debt, _, _, _ = lease.controller.voice_snapshot()
+    if record is not None and debt is record:
+        if not _finish_voice_recovery(agent, record, lease):
+            from agent.primary_runtime_snapshot import RuntimeRecoveryPendingError
+            raise RuntimeRecoveryPendingError('voice cleanup requested during route setup is pending')
+        return agent._cached_system_prompt or system_prompt
+    return result
+
+
+def end_voice_turn_route(agent: Any):
+    """Restore the captured active runtime, or retain cleanup debt without masking a turn result."""
+    from agent.runtime_mutation import RuntimeMutationBusyError, runtime_controller, runtime_mutation
+    controller = runtime_controller(agent)
+    record, debt, revision, selected, _ = controller.voice_snapshot()
+    if record is not None and debt is record:
+        return 'deferred'  # Only the established next-turn recovery hook retries cleanup.
+    projection = getattr(agent, '_voice_route_state', None)
+    if record is None and projection is None and not controller.voice_setup_pending:
+        return None
+    # Acquisition is outside the installer exception handler: contention is not an install failure.
+    scope = runtime_mutation(agent, 'end_voice_turn_route')
+    try:
+        lease = scope.__enter__()
+    except RuntimeMutationBusyError:
+        controller.request_voice_cleanup(record, expected_revision=revision, expected_selection=selected)
+        return 'deferred'
+    try:
+        record = controller.voice_snapshot()[0]
+        if record is None:
+            projection = getattr(agent, '_voice_route_state', None)
+            if projection is None:
+                return None
+            # A legacy active projection may be cleaned up now, but cannot attest a missing primary for retry.
+            record = _register_voice(agent, projection, lease, explicit=False)
+        return None if _finish_voice_recovery(agent, record, lease) else 'deferred'
+    finally:
+        scope.__exit__(None, None, None)
+
+
+def recover_voice_cleanup(agent, lease):
+    """Drain only exact existing cleanup debt on the established turn-start recovery path."""
+    record = lease.controller.voice_snapshot()[1]
+    if record is None:
+        return True
+    if record.preferred_snapshot is None and not record.explicit_provenance:
+        return False
+    return _finish_voice_recovery(agent, record, lease)

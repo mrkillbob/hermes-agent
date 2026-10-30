@@ -23,6 +23,44 @@ from agent.i18n import t
 from hermes_cli.cli_agent_setup_mixin import _retire_agent
 
 
+def _restore_one_turn_after_chat(cli, snapshot):
+    """Keep owed restoration local while allowing the turn's finalizers to finish."""
+    from agent.primary_runtime_snapshot import RuntimeRecoveryPendingError
+    from agent.runtime_mutation import RuntimeMutationBusyError, RuntimeMutationStaleError
+    try:
+        cli._restore_model_runtime_snapshot(snapshot)
+    except RuntimeMutationStaleError:
+        return  # a newer successful selection superseded this obligation
+    except (RuntimeMutationBusyError, RuntimeRecoveryPendingError):
+        if getattr(cli, "_one_turn_runtime_cleanup", None) is None:
+            cli._one_turn_runtime_cleanup = snapshot
+    except Exception:
+        if getattr(cli, "_one_turn_runtime_cleanup", None) is None:
+            cli._one_turn_runtime_cleanup = snapshot
+        logging.debug("CLI one-turn restore remains pending", exc_info=True)
+
+
+def _drain_one_turn_before_chat(cli):
+    """Complete a used override's cleanup before admitting another conversation turn."""
+    snapshot = getattr(cli, "_one_turn_runtime_cleanup", None)
+    if snapshot is None:
+        return
+    from agent.primary_runtime_snapshot import RuntimeRecoveryPendingError
+    from agent.runtime_mutation import RuntimeMutationBusyError, RuntimeMutationStaleError
+    try:
+        cli._restore_model_runtime_snapshot(snapshot)
+    except RuntimeMutationStaleError:
+        pass  # a successful newer selection superseded the completed override
+    except (RuntimeMutationBusyError, RuntimeRecoveryPendingError) as exc:
+        raise RuntimeRecoveryPendingError("one-turn cleanup must complete before another turn") from exc
+    except Exception as exc:
+        raise RuntimeRecoveryPendingError("one-turn cleanup failed before another turn") from exc
+    if getattr(cli, "_one_turn_runtime_cleanup", None) is snapshot:
+        cli._one_turn_runtime_cleanup = None
+    if getattr(cli, "_one_turn_runtime_cleanup", None) is not None:
+        raise RuntimeRecoveryPendingError("newer one-turn cleanup remains pending")
+
+
 class CLIChatTurnMixin:
     """chat() and its per-turn phase helpers."""
 
@@ -58,6 +96,7 @@ class CLIChatTurnMixin:
         objects for attached images voice_input: True when the message came from voice transcription (gates
         the concise voice-response prefix, #65827)
         """
+        _drain_one_turn_before_chat(self)
         from cli import ChatConsole, _ChatTurn, _DIM, _RST, _accent_hex, _cprint, set_secret_capture_callback
         from tools.process_registry_notifications import TimelineNotification
         # Test doubles subclass CLIChatTurnMixin alone (no worktree mixin), so bind only when
@@ -84,6 +123,10 @@ class CLIChatTurnMixin:
             }
             return None
 
+        from hermes_cli.cli_one_turn_runtime import (
+            carry_gateway_one_turn_controller, remember_gateway_one_turn_controller,
+        )
+        remember_gateway_one_turn_controller(self)
         turn_route = self._resolve_turn_agent_config(message)
         if turn_route["signature"] != self._active_agent_route_signature:
             _retire_agent(self)
@@ -102,6 +145,7 @@ class CLIChatTurnMixin:
         agent = self.agent
         if agent is None:
             return None
+        carry_gateway_one_turn_controller(self)
         self._sync_fallback_chain_with_config(agent)  # chain added after this chat opened reaches this turn
         message = self._chat_route_images(message, images)
 
@@ -307,6 +351,7 @@ class CLIChatTurnMixin:
 
     def _chat_run_agent(self, turn, message):
         """Agent-thread body: bind per-thread callbacks/approval key, prepend one-shot notes, run the turn."""
+        _drain_one_turn_before_chat(self)
         from cli import (
             _prepend_note_to_message, set_approval_callback, set_secret_capture_callback,
             set_sudo_password_callback,
@@ -393,19 +438,21 @@ class CLIChatTurnMixin:
                 # The owner admitted nothing: the resend is still the one turn the pick was for.
                 self._pending_one_turn_model_restore = _one_turn_model_restore
             elif _one_turn_model_restore:
-                self._restore_model_runtime_snapshot(_one_turn_model_restore)
+                _restore_one_turn_after_chat(self, _one_turn_model_restore)
             # Credit notices paint cleanly above the prompt here, not behind streamed output.
-            self._flush_credit_notices()
-            # A reused thread must never hold stale references to a disposed CLI instance.
             try:
-                set_sudo_password_callback(None)
-                set_approval_callback(None)
-                set_secret_capture_callback(None)
-                set_unlock_prompt_callback(None)
-                set_save_login_prompt_callback(None)
-                set_code_prompt_callback(None)
+                self._flush_credit_notices()
             except Exception:
-                pass
+                logging.debug("CLI credit notice cleanup failed", exc_info=True)
+            # A reused thread must never hold stale references to a disposed CLI instance.
+            for callback in (
+                set_sudo_password_callback, set_approval_callback, set_secret_capture_callback,
+                set_unlock_prompt_callback, set_save_login_prompt_callback, set_code_prompt_callback,
+            ):
+                try:
+                    callback(None)
+                except Exception:
+                    pass
             # Unbind the per-turn key; ``_session_yolo`` state itself persists across turns.
             if _approval_session_token is not None and reset_current_session_key is not None:
                 try:

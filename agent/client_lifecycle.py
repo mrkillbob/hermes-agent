@@ -10,6 +10,9 @@ from contextlib import suppress
 from typing import Any, Optional
 
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static, lazy_attr as _lazy_attr
+from agent.runtime_mutation import (
+    RuntimeMutationBusyError, serialized_runtime_mutation,
+)
 from hermes_cli.timeouts import get_provider_request_timeout
 from utils import base_url_host_matches, env_float
 
@@ -213,7 +216,7 @@ class ClientLifecycleMixin:
     _force_close_tcp_sockets = _forward_static("agent.agent_runtime_helpers_connections", "force_close_tcp_sockets")
     _cleanup_dead_connections = _forward("agent.agent_runtime_helpers_dead_connections", "cleanup_dead_connections")
     _run_codex_stream = _forward("agent.codex_runtime", "run_codex_stream")
-    _recover_with_credential_pool = _forward("agent.agent_runtime_helpers", "recover_with_credential_pool")
+    _recover_with_credential_pool = _forward("agent.primary_runtime_snapshot", "recover_with_credential_pool")
 
     def _close_openai_client(self, client: Any, *, reason: str, shared: bool) -> None:
         if client is None:
@@ -592,6 +595,7 @@ class ClientLifecycleMixin:
         self._sync_client_kwargs_credentials()
         return self._replace_primary_openai_client(reason=reason)
 
+    @serialized_runtime_mutation("refresh_codex_credentials")
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider not in {"openai-codex", "xai-oauth"}:
             return False
@@ -629,6 +633,7 @@ class ClientLifecycleMixin:
             return False
         return self._adopt_openai_credentials(api_key, base_url, reason=f"{self.provider}_credential_refresh")
 
+    @serialized_runtime_mutation("refresh_nous_credentials")
     def _try_refresh_nous_client_credentials(self, *, force: bool = True, require_account: str | None = None) -> bool:
         # Portal serves anthropic/* on the native Messages route, so either client kind may hold the expiring JWT.
         if self.provider != "nous" or self.api_mode not in ("chat_completions", "anthropic_messages"):
@@ -703,6 +708,8 @@ class ClientLifecycleMixin:
             return False
         try:
             return self._try_refresh_nous_client_credentials(force=False, require_account=str(account))
+        except RuntimeMutationBusyError:
+            raise
         except Exception:
             logger.debug("Nous key pre-expiry adoption failed", exc_info=True)
             return False
@@ -773,6 +780,7 @@ class ClientLifecycleMixin:
         # Adopt only while the session still runs on the registry default or the previously-seen env value.
         return (base_url, api_key) != prev and current_base in {default_base, prev[0]} and not unchanged
 
+    @serialized_runtime_mutation("refresh_env_credentials")
     def _try_refresh_env_client_credentials(self) -> bool:
         """Adopt ``~/.hermes/.env`` credential/base-url edits at the turn boundary (a Settings save updates ``.env``
         but a live worker keeps init-time values). Adoption rule: ``_should_adopt_env_credentials``.
@@ -814,6 +822,7 @@ class ClientLifecycleMixin:
         logger.info("Applied updated .env credentials for %s: endpoint %s", self.provider, self.base_url)
         return True
 
+    @serialized_runtime_mutation("refresh_vertex_credentials")
     def _try_refresh_vertex_client_credentials(self) -> bool:
         """Re-mint the Vertex OAuth2 token (~1h TTL; long sessions 401 on the expired bearer) and rebuild the client."""
         if self.api_mode != "chat_completions" or self.provider != "vertex":
@@ -831,6 +840,7 @@ class ClientLifecycleMixin:
             logger.info("Vertex AI OAuth token refreshed")
         return ok
 
+    @serialized_runtime_mutation("refresh_provider_credentials")
     def _try_refresh_provider_runtime_credentials(self, *, reason: str) -> bool:
         """Re-mint the live credential through the provider profile's ``refresh_runtime_credentials``
         and rebuild the shared client (caller enforces the single-shot guard). ``reason``:
@@ -849,6 +859,7 @@ class ClientLifecycleMixin:
         self._apply_client_headers_for_base_url(str(self.base_url or ""))
         return self._replace_primary_openai_client(reason=f"{profile.name}_credential_{reason}")
 
+    @serialized_runtime_mutation("refresh_anthropic_credentials")
     def _try_refresh_anthropic_client_credentials(self) -> bool:
         # Only native Anthropic rotates OAuth tokens; other anthropic_messages providers (MiniMax, Alibaba, ...)
         # and Azure use static keys — a refresh would pick up the ~/.claude OAuth token and break auth.
@@ -899,6 +910,8 @@ class ClientLifecycleMixin:
         for k in ("api_key", "anthropic_api_key", "compressor_api_key"):
             if rt.get(k) == old_token:
                 rt[k] = new_token
+        from agent.voice_turn_route import _propagate_validated_voice_credential
+        _propagate_validated_voice_credential(self, old_token, new_token)
         # The turn's aux runtime was published before the first request triggered this refresh, so
         # same-turn `auto` aux calls (approvals, goal judge, plugin llm) would still send the revoked token.
         from agent.auxiliary_key_rotation import rotate_runtime_main_api_key
@@ -947,6 +960,7 @@ class ClientLifecycleMixin:
         if merged:
             self._client_kwargs["default_headers"] = merged
 
+    @serialized_runtime_mutation("swap_credential")
     def _swap_credential(self, entry) -> bool:
         """Adopt *entry* as the live credential. Returns False, changing nothing, when the entry's
         route cannot serve this conversation's model (a conversation's model is never rewritten by a
