@@ -29,8 +29,8 @@ def _unlink_pty_markers(app: FastAPI) -> None:
 async def standalone_lifespan(app: "FastAPI"):
     from hermes_cli.web_server import (
         _eager_reconcile_own_session_db, _warm_gateway_module,
-        _start_desktop_cron_ticker, _dashboard_selftest_loop,
-        _auto_archive_ticker_loop, _terminate_desktop_managed_gateway, _probe_install_before_state_db,
+        _start_desktop_cron_ticker, _desktop_cron_ticker_enabled, _dashboard_selftest_loop,
+        _auto_archive_ticker_loop, _terminate_desktop_managed_gateway,
     )
     from hermes_cli.web_server_chat import PTY_REGISTRY
 
@@ -52,10 +52,6 @@ async def standalone_lifespan(app: "FastAPI"):
     # connection closed from the main thread mid-probe (pytest's leaked-DB
     # sweep) and segfaulted the interpreter. The worker is time-bounded by
     # SessionDB's lock patience, so the join cannot hang shutdown.
-    # The first-install check reads the default root's state.db: on the desktop's own backend it runs
-    # before this process starts creating or healing that database, and its answer is kept.
-    _probe_install_before_state_db()
-
     eager_reconcile_thread = threading.Thread(
         target=_eager_reconcile_own_session_db,
         name="statedb-eager-reconcile",
@@ -125,36 +121,27 @@ async def standalone_lifespan(app: "FastAPI"):
         except Exception:
             logger.exception("Desktop startup: orphan gateway reap failed")
 
-        cron_stop = threading.Event()
-        cron_thread = threading.Thread(
-            target=_start_desktop_cron_ticker,
-            args=(cron_stop,),
-            daemon=True,
-            name="desktop-cron-ticker",
-        )
-        cron_thread.start()
+        if _desktop_cron_ticker_enabled():
+            cron_stop = threading.Event()
+            cron_thread = threading.Thread(
+                target=_start_desktop_cron_ticker,
+                args=(cron_stop,),
+                daemon=True,
+                name="desktop-cron-ticker",
+            )
+            cron_thread.start()
 
-    # Reap idle/dead keep-alive PTY sessions (30-min TTL).
+    # Reap idle/dead keep-alive PTY sessions (30-min TTL). The registry is process-wide and
+    # close_all() refuses new spawns, so a re-entered lifespan reopens it first.
+    PTY_REGISTRY.reopen()
     pty_reaper_task = asyncio.create_task(run_reaper(PTY_REGISTRY))
     # Periodic authenticated self-test feeding the ``dashboard`` component on /api/status.
     selftest_task = asyncio.create_task(_dashboard_selftest_loop())
     # Live auto-archive timer, independent of list requests.
     auto_archive_task = asyncio.create_task(_auto_archive_ticker_loop())
 
-    # Managed local runtime (local_runtime.enabled): bring llama-server back so a
-    # restart doesn't strand a llamacpp main model. Off-thread and best-effort;
-    # failure falls back to cloud providers like a cold start. Server only —
-    # models load on first inference (an empty router holds no VRAM).
-    def _boot_local_runtime():
-        try:
-            from hermes_cli.config import load_config
-            from hermes_cli.local_runtime.bootstrap import ensure_local_runtime
-
-            ensure_local_runtime(load_config())
-        except Exception as exc:
-            logging.getLogger(__name__).warning("local runtime boot failed: %s", exc)
-
-    threading.Thread(target=_boot_local_runtime, daemon=True, name="local-runtime-boot").start()
+    # This compatibility backend is an inference consumer. The durable root gateway owns the
+    # shared router; closing a Desktop window must not kill another process's active requests.
 
     # Records who carries inference for setup.status / free_tier.status and broadcasts `setup.ready`
     # (no identity is created at boot). Off-thread; the desktop's first setup.status waits on the
@@ -162,9 +149,6 @@ async def standalone_lifespan(app: "FastAPI"):
     from hermes_cli.free_tier_bootstrap import start_background_bootstrap
 
     start_background_bootstrap()
-    # The desktop's onboarding due answer, worked out after that bootstrap and before it is asked.
-    # Through the server: methods_* functions run with the server's globals (``bind_module``).
-    tui_gateway.server.start_due_boot()
 
     try:
         yield
@@ -189,15 +173,6 @@ async def standalone_lifespan(app: "FastAPI"):
         # including stale paths from sessions reaped earlier.
         _unlink_pty_markers(app)
 
-        # Stop the managed llama-server with its parent (an orphan pins VRAM).
-        try:
-            from hermes_cli.local_runtime.bootstrap import shutdown_local_runtime
-
-            shutdown_local_runtime()
-        except Exception:
-            # Shutdown boundary: a supervisor that fails to stop must not skip the
-            # managed-gateway teardown below; log it so the orphan is diagnosable.
-            logger.warning("managed local runtime shutdown failed", exc_info=True)
         if desktop_owned:
             _terminate_desktop_managed_gateway()
 
@@ -205,19 +180,27 @@ async def standalone_lifespan(app: "FastAPI"):
 @asynccontextmanager
 async def http_lifespan(app: FastAPI):
     """The gateway already owns schema, rooms, scheduler and model services."""
+    from contextlib import AsyncExitStack
+
     from hermes_cli.web_server import _dashboard_selftest_loop
     from hermes_cli.web_server_chat import PTY_REGISTRY
+    from hermes_cli.web_server_surface import policy
 
     app.state.event_channels = {}
     app.state.event_lock = asyncio.Lock()
     app.state.pty_active_session_files = {}
     app.state.chat_argv_lock = asyncio.Lock()
+    PTY_REGISTRY.reopen()  # a prior lifespan's close_all() refuses spawns until reopened
     tasks = [
         asyncio.create_task(run_reaper(PTY_REGISTRY), name="gateway-api-pty-reaper"),
         asyncio.create_task(_dashboard_selftest_loop(), name="gateway-api-selftest"),
     ]
     try:
-        yield
+        async with AsyncExitStack() as surface:
+            if policy(app.state).host_terminal:
+                from hermes_cli.web_host_terminal_sessions import host_terminal_lifespan
+                await surface.enter_async_context(host_terminal_lifespan(app))
+            yield
     finally:
         for task in tasks:
             task.cancel()

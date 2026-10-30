@@ -65,13 +65,26 @@ const isServerRequestFrame = (frame: JsonRpcFrame): frame is JsonRpcFrame & { id
 export class JsonRpcGatewayError extends Error {
   readonly code?: number
   readonly data?: unknown
+  readonly method?: string
 
-  constructor(message: string, options?: { code?: number; data?: unknown }) {
+  constructor(message: string, options?: { code?: number; data?: unknown; method?: string }) {
     super(message)
     this.name = 'JsonRpcGatewayError'
     this.code = options?.code
     this.data = options?.data
+    this.method = options?.method
   }
+}
+
+/** Refusals `session.steer` / `session.redirect` answer before the text reaches any agent
+ *  (gateway/session_busy_controls.py::correct): the turn the client believed busy is gone or cannot
+ *  take a correction, so the words are safe to admit as the next prompt — never retried as a control. */
+const UNDELIVERED_CORRECTION_REASONS = new Set(['execution_not_ready', 'stale_generation', 'unsupported_control'])
+
+export function isUndeliveredCorrectionRefusal(error: unknown): boolean {
+  const reason = error instanceof JsonRpcGatewayError ? (error.data as { reason?: unknown } | undefined)?.reason : null
+
+  return typeof reason === 'string' && UNDELIVERED_CORRECTION_REASONS.has(reason)
 }
 
 /** JSON-RPC "method not found" (tui_gateway/server.py::dispatch `_err(rid, -32601, …)`). */
@@ -84,12 +97,17 @@ export const JSON_RPC_INTERNAL_ERROR = -32603
 export const JSON_RPC_SESSION_NOT_SHOWN = 4404
 
 /** Map a raw `error` member of a response frame to the typed error every surface inspects. */
-export function jsonRpcErrorFromFrame(raw: unknown, fallbackMessage = 'Hermes RPC failed'): JsonRpcGatewayError {
+export function jsonRpcErrorFromFrame(
+  raw: unknown,
+  fallbackMessage = 'Hermes RPC failed',
+  method?: string
+): JsonRpcGatewayError {
   const err = (raw && typeof raw === 'object' ? raw : {}) as JsonRpcErrorPayload
 
   return new JsonRpcGatewayError(typeof err.message === 'string' && err.message ? err.message : fallbackMessage, {
     code: typeof err.code === 'number' ? err.code : undefined,
-    data: err.data
+    data: err.data,
+    method
   })
 }
 
@@ -135,11 +153,17 @@ export interface JsonRpcRequestChannelOptions {
   heartbeatLiveness?: HeartbeatLiveness
   /** `setTimeout`/`setInterval` handles are `unref`'d when the runtime supports it (Node) so a pending call cannot pin the process. */
   unrefTimers?: boolean
+  /**
+   * Read at each attach: this client is the Desktop app connected to a backend on its own machine.
+   * The backend offers the welcome trial and first-run onboarding only to that client.
+   */
+  desktopLocal?: () => boolean
 }
 
 export type HeartbeatLiveness = 'any-inbound' | 'response'
 
 interface PendingCall {
+  method: string
   reject: (error: Error) => void
   resolve: (value: unknown) => void
   timer?: ReturnType<typeof setTimeout>
@@ -204,6 +228,7 @@ export class JsonRpcRequestChannel {
   constructor(options: JsonRpcRequestChannelOptions = {}) {
     this.options = {
       createRequestId: options.createRequestId ?? ((nextId: number) => `${options.requestIdPrefix ?? 'r'}${nextId}`),
+      desktopLocal: options.desktopLocal ?? (() => false),
       heartbeatDeadlineMs: options.heartbeatDeadlineMs ?? DEFAULT_HEARTBEAT_DEADLINE_MS,
       heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
       heartbeatLiveness: options.heartbeatLiveness ?? 'response',
@@ -231,6 +256,13 @@ export class JsonRpcRequestChannel {
     this.transport = transport
     this.lastLivenessAt = Date.now()
     this.backendCountsDeclines = false
+
+    // First on the socket, before the owner's own requests: the backend reads frames in order, and its
+    // answer to the boot's first onboarding.state already depends on this. A call of its own, so a
+    // backend older than the field refuses just this one (4000) and keeps server_requests.
+    if (this.options.desktopLocal()) {
+      this.request('client.capabilities', { desktop_local: true }).catch(() => undefined)
+    }
   }
 
   /** Drop the transport and fail every in-flight call with `error`. */
@@ -274,6 +306,7 @@ export class JsonRpcRequestChannel {
       }
 
       const pending: PendingCall = {
+        method,
         resolve: value => {
           detachAbort()
           resolve(value as T)
@@ -470,7 +503,7 @@ export class JsonRpcRequestChannel {
         this.clearPending(frame.id)
 
         if (frame.error) {
-          call.reject(jsonRpcErrorFromFrame(frame.error))
+          call.reject(jsonRpcErrorFromFrame(frame.error, 'Hermes RPC failed', call.method))
         } else {
           // Reconnect contract: `session.resume` / `session.activate` /
           // `session.events.since` answer with `open_requests` — the server→

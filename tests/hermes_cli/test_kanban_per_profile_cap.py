@@ -23,15 +23,33 @@ def isolated_kanban_home_with_profiles(monkeypatch):
         with open(os.path.join(test_home, "profiles", prof, "config.yaml"), "w") as fh:
             fh.write("{}\n")  # identity marker: a bare dir is not a profile
     monkeypatch.setenv("HERMES_HOME", test_home)
-    for mod in list(sys.modules.keys()):
-        if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
-            del sys.modules[mod]
-    from hermes_cli import kanban_db
-    from hermes_cli import kanban_db_dispatch
-    # The module purge above discards the conftest's memory-sample neutralizer;
-    # re-apply it so the host's live memory pressure cannot cap this tick.
-    monkeypatch.setattr(kanban_db_dispatch, "_system_memory_sample", dict)
-    yield kanban_db
+    def is_hermes_module(name):
+        return (
+            name.startswith("hermes_cli")
+            or name.startswith("hermes_state")
+            or name == "hermes_constants"
+        )
+
+    saved_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if is_hermes_module(name)
+    }
+    for name in saved_modules:
+        del sys.modules[name]
+    try:
+        from hermes_cli import kanban_db
+        from hermes_cli import kanban_db_dispatch
+
+        # The module purge above discards the conftest's memory-sample neutralizer;
+        # re-apply it so the host's live memory pressure cannot cap this tick.
+        monkeypatch.setattr(kanban_db_dispatch, "_system_memory_sample", dict)
+        yield kanban_db
+    finally:
+        for name in list(sys.modules):
+            if is_hermes_module(name):
+                del sys.modules[name]
+        sys.modules.update(saved_modules)
 
 
 def _fake_spawn(*args, **kwargs):
@@ -106,5 +124,4 @@ def test_capped_tasks_dispatched_on_subsequent_tick(isolated_kanban_home_with_pr
     assert len(res2.spawned) == 1
     assert len(res2.skipped_per_profile_capped) == 1
     assert res2.spawned[0][0] != spawned_id  # different task this time
-
 

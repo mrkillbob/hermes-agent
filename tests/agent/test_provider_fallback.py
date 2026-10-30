@@ -7,9 +7,11 @@ advancement through multiple providers.
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 
+from agent import chat_completion_helpers
 from agent.error_classifier import FailoverReason
-from run_agent import AIAgent
+from run_agent import AIAgent, _pool_may_recover_from_rate_limit
 
 
 def _make_agent(fallback_model=None):
@@ -42,8 +44,11 @@ def _mock_client(base_url="https://openrouter.ai/api/v1", api_key="fb-key"):
 
 
 class TestFallbackChainInit:
-
-
+    def test_no_fallback(self):
+        agent = _make_agent(fallback_model=None)
+        assert agent._fallback_chain == []
+        assert agent._fallback_index == 0
+        assert agent._fallback_model is None
 
     def test_invalid_entries_filtered(self):
         fbs = [
@@ -65,8 +70,92 @@ class TestFallbackChainInit:
 # ── Chain advancement ─────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (FailoverReason.auth, "authentication failed"),
+        (FailoverReason.billing, "billing or quota exhausted"),
+        (FailoverReason.rate_limit, "rate limit"),
+        (FailoverReason.upstream_rate_limit, "upstream model rate limit"),
+        (FailoverReason.overloaded, "provider overloaded"),
+        (FailoverReason.server_error, "provider server error"),
+        (FailoverReason.timeout, "request timeout"),
+        (FailoverReason.model_not_found, "model not found"),
+        (
+            FailoverReason.egress_policy_blocked,
+            "local egress policy blocked the request",
+        ),
+        (FailoverReason.unknown, "provider failure"),
+    ],
+)
+def test_fallback_reason_text_is_operator_friendly(reason, expected):
+    assert chat_completion_helpers._fallback_reason_text(reason) == expected
 
 
+def test_fallback_reason_text_defaults_when_reason_is_missing():
+    assert chat_completion_helpers._fallback_reason_text(None) == "provider failure"
+
+
+def test_unsupported_thinking_never_activates_remote_fallback():
+    agent = _make_agent(
+        fallback_model={"provider": "nous", "model": "solar-pro"},
+    )
+    with patch("agent.auxiliary_client.resolve_provider_client") as resolve_client:
+        assert agent._try_activate_fallback(FailoverReason.unsupported_thinking) is False
+
+    resolve_client.assert_not_called()
+    assert agent._fallback_index == 0
+
+
+def test_kanban_local_only_suppresses_profile_fallback_chain(monkeypatch):
+    """A local CI child must not escape to a remote configured fallback."""
+    monkeypatch.setenv("HERMES_KANBAN_LOCAL_ONLY", "1")
+    agent = _make_agent(
+        fallback_model=[
+            {"provider": "openai-codex", "model": "gpt-5.6-luna"},
+            {"provider": "nous", "model": "hermes-4"},
+        ],
+    )
+
+    assert agent._fallback_chain == []
+    assert agent._fallback_model is None
+
+
+def test_egress_policy_skips_remote_fallbacks_and_uses_loopback():
+    """Unsafe remote payloads must go directly to a local fallback.
+
+    The firewall has already rejected the current request, so retrying the
+    same payload against another remote provider only creates noisy false
+    provider failures and cannot succeed.
+    """
+    agent = _make_agent(
+        fallback_model=[
+            {
+                "provider": "openai-codex",
+                "model": "gpt-5.5",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+            },
+            {
+                "provider": "ollama-launch",
+                "model": "hermes-review-fast:latest",
+                "base_url": "http://127.0.0.1:11434/v1",
+            },
+        ]
+    )
+    clients = [_mock_client(base_url="http://127.0.0.1:11434/v1")]
+    with patch(
+        "agent.auxiliary_client.resolve_provider_client",
+        return_value=(clients[0], "hermes-review-fast:latest"),
+    ) as resolve_client:
+        assert (
+            agent._try_activate_fallback(FailoverReason.egress_policy_blocked)
+            is True
+        )
+
+    assert agent.provider == "ollama-launch"
+    assert agent.model == "hermes-review-fast:latest"
+    assert agent._fallback_index == 2
+    resolve_client.assert_called_once()
 
 
 class TestFallbackChainAdvancement:
@@ -87,6 +176,26 @@ class TestFallbackChainAdvancement:
             assert agent.model == "gpt-4o"
             assert agent._fallback_activated is True
 
+    @patch("time.monotonic", return_value=1000.0)
+    def test_records_user_visible_switch_with_reason(self, _clock):
+        agent = _make_agent(
+            fallback_model={"provider": "zai", "model": "glm-5.2"},
+        )
+        agent.model = "gpt-5.6-sol"
+        agent.provider = "openai-codex"
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(_mock_client(base_url="https://api.z.ai/v1"), "glm-5.2"),
+        ):
+            assert agent._try_activate_fallback(FailoverReason.rate_limit) is True
+
+        expected = (
+            "⚠️ Model fallback: gpt-5.6-sol via openai-codex unavailable "
+            "(rate limit); using glm-5.2 via zai. "
+            "Primary retry eligible in ~60 s; recovery is not guaranteed."
+        )
+        assert agent._pending_fallback_notice == [expected]
+        assert agent._retry_status_buffer[-1] == ("status", expected)
 
     @patch("time.monotonic", return_value=1000.0)
     def test_records_sequential_switches_in_order(self, _clock):
@@ -293,7 +402,9 @@ def _pool(n_entries: int, has_available: bool = True):
     return pool
 
 
-
+class TestPoolRotationRoom:
+    def test_none_pool_returns_false(self):
+        assert _pool_may_recover_from_rate_limit(None) is False
 
 
 

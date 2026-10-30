@@ -63,6 +63,26 @@ def _(rid, params):
     })
 
 
+@method("subagent.status")
+def _(rid, params):
+    from tools.delegate_tool import owned_subagent_status
+
+    subagent_id = _str_param(params, "subagent_id")
+    if not subagent_id:
+        return _err(rid, 4000, "subagent_id required")
+    session_id = _str_param(params, "session_id")
+    transport, owner = _current_session_steer_authority(session_id)
+    status = None
+    if transport is not None and owner is not None:
+        status = owned_subagent_status(
+            subagent_id,
+            owner_session_id=session_id,
+            owner_transport=transport,
+            owner_session_record=owner,
+        )
+    return _ok(rid, {"found": status is not None, "subagent": status})
+
+
 def _failed_delegations(session_id, owner):
     """Recently failed async delegation tasks for this session from the durable store (the live
     roster forgets ended children and dies with a renderer reload, #97202). Read under the session's
@@ -87,11 +107,14 @@ def _(rid, params):
         return _err(rid, 4000, "subagent_id required")
     session_id = _str_param(params, "session_id")
     transport, owner = _current_session_steer_authority(session_id)
-    if transport is None or owner is None:
-        return _err(rid, 4001, "session not found or not owned by this transport")
+    expected_generation = str(params.get("expected_generation") or "").strip()
+    if transport is None or owner is None or not expected_generation:
+        return _ok(rid, {"found": False, "subagent_id": subagent_id})
     record = next((r for r in _owned_subagent_records(session_id, transport, owner)
                    if r.get("subagent_id") == subagent_id), None)
-    agent = record.get("agent") if record else None
+    if not record or str(record.get("_authority_generation") or "") != expected_generation:
+        return _ok(rid, {"found": False, "subagent_id": subagent_id})
+    agent = record.get("agent")
     # Interrupt the authorized object, never re-resolve a globally recyclable id.
     found = False
     if agent is not None:

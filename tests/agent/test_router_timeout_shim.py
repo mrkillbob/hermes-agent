@@ -53,18 +53,34 @@ def test_stream_holds_router_timeout_shim_until_judged(mock_close, mock_create, 
     assert agent._get_transport().validate_response(response) is expect_valid
 
 
-def test_auxiliary_validation_rejects_router_timeout_shim():
+def test_auxiliary_validation_rejects_router_timeout_shim(monkeypatch):
     """The auxiliary fallback chain treats the shim like a malformed response, not a title."""
+    from agent import auxiliary_client, relay_llm
     from agent.auxiliary_client import _validate_llm_response
+
+    outcomes = []
+    monkeypatch.setattr(relay_llm, "complete_logical_call", lambda _request_id, **kw: outcomes.append(kw["outcome"]))
 
     shim = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=SHIM, tool_calls=None))],
                            usage=SimpleNamespace(completion_tokens=0), model="m")
-    with pytest.raises(RuntimeError):
-        _validate_llm_response(shim, "title")
-
     generated = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=SHIM, tool_calls=None))],
                                 usage=SimpleNamespace(completion_tokens=9), model="m")
-    assert _validate_llm_response(generated, "title") is generated
+    with patch("agent.aux_accounting.record_aux_usage") as record_usage:
+        with auxiliary_client._relay_aux_call_scope(("title",), {}):
+            with pytest.raises(RuntimeError, match="router timeout shim"):
+                _validate_llm_response(shim, "title")
+            assert outcomes == []
+            assert auxiliary_client._RELAY_AUX_CALL_CONTEXT.get().get("error_class")
+            record_usage.assert_not_called()
+            assert _validate_llm_response(generated, "title") is generated
+        assert outcomes == ["success"]
+        record_usage.assert_called_once()
+
+        with pytest.raises(RuntimeError, match="router timeout shim"):
+            with auxiliary_client._relay_aux_call_scope(("title",), {}):
+                _validate_llm_response(shim, "title")
+        assert outcomes == ["success", "failed"]
+        record_usage.assert_called_once()
 
 
 @patch("agent.process_bootstrap.OpenAI")

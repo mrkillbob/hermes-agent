@@ -507,6 +507,39 @@ class GatewayConfigLoadersMixin:
             return {}
 
     @staticmethod
+    def _load_performance_routes() -> Any:
+        """Compile the benchmark-backed model route table from the configured artifact path.
+
+        Reads ``agent.performance_route_artifact`` (a path to a JSON artifact produced by
+        ``hermes_cli.profile_route_compiler``), compiles it via
+        ``agent.model_performance_router.compile_profile_routes``, and installs it into the
+        egress runtime so ``_route_for_agent`` can consult it.  Fail-open: any error logs a
+        warning and leaves the runtime table at None (agent defaults stay active).
+        """
+        from gateway.run import _load_gateway_runtime_config
+        try:
+            cfg = _load_gateway_runtime_config()
+            agent_cfg = cfg.get("agent") or {}
+            artifact_path_str = agent_cfg.get("performance_route_artifact") if isinstance(agent_cfg, dict) else None
+            if not artifact_path_str:
+                return None
+            artifact_path = Path(str(artifact_path_str)).expanduser()
+            with artifact_path.open(encoding="utf-8") as fh:
+                artifact = json.load(fh)
+            profiles = list((artifact.get("profiles") or {}).keys())
+            if not profiles:
+                return None
+            from agent.model_performance_router import compile_profile_routes
+            compiled = compile_profile_routes(profiles, artifact)
+            from agent.llm_egress_runtime import install_performance_route_table
+            install_performance_route_table(compiled)
+            logger.info("Installed performance route table for %d profile(s): %s", len(profiles), ", ".join(profiles))
+            return compiled
+        except Exception:
+            logger.warning("Could not load performance route artifact; agent defaults remain active", exc_info=True)
+            return None
+
+    @staticmethod
     def _load_fallback_model() -> list | None:
         """Fallback chain: ``fallback_providers`` (kept first) merged with legacy ``fallback_model``."""
         from gateway.run import _load_gateway_config
@@ -532,6 +565,7 @@ class GatewayConfigLoadersMixin:
         and keeps one last-known-good chain per home: a single runner-wide slot filled from the launch
         home handed every secondary profile the default profile's fallback chain.
         """
+        from hermes_cli.config_backend import config_exists
         from gateway.run import _gateway_config_home
         from hermes_constants import hermes_home_key
         home = _gateway_config_home()
@@ -542,7 +576,7 @@ class GatewayConfigLoadersMixin:
         try:
             from hermes_cli.config_effective import load_user_config_effective
             cfg_path = home / "config.yaml"
-            if not cfg_path.exists():
+            if not config_exists(cfg_path):
                 by_home[home_key] = self._fallback_model = None
                 return self._fallback_model
             # fail_closed: a torn mid-edit write must raise so the per-home last known-good chain

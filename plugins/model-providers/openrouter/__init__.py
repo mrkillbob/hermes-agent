@@ -106,6 +106,10 @@ class OpenRouterProfile(ProviderProfile):
             cfg = {**cfg, "effort": clamped}
         return cfg
 
+    def owns_reasoning_policy(self, **context: Any) -> bool:
+        """OpenRouter owns reasoning emission, including intentional omission."""
+        return bool(context.get("supports_reasoning"))
+
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:

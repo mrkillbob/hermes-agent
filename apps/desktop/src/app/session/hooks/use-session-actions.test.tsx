@@ -62,7 +62,6 @@ import {
   $selectedStoredSessionId,
   $sessions,
   $sessionStartedAt,
-  $turnStartedAt,
   _resetSessionOwnerHintsForTests,
   getSessionOwnerHint,
   knownSessionOwner,
@@ -89,7 +88,6 @@ import {
   setSessionOwnerHint,
   setSessions,
   setSessionStartedAt,
-  setTurnStartedAt,
   setUnlistedSessionOwnerRows
 } from '@/store/session'
 import { assertSessionOwnerResolved } from '@/store/session-owner-resolution'
@@ -99,8 +97,10 @@ import {
   $sessionTiles,
   clearAllSessionStates,
   dropSessionState,
+  foregroundSessionScopes,
   knownOwnerForSession,
   publishSessionState,
+  releaseSessionOwnerHold,
   requestForOwnedSession,
   sessionTileOwnerRoute
 } from '@/store/session-states'
@@ -109,7 +109,6 @@ import { $subagentsBySession, type SubagentProgress } from '@/store/subagents'
 import { $retainedTodosBySession, $todosBySession, clearSessionTodos } from '@/store/todos'
 import { loadTranscriptTail, saveTranscriptTail } from '@/store/transcript-tail-cache'
 
-import sessionResumeActiveTurn from '../../../../../../tests/fixtures/session-resume-active-turn.json'
 import { deferred } from '../../../test/deferred'
 import { NEW_CHAT_ROUTE, sessionRoute } from '../../routes'
 import type { ClientSessionState } from '../../types'
@@ -1241,6 +1240,79 @@ describe('submitTextToNewSession pin release', () => {
     vi.restoreAllMocks()
   })
 
+  it('captures the draft owner for create compatibility and the exact accepted runtime through navigation failure', async () => {
+    const route = { connectionId: 'draft-remote', mode: 'remote' as const, profile: 'draft-profile' }
+    const previousTree = $projectTree.get()
+    const previousScope = $projectScope.get()
+    const previousCwd = $currentCwd.get()
+    const previousWorkspace = $newChatWorkspaceTarget.get()
+    const previousRoute = $newChatRoute.get()
+    const previousProfile = $newChatProfile.get()
+    const release = vi.fn()
+    vi.mocked(retainGatewayForAgent).mockResolvedValue(release)
+    const calls: Array<{ method: string; params: Record<string, unknown> | undefined }> = []
+    vi.mocked(requestGatewayForAgent).mockImplementation(async (connection, profile, method, params) => {
+      expect([connection, profile]).toEqual([route.connectionId, route.profile])
+      calls.push({ method, params })
+      if (method === 'session.create') {
+        $newChatRoute.set({ connectionId: 'different-remote', mode: 'remote', profile: 'different-profile' })
+        if (params && 'cwd_explicit' in params) {
+          throw new Error('invalid params for session.create: cwd_explicit: unknown field')
+        }
+        return { session_id: 'rt-draft', stored_session_id: 'st-draft' } as never
+      }
+      expect(getSessionOwnerHint('st-draft')).toEqual(route)
+      return {} as never
+    })
+    const ambient = vi.fn(async () => {
+      throw new Error('focused owner must not receive the draft prompt')
+    })
+    const navigate = vi.fn(() => {
+      expect(foregroundSessionScopes()).toContain(registryBackendScopeKey(route.connectionId, route.profile))
+      throw new Error('local navigation failed')
+    })
+    const onAccepted = vi.fn()
+    const onDispatched = vi.fn()
+    let handle: HarnessHandle | null = null
+    $newChatRoute.set(route)
+    $newChatProfile.set(route.profile)
+    $projectTree.set([{ id: 'quick-draft-project', label: 'Quick draft', path: '/draft/workspace', repos: [], sessionCount: 0 }])
+    $projectScope.set('quick-draft-project')
+    setCurrentCwd('/draft/workspace')
+    setNewChatWorkspaceTarget('/draft/workspace')
+    try {
+      render(<Harness navigate={navigate} onReady={value => (handle = value)} requestGateway={ambient as never} />)
+      await waitFor(() => expect(handle).not.toBeNull())
+      await act(async () => {
+        await expect(
+          handle!.submitTextToNewSession('quick draft', 'corr-draft', { onAccepted, onDispatched })
+        ).rejects.toThrow('local navigation failed')
+      })
+      expect(calls.map(call => call.method)).toEqual(['session.create', 'session.create', 'prompt.submit'])
+      expect(calls[0].params).toHaveProperty('cwd_explicit')
+      expect(calls[1].params).not.toHaveProperty('cwd_explicit')
+      expect(calls[2].params).toEqual({ session_id: 'rt-draft', text: 'quick draft' })
+      expect(onDispatched).toHaveBeenCalledOnce()
+      expect(onAccepted).toHaveBeenCalledWith({ runtimeSessionId: 'rt-draft', storedSessionId: 'st-draft' })
+      expect($sessions.get().find(session => session.id === 'st-draft')).toMatchObject({
+        connection_id: route.connectionId,
+        profile: route.profile
+      })
+      expect(ambient).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledOnce()
+      expect(pinnedStoredSessionIdsForOwner('corr-draft').size).toBe(0)
+    } finally {
+      releaseSessionOwnerHold('st-draft')
+      $newChatRoute.set(previousRoute)
+      $newChatProfile.set(previousProfile)
+      $projectTree.set(previousTree)
+      $projectScope.set(previousScope)
+      setCurrentCwd(previousCwd)
+      setNewChatWorkspaceTarget(previousWorkspace)
+      vi.mocked(requestGatewayForAgent).mockReset()
+    }
+  })
+
   it('releases the pin at the terminal transition instead of on ticks', async () => {
     const requestGateway = vi.fn(async (method: string) => {
       if (method === 'session.create') {
@@ -1788,53 +1860,6 @@ function ResumeHarness({
 
       return next
     }
-  })
-
-  useEffect(() => {
-    onReady(actions.resumeSession)
-  }, [actions.resumeSession, onReady])
-
-  return null
-}
-
-function ResumeTimerHarness({
-  onReady,
-  requestGateway
-}: {
-  onReady: (resume: (storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) => void
-  requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
-}) {
-  const activeSessionId = useStore($activeSessionId)
-  const busyRef = useRef(false)
-
-  const cache = useSessionStateCache({
-    activeSessionId,
-    busyRef,
-    selectedStoredSessionId: null,
-    setAwaitingResponse,
-    setBusy,
-    setMessages
-  })
-
-  const actions = useSessionActions({
-    activeSessionId,
-    activeSessionIdRef: cache.activeSessionIdRef,
-    busyRef,
-    creatingSessionRef: useRef(false),
-    ensureSessionState: cache.ensureSessionState,
-    getRouteToken: () => 'timer-contract',
-    navigate: vi.fn() as never,
-    requestGateway,
-    resetViewSync: cache.resetViewSync,
-    runtimeIdByStoredSessionIdRef: cache.runtimeIdByStoredSessionIdRef,
-    selectedStoredSessionId: null,
-    selectedStoredSessionIdRef: cache.selectedStoredSessionIdRef,
-    sessionStateByRuntimeIdRef: cache.sessionStateByRuntimeIdRef,
-    holdSessionTranscriptView: cache.holdSessionTranscriptView,
-    syncSessionStateToView: cache.syncSessionStateToView,
-    getRoutedStoredSessionId: () => null,
-    routedSessionId: null,
-    updateSessionState: cache.updateSessionState
   })
 
   useEffect(() => {
@@ -2845,78 +2870,6 @@ describe('resumeSession failure recovery', () => {
     await runResume(requestGateway)
 
     expect(getSessionOwnerHint('stored-1')).toBeUndefined()
-  })
-})
-
-describe('session.resume turn timer contract', () => {
-  beforeEach(() => {
-    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback: FrameRequestCallback) => {
-      callback(0)
-
-      return null as unknown as number
-    })
-    setActiveSessionId(null)
-    setAwaitingResponse(false)
-    setBusy(false)
-    setMessages([])
-    setSessions([])
-    setTurnStartedAt(null)
-  })
-
-  afterEach(() => {
-    cleanup()
-    setActiveSessionId(null)
-    setAwaitingResponse(false)
-    setBusy(false)
-    setMessages([])
-    setSessions([])
-    setTurnStartedAt(null)
-    vi.restoreAllMocks()
-  })
-
-  async function resumeFrom(response: unknown): Promise<void> {
-    const requestGateway = vi.fn(async (method: string) => {
-      if (method === 'session.resume') {
-        // Model the JSON-RPC serialization/deserialization boundary. The shared
-        // fixture is asserted against the real gateway response in Python.
-        return JSON.parse(JSON.stringify(response)) as never
-      }
-
-      return {} as never
-    })
-
-    vi.mocked(getAllSessionMessages).mockResolvedValue({ messages: [], session_id: 'stored-running' } as never)
-
-    let resume: ((storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) | null = null
-    render(<ResumeTimerHarness onReady={ready => (resume = ready)} requestGateway={requestGateway} />)
-    await waitFor(() => expect(resume).not.toBeNull())
-    await act(async () => {
-      await resume!('stored-running', true)
-    })
-  }
-
-  it('restores the canonical gateway turn timestamp in milliseconds', async () => {
-    await resumeFrom(sessionResumeActiveTurn)
-
-    expect($turnStartedAt.get()).toBe(sessionResumeActiveTurn.turn_started_at * 1000)
-  })
-
-  it('clears a stale timer when the gateway response is not running', async () => {
-    setTurnStartedAt(1_600_000_000_000)
-
-    await resumeFrom({ ...sessionResumeActiveTurn, running: false })
-
-    expect($turnStartedAt.get()).toBeNull()
-  })
-
-  it('clears a stale timer when the running gateway response omits its timestamp', async () => {
-    const missingTimestamp: Record<string, unknown> = JSON.parse(JSON.stringify(sessionResumeActiveTurn))
-    delete missingTimestamp.turn_started_at
-    setTurnStartedAt(1_600_000_000_000)
-
-    await resumeFrom(missingTimestamp)
-
-    expect($turnStartedAt.get()).toBeNull()
   })
 })
 

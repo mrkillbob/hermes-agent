@@ -6,7 +6,7 @@ cron model pinning) — so nine surfaces used to hand-roll raw-read → overlay 
 differing orders and none of them replayed the model-key canonicalization or the last-known-good
 recovery ``load_config()`` gained. This module is that one primitive.
 
-Order matches ``_load_config_impl``: the user layer is expanded BEFORE the managed overlay so a
+Order matches ``config._load_config_impl``: the user layer is expanded BEFORE the managed overlay so a
 managed ``${VAR}`` resolves against the process environment only (``apply_managed_overlay``
 expands it) and can never be re-resolved through a profile's secret scope
 (docs/design/managed-scope.md §4.1). ``read_user_config_raw`` stays the write-back primitive.
@@ -20,13 +20,13 @@ from typing import Any, Dict, Optional, Tuple
 
 from hermes_cli import config as _config
 from hermes_cli import managed_scope
+from hermes_cli.config_backend import read_config_doc
 from hermes_cli.config_read_errors import _warn_config_parse_failure
-from utils import fast_safe_load
 
 # path -> raw user mapping from the last successful parse in this process; served (through the
 # normal pipeline) when the file is later found mid-edit as broken YAML.
 _LAST_GOOD_USER_RAW: dict[str, dict[str, Any]] = {}
-# path -> (*user_signature, *managed_signature, effective, env_snapshot); see utils.file_signature.
+# path -> (*cache_signature, effective, env_snapshot); signature includes maintenance mode.
 _EFFECTIVE_CACHE: dict[str, tuple[Any, ...]] = {}
 
 
@@ -70,37 +70,36 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
     if config_path is None:
         config_path = _config.get_config_path()
     path_key = str(config_path)
+    from hermes_cli.config_load import _load_config_cache_sig
     with _config._CONFIG_LOCK:
-        user_sig, cache_sig = _config._load_config_cache_sig(config_path)
+        user_sig, cache_sig = _load_config_cache_sig(config_path)
         cached = _EFFECTIVE_CACHE.get(path_key)
-        if cached is not None and cache_sig is not None and cached[:8] == cache_sig:
-            if all(_config._env_ref_lookup(k) == v for k, v in cached[9].items()):
-                return copy.deepcopy(cached[8])
+        if cached is not None and cache_sig is not None and cached[:len(cache_sig)] == cache_sig:
+            if all(_config._env_ref_lookup(k) == v for k, v in cached[len(cache_sig) + 1].items()):
+                return copy.deepcopy(cached[len(cache_sig)])
 
         raw: dict[str, Any] = {}
         recovered = False
-        raw_hit = _config._RAW_CONFIG_CACHE.get(path_key)
-        if user_sig is not None and raw_hit is not None and raw_hit[:4] == user_sig:
-            raw = copy.deepcopy(raw_hit[4])  # one parse per process, shared with read_raw_config()
+        raw_hit = _config._raw_config_cache_hit(path_key, user_sig) if user_sig is not None else None
+        if raw_hit is not None:
+            raw = copy.deepcopy(raw_hit)  # one parse per process, shared with read_raw_config()
             _LAST_GOOD_USER_RAW.setdefault(path_key, copy.deepcopy(raw))
         elif user_sig is not None:
             try:
-                with open(config_path, encoding="utf-8-sig") as f:
-                    loaded = fast_safe_load(f)
+                loaded = read_config_doc(config_path)
             except Exception as exc:
                 if fail_closed:
                     raise
                 raw, recovered = _recover_user_raw(config_path, path_key, exc), True
             else:
                 raw = loaded if isinstance(loaded, dict) else {}
-                _config._RAW_CONFIG_CACHE[path_key] = (*user_sig, copy.deepcopy(raw))
+                _config._raw_config_cache_store(path_key, user_sig, copy.deepcopy(raw))
                 _LAST_GOOD_USER_RAW[path_key] = copy.deepcopy(raw)
-                # Same copy load_config keeps: a fresh process recovers from it (see _recover_user_raw).
-                # Only for the ACTIVE home — a read of another profile's file (doctor, TUI cwd lookup)
-                # must not create backups/ inside that profile.
-                if config_path == _config.get_config_path():
-                    from hermes_cli.config_backups import backup_config
-                    backup_config(config_path, "good")
+        # A raw-cache hit is current successful parse evidence too; a deferred read must
+        # not suppress the first normal snapshot. Recovered data is never such evidence.
+        if user_sig is not None and not recovered and config_path == _config.get_config_path():
+            from hermes_cli.config_load import record_good_config
+            record_good_config(config_path)
 
         env_snapshot = _config._env_ref_snapshot(raw)
         managed = managed_scope.load_managed_config()

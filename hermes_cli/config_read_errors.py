@@ -13,11 +13,10 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from utils import file_signature
 
 logger = logging.getLogger(__name__)
 
-# (config_path, mtime_ns, size) tuples already warned about, so concurrent CLI/gateway
+# (config_path, *file_signature, deferred) tuples already warned about, so CLI/gateway
 # loads of a broken config.yaml don't spam stderr. A changed file (new mtime) warns again.
 _CONFIG_PARSE_WARNED: set = set()
 
@@ -66,6 +65,14 @@ def format_config_parse_failure(config_path: Path, exc: Exception, *, fallback: 
     return f"Your settings file ({config_path}) has a formatting error{at}. {fallback_msg} {repair}"
 
 
+def _backup_parse_failure(config_path: Path, exc: Exception, *, deferred: bool):
+    # A transient read error leaves intact bytes; a held reader must not migrate/prune backups.
+    if isinstance(exc, OSError) or deferred:
+        return None
+    from hermes_cli.config_backups import backup_config
+    return backup_config(config_path, "corrupt")
+
+
 def _warn_config_parse_failure(
     config_path: Path, exc: Exception, *, fallback: str = "defaults") -> None:
     """Surface a config.yaml parse failure to log and stderr (once per file signature).
@@ -75,19 +82,19 @@ def _warn_config_parse_failure(
     ``"last-known-good"`` (in-process retention of the previously loaded config — see the codex#31188 port
     in ``hermes_cli.config._load_config_impl``).
     """
+    from hermes_cli.startup_hold import defer_maintenance
+    deferred = defer_maintenance()
     try:
-        st = config_path.stat()
-        sig = file_signature(st)
-        key = (str(config_path), *sig)
-        _CONFIG_PARSE_FAILURES[str(config_path)] = (*sig, str(exc))
+        from hermes_cli.config_backend import config_version
+        sig = config_version(config_path)
+        key = (str(config_path), *sig, deferred)
+        _CONFIG_PARSE_FAILURES[str(config_path)] = (*_failure_version(config_path), str(exc))
     except OSError:
-        key = (str(config_path), 0, 0, 0, 0)
+        key = (str(config_path), 0, 0, 0, 0, deferred)
     if key in _CONFIG_PARSE_WARNED:
         return
     _CONFIG_PARSE_WARNED.add(key)
-    from hermes_cli.config_backups import backup_config
-    # A read error leaves an intact file behind: no "corrupt" copy of a good file.
-    backup_path = None if isinstance(exc, OSError) else backup_config(config_path, "corrupt")
+    backup_path = _backup_parse_failure(config_path, exc, deferred=deferred)
     msg = format_config_parse_failure(config_path, exc, fallback=fallback)
     if backup_path is not None:
         msg += f" A copy of the broken file was saved to {backup_path}."
@@ -99,14 +106,26 @@ def _warn_config_parse_failure(
         pass
 
 
+def _failure_version(path: Path) -> tuple:
+    """What a parse-failure record is matched on: ``file_cache_version`` hashed even once settled,
+    because the record is compared long after it was taken and a same-tick same-size fix must clear
+    it. An unreadable file (the OSError failures) gets its stat signature and the error's name."""
+    from utils import file_cache_version
+    try:
+        return file_cache_version(path, always_digest=True)
+    except OSError:
+        from hermes_cli.config_backend import config_version
+        return (*config_version(path), None)
+
+
 def get_active_config_parse_failure() -> Optional[str]:
     """Return the recorded parse error while the ACTIVE config.yaml is still byte-identical
-    (mtime_ns + size + ino + ctime_ns) to the file that failed to parse; else None."""
+    (``file_cache_version`` with its content digest) to the file that failed to parse; else None."""
     from hermes_cli.config import get_config_path
     try:
         record = _CONFIG_PARSE_FAILURES[str(path := get_config_path())]
-        st = path.stat()
-        return record[4] if file_signature(st) == record[:4] else None
+        sig = _failure_version(path)
+        return record[len(sig)] if sig == record[:len(sig)] else None
     except Exception:
         return None
 
@@ -118,7 +137,7 @@ class FailedConfigRead(dict):
     after one transient EMFILE/EIO replaced the whole file with the fallback plus the caller's edit.
     A dict subclass so the refusal survives the load→mutate→save round trip at every call site."""
 
-    def __init__(self, data: Any = (), *, error: Exception):
+    def __init__(self, data: Any = (), *, error: BaseException):
         super().__init__(data)
         self.read_error = error
 
@@ -135,6 +154,8 @@ def _refuse_failed_read(config_path: Path, data: Any) -> None:
     exc = data.read_error
     if isinstance(exc, OSError):
         raise _refuse_overwrite(config_path, "could not be read", exc, _read_error_fix(exc))
+    if isinstance(exc, SystemExit):  # ConfigBackendUnavailable: the config backend could not serve it
+        raise RuntimeError(f"The config could not be read, so this change was not saved: {exc.code}")
     raise _refuse_overwrite(
         config_path, "has a formatting error", exc, _FIX_YAML.format(backups=_backups_dir_display()))
 

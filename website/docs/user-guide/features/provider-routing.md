@@ -108,12 +108,19 @@ Pin a different provider set per model. Keys under `models` are model ids; each 
 `sort` / `only` / `ignore` / `order` / `require_parameters` / `data_collection` keys and overrides the
 flat value for that model only. Anything you don't set per model falls through to the flat defaults.
 
+Per-model entries also accept `allow_fallbacks: false` to prevent OpenRouter from falling back to
+other sub-providers, or `true` to allow it. This option accepts YAML booleans only and is supported
+under `provider_routing.models.<model-id>`, not in the flat `provider_routing` section or as an
+`AIAgent` constructor parameter. Omit it to leave OpenRouter's fallback behavior unchanged. It does
+not control Hermes [fallback models](./fallback-providers.md).
+
 ```yaml
 provider_routing:
   sort: "price"                      # applies to every model
   models:
     "openai/gpt-6-astra":
       only: ["openai"]               # never let a reseller serve this one
+      allow_fallbacks: false          # keep OpenRouter's sub-provider fallback disabled
     "anthropic/claude-fable-5.1":
       only: ["anthropic"]
     "moonshotai/kimi-k2.6":

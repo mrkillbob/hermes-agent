@@ -81,9 +81,10 @@ def test_kanban_block_reason_scrubbed_jwt(worker_env):
         run = kb.latest_run(conn, worker_env)
     finally:
         conn.close()
-    # block_task stores reason as run.summary
+    # kanban_block never lands on "blocked" (it routes unresolved work to the repair
+    # profile instead); the reason still lands as run.summary.
     assert run is not None
-    assert run.outcome == "blocked"
+    assert run.outcome == "routed_to_repair_profile"
     stored = run.summary or ""
     assert jwt not in stored
 

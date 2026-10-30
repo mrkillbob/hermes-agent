@@ -42,9 +42,9 @@ def service_suffix(home: Path) -> str:
     profile name; any other root (Docker, a temp harness) yields a path hash so a
     custom root can never resolve to the production ``hermes-gateway`` unit.
     """
-    from hermes_constants import _get_platform_default_hermes_home
+    from hermes_constants import account_default_hermes_home
     from hermes_cli.gateway import _profile_name_from_home
-    default = _get_platform_default_hermes_home().resolve()
+    default = account_default_hermes_home().resolve()
     home = home.resolve()
     if home == default:
         return ""
@@ -190,31 +190,48 @@ def _launchd(home: Path, deadline: float) -> ExistingService | None:
     account = pwd.getpwuid(os.getuid())  # windows-footgun: ok — native launchd only
     account_home = Path(account.pw_dir)
     plist = account_home / "Library/LaunchAgents" / f"{label}.plist"
-    from hermes_cli.gateway_runtime_service_identity import verify_launchd_loaded, verify_launchd_plist, read_definition
+    from hermes_cli.gateway_runtime_service_identity import ForeignRoot, verify_launchd_loaded, verify_launchd_plist, read_definition
     installed = _exists(plist)
     domains = [f"gui/{os.getuid()}", f"user/{os.getuid()}"]  # windows-footgun: ok — native launchd only
-    found = []
     loaded = []
     for domain in domains:
         result = _run(["launchctl", "print", f"{domain}/{label}"], deadline)
         if result.returncode == 0:
-            loaded.append(result.stdout)
-            found.append(ExistingService("launchd", ("launchctl", "kickstart", f"{domain}/{label}"),
-                                         "state = running" in result.stdout))
+            loaded.append((domain, result.stdout))
             continue
         # launchctl's native absent-service code; other errors retain uncertainty.
         if result.returncode != 113:
             raise RuntimeStartError("service_manager_unavailable")
-    if len(found) > 1:
-        raise RuntimeStartError("service_scope_conflict", "conflict")
-    if found:
-        _verify_binding(verify_launchd_loaded, loaded[0], home, uid=os.getuid(), username=account.pw_name)  # windows-footgun: ok — native launchd only
-        return found[0]
-    if installed:
-        definition = _verify_binding(plistlib.loads, read_definition(plist))
-        _verify_binding(verify_launchd_plist, definition, label, home)
-        # Load ONLY the existing file, never bootout/rewrite or kickstart -k.
-        return ExistingService("launchd", ("launchctl", "bootstrap", domains[0], str(plist)))
+    try:
+        found = []
+        for domain, output in loaded:
+            try:
+                verify_launchd_loaded(output, home, uid=os.getuid(), username=account.pw_name)  # windows-footgun: ok — native launchd only
+            except ForeignRoot:
+                continue
+            found.append(ExistingService("launchd", ("launchctl", "kickstart", f"{domain}/{label}"),
+                                         "state = running" in output))
+        if len(found) > 1:
+            raise RuntimeStartError("service_scope_conflict", "conflict")
+        if found:
+            return found[0]
+        # Loaded bindings outrank a stale plist, even when all belong to other roots.
+        if loaded:
+            return None
+        if installed:
+            definition = _verify_binding(plistlib.loads, read_definition(plist))
+            verify_launchd_plist(definition, label, home)
+            # Load ONLY the existing file, never bootout/rewrite or kickstart -k.
+            return ExistingService("launchd", ("launchctl", "bootstrap", domains[0], str(plist)))
+    except ForeignRoot:
+        # A fake HOME can share a label with the account's installed gateway.
+        # Its explicit foreign root neither serves nor blocks the requested home.
+        return None
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        reason = str(exc)
+        raise RuntimeStartError(reason if reason in {
+            "profile_mismatch", "service_account_mismatch", "service_disabled"
+        } else "service_identity_unverified") from None
     return None
 
 
@@ -231,10 +248,10 @@ def _windows(home: Path, deadline: float) -> ExistingService | None:
             raise RuntimeStartError(refusal)
         return _decode_schtasks_output(result.stdout or b"")
 
-    rows = list(csv.reader(io.StringIO(query("service_manager_unavailable", "schtasks.exe", "/Query", "/FO", "CSV", "/NH"))))
-    if any(len(row) != 3 for row in rows if row):
-        raise RuntimeStartError("service_state_unknown")
-    if any(row and row[0].lstrip("\\") == name for row in rows):
+    rows = csv.reader(io.StringIO(query("service_manager_unavailable", "schtasks.exe", "/Query", "/FO", "CSV", "/NH")))
+    # Orphaned TaskCache entries print localized one-field diagnostics among the rows (#142140). Only a
+    # well-formed row can name our task, so skipping the rest can only fall through to the unmanaged path.
+    if any(len(row) == 3 and row[0].lstrip("\\") == name for row in rows):
         from hermes_cli.gateway_runtime_service_identity import verify_windows_task
         unverified = "service_identity_unverified"
         definition = query(unverified, "schtasks.exe", "/Query", "/TN", name, "/XML")

@@ -1,0 +1,308 @@
+"""Restore opt-in worker routing across the profile process boundary."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Mapping, Optional
+from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from hermes_cli.kanban_db import Task
+
+_OLLAMA_KANBAN_PROVIDERS = frozenset({"ollama", "ollama-launch"})
+_LOCAL_KANBAN_PROVIDERS = _OLLAMA_KANBAN_PROVIDERS | {"local", "llamacpp", "llama.cpp", "llama-cpp"}
+
+
+def prepare_worker_route(task, profile_home, env):
+    from hermes_cli.config import read_user_config_raw
+
+    env.pop("HERMES_KANBAN_LOCAL_ONLY", None)
+    route = _resolve_explicit_local_task_route(task)
+    if route is None and not task.model_override and _kanban_local_first_enabled():
+        path = Path(profile_home) / "config.yaml" if profile_home else None
+        from hermes_cli.config_backend import config_exists
+        config = read_user_config_raw(path) if path and config_exists(path) else None
+        route = _resolve_local_first_route(config)
+    if route is None:
+        return task
+    provider, model = route
+    endpoint = _resolve_process_local_provider_endpoint(provider)
+    if endpoint:
+        env["CUSTOM_BASE_URL"] = endpoint
+        # Only Ollama pins take the Ollama label; relabelling a llama.cpp pin would hand its
+        # worker Ollama-specific behaviour (vision probes, finish_reason rewrites) on a non-Ollama server.
+        if provider in _OLLAMA_KANBAN_PROVIDERS:
+            provider = "ollama"
+    else:
+        # An ambient value belongs to some other bare-custom model; the local route must not inherit it.
+        env.pop("CUSTOM_BASE_URL", None)
+    env["HERMES_KANBAN_LOCAL_ONLY"] = "1"
+    return replace(task, provider_override=provider, model_override=model,
+                   reasoning_effort=task.reasoning_effort or "none")
+
+
+def _local_route_candidates(raw: Any) -> list[Mapping[str, Any]]:
+    """Normalize a profile's configured model-route list for local selection."""
+    if isinstance(raw, Mapping):
+        return [raw]
+    if isinstance(raw, (list, tuple)):
+        return [item for item in raw if isinstance(item, Mapping)]
+    return []
+
+
+def _resolve_local_first_route(
+    profile_config: Optional[Mapping[str, Any]],
+) -> Optional[tuple[str, str]]:
+    """Return the first usable local route from a profile configuration.
+
+    Kanban workers receive task-owned paths, attachments, and tool results. A
+    remote primary therefore often cannot be authorized by the egress policy;
+    waiting for that rejection and then falling back wastes a full model turn.
+    When the operator enables ``kanban.local_first``, choose the profile's
+    already-configured local route before spawning. This function is pure so
+    route precedence is testable without starting a worker or contacting a
+    provider. Unknown providers are deliberately ignored.
+    """
+    if not isinstance(profile_config, Mapping):
+        return None
+
+    candidates: list[Mapping[str, Any]] = []
+    primary = profile_config.get("model")
+    candidates.extend(_local_route_candidates(primary))
+    # ``fallback_model`` is the effective profile fallback schema in current
+    # installs. ``fallback_providers`` remains supported for older profiles.
+    candidates.extend(_local_route_candidates(profile_config.get("fallback_model")))
+    candidates.extend(
+        _local_route_candidates(profile_config.get("fallback_providers"))
+    )
+    for entry in candidates:
+        provider = str(entry.get("provider") or "").strip().lower()
+        model = str(entry.get("model") or entry.get("default") or "").strip()
+        if provider in _LOCAL_KANBAN_PROVIDERS and model:
+            return provider, model
+
+    providers = profile_config.get("providers")
+    if isinstance(providers, Mapping):
+        for provider, raw_provider in providers.items():
+            provider_name = str(provider or "").strip().lower()
+            if provider_name not in _LOCAL_KANBAN_PROVIDERS:
+                continue
+            if not isinstance(raw_provider, Mapping):
+                continue
+            model = str(raw_provider.get("default_model") or "").strip()
+            if model:
+                return provider_name, model
+    return None
+
+
+def _kanban_local_first_enabled() -> bool:
+    """Read the explicit operator opt-in for local-first Kanban spawning."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        cfg = load_config_readonly() or {}
+    except Exception:
+        return False
+    kanban = cfg.get("kanban") if isinstance(cfg, Mapping) else None
+    return bool(isinstance(kanban, Mapping) and kanban.get("local_first"))
+
+
+def _resolve_explicit_local_task_route(
+    task: Task,
+) -> Optional[tuple[str, str]]:
+    """Return an explicitly pinned local task route, if one was supplied.
+
+    ``kanban.local_first`` is a policy for avoiding doomed remote attempts;
+    it must not erase a deliberate per-card local model selection.  The
+    provider is required here so a model name cannot be guessed to be local
+    from its spelling alone.
+    """
+    provider = str(task.provider_override or "").strip().lower()
+    model = str(task.model_override or "").strip()
+    if provider in _LOCAL_KANBAN_PROVIDERS and model:
+        return provider, model
+    return None
+
+
+def _resolve_process_local_provider_endpoint(provider: str) -> Optional[str]:
+    """Return a configured loopback endpoint for a local provider name.
+
+    Kanban workers run with ``HERMES_HOME`` set to the assignee profile so
+    profile-local state and credentials stay isolated.  Provider definitions,
+    however, are commonly owned by the process-level Hermes config.  A local
+    task pin must not become an unknown provider in that profile and then fall
+    through to a remote fallback.  Resolve only the named provider's endpoint
+    from the process config, and only when it is loopback; never copy or
+    expose a remote provider definition across the profile boundary.
+    """
+    provider_name = str(provider or "").strip().lower()
+    if provider_name not in _LOCAL_KANBAN_PROVIDERS:
+        return None
+    try:
+        from hermes_constants import get_process_hermes_home
+        from hermes_cli.config import read_user_config_raw
+
+        config = read_user_config_raw(
+            get_process_hermes_home() / "config.yaml"
+        )
+        providers = config.get("providers")
+        entry = providers.get(provider_name) if isinstance(providers, Mapping) else None
+        if not isinstance(entry, Mapping):
+            return None
+        endpoint = str(
+            entry.get("api") or entry.get("url") or entry.get("base_url") or ""
+        ).strip()
+        parsed = urlparse(endpoint)
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        if (parsed.hostname or "").lower().rstrip(".") not in {
+            "localhost", "127.0.0.1", "::1"
+        }:
+            return None
+        return endpoint.rstrip("/") or None
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def recover_generated_assignee(conn, row, default_assignee, *, dry_run, result):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.profiles import profile_exists
+    assignee = row["assignee"]
+    if not assignee or profile_exists(assignee) or not default_assignee:
+        return assignee
+    # Any persisted assignee is an execution claim, regardless of which
+    # producer wrote it.  Legacy producers have emitted stale aliases and
+    # typos (for example ``ci_general_fixer``); leaving those rows in ready
+    # strands them forever because the dispatcher correctly refuses to spawn
+    # a nonexistent profile.  Normalize every invalid assignee to the
+    # validated intake/default profile, which then applies deterministic
+    # specialist routing before spawn.
+    if not profile_exists(default_assignee):
+        return assignee
+    detail = conn.execute(
+        "SELECT title, body, idempotency_key FROM tasks WHERE id = ?", (row["id"],)
+    ).fetchone()
+    if detail is None:
+        return assignee
+    try:
+        kb._validate_pr_task_assignee_authority(
+            title=detail["title"], body=detail["body"], idempotency_key=detail["idempotency_key"],
+            assignee=default_assignee,
+        )
+    except ValueError:
+        return assignee
+    if not dry_run:
+        with kb.write_txn(conn):
+            changed = conn.execute(
+                "UPDATE tasks SET assignee = ?, consecutive_failures = 0, last_failure_error = NULL "
+                "WHERE id = ? AND assignee = ? AND status = 'ready' AND claim_lock IS NULL",
+                (default_assignee, row["id"], assignee))
+            if changed.rowcount != 1:
+                return assignee
+            kb._append_event(conn, row["id"], "assigned", {
+                "assignee": default_assignee, "previous_assignee": assignee,
+                "source": "kanban.invalid_assignee_fallback",
+            })
+    result.auto_reassigned_invalid.append(row["id"])
+    return default_assignee
+
+
+def _record_routing_refused(conn, task_id: str, target: str, reason: str, *, dry_run: bool, result) -> None:
+    """Make an authority refusal visible instead of stranding the card silently in ``ready``.
+
+    The card deliberately stays in ``ready``: a PR-feedback card parked in ``triage`` is promoted
+    straight back by ``recompute_ready``, which would loop. The card is re-read inside the write
+    transaction because the tick's snapshot can be stale (an operator may have reassigned, edited
+    or archived it since); a card that no longer qualifies is neither recorded nor reported.
+    Deduplicated against the newest appended event by id (imported cards can carry future
+    timestamps), so ``tail`` names the profile that needs ``execution_authority`` without a row
+    per tick.
+    """
+    from hermes_cli import kanban_db as kb
+
+    def still_in_lane() -> bool:
+        return conn.execute(
+            "SELECT 1 FROM tasks WHERE id=? AND status='ready' AND claim_lock IS NULL AND assignee IN "
+            "('task-orchestrator', 'task-intake-router', 'intake-router')", (task_id,)).fetchone() is not None
+
+    if dry_run:
+        if still_in_lane():
+            result.routing_refused.append((task_id, target, reason))
+        return
+    payload = {"assignee": target, "reason": reason}
+    with kb.write_txn(conn):
+        if not still_in_lane():
+            return
+        result.routing_refused.append((task_id, target, reason))
+        last = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1",
+            (task_id,)).fetchone()
+        if last is None or last["kind"] != "routing_refused" or last["payload"] != kb._json_or_null(payload):
+            kb._append_event(conn, task_id, "routing_refused", payload)
+
+
+def route_orchestrator_task(conn, row, *, dry_run: bool, result, board: Optional[str] = None) -> Optional[str]:
+    """Hand a routed task to its repair owner before any worker is spawned."""
+    if row["assignee"] not in {"task-orchestrator", "task-intake-router", "intake-router"}:
+        return row["assignee"]
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_repair_routing import repair_profile_for_task
+
+    # Some older dispatcher callers provide a compact row without task prose;
+    # resolve the authoritative title/body by id before classifying ownership.
+    try:
+        title, body = row["title"], row["body"]
+    except (IndexError, KeyError):
+        detail = conn.execute(
+            "SELECT title, body FROM tasks WHERE id = ?", (row["id"],)
+        ).fetchone()
+        title = detail["title"] if detail else ""
+        body = detail["body"] if detail else ""
+    profile = repair_profile_for_task(title, body)
+    detail = conn.execute(
+        "SELECT title, body, idempotency_key FROM tasks WHERE id = ?", (row["id"],)
+    ).fetchone()
+    if detail is None:
+        return None
+    try:
+        kb._validate_pr_task_assignee_authority(
+            title=detail["title"], body=detail["body"], idempotency_key=detail["idempotency_key"],
+            assignee=profile or "task-intake-router",
+        )
+    except ValueError as exc:
+        _record_routing_refused(conn, row["id"], profile or "task-intake-router", str(exc),
+                                dry_run=dry_run, result=result)
+        return None
+    if profile is None:
+        if not dry_run:
+            with kb.write_txn(conn):
+                changed = conn.execute(
+                    "UPDATE tasks SET status = 'triage', assignee = 'task-intake-router' "
+                    "WHERE id = ? AND status = 'ready' AND assignee IN "
+                    "('task-orchestrator', 'task-intake-router', 'intake-router')",
+                    (row["id"],),
+                ).rowcount
+                if changed:
+                    kb._append_event(conn, row["id"], "orchestrator_scope_required", {
+                        "reason": "no deterministic repair profile matched",
+                        "assignee": "task-intake-router",
+                    })
+        return None
+    if not dry_run:
+        # Ownership classification cannot adopt a project from quoted body paths.
+        # Explicit project links and board inheritance are resolved at creation.
+        with kb.write_txn(conn):
+            changed = conn.execute(
+                "UPDATE tasks SET assignee = ?, consecutive_failures = 0, "
+                "last_failure_error = NULL WHERE id = ? AND status = 'ready' "
+                "AND assignee IN ('task-orchestrator', 'task-intake-router', 'intake-router')",
+                (profile, row["id"]),
+            ).rowcount
+            if changed:
+                kb._append_event(conn, row["id"], "assigned", {
+                    "from": row["assignee"], "assignee": profile,
+                    "source": "task_orchestrator_repair_routing",
+                })
+    result.routed_to_specialist.append((row["id"], profile))
+    return profile

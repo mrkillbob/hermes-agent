@@ -145,7 +145,7 @@ def source_checkout(tmp_path, monkeypatch):
     scripts = root / "scripts" / "build"
     scripts.mkdir(parents=True)
     repository = Path(__file__).resolve().parents[2]
-    for name in ("node-deps.mjs", "freshness.mjs", "frontend-common.mjs"):
+    for name in ("node-deps.mjs", "get-windows-compiler.cjs", "electron-runtime.mjs", "freshness.mjs", "frontend-common.mjs"):
         shutil.copy2(repository / "scripts/build" / name, scripts / name)
     (root / ".gitignore").write_text("node_modules/\n**/dist/\n", encoding="utf-8")
     return root, acquired
@@ -376,7 +376,13 @@ def test_module_cli_builds_the_requested_products(source_products, desktop, monk
 
     root, acquired = source_products
     monkeypatch.setattr(sys, "argv", ["source_build", "--source", str(root)] + (["--desktop"] if desktop else []))
-    # run_module exercises __main__ while substituting only tool acquisition.
+    # run_module exercises __main__ while substituting only tool acquisition. A fresh import inside it
+    # rebinds the package attribute, which monkeypatch does not restore with sys.modules, so later
+    # string-path patches would hit a different module than `from hermes_cli.source_build import ...`.
+    import importlib
+
+    import hermes_cli
+    monkeypatch.setattr(hermes_cli, "source_build", importlib.import_module("hermes_cli.source_build"))
     monkeypatch.delitem(sys.modules, "hermes_cli.source_build", raising=False)
     runpy.run_module("hermes_cli.source_build", run_name="__main__")
     assert acquired == ["npm"]
@@ -418,3 +424,138 @@ def test_packaged_desktop_is_reused_only_while_it_names_head(tmp_path, monkeypat
     receipt_current["value"] = True
     subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "two"], check=True)
     assert not reused()
+
+
+@pytest.mark.parametrize("binary", ["python", "node"])
+def test_failure_diagnostic_retains_child_cause_instead_of_custody_wrapper(binary):
+    from hermes_cli.source_build import ProductBuildError
+
+    command = [binary, "-I", "-c", "wrapper-line\n" * 1000, "3", "node", "node-deps.mjs"]
+    failure = subprocess.CalledProcessError(1, command, output="npm error ERESOLVE inert-dependency-cause")
+    report = str(ProductBuildError([("Node dependencies", failure)]))
+    assert "inert-dependency-cause" in report[-6000:]
+    assert "wrapper-line" not in report
+    assert len(report) < 3000
+
+
+def test_failure_diagnostic_bounds_and_redacts_child_output():
+    from hermes_cli.source_build import ProductBuildError
+
+    failure = subprocess.CalledProcessError(1, ["node", "private-command-argument"],
+                                           output="noise\n" * 2000 + "API_KEY=ghp_" + "a1b2c3d4" * 5 + "\npublic-inert-cause")
+    report = str(ProductBuildError([("Node dependencies", failure)]))
+    assert "public-inert-cause" in report
+    assert "ghp_" + "a1b2c3d4" * 5 not in report
+    assert "private-command-argument" not in report
+    assert len(report) < 3000
+
+
+def test_failure_diagnostic_source_paths_keep_unicode_spaces_as_argv(tmp_path, monkeypatch):
+    from hermes_cli.source_build import run_source_script
+
+    root = tmp_path / "José Müller 漢字 dir"
+    captured = []
+    monkeypatch.setattr("hermes_cli.source_build.run_in_custody", lambda source, command, label, **kwargs: captured.append((source, command, kwargs)))
+    monkeypatch.setattr("hermes_cli.source_build.shutil.which", lambda *_args, **_kwargs: "/inert/node")
+    run_source_script(root, "scripts/build/node-deps.mjs", "--source", str(root), env={"PATH": ""}, label="Inert build")
+    source, command, kwargs = captured[0]
+    assert source == root and kwargs["cwd"] == root
+    assert command == ["/inert/node", str(root / "scripts/build/node-deps.mjs"), "--source", str(root)]
+
+
+@pytest.mark.parametrize("stream,cap", [("output", 1500), ("stderr", 500)])
+def test_failure_diagnostic_redacts_credentials_crossing_tail_boundary(stream, cap):
+    from hermes_cli.source_build import ProductBuildError
+
+    inert_key = "ghp_" + "z9y8x7w6" * 5
+    # The prefix would be clipped, leaving almost the entire credential bare.
+    text = "noise\nAPI_KEY=" + inert_key + "\n" + "x" * (cap - 54) + "\npublic output"
+    # Control: clipping first destroys the identifying prefix while retaining
+    # a long credential fragment that the existing redactor cannot identify.
+    from agent.redact import redact_sensitive_text
+    assert "z9y8x7w6" * 4 in redact_sensitive_text(text[-cap:], force=True)
+    failure = subprocess.CalledProcessError(1, ["node"], **{stream: text})
+    report = str(ProductBuildError([("Node dependencies", failure)]))
+    assert "z9y8x7w6" * 4 not in report
+    assert "public output" in report
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_update_rebuilds_the_webapp_bundle_a_home_serves(tmp_path, monkeypatch, enabled):
+    """``hermes update`` rebuilds ``apps/desktop/dist-webapp``, with the function ``hermes webapp``
+    uses, when any home sharing this install has ``webapp.enabled``: that home's gateway serves the
+    bundle as built, so an old one would talk to the updated backend. Otherwise it is left alone."""
+    import hermes_cli.left_core_migration as left_core
+    import hermes_cli.main_install_repair as install_repair
+    import hermes_cli.memory_provider_migration as memory_migration
+    from hermes_cli import update_stage, webapp
+    from hermes_cli.source_build import build_update_products
+    from pm import plugins_state
+
+    root = tmp_path / "checkout"
+    (root / "apps/desktop/scripts").mkdir(parents=True)
+    (root / "apps/desktop/scripts/build-webapp.mjs").write_text("", encoding="utf-8")
+    homes = [tmp_path / "default", tmp_path / "profiles" / "work"]
+    for home in homes:
+        home.mkdir(parents=True)
+    (homes[1] / "config.yaml").write_text(f"webapp:\n  enabled: {str(enabled).lower()}\n", encoding="utf-8")
+    builds = []
+    monkeypatch.setattr(install_repair, "_install_configured_features_missing_deps", lambda _root: None)
+    monkeypatch.setattr(memory_migration, "migrate_all_homes", list)
+    monkeypatch.setattr(left_core, "migrate_all_homes", list)
+    monkeypatch.setattr(update_stage, "publish_stage", lambda _stage: None)
+    monkeypatch.setattr(plugins_state, "dependency_homes", lambda: homes)
+    monkeypatch.setattr(webapp, "prepare_webapp_renderer",
+                        lambda project_root, **options: builds.append((project_root, options)))
+
+    build_update_products(root, desktop=False)
+
+    assert builds == ([(root, {"explicit": True})] if enabled else [])
+
+
+@pytest.mark.parametrize("built", [True, False])
+def test_a_failed_webapp_rebuild_in_update_marks_the_served_bundle_out_of_date(tmp_path, monkeypatch, capsys, built):
+    """When ``hermes update`` cannot rebuild the Webapp bundle a home serves, the previous bundle
+    stays on disk but is marked out of date: its gateway reports the Webapp unavailable and says to
+    run ``hermes webapp`` (which rebuilds it) instead of serving it against the updated backend. The
+    update still reports the failure. With no bundle built there is nothing to mark."""
+    import hermes_cli.left_core_migration as left_core
+    import hermes_cli.main_install_repair as install_repair
+    import hermes_cli.memory_provider_migration as memory_migration
+    from gateway.webapp_listener import NOT_BUILT, bundle_missing_reason
+    from hermes_cli import update_stage, webapp
+    from hermes_cli.source_build import ProductBuildError, build_update_products
+    from pm import plugins_state
+
+    root = tmp_path / "checkout"
+    (root / "apps/desktop/scripts").mkdir(parents=True)
+    (root / "apps/desktop/scripts/build-webapp.mjs").write_text("", encoding="utf-8")
+    dist = webapp.webapp_dist_dir(root)
+    dist.mkdir()
+    if built:
+        (dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    home = tmp_path / "default"
+    home.mkdir()
+    (home / "config.yaml").write_text("webapp:\n  enabled: true\n", encoding="utf-8")
+    monkeypatch.setattr(install_repair, "_install_configured_features_missing_deps", lambda _root: None)
+    monkeypatch.setattr(memory_migration, "migrate_all_homes", list)
+    monkeypatch.setattr(left_core, "migrate_all_homes", list)
+    monkeypatch.setattr(update_stage, "publish_stage", lambda _stage: None)
+    monkeypatch.setattr(plugins_state, "dependency_homes", lambda: [home])
+
+    def fail(_project_root, **_options):
+        raise webapp.WebappBuildError("Browser-hosted Desktop build failed: npm ci exited 1")
+
+    monkeypatch.setattr(webapp, "prepare_webapp_renderer", fail)
+    before = sorted(root.rglob("*"))
+
+    with pytest.raises(ProductBuildError, match="Webapp build"):
+        build_update_products(root, desktop=False)
+
+    reason = bundle_missing_reason(dist)
+    assert reason is not None and reason.startswith(NOT_BUILT) and "hermes webapp" in reason
+    if built:
+        assert (dist / "index.html").read_text(encoding="utf-8") == "<!doctype html>"
+        assert "hermes webapp" in capsys.readouterr().out
+    else:
+        assert sorted(root.rglob("*")) == before

@@ -1,0 +1,126 @@
+"""An orchestrator-lane card whose routing target fails PR write-authority is reported, not stranded.
+
+``route_orchestrator_task`` used to return ``None`` on the authority refusal with no event and no
+result bucket, so a ready card sat in ``ready`` forever while ``tail``/``show`` and the stuck-queue
+telemetry said nothing about why.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_dispatch as kbd
+
+_PR_WRITE_BODY = json.dumps({
+    "repository": "mrkillbob/hermes-agent", "pr_number": 282,
+    "expected_head_sha": "a" * 40, "action": "repair",
+})
+
+
+def _orchestrator_pr_card(tmp_path, monkeypatch, *, authority):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    from hermes_cli import profiles
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: True)
+    monkeypatch.setattr(kb, "_profile_read_only_status", lambda profile: authority)
+    with kbc.connect() as conn:
+        # create_task refuses this assignee up front; a legacy row or a later authority change
+        # is how such a card reaches the orchestrator lane.
+        conn.execute(
+            "INSERT INTO tasks (id, title, body, assignee, status, created_by, created_at, priority, "
+            "idempotency_key) VALUES ('t_refused', 'GitHub PR feedback: repair review findings', ?, "
+            "'task-intake-router', 'ready', 'user', strftime('%s','now'), 0, 'github-pr-feedback:x')",
+            (_PR_WRITE_BODY,),
+        )
+        conn.commit()
+    return "t_refused"
+
+
+def test_unverifiable_write_authority_is_recorded_once_and_visible(tmp_path, monkeypatch):
+    tid = _orchestrator_pr_card(tmp_path, monkeypatch, authority=None)
+    spawned = []
+    with kbc.connect() as conn:
+        kbd.dispatch_once(conn, dry_run=True, spawn_fn=lambda *a, **k: spawned.append(a))
+        assert "routing_refused" not in [e.kind for e in kb.list_events(conn, tid)]
+        results = [
+            kbd.dispatch_once(conn, dry_run=False, spawn_fn=lambda *a, **k: spawned.append(a))
+            for _ in range(3)
+        ]
+        events = [e for e in kb.list_events(conn, tid) if e.kind == "routing_refused"]
+        task = kb.get_task(conn, tid)
+    assert spawned == []
+    assert task is not None and task.status == "ready" and task.assignee == "task-intake-router"
+    for res in results:
+        assert [(t, who) for t, who, _ in res.routing_refused] == [(tid, "pr-repair-steward")]
+        assert "cannot verify write authority" in res.routing_refused[0][2]
+        assert tid not in res.skipped_unassigned
+        assert "routing_refused=1" in kbd.describe_suppression([res])
+    assert len(events) == 1
+    assert events[0].payload["assignee"] == "pr-repair-steward"
+    assert "cannot verify write authority" in events[0].payload["reason"]
+
+
+def test_verified_write_profile_routes_the_same_card(tmp_path, monkeypatch):
+    tid = _orchestrator_pr_card(tmp_path, monkeypatch, authority=False)
+    with kbc.connect() as conn:
+        res = kbd.dispatch_once(conn, dry_run=False, spawn_fn=lambda *a, **k: None)
+        events = [e.kind for e in kb.list_events(conn, tid)]
+        task = kb.get_task(conn, tid)
+    assert (tid, "pr-repair-steward") in res.routed_to_specialist
+    assert task is not None and task.assignee == "pr-repair-steward"
+    assert "routing_refused" not in events
+
+
+def test_refusal_is_deduplicated_against_a_future_dated_imported_event(tmp_path, monkeypatch):
+    tid = _orchestrator_pr_card(tmp_path, monkeypatch, authority=None)
+    with kbc.connect() as conn:
+        # kanban_transfer keeps imported timestamps while assigning new local ids.
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "commented", {"author": "import"})
+            conn.execute("UPDATE task_events SET created_at = created_at + 31536000 WHERE task_id = ?", (tid,))
+        for _ in range(3):
+            kbd.dispatch_once(conn, dry_run=False, spawn_fn=lambda *a, **k: None)
+        events = [e.kind for e in kb.list_events(conn, tid)]
+    assert events.count("routing_refused") == 1
+
+
+def test_a_routing_refusal_is_not_an_idle_dispatch_tick(tmp_path, monkeypatch):
+    from hermes_cli.plugins import get_plugin_manager
+
+    _orchestrator_pr_card(tmp_path, monkeypatch, authority=None)
+    manager = get_plugin_manager()
+    saved = {name: list(callbacks) for name, callbacks in manager._hooks.items()}
+    outcomes = []
+    manager._hooks.setdefault("on_kanban_dispatch_tick", []).append(lambda **kw: outcomes.append(kw["outcome"]))
+    try:
+        with kbc.connect() as conn:
+            kbd.dispatch_once(conn, dry_run=False, spawn_fn=lambda *a, **k: None)
+    finally:
+        manager._hooks = saved
+    assert outcomes == ["ok"]
+
+
+@pytest.mark.parametrize("change", [
+    "UPDATE tasks SET assignee = 'pr-repair-steward' WHERE id = 't_refused'",
+    "UPDATE tasks SET status = 'archived' WHERE id = 't_refused'",
+])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_stale_snapshot_is_not_recorded_after_the_card_left_the_lane(tmp_path, monkeypatch, change, dry_run):
+    from hermes_cli.kanban_worker_routing import route_orchestrator_task
+
+    tid = _orchestrator_pr_card(tmp_path, monkeypatch, authority=None)
+    with kbc.connect() as conn:
+        snapshot = conn.execute("SELECT id, assignee, title, body FROM tasks WHERE id = ?", (tid,)).fetchone()
+        conn.execute(change)
+        conn.commit()
+        res = kbd.DispatchResult()
+        assert route_orchestrator_task(conn, snapshot, dry_run=dry_run, result=res) is None
+        events = [e.kind for e in kb.list_events(conn, tid)]
+    assert res.routing_refused == [] and "routing_refused" not in events

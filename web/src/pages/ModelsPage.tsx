@@ -29,7 +29,7 @@ import {
   DASHBOARD_MODAL_PANEL,
   shouldCloseOuterModalOnEscape,
 } from "@/lib/dashboard-modal-shell";
-import { compactNumber } from "@hermes/shared";
+import { formatTokenCount } from "@/lib/format";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Stats } from "@nous-research/ui/ui/components/stats";
@@ -43,7 +43,6 @@ import { useI18n } from "@/i18n";
 import { PluginSlot } from "@/plugins";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { ModelReloadConfirm } from "@/components/ModelReloadConfirm";
-import { errorMessage } from "@/lib/api-error";
 import { assignmentToPickerCurrent } from "@/lib/model-picker-current";
 
 const PERIODS = [
@@ -248,7 +247,7 @@ function UseAsMenu({
       onAssigned();
       setOpen(false);
     } catch (e) {
-      setError(errorMessage(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -421,12 +420,12 @@ function ModelCard({
               )}
               {caps.context_window && caps.context_window > 0 && (
                 <span className="text-xs text-text-secondary">
-                  {compactNumber(caps.context_window)} ctx
+                  {formatTokenCount(caps.context_window)} ctx
                 </span>
               )}
               {caps.max_output_tokens && caps.max_output_tokens > 0 && (
                 <span className="text-xs text-text-secondary">
-                  {compactNumber(caps.max_output_tokens)} out
+                  {formatTokenCount(caps.max_output_tokens)} out
                 </span>
               )}
             </div>
@@ -768,7 +767,7 @@ function MoaModelsModal({
       onSaved(saved);
       onClose();
     } catch (e) {
-      setError(errorMessage(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -965,6 +964,8 @@ function ModelSettingsPanel({
   const [pendingReloadModel, setPendingReloadModel] = useState<string | null>(
     null,
   );
+  // Nous window plans, Large model: the backend's switch warning (never a confirm).
+  const [switchNotice, setSwitchNotice] = useState<string | null>(null);
 
   const mainProv = aux?.main.provider ?? "";
   const mainModel = aux?.main.model ?? "";
@@ -1105,6 +1106,7 @@ function ModelSettingsPanel({
                 model,
               });
               if (!result.confirm_required) {
+                setSwitchNotice(result.notice ?? null);
                 setPendingReloadModel(model.split("/").slice(-1)[0]);
               }
               return result;
@@ -1124,6 +1126,7 @@ function ModelSettingsPanel({
 
         <ModelReloadConfirm
           model={pendingReloadModel}
+          notice={switchNotice}
           onCancel={() => setPendingReloadModel(null)}
         />
         {moaModalOpen && moa && (
@@ -1184,7 +1187,7 @@ export default function ModelsPage() {
         setData(models);
         setAux(auxData);
       })
-      .catch((err) => setError(errorMessage(err)))
+      .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
   }, [days]);
 

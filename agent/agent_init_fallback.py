@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List
 
 logger = logging.getLogger("run_agent")
@@ -10,6 +11,9 @@ logger = logging.getLogger("run_agent")
 
 def _fallback_entries(fallback_model) -> list[dict[str, Any]]:
     """Normalize legacy single-dict ``fallback_model`` / list ``fallback_providers``."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only() or os.environ.get("HERMES_KANBAN_LOCAL_ONLY") == "1":
+        return []
     if isinstance(fallback_model, dict):
         fallback_model = [fallback_model]
     if not isinstance(fallback_model, list):
@@ -43,8 +47,9 @@ def _init_fallback_chain(agent, fallback_model):
 def recompute_init_fallback_api_mode(agent, fb_client) -> None:
     """Give an init-time fallback its own api_mode instead of the unreachable primary's.
 
-    A Nous primary configured with ``api_mode: codex_responses`` otherwise leaves a Copilot
-    gpt-5-mini fallback on the Responses API, which silently drops reasoning content (#46527).
+    A Nous primary configured with ``api_mode: codex_responses`` otherwise leaves a fallback whose
+    profile serves that model on chat completions (``api_mode_for_model``) on the Responses API,
+    which silently drops reasoning content (#46527).
     The per-turn path (``try_activate_fallback``) already recomputes via
     ``_fallback_api_mode_resolved``; this keeps init in agreement, and runs before the
     ``_primary_runtime`` snapshot so ``restore_primary_runtime`` replays the recomputed mode.

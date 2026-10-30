@@ -140,7 +140,11 @@ def test_serve_tree_kill_leaves_no_orphans_and_reboots(tmp_path: Path) -> None:
             assert first.pid in owned, f"ownership scan cannot see serve pid {first.pid} (saw {owned})"
 
             killed = taskkill_tree(first.pid)
-            assert killed.returncode == 0, killed.stderr
+            # taskkill can race a backend that exits as the tree kill begins: it may report that
+            # the root PID no longer exists after already terminating its descendants. The
+            # ownership and port checks below are the behavior contract; reject only a failed
+            # taskkill while the root is still alive.
+            assert killed.returncode == 0 or first.poll() is not None, killed.stderr
             # Ownership, not ancestry: anything the backend spawned detached (a broken
             # parent link taskkill /T cannot follow) still carries this profile's
             # HERMES_HOME / cwd, and is an orphan the Desktop quit leaves behind.

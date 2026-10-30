@@ -16,7 +16,7 @@
         "type": "integer"
       },
       "path": {
-        "description": "Path to the file to read (absolute, relative, or ~/path)",
+        "description": "Path to the file to read (absolute or relative)",
         "type": "string"
       }
     },

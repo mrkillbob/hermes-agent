@@ -51,6 +51,37 @@ class ServerDisconnectedError(MockTransportError):
 
 # ── Test: FailoverReason enum ──────────────────────────────────────────
 
+class TestFailoverReason:
+    def test_all_reasons_have_string_values(self):
+        for reason in FailoverReason:
+            assert isinstance(reason.value, str)
+
+    def test_enum_members_exist(self):
+        expected = {
+            "auth", "auth_permanent", "billing", "rate_limit",
+            "upstream_rate_limit", "upstream_blocked",
+            "overloaded", "server_error", "timeout",
+            "ssl_cert_verification",
+            "context_overflow", "payload_too_large", "image_too_large",
+            "image_corrupt",
+            "model_not_found", "format_error", "role_alternation",
+            "invalid_encrypted_content",
+            "multimodal_tool_content_unsupported",
+            "reasoning_mandatory",
+            "provider_policy_blocked",
+            "content_policy_blocked",
+            "model_entitlement",
+            "incomplete_response",
+            "thinking_signature", "long_context_tier",
+            "oauth_long_context_beta_forbidden",
+            "llama_cpp_grammar_pattern",
+            "unknown",
+        }
+        actual = {r.value for r in FailoverReason}
+        # New failover reasons may be added as providers and policy boundaries
+        # evolve; this test protects the established public vocabulary without
+        # becoming a change-detector for the enum's current size.
+        assert expected <= actual
 
 
 # ── Test: ClassifiedError ──────────────────────────────────────────────
@@ -2159,3 +2190,61 @@ class TestStreamingRenderFormatError:
         e = MockAPIError("Error rendering prompt with jinja template: ...", status_code=500)
         result = classify_api_error(e, provider="lm-studio", model="x")
         assert result.reason != FailoverReason.format_error
+
+
+@pytest.mark.parametrize("status_code", [400, 429, None])
+def test_nous_wrapped_limit_reset_is_transient_quota(status_code):
+    error = MockAPIError(
+        "This request is not valid. Check the model name and other parameters. "
+        "Additional info: Provider returned error Limit resets at 13:49 (in 1m).",
+        status_code=status_code,
+    )
+    result = classify_api_error(error, provider="nous", model="meituan/longcat-2.5-preview:free")
+    assert result.reason == FailoverReason.rate_limit
+    assert result.retryable is True
+    assert result.should_fallback is True
+
+
+def test_nous_invalid_request_without_quota_signal_stays_fatal():
+    result = classify_api_error(MockAPIError(
+        "This request is not valid. Check the model name and other parameters.",
+        status_code=400,
+    ), provider="nous", model="meituan/longcat-2.5-preview:free")
+    assert result.reason == FailoverReason.format_error
+    assert result.retryable is False
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_local_privacy_denial_precedes_provider_hooks_without_recovery(monkeypatch, wrapped):
+    import agent.error_classifier as classifier
+    from agent.llm_egress_firewall import EgressBlocked
+
+    error = (RuntimeError("LLM egress blocked: untrusted_provenance,base64_payload")
+             if wrapped else EgressBlocked(SimpleNamespace(
+                 reason_codes=("untrusted_provenance", "base64_payload"))))
+    monkeypatch.setattr(classifier, "_STAGES", tuple(
+        (lambda _: pytest.fail("provider hook reached"))
+        if stage.__name__ == "_plugin_verdict" else stage
+        for stage in classifier._STAGES
+    ))
+    actual = classifier.classify_api_error(error, provider="nous")
+    assert actual.reason == FailoverReason.egress_policy_blocked
+    assert not any((actual.retryable, actual.should_compress,
+                    actual.should_rotate_credential, actual.should_fallback))
+    assert actual.error_context["egress_reason_codes"] == (
+        "untrusted_provenance", "base64_payload")
+
+
+@pytest.mark.parametrize("error, expected", [
+    (MockAPIError("Provider internal server error", status_code=500), FailoverReason.server_error),
+    (MockAPIError("Quota exceeded", status_code=429), FailoverReason.billing),
+    (TimeoutError("network timeout"), FailoverReason.timeout),
+    (MockAPIError("LLM egress blocked: untrusted_provenance", status_code=500), FailoverReason.server_error),
+    (RuntimeError("Provider said: LLM egress blocked: untrusted_provenance"), FailoverReason.unknown),
+    (RuntimeError("LLM egress blocked: made_up_reason"), FailoverReason.unknown),
+    (RuntimeError("LLM egress blocked: untrusted_provenance\nraw request payload"), FailoverReason.unknown),
+])
+def test_provider_errors_are_not_reclassified_as_local_privacy_denials(error, expected):
+    actual = classify_api_error(error, provider="nous")
+    assert actual.reason == expected
+    assert "egress_reason_codes" not in actual.error_context

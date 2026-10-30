@@ -12,7 +12,9 @@ Resolution order:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,16 +60,55 @@ def _derived_version(
     return base_version
 
 
-def _run_git(repo_dir: Path, *args: str) -> str | None:
-    try:
+def _git_probe(command):
+    from hermes_cli.startup_hold import defer_maintenance
+    if not defer_maintenance():
+        return command, None
+    import os
+    return ([command[0], '-c', 'core.fsmonitor=false', *command[1:]],
+            {**os.environ, 'GIT_NO_LAZY_FETCH': '1', 'GIT_OPTIONAL_LOCKS': '0'})
+
+
+# Metadata only: reject oversized output rather than cache a truncated identity.
+_MAX_GIT_PROBE_OUTPUT = 1024 * 1024
+
+
+def _git_output(repo_dir: Path, command: list[str], probe_env: dict | None,
+                *, presence_only: bool = False) -> tuple[int, str]:
+    # On Windows, run(capture_output=True) drains its reader threads WITHOUT a
+    # timeout after killing a timed-out parent. A descendant retaining either
+    # pipe can therefore strand session readiness indefinitely. Regular-file
+    # capture needs no pipe reader, and these probes never require RPC stdin.
+    with tempfile.TemporaryFile() as output:
         result = subprocess.run(
-            ["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3, cwd=str(repo_dir),
-            check=False,
+            command, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+            timeout=3, cwd=str(repo_dir), env=probe_env, check=False,
         )
+        output.flush()
+        size = os.fstat(output.fileno()).st_size
+        if result.returncode != 0:
+            return result.returncode, ""
+        # Status needs only output presence. A large dirty tree must not be
+        # mistaken for clean because its path list exceeds the identity cap.
+        if presence_only:
+            return result.returncode, "present" if size else ""
+        if size > _MAX_GIT_PROBE_OUTPUT:
+            return result.returncode, ""
+        output.seek(0)
+        raw = output.read(size)  # finite snapshot: a retained writer cannot extend this read
+        if len(raw) != size or os.fstat(output.fileno()).st_size != size:
+            return result.returncode, ""
+    return result.returncode, raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _run_git(repo_dir: Path, *args: str) -> str | None:
+    command, probe_env = _git_probe(['git', *args])
+    try:
+        returncode, stdout = _git_output(repo_dir, command, probe_env)
     except (OSError, subprocess.SubprocessError):
         return None
-    value = (result.stdout or "").strip()
-    return value if result.returncode == 0 and value else None
+    value = stdout.strip()
+    return value if returncode == 0 and value else None
 
 
 def _resolve_repo_dir() -> Path | None:
@@ -114,6 +155,19 @@ def _calver_release_version(repo_dir: Path) -> tuple[str, int] | None:
     if distance is None or not isinstance(version, str) or not STABLE_TAG_RE.fullmatch(f"v{version}"):
         return None
     return version, distance
+
+
+# Forks may carry this release's code without carrying its upstream CalVer tag.
+# NousResearch/hermes-agent v2026.9.24 ships 0.21.5; admit it only with ancestry proof.
+_UPSTREAM_CALVER_RELEASE = ("0.21.5", "f97608f178d1ffeca59860195ab7da295f7c8e5f")
+
+
+def _upstream_calver_release(repo_dir: Path) -> tuple[str, int] | None:
+    version, commit = _UPSTREAM_CALVER_RELEASE
+    if _run_git(repo_dir, "merge-base", commit, "HEAD") != commit:
+        return None
+    distance = _parse_nonnegative(_run_git(repo_dir, "rev-list", "--count", f"{commit}..HEAD"))
+    return (version, distance) if distance is not None else None
 
 
 # --- Install stamp reader ---------------------------------------------------
@@ -225,15 +279,9 @@ def _git_version_info(repo_dir: Path, *, include_untracked: bool = False) -> Ver
         status_command = ["git", "--no-optional-locks", "status", "--porcelain"]
         if not include_untracked:
             status_command.append("-uno")
-        dirty_result = subprocess.run(
-            status_command,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=3,
-            cwd=str(repo_dir),
-            check=False,
-        )
-        dirty = dirty_result.returncode == 0 and bool((dirty_result.stdout or "").strip())
+        status_command, probe_env = _git_probe(status_command)
+        returncode, stdout = _git_output(repo_dir, status_command, probe_env, presence_only=True)
+        dirty = returncode == 0 and bool(stdout.strip())
     except (OSError, subprocess.SubprocessError):
         dirty = False
 
@@ -250,8 +298,20 @@ def _git_version_info(repo_dir: Path, *, include_untracked: bool = False) -> Ver
     distance = _parse_nonnegative(
         _run_git(repo_dir, "rev-list", "--count", f"v{base_version}..HEAD")
     ) if releases else None
-    if not releases:
-        base_version, distance = _calver_release_version(repo_dir) or ("unknown", None)
+    # Preserve explicit current SemVer authority and its startup cost. Only a
+    # stale/absent fork identity needs additional CalVer and ancestry recovery.
+    if not releases or tuple(int(part) for part in base_version.split(".")) < tuple(
+        int(part) for part in _UPSTREAM_CALVER_RELEASE[0].split(".")
+    ):
+        candidates = [candidate for candidate in (
+            (base_version, distance) if releases else None,
+            _calver_release_version(repo_dir),
+            _upstream_calver_release(repo_dir),
+        ) if candidate is not None]
+        if candidates:
+            base_version, distance = max(
+                candidates, key=lambda item: tuple(int(part) for part in item[0].split("."))
+            )
     short_commit = _run_git(repo_dir, "rev-parse", "--short=7", "HEAD")
     if base_version == "unknown" and short_commit:
         display_version = f"git.{short_commit}{'.dirty' if dirty else ''}"
@@ -274,6 +334,21 @@ def _reset_version_info_cache() -> None:
     _cached_version_info = None
 
 
+def _stamp_or_none() -> VersionInfo | None:
+    """The install stamp's provenance, or None without a valid stamp.
+
+    A malformed stamp (missing/illegal updateMechanism, mispackaged "light"
+    payload) raises RuntimeError — the build lane that wrote it must be
+    fixed, but a crashing CLI is the wrong failure mode for every uncached
+    caller. Degrade to live git / "unknown" and let the authoring lane's own
+    tests surface the malformed stamp.
+    """
+    try:
+        return _stamp_version_info()
+    except RuntimeError:
+        return None
+
+
 def get_version_info() -> VersionInfo:
     """Return cached provenance from install stamp, git, or unknown."""
     global _cached_version_info
@@ -281,15 +356,7 @@ def get_version_info() -> VersionInfo:
         return _cached_version_info
 
     # 1. Install stamp (packaged builds: Docker, Nix)
-    # A malformed stamp (missing/illegal updateMechanism, mispackaged "light"
-    # payload) raises RuntimeError — the build lane that wrote it must be
-    # fixed, but a crashing CLI is the wrong failure mode for every uncached
-    # caller. Degrade to "unknown" and let the authoring lane's own tests
-    # surface the malformed stamp.
-    try:
-        info = _stamp_version_info()
-    except RuntimeError:
-        info = None
+    info = _stamp_or_none()
 
     # 2. Live git (source/dev installs)
     if info is None:
@@ -303,6 +370,16 @@ def get_version_info() -> VersionInfo:
 
     _cached_version_info = info
     return info
+
+
+def hermes_user_agent(product: str = "hermes-cli") -> str:
+    """``<product>/<base version>`` for an outbound request.
+
+    Call it where the request is built, never at module level: a source checkout resolves the
+    release from git, so a module-level read made every Hermes start pay that walk whether or not
+    it ever sent the request.
+    """
+    return f"{product}/{get_version_info().base_version}"
 
 
 def get_code_identity(refresh: bool = False) -> dict:
@@ -330,3 +407,19 @@ def get_code_identity(refresh: bool = False) -> dict:
         "source": info.source,
         "commit_date": info.commit_date,
     }
+
+
+def read_checkout_sha() -> str | None:
+    """The running install's commit, re-read now: the stamp's, else ``git rev-parse HEAD``.
+
+    Same answer as ``get_code_identity(refresh=True)["sha"]`` for one git call instead of the
+    whole provenance walk (the tag scan alone costs ~0.35 s in a large clone), which the
+    pending-restart check on every CLI start was paying just to compare SHAs. Drops the cached
+    identity like that refresh does: the checkout may have moved under this process.
+    """
+    _reset_version_info_cache()
+    stamp = _stamp_or_none()
+    if stamp is not None:
+        return stamp.commit
+    repo_dir = _resolve_repo_dir()
+    return _run_git(repo_dir, "rev-parse", "HEAD") if repo_dir is not None else None

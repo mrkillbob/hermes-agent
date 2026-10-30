@@ -895,7 +895,7 @@ class RelayAdapter(RelayDiscordInteractionMixin, BasePlatformAdapter):
             self._seen_inbound[dedupe_key] = None
             self._evict_oldest(self._seen_inbound, self._SEEN_INBOUND_MAX)
         try:
-            self._capture_scope(event)
+            self._capture_ingress_scope(event)
             await self._remember_discord_labels(event.source)
             self._stamp_slack_session_thread(event)
             # A structured prompt answer resolves its waiting primitive and is CONSUMED —
@@ -1161,7 +1161,7 @@ class RelayAdapter(RelayDiscordInteractionMixin, BasePlatformAdapter):
                     self._revocation_monitor, timeout=_RELAY_REVOCATION_MONITOR_TEARDOWN_TIMEOUT_S
                 )
             except (TimeoutError, asyncio.CancelledError, Exception):
-                pass
+                logger.debug("revocation monitor teardown ended early", exc_info=True)
             self._revocation_monitor = None
         if self._transport is not None:
             # Ask the connector to flip this instance to buffered-only BEFORE tearing

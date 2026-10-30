@@ -40,7 +40,7 @@ async def _qqbot_api_json(client, headers: dict, method: str, path: str,
     resp = await client.request(method, f"{API_BASE}{path}", json=body, headers=headers, timeout=timeout)
     try:
         data = resp.json() if resp.content else {}
-    except Exception:
+    except ValueError:
         data = {}
     if resp.status_code >= 400:
         raise RuntimeError(
@@ -49,17 +49,24 @@ async def _qqbot_api_json(client, headers: dict, method: str, path: str,
     return data if isinstance(data, dict) else {}
 
 
+def _qqbot_local_media_path(media_path):
+    """Resolve and validate a local attachment off the event loop."""
+    from pathlib import Path
+
+    local_path = Path(media_path).expanduser()
+    if not local_path.is_absolute():
+        local_path = (Path.cwd() / local_path).resolve()
+    if not local_path.exists() or not local_path.is_file():
+        raise FileNotFoundError(f"Media file not found: {local_path}")
+    return local_path
+
+
 async def _qqbot_upload_local_file(client, headers, chat_type, chat_id, media_path, file_type) -> dict:
     """Chunked-upload a local file; returns the ``/files`` complete response."""
-    from pathlib import Path as _Path
     from .chunked_upload import ChunkedUploader
     from .constants import FILE_UPLOAD_TIMEOUT
 
-    local_path = _Path(media_path).expanduser()
-    if not local_path.is_absolute():
-        local_path = (_Path.cwd() / local_path).resolve()
-    if not local_path.exists() or not local_path.is_file():
-        raise FileNotFoundError(f"Media file not found: {local_path}")
+    local_path = await asyncio.to_thread(_qqbot_local_media_path, media_path)
 
     async def _api_request(method, path, body=None, timeout=FILE_UPLOAD_TIMEOUT):
         return await _qqbot_api_json(client, headers, method, path, body, timeout=timeout)
@@ -144,6 +151,8 @@ async def _qqbot_deliver_one_media(client, headers, chat_id, media_path, is_voic
                 client, headers, chat_type, chat_id, file_info, caption=caption)
             return _success("qqbot", chat_id, message_id=send_data.get("id"), chat_type=chat_type)
         except Exception as exc:
+            # Foreign transport/upload implementations remain a best-effort delivery boundary.
+            logger.debug("QQBot %s media delivery failed", chat_type, exc_info=True)
             errors.append(f"{chat_type}: {exc}")
             continue
 

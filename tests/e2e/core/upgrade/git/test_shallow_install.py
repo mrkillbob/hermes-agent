@@ -1,7 +1,8 @@
 """Shallow and stale installs through the real ``hermes update``.
 
 N-1's ``scripts/install.sh`` clones ``--depth 1 --single-branch``: that is the checkout every
-N-1 user has. Three installs run concurrently over smart HTTP:
+N-1 user has. Each scenario starts on demand over smart HTTP; selecting a test does not start
+the other scenarios:
 
 * ``depth1``: N-1's own depth-1 install, updated to HEAD and then to one more release. The first
   update must not download the whole project history to move one release (#123254: on a real
@@ -20,6 +21,8 @@ N-1 user has. Three installs run concurrently over smart HTTP:
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 import pytest
 
 from tests.e2e.core._pending_fixes import known_failure
@@ -31,23 +34,24 @@ pytestmark = G.PYTESTMARK
 ORPHAN = "orphan divergence"
 
 
-def _depth1(root) -> dict:
-    cm, w = G.start_world(root / "depth1", base=G.n1_base(), installer_ref=G.n1_tag())
-    run = {"cm": cm, "w": w, "shape0": w.install_shape}
-    w.set_main(I.head_sha())
+def _depth1(root, stack: ExitStack) -> dict:
+    tag, base, target = G.n1_tag(), G.n1_base(), I.head_sha()
+    w = stack.enter_context(G.world(root / "depth1", base=base, installer_ref=tag))
+    run = {"w": w, "shape0": dict(w.install_shape), "target1": target}
+    w.set_main(target)
     run["mark1"] = w.srv.mark()
     run["cp1"], run["head1"] = w.update(), w.head()
     run["fetches1"] = [r for r in w.srv.since(run["mark1"]) if r.command == "fetch"]
-    run["target2"] = w.publish("release: e2e shallow next", {"e2e-shallow-next.txt": "release\n"})
-    run["mark2"] = w.srv.mark()
-    run["cp2"], run["head2"] = w.update(), w.head()
-    run["version"] = w.version()
+    # The second-update test mutates this world. Preserve the first attempt's evidence before
+    # another update can replace its refs, clone shape, receipt or log tail.
+    run["diag1"] = (f"N-1 tag={tag} base={base} target={target} initial_shape={run['shape0']}\n"
+                    f"{w.diag(run['cp1'], run['mark1'])}")
     return run
 
 
-def _checked(root) -> dict:
-    cm, w = G.start_world(root / "checked", base=G.n1_base(), installer_ref=G.n1_tag())
-    run = {"cm": cm, "w": w, "shape0": w.install_shape, "checks": []}
+def _checked(root, stack: ExitStack) -> dict:
+    w = stack.enter_context(G.world(root / "checked", base=G.n1_base(), installer_ref=G.n1_tag()))
+    run = {"w": w, "shape0": w.install_shape, "checks": []}
     between = I.git("rev-list", "--first-parent", f"{G.n1_base()}..{I.head_sha()}", cwd=I.H.WORKTREE).split()
     for k in (len(between) * 3 // 4, len(between) // 2, len(between) // 4):
         w.set_main(between[k])
@@ -59,9 +63,9 @@ def _checked(root) -> dict:
     return run
 
 
-def _prefetched(root) -> dict:
-    cm, w = G.start_world(root / "prefetched", base=I.head_sha())
-    run = {"cm": cm, "w": w}
+def _prefetched(root, stack: ExitStack) -> dict:
+    w = stack.enter_context(G.world(root / "prefetched", base=I.head_sha()))
+    run = {"w": w}
     (w.checkout / "e2e-local-before-prefetch.txt").write_text("my local commit\n", encoding="utf-8")
     w.git("add", "-A")
     w.git("commit", "-q", "-m", "my local patch")
@@ -74,29 +78,29 @@ def _prefetched(root) -> dict:
 
 
 @pytest.fixture(scope="module")
-def runs(tmp_path_factory):
-    root = tmp_path_factory.mktemp("git-shallow")
-    results = G.in_parallel({"depth1": lambda: _depth1(root), "checked": lambda: _checked(root),
-                             "prefetched": lambda: _prefetched(root)})
-    yield results
-    for res in results.values():
-        if isinstance(res, dict):
-            res["cm"].__exit__(None, None, None)
+def depth1(tmp_path_factory):
+    with ExitStack() as stack:
+        yield _depth1(tmp_path_factory.mktemp("git-shallow-depth1"), stack)
 
 
-def _run(runs, name) -> dict:
-    run = runs[name]
-    if isinstance(run, BaseException):
-        raise run
-    return run
+@pytest.fixture(scope="module")
+def checked(tmp_path_factory):
+    with ExitStack() as stack:
+        yield _checked(tmp_path_factory.mktemp("git-shallow-checked"), stack)
 
 
-def test_stale_depth1_install_updates_without_fetching_the_whole_history(runs):
-    run = _run(runs, "depth1")
+@pytest.fixture(scope="module")
+def prefetched(tmp_path_factory):
+    with ExitStack() as stack:
+        yield _prefetched(tmp_path_factory.mktemp("git-shallow-prefetched"), stack)
+
+
+def test_stale_depth1_install_updates_without_fetching_the_whole_history(depth1):
+    run = depth1
     w: G.World = run["w"]
     cp1 = run["cp1"]
     assert run["shape0"]["shallow"] == "true", f"N-1's installer did not make a shallow clone: {run['shape0']}"
-    assert cp1.returncode == 0 and run["head1"] == I.head_sha(), f"N-1 -> HEAD update failed:\n{w.diag(cp1, run['mark1'])}"
+    assert cp1.returncode == 0 and run["head1"] == run["target1"], f"N-1 -> HEAD update failed:\n{run['diag1']}"
     main_fetch = run["fetches1"][0].body_bytes if run["fetches1"] else 0
     bound = 2 * w.install_bytes
     with known_failure(r"downloaded .* the depth-1 install itself",
@@ -105,23 +109,26 @@ def test_stale_depth1_install_updates_without_fetching_the_whole_history(runs):
                        "this flips once a release carrying the fix is N-1"):
         assert main_fetch <= bound, (
             f"moving one release, the update's main fetch downloaded {main_fetch} bytes, more than twice the "
-            f"{w.install_bytes} bytes of the depth-1 install itself:\n{w.diag(cp1, run['mark1'])}")
+            f"{w.install_bytes} bytes of the depth-1 install itself:\n{run['diag1']}")
 
 
-def test_second_update_after_the_unshallowing_update_succeeds(runs):
-    run = _run(runs, "depth1")
+def test_second_update_after_the_unshallowing_update_succeeds(depth1):
+    run = depth1
     w: G.World = run["w"]
-    cp1, cp2 = run["cp1"], run["cp2"]
-    assert cp1.returncode == 0 and run["head1"] == I.head_sha(), f"N-1 -> HEAD update failed:\n{w.diag(cp1, run['mark1'])}"
-    assert cp2.returncode == 0 and run["head2"] == run["target2"], (
+    cp1 = run["cp1"]
+    assert cp1.returncode == 0 and run["head1"] == run["target1"], f"N-1 -> HEAD update failed:\n{run['diag1']}"
+    target2 = w.publish("release: e2e shallow next", {"e2e-shallow-next.txt": "release\n"})
+    mark2 = w.srv.mark()
+    cp2, head2 = w.update(), w.head()
+    assert cp2.returncode == 0 and head2 == target2, (
         f"the update after the unshallowing update failed (rc={cp2.returncode}):\n"
-        f"{G.output(cp2)[-1500:]}\n{w.diag(cp2, run['mark2'])}")
-    version = run["version"]
+        f"{G.output(cp2)[-1500:]}\n{w.diag(cp2, mark2)}")
+    version = w.version()
     assert version.returncode == 0 and G.TRACEBACK not in G.output(version), w.diag(version)
 
 
-def test_passive_checks_do_not_push_the_next_update_into_orphan_divergence(runs):
-    run = _run(runs, "checked")
+def test_passive_checks_do_not_push_the_next_update_into_orphan_divergence(checked):
+    run = checked
     w: G.World = run["w"]
     cp1 = run["cp1"]
     for cp in run["checks"]:
@@ -137,8 +144,8 @@ def test_passive_checks_do_not_push_the_next_update_into_orphan_divergence(runs)
             f"claims orphan divergence on a history it shares with upstream:\n{w.diag(cp1)}")
 
 
-def test_depth1_prefetch_never_turns_shared_history_into_orphan_divergence(runs):
-    run = _run(runs, "prefetched")
+def test_depth1_prefetch_never_turns_shared_history_into_orphan_divergence(prefetched):
+    run = prefetched
     w: G.World = run["w"]
     cp1 = run["cp1"]
     assert run["prefetch_shape"]["shallow"] == "true", f"the --depth 1 pre-fetch did not graft: {run['prefetch_shape']}"

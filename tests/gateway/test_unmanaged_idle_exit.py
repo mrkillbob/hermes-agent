@@ -91,6 +91,47 @@ async def test_queued_work_clients_adapters_and_cron_each_keep_it_up(tmp_path, m
         db.close()
 
 
+def test_a_profile_still_starting_leaves_the_served_ledgers_readable(tmp_path, monkeypatch):
+    """Hot-serve reserves a starting profile's registry slot before its authority exists. The probe
+    still reads every built profile's ledger meanwhile, instead of failing on the slot."""
+    runner, _home, db, _stops = _runner(tmp_path, monkeypatch)
+    starting = tmp_path / "starting"
+    starting.mkdir()
+    runner.session_authorities.add(starting, None, name="starting")  # as serve_profile_runtime does
+    try:
+        db.create_session("s", source="cli")
+        epoch = begin_runtime_epoch(db, instance_id="owner")
+        admit_session_input(db, epoch=epoch, principal_id="p", session_id="s", request_id="r",
+                            payload={"text": "queued while another profile starts"})
+        assert "admissions pending" in run_idle_exit.busy_reason(runner, window=0.2)
+    finally:
+        db.close()
+
+
+def test_a_profile_still_starting_keeps_an_otherwise_idle_gateway_up(tmp_path, monkeypatch):
+    """With every built ledger empty, a profile hot-serve is still building holds the gateway: its
+    queued admissions are recovered only once it starts. The hold ends with the start, filled or failed."""
+    runner, _home, db, _stops = _runner(tmp_path, monkeypatch)
+    registry = runner.session_authorities
+    starting = tmp_path / "starting"
+    starting.mkdir()
+    try:
+        assert run_idle_exit.busy_reason(runner, window=0.2) is None
+        registry.add(starting, None, name="starting")  # as serve_profile_runtime does
+        assert "profile starting" in run_idle_exit.busy_reason(runner, window=0.2)
+        registry.remove(starting)  # the build failed
+        assert run_idle_exit.busy_reason(runner, window=0.2) is None
+        registry.add(starting, None, name="starting")
+        starting_db = SessionDB(db_path=starting / "state.db")
+        registry.replace(starting, SimpleNamespace(profile_id=str(starting), db=starting_db))
+        try:
+            assert run_idle_exit.busy_reason(runner, window=0.2) is None
+        finally:
+            starting_db.close()
+    finally:
+        db.close()
+
+
 def test_secondary_local_session_adapter_does_not_count_as_messaging(tmp_path, monkeypatch):
     """A secondary local session leaves an adapter map behind after the client disconnects."""
     runner, _home, db, _stops = _runner(tmp_path, monkeypatch)
@@ -107,4 +148,26 @@ def test_secondary_local_session_adapter_does_not_count_as_messaging(tmp_path, m
         assert "telegram" in run_idle_exit.busy_reason(runner, window=0.2)
     finally:
         secondary_db.close()
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_retained_gateway_ignores_pending_idle_probe(tmp_path, monkeypatch):
+    runner, _home, db, stops = _runner(tmp_path, monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def probe(*args, **kwargs):
+        entered.set()
+        await release.wait()
+    monkeypatch.setattr(run_idle_exit.asyncio, 'to_thread', probe)
+    task = asyncio.create_task(run_idle_exit.unmanaged_idle_exit_watcher(runner))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        runner._idle_exit_promoted = True
+        release.set()
+        await asyncio.wait_for(task, 5)
+        assert stops == [] and runner.session_runtime_descriptor['state'] == 'ready'
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
         db.close()

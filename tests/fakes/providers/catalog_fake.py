@@ -220,9 +220,11 @@ def _anthropic_json(fake: CatalogFake, text: str, call_id: str | None) -> dict[s
 def _responses_events(fake: CatalogFake, text: str, call_id: str | None) -> list[dict[str, Any]]:
     rid = f"resp_{uuid.uuid4().hex[:10]}"
     usage = {"input_tokens": USAGE_IN, "output_tokens": USAGE_OUT, "total_tokens": USAGE_IN + USAGE_OUT,
-             "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}}
+             "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+             "output_tokens_details": {"reasoning_tokens": 0}}
     shell = {"id": rid, "object": "response", "created_at": int(time.time()), "model": "catalog-model-a",
-             "status": "in_progress", "output": []}
+             "status": "in_progress", "output": [], "parallel_tool_calls": True,
+             "tool_choice": "auto", "tools": []}
     if call_id:
         item = {"type": "function_call", "id": f"fc_{call_id}", "call_id": call_id, "name": fake.tool_name,
                 "arguments": json.dumps(fake.tool_args), "status": "completed"}
@@ -239,7 +241,7 @@ def _responses_events(fake: CatalogFake, text: str, call_id: str | None) -> list
             {"type": "response.output_item.added", "output_index": 0,
              "item": {**item, "content": [], "status": "in_progress"}},
             {"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "item_id": item["id"],
-             "delta": text},
+             "delta": text, "logprobs": []},
             {"type": "response.output_item.done", "output_index": 0, "item": item},
         ]
     done = {**shell, "status": "completed", "output": [item], "usage": usage}

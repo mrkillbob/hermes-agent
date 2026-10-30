@@ -231,4 +231,3 @@ def test_unconfirmed_deep_truncation_is_warn_only_this_release(monkeypatch, capl
         assert "ALLOWED (warn-only release) unconfirmed deep truncation" in caplog.text
     finally:
         server._sessions.pop("warn-only-sid", None)
-

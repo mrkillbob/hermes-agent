@@ -1,7 +1,6 @@
-# Paths that need a hermes-agent-core approval before merge. This replaces the
-# ``ci-reviewed`` label gate: GitHub requests the review and enforces it
-# (ruleset: "Require review from Code Owners"), so CI no longer needs to
-# classify these paths, check a label, or rerun jobs when one is added.
+# Upstream paths that need a hermes-agent-core approval before merge where
+# GitHub's code-owner ruleset is configured. The fork also retains its
+# ``ci-reviewed`` label gate for CI-sensitive and MCP catalog changes.
 #
 # Last match wins; every rule below has the same owner, so order is moot.
 # Patterns without a leading slash match at any depth.

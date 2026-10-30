@@ -20,10 +20,14 @@ permissions:
 
 jobs:
   structural:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    # Checkout alone has been observed taking >10 min on this fork right after a
+    # large upstream-sync merge (materializing/transferring the huge
+    # refs/pull/<N>/merge synthetic commit is slow); the job's own work is
+    # seconds. Generous headroom so a slow-but-succeeding fetch isn't killed.
+    timeout-minutes: 30
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           persist-credentials: false # this job is read-only
 
@@ -44,10 +48,10 @@ jobs:
           python3 scripts/validate_plugin_catalog.py plugin-catalog/
 
   pinned-source-validate:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           # Full commit graph + tags, blobs on demand: the diff below needs the
           # merge commit's first parent, and Hermes resolves its own version
@@ -216,13 +220,20 @@ jobs:
               FAILED=1; echo "::endgroup::"; continue
             fi
 
+            # Fetch an unadvertised exact pin from its declared repo before validating its object type.
+            if ! git -C "$CLONE_DIR" cat-file -e "$SHA" 2>/dev/null; then
+              if ! timeout 600 git -C "$CLONE_DIR" fetch --depth=1 origin "$SHA" </dev/null; then
+                echo "::error file=$entry::pinned sha $SHA could not be fetched from $REPO"
+                FAILED=1; echo "::endgroup::"; continue
+              fi
+            fi
             # The pin must name a commit object -- a tag-object sha would peel
             # to a commit the reviewer never declared as the pin.
             if [ "$(git -C "$CLONE_DIR" cat-file -t "$SHA" 2>/dev/null)" != "commit" ]; then
               echo "::error file=$entry::pinned sha $SHA is not a commit object in $REPO"
               FAILED=1; echo "::endgroup::"; continue
             fi
-            # SUPPLY-CHAIN GATE: the pinned sha must be reachable in the repo.
+            # SUPPLY-CHAIN GATE: the pinned commit must be reachable in the declared repo.
             if ! git -C "$CLONE_DIR" checkout --detach "$SHA" </dev/null; then
               echo "::error file=$entry::pinned sha $SHA is not reachable in $REPO"
               FAILED=1; echo "::endgroup::"; continue

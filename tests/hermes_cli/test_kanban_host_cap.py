@@ -106,6 +106,37 @@ def test_configured_max_in_progress_parsing(monkeypatch):
         assert kbd.configured_max_in_progress() == expected, config
 
 
+def test_profile_dispatcher_inherits_root_host_policy(monkeypatch, tmp_path):
+    """Named profiles must not drop the installation-wide dispatcher cap."""
+    import hermes_cli.config as cfgmod
+    import hermes_constants as constants
+
+    monkeypatch.setattr(
+        cfgmod,
+        "read_user_config_raw",
+        lambda _path: {
+            "kanban": {
+                "max_in_progress": 8,
+                "max_in_progress_by_profile": {"task-orchestrator": 4},
+                "priority_runtime_guard": {"max_in_progress": 2},
+            }
+        },
+    )
+    monkeypatch.setattr(constants, "get_default_hermes_root", lambda: tmp_path)
+
+    merged = kbd.shared_kanban_config(
+        {"dispatch_interval_seconds": 5, "max_in_progress_by_profile": {"reviewer": 1}}
+    )
+
+    assert merged["max_in_progress"] == 8
+    assert merged["max_in_progress_by_profile"] == {
+        "task-orchestrator": 4,
+        "reviewer": 1,
+    }
+    assert merged["priority_runtime_guard"]["max_in_progress"] == 2
+    assert merged["dispatch_interval_seconds"] == 5
+
+
 # ---------------------------------------------------------------------------
 # 2. max_in_progress counts running work on ALL boards (P1b)
 # ---------------------------------------------------------------------------
@@ -133,6 +164,55 @@ def test_max_in_progress_counts_other_boards(
     # Host budget (2) already consumed by the second board → nothing spawns.
     assert not spawns
     assert not res.spawned
+    assert res.host_capacity_saturated is True
+
+
+def test_max_in_progress_per_profile_counts_other_boards(
+    kanban_home, all_assignees_spawnable,
+):
+    """A profile's per-profile cap applies to workers on every board."""
+    kb.create_board("second")
+    with kbc.connect(board="second") as conn:
+        running_id = kb.create_task(conn, title="busy", assignee="alice")
+        assert kb.claim_task(conn, running_id) is not None
+
+    spawns: list = []
+    with kbc.connect() as conn:
+        kb.create_task(conn, title="waiting", assignee="alice")
+        res = kbd.dispatch_once(
+            conn,
+            spawn_fn=_fake_spawn_factory(spawns),
+            max_in_progress_per_profile=1,
+        )
+
+    assert not spawns
+    assert not res.spawned
+    assert len(res.skipped_per_profile_capped) == 1
+    assert res.skipped_per_profile_capped[0][1:] == ("alice", 1)
+
+
+def test_host_capacity_is_reported_when_board_cap_is_checked_first(
+    kanban_home, all_assignees_spawnable,
+):
+    """A board-local cap must not hide an already-full host cap."""
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    import hermes_cli.kanban_db_dispatch as _hermes_cli_kanban_db_dispatch
+    spawns: list = []
+    with _hermes_cli_kanban_db_connect.connect() as conn:
+        running_id = kb.create_task(conn, title="already-running", assignee="alice")
+        assert kb.claim_task(conn, running_id) is not None
+        kb.create_task(conn, title="waiting-for-slot", assignee="alice")
+
+        res = _hermes_cli_kanban_db_dispatch.dispatch_once(
+            conn,
+            spawn_fn=_fake_spawn_factory(spawns),
+            max_spawn=1,
+            max_in_progress=1,
+        )
+
+    assert not spawns
+    assert not res.spawned
+    assert res.host_capacity_saturated is True
 
 
 def test_max_in_progress_partial_budget_across_boards(
@@ -155,6 +235,64 @@ def test_max_in_progress_partial_budget_across_boards(
     # 1 running elsewhere + budget 2 → exactly one new spawn here.
     assert len(spawns) == 1
     assert len(res.spawned) == 1
+
+
+def test_model_capacity_counts_running_workers_on_other_boards(
+    kanban_home, all_assignees_spawnable,
+):
+    """A model cap is host-wide even when boards use separate databases."""
+    kb.create_board("second")
+    with kbc.connect(board="second") as conn:
+        busy = kb.create_task(
+            conn, title="busy", assignee="alice", provider_override="local",
+            model_override="shared-model",
+        )
+        assert kb.claim_task(conn, busy) is not None
+
+    spawns: list = []
+    with kbc.connect() as conn:
+        waiting = kb.create_task(
+            conn, title="waiting", assignee="bob", provider_override="local",
+            model_override="shared-model",
+        )
+        res = kbd.dispatch_once(
+            conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=5,
+            max_in_progress_per_model=1,
+        )
+
+    assert not spawns
+    assert res.skipped_per_model_capped == [(waiting, "local", "shared-model", 1)]
+
+
+def test_workspace_ownership_counts_running_workers_on_other_boards(
+    kanban_home, all_assignees_spawnable, tmp_path,
+):
+    """A physical checkout cannot be concurrently owned by different boards."""
+    kb.create_board("second")
+    shared = tmp_path / "shared-checkout"
+    shared.mkdir()
+    with kbc.connect(board="second") as conn:
+        owner = kb.create_task(
+            conn, title="other board owner", assignee="alice",
+            workspace_kind="dir", workspace_path=str(shared),
+        )
+        assert kb.claim_task(conn, owner) is not None
+
+    spawns: list = []
+    with kbc.connect() as conn:
+        contender = kb.create_task(
+            conn, title="current board contender", assignee="bob",
+            workspace_kind="dir", workspace_path=str(shared),
+        )
+        res = kbd.dispatch_once(
+            conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=5,
+            reconcile_orphans=False,
+        )
+        task = kb.get_task(conn, contender)
+
+    assert not spawns
+    assert res.workspace_collisions == [(contender, owner, str(shared.resolve()))]
+    assert task is not None and task.status == "ready"
 
 
 def test_count_running_tasks_other_boards_fails_open(

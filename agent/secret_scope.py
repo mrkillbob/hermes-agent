@@ -1,8 +1,10 @@
 """Profile-scoped credential resolution for multi-profile gateway multiplexing.
 
-The multiplexing gateway serves many profiles from one process; each profile's
-``.env`` keys **cannot** be unioned into ``os.environ`` (profile A's keys would
-leak into profile B's turns and subprocesses). This module is a fail-closed,
+The multiplexing gateway serves many profiles from one process; platform and
+service ``.env`` keys **cannot** be unioned into ``os.environ`` (profile A's keys
+would leak into profile B's turns and subprocesses). Cloud model-provider keys
+are the deliberate installation-wide exception and are copied into each routed
+scope from the root store. This module is a fail-closed,
 context-local secret scope: ``set_secret_scope(mapping)`` installs the active
 profile's secrets for the current task (a contextvar, so it propagates into the
 agent's worker thread via ``copy_context()``); ``get_secret(name)`` reads from
@@ -18,7 +20,7 @@ import threading
 from collections import OrderedDict
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Dict, Mapping, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, Mapping, NamedTuple, Optional, Tuple
 
 
 # Process-global (describes the deployment mode, not a per-task value): set once
@@ -108,6 +110,19 @@ def serves_routed_profile() -> bool:
 
 
 _SECRET_SCOPE: ContextVar[Optional[_BoundScope]] = ContextVar("_SECRET_SCOPE", default=None)
+# A launch-profile body that entered before this process started multiplexing (no scope bound,
+# single-profile semantics): the launch profile's own mapping to read once fail-closed is armed
+# mid-body. Set only by ``tui_gateway.launch_profile_policy.launch_body``; never ``os.environ``.
+_LAUNCH_BODY_SCOPE: ContextVar[Optional[Callable[[], Mapping[str, str]]]] = ContextVar(
+    "_LAUNCH_BODY_SCOPE", default=None)
+
+
+def set_launch_body_scope(resolver: Callable[[], Mapping[str, str]]) -> Token:
+    return _LAUNCH_BODY_SCOPE.set(resolver)
+
+
+def reset_launch_body_scope(token: Token) -> None:
+    _LAUNCH_BODY_SCOPE.reset(token)
 
 
 class UnscopedSecretError(RuntimeError):
@@ -233,6 +248,9 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
             return val
         return default if serves_routed_profile() else _environ_or(name, default)
     if is_multiplex_active():
+        launch_scope = _LAUNCH_BODY_SCOPE.get()
+        if launch_scope is not None:
+            return launch_scope().get(name, default)
         raise UnscopedSecretError(
             name,
             f"get_secret({name!r}) called with no profile secret scope active "
@@ -243,6 +261,14 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
             f"(Workstream A).",
         )
     return _environ_or(name, default)
+
+
+def secret_source_label(name: str) -> str:
+    """``" (from Bitwarden)"``-style suffix naming the external secret source (a secret-source plugin)
+    that supplied env var *name*; ``""`` for ``.env`` / shell values. Public for plugins' status lines."""
+    from hermes_cli.env_loader import format_secret_source_suffix
+
+    return format_secret_source_suffix(name)
 
 
 def get_secret_str(name: str, default: str = "") -> str:
@@ -308,6 +334,149 @@ def _parse_env_value(raw_value: str) -> str:
 _ENV_FILE_CACHE: OrderedDict[str, tuple[bytes, dict[str, str]]] = OrderedDict()
 _ENV_FILE_CACHE_LOCK = threading.Lock()
 _ENV_FILE_CACHE_MAX = 64  # one entry per profile home in practice
+
+# Model-provider credentials are installation-wide resources.  A multiplexed Hermes
+# gateway may serve dozens of named profiles, but those profiles should not need a
+# duplicate copy of every cloud-model key in their private ``.env`` files.  Keep this
+# allowlist derived from the provider registry (plus the legacy OpenAI rows that are
+# owned by ``hermes_cli.auth`` rather than a provider plugin); platform, relay and
+# arbitrary service credentials stay profile-scoped.
+_MODEL_PROVIDER_SECRET_FALLBACKS = frozenset({
+    "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL",
+    "LM_API_KEY", "LM_BASE_URL",
+})
+_MODEL_PROVIDER_SECRET_NAMES: frozenset[str] | None = None
+
+# The installation-wide GitHub automation credential is intentionally shared
+# only with profiles that have a narrowly governed GitHub write workflow.
+_GITHUB_AUTOMATION_PROFILES = frozenset({
+    "hermes-pr-feedback",
+    "lunabot-issue-reporter",
+    "publication-curator",
+})
+_MODEL_PROVIDER_SECRET_NAMES_LOCK = threading.Lock()
+
+
+def _model_provider_secret_names() -> frozenset[str]:
+    """Return env names that may be shared from the installation root.
+
+    Provider plugins are discovered lazily, so discovery failures must not prevent a
+    profile from booting.  The fallback covers the built-in auth rows that predate
+    provider plugins; all plugin-declared API keys and base-URL overrides are added
+    when discovery is available.
+    """
+    global _MODEL_PROVIDER_SECRET_NAMES
+    cached = _MODEL_PROVIDER_SECRET_NAMES
+    if cached is not None:
+        return cached
+    names = set(_MODEL_PROVIDER_SECRET_FALLBACKS)
+    try:
+        from providers import list_providers
+
+        for profile in list_providers():
+            names.update(str(name).strip() for name in getattr(profile, "env_vars", ()) if str(name).strip())
+    except Exception:
+        # Secret scope construction is on every profile turn; a plugin import must
+        # never take the whole gateway down or widen the shared-secret boundary.
+        pass
+    result = frozenset(names)
+    with _MODEL_PROVIDER_SECRET_NAMES_LOCK:
+        if _MODEL_PROVIDER_SECRET_NAMES is None:
+            _MODEL_PROVIDER_SECRET_NAMES = result
+        return _MODEL_PROVIDER_SECRET_NAMES
+
+
+def _shared_model_provider_secrets(hermes_home: Path) -> dict[str, str]:
+    """Load provider credentials from the installation root for named profiles only.
+
+    The root ``.env`` remains the single shared credential store.  A profile's own
+    ``.env`` is layered afterwards by :func:`build_profile_secret_scope`, so an
+    explicit per-profile key still wins without copying or mutating any file.
+    """
+    try:
+        from hermes_constants import get_default_hermes_root, hermes_home_key, named_profile_home
+
+        if named_profile_home(hermes_home) is None:
+            return {}
+        root = get_default_hermes_root()
+        if hermes_home_key(root) == hermes_home_key(hermes_home):
+            return {}
+        allowed = _model_provider_secret_names()
+        shared = {key: value for key, value in load_env_file(root / ".env").items() if key in allowed}
+        try:
+            from hermes_cli.env_loader import get_secret_source_values
+
+            shared.update(
+                (key, value)
+                for key, value in get_secret_source_values(root).items()
+                if key in allowed
+            )
+        except Exception:
+            pass
+        return shared
+    except Exception:
+        return {}
+
+
+def _shared_github_automation_secrets(hermes_home: Path) -> dict[str, str]:
+    """Share the central bot identity only with profiles authorized to publish."""
+    try:
+        from hermes_constants import get_default_hermes_root, hermes_home_key, named_profile_home
+
+        profile_home = named_profile_home(hermes_home)
+        if profile_home is None or profile_home.name not in _GITHUB_AUTOMATION_PROFILES:
+            return {}
+        root = get_default_hermes_root()
+        if hermes_home_key(root) == hermes_home_key(hermes_home):
+            return {}
+        return {
+            key: value
+            for key, value in load_env_file(root / ".env").items()
+            if key in {"HERMES_GITHUB_BOT_LOGIN", "HERMES_GITHUB_BOT_TOKEN"}
+        }
+    except Exception:
+        return {}
+
+
+def get_github_automation_secret(name: str, default: str = "") -> str:
+    """Resolve the centralized GitHub identity without bypassing profile isolation.
+
+    Gateway work reads from the installed profile scope. A standalone Hermes CLI
+    process has no turn scope, so it may read the root store only for the default
+    home and the explicitly authorized automation profiles.
+    """
+    if name not in {"HERMES_GITHUB_BOT_LOGIN", "HERMES_GITHUB_BOT_TOKEN"}:
+        raise ValueError("unsupported GitHub automation credential")
+    scope = current_secret_scope()
+    if scope is not None:
+        return scope.get(name, default)
+    # A gateway without a bound profile must fail closed even though the
+    # standalone CLI below is allowed to resolve its explicitly named home.
+    if os.environ.get("_HERMES_GATEWAY"):
+        return default
+    try:
+        from hermes_constants import (
+            get_default_hermes_root,
+            get_hermes_home,
+            hermes_home_key,
+            named_profile_home,
+        )
+
+        root = get_default_hermes_root()
+        home = get_hermes_home()
+        profile_home = named_profile_home(home)
+        authorized = (
+            hermes_home_key(home) == hermes_home_key(root)
+            or (profile_home is not None and profile_home.name in _GITHUB_AUTOMATION_PROFILES)
+        )
+        if authorized:
+            value = load_env_file(root / ".env").get(name)
+            if value:
+                return value
+            return os.environ.get(name, default)
+    except Exception:
+        return default
+    return default
 
 
 def invalidate_env_file_cache(env_path: Optional[Path] = None) -> None:
@@ -380,11 +549,25 @@ def load_env_file(env_path: Path) -> dict[str, str]:
     return secrets
 
 
-def build_profile_secret_scope(hermes_home: Path) -> dict[str, str]:
-    """Build a profile's secret mapping from ``<home>/.env`` plus its external
-    secret sources. Global vars are NOT copied in — ``get_secret`` reads those
-    from ``os.environ`` — so the scope holds only profile secrets."""
-    secrets = load_env_file(Path(hermes_home) / ".env")
+def build_profile_secret_scope(hermes_home: Path, *, include_shared_credentials: bool = True) -> dict[str, str]:
+    """Build a profile's secret mapping from shared model keys and its own secrets.
+
+    By default, named profiles inherit only model-provider credentials from the installation
+    root; their platform, relay, and arbitrary service credentials remain private.
+    The profile's own ``.env`` and external secret source are layered afterwards,
+    so an explicit profile key wins. Global vars are NOT copied in — ``get_secret``
+    reads those from ``os.environ`` — so the scope still contains only credentials
+    that are authorized for this profile.
+    Metadata callers can omit shared credentials without discovering providers;
+    local, cached-source and managed composition retain the same precedence.
+    """
+    # Metadata admission needs the profile's path variables, without discovering
+    # provider plugins or reading installation-wide shared credential stores.
+    secrets = {}
+    if include_shared_credentials:
+        secrets = _shared_model_provider_secrets(Path(hermes_home))
+        secrets.update(_shared_github_automation_secrets(Path(hermes_home)))
+    secrets.update(load_env_file(Path(hermes_home) / ".env"))
     try:
         from hermes_cli.env_loader import get_secret_source_values
         external_secrets = get_secret_source_values(Path(hermes_home))

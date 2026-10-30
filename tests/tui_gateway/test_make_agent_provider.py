@@ -129,3 +129,76 @@ def test_resumed_row_cannot_pin_stale_wire_onto_per_model_provider():
             {"model": "claude-opus-4-6", "provider": "anthropic",
              "base_url": "https://my-proxy.example", "api_mode": "anthropic_messages"}, None)
         assert (runtime["api_mode"], runtime["base_url"]) == ("anthropic_messages", "https://my-proxy.example")
+
+
+def test_resumed_per_model_routes_rederive_after_persisted_overlays(tmp_path, monkeypatch):
+    """Use real config/provider resolution and model derivation for all three families."""
+    import json
+    from pathlib import Path
+
+    from tui_gateway import server
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    providers = {
+        "opencode-go-bridge": {"api_mode": "anthropic_messages", "base_url": "https://opencode.ai/zen/go/v1"},
+        "nous-portal": {"api_mode": "chat_completions", "base_url": "https://nous-proxy.invalid/v1"},
+        "github-copilot": {"api_mode": "chat_completions", "base_url": "https://copilot-proxy.invalid"},
+    }
+    for provider in providers.values():
+        provider["api_key"] = "config-test-key"
+    (home / "config.yaml").write_text(json.dumps({"providers": providers, "nous": {"anthropic_wire": "native"}}), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(server, "_hermes_home", home)
+
+    for provider, model, stale_mode, expected_mode, stale_url, expected_url in (
+        ("opencode-go-bridge", "deepseek-v4-flash-vision-exp", "anthropic_messages", "chat_completions",
+         "https://opencode.ai/zen/go", "https://opencode.ai/zen/go/v1"),
+        ("nous-portal", "anthropic/claude-test", "chat_completions", "anthropic_messages",
+         "https://nous-proxy.invalid/v1", "https://nous-proxy.invalid/v1"),
+        ("github-copilot", "gpt-5", "chat_completions", "codex_responses",
+         "https://copilot-proxy.invalid", "https://copilot-proxy.invalid"),
+    ):
+        selected, runtime, notice = server._resolve_agent_model_runtime(
+            {"model": model, "provider": provider, "base_url": stale_url,
+             "api_mode": stale_mode, "api_key": "persisted-test-key"}, None, include_notice=True)
+        assert selected == model and notice is None
+        assert (runtime["api_mode"], runtime["base_url"]) == (expected_mode, expected_url), provider
+        assert runtime["api_key"] == "persisted-test-key"
+
+
+def test_auth_fallback_keeps_its_model_route_and_notice_without_primary_overlays(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+
+    from tui_gateway import server
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    fallback_url = "https://fallback.invalid/v1"
+    fallback_model = "fallback-chat-model"
+    config = {
+        "providers": {"fallback-route": {"base_url": fallback_url, "api_mode": "chat_completions",
+                                          "api_key": "fallback-test-key"}},
+        "fallback_providers": [{"provider": "fallback-route", "model": fallback_model}],
+    }
+    (home / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(server, "_hermes_home", home)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    primary = {"model": "primary-model", "provider": "anthropic", "api_mode": "chat_completions",
+               "base_url": "https://primary.invalid", "api_key": "primary-test-key"}
+
+    selected, runtime, notice = server._resolve_agent_model_runtime(primary, None, include_notice=True)
+    assert selected == fallback_model
+    assert runtime["provider"] == "fallback-route"
+    assert (runtime["api_mode"], runtime["base_url"], runtime["api_key"]) == (
+        "chat_completions", fallback_url, "fallback-test-key")
+    assert "anthropic/primary-model" in notice and f"fallback-route/{fallback_model}" in notice
+    selected_without_notice, runtime_without_notice = server._resolve_agent_model_runtime(primary, None)
+    assert selected_without_notice == selected
+    assert runtime_without_notice["api_mode"] == runtime["api_mode"]
+    assert "_fallback_notice" not in runtime_without_notice

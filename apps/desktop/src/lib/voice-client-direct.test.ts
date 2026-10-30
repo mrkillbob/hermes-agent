@@ -6,6 +6,7 @@ import {
   clearVoiceClientConfigCache,
   type DirectTtsConfig,
   fetchVoiceClientConfig,
+  fetchVoiceClientConfigFor,
   isSttSilenceHallucination,
   synthesizeSpeechClientDirect,
   transcribeAudioClientDirect,
@@ -77,6 +78,22 @@ describe('fetchVoiceClientConfig', () => {
     expect(api).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps captured null owner halves off ambient routing and foreground priority', async () => {
+    const api = mockDesktopApi({ ok: true, stt: directStt, tts: relay })
+    setApiRequestConnection('other-gateway')
+    setApiRequestProfile('other-profile')
+
+    await fetchVoiceClientConfigFor({ connectionId: null, profile: null })
+    await fetchVoiceClientConfigFor({ connectionId: 'owner-gateway', profile: 'owner-profile' })
+
+    expect(api.mock.calls[0][0]).toEqual({ path: '/api/audio/voice-config' })
+    expect(api.mock.calls[1][0]).toEqual({
+      connectionId: 'owner-gateway',
+      path: '/api/audio/voice-config',
+      profile: 'owner-profile'
+    })
+  })
+
   it('resolves null on an older backend without the endpoint', async () => {
     Object.defineProperty(window, 'hermesDesktop', {
       configurable: true,
@@ -96,6 +113,51 @@ describe('transcribeAudioClientDirect', () => {
     Reflect.deleteProperty(window, 'hermesDesktop')
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
+  })
+
+  it('honors cancellation after captured-owner config resolves without uploading audio', async () => {
+    const api = mockDesktopApi({ ok: true, stt: directStt, tts: relay })
+    setApiRequestConnection('other-gateway')
+    setApiRequestProfile('other-profile')
+    const controller = new AbortController()
+    controller.abort()
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      transcribeAudioClientDirect(new Blob(['x']), { connectionId: 'owner-gateway', profile: null }, controller.signal)
+    ).rejects.toThrow('Voice transcription was aborted')
+    expect(api.mock.calls[0][0]).toEqual({ connectionId: 'owner-gateway', path: '/api/audio/voice-config' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('cancels an upload already in progress with the caller abort reason', async () => {
+    vi.useFakeTimers()
+
+    try {
+      mockDesktopApi({ ok: true, stt: directStt, tts: relay })
+      const controller = new AbortController()
+      const reason = new DOMException('Recording was cancelled', 'AbortError')
+      const fetchMock = vi.fn(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+          })
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      const pending = transcribeAudioClientDirect(new Blob(['x']), undefined, controller.signal)
+      pending.catch(() => {})
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fetchMock).toHaveBeenCalledOnce()
+
+      controller.abort(reason)
+      const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+      expect(init.signal?.aborted).toBe(true)
+      await expect(pending).rejects.toBe(reason)
+    } finally {
+      await vi.runAllTimersAsync()
+      vi.useRealTimers()
+    }
   })
 
   it('POSTs multipart to the provider and returns the transcript', async () => {

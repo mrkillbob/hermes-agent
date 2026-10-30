@@ -16,14 +16,16 @@ def _raise_exit(code: int) -> None:
     raise _ExitCalled(code)
 
 
-def test_main_terminates_via_os_exit_not_systemexit(monkeypatch):
+@pytest.mark.parametrize("idle", [False, True])
+def test_main_terminates_via_os_exit_not_systemexit(monkeypatch, idle):
     """The terminating call must be os._exit, NOT sys.exit — SystemExit is
     exactly what triggers the Py_FinalizeEx non-daemon-thread join hang this
     fixes (#53107). If main() ever regresses to sys.exit(), SystemExit would
     propagate instead of our os._exit sentinel and this test would fail.
 
     Test contributed by @AgenticSpark (PR #53122, duplicate of #53121)."""
-    async def fake_start_gateway(config=None):
+    async def fake_start_gateway(config=None, *, idle_exit=False):
+        assert idle_exit is idle
         return False
 
     stdout = SimpleNamespace(flush=Mock())
@@ -31,7 +33,7 @@ def test_main_terminates_via_os_exit_not_systemexit(monkeypatch):
 
     monkeypatch.setattr(gateway_run, "start_gateway", fake_start_gateway)
     monkeypatch.setattr(gateway_run.os, "_exit", _raise_exit)
-    monkeypatch.setattr(gateway_run.sys, "argv", ["gateway.run"])
+    monkeypatch.setattr(gateway_run.sys, "argv", ["gateway.run", *(["--idle-exit"] if idle else [])])
     monkeypatch.setattr(gateway_run.sys, "stdout", stdout)
     monkeypatch.setattr(gateway_run.sys, "stderr", stderr)
 
@@ -47,7 +49,8 @@ def test_main_routes_systemexit_through_os_exit(monkeypatch):
     (#53107) — a SystemExit propagating to interpreter finalization would join a
     stuck non-daemon worker and hang. Verifies the explicit code (e.g. 78) is
     preserved through the os._exit backstop."""
-    async def fake_start_gateway(config=None):
+    async def fake_start_gateway(config=None, *, idle_exit=False):
+        assert not idle_exit
         raise SystemExit(78)
 
     stdout = SimpleNamespace(flush=Mock())

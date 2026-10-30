@@ -65,6 +65,8 @@ killer.unref()
 
 async function main() {
   const { runUpdateWindowChat } = await import('./update-window-chat.mjs')
+  const { predictSmokeHermesHome } = await import('./desktop-smoke.ts')
+  const { readBundledBundleEnv } = await import('../../../tests-js/scripts/desktop-smoke-process.ts')
   const { isolateUpdateWindowEnvironment, isolatedElectronArgs, updateWindowEnvironment } = await import('./smoke-env.mjs')
   const origin = nativeHandoff ? 'bundled' : 'source'
   const root = nativeHandoff ? path.join(path.dirname(exePath), 'resources', 'agent-payload') : path.join(process.env.HERMES_HOME, 'hermes-agent')
@@ -98,16 +100,16 @@ async function main() {
   log(`launched Electron pid=${appPid}`)
 
   const page = await pickAppWindow(app, log)
-
-  await prepareWindowForInput(app, page)
-  log('[zoom] app window prepared at 100%')
-
   await runUpdateWindowChat(app, page, {
     mockUrl: process.env.HERMES_E2E_MOCK_URL, outDir: proofDir,
     expectCommit: oldSha,
-    origin, root, executable: exePath, userData,
+    origin, root, executable: exePath, userData, hermesHome: origin === 'bundled' ? predictSmokeHermesHome(launchEnv, readBundledBundleEnv(root) ?? {}) : launchEnv.HERMES_HOME,
+    prepare: async () => {
+      await prepareWindowForInput(app, page)
+      log('[zoom] app window prepared at 100%')
+      await shot(page, '01-app-booted')
+    },
   })
-  await shot(page, '01-app-booted')
 
   if (nativeHandoff) {
     fs.writeFileSync(path.join(proofDir, 'old-chat-ready.json'), JSON.stringify({ pid: appPid, exe: exePath, oldSha }) + '\n')
@@ -117,7 +119,7 @@ async function main() {
   }
 
   await openAbout(page, { log, shot, prepare: () => prepareWindowForInput(app, page) })
-  const updateNow = await waitForUpdate(page, { log, shot })
+  const updateNow = await waitForUpdate(page, { log, shot, expectedTargetSha: targetSha })
 
   let appClosed = false
   app.on('close', () => {

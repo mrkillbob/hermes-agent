@@ -13,6 +13,13 @@ import psutil
 import pytest
 
 
+def _runtime_owner():
+    from hermes_cli.local_runtime.ownership import RuntimeOwner
+    from hermes_constants import get_hermes_home
+
+    return RuntimeOwner(get_hermes_home())
+
+
 def _wait_for(predicate, timeout=10):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -74,9 +81,16 @@ def test_startup_preserves_trees_and_explicit_stop_checks_owner(tmp_path, monkey
     ], stdout=subprocess.PIPE, text=True, env=env)
     owner_identity = json.loads(owner.stdout.readline())
     processes = []
+    def _ready_record():
+        try:
+            return json.loads(ready.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
     try:
-        _wait_for(ready.exists)
-        record = json.loads(ready.read_text())
+        _wait_for(lambda: _ready_record() is not None)
+        record = _ready_record()
+        assert record is not None
         processes = [psutil.Process(record[k]) for k in ("router", "child")]
         if case != "live-owner":
             owner.wait(timeout=10)
@@ -108,7 +122,7 @@ def test_startup_preserves_trees_and_explicit_stop_checks_owner(tmp_path, monkey
             state["owner_pid"] = os.getpid()
             supervisor.state_path().write_text(json.dumps(state))
         for _ in range(2):
-            bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}})
+            bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}}, owner=_runtime_owner())
             assert all(p.is_running() for p in processes), f"startup killed: {case}"
             assert json.loads(supervisor.state_path().read_text()) == state
         if case == "state-replaced":
@@ -118,6 +132,10 @@ def test_startup_preserves_trees_and_explicit_stop_checks_owner(tmp_path, monkey
             if case == "modern":
                 from fastapi import FastAPI
                 from fastapi.testclient import TestClient
+                from hermes_cli.local_runtime import ownership
+
+                # The HTTP control path requires the durable gateway's scoped capability.
+                monkeypatch.setattr(ownership, "_OWNER", _runtime_owner())
                 app = FastAPI()
                 app.include_router(local_models.router)
                 disabled = []
@@ -172,7 +190,7 @@ def test_startup_reuses_without_activity_probe(tmp_path, monkeypatch, failure):
                         lambda state: SimpleNamespace(is_running=lambda: False))
     monkeypatch.setattr(recovery, "_owner_is_dead", lambda state: True)
     for _ in range(2):
-        assert bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}}) is None
+        assert bootstrap.ensure_local_runtime({"local_runtime": {"enabled": True}}, owner=_runtime_owner()) is None
     assert not calls
 
 
@@ -226,6 +244,10 @@ def test_spawn_state_records_process_incarnations(tmp_path, monkeypatch):
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         sup.proc = proc
+        if os.name != "nt":
+            from hermes_cli.local_runtime.tree_custody import reserve_uncontained_tree
+
+            sup._spawn_intent = reserve_uncontained_tree(supervisor.state_path())
         sup._write_state()
         state = json.loads(supervisor.state_path().read_text())
         assert state.get("create_time") == psutil.Process(proc.pid).create_time()
@@ -347,7 +369,7 @@ def test_explicit_stop_preserves_verified_root_incarnation(tmp_path, monkeypatch
     replacement.kill.assert_not_called()
     root.children.assert_called_once_with(recursive=True)
     factory.assert_not_called()
-    assert stopped is (reuse_at == "never")
+    assert stopped is (reuse_at == "never" and os.name == "nt")
     if reuse_at != "never":
         root.terminate.assert_not_called()
         root.kill.assert_not_called()
@@ -404,6 +426,9 @@ def test_clock_step_keeps_the_recorded_router(tmp_path, monkeypatch):
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         sup.proc = proc
+        from hermes_cli.local_runtime.tree_custody import reserve_uncontained_tree
+
+        sup._spawn_intent = reserve_uncontained_tree(supervisor.state_path())
         sup._write_state()
         stepped = psutil._pslinux.boot_time() + 22
         monkeypatch.setattr(psutil._pslinux, "boot_time", lambda: stepped)
@@ -419,12 +444,10 @@ def test_clock_step_keeps_the_recorded_router(tmp_path, monkeypatch):
 
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("owner", ["exited", "alive"])
-def test_replacement_stops_only_an_orphaned_router(tmp_path, monkeypatch, owner):
-    """Stale-preset replacement and the rescan bounce stop the recorded router only when its owner
-    is gone; a live owner's router keeps running (its watchdog would respawn it anyway). POSIX: a
-    Windows router dies with its owner's job object, so no orphan exists to stop."""
+def test_startup_preserves_router_and_only_explicit_stop_recovers_an_orphan(tmp_path, monkeypatch, owner):
+    """An exited owner does not prove its adopters are idle; startup must preserve the router."""
     from gateway.status import get_process_start_time
-    from hermes_cli.local_runtime import bootstrap, endpoint, supervisor
+    from hermes_cli.local_runtime import bootstrap, endpoint, recovery, supervisor
 
     monkeypatch.setattr(supervisor, "runtimes_root", lambda: tmp_path)
     holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -441,7 +464,9 @@ def test_replacement_stops_only_an_orphaned_router(tmp_path, monkeypatch, owner)
             holder.kill()
             holder.wait(timeout=5)
 
-        bootstrap._stop_state_server()
+        assert bootstrap._incumbent_allows_boot() is False
+        assert router.poll() is None
+        assert recovery.stop_recorded_orphan() is False  # root stop does not prove tree closure
 
         if owner == "exited":
             router.wait(timeout=10)

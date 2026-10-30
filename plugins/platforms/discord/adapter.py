@@ -700,7 +700,10 @@ def _discord_ready_timeout_seconds() -> float:
     return 30.0
 
 
-class VoiceReceiver:
+from .adapter_voice_packets import VoicePacketMixin
+
+
+class VoiceReceiver(VoicePacketMixin):
     """Captures voice audio from a Discord voice channel: hooks the VoiceClient socket, decrypts
     RTP (NaCl + DAVE E2EE), decodes Opus per user; a polling loop delivers utterances on silence."""
 
@@ -709,6 +712,11 @@ class VoiceReceiver:
     SAMPLE_RATE = 48000        # Discord native rate
     CHANNELS = 2               # Discord sends stereo
     REKEY_FAILURE_STREAK = 25  # consecutive NaCl failures → re-resolve creds
+
+    @staticmethod
+    def _voice_packet_dependencies():
+        """Resolve SDK and logger from this adapter's loaded plugin namespace."""
+        return discord, logger
 
     def __init__(self, voice_client, allowed_user_ids: set | None = None):
         self._vc = voice_client
@@ -842,7 +850,7 @@ class VoiceReceiver:
             )
         except Exception as e:
             logger.warning(
-                "VoiceReceiver credential refresh failed (%s): %s", reason, e
+                "VoiceReceiver credential refresh failed (%s): %s", reason, e, exc_info=True
             )
 
     def stop(self):
@@ -944,163 +952,6 @@ class VoiceReceiver:
             logger.warning("Could not install hook on live ws: %s", e)
 
     # --- Packet handler (called from SocketReader thread) ---
-
-    def _on_packet(self, data: bytes):
-        if not self._running or self._paused:
-            return
-
-        # One consistent credential generation for this packet — a refresh
-        # on another thread swaps the whole tuple, never half of it.
-        secret_key, dave_session, dave_pver, _dave_downgraded = self._creds
-
-        # Log first few raw packets for debugging
-        self._packet_debug_count += 1
-        if self._packet_debug_count <= 5:
-            logger.debug(
-                "Raw UDP packet: len=%d, first_bytes=%s",
-                len(data), data[:4].hex() if len(data) >= 4 else "short",
-            )
-        if len(data) < 16:
-            return
-        # RTP v2: top 2 bits 10 (rest varies); voice payload type (byte 1 & 0x7F) is 0x78.
-        if (data[0] >> 6) != 2 or (data[1] & 0x7F) != 0x78:
-            if self._packet_debug_count <= 5:
-                logger.debug("Skipped non-RTP: byte0=0x%02x byte1=0x%02x", data[0], data[1])
-            return
-        first_byte = data[0]
-        _, _, seq, _timestamp, ssrc = struct.unpack_from(">BBHII", data, 0)
-        if ssrc == self._bot_ssrc:
-            return
-        # Calculate dynamic RTP header size (RFC 9335 / rtpsize mode)
-        cc = first_byte & 0x0F  # CSRC count
-        has_extension = bool(first_byte & 0x10)  # extension bit
-        has_padding = bool(first_byte & 0x20)  # padding bit (RFC 3550 §5.1)
-        header_size = 12 + (4 * cc) + (4 if has_extension else 0)
-        if len(data) < header_size + 4:  # need at least header + nonce
-            return
-        # Read extension length from preamble (for skipping after decrypt)
-        ext_data_len = 0
-        if has_extension:
-            ext_preamble_offset = 12 + (4 * cc)
-            ext_words = struct.unpack_from(">H", data, ext_preamble_offset + 2)[0]
-            ext_data_len = ext_words * 4
-        if self._packet_debug_count <= 10:
-            with self._lock:
-                known_user = self._ssrc_to_user.get(ssrc, "unknown")
-            logger.debug(
-                "RTP packet: ssrc=%d, seq=%d, user=%s, hdr=%d, ext_data=%d",
-                ssrc, seq, known_user, header_size, ext_data_len,
-            )
-        header = bytes(data[:header_size])
-        payload_with_nonce = data[header_size:]
-        # --- NaCl transport decrypt (aead_xchacha20_poly1305_rtpsize) ---
-        if len(payload_with_nonce) < 4:
-            return
-        nonce = bytearray(24)
-        nonce[:4] = payload_with_nonce[-4:]
-        encrypted = bytes(payload_with_nonce[:-4])
-        try:
-            import nacl.secret
-            box = nacl.secret.Aead(secret_key)
-            decrypted = box.decrypt(encrypted, header, bytes(nonce))
-            self._nacl_fail_streak = 0
-        except Exception as e:
-            self._decode_failed += 1
-            self._nacl_fail_streak += 1
-            # Never go fully dark: after the first 10 warnings, keep emitting
-            # one every 250 failures so a deaf session stays diagnosable.
-            if self._packet_debug_count <= 10 or self._nacl_fail_streak % 250 == 0:
-                logger.warning(
-                    "NaCl decrypt failed: %s (hdr=%d, enc=%d, streak=%d)",
-                    e, header_size, len(encrypted), self._nacl_fail_streak,
-                )
-            # A sustained failure streak means the transport key rotated
-            # under us (voice reconnect / re-key) — re-read it from the live
-            # connection instead of staying deaf on a stale copy.  The
-            # refresh resets the streak, so this retries every
-            # REKEY_FAILURE_STREAK packets while the failure persists.
-            if self._nacl_fail_streak >= self.REKEY_FAILURE_STREAK:
-                self.refresh_credentials("decrypt-failure streak")
-            return
-        # Skip encrypted extension data to get the actual opus payload
-        if ext_data_len and len(decrypted) > ext_data_len:
-            decrypted = decrypted[ext_data_len:]
-        # Strip RTP padding (RFC 3550 §5.1): last payload byte is the count; leaving it corrupts DAVE/Opus.
-        if has_padding:
-            if not decrypted:
-                if self._packet_debug_count <= 10:
-                    logger.warning("RTP padding bit set but no payload (ssrc=%d)", ssrc)
-                return
-            pad_len = decrypted[-1]
-            if pad_len == 0 or pad_len > len(decrypted):
-                if self._packet_debug_count <= 10:
-                    logger.warning(
-                        "Invalid RTP padding length %d for payload size %d (ssrc=%d)",
-                        pad_len, len(decrypted), ssrc,
-                    )
-                return
-            decrypted = decrypted[:-pad_len]
-            if not decrypted:
-                return
-        # --- DAVE E2EE decrypt ---
-        if dave_session:
-            with self._lock:
-                user_id = self._ssrc_to_user.get(ssrc, 0)
-                if not user_id:
-                    # Rejoin race: SPEAKING may never be resent for a user who
-                    # was already talking — try the sole-member inference
-                    # before giving up on this frame.
-                    user_id = self._infer_user_for_ssrc(ssrc)
-            if user_id:
-                try:
-                    import davey
-                    decrypted = dave_session.decrypt(
-                        user_id, davey.MediaType.audio, decrypted
-                    )
-                except Exception as e:
-                    # Unencrypted passthrough — use NaCl-decrypted data as-is
-                    if "Unencrypted" not in str(e):
-                        if self._packet_debug_count <= 10:
-                            logger.warning("DAVE decrypt failed for ssrc=%d: %s", ssrc, e)
-                        return
-            elif (
-                dave_pver > 0
-                and time.monotonic() >= self._dave_passthrough_until
-            ):
-                # E2EE is actively on (protocol > 0, no passthrough window),
-                # so an unmapped SSRC's payload is still ciphertext.  Opus
-                # will happily "decode" it (producing shredded audio and
-                # poisoning decoder state), so drop the frame until a
-                # SPEAKING event maps the SSRC — bounded loss beats corrupt
-                # audio.  A non-null session alone is NOT this predicate: the
-                # session object survives protocol downgrades to 0 and
-                # passthrough transitions, where plaintext is legitimate and
-                # must fall through to opus below.
-                self._dave_unmapped_dropped += 1
-                if (
-                    self._packet_debug_count <= 10
-                    or self._dave_unmapped_dropped % 250 == 1
-                ):
-                    logger.debug(
-                        "Dropping DAVE frame for unmapped ssrc=%d (dropped=%d)",
-                        ssrc, self._dave_unmapped_dropped,
-                    )
-                return
-
-        # --- Opus decode -> PCM ---
-        try:
-            if ssrc not in self._decoders:
-                self._decoders[ssrc] = discord.opus.Decoder()
-            pcm = self._decoders[ssrc].decode(decrypted)
-            self._decode_ok += 1
-            with self._lock:
-                self._buffers[ssrc].extend(pcm)
-                self._last_packet_time[ssrc] = time.monotonic()
-        except Exception as e:
-            with self._lock:
-                self._decoders.pop(ssrc, None)
-            logger.debug("Opus decode error for SSRC %s; reset decoder: %s", ssrc, e)
-            return
 
     # --- Silence detection ---
 
@@ -1225,6 +1076,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
     MAX_MESSAGE_LENGTH = 2000
     _SPLIT_THRESHOLD = 1900  # near the 2000-char split point
     supports_code_blocks = True  # Discord markdown renders fenced code blocks natively
+    allow_from_covers_groups = True  # no group_allow_from: allow_from is the one user allowlist
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
     # Safety ceiling on split deliveries: chunks beyond the cap become a notice (degenerate turns).
     # Safety ceiling on split deliveries (#86581): a degenerate turn can produce tens of thousands of
@@ -1269,6 +1121,11 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         self._voice_timeout_tasks: dict[int, asyncio.Task] = {}  # guild_id -> timeout task
         self._voice_timeout_seconds = self._load_voice_timeout()
         self._playback_timeout_seconds = self._load_playback_timeout()
+        (
+            self._voice_auto_join_channel_id,
+            self._voice_auto_join_user_ids,
+            self._voice_auto_join_text_channel_id,
+        ) = self._load_voice_auto_join_config()
         self._voice_receivers: dict[int, VoiceReceiver] = {}  # guild_id -> VoiceReceiver
         self._voice_listen_tasks: dict[int, asyncio.Task] = {}  # guild_id -> listen loop
         self._voice_input_callback: Optional[Callable] = None  # set by run.py
@@ -1562,6 +1419,26 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                 if guild_id not in bot_guild_ids:
                     return
                 if member == adapter_self._client.user:
+                    # A move performed outside this adapter (for example from
+                    # Discord's UI or REST API) makes discord.py replace the
+                    # UDP packet reader while retaining the VoiceClient.  The
+                    # existing VoiceReceiver remains attached to the old
+                    # reader, so it can still see websocket SPEAKING events
+                    # but receives no audio packets.  Refresh the receiver
+                    # after discord.py has completed its reconnect.
+                    if before.channel != after.channel and after.channel is not None:
+                        asyncio.ensure_future(
+                            adapter_self._refresh_voice_receiver_after_forced_move(guild_id)
+                        )
+                    return
+
+                await adapter_self._auto_join_voice_for_member(member, before, after)
+
+                # Only log ordinary member state changes while the bot is in
+                # this guild. Auto-join above runs before this guard because
+                # it is how an initially disconnected bot enters the room.
+                bot_guild_ids = set(adapter_self._voice_clients.keys())
+                if guild_id not in bot_guild_ids:
                     return
                 joined = before.channel is None and after.channel is not None
                 left = before.channel is not None and after.channel is None
@@ -2353,6 +2230,7 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         if not self._client:
             return
         try:
+            await self._auto_join_configured_voice_channel_if_user_present()
             sync_policy = self._get_discord_command_sync_policy()
             if sync_policy == "off":
                 logger.info("[%s] Skipping Discord slash command sync (policy=off)", self.name)
@@ -3632,6 +3510,33 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             "voice_channel_inactivity_timeout_seconds", self.VOICE_TIMEOUT, minimum=0,
         )
 
+    def _load_voice_auto_join_config(self) -> tuple[Optional[int], set[str], Optional[int]]:
+        """Load the voice room, user allowlist, and optional text reply channel.
+
+        Both values must be valid. A partial or malformed configuration stays
+        disabled so Hermes can never join a room merely because voice-state
+        events are enabled.
+        """
+        try:
+            from hermes_cli.config import read_raw_config
+
+            discord_cfg = (read_raw_config() or {}).get("discord") or {}
+            channel_id = int(discord_cfg.get("voice_auto_join_channel_id"))
+            text_channel_id_raw = discord_cfg.get("voice_auto_join_text_channel_id")
+            text_channel_id = int(text_channel_id_raw) if text_channel_id_raw else None
+            raw_user_ids = discord_cfg.get("voice_auto_join_user_ids") or []
+            if isinstance(raw_user_ids, str):
+                raw_user_ids = raw_user_ids.split(",")
+            user_ids = {str(value).strip() for value in raw_user_ids if str(value).strip().isdigit()}
+            if channel_id <= 0 or not user_ids:
+                return None, set(), None
+            if text_channel_id is not None and text_channel_id <= 0:
+                text_channel_id = None
+            return channel_id, user_ids, text_channel_id
+        except Exception as e:
+            logger.debug("Could not load Discord voice auto-join config: %s", e)
+            return None, set(), None
+
     def _load_playback_timeout(self) -> int:
         """Return minimum playback wait seconds for Discord VC audio."""
         return self._load_discord_int_config(
@@ -3820,6 +3725,106 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
                 except Exception as e:
                     logger.warning("Voice mixer failed to start: %s", e)
             return True
+
+    async def _refresh_voice_receiver_after_forced_move(self, guild_id: int) -> None:
+        """Attach a new packet receiver after discord.py reconnects a moved bot.
+
+        Discord can force-move a bot without going through ``move_to``.  In
+        that case the VoiceClient survives but its UDP SocketReader changes;
+        the previous VoiceReceiver must be stopped and reattached.
+        """
+        # Give discord.py's voice-state handler time to replace the transport.
+        await asyncio.sleep(0.5)
+        vc = self._voice_clients.get(guild_id)
+        if not vc or not vc.is_connected():
+            logger.warning("Voice receiver refresh skipped: no connected client for guild %s", guild_id)
+            return
+
+        previous_receiver = self._voice_receivers.pop(guild_id, None)
+        if previous_receiver:
+            previous_receiver.stop()
+        previous_task = self._voice_listen_tasks.pop(guild_id, None)
+        if previous_task:
+            previous_task.cancel()
+
+        try:
+            receiver = VoiceReceiver(vc, allowed_user_ids=self._allowed_user_ids)
+            receiver.start()
+            self._voice_receivers[guild_id] = receiver
+            self._voice_listen_tasks[guild_id] = asyncio.ensure_future(
+                self._voice_listen_loop(guild_id)
+            )
+            logger.info("Voice receiver refreshed after forced move (guild=%s)", guild_id)
+        except Exception as e:
+            logger.warning("Voice receiver refresh failed after forced move: %s", e)
+
+    async def _auto_join_voice_for_member(self, member, before, after) -> None:
+        """Join or leave the configured room when its configured user moves."""
+        channel_id = getattr(self, "_voice_auto_join_channel_id", None)
+        user_ids = getattr(self, "_voice_auto_join_user_ids", set())
+        if not channel_id or str(getattr(member, "id", "")) not in user_ids:
+            return
+
+        before_channel = getattr(before, "channel", None)
+        after_channel = getattr(after, "channel", None)
+        was_in_configured_channel = getattr(before_channel, "id", None) == channel_id
+        is_in_configured_channel = getattr(after_channel, "id", None) == channel_id
+
+        if is_in_configured_channel and not was_in_configured_channel:
+            text_channel_id = int(
+                getattr(self, "_voice_auto_join_text_channel_id", None) or channel_id
+            )
+            await self.join_voice_channel(
+                after_channel,
+                text_channel_id=text_channel_id,
+                source=self._voice_auto_join_source(text_channel_id, member.id),
+            )
+            return
+
+        if was_in_configured_channel and not is_in_configured_channel:
+            # Only disconnect when no other configured user remains in the channel.
+            remaining = {
+                str(getattr(m, "id", ""))
+                for m in getattr(before_channel, "members", [])
+                if str(getattr(m, "id", "")) in user_ids and str(getattr(m, "id", "")) != str(getattr(member, "id", ""))
+            }
+            if not remaining:
+                await self.leave_voice_channel(member.guild.id)
+
+    async def _auto_join_configured_voice_channel_if_user_present(self) -> None:
+        """Restore the configured voice session after Gateway startup."""
+        channel_id = getattr(self, "_voice_auto_join_channel_id", None)
+        user_ids = getattr(self, "_voice_auto_join_user_ids", set())
+        if not channel_id or not user_ids or not self._client:
+            return
+        channel = self._client.get_channel(channel_id)
+        if channel is None:
+            logger.warning("Configured voice auto-join channel %s is unavailable", channel_id)
+            return
+        for member in getattr(channel, "members", []):
+            if str(getattr(member, "id", "")) not in user_ids:
+                continue
+            text_channel_id = int(
+                getattr(self, "_voice_auto_join_text_channel_id", None) or channel_id
+            )
+            await self.join_voice_channel(
+                channel,
+                text_channel_id=text_channel_id,
+                source=self._voice_auto_join_source(text_channel_id, member.id),
+            )
+            return
+
+    @staticmethod
+    def _voice_auto_join_source(text_channel_id: int, user_id: int) -> dict[str, str]:
+        """Build valid session metadata for a voice auto-join reply destination."""
+        user_id_str = str(user_id)
+        return {
+            "platform": Platform.DISCORD.value,
+            "chat_id": str(text_channel_id),
+            "user_id": user_id_str,
+            "user_name": user_id_str,
+            "chat_type": "channel",
+        }
 
     async def leave_voice_channel(self, guild_id: int) -> None:
         """Disconnect from the voice channel in a guild."""
@@ -5046,11 +5051,10 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
     def _component_live_auth(self, interaction) -> Optional[bool]:
         """The gateway's live allowlist verdict for a component click (None when no check is wired):
         an out-of-process revoke never reaches the connect-time ``_allowed_user_ids`` snapshot."""
+        from plugins.platforms.discord.adapter_component_auth import component_chat_context
         user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
-        channel_id = getattr(interaction, "channel_id", None)
-        chat_type = "dm" if getattr(interaction, "guild", None) is None else "group"
-        return self._is_sender_authorized(
-            user_id, chat_type, str(channel_id) if channel_id is not None else None)
+        chat_type, chat_id, thread_id = component_chat_context(interaction, discord.Thread)
+        return self._is_sender_authorized(user_id, chat_type, chat_id, thread_id=thread_id)
 
     def resolved_allowlist_user_ids(self) -> set:
         """Numeric IDs from connect-time username resolution.
@@ -5213,6 +5217,212 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
             return int(raw)
         except (ValueError, TypeError):
             return 50
+
+    def _specialist_routing_settings(self) -> dict[str, Any]:
+        """Return validated, explicitly opt-in Discord specialist routing settings."""
+        raw = self.config.extra.get("specialist_routing")
+        if not isinstance(raw, dict):
+            return {"enabled": False}
+        enabled = raw.get("enabled", False)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() in {"true", "1", "yes", "on"}
+        if not enabled:
+            return {"enabled": False}
+        board = raw.get("board")
+        if not isinstance(board, str) or not board.strip():
+            return {"enabled": False}
+        board = board.strip()
+        try:
+            threshold = float(raw.get("confidence_threshold", 0.80))
+        except (TypeError, ValueError):
+            threshold = 0.80
+        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            threshold = 0.80
+        try:
+            timeout = float(raw.get("timeout_seconds", 12))
+        except (TypeError, ValueError):
+            timeout = 12.0
+        return {"enabled": True, "confidence_threshold": threshold,
+                "timeout_seconds": max(1.0, min(30.0, timeout)),
+                "model": str(raw.get("model") or "").strip(), "board": board,
+                "capabilities": raw.get("capabilities")}
+
+    @staticmethod
+    def _specialist_capability_registry(settings: dict[str, Any]):
+        """Build the board-local registry from explicit operator declarations."""
+        raw = settings.get("capabilities")
+        from gateway.capability_registry import CapabilityRegistry, CapabilitySignature
+        from gateway.configured_board import configured_board_db_path
+        from gateway.specialist_routing import SPECIALIST_PROFILES
+
+        db_path = configured_board_db_path(settings["board"])
+
+        if not isinstance(raw, dict) or not raw:
+            # Specialist routing is enabled only by explicit configuration;
+            # without declarations it remains fail-closed and cannot hand off.
+            return CapabilityRegistry(db_path=db_path, board=settings["board"], configured_profiles={})
+
+        declarations = {}
+        try:
+            def tokens(value):
+                if isinstance(value, str) or not isinstance(value, (list, tuple)):
+                    raise TypeError("capability tokens must be a list")
+                return tuple(value)
+
+            for profile, value in raw.items():
+                if profile not in SPECIALIST_PROFILES or not isinstance(value, dict):
+                    # Any malformed declaration invalidates the whole registry;
+                    # returning None would be interpreted as "no registry" and
+                    # let arbitrary specialist profiles through.
+                    return CapabilityRegistry(db_path=db_path, board=settings["board"], configured_profiles={})
+                declarations[profile] = CapabilitySignature(
+                    domain=value["domain"],
+                    actions=tokens(value["actions"]),
+                    evidence_class=value["evidence_class"],
+                    requested_permissions=tokens(value["requested_permissions"]),
+                )
+            registry = CapabilityRegistry(
+                db_path=db_path, board=settings["board"], configured_profiles=declarations,
+            )
+            # Loading request scope must not activate or revive a profile.
+            # Activation is an explicit registry operation, separate from ingress.
+            return registry
+        except (KeyError, TypeError, ValueError):
+            return CapabilityRegistry(db_path=db_path, board=settings["board"], configured_profiles={})
+
+    def toolsets_for_source(self, source) -> Optional[list[str]]:
+        """Return source-scoped toolsets; voice fast-lane turns are tool-free."""
+        if getattr(source, "_voice_fast_lane", False):
+            return []
+        return None
+
+    async def _maybe_answer_progress_event(self, event: MessageEvent) -> bool:
+        """Answer a source-scoped status question before model specialist routing."""
+        settings = self._specialist_routing_settings()
+        if not settings.get("enabled") or event.message_type is not MessageType.TEXT:
+            return False
+        if not (event.text or "").strip() or getattr(event.source, "is_bot", False):
+            return False
+        try:
+            from gateway.progress_queries import (
+                ProgressSource,
+                is_progress_query,
+                resolve_progress_query,
+            )
+
+            if not is_progress_query(event.text):
+                return False
+            platform = getattr(event.source.platform, "value", event.source.platform)
+            source = ProgressSource(
+                platform=str(platform),
+                chat_id=str(event.source.chat_id),
+                thread_id=(str(event.source.thread_id) if event.source.thread_id else None),
+                reply_to_message_id=(
+                    str(event.reply_to_message_id) if event.reply_to_message_id else None
+                ),
+            )
+            result = await asyncio.to_thread(
+                resolve_progress_query,
+                event.text,
+                source=source,
+                board=settings["board"],
+            )
+        except Exception:
+            logger.warning("[Discord] progress query lookup failed", exc_info=True)
+            return False
+        if not result.handled:
+            return False
+        await self.send(event.source.chat_id, content=result.response, reply_to=event.message_id)
+        return True
+
+    async def _classify_specialist_event(self, event: MessageEvent):
+        """Ask the bounded auxiliary router for one typed routing decision."""
+        settings = self._specialist_routing_settings()
+        from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+        from gateway.specialist_routing import classify_specialist_request
+
+        async def _classifier(messages):
+            response = await async_call_llm(
+                task="specialist_router", model=settings["model"] or None,
+                messages=messages, temperature=0.0, max_tokens=180,
+                timeout=settings["timeout_seconds"], reasoning_config={"enabled": False},
+            )
+            return extract_content_or_reasoning(response)
+
+        return await classify_specialist_request(
+            event.text, _classifier, threshold=settings["confidence_threshold"],
+            timeout=settings["timeout_seconds"],
+        )
+
+    async def _maybe_route_specialist_event(self, event: MessageEvent) -> bool:
+        """Create a guarded specialist card, or return false for normal chat."""
+        settings = self._specialist_routing_settings()
+        if not settings.get("enabled") or event.message_type is not MessageType.TEXT:
+            return False
+        if not (event.text or "").strip() or getattr(event.source, "is_bot", False):
+            return False
+        try:
+            decision = await self._classify_specialist_event(event)
+        except Exception:
+            logger.warning("[Discord] specialist routing classifier failed", exc_info=True)
+            return False
+        if decision.kind.value == "general":
+            logger.info("[Discord] specialist routing fell through: %s", decision.audit_reason)
+            return False
+        if decision.kind.value == "clarify":
+            await self.send(
+                event.source.chat_id,
+                content=("Which specialist task should I start: an audit, a narrow patch, "
+                         "acceptance verification, safety review, research, or performance work?"),
+                reply_to=event.message_id,
+            )
+            return True
+        if not decision.dispatches:
+            return False
+        try:
+            from gateway.specialist_handoff import HandoffSource, create_specialist_handoff
+
+            platform = getattr(event.source.platform, "value", event.source.platform)
+            registry = await asyncio.to_thread(self._specialist_capability_registry, settings)
+            signature = registry.configured_signature(decision.profile or "")
+            if signature is None:
+                logger.warning(
+                    "[Discord] specialist routing profile is not configured: %s",
+                    decision.profile,
+                )
+                return False
+            source = HandoffSource(
+                platform=str(platform), chat_id=str(event.source.chat_id),
+                chat_type=str(event.source.chat_type or "group"),
+                user_id=str(event.source.user_id) if event.source.user_id else None,
+                user_id_alt=str(event.source.user_id_alt) if event.source.user_id_alt else None,
+                guild_id=str(event.source.guild_id) if event.source.guild_id else None,
+                thread_id=str(event.source.thread_id) if event.source.thread_id else None,
+                message_id=str(event.message_id or event.source.message_id or ""),
+                notifier_profile=getattr(event.source, "profile", None) or "default",
+            )
+            result = await asyncio.to_thread(
+                create_specialist_handoff, decision=decision, source=source,
+                request=event.text, router_model=settings["model"] or "configured_auxiliary",
+                board=settings["board"],
+                signature=signature,
+                registry=registry,
+            )
+        except Exception:
+            logger.warning("[Discord] specialist routing handoff failed", exc_info=True)
+            return False
+        if not result.ok or not result.task_id or not result.assignee:
+            logger.warning("[Discord] specialist routing handoff rejected: %s", result.reason)
+            return False
+        await self.send(
+            event.source.chat_id,
+            content=(
+                f"Planning `{result.task_id}` with `{result.assignee}`. "
+                "I’ll post the worker plan and progress here."
+            ),
+            reply_to=event.message_id,
+        )
+        return True
 
     async def _fetch_channel_context(
         self, channel: Any, before: DiscordMessage, reply_target: Optional[Any] = None,
@@ -6306,6 +6516,12 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         # Track participation so follow-ups in this thread don't need @mention.
         if thread_id:
             await self._threads.mark_async(thread_id)
+        # Status questions and specialist routing are answered directly, ahead of the normal
+        # agent dispatch/batch path — neither should wait out the text-batch quiet period.
+        if not recovered and await self._maybe_answer_progress_event(event):
+            return True
+        if not recovered and await self._maybe_route_specialist_event(event):
+            return True
         # Only live plain text is batched: recovery candidates are complete; coalescing would replay IDs.
         if (not recovered and msg_type == MessageType.TEXT and self._text_batch_delay_seconds > 0):
             self._enqueue_text_event(event)
@@ -6670,11 +6886,15 @@ def _define_discord_view_classes() -> None:
                 for i in range(0, len(models), _DISCORD_SELECT_MAX_OPTIONS)
             ][: _DISCORD_SELECT_MAX_ROWS - 2]
             placeholder_base = t("platform.discord.picker.model_placeholder", provider=provider.get("name", provider_slug))
+            from hermes_cli.model_picker_usage import picker_row_suffix
             for idx, chunk in enumerate(chunks):
                 options = [
                     discord.SelectOption(
                         label=_truncate_discord_component_text(model_id.split("/")[-1], _DISCORD_SELECT_FIELD_LIMIT),
                         value=_truncate_discord_component_text(model_id, _DISCORD_SELECT_FIELD_LIMIT),
+                        # Usage-window plans: "Large" / "Free" (empty for every other account).
+                        description=(_truncate_discord_component_text(suffix, _DISCORD_SELECT_FIELD_LIMIT)
+                                     if (suffix := picker_row_suffix(provider, model_id)) else None),
                     )
                     for model_id in chunk
                 ]
@@ -6718,7 +6938,9 @@ def _define_discord_view_classes() -> None:
             total = provider.get("total_models", 0) if provider else 0
             shown = min(len(provider.get("models", [])), _DISCORD_MODEL_SELECT_CAPACITY) if provider else 0
             extra = f"\n*{t('platform.discord.picker.more_available', count=str(total - shown))}*" if total > shown else ""
-            await self._edit(interaction, t("platform.discord.picker.select_model", provider=pname, extra=extra))
+            # Window plans: the limit line leads the message (absent for every other account).
+            plan_line = f"⚠️ {provider['plan_line']}\n" if provider and provider.get("plan_line") else ""
+            await self._edit(interaction, plan_line + t("platform.discord.picker.select_model", provider=pname, extra=extra))
 
         async def _switch_selected_model(self, interaction: discord.Interaction, model_id: str):
             if not await self._gate(interaction, resolved_msg=t("platform.discord.picker.already_resolved"), unauth_msg=_unauthorized()):

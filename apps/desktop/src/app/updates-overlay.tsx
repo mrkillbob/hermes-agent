@@ -7,7 +7,7 @@ import { settingsSearchTargetQuery } from '@/app/settings/settings-search'
 import { BrandMark } from '@/components/brand-mark'
 import { SyncStatusCard } from '@/components/sync-status-card'
 import { Button } from '@/components/ui/button'
-import { CopyButton, writeClipboardText } from '@/components/ui/copy-button'
+import { CopyButton } from '@/components/ui/copy-button'
 import {
   Dialog,
   DialogContent,
@@ -28,6 +28,7 @@ import type {
   UpdaterMechanismClient
 } from '@/global'
 import { useI18n } from '@/i18n'
+import { writeClipboardText } from '@/lib/clipboard'
 import { buildCommitChangelog, type CommitGroup, formatFullChangelogText } from '@/lib/commit-changelog'
 import { AlertCircle, Check, Copy, ExternalLink, Terminal } from '@/lib/icons'
 import { resolveUpdateCopy, rollbackRelease, type UpdateTarget } from '@/lib/update-copy'
@@ -305,6 +306,7 @@ function IdleView({
   version: DesktopVersionInfo | null
 }) {
   const { t } = useI18n()
+  const clientStatus = useStore($updateStatus)
   const u = t.updates
   const notes = useUpdateNotes(status, updateAvailable)
 
@@ -346,8 +348,10 @@ function IdleView({
   )
 
   // Only where Settings shows a selector: a custom branch or an older runtime gets the label alone.
+  // The row names the CLIENT's channel (VersionDetails reads $updateStatus), so the link follows the
+  // client status even while the overlay is showing a remote backend's update.
   const details = version ? (
-    <VersionDetails channelAction={sourceUpdateChannel(status) ? changeChannel : undefined} version={version} />
+    <VersionDetails channelAction={sourceUpdateChannel(clientStatus) ? changeChannel : undefined} version={version} />
   ) : null
 
   // App-installer check-unknown (OS checker unavailable): NOT "no updates"
@@ -389,7 +393,7 @@ function IdleView({
           )}
           version={version}
         />
-        <UpdateStatusCard target={target} />
+        <UpdateStatusCard target={target} version={version} />
         <SyncStatusCard />
         {details}
       </div>

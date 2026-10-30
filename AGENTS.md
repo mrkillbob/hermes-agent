@@ -1,19 +1,15 @@
 # Hermes Agent - Development Guide
 
-For AI coding assistants and developers working on hermes-agent. This root file is a hub: what
-applies everywhere, then a routing table. Each area's `AGENTS.md` loads automatically when you work
-in that directory; read it before editing there. `python scripts/check` caps this file at 12k chars
-and every root-to-area chain at 30k, so it loads whole on 128k+ models: long form goes in the guide.
+Read this guide and the area's `AGENTS.md` before editing. `python scripts/check` caps this hub
+at 12k chars and root-to-area chains at 30k; long form belongs in the developer guide.
 
 **Never give up on the right solution.**
 
 ## What Hermes Is
 
-Hermes is a personal AI agent that runs the same agent core across a CLI, a messaging
-gateway (Telegram, Discord, Slack, ~20 platforms), a TUI, and an Electron desktop app. It
-learns across sessions (memory + skills), delegates to subagents, runs scheduled jobs, and
-drives a real terminal and browser. It is extended primarily through **plugins and skills**,
-not by growing the core.
+Hermes shares one agent core across CLI, messaging gateways, TUI and Electron desktop. It learns
+through memory and skills, delegates, schedules jobs, and drives terminals and browsers. Extend
+it through **plugins and skills**, keeping the core narrow.
 
 Two invariants shape almost every design decision and are the lens for reviewing any change:
 
@@ -59,6 +55,8 @@ skill → service-gated tool (`check_fn` answers reachability/opt-in, never per-
 unreachable otherwise).
 
 ## Development Environment
+
+For this fork, also read `website/docs/developer-guide/fork-local-environment.md` before local work.
 
 `source ./activate` (fish: `activate.fish`, PowerShell: `activate.ps1`) provisions and activates the
 PM environment; pick an isolated `HERMES_HOME`/`HERMES_RUNTIME_DIR` first

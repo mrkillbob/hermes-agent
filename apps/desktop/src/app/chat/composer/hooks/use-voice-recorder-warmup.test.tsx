@@ -1,7 +1,9 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { MicRecording } from './use-mic-recorder'
+import type { DictationStreamSession } from '@/lib/voice-stream'
+
+import type { MicRecorderOptions, MicRecording } from './use-mic-recorder'
 import { useVoiceRecorder } from './use-voice-recorder'
 
 // #105955 review: the mic-open warm-up must act as a READINESS BARRIER before
@@ -16,7 +18,7 @@ let recording = false
 
 const micHandle = {
   cancel: vi.fn(),
-  start: vi.fn(async () => {
+  start: vi.fn(async (_options?: MicRecorderOptions) => {
     recording = true
   }),
   stop: vi.fn<() => Promise<MicRecording | null>>(async () => {
@@ -83,6 +85,18 @@ vi.mock('@/hermes', () => ({
   })
 }))
 
+const fetchVoiceConfig = vi.fn(async (..._args: unknown[]) => ({ stt: { streaming: false } }))
+const openStream = vi.fn<
+  (owner: unknown, sampleRate: number, onPartial?: (text: string) => void) => Promise<DictationStreamSession | null>
+>(async () => null)
+
+vi.mock('@/lib/voice-client-direct', () => ({
+  fetchVoiceClientConfigFor: (...args: unknown[]) => fetchVoiceConfig(...args)
+}))
+vi.mock('@/lib/voice-stream', () => ({
+  openDictationStream: (...args: Parameters<typeof openStream>) => openStream(...args)
+}))
+
 const OWNER_A = { connectionId: 'gateway-a', profile: 'worker_alpha' }
 
 describe('useVoiceRecorder STT readiness barrier', () => {
@@ -91,7 +105,13 @@ describe('useVoiceRecorder STT readiness barrier', () => {
     recording = false
     ambient.connectionId = 'gateway-a'
     ambient.profile = 'worker_alpha'
-    micHandle.start.mockClear()
+    micHandle.start.mockReset()
+    micHandle.start.mockImplementation(async () => { recording = true })
+    micHandle.cancel.mockClear()
+    fetchVoiceConfig.mockReset()
+    fetchVoiceConfig.mockResolvedValue({ stt: { streaming: false } })
+    openStream.mockReset()
+    openStream.mockResolvedValue(null)
     micHandle.stop.mockReset()
     micHandle.stop.mockImplementation(async () => {
       recording = false
@@ -283,4 +303,147 @@ describe('useVoiceRecorder STT readiness barrier', () => {
 
     expect(onTranscript).not.toHaveBeenCalled()
   })
+
+  function streamSession() {
+    return { cancel: vi.fn(), pushAudio: vi.fn(), stop: vi.fn(async () => 'streamed words') }
+  }
+
+  function enableStreaming() {
+    fetchVoiceConfig.mockResolvedValue({ stt: { streaming: true } })
+    micHandle.start.mockImplementation(async options => {
+      options?.onPcmRate?.(16_000)
+      options?.onPcm?.(new ArrayBuffer(2))
+      recording = true
+    })
+  }
+
+  it('cancels the active stream on unmount and never transcribes or inserts a late result', async () => {
+    enableStreaming()
+    const session = streamSession()
+    let rejectStop!: (error: Error) => void
+    session.stop.mockImplementation(() => new Promise<string>((_resolve, reject) => { rejectStop = reject }))
+    session.cancel.mockImplementation(() => rejectStop?.(new Error('cancelled')))
+    openStream.mockResolvedValue(session)
+    const transcribe = vi.fn(async () => 'blob words')
+    const onTranscript = vi.fn()
+    const hook = renderRecorder(transcribe, onTranscript)
+    await act(async () => { hook.result.current.dictate() })
+    await act(async () => { hook.result.current.dictate() })
+    await waitFor(() => expect(session.stop).toHaveBeenCalled())
+    hook.unmount()
+    await act(async () => { await Promise.resolve() })
+    expect(session.cancel).toHaveBeenCalledTimes(1)
+    expect(syncSttLeaseSpy).toHaveBeenLastCalledWith('desktop:voice-input:test', false, OWNER_A)
+    expect(transcribe).not.toHaveBeenCalled()
+    expect(onTranscript).not.toHaveBeenCalled()
+  })
+
+  it('cancels a stream that opens after unmount without flushing buffered PCM', async () => {
+    enableStreaming()
+    const session = streamSession()
+    let resolveOpen!: (value: DictationStreamSession) => void
+    openStream.mockImplementation(() => new Promise(resolve => { resolveOpen = resolve }))
+    const transcribe = vi.fn(async () => 'blob words')
+    const hook = renderRecorder(transcribe)
+    await act(async () => { hook.result.current.dictate() })
+    await waitFor(() => expect(openStream).toHaveBeenCalled())
+    hook.unmount()
+    await act(async () => { resolveOpen(session) })
+    expect(session.cancel).toHaveBeenCalledTimes(1)
+    expect(session.pushAudio).not.toHaveBeenCalled()
+    expect(session.stop).not.toHaveBeenCalled()
+    expect(transcribe).not.toHaveBeenCalled()
+  })
+
+  it('cancels a pending stream when mic startup fails', async () => {
+    enableStreaming()
+    const session = streamSession()
+    let resolveOpen!: (value: DictationStreamSession) => void
+    openStream.mockImplementation(() => new Promise(resolve => { resolveOpen = resolve }))
+    micHandle.start.mockImplementation(async options => {
+      options?.onPcmRate?.(16_000)
+      await Promise.resolve()
+      throw new Error('mic failed')
+    })
+    const hook = renderRecorder(vi.fn(async () => 'blob words'))
+    await act(async () => { hook.result.current.dictate() })
+    // Opening was initiated before start rejected; its eventual result must be retired.
+    await waitFor(() => expect(openStream).toHaveBeenCalled())
+    await act(async () => { resolveOpen(session) })
+    expect(session.cancel).toHaveBeenCalledTimes(1)
+    expect(session.pushAudio).not.toHaveBeenCalled()
+    expect(hook.result.current.voiceStatus).toBe('idle')
+    expect(syncSttLeaseSpy).not.toHaveBeenCalledWith('desktop:voice-input:test', true, OWNER_A)
+  })
+
+  it('retires mic startup that completes after unmount without acquiring a lease or starting timers', async () => {
+    enableStreaming()
+    const session = streamSession()
+    openStream.mockResolvedValue(session)
+    let finishStart!: () => void
+    micHandle.start.mockImplementation(async options => {
+      options?.onPcmRate?.(16_000)
+      await new Promise<void>(resolve => { finishStart = resolve })
+      recording = true
+    })
+    const hook = renderRecorder(vi.fn(async () => 'blob words'))
+    await act(async () => { hook.result.current.dictate() })
+    await waitFor(() => expect(openStream).toHaveBeenCalled())
+    hook.unmount()
+    await act(async () => { finishStart() })
+    expect(session.cancel).toHaveBeenCalledTimes(1)
+    expect(micHandle.cancel).toHaveBeenCalledTimes(1)
+    expect(syncSttLeaseSpy).not.toHaveBeenCalledWith('desktop:voice-input:test', true, OWNER_A)
+  })
+
+  it('uses the recorded blob when the startup PCM buffer overflows before the stream opens', async () => {
+    fetchVoiceConfig.mockResolvedValue({ stt: { streaming: true } })
+    micHandle.start.mockImplementation(async options => {
+      options?.onPcmRate?.(16_000)
+      for (let i = 0; i < 70; i++) { options?.onPcm?.(new ArrayBuffer(2)) }
+      recording = true
+    })
+    const session = streamSession()
+    openStream.mockResolvedValue(session)
+    const transcribe = vi.fn(async () => 'blob words')
+    const onTranscript = vi.fn()
+    const hook = renderRecorder(transcribe, onTranscript)
+    await act(async () => { hook.result.current.dictate() })
+    await act(async () => { hook.result.current.dictate() })
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith('blob words'))
+    expect(session.pushAudio).not.toHaveBeenCalled()
+    expect(session.stop).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the original owner blob when the live final response times out', async () => {
+    enableStreaming()
+    const session = streamSession()
+    session.stop.mockRejectedValue(new Error('live transcription final response timed out'))
+    openStream.mockResolvedValue(session)
+    const transcribe = vi.fn(async (_audio: Blob, _owner?: unknown) => 'blob words')
+    const onTranscript = vi.fn()
+    const hook = renderRecorder(transcribe, onTranscript)
+    await act(async () => { hook.result.current.dictate() })
+    await act(async () => { hook.result.current.dictate() })
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith('blob words'))
+    expect(transcribe.mock.calls[0][1]).toEqual(OWNER_A)
+    expect(session.cancel).toHaveBeenCalled()
+    expect(hook.result.current.voiceStatus).toBe('idle')
+  })
+
+  it('ignores partial text from a retired take while a new take is recording', async () => {
+    enableStreaming()
+    openStream.mockImplementation(async () => streamSession())
+    const hook = renderRecorder(vi.fn(async () => 'blob words'))
+    await act(async () => { hook.result.current.dictate() })
+    const oldPartial = openStream.mock.calls[0][2]!
+    await act(async () => { hook.result.current.dictate() })
+    await waitFor(() => expect(hook.result.current.voiceStatus).toBe('idle'))
+    await act(async () => { hook.result.current.dictate() })
+    await waitFor(() => expect(openStream).toHaveBeenCalledTimes(2))
+    const newPartial = openStream.mock.calls[1][2]!
+    await act(async () => { newPartial('current words'); oldPartial('retired words') })
+    expect(hook.result.current.voiceActivityState.partial).toBe('current words')
+  })
+
 })

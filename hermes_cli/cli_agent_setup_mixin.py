@@ -4,12 +4,30 @@ imported lazily inside each method (import cycle)."""
 
 from __future__ import annotations
 
+import os
 import sys
 
 from rich.markup import escape as _escape
 
 from agent.i18n import t
 from utils import base_url_host_matches
+
+
+def _remote_kanban_private_work(provider, fallbacks=None) -> bool:
+    """Whether a dispatched Kanban task can reach a protected remote provider."""
+    if not os.environ.get("HERMES_KANBAN_TASK", "").strip():
+        return False
+    from agent.llm_egress_runtime import provider_uses_egress_firewall
+
+    routes = [provider]
+    if isinstance(fallbacks, (list, tuple)):
+        routes.extend(item.get("provider") for item in fallbacks if isinstance(item, dict))
+    return any(provider_uses_egress_firewall(route) for route in routes)
+
+
+def _remote_kanban_toolsets(_toolsets) -> list[str]:
+    """Minimal shell/file/web toolsets available to protected remote Kanban work."""
+    return ["terminal", "file", "web"]
 
 
 def _single_query_clarify_callback(questions: list) -> dict:
@@ -118,13 +136,25 @@ def _gateway_owned_id(session_db, session_id):
     ``stored_session_id``. A canonical local compression segment holds the transcript, but its creation
     receipt lives on the conversation's logical owner, which every turn and mutation must name (as Ink
     and ``session.resume`` do). Unchanged off the gateway store or when the resume is refused."""
+    return _gateway_open(session_db, session_id)[0]
+
+
+def _gateway_open(session_db, session_id):
+    """``(owner_id, refusal)`` from one ``session.resume`` of *session_id* on this viewer: the attach
+    subscribes it and names its receipt owner (:func:`_gateway_owned_id`). ``refusal`` is the reason
+    code when the owner answered that this viewer may not open it (``RESUME_GONE``), else ``None``:
+    off the gateway store, a transient refusal, or no answer, the caller proceeds on its local reads."""
+    from hermes_cli.gateway_client import GatewayRPCError
+    from hermes_cli.gateway_connection import RESUME_GONE
     from hermes_cli.gateway_session_store import GatewaySessionStore
     if not isinstance(session_db, GatewaySessionStore):
-        return session_id
+        return session_id, None
     try:
-        return session_db.attach(session_id).get("stored_session_id") or session_id
-    except Exception:  # health: allow BLE001 -- a refused attach leaves main's own resume path to report it
-        return session_id
+        return session_db.attach(session_id).get("stored_session_id") or session_id, None
+    except GatewayRPCError as exc:
+        return session_id, (str(exc) if str(exc) in RESUME_GONE else None)
+    except Exception:  # health: allow BLE001 -- no answer: the turn reports the lost connection itself
+        return session_id, None
 
 
 def _user_display_text(content) -> str:
@@ -240,8 +270,54 @@ def _retire_agent(cli) -> None:
     cli.agent = None
 
 
+class SkillPreloadPending(TimeoutError):
+    """The shared skill preload has not reached a completed result yet."""
+
+
 class CLIAgentSetupMixin:
     """Agent construction + session-resume display methods for ``HermesCLI``."""
+
+    def finalize_preloaded_skills(self) -> None:
+        """Join the background --skills preload and fold it into the prompt (idempotent).
+
+        Raises ``SkillPreloadPending`` while explicit or auto-load skills are still loading;
+        ``ValueError`` when every explicitly requested skill was unknown.
+        """
+        from cli import logger
+
+        if getattr(self, "_preload_skills_finalized", False):
+            return
+        thread = getattr(self, "_preload_skills_thread", None)
+        if thread is None:
+            self._preload_skills_finalized = True
+            return
+        thread.join(timeout=120)
+        if thread.is_alive():
+            raise SkillPreloadPending("Skill preload did not finish before the startup deadline")
+        err = getattr(self, "_preload_skills_error", None)
+        if err is not None:
+            raise err
+        auto_result = getattr(self, "_auto_load_skills_result", None)
+        if auto_result and auto_result[2]:
+            logger.warning("skills.auto_load: skill(s) not found or disabled, skipped: %s", ", ".join(auto_result[2]))
+        # auto_load names first, then explicit -s names that were not already pinned.
+        self.preloaded_skills = list(auto_result[1]) if auto_result else []
+        result = getattr(self, "_preload_skills_result", None)
+        if not result:
+            self._preload_skills_finalized = True
+            return
+        skills_prompt, loaded_skills, missing_skills = result
+        if missing_skills:
+            from agent.skill_commands import format_missing_skills
+            # A typo'd name must not crash a kanban worker; only a fully-missing set fails loudly.
+            if not loaded_skills:
+                raise ValueError(format_missing_skills(missing_skills))
+            logger.warning("Skipping %s. Continuing with: %s. List available skills with `hermes skills list`.",
+                           format_missing_skills(missing_skills), ", ".join(loaded_skills))
+        if skills_prompt:
+            self.system_prompt = "\n\n".join(p for p in (self.system_prompt, skills_prompt) if p).strip()
+        self.preloaded_skills += [name for name in loaded_skills if name not in self.preloaded_skills]
+        self._preload_skills_finalized = True
 
     def _ensure_runtime_credentials(self) -> bool:
         """Re-resolve provider credentials before agent use so key rotation / token
@@ -258,7 +334,7 @@ class CLIAgentSetupMixin:
         # process only routes, so it must not run a second JWT exchange per launch.
         with deferred_token_mint():
             try:
-                # target_model: the ladder's model-keyed rungs (Zen/Go api_mode, Copilot/Nous
+                # target_model: the ladder's model-keyed rungs (Zen/Go api_mode, per-model
                 # api_mode) must see the model this CLI will actually send, not config's `default`,
                 # or `hermes -m mimo-v2.5 --provider opencode-go` resolves an api_mode/base_url the
                 # sent model cannot use (#112600).
@@ -634,13 +710,17 @@ class CLIAgentSetupMixin:
         """Build the agent on first use; when resuming, restore history from SQLite.
         Returns True on success."""
         from cli import ChatConsole, _cprint, logger
-        from hermes_cli.gateway_agent import GatewayAgent as AIAgent  # the gateway runs the turn
         if self.agent is not None:
             return True
 
         # Join the background preloaded-skills load (--skills/-s) BEFORE the agent
         # snapshots self.system_prompt below. No-op when nothing was requested.
-        self.finalize_preloaded_skills()
+        try:
+            self.finalize_preloaded_skills()
+        except SkillPreloadPending:
+            ChatConsole().print("[yellow]Skill loading is still in progress. Please try again.[/]")
+            return False
+        from hermes_cli.gateway_agent import GatewayAgent as AIAgent  # the gateway runs the turn
         # No deferred plugin discovery either: the gateway that runs the turn loads the plugins (PLG-7).
         self._install_tool_callbacks()
         if not self._ensure_runtime_credentials():
@@ -704,6 +784,7 @@ class CLIAgentSetupMixin:
                 openrouter_min_coding_score=self._openrouter_min_coding_score,
                 session_id=self.session_id, platform="cli", session_db=self._session_db,
                 clarify_callback=clarify_callback, connection_callback=connection_callback,
+                connection_update_callback=None if single_query_mode else self._connection_on_change,
                 # The gateway's model-guard refusal is asked like main's own guard; -q cannot answer it.
                 model_confirm_callback=None if single_query_mode else self._confirm_owner_model_switch,
                 # Another viewer answering the gateway's clarify/sudo/secret request closes this modal.

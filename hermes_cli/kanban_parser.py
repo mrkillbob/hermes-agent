@@ -13,6 +13,7 @@ import argparse
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_notify as kbn
+from hermes_cli.kanban_audit_enqueue import argument_specs as audit_argument_specs
 
 
 def _arg(*flags: str, **kw):
@@ -144,11 +145,23 @@ _BOARD_SPECS = [
         "NEW board — the slug gains a numeric suffix if it is already taken — so an import can "
         "never overwrite or merge into a board you already have."
     )),
+    _cmd("merge", [
+        _arg("slug", help="Source board"),
+        _arg("--into", required=True, help="Existing destination board"),
+        _arg("--backup", required=True, help="Recovery archive path (includes attachments and logs)"),
+        _arg("--task-id", action="append", dest="task_ids", help="Move only this card (repeatable)"),
+        _arg("--delete-source", action="store_true", help="Delete source after card and history verification"),
+    ], help="Copy cards and history into an existing board", description=(
+        "Creates a complete recovery archive, refuses live task claims, copies task history and "
+        "attachments, and verifies the destination. The source remains unless --delete-source is set."
+    )),
 ]
 
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
     _cmd("init", help="Create kanban.db if missing (idempotent)"),
+    _cmd("enqueue-audit", audit_argument_specs(),
+         help="Enqueue a recurring audit on its explicitly registered project's board"),
     _cmd("boards", children=("boards_action", _BOARD_SPECS),
          help="Manage kanban boards (one board per project / workstream)",
          description=(
@@ -159,6 +172,8 @@ _SPECS = [
          )),
     _cmd("create", [
         _arg("title", help="Task title"),
+        _arg("--federated", action="store_true",
+             help="Submit an unassigned task to the opt-in Mac/Windows runner pool"),
         _arg("--body", help="Optional opening post"),
         _arg("--body-file", metavar="PATH",
              help="Read the opening post from a file ('-' = stdin), so bodies with embedded "
@@ -174,6 +189,8 @@ _SPECS = [
              help="Link to a project (id or slug). Anchors the task's "
                   "worktree under the project's primary repo with a "
                   "deterministic branch. See `hermes project list`."),
+        _arg("--require-active-project", action="store_true",
+             help="Require a current canonical project ID and hold retirement until creation commits"),
         _TENANT,
         _PRIORITY,
         _arg("--triage", action="store_true",
@@ -203,6 +220,8 @@ _SPECS = [
         _arg("--provider", dest="provider_override",
              help="Provider the --model belongs to (passed as --provider <name> to "
                   "the worker). Requires --model."),
+        _arg("--reasoning", "--reasoning-effort", dest="reasoning_effort",
+             help="Pin the worker reasoning effort (for example: none, low, medium, or high)."),
         _arg("--completion-contract", metavar="CONTRACT",
              help="local-only (default), OWNER/REPO for publication, or exact GitHub PR URL; required CI gates done."),
         _arg("--goal", action="store_true", dest="goal_mode",
@@ -214,9 +233,8 @@ _SPECS = [
         _arg("--goal-max-turns", type=int, metavar="N", dest="goal_max_turns",
              help="Turn budget for --goal workers (default 20). Ignored without --goal."),
         _arg("--initial-status", choices=sorted(kb.VALID_INITIAL_STATUSES), default="running",
-             help="Initial card status. Use 'blocked' for cards "
-                  "that require immediate human ops (R3 gate) "
-                  "to skip the brief running-to-blocked transition."),
+             help="Initial card status. Use 'todo' to stage a task safely before dispatch, "
+                  "or 'blocked' only when immediate human input is required."),
         _json_flag(help="Emit JSON output"),
     ], help="Create a new task"),
     _cmd("swarm", [
@@ -250,6 +268,8 @@ _SPECS = [
          help="Show a task with comments + events"),
     _cmd("assign", [_TASK_ID, _arg("profile", help="Profile name (or 'none' to unassign)")],
          help="Assign or reassign a task"),
+    _cmd("set-reasoning", [_TASK_ID, _arg("effort", help="Reasoning effort or inherit to use the profile default")],
+         help="Set reasoning effort for the next task dispatch"),
     _cmd("set-model", [
         _TASK_ID,
         _arg("model", nargs="?", help="Model to pin the worker to (or 'none' to clear the override)"),
@@ -353,7 +373,7 @@ _SPECS = [
         _bulk_ids("promote"),
         _arg("--dry-run", action="store_true", help="Validate the promotion without mutating state"),
         _arg("--json", dest="json", action="store_true", help="Emit machine-readable JSON result"),
-    ], help="Manually move one or more todo/blocked tasks to ready (recovery path)"),
+    ], help="Manually move fully specified todo/blocked/triage tasks to ready (recovery path)"),
     _cmd("archive", [
         _arg("task_ids", nargs="*", help="Task ids to archive (default mode)"),
         _arg("--rm", dest="purge_ids", nargs="+",
@@ -361,17 +381,24 @@ _SPECS = [
     ], help="Archive one or more tasks"),
     _cmd("tail", [_TASK_ID, _arg("--interval", type=float, default=1.0)], help="Follow a task's event stream"),
     _cmd("dispatch", [
+        _arg("--local-text-only", action="store_true", help="One bounded local text request, parked for human acceptance; no tools, fallback or auxiliary calls; requires all budget flags and --requests 1"),
+        _arg("--wall-seconds", type=int, help="Bound one exact managed worker to at most 120 seconds; requires all budget flags"),
+        _arg("--output-bytes", type=int, help="Combined worker output ceiling, at most 65536 bytes"),
+        _arg("--requests", type=int, help="Provider request ceiling, at most 4; requires --task-id and --max 1"),
+        _arg("--task-id", action="append", dest="task_ids", metavar="ID",
+             help="Dispatch only this exact ready/review card; repeat for a finite set. "
+                  "Skips board-wide reclaim, watchdog and promotion."),
         _arg("--dry-run", action="store_true", help="Don't actually spawn processes; just print what would happen"),
         _arg("--max", type=int, help="Cap number of spawns this pass"),
-        _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT,
+        _arg("--failure-limit", type=int, default=None,
              help=f"Auto-block a task after this many consecutive non-success attempts "
-                  f"(spawn_failed, timed_out, or crashed; default: {kbd.DEFAULT_FAILURE_LIMIT})"),
+                  f"(spawn_failed, timed_out, or crashed; default: kanban.failure_limit or {kbd.DEFAULT_FAILURE_LIMIT})"),
         _json_flag(),
     ], help="One dispatcher pass: reclaim stale, promote ready, spawn workers"),
     _cmd("daemon", [
         _arg("--interval", type=float, default=60.0, help="Seconds between dispatch ticks (default: 60)"),
         _arg("--max", type=int, help="Cap number of spawns per tick"),
-        _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT),
+        _arg("--failure-limit", type=int, default=None),
         _arg("--pidfile", help="Write the daemon's PID to this file on start"),
         _arg("--verbose", "-v", action="store_true", help="Log each tick's outcome to stdout"),
         # Escape hatch for hosts that truly cannot run the gateway; hidden from
@@ -472,6 +499,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                     "via `hermes kanban boards switch <slug>` or the "
                                     "HERMES_KANBAN_BOARD env var). Use `hermes kanban boards "
                                     "list` to see all boards.")
-    _add_commands(kanban_parser.add_subparsers(dest="kanban_action"), _SPECS)
+    actions = kanban_parser.add_subparsers(dest="kanban_action")
+    _add_commands(actions, _SPECS)
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser

@@ -39,6 +39,12 @@ def source_build_env(base_env: dict | None = None, *, explicit: bool = False, ve
     python = str(project_python(root)) if running_from_selected_environment(root) else sys.executable
     env = {**os.environ, **(base_env or {}), "CI": "1", "HERMES_PYTHON": python,
            "PYTHON": python}
+    # Electron's installer unpacks its binary with a native module that imports
+    # VCRUNTIME140.dll, which a fresh Windows lacks. Our Python ships one, and
+    # scripts/build/electron-runtime.mjs copies it beside that module.
+    vc_runtime = Path(sys.base_prefix) / "vcruntime140.dll"
+    if vc_runtime.is_file():
+        env["HERMES_VC_RUNTIME"] = str(vc_runtime)
     env.pop("ESBUILD_BINARY_PATH", None)
     npmrc = get_hermes_home() / "npmrc"
     if npmrc.is_file():
@@ -67,13 +73,17 @@ def run_source_script(project_root: Path, script: str, *args: str, env: dict, la
                    indent="  ", cwd=project_root, env=env)
 
 
-def prepare_source_dependencies(project_root: Path, workspaces: tuple[str, ...], *, env: dict,
-                                explicit: bool = False) -> None:
+def _install_args(explicit: bool) -> tuple[str, ...]:
     from pm import lazy_installs_allowed
 
+    return () if explicit or lazy_installs_allowed() else ("--no-install",)
+
+
+def prepare_source_dependencies(project_root: Path, workspaces: tuple[str, ...], *, env: dict,
+                                explicit: bool = False) -> None:
     run_source_script(
         project_root, "scripts/build/node-deps.mjs", "--source", str(project_root), "--reuse",
-        *(() if explicit or lazy_installs_allowed() else ("--no-install",)),
+        *_install_args(explicit),
         *(arg for workspace in workspaces for arg in ("--workspace", workspace)), env=env,
         label="Preparing Node dependencies",
     )
@@ -106,6 +116,12 @@ def build_source_web(project_root: Path, *, env: dict, icons: Path | None = None
                       label="Building the web UI")
 
 
+def build_source_webapp(project_root: Path, *, env: dict, explicit: bool = False) -> None:
+    """Browser renderer; its dependencies live in a private workspace, never the checkout's."""
+    run_source_script(project_root, "apps/desktop/scripts/build-webapp.mjs", *_install_args(explicit),
+                      env=env, label="Building the Webapp renderer")
+
+
 def source_frontends(project_root: Path) -> tuple[str, ...]:
     """The frontend workspaces this checkout carries. A source slice without them
     (python-only installs, the installer's acceptance fixture) has no products
@@ -116,14 +132,33 @@ def source_frontends(project_root: Path) -> tuple[str, ...]:
 class ProductBuildError(RuntimeError):
     """One or more products failed; every independent product was still attempted."""
 
-    def __init__(self, failures: list[tuple[str, BaseException]]):
+    def __init__(self, failures: list[tuple[str, BaseException]], *, pending=None):
         self.failures = failures
+        self.pending = list(pending or [])
         super().__init__("; ".join(f"{name}: {_failure_text(exc)}" for name, exc in failures))
 
 
 def _failure_text(exc: BaseException) -> str:
     if isinstance(exc, subprocess.CalledProcessError):
-        return f"{' '.join(map(str, exc.cmd)) if isinstance(exc.cmd, (list, tuple)) else exc.cmd} exited {exc.returncode}"
+        from agent.redact import redact_sensitive_text
+
+        # Custody prepends a large Python -c program. Printing that argv pushes
+        # the actual child failure out of bounded installer/receipt diagnostics.
+        command = exc.cmd[0] if isinstance(exc.cmd, (list, tuple)) and exc.cmd else "command"
+        executable = Path(str(command)).name[:100]
+        output = exc.output or ""
+        stderr = exc.stderr or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        # Redact before clipping, retaining complete credential prefixes and
+        # assignment names even when they cross the diagnostic byte boundary.
+        tail = redact_sensitive_text(str(output), force=True)[-1500:]
+        if stderr:
+            tail += "\n" + redact_sensitive_text(str(stderr), force=True)[-500:]
+        detail = tail.strip()
+        return f"{executable} exited {exc.returncode}" + (f"\n{detail}" if detail else "")
     return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
@@ -131,7 +166,7 @@ def _headless_linux() -> bool:
     return sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
-def build_update_products(project_root: Path, *, desktop: bool) -> None:
+def build_update_products(project_root: Path, *, desktop: bool) -> list[tuple[str, str]]:
     """Prepare the selected union once, attempting every independent product.
 
     A failed product never skips the next one (a broken web build must not leave the TUI or the
@@ -143,6 +178,8 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
     from hermes_cli.update_stage import publish_stage
 
     failures: list[tuple[str, BaseException]] = []
+    pending: list[tuple[str, str]] = []
+    publish_stage("Building the apps")
 
     def attempt(name: str, step) -> bool:
         try:
@@ -208,6 +245,9 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
             # One whole line the Desktop hand-off scripts match: the follow-up text is truncated
             # and names whichever products failed first, so it cannot say if THIS app was rebuilt.
             print(f"  Desktop app build owed: {desktop_reason} failed")
+    if (project_root / "apps/desktop/scripts/build-webapp.mjs").is_file():
+        # Its dependencies live in a private workspace, so it never waits on the union above.
+        attempt("Webapp build", lambda: _rebuild_served_webapp(project_root, publish_stage))
     # A configured memory provider that no longer ships in core is installed from the
     # catalog for every profile home sharing this venv (config, data and tool names
     # unchanged). The update must finish even if the migration blows up.
@@ -222,20 +262,50 @@ def build_update_products(project_root: Path, *, desktop: bool) -> None:
     try:
         from hermes_cli.left_core_migration import migrate_all_homes as migrate_left_core
 
-        migrate_left_core()
+        migrate_left_core(pending=pending)
     except Exception as exc:  # health: allow BLE001 -- post-commit boundary: printed as ⚠, never fails the committed update; every later update/tail re-runs it
-        print(f"  ⚠ Plugin migration skipped: {exc}")
+        reason = f"Left-core plugin migration failed: {exc}"
+        print(f"  ⚠ {reason}")
+        pending.append(("left_core_migration", reason))
     if failures:
-        raise ProductBuildError(failures)
+        raise ProductBuildError(failures, pending=pending)
+    return pending
+
+
+def _rebuild_served_webapp(project_root: Path, publish_stage) -> None:
+    """The Webapp bundle (``apps/desktop/dist-webapp``), when a home sharing this install serves it
+    (``webapp.enabled``): its gateway serves the bundle as built, so one older than the updated
+    backend would talk to it with an outdated contract. Built with the function ``hermes webapp``
+    uses, which reuses a current bundle. A failed build leaves the previous bundle on disk, marked
+    out of date: its gateways report the Webapp unavailable until ``hermes webapp`` rebuilds it."""
+    from gateway.webapp_listener import webapp_settings
+    from hermes_cli.webapp import mark_webapp_stale, prepare_webapp_renderer
+    from pm.plugins_state import dependency_homes
+
+    if not any(webapp_settings(home).enabled for home in dependency_homes()):
+        return
+    publish_stage("Building the Webapp")
+    try:
+        prepare_webapp_renderer(project_root, explicit=True)
+    except BaseException:
+        try:
+            if mark_webapp_stale(project_root):
+                print("  ⓘ The Webapp stays unavailable until `hermes webapp` rebuilds it.")
+        except OSError as exc:
+            print(f"  ⚠ Could not mark the Webapp out of date: {exc}")
+        raise
 
 
 def _build_desktop_product(project_root: Path, env: dict, publish_stage) -> None:
+    from hermes_cli.desktop_build_reuse import packaged_desktop_reusable
     from hermes_cli.main_desktop import (
         _packaged_desktop_current_for_head, _refresh_installed_desktop_apps, build_prepared_desktop)
 
     desktop_dir = project_root / "apps/desktop"
     if _packaged_desktop_current_for_head(desktop_dir, project_root):
         print("  ✓ Desktop app is up to date")
+    elif built_from := packaged_desktop_reusable(desktop_dir, project_root, env):
+        print(f"  ✓ Desktop app is up to date: no desktop build input changed since {built_from[:12]}")
     else:
         publish_stage("Building the desktop app")
         # The desktop build mutates checkout-scoped node_modules and
@@ -266,4 +336,9 @@ if __name__ == "__main__":
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--desktop", action="store_true")
     args = parser.parse_args()
-    build_update_products(args.source.resolve(), desktop=args.desktop)
+    pending = build_update_products(args.source.resolve(), desktop=args.desktop)
+    if pending:
+        from hermes_cli.maintenance_policy import report_pending
+
+        report_pending(pending, None)
+        raise SystemExit(1)

@@ -117,7 +117,8 @@ def _seed(tmp_path, tail_rows, fold, follower):
     ]
     assert isinstance(messages[-2].get("_row_id"), int) and messages[-2].get("timestamp") is not None
 
-    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}), \
+            patch("agent.context_compressor.get_model_context_length", return_value=256_000):
         from run_agent import AIAgent
 
         agent = AIAgent(
@@ -142,6 +143,7 @@ def _seed(tmp_path, tail_rows, fold, follower):
     engine._last_aux_model_failure_model = None
     engine._last_aux_model_failure_error = None
     agent.context_compressor = engine
+    agent._compression_feasibility_checked = True
     return db, session_id, messages, agent
 
 
@@ -180,12 +182,12 @@ class TestEngineDropsReplyEndToEnd:
     @pytest.mark.parametrize("todo_store", [False, True], ids=["dropped", "dropped_with_todo_store"])
     def test_reply_row_stays_active_after_commit(self, tmp_path, todo_store):
         """LCM-shaped fold: summary + next-turn tail only; the long reply gone. With an
-        active todo store the snapshot fold rewrites the trailing user row, so the reply
-        must be back in place BEFORE it runs."""
+        active todo store the tool-state fold must preserve the reinserted reply
+        and the trailing human request as distinct visible turns."""
         fold = [{"role": "user", "content": SUMMARY}, {"role": "user", "content": FOLLOWER}]
         db, session_id, messages, agent = _seed(tmp_path, [], fold, FOLLOWER)
         if todo_store:
-            agent._todo_store._items = [{"id": "t1", "content": "inspect image", "status": "pending"}]
+            agent._todo_store.write([{"id": "t1", "content": "inspect image", "status": "pending"}])
 
         live, live_contents = self._compress_and_read(db, session_id, agent, messages, tail_role="user")
 

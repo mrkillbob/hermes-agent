@@ -271,12 +271,15 @@ def _typed_stop_phrase_response(rid, text, sid=None):
 _HOSTED_TASK_FIELDS = {"room_id", "task_id", "thread_id", "turn_id", "execution_generation", "member_id"}
 
 
-def _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback):
-    """Validate the hosted-room turn proof carried by an internal submit."""
+def _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback, hosted_images=None):
+    """Validate the hosted-room turn proof carried by an internal submit. ``hosted_images`` are the
+    member's event-bound images, already materialized under the image cache by the room worker."""
     if session.get("source") != "bot_room":
         return _err(rid, 4120, "hosted room turns require a bot_room session")
     valid = (
         isinstance(hosted_task, dict) and callable(hosted_terminal_callback)
+        and (hosted_images is None or (isinstance(hosted_images, list)
+                                       and all(isinstance(p, str) and p for p in hosted_images)))
         and set(hosted_task) == _HOSTED_TASK_FIELDS
         and all(isinstance(hosted_task.get(f), str) and hosted_task[f]
                 for f in _HOSTED_TASK_FIELDS - {"execution_generation"})
@@ -447,6 +450,18 @@ def _row_ids_of(messages) -> set:
     return {row_id for message in messages if isinstance((row_id := _message_row_id(message)), int)}
 
 
+def _truncation_survivor_history(history, resolved):
+    """Use the same survivor boundary for detached validation and the admitted cut."""
+    durable_prefix = resolved[3] if len(resolved) > 3 else None
+    if durable_prefix is not None:
+        # A repaired carrier can contain several physical rows. Keep the rows
+        # strictly before the durable target, including the carrier's earlier half.
+        return [message.copy() for message in durable_prefix]
+    from agent.context_compressor import history_before_user_originated_turn
+    truncated, _ = history_before_user_originated_turn(history, resolved[1])
+    return truncated
+
+
 # Rollout (#133716, maintainer decision G15-B): one release warn-only, so an older Desktop or a
 # third-party client that predates confirm_deep_truncate keeps working while upgraded clients ask
 # before a deep cut on their own. The next release flips this to refuse with 4033.
@@ -491,15 +506,7 @@ def _truncate_history_for_submit(rid, sid, session, params, requested_rebind_ids
     if err is not None:
         return err, {}
     durable_prefix = resolved[3] if len(resolved) > 3 else None
-    from agent.context_compressor import history_before_user_originated_turn
-    if durable_prefix is not None:
-        # Durable-boundary cut: the target row is physically present but merged into
-        # a repaired live carrier; the physical rows strictly before it are the
-        # survivors — the carrier's earlier half stays, the absorbed target and
-        # everything after it are replaced by the submitted turn.
-        truncated, _live_view = [message.copy() for message in durable_prefix], None
-    else:
-        truncated, _live_view = history_before_user_originated_turn(history, cut_index)
+    truncated = _truncation_survivor_history(history, resolved)
     # Second gate: ordinal 0 would DELETE every durable row; wiping needs its own opt-in.
     if not truncated and history and not is_truthy_value(params.get("confirm_empty_truncate")):
         logger.warning(
@@ -625,6 +632,7 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
     here), then the message itself (#111868: a freeze during the first build must leave a
     resumable transcript); the error reply is the only user-visible signal (desktop maps it to a toast)."""
     from hermes_state_user_copy import describe_storage_failure
+    from tui_gateway.server import _db_error
     try:
         if _ensure_session_db_row(session) is False:
             failure = describe_storage_failure(_db_error)
@@ -634,6 +642,7 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
                 f"{failure.action} Then send your message again.",
                 data=_storage_error_data(failure, _db_error))
         else:
+            _bind_conversation_worktree_on_submit(session)
             _persist_branch_seed(session)
             # The first real turn reopens a finalized row (#85303): resume is read-only, so
             # an ended_at set at mount time is cleared HERE, before the turn's first write.
@@ -669,7 +678,8 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
 
 
 def _run_after_agent_ready(
-    rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None
+    rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None,
+    hosted_images=None,
 ):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
@@ -700,7 +710,7 @@ def _run_after_agent_ready(
             return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
-        terminal_callback=hosted_terminal_callback, turn_author=turn_author)
+        image_paths=hosted_images, terminal_callback=hosted_terminal_callback, turn_author=turn_author)
 
 
 _TRUNCATION_PARAMS = (
@@ -808,9 +818,123 @@ def _lock_in_submit_turn(
     return None, fields
 
 
-# Per-turn client surfaces that carry a model-bound note (session_notifications._hud_surface_note);
-# the canonical admission path shares the same set (gateway.session_surface).
-from gateway.session_surface import SURFACES as _CLIENT_SURFACES
+def _session_prompt_submit_lock(session: dict):
+    """Return the per-session admission lock, including legacy runtime records."""
+    history_lock = session.setdefault("history_lock", threading.Lock())
+    with history_lock:
+        return session.setdefault("prompt_submit_lock", threading.Lock())
+
+
+def _validate_truncation_before_materializing(rid, sid, session, params):
+    """Run destructive-rewind validation against a detached history snapshot."""
+    history = _history_without_ephemeral_scaffolding(session.get("history", []))
+    # Row-id healing is allowed during the actual cut, but a rejected submit must
+    # not mutate a live draft while it is still unpersisted.
+    snapshot = [dict(message) if isinstance(message, dict) else message for message in history]
+    resolved = _resolve_truncation_ordinal(rid, sid, session, params, snapshot)
+    if (err := resolved[2]) is not None:
+        return err
+    truncated = _truncation_survivor_history(snapshot, resolved)
+    if not truncated and snapshot and not is_truthy_value(params.get("confirm_empty_truncate")):
+        return _err(
+            rid, 4028,
+            "truncation would erase the entire session transcript; "
+            "resubmit with confirm_empty_truncate=true if this is intended")
+    if DEEP_TRUNCATE_ENFORCED and not is_truthy_value(params.get("confirm_deep_truncate")):
+        cut_index = resolved[1]
+        archived_user_turns = _archived_user_turns(session, sid, snapshot, cut_index, _row_ids_of(truncated))
+        if archived_user_turns > 1:
+            durable_prefix = resolved[3] if len(resolved) > 3 else None
+            archived_messages = len(snapshot) - (cut_index if durable_prefix is not None else len(truncated))
+            return _err(
+                rid, 4033,
+                "truncation would archive later user turns; resubmit with "
+                "confirm_deep_truncate=true if this is intended",
+                data={"archived_messages": archived_messages, "archived_user_turns": archived_user_turns})
+    return None
+
+
+def _admit_prompt_submit(
+    rid, sid, session, text, params, has_truncation, requested_rebind_ids,
+    hosted_task, internal_hosted_submit, transport, *, reattach=False, client_surface="", display_kind=None,
+    persist_session=True):
+    """Serialize admission, validation, materialization, and turn claim per session."""
+    raw_turn_author = params.get("_turn_author")
+    turn_author = None
+    if raw_turn_author is not None:
+        from tools.bot_relay import DeliveryAuthor
+        if not isinstance(raw_turn_author, DeliveryAuthor):
+            return _err(rid, 4124, "turn author may only be supplied by the in-process relay"), None
+        turn_author = dict(raw_turn_author.author)
+    with _session_prompt_submit_lock(session):
+        if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
+            return _slot_refusal(rid, sid, session, text, params, limit_message, internal_hosted_submit), None
+        if reattach:
+            with _session_resume_lock:
+                if (refusal := _reattach_refusal(rid, sid, session)) is not None:
+                    return refusal, None
+                if transport is not None:
+                    _attach_session_transport(session, transport)
+                    _cancel_ws_orphan_reap(sid)
+        while True:
+            with session["history_lock"]:
+                if not session.get("running"):
+                    break
+                if internal_hosted_submit:
+                    return _err(rid, 4091, "hosted room member session is busy"), None
+                busy_transport = transport or session.get("transport")
+            busy_response = _handle_busy_submit(
+                rid, sid, session, text, busy_transport, queued=bool(params.get("queued")),
+                turn_author=turn_author,
+                voice_turn=params.get("voice_turn") is True,
+                client_surface="voice-live" if params.get("surface") == "voice-live" else "",
+                voice_live_context=(str(params.get("voice_context") or "")
+                                    if params.get("surface") == "voice-live" else ""))
+            if busy_response is not None:
+                return busy_response, None
+        if has_truncation:
+            if (err := _validate_truncation_before_materializing(
+                    rid, sid, session, params)) is not None:
+                return err, None
+        err, survivor_fields = _lock_in_submit_turn(
+            rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
+        if err is not None:
+            return err, None
+        if persist_session:
+            if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
+                return err, None
+        # Record the surface only after this request owns the turn. A rejected busy
+        # request must not overwrite the surface used by the in-flight turn.
+        session["client_surface"] = client_surface
+        session["voice_live_context"] = (
+            str(params.get("voice_context") or "") if client_surface == "voice-live" else ""
+        )
+        session["voice_turn"] = params.get("voice_turn") is True
+        session["_surface_from_busy_queue"] = False
+        if turn_author is not None:
+            session["_accepted_turn_author"] = turn_author
+        return None, survivor_fields
+
+
+def _prompt_submit_context(rid, session: dict, params: dict):
+    """Validate the in-process author and hosted/group submit authority before admission."""
+    raw_turn_author = params.get("_turn_author")
+    turn_author = None
+    if raw_turn_author is not None:
+        from tools.bot_relay import DeliveryAuthor
+        if not isinstance(raw_turn_author, DeliveryAuthor):
+            return None, None, None, None, False, _err(
+                rid, 4124, "turn author may only be supplied by the in-process relay")
+        turn_author = dict(raw_turn_author.author)
+    hosted_task = params.get("_hosted_task")
+    hosted_terminal_callback = params.get("_hosted_terminal_callback")
+    hosted_images = params.get("_hosted_images")
+    internal_hosted_submit = (
+        hosted_task is not None or hosted_terminal_callback is not None or hosted_images is not None)
+    err = (
+        _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback, hosted_images)
+        if internal_hosted_submit else _legacy_group_fence_error(rid, session, params))
+    return turn_author, hosted_task, hosted_terminal_callback, hosted_images, internal_hosted_submit, err
 
 
 @method("prompt.submit")
@@ -837,33 +961,10 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-    from tools.bot_relay import DeliveryAuthor
-
-    # Only the relay handler can build a DeliveryAuthor. A dict here is a client claiming a sender.
-    raw_author = params.get("_turn_author")
-    if raw_author is not None and not isinstance(raw_author, DeliveryAuthor):
-        return _err(rid, 4124, "turn author is stamped by the gateway, never by a client")
-    turn_author = raw_author.author if raw_author is not None else None
-    hosted_task = params.get("_hosted_task")
-    hosted_terminal_callback = params.get("_hosted_terminal_callback")
-    internal_hosted_submit = hosted_task is not None or hosted_terminal_callback is not None
-    err = (
-        _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback)
-        if internal_hosted_submit else _legacy_group_fence_error(rid, session, params))
+    turn_author, hosted_task, hosted_terminal_callback, hosted_images, internal_hosted_submit, err = (
+        _prompt_submit_context(rid, session, params))
     if err is not None:
         return err
-    if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
-        # Refused HERE — before the busy queue, db row and agent build — so a refusal
-        # leaves the session untouched.  The reason travels as machine-readable data.
-        return _slot_refusal(rid, sid, session, text, params, limit_message, internal_hosted_submit)
-    # Rewritten every submit: a session alternates app window / HUD / live voice; a stale value misinforms.
-    session["client_surface"] = params.get("surface") if params.get("surface") in _CLIENT_SURFACES else ""
-    # Live-voice delegations carry the recent spoken transcript for the MODEL INPUT only (the persisted
-    # user row stays the words the user said); anything else clears it.
-    voice_context = params.get("voice_context")
-    session["voice_live_context"] = (
-        voice_context[:6000] if session["client_surface"] == "voice-live" and isinstance(voice_context, str) else "")
-    session["voice_turn"] = params.get("voice_turn") is True
     has_truncation = any(params.get(k) is not None for k in _TRUNCATION_PARAMS)
     if has_truncation and isinstance(text, str):
         # A rewind replays what the transcript shows: re-expand a skill invocation or
@@ -902,21 +1003,34 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4009, "session busy")
         busy_response = _handle_busy_submit(
             rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author,
-            display_kind=display_kind)
+            display_kind=display_kind,
+            voice_turn=params.get("voice_turn") is True,
+            client_surface="voice-live" if params.get("surface") == "voice-live" else "",
+            voice_live_context=(str(params.get("voice_context") or "")
+                                if params.get("surface") == "voice-live" else ""))
         if busy_response is not None:
             return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
     requested_rebind_ids = (
         {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}
         if isinstance(raw_rebind_ids, list) else None)
-    err, survivor_fields = _lock_in_submit_turn(
-        rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
+    err, survivor_fields = _admit_prompt_submit(
+        rid, sid, session, text, params, has_truncation, requested_rebind_ids,
+        hosted_task, internal_hosted_submit, t, reattach=True,
+        client_surface=(
+            params.get("surface")
+            if params.get("surface") in {"hud", "voice-live"}
+            else ""
+        ),
+        display_kind=display_kind,
+        # Ordinary isolated turns persist in the compute host. A truncating
+        # submit is different: its rewind is applied locally before dispatch,
+        # so the replacement user row and any branch seed must be written here.
+        persist_session=not turn_isolation or has_truncation)
     if err is not None:
         return err
+    turn_author = session.pop("_accepted_turn_author", None)
     if turn_isolation:
-        if turn_author:
-            logger.debug("isolated compute turns carry no author yet; the turn from %s runs unattributed",
-                         turn_author.get("id"))
         # The isolated dispatch returns BELOW before the inline persist, so the reopen
         # cannot live only in _persist_session_row_for_submit: the turn is already
         # admitted here (running, in flight, active-slot lease claimed, truncation
@@ -947,8 +1061,8 @@ def _(rid, params: dict) -> dict:
         logger.warning(
             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
             isolated_response["error"].get("message", "unknown error"))
-    if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
-        return err
+        if (err := _persist_session_row_for_submit(rid, session, text, display_kind)) is not None:
+            return err
     # Capture before starting the worker: it consumes the staging dict and may finish before the RPC returns.
     staged_user = session.get("_submit_user_row") or {}
     if isinstance(staged_user.get("_row_id"), int):
@@ -958,7 +1072,8 @@ def _(rid, params: dict) -> dict:
         _start_agent_build(sid, session)
     run_thread = threading.Thread(
         target=lambda: _run_after_agent_ready(
-            rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author),
+            rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author,
+            hosted_images),
         daemon=True)
     # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
     session["_run_thread"] = run_thread
@@ -1286,20 +1401,13 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"status": "ok", "remaining": remaining})
 
 
-@method("request.answer")
-def _(rid, params: dict) -> dict:
-    """Answer an open server→client request from a client that did not receive it (a Bot Mode room
-    window answering a member's prompt mirrored from its resume snapshot). The response-frame path is
-    the norm; this is the proxy for it. ``expired`` when the request already ended."""
-    request_id = str(params.get("id") or "")
-    result = params.get("result")
-    if not request_id or not isinstance(result, dict):
-        return _err(rid, 4002, "id and an object result required")
-    from tui_gateway import server_requests
-    frame = {"jsonrpc": "2.0", "id": request_id, "result": result}
-    if server_requests.resolve_response(frame) or _relay_compute_host_response(frame):
-        return _ok(rid, {"status": "ok"})
-    return _ok(rid, {"status": "expired"})
+_LATE_RESPOND_KEYS = {
+    "terminal.read.respond": "text", "preview.read.respond": "text", "preview.act.respond": "text",
+    "window.read.respond": "text", "tour.respond": "text", "mcp.setup.respond": "result",
+    "sudo.respond": "password", "secret.respond": "value"}
+for _name, _key in _LATE_RESPOND_KEYS.items():
+    method(_name)(lambda rid, params, _k=_key: _respond(rid, params, _k, allow_expired=True))
+del _name, _key
 
 
 @method("approval.pending")
@@ -1512,7 +1620,11 @@ def _approval_reply(rid, result_key, call):
 def _approval_respond_session_fallback(params: dict):
     """Durable-identity fallback for a stale live sid (re-minted after a reconnect while
     the prompt stayed on screen): (1) the ``request_id`` against every live session's
-    pending approvals, then (2) ``session_id`` as a STORED id.  Live session or None.
+    pending approvals, (2) ``session_id`` as a STORED id, then (3) the ``request_id`` against
+    every pending approval queue directly -- the UI runtime may be fully gone from ``_sessions``
+    (not just re-minted under a different id), and the approval queue itself is the durable
+    record of which session_key still owns this exact request. Live session, a minimal
+    ``{"session_key": ...}`` stand-in for tier 3, or None.
 
     See #91684.
     """
@@ -1522,7 +1634,7 @@ def _approval_respond_session_fallback(params: dict):
             from tools.approval import list_gateway_approvals
             with _sessions_lock:
                 live = list(_sessions.items())
-            for sid, session in live:
+            for _, session in live:
                 key = str(session.get("session_key") or "")
                 if key and any(
                     str(pending.get("request_id") or "") == request_id
@@ -1536,6 +1648,13 @@ def _approval_respond_session_fallback(params: dict):
                 return live[1]
         except Exception:
             logger.debug("approval.respond stored-id fallback failed", exc_info=True)
+    if request_id:
+        try:
+            from tools.approval import find_gateway_approval_session
+            if key := find_gateway_approval_session(request_id):
+                return {"session_key": key}
+        except Exception:
+            logger.debug("approval.respond queue-scan fallback failed", exc_info=True)
     return None
 
 

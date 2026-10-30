@@ -446,3 +446,13 @@ hermes cron remove <job_id>         # Delete a job
 - [Cron Feature Guide](../user-guide/features/cron.md)
 - [Gateway Internals](./gateway-internals.md)
 - [Agent Loop Internals](./agent-loop.md)
+
+### Exact-card dispatch ticks
+
+`kanban_db_dispatch.dispatch_once(task_ids=...)` validates an explicit nonempty
+list/tuple of exact IDs before taking locks. `None` preserves the normal tick.
+`kanban_dispatch_tick.py` owns lane selection and the locked tick: parameterized
+ID filtering precedes routing and assignment; exact mode skips board-wide
+watchdog/reclaim/promotion rather than mutating cards outside its selection. Only
+already-ready/review cards are eligible. Capacity snapshots still cover all
+running work. The CLI exposes this through repeated `dispatch --task-id ID`.

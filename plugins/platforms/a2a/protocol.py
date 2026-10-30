@@ -227,6 +227,12 @@ def sse_data(payload: dict, req_id: Any = None) -> str:
     return f"data: {json.dumps(envelope, ensure_ascii=False)}\n\n"
 
 
+def sse_jsonrpc_data(payload: dict, req_id: Any) -> str:
+    """An SSE frame for a JSON-RPC request, including the valid explicit ``id: null`` case."""
+    envelope = jsonrpc_result(req_id, payload)
+    return f"data: {json.dumps(envelope, ensure_ascii=False, allow_nan=False)}\n\n"
+
+
 def sse_done() -> str:
     """Stream-closure marker as an SSE *comment* — ``data: {}`` would make JSON-RPC clients parse."""
     return ": done\n\n"

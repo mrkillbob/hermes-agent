@@ -22,6 +22,12 @@ _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar("_HERMES_HOME_OVERR
 INDICATOR_STYLES: tuple[str, ...] = ("ascii", "emoji", "kaomoji", "unicode")
 DEFAULT_INDICATOR_STYLE: str = "kaomoji"
 
+# Browser-hosted attachments are staged on the Hermes host and then read back
+# as a base64 data URL for the normal remote attachment RPC. Keep the upload
+# and read-back boundaries identical so a successful picker/drop can always be
+# attached afterward.
+WEBAPP_ATTACHMENT_MAX_BYTES: int = 16 * 1024 * 1024
+
 
 def set_hermes_home_override(path: str | Path | None) -> Token:
     """Set a context-local Hermes home override and return its reset token.
@@ -61,6 +67,33 @@ def _platform_default_hermes_home(environ: Mapping[str, str], user_home: Callabl
 def _get_platform_default_hermes_home() -> Path:
     """Return the platform default with the literal data-directory suffix."""
     return _platform_default_hermes_home(os.environ, Path.home)
+
+
+def _account_home() -> Path:
+    """The OS account's home from the password database, never ``$HOME``: harnesses and profile isolation
+    repoint HOME (root under ``sudo`` has uid 0 too, which keeps the #108674 remap). Falls back to the
+    shared real-home resolver where pwd cannot answer."""
+    try:
+        import pwd
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)  # windows-footgun: ok — POSIX-only module inside try/except
+    except (ImportError, KeyError, OSError, AttributeError):
+        return Path(get_real_home())
+
+
+def account_default_hermes_home() -> Path:
+    """The platform default of the OS ACCOUNT, never of a foreign process ``HOME``.
+
+    Host service identities (``systemctl --user`` units, LaunchAgents) belong to the account, and their
+    definitions are found under the account home. A process started with ``HOME=<scratch>`` used to call
+    ``<scratch>/.hermes`` native, name the bare ``hermes-gateway`` unit, and stop the account's real
+    gateway through it. When the process HOME is the account home the two answers are the same home.
+    """
+    account = _account_home()
+    try:
+        same = Path.home().resolve() == account.resolve()
+    except (OSError, RuntimeError):
+        same = False
+    return _get_platform_default_hermes_home() if same else _platform_default_hermes_home(os.environ, lambda: account)
 
 
 def _hermes_root_of(native_home: Path, env_path: Path | None) -> Path:
@@ -315,13 +348,18 @@ def named_profile_home(path: str | Path) -> Path | None:
     Requires ``<name>`` not to start with ``.`` and the ``profiles`` parent to be a real Hermes home;
     a default home whose path merely contains a ``profiles`` segment is not a named profile.
     """
-    current = Path(path)
-    for candidate in (current, *current.parents):
-        if (candidate.parent.name == "profiles" and not candidate.name.startswith(".")
-                and _is_hermes_profiles_root(candidate.parent)):
-            return candidate
-        if candidate.name == ".hermes":  # default home: a coincidental profiles/ ancestor is not a root
-            return None
+    current = Path(path).expanduser()
+    try:
+        resolved = current.resolve(strict=False)
+    except (OSError, RuntimeError):
+        resolved = current
+    for walked in (resolved, current):
+        for candidate in (walked, *walked.parents):
+            if (candidate.parent.name == "profiles" and not candidate.name.startswith(".")
+                    and _is_hermes_profiles_root(candidate.parent)):
+                return candidate
+            if candidate.name == ".hermes":  # default home: a coincidental profiles/ ancestor is not a root
+                break
     return None
 
 
@@ -363,7 +401,9 @@ def named_profile_is_deleted(profile_home: str | Path) -> bool:
 # Runtime side-effects (cron heartbeats, log rotation, caches) create dirs that carry
 # none of these; a pre-tombstone ghost shell or a stray infrastructure dir must never be
 # listed, served, ticked, or seeded with the default install's credentials.
-_PROFILE_IDENTITY_MARKERS = ("config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db")
+_PROFILE_IDENTITY_MARKERS = (
+    "config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db", "federation_role.json",
+)
 # Canonical named-profile id grammar; every profile-directory gate imports this one object.
 PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -585,22 +625,6 @@ def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:
     from pm import env_for
 
     return env_for("npm", base_env=env)
-
-
-def agent_browser_runnable(path: str | None) -> bool:
-    """True when *path* is an agent-browser CLI that runs (``--version`` exits 0).
-
-    Dead/wrong-arch/hung binaries are rejected so callers try the next candidate.
-
-    A bare presence check (``shutil.which`` / ``Path.exists``) is not enough: agent-browser's npm
-    ``postinstall`` re-points a *global* install symlink (e.g. ``/opt/homebrew/bin/agent-browser``) at our
-    local ``node_modules/agent-browser/bin/...`` binary, which then disappears on the next ``hermes update``
-    — leaving a **dangling symlink** that ``which`` still reports but exec fails on with exit 127 (issue
-    #48521). Callers that trust such a path silently break every browser tool.
-    """
-    if not path:
-        return False
-    return _is_executable_file(path) and _version_probe_ok(path)
 
 
 def _legacy_path_has_content(path: Path) -> bool:
@@ -949,6 +973,10 @@ def get_scratch_dir(home: str | Path | None = None, *, prune: bool = True) -> Pa
     :func:`export_scratch_tmp_env`), so ``tempfile`` defaults land here without call sites
     knowing. Entries idle for ``SCRATCH_MAX_IDLE_HOURS`` are pruned at most once per process
     and once per hour across processes (stamp file), so a fan-out of children stays cheap.
+    The pass itself runs in a detached child process (``hermes_constants_scratch_detach``): the
+    directory is created and permissioned before this returns, no caller (the boot hook
+    included) waits on the idle scan or the ``rmtree`` of a multi-GB entry, and the pass still
+    finishes when the caller is a ``hermes`` command that exits a moment later.
 
     Permissions follow :func:`apply_secure_dir_policy`, so an explicit ``HERMES_HOME_MODE`` or
     a managed/shared home is honored instead of a blanket ``0700`` (#117347).
@@ -995,7 +1023,9 @@ def _prune_scratch_dir_once(scratch: Path) -> None:
         pass
     with contextlib.suppress(Exception):
         stamp.touch()
-        prune_scratch_dir(scratch)
+        from hermes_constants_scratch_detach import spawn_prune
+
+        spawn_prune(scratch)
 
 
 def scratch_dir_usage_bytes(scratch: Path | None = None) -> int:

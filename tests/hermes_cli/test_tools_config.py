@@ -1,7 +1,6 @@
 """Tests for hermes_cli.tools_config platform tool persistence."""
 
 import logging
-import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -413,7 +412,7 @@ def test_a_saved_disabled_mcp_server_does_not_enable_every_other_server(listed):
 
 
 
-class TestAgentBrowserPostSetup:
+class TestChromiumPostSetup:
     """Cloud isolation, image ownership, and failed setup remain observable."""
 
     @pytest.fixture(autouse=True)
@@ -421,57 +420,40 @@ class TestAgentBrowserPostSetup:
         with patch("hermes_cli.tools_config_post_setup._ensure_browser_use_cli") as stub:
             yield stub
 
-    @pytest.fixture(autouse=True)
-    def _stub_package_install(self):
-        with patch("pm.ensure") as ensure:
-            yield ensure
-
-
-
-    @pytest.mark.parametrize("failure", ["pm", "timeout"])
-    def test_install_failure_reports_error(self, failure):
+    @pytest.mark.parametrize("failure", ["pm", "worker"])
+    def test_install_failure_reports_error(self, failure, tmp_path):
         import pm
 
-        error = (pm.InstallError("agent-browser", "fatal: network error") if failure == "pm"
-                 else subprocess.TimeoutExpired(cmd=["agent-browser"], timeout=600))
+        error = (pm.InstallError("chromium", "fatal: network error") if failure == "pm"
+                 else RuntimeError("worker exited unsuccessfully"))
         with patch("pm.ensure", side_effect=error), patch(
-            "tools.browser_tool_install._running_in_docker", return_value=False
+            "hermes_cli.browser_runtime.chromium_executable", return_value=None
+        ), patch("hermes_cli.browser_runtime.BAKED_EXECUTABLE_FILE", tmp_path / "absent"), patch(
+            "hermes_constants.is_termux", return_value=False
         ), patch("hermes_cli.tools_config_post_setup._print_warning") as warn, patch(
             "hermes_cli.tools_config_post_setup._print_info"
         ) as info:
-            _run_post_setup("agent_browser")
+            _run_post_setup("chromium")
 
         assert any(str(error) in c.args[0] for c in warn.call_args_list)
-        assert any("hermes tools post-setup agent_browser" in c.args[0] for c in info.call_args_list)
+        assert any("hermes tools post-setup chromium" in c.args[0] for c in info.call_args_list)
 
 
-class TestBrowserUseCliInstalledForAllNonCamofoxBackends:
-    """The Browser Use CLI is the primary driver engine for every browser
-    backend except Camofox — so EVERY browser picker selection except
-    Camofox must attempt the CLI install, not just the explicit
-    "Browser Use" row."""
+class TestBrowserExecEngineCheckedForEveryBrowserRow:
+    """browser-harness is browser_exec's engine for every browser row, so each hook confirms it."""
 
-    @pytest.mark.parametrize("key", ["agent_browser", "browserbase", "browser_use_cli"])
+    @pytest.mark.parametrize("key", ["chromium", "browserbase", "lightpanda"])
     def test_browser_post_setup_attempts_cli_install(self, key):
         with patch("hermes_cli.tools_config_post_setup._ensure_browser_use_cli") as ensure, patch(
             "shutil.which", return_value=None
-        ), patch("subprocess.run"), patch("pm.ensure"):  # the managed driver install is PM's, not this test's
+        ), patch("subprocess.run"), patch("pm.ensure"), patch(
+            "hermes_cli.browser_runtime.chromium_executable", return_value="/pm/chrome"
+        ), patch("tools.browser_lightpanda.find_lightpanda_binary", return_value=None):
             _run_post_setup(key)
         ensure.assert_called_once()
 
-    def test_camofox_post_setup_never_touches_browser_use(self):
-        """Camofox is Firefox-based with no CDP surface; the CDP-only
-        browser-use harness cannot drive it, so its setup must not pull
-        the CLI in."""
-        with patch("hermes_cli.tools_config_post_setup._ensure_browser_use_cli") as ensure, patch(
-            "hermes_constants.find_node_executable", return_value=None
-        ), patch("subprocess.run"):
-            _run_post_setup("camofox")
-        ensure.assert_not_called()
-
     def test_ensure_helper_missing_harness_is_non_fatal(self):
-        """A missing harness must warn and point at `hermes update`, never raise — the built-in
-        tools remain available."""
+        """A missing harness must warn and point at `hermes update`, never raise."""
         from hermes_cli.tools_config import _ensure_browser_use_cli
 
         with patch("tools.browser_use_cli._find_cli", return_value=None), patch(
@@ -784,6 +766,15 @@ _requires_recently_shipped = pytest.mark.skipif(
 )
 
 
+def test_inter_agent_toolset_is_opt_in_and_reachable_from_picker():
+    """Messaging stays off the default schema while remaining user-selectable."""
+    from toolsets import TOOLSETS, resolve_toolset
+
+    assert "inter_agent" in TOOLSETS
+    assert "inter_agent" not in resolve_toolset("hermes-cli")
+    assert "inter_agent" in _checklist_toolset_keys("cli")
+
+
 def _saved_list_from_before(platform="cli"):
     """A saved explicit list as it looked before the new toolsets existed."""
     from hermes_cli.tools_config import (
@@ -905,6 +896,20 @@ def test_disabled_composite_display_matches_runtime_tool_selection():
 
     for name in ("terminal", "file", "web", "vision", "skills"):
         assert (name in enabled) == bool(set(resolve_toolset(name)) & runtime), name
+
+
+def test_dispatcher_worker_recovers_kanban_and_injects_inter_agent_separately(monkeypatch):
+    """Kanban recovery must not depend on the messaging toolset's membership."""
+    from model_tools import _select_tool_names
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "task-1")
+    monkeypatch.setattr("model_tools._is_dispatcher_owned_worker", lambda: True)
+    monkeypatch.setattr("model_tools._is_delegated_child_context", lambda: False)
+
+    enabled = _get_platform_tools({}, "cli", include_default_mcp_servers=False)
+    selected = _select_tool_names(sorted(enabled), [], quiet_mode=True)
+    assert "kanban_complete" in selected
+    assert "inter_agent" in selected
 
 
 @_requires_recently_shipped

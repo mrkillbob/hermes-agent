@@ -44,7 +44,7 @@ def recover_left_core_in(home: Path, *, hydrate_secrets: bool = True) -> None:
     from gateway.run import _profile_runtime_scope
     from hermes_cli.left_core_migration import recover_at_startup
     with _profile_runtime_scope(Path(home), hydrate_secrets=hydrate_secrets):
-        recover_at_startup()
+        recover_at_startup(gateway_start=True)
 
 
 def recover_left_core_at_gateway_start() -> None:
@@ -54,7 +54,7 @@ def recover_left_core_at_gateway_start() -> None:
     so a platform plugin it gets starts its adapter in the same gateway start."""
     from hermes_cli.left_core_migration import recover_at_startup
     from hermes_constants import get_default_hermes_root, get_hermes_home
-    recover_at_startup()
+    recover_at_startup(gateway_start=True)
     root = Path(get_default_hermes_root())
     if root.resolve() != Path(get_hermes_home()).resolve():
         recover_left_core_in(root)
@@ -92,9 +92,29 @@ class GatewayStartupMixin:
     # A configured platform failed non-retryably this boot and is parked: every "we are serving"
     # status stamp (startup, drain release, scale-to-zero wake) must say ``degraded``, not ``running``.
     _startup_parked_platforms: bool = False
+    # A startup platform failure was a live foreign token/profile holder (exit 78 when nothing else runs).
+    _startup_ownership_conflict: bool = False
 
     def _serving_state(self) -> str:
         return "degraded" if self._startup_parked_platforms else "running"
+
+    def _park_last_fatal_platform(self, adapter) -> bool:
+        """Mid-run twin of the all-fatal startup case: the last platform failed non-retryably, so park it
+        and stay up degraded for local clients and cron. Return False when the gateway must stop instead
+        (retryable, or another gateway owns the token/profile)."""
+        if adapter.fatal_error_retryable or is_global_startup_conflict(adapter.fatal_error_code):
+            return False
+        self._startup_parked_platforms = True
+        # An active drain or shutdown owns the state; the drain release stamps _serving_state() itself.
+        if not (self._external_drain_active or self._draining or not self._running):
+            self._update_runtime_status(self._serving_state())
+        logger.error(
+            "%s is parked after a non-retryable error (fix it, then `hermes gateway restart`). The gateway "
+            "is DEGRADED — it serves local clients and cron with no messaging platform. %s: %s",
+            adapter.platform.value, adapter.fatal_error_code or "unknown",
+            adapter.fatal_error_message or "unknown error",
+        )
+        return True
 
     async def _run_startup_resume_event(
         self, adapter: BasePlatformAdapter, event: MessageEvent, session_key: str,
@@ -916,6 +936,11 @@ class GatewayStartupMixin:
             self._gateway_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._gateway_loop = None
+        from hermes_cli.startup_hold import active
+        if active(self):
+            from hermes_startup_watchdog import disarm_startup_watchdog
+            disarm_startup_watchdog()
+            return
         if self._gateway_loop is not None:
             self._start_loop_liveness_guards(self._gateway_loop)
             # Loop live: the loop-liveness watchdog takes over from the startup watchdog. Disarm even
@@ -1209,7 +1234,7 @@ class GatewayStartupMixin:
         """Create + wire an adapter per enabled platform (no connects). Returns
         (aborted, enabled_platform_count, multiplex_skipped_platforms, pending_connects)."""
         from gateway.run import _platform_has_bot_credential
-        from gateway.run_adapters import _adapter_unavailable_message
+        from gateway.run_adapter_errors import _adapter_unavailable_message
         enabled_platform_count = 0
         _multiplex_on = self._multiplex_on()
         _multiplex_skipped_platforms: list[Platform] = []
@@ -1363,7 +1388,10 @@ class GatewayStartupMixin:
                 continue
             # A live foreign token holder is an ownership conflict, not a blip: retryable only for
             # MID-RUN reconnects; at startup route it non-retryable so the gateway exits 78, not deaf.
-            _retryable = adapter.fatal_error_retryable and not is_global_startup_conflict(adapter.fatal_error_code)
+            _conflict = is_global_startup_conflict(adapter.fatal_error_code)
+            if _conflict:
+                self._startup_ownership_conflict = True
+            _retryable = adapter.fatal_error_retryable and not _conflict
             self._update_platform_runtime_status(
                 platform.value, platform_state="retrying" if _retryable else "fatal",
                 error_code=adapter.fatal_error_code, error_message=adapter.fatal_error_message,
@@ -1448,10 +1476,22 @@ class GatewayStartupMixin:
                 )
             return False
         if startup_nonretryable_errors and not startup_retryable_errors:
-            reason = "; ".join(startup_nonretryable_errors)
-            logger.error("Gateway hit a non-retryable startup conflict: %s", reason)
-            self._startup_fail_fatal_config(reason)
-            return True
+            if self._startup_ownership_conflict:
+                # Another gateway owns a token/profile: staying up would be a second, deaf owner.
+                reason = "; ".join(startup_nonretryable_errors)
+                logger.error("Gateway hit a non-retryable startup conflict: %s", reason)
+                self._startup_fail_fatal_config(reason)
+                return True
+            # Every platform is parked, but local clients and cron still need this gateway: exiting 78
+            # would take them all down over one unusable bot. Stay up degraded, like the mixed case.
+            self._startup_parked_platforms = True
+            logger.error(
+                "%d configured platform(s) failed to start and are parked (fix the reported error, then "
+                "`hermes gateway restart`): %s. The gateway is DEGRADED — it serves local clients and "
+                "cron with no messaging platform.",
+                len(startup_nonretryable_errors), "; ".join(startup_nonretryable_errors),
+            )
+            return False
         if startup_nonretryable_errors:
             # Mixed (some fatal, some transient): exiting 78 would take the gateway PERMANENTLY down
             # over a blip. Log the fatal side loudly and fall through to the degraded/retry path.
@@ -1647,8 +1687,16 @@ class GatewayStartupMixin:
         await self._start_log_startup_environment()
         if await self._abort_startup_if_shutdown_requested():
             return True
-        if self._start_check_access_policy():
+        from hermes_cli.startup_hold import active
+        if not active(self) and self._start_check_access_policy():
             return True
+        from gateway.drain_kanban import held
+        if held(self):
+            self._external_drain_active = True
+            self._running = True
+            self._update_runtime_status('draining')
+            self._spawn_supervised(self._drain_control_watcher, 'drain_control_watcher')
+            return True  # native listener is already owned; no adapters/recovery/warm-up
         await self._start_recover_previous_run()
         # Serialize startup restore against inbound: adapters receive as soon as they connect, so inbound
         # queues until every synthetic resume turn has finished.
@@ -1661,6 +1709,7 @@ class GatewayStartupMixin:
         startup_nonretryable_errors: list[str] = []
         startup_retryable_errors: list[str] = []
         self._startup_parked_platforms = False  # fresh boot: no platform has failed yet
+        self._startup_ownership_conflict = False
         (
             _aborted, enabled_platform_count, _multiplex_skipped_platforms, _pending_connects
         ) = await self._start_prefilter_platforms()
@@ -1846,6 +1895,53 @@ class GatewayStartupMixin:
             thread_sessions_per_user=extra.get("thread_sessions_per_user", False), profile=handoff_profile,
         )
 
+    async def _handoff_repoint(
+        self, dest, session_key: str, cli_session_id: str, persisted_cwd: Optional[str] = None,
+    ) -> None:
+        """Repoint the current local conversation head in one verified routing flight."""
+        from gateway.session_route_recovery import conversation_head, follow_hand_off
+
+        authority, local_owner, target = await conversation_head(self, cli_session_id)
+        # A later /new segment may own a different root. Prefer its persisted cwd and verify
+        # against the target binding; the CLI row's cwd is only a fallback for the same lineage.
+        store = getattr(self.async_session_store, "_store", self.async_session_store)
+        db = authority.db if authority is not None else getattr(store, "_db", None)
+        # Narrow injected stores can be MagicMock objects: their invented get_session
+        # must never count as a persisted cwd or bypass the isolation check.
+        get_row = getattr(db, "get_session", None) if callable(
+            getattr(type(db), "get_session", None)
+        ) else None
+        target_row = await asyncio.to_thread(get_row, target) if callable(get_row) else None
+        target_cwd = (target_row or {}).get("cwd") or persisted_cwd
+        resolver = getattr(store, "resolve_task_owned_workspace", None)
+        switch_kwargs = {"conversation_kind": "task", "preserve_prompt_pin": False}
+        if callable(resolver) and target_cwd:
+            # Validate off the event loop. switch_session repeats this check and acquires
+            # the lease before publishing the route.
+            await asyncio.to_thread(resolver, target, target_cwd)
+            switch_kwargs["persisted_cwd"] = target_cwd
+        elif callable(resolver):
+            policy_probe = getattr(store, "conversation_worktree_isolation_enabled", None)
+            if callable(policy_probe) and await asyncio.to_thread(policy_probe, session_key) is True:
+                raise RuntimeError("cannot hand off a CLI session without a persisted verified workspace")
+        # Keep get/create and switch in one single-flight operation so an interactive turn
+        # cannot observe the pre-handoff route between the two calls.
+        handoff = getattr(type(store), "get_or_create_session_and_switch", None)
+        if callable(handoff):
+            switched = await self.async_session_store.get_or_create_session_and_switch(
+                dest.source, target, **switch_kwargs,
+            )
+        else:
+            # Narrow injected test doubles may expose only the legacy pair.
+            await self.async_session_store.get_or_create_session(dest.source, conversation_kind="task")
+            switched = await self.async_session_store.switch_session(
+                session_key, target, **switch_kwargs,
+            )
+        if switched is None:
+            raise RuntimeError(f"could not switch session key {session_key} → {target}")
+        if authority is not None:
+            follow_hand_off(authority, dest.source, session_key, authority.logical_owner(target), local_owner)
+
     async def _process_handoff(self, row: dict[str, Any], profile_name: Optional[str] = None) -> None:
         """Execute one handoff row; raises on failure (caller marks failed). ``profile_name`` (None =
         root) is the profile whose store queued it — load-bearing under multiplex: secondaries live in
@@ -1853,14 +1949,7 @@ class GatewayStartupMixin:
         cli_session_id = row["id"]
         dest = await self._handoff_resolve_destination(row, profile_name)
         session_key = self._handoff_session_key(dest, profile_name)
-        # Ensure a session_store entry exists for this key; switch_session then re-points it.
-        await self.async_session_store.get_or_create_session(dest.source)
-        # switch_session ends the prior session and reopens the CLI session under the new key.
-        switched = await self.async_session_store.switch_session(
-            session_key, cli_session_id, preserve_prompt_pin=False,
-        )
-        if switched is None:
-            raise RuntimeError(f"could not switch session key {session_key} → {cli_session_id}")
+        await self._handoff_repoint(dest, session_key, cli_session_id, row.get("cwd"))
         # Evict the cached AIAgent (rebuild against the CLI session_id, like /resume) and clear stale
         # running-agent state so the synthetic turn isn't queued behind it.
         self._evict_cached_agent(session_key)

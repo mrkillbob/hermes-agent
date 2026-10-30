@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError
+from pathlib import Path
+import tomllib
 
 import pytest
+from packaging.requirements import Requirement
 
 import pm
 from plugins.platforms.google_chat import oauth
@@ -16,6 +19,7 @@ def test_stale_google_transitives_are_reported_missing(monkeypatch):
         "google-api-python-client": "2.194.0",
         "google-auth": "2.55.0",
         "google-auth-oauthlib": "1.3.1",
+        "oauthlib": "3.3.1",
         "google-auth-httplib2": "0.3.1",
         "httplib2": "0.31.2",
         "pyasn1": "0.6.3",
@@ -30,7 +34,22 @@ def test_stale_google_transitives_are_reported_missing(monkeypatch):
     monkeypatch.setattr(oauth, "_distribution_version", fake_version)
 
     stale = {spec.split("==")[0] for spec in oauth._missing_required_packages()}
-    assert {"google-auth", "httplib2", "pyasn1"} <= stale
+    assert {"google-auth", "httplib2", "pyasn1", "oauthlib"} <= stale
+
+
+@pytest.mark.parametrize("installed_version,missing", [("3.3.1", True), ("4.0.0", False)])
+def test_oauthlib_version_controls_dependency_repair(monkeypatch, installed_version, missing):
+    """A usable Google client import must not hide a stale OAuth dependency."""
+    def version(name):
+        if name == "oauthlib":
+            return installed_version
+        return next(spec.split("==")[1] for spec in oauth._REQUIRED_PACKAGES
+                    if spec.split("==")[0] == name)
+
+    monkeypatch.setattr(oauth, "_distribution_version", version)
+
+    stale = {spec.split("==")[0] for spec in oauth._missing_required_packages()}
+    assert ("oauthlib" in stale) is missing
 
 
 def test_installer_repairs_stale_transitives_through_pm(monkeypatch, capsys):
@@ -41,6 +60,33 @@ def test_installer_repairs_stale_transitives_through_pm(monkeypatch, capsys):
 
     assert oauth.install_deps() is True
     assert calls == [(["google", "google-chat"], {"explicit": True})]
+    assert "restart" in capsys.readouterr().out.lower()
+
+
+def test_declared_google_packages_allow_dependency_repair(monkeypatch, capsys):
+    """Repair accepts the declared Google packages once stale OAuthlib is replaced."""
+    metadata = tomllib.loads(
+        (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    installed = {}
+    for extra in oauth._DEPENDENCY_EXTRAS:
+        for spec in metadata["project"]["optional-dependencies"][extra]:
+            requirement = Requirement(spec)
+            installed[requirement.name] = next(iter(requirement.specifier)).version
+    updated_oauthlib = installed["oauthlib"]
+    installed["oauthlib"] = "3.3.1"
+    monkeypatch.setattr(oauth, "_distribution_version", installed.__getitem__)
+    calls = []
+
+    def sync(extras, **kwargs):
+        calls.append((extras, kwargs))
+        installed["oauthlib"] = updated_oauthlib
+
+    monkeypatch.setattr(pm, "sync_venv", sync)
+
+    assert oauth.install_deps() is True
+    assert calls == [(["google", "google-chat"], {"explicit": True})]
+    assert oauth._missing_required_packages() == []
     assert "restart" in capsys.readouterr().out.lower()
 
 

@@ -8,6 +8,16 @@ Hermes' own bootstraps, which run an entry point in-process and are mapped back 
 from __future__ import annotations
 
 import re
+import shlex
+
+
+def command_line_tokens(command: str) -> list[str]:
+    """Case-preserving, quote-aware tokens shared by identity and profile readers."""
+    try:
+        tokens = shlex.split(command, posix=False)
+    except ValueError:
+        tokens = command.split()
+    return [t.strip("\"'").replace("\\", "/") for t in tokens]
 
 
 def inline_source_flag_index(tokens: list[str]) -> int | None:
@@ -106,9 +116,15 @@ _EXEC_LAUNCHER = re.compile(
 _EXEC_BASE64 = re.compile(r"import base64; exec\(base64\.b64decode\(\W*(?P<b64>[A-Za-z0-9+/=]+)")
 
 
-def _bootstrap_entry(source: str, argv: list[str]) -> list[str] | None:
+def _bootstrap_entry(source: str, argv: list[str], depth: int = 0) -> list[str] | None:
     """``[-m, <module>, *argv]`` (or ``[<path>, *argv]``) the inline *source* runs in-process, else None."""
+    if depth >= 8:
+        return None
     source = source.strip()
+    if source.startswith('import base64, hashlib, os, stat, sys\n'):
+        from hermes_cli.startup_hold_exec import writer_exec_body
+        body = writer_exec_body(source)
+        return _bootstrap_entry(body, argv, depth + 1) if body is not None else None
     kind, match = next(((k, m) for k, p in _BOOTSTRAPS if (m := p.fullmatch(source))), (None, None))
     if match is None:
         return None
@@ -117,7 +133,7 @@ def _bootstrap_entry(source: str, argv: list[str]) -> list[str] | None:
         import base64
         import binascii
         try:
-            return _bootstrap_entry(base64.b64decode(target, validate=True).decode("utf-8"), argv)
+            return _bootstrap_entry(base64.b64decode(target, validate=True).decode("utf-8"), argv, depth + 1)
         except (binascii.Error, UnicodeDecodeError):
             return None
     if kind == "exec":
@@ -129,7 +145,7 @@ def _bootstrap_entry(source: str, argv: list[str]) -> list[str] | None:
             import base64
             import binascii
             try:
-                return _bootstrap_entry(base64.b64decode(wrapped["b64"], validate=True).decode("utf-8"), argv)
+                return _bootstrap_entry(base64.b64decode(wrapped["b64"], validate=True).decode("utf-8"), argv, depth + 1)
             except (binascii.Error, UnicodeDecodeError):
                 return None
         launcher = _EXEC_LAUNCHER.search(target)

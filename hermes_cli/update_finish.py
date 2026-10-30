@@ -8,7 +8,7 @@ import sys
 
 def finish_update(*, root, assume_yes, gateway_mode, pre_update_snapshot_id,
                   had_desktop_app_before_update, pre_update_version,
-                  plan, windows_resume, followups=None) -> None:
+                  plan, windows_resume, followups=None, pending=None, _on_windows_resume=None) -> None:
     """Finish the selected checkout; never fetch, switch branches or restore a stash.
 
     Same contract as the current completion (C3): the code is committed, so a failed build,
@@ -16,7 +16,8 @@ def finish_update(*, root, assume_yes, gateway_mode, pre_update_snapshot_id,
     ``followups`` carries the steps that already failed (the product build); while any is owed
     the install stamp is withheld, the source-update tail stays pending for the next launch, and
     the gateway topology is left alone. An unsafe SQLite runtime is reported by maintenance and
-    vetoes migration only.
+    vetoes migration only. ``_on_windows_resume`` transfers attempt ownership to this tail before
+    its resume call, including a call that leaves readiness debt outstanding.
     """
     from hermes_cli.update_cmd import (
         _run_post_update_maintenance,
@@ -33,7 +34,7 @@ def finish_update(*, root, assume_yes, gateway_mode, pre_update_snapshot_id,
             assume_yes=assume_yes, gateway_mode=gateway_mode,
             pre_update_snapshot_id=pre_update_snapshot_id,
             had_desktop_app_before_update=had_desktop_app_before_update,
-            pre_update_version=pre_update_version, followups=owed,
+            pre_update_version=pre_update_version, followups=owed, pending=pending,
         )
     except (Exception, SystemExit) as exc:  # health: allow BLE001 -- the code is committed; retry later
         reason = str(exc) or type(exc).__name__
@@ -59,11 +60,16 @@ def finish_update(*, root, assume_yes, gateway_mode, pre_update_snapshot_id,
     update_id = run.data.get("update_id") if run is not None else None
     try:
         restarted = _restart_gateway_fleet_after_update(plan, gateway_mode)
+        if _on_windows_resume is not None:
+            _on_windows_resume()
         _resume_windows_gateways_and_merge_outcome(restarted, windows_resume, gateway_mode)
         _verify_fleet_after_update(restarted, _pre_update_plan=plan, _windows_gateway_resume=windows_resume,
                                   update_complete=bool(runtime_safe) and not tail_owed)
     except (Exception, SystemExit) as exc:  # health: allow BLE001 -- the code is committed (C3): the fleet obligation stays armed
         update_receipt.owe_followup(update_id, "gateway_restart", str(exc) or type(exc).__name__)
+        terminal = update_receipt.finalized_receipt(update_id) or {}
+        if terminal.get("outcome") == "partial":
+            raise  # config migration failed before success bookkeeping
 
 
 def _restore_plan(data):
@@ -79,6 +85,14 @@ def _restore_plan(data):
     return UpdatePlan(**values)
 
 
+def _record_interrupted_resume(update_id, token, attempted) -> None:
+    from hermes_cli import update_receipt
+
+    terminal = update_receipt.finalized_receipt(update_id) or {}
+    if attempted and token and token.get("resume_needed") and terminal.get("outcome") != "success":
+        update_receipt.owe_followup(update_id, "windows_resume", "KeyboardInterrupt: Windows gateway resume interrupted")
+
+
 def main(context: Path, result: Path) -> int:
     request = json.loads(context.read_text(encoding="utf-8-sig"))
     root = Path(request["root"])
@@ -90,6 +104,12 @@ def main(context: Path, result: Path) -> int:
     restarting = request.get("restart_update", False)
     cli_started = False
     begun = False
+    attempted = False
+
+    def own_windows_resume() -> None:
+        nonlocal attempted
+        attempted = True
+
     code = 1
     try:
         if not restarting:
@@ -144,47 +164,61 @@ def main(context: Path, result: Path) -> int:
                 except OSError as exc:  # stale dependencies still trigger the next launch's sync
                     print(f"  ⚠ Could not record the owed source-update tail: {exc}")
                 owed: list[tuple[str, str]] = []
+                pending: list[tuple[str, str]] = []
                 try:
-                    build_update_products(root, desktop=desktop)
+                    pending.extend(build_update_products(root, desktop=desktop) or [])
                 except (Exception, SystemExit) as exc:  # health: allow BLE001 -- committed code: owed, not failed
                     reason = str(exc) or type(exc).__name__
                     update_receipt.record_followup("build", reason)
                     owed.append(("build", reason))
+                    pending.extend(getattr(exc, "pending", []))
                 finish_update(
                     root=root, assume_yes=request["assume_yes"], gateway_mode=request["gateway_mode"],
                     pre_update_snapshot_id=request.get("pre_update_snapshot_id"),
                     had_desktop_app_before_update=desktop,
                     pre_update_version=request.get("pre_update_version"),
-                    plan=plan, windows_resume=token, followups=owed,
+                    plan=plan, windows_resume=token, followups=owed, pending=pending,
+                    _on_windows_resume=own_windows_resume,
                 )
         code = 0
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 1
+    except KeyboardInterrupt:
+        code = 130
+        _record_interrupted_resume(request["update_id"], token, attempted)
     except Exception as exc:
         update_receipt.record_step("historical_completion", False, str(exc))
         print(f"Update completion failed: {exc}", file=sys.stderr, flush=True)
     finally:
+        if restarting and not cli_started:
+            # Startup failed before the replacement command could own a
+            # receipt. Preserve the original handoff, just like preparation.
+            update_receipt.begin_update_receipt(previous=request.get("receipt"), correlation_id=request["update_id"])
+            begun = update_receipt._current.get() is not None
+        # Readiness debt is not permission to replay this run's completed attempt. A late
+        # successor can already be alive; replaying its --replace watcher kills it again.
+        # Preserve rescue when completion failed before it reached the resume boundary.
+        if resume is not None and not attempted:
+            attempted = True
+            try:
+                resume(token)
+            except KeyboardInterrupt:
+                code = 130
+                _record_interrupted_resume(request["update_id"], token, attempted)
+            except Exception as exc:  # health: allow BLE001 -- post-commit rescue failures stay owed, never replace the update's exit
+                update_receipt.owe_followup(request["update_id"], "windows_resume", f"Windows gateway recovery failed: {exc}")
+        if code == 130:
+            # Startup can precede receipt creation, and rescue can itself be interrupted.
+            update_receipt.finalize_interrupted_update_receipt("KeyboardInterrupt: interrupted after the code was updated")
         terminal = update_receipt.finalized_receipt(request["update_id"]) or {}
         if code and request.get("gateway_mode"):
-            # Even an application import failure must wake the gateway watcher. A run that already
+            # Rescue can itself be interrupted; publish status after it settles. A run that already
             # closed as a success (an interrupt after verification) stays 0 (review regression 3).
             from hermes_constants import get_hermes_home
             from hermes_cli.runtime_state import _atomic_bytes
 
             _atomic_bytes(get_hermes_home() / ".update_exit_code",
                           b"0" if terminal.get("outcome") == "success" else b"1")
-        if restarting and not cli_started:
-            # Startup failed before the replacement command could own a
-            # receipt. Preserve the original handoff, just like preparation.
-            update_receipt.begin_update_receipt(previous=request.get("receipt"), correlation_id=request["update_id"])
-            begun = update_receipt._current.get() is not None
-        attempted = False
-        if resume is not None:
-            try:
-                resume(token)
-            except Exception as exc:
-                attempted = True
-                update_receipt.owe_followup(request["update_id"], "windows_resume", f"Windows gateway recovery failed: {exc}")
         handled = cli_started or (begun and update_receipt._current.get() is None)
         written = update_receipt.finalize_pending_update_receipt(code, "historical takeover completion")
         result.write_text(json.dumps({

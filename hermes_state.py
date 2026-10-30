@@ -22,10 +22,12 @@ import time
 import uuid
 from collections import deque
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 from hermes_dir_acl import make_user_dir
 
-from hermes_constants import get_hermes_home, mkdir_under_hermes_home
+from agent.message_sanitization import _sanitize_surrogates
+from hermes_constants import get_hermes_home, get_hermes_home_override, mkdir_under_hermes_home
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, cast
 
 from hermes_state_common import (
@@ -50,6 +52,9 @@ from hermes_state_guard import (
     _register_test_instance, _set_last_init_error, get_last_init_error,
 )
 from hermes_state_readpool import _READ_POOL_MAX, _proc_fd_targets, _read_budget_for
+from hermes_state_worktrees import (
+    ConversationWorktreeConflict, ConversationWorktreeRecord, SessionWorktreesMixin,
+)
 from hermes_state_sessions import SessionSessionsMixin
 from hermes_state_fts import SessionFtsSetupMixin, load_fts5_cjk_extension
 from hermes_state_portability import SessionPortabilityMixin
@@ -64,7 +69,7 @@ from hermes_state_dbfile import (
     _read_sqlite_application_id, _stat_sqlite_sidecar_identity,
     _watched_sqlite_sidecar_paths, has_invalid_sqlite_header_preopen, is_zeroed_state_db, quarantine_cross_process_lock,
     quarantine_invalid_state_db,
-    RetiredGenerationCaptureError, capture_retired_wal_generation, refuse_deleted_wal_generation,
+    RetiredGenerationCaptureError, capture_retired_wal_generation,
 )
 from hermes_state_messages import SessionMessagesMixin
 from hermes_state_prune_rewrite import SessionPruneRewriteMixin
@@ -76,6 +81,9 @@ from hermes_state_wal import (
 )
 from hermes_state_repair import _claim_repair_attempt, preflight_db_writability, repair_state_db_schema
 from hermes_state_titles import SessionTitlesMixin
+from hermes_state_worktrees import (
+    ConversationWorktreeConflict, ConversationWorktreeRecord, SessionWorktreesMixin,
+)
 from hermes_state_usage import SessionUsageMixin
 from hermes_state_maintenance import SessionMaintenanceMixin
 from hermes_state_gateway import SessionGatewayMixin
@@ -88,6 +96,7 @@ except ImportError:  # pragma: no cover - stripped/scaffold installs only
     psutil = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
 
 _MAX_SAFE_MESSAGES = 20_000  # resume/export guard default
 
@@ -199,7 +208,12 @@ _READ_BUSY_TIMEOUT_S = 5.0
 
 def _default_db_path() -> Path:
     """Default state DB path at CALL time: a re-pointed ``DEFAULT_DB_PATH`` wins, else
-    ``get_hermes_home()`` is resolved fresh (a runtime HERMES_HOME redirect works regardless of import)."""
+    ``get_hermes_home()`` is resolved fresh (a runtime HERMES_HOME redirect works regardless of import).
+    A context-local profile route takes precedence over the process/test pin so multiplexed turns
+    cannot open the launch profile's database."""
+    override = get_hermes_home_override()
+    if override:
+        return Path(override) / "state.db"
     return DEFAULT_DB_PATH if DEFAULT_DB_PATH != _IMPORT_DEFAULT_DB_PATH else get_hermes_home() / "state.db"
 
 
@@ -465,6 +479,7 @@ class SessionDB(
     SessionPortabilityMixin, SessionTelegramTopicsMixin, SessionCompressionMixin,
     SessionGatewayMixin, SessionMaintenanceMixin, SessionUsageMixin, SessionTitlesMixin,
     SessionMessagesMixin, SessionPruneRewriteMixin, SessionApiContentMixin, SessionCoverageMixin, SessionRewindMixin, SessionProfileRepairMixin,
+    SessionWorktreesMixin,
 ):
     """SQLite-backed session storage with FTS5 search; many reader threads, one writer (WAL)."""
 
@@ -681,6 +696,9 @@ class SessionDB(
         malformed sqlite_master), generation stamp."""
         # Never materialize a deleted/archived named profile's home: a multiplexer or Desktop backend
         # still holding the profile's route would otherwise re-scaffold it on the next turn (#94590).
+        from hermes_cli.startup_hold import active
+        if active() and self.db_path.exists() and has_invalid_sqlite_header_preopen(self.db_path):
+            raise RuntimeError('startup_hold: database recovery requires a separate operator action')
         mkdir_under_hermes_home(self.db_path.parent)
         try:
             # Serialize zero-byte check, quarantine, connect and schema commit so concurrent
@@ -710,7 +728,7 @@ class SessionDB(
         except sqlite3.DatabaseError as exc:
             # A malformed schema fails on the very first statement (before _init_schema), so the
             # FTS-rebuild layer never sees it: repair sqlite_master in place (backup first), reopen once.
-            if not is_malformed_schema_error(exc) or not _claim_repair_attempt(self.db_path):
+            if active() or not is_malformed_schema_error(exc) or not _claim_repair_attempt(self.db_path):
                 raise
             logger.error(
                 "state.db schema is malformed (%s) — attempting automatic "
@@ -823,7 +841,7 @@ class SessionDB(
     def _connect_and_init(self) -> None:
         # Refuse before sqlite3.connect (under the startup lock) so we cannot mint
         # a replacement WAL while a live writer still holds a deleted sidecar inode.
-        refuse_deleted_wal_generation(self.db_path)
+        _state_holders.refuse_deleted_wal_generation(self.db_path)
         # Create/tighten the main database before sqlite3.connect() so a
         # permissive process umask can never expose a fresh profile store.
         _secure_state_db_files(self.db_path, create_main=True)
@@ -1220,7 +1238,7 @@ class SessionDB(
     def _record_db_file_identity(self) -> None:
         """Snapshot inode plus the on-disk generation header when present."""
         self._db_file_identity = _stat_db_file_identity(self.db_path)
-        self._db_sidecar_identity = _stat_sqlite_sidecar_identity(self.db_path)
+        self._db_sidecar_identity = _state_holders.sqlite_sidecar_identity(self.db_path)
         disk_id = _read_sqlite_application_id(self.db_path)
         if disk_id:
             self._db_file_application_id = disk_id

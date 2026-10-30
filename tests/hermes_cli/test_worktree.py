@@ -5,10 +5,13 @@ Verifies worktree creation, cleanup, .worktreeinclude handling,
 """
 
 import os
+import shutil
 import subprocess
 import pytest
 
 from hermes_cli import worktree_ops
+from hermes_cli.cli_conversation_worktree_mixin import _should_use_legacy_worktree
+from pathlib import Path
 
 
 @pytest.fixture
@@ -81,6 +84,277 @@ def git_repo_no_remote(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+
+@pytest.fixture
+def git_repo_remote_no_tracking(tmp_path):
+    """Create a temporary git repo with a remote but no remote-tracking refs."""
+    repo = tmp_path / "test-repo-remote-no-tracking"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=False)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo, capture_output=True, check=False,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo, capture_output=True, check=False,
+    )
+    (repo / "README.md").write_text("# Test Repo\n")
+    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=False)
+    subprocess.run(
+        ["git", "commit", "-m", "Initial commit"],
+        cwd=repo, capture_output=True, check=False,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://example.com/test-repo.git"],
+        cwd=repo, capture_output=True, check=False,
+    )
+    return repo
+
+
+# ---------------------------------------------------------------------------
+# Lightweight reimplementations for testing (avoid importing cli.py)
+# ---------------------------------------------------------------------------
+
+def _git_repo_root(cwd=None):
+    """Test version of _git_repo_root."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+            cwd=cwd, check=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _setup_worktree(repo_root):
+    """Test version of _setup_worktree — creates a worktree."""
+    import uuid
+    short_id = uuid.uuid4().hex[:8]
+    wt_name = f"hermes-{short_id}"
+    branch_name = f"hermes/{wt_name}"
+
+    worktrees_dir = Path(repo_root) / ".worktrees"
+    worktrees_dir.mkdir(parents=True, exist_ok=True)
+    wt_path = worktrees_dir / wt_name
+
+    result = subprocess.run(
+        ["git", "worktree", "add", str(wt_path), "-b", branch_name, "HEAD"],
+        capture_output=True, text=True, timeout=30, cwd=repo_root, check=False,
+    )
+    if result.returncode != 0:
+        return None
+
+    return {
+        "path": str(wt_path),
+        "branch": branch_name,
+        "repo_root": repo_root,
+    }
+
+
+def _has_unpushed_commits(worktree_path, timeout=10):
+    """Test version of the worktree unpushed-commit helper."""
+    try:
+        remote_refs = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname)", "refs/remotes"],
+            capture_output=True, text=True, timeout=timeout, cwd=worktree_path, check=False,
+        )
+        if remote_refs.returncode != 0:
+            return True
+        if not remote_refs.stdout.strip():
+            return False
+
+        result = subprocess.run(
+            ["git", "log", "--oneline", "HEAD", "--not", "--remotes"],
+            capture_output=True, text=True, timeout=timeout, cwd=worktree_path, check=False,
+        )
+        if result.returncode != 0:
+            return True
+        return bool(result.stdout.strip())
+    except Exception:
+        return True
+
+
+def _cleanup_worktree(info):
+    """Test version of _cleanup_worktree.
+
+    Preserves the worktree only if it has unpushed commits.
+    Dirty working tree alone is not enough to keep it.
+    """
+    wt_path = info["path"]
+    branch = info["branch"]
+    repo_root = info["repo_root"]
+
+    if not Path(wt_path).exists():
+        return
+
+    if _has_unpushed_commits(wt_path, timeout=10):
+        return False  # Did not clean up — has unpushed commits
+
+    subprocess.run(
+        ["git", "worktree", "remove", wt_path, "--force"],
+        capture_output=True, text=True, timeout=15, cwd=repo_root, check=False,
+    )
+    subprocess.run(
+        ["git", "branch", "-D", branch],
+        capture_output=True, text=True, timeout=10, cwd=repo_root, check=False,
+    )
+    return True  # Cleaned up
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class TestGitRepoDetection:
+    """Test git repo root detection."""
+
+    def test_detects_git_repo(self, git_repo):
+        root = _git_repo_root(cwd=str(git_repo))
+        assert root is not None
+        assert Path(root).resolve() == git_repo.resolve()
+
+
+    def test_returns_none_outside_repo(self, tmp_path):
+        # tmp_path itself is not a git repo
+        bare_dir = tmp_path / "not-a-repo"
+        bare_dir.mkdir()
+        root = _git_repo_root(cwd=str(bare_dir))
+        assert root is None
+
+
+class TestWorktreeCreation:
+    """Test worktree setup."""
+
+    def test_creates_worktree(self, git_repo):
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+        assert Path(info["path"]).exists()
+        assert info["branch"].startswith("hermes/hermes-")
+        assert info["repo_root"] == str(git_repo)
+
+        # Verify it's a valid git worktree
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, cwd=info["path"], check=False,
+        )
+        assert result.stdout.strip() == "true"
+
+    def test_worktree_has_own_branch(self, git_repo):
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+
+        # Check branch name in worktree
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, cwd=info["path"], check=False,
+        )
+        assert result.stdout.strip() == info["branch"]
+
+    def test_worktree_is_independent(self, git_repo):
+        """Two worktrees from the same repo are independent."""
+        info1 = _setup_worktree(str(git_repo))
+        info2 = _setup_worktree(str(git_repo))
+        assert info1 is not None
+        assert info2 is not None
+        assert info1["path"] != info2["path"]
+        assert info1["branch"] != info2["branch"]
+
+        # Create a file in worktree 1
+        (Path(info1["path"]) / "only-in-wt1.txt").write_text("hello")
+
+        # It should NOT appear in worktree 2
+        assert not (Path(info2["path"]) / "only-in-wt1.txt").exists()
+
+
+
+
+class TestWorktreeCleanup:
+    """Test worktree cleanup on exit."""
+
+    def test_clean_worktree_removed(self, git_repo):
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+        assert Path(info["path"]).exists()
+
+        result = _cleanup_worktree(info)
+        assert result is True
+        assert not Path(info["path"]).exists()
+
+
+
+
+
+    def test_branch_deleted_on_cleanup(self, git_repo):
+        info = _setup_worktree(str(git_repo))
+        branch = info["branch"]
+
+        _cleanup_worktree(info)
+
+        # Branch should be gone
+        result = subprocess.run(
+            ["git", "branch", "--list", branch],
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
+        )
+        assert branch not in result.stdout
+
+    def test_cleanup_nonexistent_worktree(self, git_repo):
+        """Cleanup should handle already-removed worktrees gracefully."""
+        info = {
+            "path": str(git_repo / ".worktrees" / "nonexistent"),
+            "branch": "hermes/nonexistent",
+            "repo_root": str(git_repo),
+        }
+        # Should not raise
+        _cleanup_worktree(info)
+
+
+class TestWorktreeInclude:
+    """Test .worktreeinclude file handling."""
+
+    def test_copies_included_files(self, git_repo):
+        """Files listed in .worktreeinclude should be copied to the worktree."""
+        # Create a .env file (gitignored)
+        (git_repo / ".env").write_text("SECRET=abc123")
+        (git_repo / ".gitignore").write_text(".env\n.worktrees/\n")
+        subprocess.run(
+            ["git", "add", ".gitignore"],
+            cwd=str(git_repo), capture_output=True, check=False,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add gitignore"],
+            cwd=str(git_repo), capture_output=True, check=False,
+        )
+
+        # Create .worktreeinclude
+        (git_repo / ".worktreeinclude").write_text(".env\n")
+
+        # Import and use the real _setup_worktree logic for include handling
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+
+        # Manually copy .worktreeinclude entries (mirrors cli.py logic)
+        include_file = git_repo / ".worktreeinclude"
+        wt_path = Path(info["path"])
+        for line in include_file.read_text().splitlines():
+            entry = line.strip()
+            if not entry or entry.startswith("#"):
+                continue
+            src = git_repo / entry
+            dst = wt_path / entry
+            if src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+
+        # Verify .env was copied
+        assert (wt_path / ".env").exists()
+        assert (wt_path / ".env").read_text() == "SECRET=abc123"
+
+        # Should not crash — just skip all lines
 @pytest.mark.parametrize(
     "real_untracked,separate_git_dir",
     [(True, False), (False, False), (False, True)],
@@ -142,6 +416,519 @@ def test_exit_cleanup_preserves_dirty_worktree(git_repo, tmp_path, monkeypatch, 
         assert not worktree.exists()
         assert "cleaned up" in out
         assert (git_repo / "node_modules" / "dep.js").exists()
+
+
+
+class TestGitignoreManagement:
+    """Test that .worktrees/ is added to .gitignore."""
+
+    def test_adds_to_gitignore(self, git_repo):
+        """Creating a worktree should add .worktrees/ to .gitignore."""
+        # Remove any existing .gitignore
+        gitignore = git_repo / ".gitignore"
+        if gitignore.exists():
+            gitignore.unlink()
+
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+
+        # Now manually add .worktrees/ to .gitignore (mirrors cli.py logic)
+        _ignore_entry = ".worktrees/"
+        existing = gitignore.read_text() if gitignore.exists() else ""
+        if _ignore_entry not in existing.splitlines():
+            with open(gitignore, "a") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(f"{_ignore_entry}\n")
+
+        content = gitignore.read_text()
+        assert ".worktrees/" in content
+
+
+
+class TestMultipleWorktrees:
+    """Test running multiple worktrees concurrently (the core use case)."""
+
+    def test_ten_concurrent_worktrees(self, git_repo):
+        """Create 10 worktrees — simulating 10 parallel agents."""
+        worktrees = []
+        for _ in range(10):
+            info = _setup_worktree(str(git_repo))
+            assert info is not None
+            worktrees.append(info)
+
+        # All should exist and be independent
+        paths = [info["path"] for info in worktrees]
+        assert len(set(paths)) == 10  # All unique
+
+        # Each should have the repo files
+        for info in worktrees:
+            assert (Path(info["path"]) / "README.md").exists()
+
+        # Edit a file in one worktree
+        (Path(worktrees[0]["path"]) / "README.md").write_text("Modified in wt0")
+
+        # Others should be unaffected
+        for info in worktrees[1:]:
+            assert (Path(info["path"]) / "README.md").read_text() == "# Test Repo\n"
+
+        # List worktrees via git
+        result = subprocess.run(
+            ["git", "worktree", "list"],
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
+        )
+        # Should have 11 entries: main + 10 worktrees
+        lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
+        assert len(lines) == 11
+
+        # Cleanup all (git_repo fixture has a fake remote ref so cleanup works)
+        for info in worktrees:
+            # Discard changes first so cleanup works
+            subprocess.run(
+                ["git", "checkout", "--", "."],
+                cwd=info["path"], capture_output=True, check=False,
+            )
+            _cleanup_worktree(info)
+
+        # All should be removed
+        for info in worktrees:
+            assert not Path(info["path"]).exists()
+
+
+def _can_symlink():
+    """Check if we can create symlinks (needs admin/dev-mode on Windows)."""
+    import tempfile
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "src"
+            src.write_text("x")
+            lnk = Path(d) / "lnk"
+            lnk.symlink_to(src)
+            return True
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not _can_symlink(), reason="Symlinks need elevated privileges")
+class TestWorktreeDirectorySymlink:
+    """Test .worktreeinclude with directories (symlinked)."""
+
+    def test_symlinks_directory(self, git_repo):
+        """Directories in .worktreeinclude should be symlinked."""
+        # Create a .venv directory
+        venv_dir = git_repo / ".venv" / "lib"
+        venv_dir.mkdir(parents=True)
+        (venv_dir / "marker.txt").write_text("venv marker")
+        (git_repo / ".gitignore").write_text(".venv/\n.worktrees/\n")
+        subprocess.run(
+            ["git", "add", ".gitignore"], cwd=str(git_repo), capture_output=True, check=False
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "gitignore"], cwd=str(git_repo), capture_output=True, check=False
+        )
+
+        (git_repo / ".worktreeinclude").write_text(".venv/\n")
+
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+
+        wt_path = Path(info["path"])
+        src = git_repo / ".venv"
+        dst = wt_path / ".venv"
+
+        # Manually symlink (mirrors cli.py logic)
+        if not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(str(src.resolve()), str(dst))
+
+        assert dst.is_symlink()
+        assert (dst / "lib" / "marker.txt").read_text() == "venv marker"
+
+
+class TestStaleWorktreePruning:
+    """Test _prune_stale_worktrees garbage collection."""
+
+    def test_prunes_old_clean_worktree(self, git_repo):
+        """Old clean worktrees should be removed on prune."""
+        import time
+
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+        assert Path(info["path"]).exists()
+
+        # Make the worktree look old (set mtime to 25h ago)
+        old_time = time.time() - (25 * 3600)
+        os.utime(info["path"], (old_time, old_time))
+
+        # Reimplementation of prune logic (matches cli.py)
+        worktrees_dir = git_repo / ".worktrees"
+        cutoff = time.time() - (24 * 3600)
+
+        for entry in worktrees_dir.iterdir():
+            if not entry.is_dir() or not entry.name.startswith("hermes-"):
+                continue
+            try:
+                mtime = entry.stat().st_mtime
+                if mtime > cutoff:
+                    continue
+            except Exception:
+                continue
+
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True, text=True, timeout=5, cwd=str(entry), check=False,
+            )
+            if status.stdout.strip():
+                continue
+
+            branch_result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True, text=True, timeout=5, cwd=str(entry), check=False,
+            )
+            branch = branch_result.stdout.strip()
+            subprocess.run(
+                ["git", "worktree", "remove", str(entry), "--force"],
+                capture_output=True, text=True, timeout=15, cwd=str(git_repo), check=False,
+            )
+            if branch:
+                subprocess.run(
+                    ["git", "branch", "-D", branch],
+                    capture_output=True, text=True, timeout=10, cwd=str(git_repo), check=False,
+                )
+
+        assert not Path(info["path"]).exists()
+
+    def test_keeps_recent_worktree(self, git_repo):
+        """Recent worktrees should NOT be pruned."""
+        import time
+
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+
+        # Don't modify mtime — it's recent
+        worktrees_dir = git_repo / ".worktrees"
+        cutoff = time.time() - (24 * 3600)
+
+        pruned = False
+        for entry in worktrees_dir.iterdir():
+            if not entry.is_dir() or not entry.name.startswith("hermes-"):
+                continue
+            mtime = entry.stat().st_mtime
+            if mtime > cutoff:
+                continue  # Too recent
+            pruned = True
+
+        assert not pruned
+        assert Path(info["path"]).exists()
+
+
+
+
+    def test_force_prunes_very_old_worktree(self, git_repo):
+        """Worktrees older than 72h should be force-pruned regardless."""
+        import time
+
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+
+        # Make an unpushed commit (would normally protect it)
+        (Path(info["path"]) / "work.txt").write_text("stale work")
+        subprocess.run(["git", "add", "work.txt"], cwd=info["path"], capture_output=True, check=False)
+        subprocess.run(
+            ["git", "commit", "-m", "old agent work"],
+            cwd=info["path"], capture_output=True, check=False,
+        )
+
+        # Make it very old (73h — beyond the 72h hard threshold)
+        old_time = time.time() - (73 * 3600)
+        os.utime(info["path"], (old_time, old_time))
+
+        # Simulate the force-prune tier check
+        hard_cutoff = time.time() - (72 * 3600)
+        mtime = Path(info["path"]).stat().st_mtime
+        assert mtime <= hard_cutoff  # Should qualify for force removal
+
+        # Actually remove it (simulates _prune_stale_worktrees force path)
+        branch_result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, timeout=5, cwd=info["path"], check=False,
+        )
+        branch = branch_result.stdout.strip()
+
+        subprocess.run(
+            ["git", "worktree", "remove", info["path"], "--force"],
+            capture_output=True, text=True, timeout=15, cwd=str(git_repo), check=False,
+        )
+        if branch:
+            subprocess.run(
+                ["git", "branch", "-D", branch],
+                capture_output=True, text=True, timeout=10, cwd=str(git_repo), check=False,
+            )
+
+        assert not Path(info["path"]).exists()
+
+
+class TestEdgeCases:
+    """Test edge cases for robustness."""
+
+    def test_no_commits_repo(self, tmp_path):
+        """Worktree creation should fail gracefully on a repo with no commits."""
+        repo = tmp_path / "empty-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True, check=False)
+
+        info = _setup_worktree(str(repo))
+        assert info is None  # Should fail gracefully
+
+    def test_not_a_git_repo(self, tmp_path):
+        """Repo detection should return None for non-git directories."""
+        bare = tmp_path / "not-git"
+        bare.mkdir()
+        root = _git_repo_root(cwd=str(bare))
+        assert root is None
+
+    def test_worktrees_dir_already_exists(self, git_repo):
+        """Should work fine if .worktrees/ already exists."""
+        (git_repo / ".worktrees").mkdir(exist_ok=True)
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+        assert Path(info["path"]).exists()
+
+
+class TestCLIFlagLogic:
+    """Test the flag/config OR logic from main()."""
+
+    def test_worktree_flag_triggers(self):
+        """--worktree flag should trigger worktree creation."""
+        worktree = True
+        w = False
+        config_worktree = False
+        use_worktree = worktree or w or config_worktree
+        assert use_worktree
+
+
+
+    def test_none_set_no_trigger(self):
+        """No flags and no config should not trigger."""
+        worktree = False
+        w = False
+        config_worktree = False
+        use_worktree = worktree or w or config_worktree
+        assert not use_worktree
+
+    def test_top_level_worktree_setting_preserved_when_policy_disabled(self, monkeypatch):
+        import cli
+
+        monkeypatch.setenv("HERMES_SESSION_SOURCE", "cli")
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        config = {"worktree": True, "conversation_worktree": {"enabled": False}}
+
+        assert _should_use_legacy_worktree(
+            worktree=False,
+            shorthand=False,
+            config=config,
+        ) is True
+
+    def test_top_level_worktree_setting_does_not_double_create_managed_root(
+        self, monkeypatch
+    ):
+        import cli
+
+        monkeypatch.setenv("HERMES_SESSION_SOURCE", "cli")
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        config = {
+            "worktree": True,
+            "conversation_worktree": {
+                "enabled": True,
+                "source_worktree": "/repo/stable",
+                "worktree_root": "/repo/.worktrees",
+            },
+        }
+
+        assert _should_use_legacy_worktree(
+            worktree=False,
+            shorthand=False,
+            config=config,
+        ) is False
+
+    def test_start_worktree_setup_does_not_create_legacy_tree_for_managed_root(
+        self, monkeypatch
+    ):
+        import cli
+
+        monkeypatch.setenv("HERMES_SESSION_SOURCE", "cli")
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        monkeypatch.setattr(
+            cli,
+            "CLI_CONFIG",
+            {
+                "worktree": True,
+                "conversation_worktree": {
+                    "enabled": True,
+                    "source_worktree": "/repo/stable",
+                    "worktree_root": "/repo/.worktrees",
+                },
+            },
+        )
+        monkeypatch.setattr(
+            cli, "_setup_worktree", lambda **_kwargs: pytest.fail("legacy worktree started")
+        )
+
+        assert cli._start_worktree_setup(False, False, True, False) is None
+
+
+class TestTerminalCWDIntegration:
+    """Test that TERMINAL_CWD is correctly set to the worktree path."""
+
+    def test_terminal_cwd_set(self, git_repo):
+        """After worktree setup, TERMINAL_CWD should point to the worktree."""
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+
+        # This is what main() does:
+        os.environ["TERMINAL_CWD"] = info["path"]
+        assert os.environ["TERMINAL_CWD"] == info["path"]
+        assert Path(os.environ["TERMINAL_CWD"]).exists()
+
+        # Clean up env
+        del os.environ["TERMINAL_CWD"]
+
+
+
+class TestOrphanedBranchPruning:
+    """Test cleanup of orphaned hermes/* and pr-* branches."""
+
+    def test_prunes_orphaned_hermes_branch(self, git_repo):
+        """hermes/hermes-* branches with no worktree should be deleted."""
+        # Create a branch that looks like a worktree branch but has no worktree
+        subprocess.run(
+            ["git", "branch", "hermes/hermes-deadbeef", "HEAD"],
+            cwd=str(git_repo), capture_output=True, check=False,
+        )
+
+        # Verify it exists
+        result = subprocess.run(
+            ["git", "branch", "--list", "hermes/hermes-deadbeef"],
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
+        )
+        assert "hermes/hermes-deadbeef" in result.stdout
+
+        # Simulate _prune_orphaned_branches logic
+        result = subprocess.run(
+            ["git", "branch", "--format=%(refname:short)"],
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
+        )
+        all_branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
+
+        wt_result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
+        )
+        active_branches = {"main"}
+        for line in wt_result.stdout.split("\n"):
+            if line.startswith("branch refs/heads/"):
+                active_branches.add(line.split("branch refs/heads/", 1)[-1].strip())
+
+        orphaned = [
+            b for b in all_branches
+            if b not in active_branches
+            and (b.startswith("hermes/hermes-") or b.startswith("pr-"))
+        ]
+        assert "hermes/hermes-deadbeef" in orphaned
+
+        # Delete them
+        if orphaned:
+            subprocess.run(
+                ["git", "branch", "-D"] + orphaned,
+                capture_output=True, text=True, cwd=str(git_repo), check=False,
+            )
+
+        # Verify gone
+        result = subprocess.run(
+            ["git", "branch", "--list", "hermes/hermes-deadbeef"],
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
+        )
+        assert "hermes/hermes-deadbeef" not in result.stdout
+
+    def test_prunes_orphaned_pr_branch(self, git_repo):
+        """pr-* branches should be deleted during pruning."""
+        subprocess.run(
+            ["git", "branch", "pr-1234", "HEAD"],
+            cwd=str(git_repo), capture_output=True, check=False,
+        )
+        subprocess.run(
+            ["git", "branch", "pr-5678", "HEAD"],
+            cwd=str(git_repo), capture_output=True, check=False,
+        )
+
+        result = subprocess.run(
+            ["git", "branch", "--format=%(refname:short)"],
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
+        )
+        all_branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
+
+        active_branches = {"main"}
+        orphaned = [
+            b for b in all_branches
+            if b not in active_branches and b.startswith("pr-")
+        ]
+        assert "pr-1234" in orphaned
+        assert "pr-5678" in orphaned
+
+        subprocess.run(
+            ["git", "branch", "-D"] + orphaned,
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
+        )
+
+        # Verify gone
+        result = subprocess.run(
+            ["git", "branch", "--format=%(refname:short)"],
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
+        )
+        remaining = result.stdout.strip()
+        assert "pr-1234" not in remaining
+        assert "pr-5678" not in remaining
+
+
+    def test_preserves_main_branch(self, git_repo):
+        """main branch should never be pruned."""
+        result = subprocess.run(
+            ["git", "branch", "--format=%(refname:short)"],
+            capture_output=True, text=True, cwd=str(git_repo), check=False,
+        )
+        all_branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
+        active_branches = {"main"}
+
+        orphaned = [
+            b for b in all_branches
+            if b not in active_branches
+            and (b.startswith("hermes/hermes-") or b.startswith("pr-"))
+        ]
+        assert "main" not in orphaned
+
+
+class TestSystemPromptInjection:
+    """Test that the agent gets worktree context in its system prompt."""
+
+    def test_prompt_note_format(self, git_repo):
+        """Verify the system prompt note contains all required info."""
+        info = _setup_worktree(str(git_repo))
+        assert info is not None
+
+        # This is what main() does:
+        wt_note = (
+            f"\n\n[System note: You are working in an isolated git worktree at "
+            f"{info['path']}. Your branch is `{info['branch']}`. "
+            f"Changes here do not affect the main working tree or other agents. "
+            f"Remember to commit and push your changes, and create a PR if appropriate. "
+            f"The original repo is at {info['repo_root']}.]\n"
+        )
+
+        assert info["path"] in wt_note
+        assert info["branch"] in wt_note
+        assert info["repo_root"] in wt_note
+        assert "isolated git worktree" in wt_note
+        assert "commit and push" in wt_note
 
 
 class TestWorktreeLockReaping:
@@ -219,6 +1006,80 @@ class TestWorktreeLockReaping:
         wt = self._mk(cli, git_repo, "hermes-nolock", pid=None)
         cli._prune_stale_worktrees(str(git_repo))
         assert not wt.exists(), "clean unlocked stale worktree should be reaped"
+
+    def test_aged_manager_owned_conversation_tree_survives(self, git_repo, tmp_path):
+        import cli
+        from agent.conversation_worktree import ConversationWorktreeManager
+        from agent.conversation_worktree_policy import ConversationWorktreePolicy
+        from hermes_state import SessionDB
+
+        stable_source = tmp_path / "managed-stable-source"
+        subprocess.run(
+            [
+                "git",
+                "worktree",
+                "add",
+                str(stable_source),
+                "-b",
+                "stable/managed-pruner-test",
+                "HEAD",
+            ],
+            cwd=git_repo,
+            check=True,
+            capture_output=True,
+        )
+        db = SessionDB(tmp_path / "managed-state.db")
+        manager = ConversationWorktreeManager(
+            ConversationWorktreePolicy(
+                enabled=True,
+                source_worktree=stable_source,
+                worktree_root=git_repo / ".worktrees",
+                branch_prefix="hermes/session",
+                bootstrap=False,
+                bootstrap_command=(),
+                bootstrap_timeout=1.0,
+                create_timeout=3.0,
+                retain_until_explicit_cleanup=True,
+            ),
+            db,
+        )
+        binding = manager.bind_new_root_session(
+            "startup-pruner-owned-root", conversation_kind="interactive"
+        )
+        assert binding is not None
+        self._age(binding.path, 24 * 365)
+        try:
+            cli._prune_stale_worktrees(str(git_repo))
+            assert binding.path.exists(), (
+                "startup pruner must never remove a manager-owned conversation worktree"
+            )
+        finally:
+            db.close()
+
+    def test_manager_ownership_appearing_after_classification_blocks_mutation(
+        self, git_repo, monkeypatch
+    ):
+        import cli
+        from agent import conversation_worktree as worktrees
+
+        wt = self._mk(cli, git_repo, "hermes-owned-race", age_h=100)
+        inspections = 0
+
+        def ownership_appears(_path):
+            nonlocal inspections
+            inspections += 1
+            return inspections >= 2
+
+        monkeypatch.setattr(
+            worktrees, "conversation_worktree_is_manager_owned", ownership_appears
+        )
+
+        cli._prune_stale_worktrees(str(git_repo))
+
+        assert inspections >= 2
+        assert wt.exists(), (
+            "startup mutation must re-inspect under the conversation manager lock"
+        )
 
     def test_dirty_survives_over_72h(self, git_repo):
         import cli

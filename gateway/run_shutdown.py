@@ -30,7 +30,11 @@ from gateway.restart import (
 from gateway.run_common import _UNSET
 from gateway.run_runtime import interrupt_side_agents, managed_turn_count, stop_managed_turns
 from gateway.run_shutdown_session_end import GatewaySessionEndMixin
-from gateway.shutdown_watchdog import arm_shutdown_watchdog, resolve_shutdown_watchdog_delay
+from gateway.run_shutdown_drain import GatewayExternalDrainMixin
+from gateway.run_shutdown_diagnostics import GatewayShutdownDiagnosticsMixin
+from gateway.shutdown_watchdog import (
+    arm_shutdown_watchdog, effective_shutdown_watchdog_delay, resolve_shutdown_watchdog_delay,
+)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
@@ -163,14 +167,7 @@ def _delivery_target_key(platform_value: str, chat_id, thread_id, *, profile: Op
     return _notice_target_key(platform_value, chat_id, thread_id)
 
 
-def _effective_watchdog_leash(runner: object) -> float:
-    """Thread-watchdog leash for the stop in progress: effective drain + grace, clamped under
-    launchd's live ``ExitTimeOut`` minus the dump margin. Lives here (not in gateway.restart)
-    because restart.py cannot import shutdown_watchdog without a cycle."""
-    return effective_stop_watchdog_delay(runner, resolve_shutdown_watchdog_delay(effective_stop_drain_timeout(runner)))
-
-
-class GatewayShutdownMixin(GatewaySessionEndMixin):
+class GatewayShutdownMixin(GatewaySessionEndMixin, GatewayExternalDrainMixin, GatewayShutdownDiagnosticsMixin):
     """Stop/drain/restart, scale-to-zero and active-work accounting methods for GatewayRunner."""
 
     @dataclasses.dataclass
@@ -700,57 +697,6 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         except Exception:
             logger.debug("scale-to-zero: redial hold toggle failed", exc_info=True)
             return False
-
-    # External drain control: the dashboard writes/removes ``.drain_request.json`` (gateway/drain_control.py);
-    # the watcher flips between accepting and refusing NEW turns WITHOUT exiting (reversible).
-    def _enter_external_drain(self) -> None:
-        """Begin external drain: refuse NEW turns (in-flight ones are NOT interrupted). Idempotent."""
-        if self._external_drain_active:
-            return
-        self._external_drain_active = True
-        logger.info(
-            "External drain ENGAGED (.drain_request.json present) — refusing "
-            "new turns; %d in-flight turn(s) will finish. Process stays up.", self._active_work_count(),
-        )
-        # Persist "draining" so /api/status tracks it; active_agents is read-merged, only state changes.
-        self._update_runtime_status("draining")
-
-    def _exit_external_drain(self) -> None:
-        """Cancel external drain: re-accept new turns. Idempotent; never resurrects a stopping gateway."""
-        if not self._external_drain_active:
-            return
-        self._external_drain_active = False
-        if self._draining or not self._running:
-            logger.info(
-                "External drain marker cleared during shutdown — not reverting "
-                "to running (shutdown takes precedence)."
-            )
-            return
-        logger.info(
-            "External drain RELEASED (.drain_request.json removed) — "
-            "re-accepting new turns; gateway_state -> %s.", self._serving_state(),
-        )
-        self._update_runtime_status(self._serving_state())
-
-    async def _drain_control_watcher(self, interval: float = 1.0) -> None:
-        """Poll ``.drain_request.json`` at 1s: present -> enter drain, absent -> exit; a stale epoch = absent."""
-        from gateway.drain_control import drain_requested
-        while self._running:
-            try:
-                # Off-thread: a synchronous marker read at 1s cadence can stall 30s+ under host I/O
-                # pressure and take every platform heartbeat down.
-                if await asyncio.to_thread(drain_requested):
-                    self._enter_external_drain()
-                    # API and cron work live outside messaging's _running_agents map; refresh the
-                    # aggregate while an external caller polls this reversible drain state.
-                    self._persist_active_agents()
-                else:
-                    self._exit_external_drain()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.debug("Drain-control watcher tick error: %s", exc, exc_info=True)
-            await asyncio.sleep(interval)
 
     def _update_platform_runtime_status(
         self, platform: str, *, platform_state: Optional[str] = None,
@@ -1794,7 +1740,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             cleanup_all_environments()
 
         def _cleanup_browsers() -> None:
-            from tools.browser_tool_lifecycle import cleanup_all_browsers
+            from tools.browser_session_lifecycle import cleanup_all_browsers
             cleanup_all_browsers()
 
         _step("cleanup_all_environments", _cleanup_environments)
@@ -1815,6 +1761,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         worker runs, the thread is left to finish on its own; the thread-based shutdown
         watchdog remains the hard backstop.
         """
+        from hermes_cli.startup_hold import active
+        if active():
+            return []
         return await asyncio.to_thread(
             GatewayShutdownMixin._stop_kill_tool_subprocesses, phase
         )
@@ -1828,6 +1777,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         self._draining = True
         from gateway.run_runtime import drain_gateway_runtime
         await drain_gateway_runtime(self)
+        if getattr(self, "_kanban_shutdown_drain_marker", None) is not None:
+            self._request_kanban_shutdown_drain(reason="gateway shutdown")
         self._mark_api_runs_shutdown_requested()
         # getattr-guards: shutdown-path test doubles may lack the room worker / systemd watchdog.
         stop_room_worker = getattr(self, "_stop_hosted_room_worker", None)
@@ -2022,6 +1973,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             # worker-thread loops that died with their ThreadPoolExecutor (notably cron ticks) only get
             # swept here. Without this, long-running gateways accumulate async httpx transports until they
             # hit EMFILE on macOS's default RLIMIT_NOFILE=256. See #14210.
+            from hermes_cli.startup_hold import active
+            if active(self):
+                return
             from agent.auxiliary_client import shutdown_cached_clients
             shutdown_cached_clients()
 
@@ -2059,10 +2013,10 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             )
             return
         logger.info("Shutdown phase: executor quiesced at +%.2fs", ctx.elapsed())
-        # Cron jobs (scheduler pool), API-server runs and deferred hygiene workers (both on the loop's
-        # default executor) never touch self._executor, so the join above cannot see them. A writer that
-        # outlived the drain is mid-write for the same #101093 reasons; the drain already spent its
-        # budget, so no second wait — leave the handles open (#102198). The API count is the snapshot
+        # Cron jobs (scheduler pool), API-server runs (their own unbounded executor, never joined at disconnect)
+        # and deferred hygiene workers (the loop's default executor) never touch self._executor, so the join above
+        # cannot see them. A writer that outlived the drain is mid-write for the same #101093 reasons; the drain
+        # spent its budget, so no second wait — leave the handles open (#102198). The API count is the snapshot
         # taken before the adapters were released; a run whose handler task was cancelled at disconnect
         # has already left it, so that term under-counts — the live worker-scoped count below covers
         # the cancelled-handler case (#116535).
@@ -2109,8 +2063,10 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
     async def _stop_persist_exit_state(self, ctx: GatewayShutdownMixin._StopContext) -> None:
         """Clean-shutdown marker, restart markers, terminal runtime status; process bootstrap
         releases PID/lock ownership after the writer drain."""
-        from gateway.run import _hermes_home, _planned_restart_notification_path, _shutdown_gateway_health_export
-        from utils import atomic_json_write
+        from gateway.run import _hermes_home, _shutdown_gateway_health_export
+        from hermes_cli.startup_hold import active
+        if active(self):
+            return _shutdown_gateway_health_export(self)
         if getattr(self, "_startup_cleanup_only", False):  # start never ran: keep startup_failed + crash markers
             return _shutdown_gateway_health_export(self)
         # Clean-shutdown marker skips crash-turn recovery next boot; a timed-out drain left
@@ -2125,15 +2081,13 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         if ctx.active_agents:
             self._increment_restart_failure_counts(set(ctx.active_agents.keys()))
         if self._restart_requested and self._restart_command_source is None:
+            # One writer for the marker (gateway/restart_notice.py): the CLI restart stamps the same
+            # file, and a rename on either side must not strand the other's write.
+            from gateway.restart_notice import write_planned_restart_marker
             with _log_suppressed(logging.DEBUG, "Failed to write planned restart notification marker: %s"):
-                atomic_json_write(
-                    _planned_restart_notification_path(),
-                    {
-                        "requested_at": time.time(),
-                        "via_service": bool(self._restart_via_service),
-                        "detached": bool(self._restart_detached),
-                    },
-                    indent=None,
+                write_planned_restart_marker(
+                    via_service=bool(self._restart_via_service),
+                    detached=bool(self._restart_detached),
                 )
         if self._restart_requested and self._restart_via_service:
             # Exit 75 + ``RestartForceExitStatus=75``: systemd replaces us without a racing helper.
@@ -2167,26 +2121,11 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         _shutdown_gateway_health_export(self)
         logger.info("Gateway stopped (total teardown %.2fs)", ctx.elapsed())
 
-    def _shutdown_watchdog_snapshot(self, ctx: GatewayShutdownMixin._StopContext) -> dict:
-        """State dumped by the thread-based shutdown watchdog when teardown hangs."""
-        return {
-            "restart_requested": bool(self._restart_requested),
-            "draining": bool(self._draining),
-            "running": bool(self._running),
-            "active_agents": self._running_agent_count(),
-            "active_cron_jobs": self._active_cron_job_count(),
-            "active_api_runs": self._active_api_run_count(),
-            "active_deferred_agent_workers": ctx.deferred_count(),
-            "restart_drain_timeout": self._restart_drain_timeout,
-            "effective_drain_timeout": effective_stop_drain_timeout(self),
-            "launchd_exit_timeout_s": getattr(self, "_launchd_exit_timeout_s", None),
-            "watchdog_delay_s": _effective_watchdog_leash(self),
-            "phase_elapsed_s": ctx.elapsed() if ctx.started_at is not None else None,
-        }
-
     async def _stop_impl(self) -> None:
         """Run every ``_stop_*`` phase under the thread-based shutdown watchdog."""
         from gateway.run import GatewayRunner
+        from gateway.run_local_runtime import begin_local_runtime_shutdown, finalize_local_runtime
+        begin_local_runtime_shutdown(self)
         # Thread-based watchdog (asyncio timeouts cannot recover a frozen loop): dumps stacks and
         # os._exit past drain+grace so the service manager revives us. Skipped under pytest.
         # Arm a plain OS thread at the start of stop(); if teardown never finishes within drain+grace it
@@ -2200,7 +2139,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         )
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             arm_shutdown_watchdog(
-                _effective_watchdog_leash(self), done_event=_watchdog_done,
+                effective_shutdown_watchdog_delay(self), done_event=_watchdog_done,
                 snapshot_fn=lambda: GatewayRunner._shutdown_watchdog_snapshot(self, ctx), exit_code=1,
             )
         try:
@@ -2216,8 +2155,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             if ctx.timed_out:
                 await GatewayRunner._stop_interrupt_remaining_work(self, ctx)
             from gateway.run_runtime import settle_gateway_runtime  # within what the leash has left
-            await settle_gateway_runtime(self, _effective_watchdog_leash(self) - ctx.elapsed(), GatewayRunner._shutdown_interrupt_reason(self))
+            await settle_gateway_runtime(self, effective_shutdown_watchdog_delay(self) - ctx.elapsed(), GatewayRunner._shutdown_interrupt_reason(self))
             await GatewayRunner._stop_finalize_agents_and_adapters(self, ctx)
+            await finalize_local_runtime(self, ctx)
             await GatewayRunner._stop_release_runtime_state(self, ctx)
             GatewayRunner._stop_quiesce_and_close_session_dbs(self, timeout, ctx)
             await GatewayRunner._stop_persist_exit_state(self, ctx)

@@ -296,3 +296,98 @@ def test_truncation_detection_semantics():
     assert event_replay.is_truncated("s1", 5)
     # Unknown session: nothing evicted, nothing truncated.
     assert not event_replay.is_truncated("nope", 0)
+
+
+def test_rpc_reconnect_replays_pending_request_until_its_answer(monkeypatch):
+    """An unanswered prompt survives a missed wire frame and disappears after settlement."""
+    from tui_gateway import server, server_requests
+
+    written, outcomes = [], []
+    monkeypatch.setattr(server_requests, "_write", written.append)
+    monkeypatch.setattr(server_requests, "_emit", lambda *args: None)
+    monkeypatch.setattr(server_requests, "_answerable", lambda sid: True)
+    server_requests.reset_for_tests()
+    settle = server_requests.send_async("sudo", "reconnect", {"command": "echo test"}, outcomes.append)
+    try:
+        reply = server.handle_request({"id": "replay", "method": "session.events.since",
+                                       "params": {"session_id": "reconnect", "last_seen": 0}})
+        assert reply["result"]["open_requests"] == [
+            {k: written[0][k] for k in ("id", "method", "params")}
+        ]
+        other = server.handle_request({"id": "other", "method": "session.events.since",
+                                       "params": {"session_id": "other", "last_seen": 0}})
+        assert other["result"]["open_requests"] == []
+        assert server_requests.resolve_response({"id": written[0]["id"], "result": {"value": "answer"}})
+        replay = server.handle_request({"id": "done", "method": "session.events.since",
+                                        "params": {"session_id": "reconnect", "last_seen": 0}})
+        assert replay["result"]["open_requests"] == []
+        assert outcomes == [{"value": "answer"}]
+    finally:
+        settle("test cleanup")
+        server_requests.reset_for_tests()
+
+
+def test_forget_session_frees_the_ring_and_keeps_seq_and_gap_semantics():
+    for _ in range(3):
+        event_replay._stamp_event(_frame("gone"))
+    event_replay._stamp_event(_frame("kept"))
+    before = replay_stats()["bytes"]
+
+    event_replay.forget_session("gone")
+
+    assert replay_stats()["sessions"] == 1
+    assert 0 < replay_stats()["bytes"] < before
+    assert events_since("gone", 0) == []
+    assert latest_seq("gone") == 3  # numbering survives: a late frame continues at 4
+    assert event_replay.is_truncated("gone", 2)  # a client behind the drop must refetch
+    assert not event_replay.is_truncated("gone", 3)
+    late = _frame("gone")
+    event_replay._stamp_event(late)
+    assert late["params"]["seq"] == 4
+    assert len(events_since("kept", 0)) == 1
+    event_replay.forget_session("never-seen")  # frees nothing, raises nothing
+
+
+def test_a_frame_stamped_after_forget_does_not_rebuild_the_ring():
+    event_replay._stamp_event(_frame("closed"))
+    event_replay.forget_session("closed")
+
+    late = _frame("closed")
+    late["params"]["payload"] = {"text": "x" * 100_000}
+    event_replay._stamp_event(late)
+
+    assert late["params"]["seq"] == 2  # numbering still advances
+    assert events_since("closed", 0) == []
+    assert replay_stats()["sessions"] == 0 and replay_stats()["bytes"] == 0
+    assert event_replay.is_truncated("closed", 1)  # a client holding seq 1 refetches
+
+
+def test_session_teardown_releases_the_replay_ring(monkeypatch):
+    from tui_gateway import session_lifecycle
+
+    # The isolated-turn settle and full finalize need an agent/DB behind the dict; the subject is the ring.
+    monkeypatch.setattr(session_lifecycle, "_teardown_session", lambda session, end_reason="tui_close": None)
+    for _ in range(3):
+        event_replay._stamp_event(_frame("closed-sid"))
+    event_replay._stamp_event(_frame("live-sid"))
+
+    assert session_lifecycle._teardown_popped_session({"_sid": "closed-sid"}, end_reason="tui_shutdown")
+
+    assert events_since("closed-sid", 0) == []
+    assert event_replay.is_truncated("closed-sid", 0)
+    assert len(events_since("live-sid", 0)) == 1
+
+
+def test_a_raising_teardown_still_releases_the_replay_ring(monkeypatch):
+    from tui_gateway import session_lifecycle
+
+    def _boom(session, end_reason="tui_close"):
+        raise RuntimeError("finalize failed")
+
+    monkeypatch.setattr(session_lifecycle, "_teardown_session", _boom)
+    event_replay._stamp_event(_frame("failed-sid"))
+
+    with pytest.raises(RuntimeError):
+        session_lifecycle._teardown_popped_session({"_sid": "failed-sid"}, end_reason="tui_shutdown")
+
+    assert events_since("failed-sid", 0) == []

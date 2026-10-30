@@ -76,6 +76,8 @@ def _start_parent_death_watchdog(original_ppid) -> None:
         deadline = time.monotonic() + _ORPHAN_GRACE_S
         while _in_flight.is_set() and time.monotonic() < deadline:
             time.sleep(0.05)  # let an in-flight command finish/flush
+        from hermes_cli.observability.shared_metrics_process import flush_before_hard_exit
+        flush_before_hard_exit()  # os._exit skips the opt-in metrics runtimes' atexit flush (bounded)
         os._exit(0)
     threading.Thread(target=_loop, daemon=True).start()
 
@@ -180,7 +182,8 @@ def main():
         # "moa" provider included). Without it HermesCLI re-resolves from config and dispatches the
         # MoA preset NAME to the configured real provider (#57283).
         cli = HermesCLI(model=args.model or None, provider=args.provider or None,
-                        compact=True, resume=args.session_key, verbose=False)
+                        compact=True, resume=args.session_key, verbose=False,
+                        manage_conversation_worktree=False)
     cli._slash_metrics_surface = None  # the TUI/Desktop client already counted the typed command
     cli.is_slash_worker = True
     # Spurious stdin-EOF recovery (same shared-file-description O_NONBLOCK issue as the gateway entry

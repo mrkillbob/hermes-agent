@@ -13,10 +13,10 @@ permissions:
 
 jobs:
   docs-site-checks:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
 
@@ -31,6 +31,10 @@ jobs:
         with:
           command: npm ci
           working-directory: website
+
+      - name: Check Docusaurus Tinypool compatibility
+        run: node scripts/check-tinypool-compat.mjs
+        working-directory: website
 
       - name: Install ascii-guard
         uses: ./.github/actions/retry
@@ -66,3 +70,8 @@ jobs:
         # Same pattern Docusaurus uses internally (build:fast --locale en).
         run: npm run build:fast
         working-directory: website
+
+      - name: Audit website dependencies
+        # Fails on any high/critical advisory except the allow-listed ones (braces has no
+        # patched release); see scripts/ci/npm_audit_gate.py.
+        run: python3 scripts/ci/npm_audit_gate.py website

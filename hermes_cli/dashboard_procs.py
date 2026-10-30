@@ -26,7 +26,7 @@ def _append_row(rows: list[tuple[int, str]], pid_text: str, command: str) -> Non
         pass
 
 
-def _iter_process_table() -> list[tuple[int, str]]:
+def _iter_process_table(*, strict: bool = False) -> list[tuple[int, str]]:
     """``(pid, cmdline)`` for every process, via wmic (Windows) or ps. Raises on scan failure."""
     rows: list[tuple[int, str]] = []
     if sys.platform == "win32":
@@ -47,6 +47,8 @@ def _iter_process_table() -> list[tuple[int, str]]:
             ["wmic", "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"],
             timeout=10, errors="ignore")
         if result is None or result.returncode != 0 or result.stdout is None:
+            if strict:
+                raise RuntimeError('startup_hold_writers_unknown')
             return rows
         current_cmd = ""
         for line in result.stdout.split("\n"):
@@ -55,13 +57,17 @@ def _iter_process_table() -> list[tuple[int, str]]:
                 current_cmd = line[len("CommandLine=") :]
             elif line.startswith("ProcessId="):
                 _append_row(rows, line[len("ProcessId=") :], current_cmd)
+        if strict and not rows:
+            raise RuntimeError('startup_hold_writers_unknown')
         return rows
     # ps, not `pgrep -f "hermes.*dashboard"` (greedy regex; consistent with gateway pid scan).
     result = subprocess.run(["ps", "-A", "-o", "pid=,command="], timeout=10, **_PS_RUN_KWARGS, check=False)
+    if strict and (result.returncode != 0 or not getattr(result, 'stdout', '')):
+        raise RuntimeError('startup_hold_writers_unknown')
     if result.returncode == 0:
         for line in getattr(result, "stdout", "").split("\n"):
             parts = line.strip().split(None, 1)
-            if len(parts) == 2 and "grep" not in line:
+            if len(parts) == 2 and (strict or "grep" not in line):
                 _append_row(rows, parts[0], parts[1])
     return rows
 
@@ -163,9 +169,12 @@ def _pid_passwd_home(pid: int) -> str | None:
     return None
 
 
-def _hermes_home_for_pid(pid: int) -> str | None:
-    """The Hermes home *pid* runs on, tri-state: ``None`` ONLY when its environment is unreadable
-    (another user, hardened ``/proc``) — callers spare those, never guess.
+def _hermes_home_for_pid(pid: int, *, require_launch_identity: bool = False) -> str | None:
+    """Resolve a process home for discovery, or require pinned launch identity for termination.
+
+    By default, ``None`` means an unreadable environment (another user, hardened ``/proc``).
+    ``require_launch_identity`` also refuses missing argv, relative/missing home anchors and
+    any profile selection that would depend on today's sticky ``active_profile``.
 
     A readable environment always resolves, replaying ``_apply_profile_override`` on the target's
     exec-time env + argv (``hermes -p X serve`` rewrites ``HERMES_HOME`` in ``os.environ`` AFTER
@@ -176,14 +185,28 @@ def _hermes_home_for_pid(pid: int) -> str | None:
     the profile is the ``--profile``/``-p`` flag, else the root's sticky ``active_profile`` unless
     the process has a fixed identity (supervised child, post-swap updater, Desktop SSH backend).
     """
+    # Destructive callers require launch evidence; discovery may still use sticky selection.
     env = _pid_environ(pid)
     if env is None:
         return None
     from hermes_cli.main_dashboard import _dashboard_cmdline_for_pid
     from hermes_cli.profiles import get_active_profile, normalize_profile_name, profile_root_for_env_home
-    argv = _dashboard_cmdline_for_pid(pid) or []
+    argv = _dashboard_cmdline_for_pid(pid)
+    if require_launch_identity and argv is None:
+        # The dashboard argv reader has no Windows implementation; psutil does.
+        import psutil
+        argv = psutil.Process(pid).cmdline()
+    if require_launch_identity and not argv:
+        return None
+    argv = argv or []
     env_home = env.get("HERMES_HOME", "").strip()
     profile = _profile_flag_value(argv)
+    if require_launch_identity:
+        anchor = (env.get('LOCALAPPDATA') or env.get('USERPROFILE')) if sys.platform == 'win32' else env.get('HOME')
+        if env_home and not Path(env_home).is_absolute():
+            return None
+        if not env_home and (not anchor or not Path(anchor).is_absolute()):
+            return None
     if profile is None and env_home and (
         Path(env_home).parent.name == "profiles" or env.get("HERMES_UPDATE_POST_SWAP") == "1"
     ):
@@ -196,8 +219,10 @@ def _hermes_home_for_pid(pid: int) -> str | None:
         default_home = Path(env.get("HOME") or _pid_passwd_home(pid) or Path.home()) / ".hermes"
     root = profile_root_for_env_home(env_home, default_home)
     fixed_identity = any(env.get(k) for k in ("HERMES_SUPERVISED_CHILD", "HERMES_S6_SUPERVISED_CHILD",
-                                               "HERMES_GATEWAY_EXTERNAL_SUPERVISOR")) or is_desktop_ssh_backend_argv(argv)
+                                               "HERMES_GATEWAY_EXTERNAL_SUPERVISOR")) or "--ssh-session-token-file" in argv
     if profile is None and not fixed_identity:
+        if require_launch_identity:
+            return None  # The sticky profile at launch is unknowable; never read today's value.
         profile = get_active_profile(root)
     canon = normalize_profile_name(profile) if profile else "default"
     return str(root) if canon == "default" else str(root / "profiles" / canon)

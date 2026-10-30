@@ -37,6 +37,26 @@ _PROBE_TIMEOUT = 30
 _PROBE_SENTINEL = "HERMES_VALIDATE_JSON:"
 
 
+def _stop_capability_probe(proc, process_group: int | None, job) -> None:
+    """Stop the probe tree before its scratch home is removed."""
+    if job is not None:
+        try:
+            job.close()
+        except Exception:
+            pass
+    if process_group is not None:
+        try:
+            import signal
+
+            os.killpg(process_group, signal.SIGKILL)  # windows-footgun: ok — POSIX-only value
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
+
+
 @dataclass
 class ValidationReport:
     """Result of validating one plugin directory."""
@@ -232,7 +252,7 @@ class RecordingContext:
     def register_tool(self, name, *args, **kwargs):
         recorded["tools"].append(str(name))
 
-    def register_hook(self, hook_name, callback):
+    def register_hook(self, hook_name, callback, *, hold_stream=False):
         recorded["hooks"].append(str(hook_name))
 
     def register_middleware(self, kind, callback):
@@ -351,27 +371,46 @@ def _run_capability_probe(
     is the ``{tools, hooks, middleware, commands, providers}`` dict on
     success, and *error* is a human-readable failure description otherwise.
     """
+    from hermes_cli.local_runtime.processes import spawn_server
+
     with tempfile.TemporaryDirectory(prefix="hermes-validate-") as scratch:
         env = dict(probe[1] if probe else os.environ)
         env["HERMES_HOME"] = scratch
+        proc = None
+        process_group = None
+        job = None
+        # Probe this source tree's provider contracts without trusting the cwd.
+        repo_root = str(Path(__file__).resolve().parents[1])
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (repo_root, env.get("PYTHONPATH", "")) if p)
+        python, *options = probe[0] if probe else [sys.executable]
         try:
-            result = subprocess.run(
+            proc, job = spawn_server(
                 [
-                    *(probe[0] if probe else [sys.executable]),
+                    # -P: ``-c`` would put the user's cwd ahead of Hermes and the plugin's imports.
+                    python, "-P", *options,
                     "-c",
                     _PROBE_SCRIPT,
                     str(plugin_dir),
                     _PROBE_SENTINEL,
                     json.dumps(_probe_options(manifest)),
                 ],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace",
-                timeout=_PROBE_TIMEOUT,
                 env=env,
-                check=False,
+                **({"process_group": 0} if os.name != "nt" else {}),
+            )
+            if os.name != "nt":
+                process_group = os.getpgid(proc.pid)
+            stdout, stderr = proc.communicate(timeout=_PROBE_TIMEOUT)
+            result = subprocess.CompletedProcess(
+                proc.args, proc.returncode, stdout=stdout, stderr=stderr
             )
         except subprocess.TimeoutExpired:
             return None, f"capability probe timed out after {_PROBE_TIMEOUT}s"
+        finally:
+            if proc is not None:
+                _stop_capability_probe(proc, process_group, job)
 
     payload: Optional[dict] = None
     for line in (result.stdout or "").splitlines():
@@ -401,7 +440,7 @@ def _declared_list(manifest: dict, key: str) -> list[str]:
 
 def _check_capabilities(
     report: ValidationReport, manifest: dict, plugin_dir: Path,
-    probe: Optional[tuple[Path, dict[str, str]]] = None,
+    probe: Optional[tuple[list[str], dict[str, str]]] = None,
 ) -> Optional[dict]:
     """Probe actual registrations and diff against declared capabilities.
 
@@ -667,6 +706,12 @@ def _validate_portable_plugin(report: ValidationReport, plugin_dir: Path) -> Val
         if config.get("trust") == "untrusted":
             report.add(f"server trust: {server_name}", True,
                        "untrusted (Hermes asks before every write-capable tool call)")
+        if config.get("tool_costs"):
+            limit = config.get("spend_limit") or 0
+            report.add(f"server costs: {server_name}", True,
+                       f"{len(config['tool_costs'])} costed tool(s), "
+                       + (f"spend limit {limit} {config.get('cost_unit') or 'credits'} per chat" if limit
+                          else "no spend limit"))
     for server_name, server_decl in package.server_declarations.items():
         result = availability(server_decl.declaration)
         detail = result.state

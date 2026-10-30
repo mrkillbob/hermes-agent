@@ -248,6 +248,32 @@ def test_unregistered_session_never_inherits_another_sessions_record(
     assert resolved == (main / "target.py").resolve()
 
 
+def test_read_file_uses_resolved_workspace_not_shared_backend_cwd(
+    _isolated_cwd, monkeypatch
+):
+    """A shared local backend must not re-resolve a relative read elsewhere."""
+    import json
+
+    workspace, decoy = _isolated_cwd
+    task_id = "sess-read-workspace"
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+    monkeypatch.setattr(ft, "_file_ops_cache", {})
+    terminal_tool.register_task_env_overrides(task_id, {"cwd": str(workspace)})
+
+    from tools.environments.local import LocalEnvironment
+    from tools.file_operations import ShellFileOperations
+
+    env = LocalEnvironment(cwd=str(decoy))
+    monkeypatch.setattr(
+        ft, "_get_file_ops", lambda task_id="default": ShellFileOperations(env)
+    )
+
+    result = json.loads(ft.read_file_tool("target.py", task_id=task_id))
+
+    assert result["content"].startswith("1|WORKSPACE_ORIGINAL")
+    assert "DECOY_ORIGINAL" not in result["content"]
+
+
 def test_v4a_patch_applies_to_resolved_workspace_not_backend_cwd(
     _isolated_cwd, monkeypatch
 ):
@@ -352,3 +378,25 @@ def test_v4a_delete_and_move_act_on_a_symlink_not_its_target(
     assert str(link) in out["files_modified"]
     if dest:
         assert os.readlink(workspace / dest) == "safe/base.yaml"
+
+
+@pytest.mark.parametrize("live_cwd", [None, "/srv/project-a"], ids=["no-env", "shared-env-moved"])
+def test_container_relative_path_without_a_recorded_cwd_uses_the_backend_cwd(_isolated_cwd, monkeypatch, live_cwd):
+    """A container session with no recorded cwd resolves relative paths against the backend's configured cwd, the
+    same place its terminal commands start: never the process cwd (a host dir such as ``/opt/data`` the sandbox
+    lacks), and never a shared env's live cwd (wherever ANOTHER session last ``cd``'d)."""
+    _workspace, decoy = _isolated_cwd
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {"env_type": "modal", "cwd": "/root"})
+    envs = {}
+    if live_cwd:
+        envs["default"] = type("ModalEnvironment", (), {"cwd": live_cwd})()
+    monkeypatch.setattr(terminal_tool, "_active_environments", envs)
+
+    resolved = ftp._resolve_path_for_task("notes/todo.md", task_id="b")
+    command_cwd = terminal_tool._resolve_command_cwd(
+        workdir=None, default_cwd="/root", session_key="b", env_type="modal")
+
+    assert resolved == PurePosixPath("/root") / "notes" / "todo.md"
+    assert resolved.parent.parent == PurePosixPath(command_cwd)
+    assert not str(resolved).startswith(str(decoy))

@@ -25,6 +25,10 @@ from tests.ci.test_update_ci_routing import _REPO, _ci_run, _consumers_reached, 
     "pm/plugins_state.py",
     "pm/install.py",
     "hermes_cli/backup.py",
+    "hermes_cli/config_load.py",  # effective update-feed config reads cache/maintenance policy
+    "hermes_cli/startup_hold_exec.py",  # bootstrap re-entry retains its writer reservation
+    "hermes_cli/backup_profiles.py",
+    "hermes_state_file_identity.py",
 ])
 def test_second_hop_update_change_dispatches_real_update_consumers(path):
     lanes = _real_classifier([path])

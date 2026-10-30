@@ -56,7 +56,8 @@ def apply_nofile_soft_limit(config: Mapping[str, Any] | None = None) -> bool:
     to a finite hard limit; never lowers a higher soft limit. Unsupported platforms, malformed
     settings, and denied ``setrlimit`` must never prevent a server from starting.
     """
-    if _resource is None:
+    from hermes_cli.startup_hold import active as startup_hold_active
+    if _resource is None or startup_hold_active():
         return False
     target = configured_nofile_soft_limit(config)
     if target is None:

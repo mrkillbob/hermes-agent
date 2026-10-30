@@ -38,6 +38,7 @@ async def test_only_the_viewers_own_turn_skips_the_whole_script_gate(tmp_path, m
     runner.session_store._db = runner._session_db = db
     authority = await initialize_session_authority(runner, profile_id="default", instance_id="owner", db=db)
     gates = {}
+    diagnostic_claims = {}
 
     def gate_in_turn_thread(live):
         # What TurnRunner binds for the agent thread: the frozen policy, the session key, its notifier.
@@ -66,6 +67,14 @@ async def test_only_the_viewers_own_turn_skips_the_whole_script_gate(tmp_path, m
                 A._pending.pop(live.route, None)
 
     async def answer(event):
+        if event.text == "plugin injection":
+            from agent.llm_egress_request_diagnostics import verify_current_claimed_turn
+            diagnostic_claim = event._diagnostic_claim
+            diagnostic_claims["routing_claim_absent"] = not hasattr(event, "_claimed_owner")
+            diagnostic_claims["verified"] = verify_current_claimed_turn(
+                diagnostic_claim[0], diagnostic_claim[1], diagnostic_claim[2],
+                event.source, ref.session_id, expected_scope=diagnostic_claim[3],
+            )
         gates[event.text] = await asyncio.to_thread(gate_in_turn_thread, authority.sessions[ref.session_id])
         return "ok"
 
@@ -99,6 +108,7 @@ async def test_only_the_viewers_own_turn_skips_the_whole_script_gate(tmp_path, m
                      "plugin injection": (False, ["execute_code"]),
                      "loop tick": (False, ["execute_code"]),
                      "typed, then detached": (False, ["execute_code"])}
+    assert diagnostic_claims == {"routing_claim_absent": True, "verified": True}
 
 
 @pytest.mark.parametrize("request_id,payload,viewer", [

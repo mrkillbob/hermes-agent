@@ -280,6 +280,13 @@ export class VoiceLiveSession {
       throw new Error('GPT-Live session already started')
     }
 
+    // An insecure origin (a Webapp opened over plain HTTP from another machine) has no
+    // mediaDevices. Fail before opening a peer, with the error the recorder's copy maps to
+    // "microphone unsupported", instead of a TypeError on the missing API.
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new DOMException('Microphone capture is unavailable here', 'NotSupportedError')
+    }
+
     const connection = new RTCPeerConnection()
     this.peer = connection
 
@@ -298,6 +305,12 @@ export class VoiceLiveSession {
     this.microphone = await navigator.mediaDevices.getUserMedia({
       audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true }
     })
+
+    if (this.finalized) {
+      this.stopMicrophone()
+
+      return
+    }
 
     for (const track of this.microphone.getAudioTracks()) {
       connection.addTrack(track, this.microphone)
@@ -504,6 +517,9 @@ export class VoiceLiveSession {
       return
     }
 
+    // Local capture ends immediately; the data channel stays alive for usage accounting.
+    this.stopMicrophone()
+
     if (!this.send({ type: 'session.close' })) {
       this.finish('close_requested', null)
 
@@ -511,6 +527,11 @@ export class VoiceLiveSession {
     }
 
     this.closeTimer = window.setTimeout(() => this.finish('close_requested', null), CLOSE_TIMEOUT_MS)
+  }
+
+  private stopMicrophone(): void {
+    this.microphone?.getTracks().forEach(track => track.stop())
+    this.microphone = null
   }
 
   private finish(reason: string, usageSeconds: null | number): void {
@@ -532,7 +553,7 @@ export class VoiceLiveSession {
 
     this.analyser?.disconnect()
     void this.audioContext?.close().catch(() => undefined)
-    this.microphone?.getTracks().forEach(track => track.stop())
+    this.stopMicrophone()
     this.events?.close()
     this.peer?.close()
     this.audio.srcObject = null

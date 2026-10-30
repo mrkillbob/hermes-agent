@@ -9,6 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 def main() -> int:
     # PM's import closure constructs HTTPS clients; install platform trust
     # before importing it, but never mutate SSL merely by importing launch.
+    from pm.lifetime_launch import adopt_arguments
+
+    adopt_arguments(sys.argv)
     truststore.inject_into_ssl()
     from pm.cli import main as cli_main
     from pm.runtime import lease_current_runtime

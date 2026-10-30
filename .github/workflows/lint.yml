@@ -10,7 +10,8 @@ name: Lint (ruff + ty)
 #   3. Blocking code-health ratchet (``scripts/code_health``) for Python and TypeScript.
 # ``python scripts/check`` runs every blocking check here locally with the same pinned tools.
 #
-# CI-sensitive file review is enforced by .github/CODEOWNERS, not a CI job.
+# The fork's CI-sensitive review remains in review-labels.yml; CODEOWNERS
+# additionally routes these files where a code-owner ruleset is configured.
 
 on:
   workflow_call:
@@ -39,14 +40,21 @@ jobs:
   lint-diff:
     name: ruff + ty diff
     if: inputs.event_name == 'pull_request' && inputs.python
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    # Checkout alone has been observed taking >10 min on this fork right after
+    # a large upstream-sync merge (materializing/transferring the huge
+    # refs/pull/<N>/merge synthetic commit is slow); the job's own work is
+    # seconds. Generous headroom so a slow-but-succeeding fetch isn't killed.
+    timeout-minutes: 20
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 0 # need full history for merge-base + worktree
+          # Two commits keep the PR merge base (or HEAD~1 for pushes) available.
+          # The exact PR base SHA comes from the event payload below; fetching
+          # every branch and tag made this advisory job time out on checkout.
+          fetch-depth: 2
 
       - uses: ./.github/actions/setup-pm
         with:
@@ -56,16 +64,24 @@ jobs:
       - name: Install ruff + ty
         uses: ./.github/actions/retry
         with:
-          command: python -m scripts.ci.python_packages "$(python -m scripts.code_health --print-pins)" ty==0.0.82
+          command: python -m scripts.ci.python_packages "$(python -m scripts.code_health --print-pins)" ty==0.0.89
 
       - name: Determine base ref
         id: base
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_NAME: ${{ inputs.event_name }}
         run: |
-          # For PRs, diff against the merge base with the target branch.
+          # For PRs, diff against the exact target SHA captured for this event.
           # For pushes to main, diff against the previous commit on main.
-          if [ "${{ inputs.event_name }}" = "pull_request" ]; then
-            BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
-            BASE_REF="origin/${{ github.base_ref }}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE_SHA="$PR_BASE_SHA"
+            if [ -z "$BASE_SHA" ]; then
+              echo "Pull request base SHA is missing" >&2
+              exit 1
+            fi
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            BASE_REF="$BASE_SHA"
           else
             BASE_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
             BASE_REF="HEAD~1"
@@ -146,11 +162,11 @@ jobs:
     # the diff comment even when enforcement fails.
     name: ruff enforcement (blocking)
     if: inputs.python
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
 
@@ -184,11 +200,11 @@ jobs:
     # parent (current main), so an improvement that lands on main is locked in at once.
     name: code health ratchet (blocking)
     if: inputs.event_name == 'pull_request'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 2 # the merge commit and its first parent (the base branch tip)
@@ -220,11 +236,11 @@ jobs:
     # See scripts/check-windows-footguns.py for the full rule list.
     name: Windows footguns (blocking)
     if: inputs.python
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
 
@@ -251,6 +267,11 @@ jobs:
       # (#92554, regressed repeatedly). All writers go through the hermes_cli.config writer seam.
       - name: Forbid config.yaml writers that bypass the comment-preserving writer
         run: python scripts/check_config_yaml_writers.py
+
+      # Every read of a user config.yaml goes through hermes_cli.config_backend, so a non-file
+      # config backend (config-config design §4.1) sees every reader.
+      - name: Forbid config.yaml readers that bypass the config backend
+        run: python scripts/check_config_yaml_readers.py
 
       # The OS lanes import only files carrying the matching marker, so a test that fakes
       # macOS (is_macos -> True, sys.platform -> "darwin") without `platforms("macos")` is green on

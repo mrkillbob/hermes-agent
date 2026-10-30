@@ -13,6 +13,27 @@ import hermes_cli.web_server_files as _web_server_files
 import hermes_cli.web_server_gateway as _web_server_gateway
 
 
+def test_gateway_start_uses_manual_run_when_no_service_is_installed(monkeypatch):
+    import asyncio
+
+    from hermes_cli import gateway
+    from hermes_cli.web_routers import ops
+
+    spawned = {}
+    monkeypatch.setattr(gateway, "_installed_service_kind", lambda: None)
+    monkeypatch.setattr(
+        ops,
+        "_spawn_hermes_action",
+        lambda command, name: spawned.update(command=command, name=name)
+        or type("Process", (), {"pid": 123})(),
+    )
+
+    result = asyncio.run(ops.start_gateway())
+
+    assert spawned == {"command": ["-p", "default", "gateway", "run"], "name": "gateway-start"}
+    assert result == {"ok": True, "pid": 123, "name": "gateway-start"}
+
+
 def _client():
     try:
         from starlette.testclient import TestClient
@@ -827,6 +848,28 @@ class TestUpdateCheckEndpoint:
         assert body["can_apply"] is True
 
 
+    @pytest.mark.parametrize("version", [None, "", "1.2.3"])
+    @pytest.mark.parametrize("held", [True, False], ids=["held", "rollback"])
+    def test_release_message_names_only_a_known_version(self, monkeypatch, version, held):
+        monkeypatch.setattr(_cfg_mod, "detect_install_method", lambda *a, **k: "git")
+        monkeypatch.setattr("hermes_cli.source_check.check_for_updates", lambda **kw: {
+            "behind": 0 if held else -1, "held": "downgrade" if held else None,
+            "rollback": not held, "sourceVersion": version, "channel": "preview", "commits": [],
+        })
+
+        response = self.client.get("/api/hermes/update/check")
+        assert response.status_code == 200
+        body = response.json()
+        release = "preview release" + (f" v{version}" if version else "")
+        assert body["message"].startswith(f"This build is newer than {release}," if held else
+                                          f"This build is newer than {release}.")
+        assert body["update_available"] is not held
+        assert body["source_version"] == version
+        if held:
+            assert body["held"] == "downgrade"
+        else:
+            assert "Updating moves it back" in body["message"]
+
     def test_managed_runtime_dashboard_is_not_applyable(self, monkeypatch):
 
         monkeypatch.setattr(_web_server_files, "_dashboard_local_update_managed_externally", lambda: True)
@@ -1181,7 +1224,9 @@ def test_named_profile_action_isolates_parent_env_and_loads_target_env(monkeypat
         "BLUEBUBBLES_PASSWORD": None,
         "NTFY_TOPIC": None,
         "NTFY_TOKEN": None,
-        "ZAI_API_KEY": None,
+        # ZAI_API_KEY is a model-provider credential declared by a provider plugin;
+        # _shared_model_provider_secrets intentionally seeds it from the root .env.
+        "ZAI_API_KEY": "default-zai",
         "A2A_AUTH_MINI": None,
         "EXTERNAL_PROFILE_AUTH": None,
     }

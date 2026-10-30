@@ -65,13 +65,17 @@ concurrency:
 jobs:
   check:
     name: python -m pm.build_env --source . --check-lock
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    # Checkout alone has been observed taking >5 min on this fork right after a
+    # large upstream-sync merge (materializing/transferring the huge
+    # refs/pull/<N>/merge synthetic commit is slow); the job's own work is
+    # seconds. Generous headroom so a slow-but-succeeding fetch isn't killed.
+    timeout-minutes: 20
     outputs:
       review_status: ${{ steps.verify.outputs.review_status }}
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
 

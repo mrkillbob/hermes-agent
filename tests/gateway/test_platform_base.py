@@ -22,6 +22,35 @@ from gateway.platforms.base_log_safety import safe_url_for_log
 from gateway.platforms.event import MessageEvent
 
 
+def test_media_delivery_roots_follow_runtime_profile_home(tmp_path, monkeypatch):
+    """Profile selection after import must move generated-media authority too."""
+    import gateway.platforms.base as platform_base
+
+    active_home = tmp_path / "profiles" / "reviewer"
+    monkeypatch.setattr(platform_base, "get_hermes_home", lambda: active_home)
+    monkeypatch.setattr(platform_base, "MEDIA_DELIVERY_SAFE_ROOTS", ())
+    monkeypatch.setattr(platform_base, "_profile_cache_roots", list)
+    monkeypatch.setattr(platform_base, "_kanban_attachment_roots", list)
+
+    roots = platform_base._media_delivery_allowed_roots()
+
+    expected = {
+        active_home / "cache" / "images",
+        active_home / "cache" / "audio",
+        active_home / "cache" / "videos",
+        active_home / "cache" / "documents",
+        active_home / "cache" / "screenshots",
+        active_home / "image_cache",
+        active_home / "audio_cache",
+        active_home / "video_cache",
+        active_home / "document_cache",
+        active_home / "browser_screenshots",
+    }
+    assert expected <= set(roots)
+    assert active_home / "audi_cache" not in roots
+    assert active_home / "screenshot_cache" not in roots
+
+
 def test_media_delivery_denies_encrypted_bitwarden_cache(tmp_path, monkeypatch):
     """Encrypted Bitwarden cache is covered by the media credential guard."""
     from gateway.platforms import base
@@ -662,6 +691,23 @@ class TestMediaDeliveryDefaultMode:
 
         assert BasePlatformAdapter.validate_media_delivery_path(str(secret)) is None
 
+    @pytest.mark.parametrize("rel", ["webapp/session-token", "webapp/native-sign-in-tokens.json"])
+    def test_denylist_blocks_the_webapps_sign_in_files(self, tmp_path, monkeypatch, rel):
+        """The Webapp's browser credential and its listener's grants to native apps under
+        ``~/.hermes/webapp/`` never deliver as native media, as the agent's file tools never read them."""
+        self._patch_roots(monkeypatch)
+
+        fake_home = tmp_path / "home"
+        hermes_dir = fake_home / ".hermes"
+        (hermes_dir / "webapp").mkdir(parents=True)
+        secret = hermes_dir / rel
+        secret.write_text("t" * 43 + "\n")
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr("gateway.platforms.base._HERMES_HOME", hermes_dir)
+        monkeypatch.setattr("gateway.platforms.base._HERMES_ROOT", hermes_dir)
+
+        assert BasePlatformAdapter.validate_media_delivery_path(str(secret)) is None
+
 
     def test_denylist_blocks_google_token_default_mode(self, tmp_path, monkeypatch):
         """Integration credentials at the HERMES_HOME root (google_token.json)
@@ -745,6 +791,7 @@ class TestMediaDeliveryDefaultMode:
         hermes_root = fake_home / ".hermes"
         profile_b = hermes_root / "profiles" / "beta"
         monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("HERMES_HOME", str(hermes_root))
         monkeypatch.setattr("gateway.platforms.base._HERMES_HOME", hermes_root)
         monkeypatch.setattr("gateway.platforms.base._HERMES_ROOT", hermes_root)
 
@@ -839,6 +886,7 @@ class TestMediaDeliveryDefaultMode:
         monkeypatch.setattr(
             "gateway.platforms.base._HERMES_ROOT", hermes_root
         )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_root))
 
         assert (
             BasePlatformAdapter.validate_media_delivery_path(str(image))

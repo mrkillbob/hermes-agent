@@ -41,7 +41,7 @@ _DEFAULT_BLOCK_MESSAGE = "Blocked by shell hook."
 # Exit code that signals "block this action" independent of stdout (Claude Code / Cursor).
 BLOCK_EXIT_CODE = 2
 # Events whose block directive is honored downstream; exit-2 blocking and fail_closed only apply here.
-_BLOCKING_EVENTS = frozenset({"pre_tool_call"})
+_BLOCKING_EVENTS = frozenset({"pre_tool_call", "pre_kanban_complete"})
 _TOOL_EVENTS = frozenset({"pre_tool_call", "post_tool_call"})
 _STDERR_MESSAGE_LIMIT = 400
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -559,22 +559,25 @@ def _evaluate_result(
     Single place that encodes the failure semantics:
 
     * spawn error / timeout — fail open (log + ``None``) unless the spec
-      is ``fail_closed`` on a blocking-capable event, in which case a
-      canonical block shape is returned;
+      is ``fail_closed`` on a blocking-capable event, or this is a completion
+      gate, in which case a canonical block shape is returned;
     * exit code 2 on a blocking-capable event — block, with the message
       taken from stdout block JSON, then stderr, then a default
       (Claude-Code / Cursor compatible);
     * other non-zero exits — warn, then parse stdout normally; a
       ``fail_closed`` hook blocks if no directive was produced;
     * non-JSON / unparseable stdout on a ``fail_closed`` blocking hook —
-      block instead of silently contributing nothing.
+      block instead of silently contributing nothing; completion gates also
+      block on an empty or missing decision.
 
     Shared by the live callback path (:func:`_make_callback`) and the CLI
     test helper (:func:`run_once`) so ``hermes hooks test`` reflects
     production behaviour exactly.
     """
     blocking_event = spec.event in _BLOCKING_EVENTS
-    fail_closed = spec.fail_closed and blocking_event
+    # Completion is a durable safety boundary: a missing or broken policy must
+    # not be converted to None and filtered out by invoke_hook().
+    fail_closed = (spec.fail_closed and blocking_event) or spec.event == "pre_kanban_complete"
     if r["error"]:
         logger.warning("shell hook failed (event=%s command=%s): %s", spec.event, spec.command, r["error"])
     elif r["timed_out"]:
@@ -602,11 +605,17 @@ def _evaluate_result(
             spec, f"hook exited {r['returncode']} with no directive",
         )
 
-    if parsed is None and fail_closed and stdout and not _is_json_object(stdout):
-        # The hook produced output we could not turn into a directive.
-        # A fail-closed gate must not silently allow the action on
-        # garbage output (e.g. a stack trace on stdout).
-        return _fail_closed_block(spec, "unparseable stdout (expected a JSON object)")
+    if parsed is None and fail_closed and (
+        spec.event == "pre_kanban_complete" or (stdout and not _is_json_object(stdout))
+    ):
+        # Completion gates must not silently allow on an empty response; other
+        # fail-closed hooks reject malformed JSON but retain a valid {} no-op.
+        reason = (
+            "unparseable stdout (expected a JSON object)"
+            if stdout
+            else "missing decision"
+        )
+        return _fail_closed_block(spec, reason)
     return parsed
 
 
@@ -652,6 +661,16 @@ def _parse_pre_tool_call(data: dict[str, Any]) -> Optional[dict[str, Any]]:
     return None
 
 
+def _parse_pre_kanban_complete(data: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Completion policies use the same block/decision dialect as tool guards."""
+    action = str(data.get("action") or data.get("decision") or "").strip().lower()
+    if action == "block":
+        return {"action": "block", "message": _block_message(data.get("message"), data.get("reason"))}
+    # Preserve every JSON object so the completion boundary can reject an
+    # invalid policy decision instead of treating it as a no-op.
+    return data
+
+
 def _parse_pre_verify(data: dict[str, Any]) -> Optional[dict[str, Any]]:
     # "continue" (Hermes) / "block" (Claude-Code Stop) both mean keep going; no message is a no-op.
     action = str(data.get("action") or data.get("decision") or "").strip().lower()
@@ -666,7 +685,11 @@ def _parse_context(data: dict[str, Any]) -> Optional[dict[str, Any]]:
     return {"context": context} if isinstance(context, str) and context.strip() else None
 
 
-_RESPONSE_PARSERS: dict[str, Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = {"pre_tool_call": _parse_pre_tool_call, "pre_verify": _parse_pre_verify}
+_RESPONSE_PARSERS: dict[str, Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = {
+    "pre_tool_call": _parse_pre_tool_call,
+    "pre_kanban_complete": _parse_pre_kanban_complete,
+    "pre_verify": _parse_pre_verify,
+}
 
 
 def _parse_response(event: str, stdout: str) -> Optional[dict[str, Any]]:

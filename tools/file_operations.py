@@ -32,6 +32,7 @@ from tools.file_operations_common import (
 from tools.file_operations_lint import LINTERS_INPROC, LintMixin, _FAIL_CLOSED_INPROC_EXTS
 from tools.file_operations_search import SearchMixin
 from tools import file_operations_native as _native_io
+from tools.interrupt import is_interrupted
 
 logger = logging.getLogger(__name__)
 
@@ -910,15 +911,15 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             file_size=file_size, file_ends_with_newline=file_ends_with_newline)
 
     def _native_read_enabled(self) -> bool:
-        """Whether ``read_file`` and ``search_files`` may bypass the shell: only POSIX + ``LocalEnvironment``
-        (file is on this host, path already native; Windows keeps the shell path since
-        file_operations holds Git-Bash-style paths there). ``HERMES_NATIVE_FILE_READ=0``
-        turns the fast path off."""
+        """Whether ``read_file`` and ``search_files`` may bypass the shell: only POSIX + a backend whose
+        files are the host's (``uses_host_filesystem``: the file is on this host, path already native;
+        Windows keeps the shell path since file_operations holds Git-Bash-style paths there).
+        ``HERMES_NATIVE_FILE_READ=0`` turns the fast path off."""
         flag = os.environ.get("HERMES_NATIVE_FILE_READ", "1").strip().lower()
         if flag in ("0", "false", "no", "off"):
             return False
-        # Same "is this env the local host" test the LSP path uses; isinstance is
-        # microseconds and self.env is never rebound, so nothing to memoize.
+        # Same "are these the host's files" test the LSP path uses; an attribute read
+        # and self.env is never rebound, so nothing to memoize.
         return sys.platform != "win32" and self._lsp_local_only()
 
     def _native_path(self, path: str) -> str:
@@ -963,6 +964,12 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         kept = bytearray()      # first ``clamp`` bytes of that line
         have_partial = False    # that line has bytes but no newline yet
         last_byte = b""
+        terminal_timeout = getattr(self.env, "timeout", None)
+        deadline = (
+            time.monotonic() + float(terminal_timeout)
+            if terminal_timeout and float(terminal_timeout) > 0
+            else None
+        )
         digest = hashlib.sha256()
         try:
             with open(full, "rb") as fh:
@@ -972,6 +979,11 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                     return self._read_binary_file(path, offset, limit, file_size, sample)
                 fh.seek(0)
                 while True:
+                    if is_interrupted():
+                        return ReadResult(error="Interrupted")
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return ReadResult(
+                            error=f"File read timed out after {terminal_timeout}s.")
                     chunk = fh.read(1 << 20)
                     if not chunk:
                         break

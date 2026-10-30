@@ -26,12 +26,15 @@ from acp.schema import (
 # ---------------------------------------------------------------------------
 
 
-COMMON_HERMES_TOOLS = ["read_file", "search_files", "terminal", "patch", "write_file", "process"]
+COMMON_HERMES_TOOLS = ["read_file", "search_files", "terminal", "patch", "write_file", "process", "process_manage"]
 
 
 class TestToolKindMap:
 
 
+
+    def test_tool_kind_process_manage(self):
+        assert get_tool_kind("process_manage") == "execute"
 
 
 
@@ -69,6 +72,14 @@ class TestBuildToolTitle:
         title = build_tool_title("terminal", {"command": long_cmd})
         assert len(title) < 120
         assert "..." in title
+
+    def test_read_file_title(self):
+        title = build_tool_title("read_file", {"path": "/etc/hosts"})
+        assert "/etc/hosts" in title
+
+    def test_process_manage_title_uses_process_formatter(self):
+        assert build_tool_title("process_manage", {"action": "list"}) == "process list"
+
 
 
 

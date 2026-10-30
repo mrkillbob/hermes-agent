@@ -10,10 +10,6 @@ import type { DashboardTheme, ThemePalette, ThemeTypography, ThemeLayout } from 
  *
  * Theme names must stay in sync with the backend's
  * `_BUILTIN_DASHBOARD_THEMES` list in `hermes_cli/web_server.py`.
- *
- * Presets that also ship on the desktop (midnight, ember, mono, cyberpunk)
- * take their colours from `@hermes/shared` `THEME_PRESET_PALETTES` so both
- * surfaces render one palette; only typography/layout/overrides live here.
  */
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,8 @@ test patches on ``update_cmd`` stay effective).
 """
 
 import logging
+import os
+import shlex
 from contextlib import nullcontext, suppress
 import subprocess
 import sys
@@ -496,6 +498,34 @@ def _has_http_code(stderr: str, *codes: str) -> bool:
     return any(f"HTTP {code}" in stderr or f"returned error: {code}" in stderr for code in codes)
 
 
+def _damaged_checkout_message(root: Path) -> str:
+    """The repair for a checkout git rejects: the installer pointed at THIS checkout (a bare one-liner
+    would rebuild the default directory and leave a ``--dir`` install broken)."""
+    if sys.platform == "win32":
+        quoted = "'" + str(root).replace("'", "''") + "'"
+        repair = ("& ([scriptblock]::Create((irm https://hermes-agent.nousresearch.com/install.ps1)))"
+                  f" -InstallDir {quoted}")
+    else:
+        repair = f"curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --dir {shlex.quote(str(root))}"
+    return (f"✗ This Hermes checkout's git data is damaged (git no longer recognizes {root / '.git'}),"
+            " so it cannot be updated in place.\n"
+            "  Run the installer again to repair it; it moves the damaged checkout aside and keeps"
+            f" your config and chats:\n    {repair}")
+
+
+def _checkout_rejected_by_git(stderr: str, git_cmd, root: Path) -> bool:
+    """The fetch failed because git cannot open *root* itself, not because of its remote.
+
+    git prints the same ``fatal: not a git repository`` for a remote whose ``.git`` is broken, so the
+    stderr line alone is not proof: the checkout must also fail to resolve as its own top level.
+    """
+    if not any(line.startswith("fatal: not a git repository") for line in stderr.splitlines()):
+        return False
+    top = _git_run(git_cmd, ["rev-parse", "--show-toplevel"], cwd=root)
+    return top.returncode != 0 or os.path.normcase(os.path.realpath(top.stdout.strip())) != os.path.normcase(
+        os.path.realpath(root))
+
+
 # Ordered (predicate, diagnosis): curl reports HTTP errors as ``unable to access '<url>': ... error: 429``,
 # so rate-limit/outage checks must run BEFORE the generic "unable to access" check. An anonymous fetch
 # answered with HTTP 401 ("could not read Username") is GitHub during an outage (or a renamed/private
@@ -529,10 +559,13 @@ def _classify_fetch_failure(stderr: str) -> str:
     return next((message for matches, message in _FETCH_FAILURE_RULES if matches(stderr)), "✗ Failed to fetch updates from origin.")
 
 
-def _print_fetch_failure(stderr: str) -> None:
-    """Print the classified diagnosis plus bounded raw stderr for diagnosis."""
+def _print_fetch_failure(stderr: str, *, git_cmd=None, root: Optional[Path] = None) -> None:
+    """Print the classified diagnosis plus bounded raw stderr for diagnosis. With *root*, a checkout
+    git rejects (no fetch can ever work; the ZIP fallback cannot tell user edits apart) gets the
+    installer repair instead."""
     stderr = (stderr or "").strip()
-    print(_classify_fetch_failure(stderr))
+    damaged = root is not None and _checkout_rejected_by_git(stderr, git_cmd, Path(root))
+    print(_damaged_checkout_message(Path(root)) if damaged else _classify_fetch_failure(stderr))
     if stderr:
         lines = stderr.splitlines()
         for line in lines[:15]:
@@ -576,23 +609,39 @@ def _portable_git_candidates() -> list:
     from hermes_constants import get_default_hermes_root, get_hermes_home
     candidates = []
     with suppress(Exception):
-        candidates += [root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe" for root in (get_default_hermes_root(), Path(get_hermes_home()))]
+        roots = (get_default_hermes_root() / "git", Path(get_hermes_home()) / "git")
+        candidates += [root / "mingw64" / "libexec" / "git-core" / "git.exe" for root in roots]
+        candidates += [
+            root / arch / directory / "git.exe"
+            for root in roots
+            for arch in ("clangarm64", "ucrt64", "mingw64", "mingw32")
+            for directory in ("bin", "libexec/git-core")
+        ]
     return candidates
 
 
 def _locate_real_git() -> Optional[Path]:
-    """Find a real Git-for-Windows ``git-core/git.exe`` (standard locations + managed PortableGit) that runs
-    without the trampoline guard. None when nothing suits — callers keep the broken command and let the
-    fetch-failure ZIP fallback handle it. A failed probe (None) disqualifies a candidate like a guard hit.
+    """Find a real Git-for-Windows binary without the trampoline guard.
 
-    The trampoline symptom is PATH-level: ``bin\\git.exe`` / ``cmd\\git.exe`` (both ~46KB shims) fail to
-    re-exec git-core, while the real binary at ``mingw64\\libexec\\git-core\\git.exe`` (≈4.4MB) works when
-    invoked directly (#87876).
+    Search standard and Hermes-managed installs, plus the install containing PATH git:
+    PM's versioned PortableGit lives outside the legacy ``<root>/git`` directory.
+    Git distributions expose the real binary in ``<arch>/bin`` and/or ``git-core``;
+    never fall back to the ``cmd``/``bin`` launchers that caused the guard (#87876).
+    A failed probe disqualifies a candidate; None lets the caller use the ZIP fallback.
     """
+    from hermes_platform.resolver import locate_command
+
+    roots = [Path(base) / "Git" for base in (r"C:\Program Files", r"C:\Program Files (x86)")]
+    command = locate_command("git").command
+    if command:
+        git_dir = Path(command[0]).parent
+        if git_dir.name.lower() in {"cmd", "bin"}:
+            roots.append(git_dir.parent)
     candidates = [
-        Path(base) / "Git" / arch / "libexec" / "git-core" / "git.exe"
-        for base in (r"C:\Program Files", r"C:\Program Files (x86)")
-        for arch in ("clangarm64", "mingw64", "mingw32")
+        root / arch / directory / "git.exe"
+        for root in roots
+        for arch in ("clangarm64", "ucrt64", "mingw64", "mingw32")
+        for directory in ("libexec/git-core", "bin")
     ] + _portable_git_candidates()
     return next((c for c in candidates if c.exists() and _probe_fork_bomb([str(c)]) is False), None)
 

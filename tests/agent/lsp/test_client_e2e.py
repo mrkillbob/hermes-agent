@@ -19,6 +19,12 @@ from agent.lsp.client import _STREAM_LIMIT, LSPClient
 from agent.lsp.protocol import LSPProtocolError, LSPRequestError
 
 
+# This file intentionally launches and terminates a fixed in-process mock LSP
+# child. The repository-wide live-system guard cannot reliably identify that
+# child after it exits and is reparented on macOS.
+pytestmark = pytest.mark.live_system_guard_bypass
+
+
 MOCK_SERVER = str(Path(__file__).parent / "_mock_lsp_server.py")
 
 
@@ -177,9 +183,11 @@ async def test_cancelled_start_hard_kills_sigterm_ignoring_descendant(tmp_path: 
             await asyncio.wait_for(start, timeout=0.05)
 
         deadline = asyncio.get_running_loop().time() + 15.0
-        while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
-            assert asyncio.get_running_loop().time() < deadline
-            await asyncio.sleep(0.01)
+        # Successful cleanup can reap the child between the identity and status probes.
+        with contextlib.suppress(psutil.NoSuchProcess):
+            while child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.01)
         assert client.state == "error"
         assert client._proc is None
     finally:

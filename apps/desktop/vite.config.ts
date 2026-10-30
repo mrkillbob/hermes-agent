@@ -2,6 +2,8 @@ import babel from '@rolldown/plugin-babel'
 import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
+import { runtimePublicAssetsPlugin } from './scripts/lunar-city/runtime-public-assets.ts'
+
 /** React Compiler preset scoped to modules that can actually contain
  *  components/hooks (JSX syntax or a react-ish import). The preset's default
  *  code filter matches any PascalCase/use* declaration — effectively every TS
@@ -18,7 +20,10 @@ function compilerPreset() {
  *  lockfile and this config (the preset and its filter) pin the toolchain it keys on. The
  *  cache lives under node_modules: ignored, and outside every freshness hash. */
 async function cachedCompilerPass(command: string) {
-  return withCompilerCache(await babel({ presets: [compilerPreset()] }), {
+  // Babel resolves the compiler preset's plugin from its cwd. Pin it here: the
+  // Webapp build runs Vite from the checkout root, which a fresh clone leaves
+  // without node_modules (its dependencies live in the private workspace).
+  return withCompilerCache(await babel({ cwd: __dirname, presets: [compilerPreset()] }), {
     command,
     cacheRoot: path.join(__dirname, 'node_modules/.cache/hermes-react-compiler'),
     base: __dirname,
@@ -106,10 +111,12 @@ const emojibaseAssets = () => ({
         return next()
       }
 
+
       fs.readFile(path.join(emojibaseDir, rel), (err: unknown, buf: Buffer) => {
         if (err) {
           return next()
         }
+
 
         res.setHeader('Content-Type', 'application/json')
         res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
@@ -134,7 +141,13 @@ const emojibaseAssets = () => ({
 
 export default defineConfig(({ command }) => ({
   base: './',
-  plugins: [react(), cachedCompilerPass(command), tailwindcss(), emojibaseAssets()],
+  plugins: [
+    react(),
+    cachedCompilerPass(command),
+    tailwindcss(),
+    emojibaseAssets(),
+    runtimePublicAssetsPlugin()
+  ],
   css: {
     // Pin an explicit (empty) PostCSS config. Tailwind is handled entirely by
     // `@tailwindcss/vite`, so the renderer needs no PostCSS plugins — and
@@ -152,6 +165,7 @@ export default defineConfig(({ command }) => ({
     // Validate the packaged generation with metadata checks at launch, without
     // reading every lazy vendor chunk (and triggering on-access AV scans).
     manifest: 'renderer-manifest.json',
+    copyPublicDir: false,
     // The renderer intentionally ships FEW chunks (not one, not thousands):
     //   · `codeSplitting: false` (the old setup) inlines every `lazy()` /
     //     dynamic import into the entry, so heavyweight lazy-only deps
@@ -165,6 +179,10 @@ export default defineConfig(({ command }) => ({
     // imports stay lazy, and the file count stays in the tens.
     chunkSizeWarningLimit: 25000,
     rolldownOptions: {
+      input: {
+        index: path.resolve(__dirname, 'index.html'),
+        lunarCityReview: path.resolve(__dirname, 'lunar-city-review.html')
+      },
       output: {
         advancedChunks: {
           groups: [

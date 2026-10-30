@@ -3,11 +3,12 @@ import type { PersistedTurn } from '@hermes/shared'
 import { transcriptRowIds } from '@/app/session/hooks/use-session-actions/pending-turn-identity'
 import type { ChatMessage } from '@/lib/chat-messages'
 
-const isRowId = (value: unknown): value is number =>
+/** A stored transcript row id (SQLite rowid: a positive safe integer). */
+export const isRowId = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 
 /** The receipt's stored user rows in turn order (prompt first, then each steer/redirect row). */
-function receiptUserRowIds(receipt: PersistedTurn): number[] {
+export function receiptUserRowIds(receipt: PersistedTurn): number[] {
   const listed = receipt.user_row_ids
 
   if (Array.isArray(listed) && listed.length && listed.every(isRowId)) {
@@ -19,7 +20,7 @@ function receiptUserRowIds(receipt: PersistedTurn): number[] {
   return isRowId(receipt.user_row_id) && receipt.complete === true ? [receipt.user_row_id] : []
 }
 
-const isTurnUserBubble = (message: ChatMessage) =>
+export const isTurnUserBubble = (message: ChatMessage) =>
   message.role === 'user' && !message.hidden && !message.id.startsWith('user-queued-')
 
 /**
@@ -62,6 +63,12 @@ export function bindReceiptUserRows(messages: ChatMessage[], receipt: PersistedT
         }) + 1
 
   const candidates = messages.flatMap((message, index) => (index >= start && isTurnUserBubble(message) ? [index] : []))
+
+  // Compaction can receipt only a surviving suffix. Its submission still
+  // names the initial prompt, so mismatched partial sets cannot be paired.
+  if (receipt.complete !== true && candidates.length !== ids.length) {
+    return messages
+  }
 
   // Unanchored, a missing bubble makes every later pairing ambiguous. Anchored,
   // the prompt is still certain even when a later bubble is absent.

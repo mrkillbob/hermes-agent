@@ -67,7 +67,7 @@ import {
   normalizePtyMobileInput,
   shouldTreatInputAsMobileReplacement,
 } from "@/lib/pty-mobile-input";
-import { computeKeyboardInset, keyboardRevealScrollDelta } from "@/lib/keyboard-inset";
+import { computeKeyboardInset, shouldPinScroll } from "@/lib/keyboard-inset";
 import {
   resolvePtyKeyboardShortcut,
   sendPtyShortcutSequence,
@@ -81,6 +81,8 @@ import { installTerminalTouchScroll } from "@/lib/terminal-touch-scroll";
 import { uploadChatImage } from "@/lib/chatImagePaste";
 import { attachChatImageDropListeners } from "@/lib/chat-image-drop";
 import { maybeReloadForLoopbackWsAuthFailure } from "@/lib/dashboard-auth-reload";
+import { ptyAttachToken } from "@/lib/pty-attach-token";
+import { loseWebglContexts } from "@/lib/xterm-webgl-release";
 import {
   PTY_GAVE_UP_BANNER,
   PTY_RECONNECTING_BANNER,
@@ -92,7 +94,7 @@ import {
   ptyRejectionBanner,
   type PtyBannerAction,
 } from "@/lib/pty-close-copy";
-import { ptyAttachToken } from "@/lib/pty-attach-token";
+import { errorMessage } from "@/lib/api-error";
 import {
   refitWhenTerminalFontLoads,
   TERMINAL_FONT_FAMILY,
@@ -105,7 +107,6 @@ import {
   shouldUseWebglRenderer,
   textNeedsDomShaping,
 } from "@/lib/xterm-webgl-gating";
-import { loseWebglContexts } from "@/lib/xterm-webgl-release";
 import {
   buildTerminalTheme,
   DEFAULT_TERMINAL_BACKGROUND,
@@ -117,7 +118,6 @@ import {
 import { PluginSlot } from "@/plugins";
 import { useTheme } from "@/themes";
 import { useProfileScope } from "@/contexts/useProfileScope";
-import { errorMessage } from "@/lib/api-error";
 import { SGR_MOUSE_RE } from "@/lib/pty-mouse-report";
 
 // Per-tab keep-alive identity (`?attach=`): lives in pty-attach-token.ts so a
@@ -184,7 +184,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   }, [reconnectGaveUp]);
   // Why ptyState is "ended": the agent process exited (/exit or crash), or the
   // server could not start it at all (close 1011; the reason is in the terminal).
-  const [endedReason, setEndedReason] = useState<"exited" | "start-failed">("exited");
+  const [endedReason, setEndedReason] = useState<"exited" | "start-failed">(
+    "exited",
+  );
   const navigate = useNavigate();
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -365,7 +367,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     [titleScope],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isActive) {
       setTitle(null);
       return;
@@ -986,31 +988,31 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         vv ? { height: vv.height, offsetTop: vv.offsetTop } : null,
         window.innerHeight,
       );
-      if (inset !== appliedKeyboardInset) {
-        appliedKeyboardInset = inset;
-        wrap.style.paddingBottom = inset > 0 ? `${inset}px` : "";
-        scheduleHostSync();
+      if (shouldPinScroll(inset)) {
+        // iOS auto-scrolls the page to reveal xterm's hidden textarea when
+        // the keyboard opens. The shell is a fixed h-dvh column that must
+        // never scroll — pin it back so the terminal chrome stays put.
+        window.scrollTo(0, 0);
+        const scroller = document.scrollingElement;
+        if (scroller && scroller.scrollTop !== 0) scroller.scrollTop = 0;
       }
-      const revealComposer = () => {
-        if (inset <= 0 || !vv) return;
+      if (inset === appliedKeyboardInset) return;
+      appliedKeyboardInset = inset;
+      if (inset > 0) {
+        wrap.style.paddingBottom = `${inset}px`;
+        // Keep the freshly-resized input line in view.
         try {
           term.scrollToBottom();
         } catch {
           /* ignore */
         }
-        const delta = keyboardRevealScrollDelta(host.getBoundingClientRect().bottom, {
-          height: vv.height,
-          offsetTop: vv.offsetTop,
-        });
-        if (delta) window.scrollBy(0, delta);
-      };
-      if (inset > 0) {
-        revealComposer();
-        requestAnimationFrame(() => {
-          revealComposer();
-          requestAnimationFrame(revealComposer);
-        });
+      } else {
+        wrap.style.paddingBottom = "";
       }
+      // The wrapper padding change resizes the host; the ResizeObserver
+      // will refit, but schedule one explicitly in case the observer
+      // coalesces with an in-flight frame.
+      scheduleHostSync();
     };
     const onViewportChange = () => {
       syncKeyboardInset();
@@ -1028,13 +1030,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       appliedKeyboardInset = 0;
       if (termWrap) termWrap.style.paddingBottom = "";
     };
-    let keyboardRevealTimer = 0;
-    const onTerminalFocus = () => {
-      onViewportChange();
-      window.clearTimeout(keyboardRevealTimer);
-      keyboardRevealTimer = window.setTimeout(onViewportChange, 350);
-    };
-    term.textarea?.addEventListener("focus", onTerminalFocus);
     scheduleHostSync();
     requestAnimationFrame(() => scheduleHostSync());
 
@@ -1129,6 +1124,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     // attempt cannot open a socket behind the replacement this schedules.
     let ticketSuperseded = false;
     let ticketTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearTicketTimer = () => {
+      if (ticketTimer) {
+        clearTimeout(ticketTimer);
+        ticketTimer = null;
+      }
+    };
     let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
     const clearKeepaliveTimer = () => {
       if (keepaliveTimer) {
@@ -1136,15 +1137,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         keepaliveTimer = null;
       }
     };
-    const clearTicketTimer = () => {
-      if (ticketTimer) {
-        clearTimeout(ticketTimer);
-        ticketTimer = null;
-      }
-    };
     // `code` is null when the attempt died before any socket existed — the
     // banner then omits the "(code N)" suffix rather than inventing one.
     const scheduleReconnect = (code: number | null) => {
+      if (reconnectTimerRef.current) {
+        return;
+      }
       // ChatPage remains mounted behind other dashboard routes. Do not churn
       // through reconnect attempts while it is inactive or the document is
       // hidden; the page-resume listener starts one when the user returns.
@@ -1157,9 +1155,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         setBanner(null);
         setBannerAction(null);
         setPtyState("closed");
-        return;
-      }
-      if (reconnectTimerRef.current) {
         return;
       }
       if (ptyReconnectExhausted(reconnectAttemptRef.current, PTY_RECONNECT_MAX_ATTEMPTS)) {
@@ -1383,7 +1378,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     };
 
     ws.onclose = (ev) => {
-      clearKeepaliveTimer();
       // Drain buffered sanitizer state. A buffered partial escape is dropped
       // (writing an unterminated CSI would wedge xterm's parser); a buffered
       // newline run is emitted collapsed.
@@ -1398,6 +1392,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       wsRef.current = null;
       connectInFlightRef.current = false;
       clearConnectingTimer();
+      clearKeepaliveTimer();
       if (unmounting) {
         return;
       }
@@ -1559,8 +1554,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       handleBrowserDropCleanup();
       if (metricsDebounce) clearTimeout(metricsDebounce);
       window.removeEventListener("resize", scheduleSyncTerminalMetrics);
-      window.clearTimeout(keyboardRevealTimer);
-      term.textarea?.removeEventListener("focus", onTerminalFocus);
       keyboardInsetSyncRef.current = null;
       keyboardInsetResetRef.current = null;
       const wrap = termWrap;
@@ -1612,7 +1605,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // NS-434 follow-up: attach the visualViewport keyboard-inset listeners
   // ONLY while the chat tab is actually visible. ChatPage stays mounted
   // (display:none) on every other dashboard route, so unconditional
-  // listeners made the composer reveal (`window.scrollBy`) fire whenever a
+  // listeners made the scroll pin (`window.scrollTo(0, 0)`) fire whenever a
   // soft keyboard opened on Settings/Sessions/etc., fighting iOS Safari's
   // own scroll-into-view for the focused input there. The handlers read
   // through refs populated by the main PTY effect, so attach/detach here is

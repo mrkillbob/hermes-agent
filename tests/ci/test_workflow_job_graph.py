@@ -69,3 +69,17 @@ def test_no_workflow_runs_from_a_tag_push():
         if not isinstance(push, dict) or not ({"branches", "branches-ignore"} & set(push)) or {"tags", "tags-ignore"} & set(push):
             violations.append(filename)
     assert not violations, "tag-triggered workflows: " + ", ".join(violations)
+
+
+def test_bundle_input_validation_has_a_required_locked_node_toolchain():
+    """The dispatch-only planner must not inherit the hosted image's Node/npm."""
+    steps = _loaded()["install-e2e.yml"]["jobs"]["bundle-inputs"]["steps"]
+    consumer = next(i for i, step in enumerate(steps) if step.get("id") == "inputs")
+    checkout = next(i for i, step in enumerate(steps)
+                    if step.get("uses", "").startswith("actions/checkout@"))
+    setups = [step for step in steps[checkout + 1:consumer]
+              if step.get("uses") == "./.github/actions/setup-pm"
+              and step.get("with", {}).get("toolchain") in {"node", "all"}]
+    assert setups, "bundle-inputs must provision locked Node/npm before npm ci"
+    assert any(not step.get("if") and str(step.get("continue-on-error", "false")) == "false"
+               for step in setups), "bundle-inputs Node setup must be unconditional and blocking"

@@ -36,7 +36,7 @@ These paths are intentionally different.
 
 ### The HEAD -> NEXT column
 
-Every combination also runs from HEAD itself. The driver installs HEAD, then mints NEXT: a synthetic child of HEAD that adds one marker file (`.hermes-e2e-next`). NEXT exists only in the object store, with no ref, and the bare clone carries it into `serve.git`. The driver then moves `main` to NEXT and applies the update method.
+Every combination also runs from HEAD itself. The driver installs HEAD, then mints NEXT: a synthetic child of HEAD that adds the root marker (`.hermes-e2e-next`) and appends a harmless comment to `apps/desktop/electron/app-version.ts`. This changes a real Desktop build input, so the strict NEXT chat probe exercises a newly built app. A root-only change legitimately reuses the old app with its truthful baked commit and is covered separately by the Desktop reuse tests. NEXT exists only in the object store, with no ref, and the bare clone carries it into `serve.git`. The separate native Windows CLI machine fixture retains its root and nested test-tree markers to exercise treeless fetching; it does not claim a Desktop rebuild. The driver then moves `main` to NEXT and applies the update method.
 
 This column tests two things that no tag leg tests:
 
@@ -93,6 +93,16 @@ Each checkpoint writes a `desktop-chat-old.json`, `desktop-chat-new.json`, or
 leg even when version, health, and update receipts passed. Existing plugin and
 user-state preservation checks remain required. The mock configuration writer
 preserves unrelated settings, including the controlled update feed.
+
+Each chat also retains `desktop-chat-<phase>-selection.json`: a bounded timeline
+of the three legacy local composer model/provider/source keys, their writes,
+and outgoing `session.create` model/provider categories. Only the smoke fixture's
+`mock-model` and `custom` identifiers are retained; every other nonempty string
+is recorded as `non-fixture`, without a hash or its original text. It records no prompts,
+RPC IDs, URLs, credentials or unrelated preferences. Observation starts after
+window attachment; earlier initialization and remote-scoped composer keys are
+not captured. Unsupported or closed renderers are marked unavailable. This is
+diagnostic evidence: it makes no model selection, config or inference requests.
 
 ## Post-build artifact smoke
 
@@ -240,7 +250,7 @@ Alongside the plugin-tree contract below, every upgrade leg also carries a
 **user-state** contract: an upgrade may add state, may rewrite `config.yaml`
 (additive config migration) and the bundled `skills/` tree (the product
 re-syncs it), but it may not delete or modify the user's own durable state —
-`.env`, `auth.json`, `state.db`, `gateway_state.json`, `memories/`, `cron/`,
+`.env`, `auth.json`, `state.db`, `memories/`, `cron/`,
 `sessions/`, `profiles/`, `photon/`, `desktop-plugins/`, `tui-widgets/`,
 `skins/`, `pets/`, `skills/.archive/` — and `state.db` may not lose rows.
 

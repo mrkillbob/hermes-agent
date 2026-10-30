@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 from dataclasses import field
+from agent.deadline import poll_until
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from pathlib import Path
 from typing import Any
@@ -41,9 +42,20 @@ _CORRUPT_BACKUP_RETENTION = 10
 
 # Bounded init-lock acquire: a bare blocking flock let a wedged holder block the
 # dispatcher's next-tick connect forever. Poll non-blocking until the deadline,
-# then proceed without the lock (in-process _INIT_LOCK + idempotent init backstop).
+# Existing DBs then proceed unlocked; missing-DB creation must retain reservation.
 _INIT_LOCK_TIMEOUT_SECONDS = 10.0
 _INIT_LOCK_POLL_SECONDS = 0.05
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    """Read a bounded integer setting used by the connection lifecycle."""
+    import os
+
+    try:
+        value = int(os.environ.get(name, "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
 
 
 def _resolve_busy_timeout_ms() -> int:
@@ -51,10 +63,10 @@ def _resolve_busy_timeout_ms() -> int:
     shared cross-profile dispatch bus, so worker stampedes are expected; a
     long timeout lets WAL serialize writers instead of surfacing transient
     ``database is locked`` failures."""
-    return _kb._env_int("HERMES_KANBAN_BUSY_TIMEOUT_MS", DEFAULT_BUSY_TIMEOUT_MS, minimum=1)
+    return _env_int("HERMES_KANBAN_BUSY_TIMEOUT_MS", DEFAULT_BUSY_TIMEOUT_MS, minimum=1)
 
 
-def _sqlite_connect(path: Path) -> sqlite3.Connection:
+def _sqlite_connect(path: Path, *, existing_only: bool = False) -> sqlite3.Connection:
     """Open a Kanban SQLite connection via ``connect_tracked``: while registered,
     byte-level probes of the file are refused because an ``open()``/``close()``
     would cancel this process's POSIX advisory locks (see ``sqlite_safe_read``)."""
@@ -62,8 +74,9 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
 
     busy_timeout_ms = _resolve_busy_timeout_ms()
     conn = connect_tracked(
-        path,
+        path.resolve().as_uri() + "?mode=rw" if existing_only else path,
         connect_fn=sqlite3.connect,
+        uri=existing_only,
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
     )
@@ -113,7 +126,7 @@ def _unlock(handle) -> None:
 
 
 @contextlib.contextmanager
-def _cross_process_init_lock(path: Path):
+def _cross_process_init_lock(path: Path, *, strict: bool = False):
     """Serialize first-connect WAL/schema/integrity setup across processes.
 
     ``_INIT_LOCK`` only covers one process's threads; a dispatcher burst has
@@ -122,24 +135,28 @@ def _cross_process_init_lock(path: Path):
 
     **Bounded** acquire: a blocking ``flock`` let one stalled/stale holder hang
     every ``connect()`` (the gateway dispatcher's next tick included) with no
-    traceback. After the deadline we WARN and proceed WITHOUT the lock — safe
-    because ``_INIT_LOCK`` still serializes same-process threads and init is
-    idempotent: two racing first-inits mean redundant work, not corruption.
+    traceback. Existing databases retain the bounded warning/fallback behavior.
+    Missing databases and strict operator reservations refuse after the same
+    deadline: creation must not bypass a reservation for reviewed absence.
+    Retry after the holder releases; no database is opened by a refused call.
     """
+    # A missing database is also an absence reservation: opening SQLite after
+    # a failed acquire would invalidate an operator's reviewed empty snapshot.
+    must_acquire = strict or not path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(path.name + ".init.lock")
     handle = lock_path.open("a+b")
     acquired = False
     try:
-        deadline = time.monotonic() + _INIT_LOCK_TIMEOUT_SECONDS
-        while True:
+        def _try_lock() -> bool:
             try:
-                acquired = _try_lock_nb(handle)
+                return _try_lock_nb(handle)
             except OSError:
-                acquired = False
-            if acquired or time.monotonic() >= deadline:
-                break
-            time.sleep(_INIT_LOCK_POLL_SECONDS)
+                return False
+
+        acquired = poll_until(_try_lock, _INIT_LOCK_TIMEOUT_SECONDS, _INIT_LOCK_POLL_SECONDS)
+        if not acquired and must_acquire:
+            raise TimeoutError("kanban database initialization reservation timed out")
         if not acquired:
             _kb._log.warning(
                 "kanban init lock for %s not acquired within %.0fs — proceeding "
@@ -158,7 +175,7 @@ def _cross_process_init_lock(path: Path):
 
 
 @contextlib.contextmanager
-def _dispatch_tick_lock(db_path: Path):
+def _dispatch_tick_lock(db_path: Path, *, strict: bool = False):
     """Non-blocking single-writer guard around one dispatcher tick; yields
     ``True`` if this process holds the board's ``.dispatch.lock``, else
     ``False`` (caller skips the tick).
@@ -168,7 +185,8 @@ def _dispatch_tick_lock(db_path: Path):
     multi-writer corruption; this is defense-in-depth behind
     ``_guard_supervised_gateway_conflict``. Non-blocking on purpose: the
     gateway's async watcher must never stall; the loser retries next interval.
-    Without ``fcntl``/``msvcrt`` it degrades to a no-op (yields ``True``).
+    ``strict=True`` refuses lock-file errors for admission boundaries; ordinary
+    dispatcher calls retain their existing best-effort behavior.
 
     Motivation (issue #35240): a ``hermes gateway run --replace`` / ``gateway restart`` invoked from a shell
     on a systemd/launchd host can leave an orphan gateway whose dispatcher escapes the service cgroup,
@@ -188,9 +206,47 @@ def _dispatch_tick_lock(db_path: Path):
         except (OSError, AttributeError):
             acquired = False
     except OSError:
-        # Can't even open the lock file (permissions, read-only FS): degrade to
-        # a no-op so a probe failure never blocks dispatch.
-        acquired = True
+        # Preserve ordinary dispatch's best-effort fallback; explicit admission
+        # boundaries must refuse when no lock handle was acquired.
+        acquired = not strict
+        handle = None
+    try:
+        yield acquired
+    finally:
+        if handle is not None:
+            try:
+                if acquired:
+                    _unlock(handle)
+            except (OSError, AttributeError):
+                pass
+            finally:
+                handle.close()
+
+
+@contextlib.contextmanager
+def _dispatch_host_admission_lock(*, strict: bool = False):
+    """Non-blocking host-wide admission guard for a dispatch tick.
+
+    A board-local lock protects one database, but the dispatcher must also keep
+    the cross-board running-task snapshot and claim/spawn decision atomic. All
+    boards therefore share one lock under the shared Kanban home. Filesystem
+    lock failures degrade to the existing best-effort behavior unless the caller
+    requires positive acquisition with ``strict=True``.
+    """
+    from hermes_cli import kanban_db as _kb_local
+
+    lock_path = _kb_local.kanban_home() / "kanban" / "dispatch-host.lock"
+    handle = None
+    acquired = False
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+b")
+        try:
+            acquired = _try_lock_nb(handle)
+        except (OSError, AttributeError):
+            acquired = False
+    except OSError:
+        acquired = not strict
         handle = None
     try:
         yield acquired
@@ -630,16 +686,20 @@ def _schema_is_present(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
-def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
+def _open_configured(path: Path, under_lock, *, existing_only: bool = False,
+                     require_schema: bool = False) -> tuple[sqlite3.Connection, Any]:
     """Open ``path`` with the kanban PRAGMA set, then run ``under_lock(conn)``.
     WAL activation and ``under_lock`` share the ``_INIT_LOCK`` critical section:
     WAL setup can take an exclusive lock while SQLite creates sidecars for a
     fresh DB, and concurrent gateway startup threads must not race before
-    ``_INITIALIZED_PATHS`` is populated. Closed if anything raises."""
-    conn = _sqlite_connect(path)
+    ``_INITIALIZED_PATHS`` is populated. ``require_schema`` refuses empty files
+    before WAL setup can initialize their header. Closed if anything raises."""
+    conn = _sqlite_connect(path, existing_only=True) if existing_only else _sqlite_connect(path)
     try:
         conn.row_factory = sqlite3.Row
         conn.text_factory = _kb._lossy_text
+        if require_schema and not _schema_is_present(conn):
+            raise ValueError('an existing initialized Kanban board is required')
         with _INIT_LOCK:
             # WAL doesn't work on network filesystems; the helper falls back to
             # DELETE with one ERROR log (see hermes_state_wal._WAL_INCOMPAT_MARKERS).
@@ -741,15 +801,21 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     # the gateway dispatcher's next-tick connect() forever, and steady-state has
     # nothing for it to protect (no schema/migration writes).
     resolved = str(path.resolve())
-    if resolved in _INITIALIZED_PATHS:
-        conn, schema_present = _open_configured(path, _schema_is_present)
+    if not path.exists():
+        with _INIT_LOCK:
+            _INITIALIZED_PATHS.discard(resolved)
+    schema_repair = False
+    if resolved in _INITIALIZED_PATHS and path.exists():
+        # An existence check cannot authorize creation: removal may occur
+        # before SQLite opens. Refuse that open; a retry takes the init lock.
+        conn, schema_present = _open_configured(path, _schema_is_present, existing_only=True)
         if schema_present:
             return conn
-        # Cache says "initialized", file says otherwise: it was deleted or
-        # replaced under a live process and the open silently recreated an empty
-        # DB. Left alone, every query fails with "no such table: tasks" for the
+        # Cache says "initialized", file says otherwise: it was replaced by an
+        # empty DB under a live process. Left alone, queries fail with "no such table: tasks" for the
         # rest of the process's life. Drop the stale entry and re-init.
         conn.close()
+        schema_repair = True
         with _INIT_LOCK:
             # Drop the stale cache entry and fall through to the full init path, which re-runs the header
             # and integrity probes and the schema script under the cross-process lock. See #83445.
@@ -760,7 +826,8 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             path,
         )
 
-    with _cross_process_init_lock(path):
+    reservation = _cross_process_init_lock(path, strict=True) if schema_repair else _cross_process_init_lock(path)
+    with reservation:
         # Read-only file/sidecar preflight first, so a stray read-only kanban.db
         # fails actionably instead of "attempt to write a readonly database".
         # See #12508.
@@ -776,6 +843,15 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             # Idempotent; runs under _INIT_LOCK so same-process dispatcher
             # threads can't race the ALTER TABLE pass with stale PRAGMA snapshots.
             if resolved not in _INITIALIZED_PATHS:
+                # CREATE INDEX statements in the canonical script can reference
+                # columns omitted by reduced external harness schemas. Restore
+                # the early task columns first; the regular migration below
+                # remains the single owner of later additive columns.
+                if _table_exists(conn, "tasks"):
+                    existing = _column_names(conn, "tasks")
+                    for name, ddl in _BASE_TASK_COLUMNS + _EARLY_TASK_COLUMNS:
+                        if name not in existing:
+                            _add_column_if_missing(conn, "tasks", name, ddl)
                 conn.executescript(_kb.SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
                 _INITIALIZED_PATHS.add(resolved)
@@ -843,6 +919,8 @@ _EARLY_TASK_COLUMNS = (
     ("tenant", "tenant TEXT"),
     ("result", "result TEXT"),
     ("branch_name", "branch_name TEXT"),
+    ("workspace_base_ref", "workspace_base_ref TEXT"),
+    ("workspace_base_sha", "workspace_base_sha TEXT"),
     ("project_id", "project_id TEXT"),
     ("idempotency_key", "idempotency_key TEXT"),
 )
@@ -890,6 +968,9 @@ _LATER_TASK_COLUMNS = (
 )
 
 _NOTIFY_SUB_COLUMNS = (
+    ("notify_claim_owner", "notify_claim_owner TEXT"),
+    ("notify_claimed_at", "notify_claimed_at INTEGER"),
+    ("notify_claimed_cursor", "notify_claimed_cursor INTEGER"),
     ("last_ping_event_id", "last_ping_event_id INTEGER NOT NULL DEFAULT 0"),
     ("notifier_profile", "notifier_profile TEXT"),
     ("delivery_mode", "delivery_mode TEXT NOT NULL DEFAULT 'notify'"),
@@ -899,6 +980,9 @@ _NOTIFY_SUB_COLUMNS = (
     # (which prefers ``user_id_alt``). NULL is inert.
     ("user_id_alt", "user_id_alt TEXT"),
     ("delivery_metadata", "delivery_metadata TEXT"),
+    ("notify_claim_owner", "notify_claim_owner TEXT"),
+    ("notify_claimed_at", "notify_claimed_at INTEGER"),
+    ("notify_claimed_cursor", "notify_claimed_cursor INTEGER"),
 )
 
 _TASK_RUN_COLUMNS = (
@@ -920,6 +1004,92 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after v1 to legacy DBs (called via ``init_db``)."""
+    # Candidate ledgers were briefly prototyped with raw scope/evidence
+    # columns. Replace that shape before any caller can write to it: the
+    # candidate contract stores only opaque hashes and bounded lifecycle data.
+    # The table is intentionally checked here rather than relying on
+    # ``CREATE TABLE IF NOT EXISTS`` because SQLite does not reconcile an
+    # existing table's columns with the canonical schema.
+    canonical_candidate_columns = {
+        "id", "request_id", "request_hash", "signature_hash", "permissions_hash",
+        "source_key_hash", "policy_digest", "evidence_ref_hashes_json",
+        "generation_id", "requested_profile_id", "lifecycle_status", "reason_code",
+        "cooldown_until", "created_at",
+    }
+    if _table_exists(conn, "candidate_profile_requests"):
+        existing_columns = _column_names(conn, "candidate_profile_requests")
+        previous_canonical_columns = canonical_candidate_columns - {"requested_profile_id"}
+        legacy_columns = previous_canonical_columns - {"generation_id"}
+        if existing_columns == previous_canonical_columns:
+            conn.execute(
+                "ALTER TABLE candidate_profile_requests ADD COLUMN requested_profile_id TEXT"
+            )
+        elif existing_columns == legacy_columns:
+            # ``connect()`` has already run SCHEMA_SQL, which installs the
+            # append-only trigger on an existing legacy table. Backfilling
+            # this additive column is the one intentional UPDATE during the
+            # migration, so temporarily remove only that trigger and restore
+            # it before any later migration step can fail.
+            conn.execute("DROP TRIGGER IF EXISTS candidate_profile_requests_no_update")
+            try:
+                conn.execute(
+                    "ALTER TABLE candidate_profile_requests ADD COLUMN requested_profile_id TEXT"
+                )
+                conn.execute(
+                    "ALTER TABLE candidate_profile_requests ADD COLUMN generation_id TEXT"
+                )
+                conn.execute(
+                    "UPDATE candidate_profile_requests SET generation_id = request_id "
+                    "WHERE generation_id IS NULL"
+                )
+            finally:
+                conn.execute(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS candidate_profile_requests_no_update
+                    BEFORE UPDATE ON candidate_profile_requests BEGIN
+                        SELECT RAISE(ABORT, 'candidate_profile_requests is append-only');
+                    END
+                    """
+                )
+        elif existing_columns != canonical_candidate_columns:
+            conn.execute("DROP TABLE candidate_profile_requests")
+        else:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_candidate_profile_requests_hash_state "
+                "ON candidate_profile_requests(request_hash, lifecycle_status, created_at)"
+            )
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_profile_requests (
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id               TEXT NOT NULL UNIQUE,
+            request_hash             TEXT NOT NULL,
+            signature_hash           TEXT NOT NULL,
+            permissions_hash         TEXT NOT NULL,
+            source_key_hash          TEXT NOT NULL,
+            policy_digest            TEXT NOT NULL,
+            evidence_ref_hashes_json TEXT NOT NULL,
+            generation_id            TEXT,
+            requested_profile_id     TEXT,
+            lifecycle_status         TEXT NOT NULL,
+            reason_code              TEXT NOT NULL,
+            cooldown_until           INTEGER,
+            created_at               INTEGER NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS candidate_profile_requests_no_update
+        BEFORE UPDATE ON candidate_profile_requests BEGIN
+            SELECT RAISE(ABORT, 'candidate_profile_requests is append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS candidate_profile_requests_no_delete
+        BEFORE DELETE ON candidate_profile_requests BEGIN
+            SELECT RAISE(ABORT, 'candidate_profile_requests is append-only');
+        END;
+        CREATE INDEX IF NOT EXISTS idx_candidate_profile_requests_hash_state
+            ON candidate_profile_requests(request_hash, lifecycle_status, created_at);
+
+        """
+    )
+
     cols = _column_names(conn, "tasks")
     for name, ddl in _BASE_TASK_COLUMNS + _EARLY_TASK_COLUMNS:
         if name not in cols:
@@ -1100,6 +1270,8 @@ _REBUILD_SPECS = {
         " delivery_metadata TEXT, created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " last_ping_event_id INTEGER NOT NULL DEFAULT 0,"
+        " notify_claim_owner TEXT, notify_claimed_at INTEGER,"
+        " notify_claimed_cursor INTEGER,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),
     ),

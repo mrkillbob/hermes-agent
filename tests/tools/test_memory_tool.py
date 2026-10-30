@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import stat
 import pytest
 from pathlib import Path
@@ -160,6 +161,18 @@ class TestMemoryStoreAdd:
         result = store.add("user", "Name: Alice")
         assert result["success"] is True
         assert result["target"] == "user"
+
+    def test_success_usage_describes_counts_without_ambiguous_encoded_text(self, store):
+        result = store.add("memory", "one durable fact")
+
+        match = re.fullmatch(r"(\d+)% — ([\d,]+) of ([\d,]+) chars", result["usage"])
+        assert match is not None
+        percent, current, limit = match.groups()
+        current = int(current.replace(",", ""))
+        limit = int(limit.replace(",", ""))
+        assert current == store._char_count("memory")
+        assert limit == store._char_limit("memory")
+        assert int(percent) == int((current / limit) * 100)
 
 
     def test_overflow_returns_consolidation_context(self, store):
@@ -682,6 +695,37 @@ class TestExternalDriftGuard:
         result = store.replace("memory", "Entry two", "Entry two replaced.")
         assert result["success"] is True
 
+    def test_entries_stay_removable_after_the_limit_is_lowered(self, store, monkeypatch):
+        """An entry written under a larger limit is no external drift: pruning stays the way back
+        under a lowered limit."""
+        roomy = MemoryStore(memory_char_limit=2200, user_char_limit=1375)
+        work, home = ("Work:" + " firmware and vision pipelines;" * 16,  # each > the fixture's 300
+                      "Home:" + " garden, workshop and bikes;" * 16)
+        for entry in (work, home, "Prefers metric.", "Uses vim."):
+            assert roomy.add("user", entry)["success"]
+
+        pruned = json.loads(memory_tool(target="user", store=store, operations=[
+            {"action": "remove", "old_text": "Prefers metric"}, {"action": "remove", "old_text": "Uses vim"}]))
+        assert pruned["success"] is True
+        monkeypatch.setattr("tools.memory_tool_store.time.time", lambda: 1_700_000_000.0)  # same second
+        first, second = store.remove("user", "Work:"), store.remove("user", "Home:")
+        assert first["success"] and second["success"] and first["removed_entry"] == work
+        assert MemoryStore._read_file(store._path_for("user")) == []
+        # Each delete of an oversized entry keeps its own snapshot, even within the same second.
+        assert first["drift_backup"] != second["drift_backup"]
+        assert work in Path(first["drift_backup"]).read_text(encoding="utf-8")
+
+    def test_removing_an_entry_with_glued_free_text_keeps_a_snapshot(self, store):
+        """Free text appended without a delimiter rides on the last entry; deleting that entry
+        must never take the text with it unless a snapshot holds it."""
+        store.add("memory", "User likes brevity.")
+        drifted = self._plant_drift(store).read_text(encoding="utf-8")
+
+        result = store.remove("memory", "User likes")
+
+        assert result["success"] is True
+        assert Path(result["drift_backup"]).read_text(encoding="utf-8") == drifted
+
     def test_drift_guard_also_protects_user_target(self, store):
         """USER.md gets the same guarantee as MEMORY.md."""
         store.add("user", "Some preference.")
@@ -895,10 +939,12 @@ class TestBatchRefusesToEmptyNonEmptyStore:
         self, store, target, seed
     ):
         assert store.add(target, seed)["success"] is True
+        assert store.add(target, "second entry here")["success"] is True
         path = store._path_for(target)
         before = path.read_text(encoding="utf-8")
 
-        result = store.apply_batch(target, [{"action": "remove", "old_text": seed}])
+        result = store.apply_batch(target, [{"action": "remove", "old_text": seed},
+                                            {"action": "remove", "old_text": "second entry"}])
 
         assert result["success"] is False
         assert "current_entries" not in result  # batch abort never echoes the store (#97316)

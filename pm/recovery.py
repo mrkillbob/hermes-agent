@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import contextlib
-import subprocess
 import sys
 from pathlib import Path
 
@@ -44,7 +43,9 @@ def validate_environment(python: Path | list[str], *, env: dict, cwd: Path) -> N
         "        assert bundle.is_file() and bundle.stat().st_size >= 1024, 'CA bundle is missing'\n"
     )
     command = [str(python), "-I"] if isinstance(python, (str, Path)) else [*python]
-    result = subprocess.run([*command, "-c", script], cwd=cwd, env=env,
+    from pm.lifetime_launch import run
+
+    result = run([*command, "-c", script], cwd=cwd, env=env,
                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=False)
     if result.returncode:
         raise InstallError("venv", f"startup validation failed: {result.stderr.strip()[-1000:]}")

@@ -25,15 +25,19 @@ from agent.message_content import flatten_message_text
 from agent.lsp.deferred import forward_to_agent as forward_lsp_verdicts
 from agent.plugin_live_notes import pop_plugin_notices
 from agent.skills_index_delta import stage_skills_index_note
-from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS, append_message, stamp_message_timestamp
+from agent.message_metadata import (
+    PERSISTENCE_ONLY_MESSAGE_FIELDS, SKILLS_NOTE_CARRIER, append_message, stamp_message_timestamp,
+)
 from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_native_anthropic_request_tokens_rough,
     estimate_request_tokens_rough,
 )
 from agent.image_token_cost import bind_image_token_cost
+from agent.surface_switch import take_surface_switch_metadata
 from agent.usage_anchor import anchored_context_tokens, restore_usage_anchor
 from agent.turn_author import parse_turn_author
+from agent.remote_task_context import compose_task_system_prompt, owned_remote_task, mark_local_task_context
 
 logger = logging.getLogger(__name__)
 
@@ -620,6 +624,9 @@ _PER_TURN_RESET_STATE: tuple[tuple[str, Any], ...] = (
 
 def _reset_per_turn_agent_state(agent: Any) -> None:
     """Reset retry counters, guardrails, iteration and run budgets at turn start."""
+    agent._skills_index_pending_delivery = None
+    agent._skills_index_delivery = None
+    agent._skills_index_note = ""
     for name, value in _PER_TURN_RESET_STATE:
         setattr(agent, name, value)
     agent._turn_failed_file_mutations = {}
@@ -651,7 +658,10 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
     if agent._compression_warning:
         agent._replay_compression_warning()
         agent._compression_warning = None  # send once
-    if getattr(agent, "_pending_startup_notices", None):  # gateway: init ran before its callbacks
+    from agent.status_output import deliver_kept_startup_notices
+    deliver_kept_startup_notices(agent)
+    if getattr(agent, "_pending_startup_notices", None) or getattr(agent, "_pending_startup_prints", None):
+        # gateway: init ran before this turn's callbacks / viewer print sink
         agent._replay_startup_warnings()
 
     agent.iteration_budget = IterationBudget(agent.max_iterations)
@@ -803,7 +813,8 @@ def _collect_pre_llm_call_context(
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
     runaway plugin can't inflate every subsequent turn's prompt."""
-    if getattr(agent, "_persist_disabled", False):
+    mark_local_task_context(agent)
+    if getattr(agent, "_persist_disabled", False) or owned_remote_task(agent):
         return ""
     try:
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
@@ -857,15 +868,24 @@ def _merge_gateway_notes(
     agent: Any, messages: list[Any], current_turn_user_idx: int, plugin_user_context: str
 ) -> str:
     """Must-deliver per-turn notes ride the user-message injection channel (one-shot) so the
-    ephemeral system prompt stays byte-stable: the gateway's staged notes, plugin go-live notices no
-    tool result carried, then the surface-switch correction. Multimodal (list) content can't take the
-    string sidecar — append a durable text part instead."""
+    ephemeral system prompt stays byte-stable: the gateway's staged notes, plugin go-live
+    notices no tool result carried, then the surface-switch correction. Multimodal (list) content can't take the string sidecar —
+    append a durable text part instead."""
     forward_lsp_verdicts(agent)  # late LSP verdicts on last turn's edits ride the plugin-notice queue
+    _surface_note = consume_surface_switch_note(agent)
+    _surface_metadata = take_surface_switch_metadata(agent)
+    _skills_note = consume_skills_index_note(agent)
     _turn_notes = "\n\n".join(
         part for part in (consume_gateway_turn_context_notes(agent), pop_plugin_notices(agent),
-                          consume_surface_switch_note(agent),
-                          consume_skills_index_note(agent)) if part
+                          _surface_note, _skills_note) if part
     )
+    if _surface_note and _surface_metadata and 0 <= current_turn_user_idx < len(messages):
+        user_msg = messages[current_turn_user_idx]
+        if isinstance(user_msg, dict):
+            display_metadata = user_msg.get("display_metadata")
+            if not isinstance(display_metadata, dict):
+                display_metadata = {}
+            user_msg["display_metadata"] = {**display_metadata, **_surface_metadata}
     if not _turn_notes:
         return plugin_user_context
     _gw_turn_content = (
@@ -875,8 +895,20 @@ def _merge_gateway_notes(
         else None
     )
     if isinstance(_gw_turn_content, list):
+        if _surface_note and _surface_metadata and isinstance(user_msg, dict):
+            # The note is part of the live multimodal envelope, but a preflushed row contains
+            # the envelope before this append. Preserve that durable projection for the row-ID
+            # guard in _stamp_api_content_sidecar; the private key is never sent or persisted.
+            from agent.session_persistence import _durable_content
+            user_msg["_surface_switch_durable_content"] = _durable_content(_gw_turn_content)
         append_notes_to_multimodal_content(_gw_turn_content, _turn_notes)
+        if _skills_note:
+            from agent.skills_index_delivery import bind_skills_note
+            bind_skills_note(agent, messages[current_turn_user_idx], _skills_note, part=_gw_turn_content[-1])
         return plugin_user_context
+    if _skills_note and 0 <= current_turn_user_idx < len(messages):
+        from agent.skills_index_delivery import bind_skills_note
+        bind_skills_note(agent, messages[current_turn_user_idx], _skills_note)
     return (
         plugin_user_context + "\n\n" + _turn_notes if plugin_user_context else _turn_notes
     )
@@ -912,7 +944,8 @@ def _memory_turn_start_and_prefetch(
     """Notify memory providers of the new turn, then prefetch external memory once
     before the tool loop (skipped on trivial prompts with no semantic signal).
     Returns the prefetch text (``""`` when nothing was injected)."""
-    if not agent._memory_manager:
+    mark_local_task_context(agent)
+    if not agent._memory_manager or owned_remote_task(agent):
         return ""
     _query = _memory_query_text(original_user_message)
     # The author rides along so a provider can attribute THIS turn, not whoever opened the session.
@@ -951,9 +984,15 @@ def _stamp_api_content_sidecar(
         agent, _turn_user_msg, live_content,
         compose_user_api_content(live_content or "", ext_prefetch_cache, plugin_user_context),
     )
-    if _api_content is None or _api_content == durable_content:
+    row_match_content = _turn_user_msg.get("_surface_switch_durable_content", durable_content)
+    display_metadata = _turn_user_msg.get("display_metadata")
+    has_api_backfill = _api_content is not None and _api_content != durable_content
+    if has_api_backfill:
+        _turn_user_msg["api_content"] = _api_content
+        from agent.skills_index_delivery import bind_skills_sidecar
+        bind_skills_sidecar(agent, _turn_user_msg, _api_content)
+    if not has_api_backfill and not display_metadata:
         return
-    _turn_user_msg["api_content"] = _api_content
 
     # When another writer materialized this turn's user row BEFORE the sidecar existed — in-place
     # preflight compaction, or a close/early flush that raced the prologue (#102194) — the crash
@@ -974,12 +1013,27 @@ def _stamp_api_content_sidecar(
         if _db is None or not (isinstance(_row_id, int) or _in_place_compacted):
             return
         try:
-            if isinstance(_row_id, int):
-                _db.set_message_api_content(agent.session_id, _row_id, durable_content, _api_content)
+            if isinstance(_row_id, int) and has_api_backfill:
+                _db.set_message_api_content(
+                    agent.session_id, _row_id, durable_content, _api_content,
+                    display_metadata=display_metadata,
+                )
+            elif isinstance(_row_id, int) and display_metadata:
+                _db.set_message_display_metadata(
+                    agent.session_id, _row_id, row_match_content, display_metadata)
             else:
                 # Compacted copies carry no row id; positional is safe only because
                 # archive_and_compact just made this message the newest active user row.
-                _db.set_latest_user_api_content(agent.session_id, durable_content, _api_content)
+                if has_api_backfill:
+                    if display_metadata:
+                        _db.set_latest_user_api_content(
+                            agent.session_id, durable_content, _api_content,
+                            display_metadata=display_metadata)
+                    else:
+                        _db.set_latest_user_api_content(agent.session_id, durable_content, _api_content)
+                elif display_metadata:
+                    _db.set_latest_user_display_metadata(
+                        agent.session_id, row_match_content, display_metadata)
         except Exception:
             logger.warning("api_content backfill failed for session=%s", agent.session_id or "none", exc_info=True)
 
@@ -1077,6 +1131,7 @@ def build_turn_context(
     from tools.skill_provenance import set_review_attended
     set_review_attended(getattr(agent, "_review_attended", False))
     agent._restore_primary_runtime()
+    mark_local_task_context(agent)
     _publish_runtime_main(agent)
     _refresh_mcp_tools_between_turns(agent)
 
@@ -1120,11 +1175,13 @@ def build_turn_context(
     # Append the user message now that close persistence is safe.
     append_message(messages, user_msg)
     current_turn_user_idx = len(messages) - 1
+    from agent.llm_egress_lineage import record_constructed_turn
+    record_constructed_turn(agent, user_msg)
     agent._persist_user_message_idx = current_turn_user_idx
 
     agent._user_turn_count += 1
-    # Copilot x-initiator: the first API call of this user turn is user-initiated;
-    # tool-loop follow-ups revert to "agent".
+    # Turn-initiator state for per-request provider headers: the first API call of this
+    # user turn is user-initiated; tool-loop follow-ups are agent-initiated.
     agent._is_user_initiated_turn = True
 
     # Preserve the original user message (no nudge injection).
@@ -1142,6 +1199,9 @@ def build_turn_context(
     if agent._cached_system_prompt is None:
         restore_or_build_system_prompt(agent, system_message, conversation_history)
     active_system_prompt = agent._cached_system_prompt
+    # `/delegation <backend> --now`: after the pin restore, so a fresh agent rebuilds too.
+    from agent.delegation_backends import apply_requested_tool_rebuild
+    apply_requested_tool_rebuild(agent)
 
     # Bot Mode DM tool — injected ONLY into a bot's canonical "Bot Chat" session (same
     # gate as the protocol section); gate is session-stable, so cache-safe.
@@ -1260,6 +1320,9 @@ def build_api_messages(
 
     has_current = isinstance(current_turn_user_idx, int) and 0 <= current_turn_user_idx < len(messages)
     current_turn_message = messages[current_turn_user_idx] if has_current else None
+    if isinstance(current_turn_message, dict):
+        from agent.skills_index_delivery import revalidate_skills_note
+        revalidate_skills_note(agent, current_turn_message)
 
     # Replay consumers canonicalize the persisted prefix on read; the request copy must
     # carry the same bytes or a resume diverges mid-prefix. Only the rows BEFORE this
@@ -1275,10 +1338,13 @@ def build_api_messages(
     canonical_messages = canonicalize_replay_history(messages[:split], now=turn_now) + messages[split:]
 
     api_messages = []
+    sidecar_rows: set[int] = set()  # request rows whose content is agent-composed bytes, not the user's text
     for idx, msg in enumerate(canonical_messages):
         # Structural clone, NOT msg.copy(): in-place transforms below must not reach
         # persisted history via nested containers; see _clone_message_for_send.
         api_msg = _clone_message_for_send(msg)
+        if msg.get("role") == "user" and msg.get(SKILLS_NOTE_CARRIER):
+            sidecar_rows.add(len(api_messages))  # A multimodal row an agent appended a skills note part to.
         # api_content is bookkeeping (exact bytes sent), never a provider field — pop
         # it from EVERY outgoing copy. Persistence/display fields (display_*, _row_id,
         # timestamp) are local bookkeeping: strict OpenAI backends reject unknown keys
@@ -1295,6 +1361,7 @@ def build_api_messages(
                 # Reuse the prologue's stamp so sidecar and wire cannot drift
                 # and every pass this turn sends identical bytes.
                 api_msg["content"] = _api_content
+                sidecar_rows.add(len(api_messages))
             else:
                 # Callers that bypass the prologue stamping: compose live.
                 _composed = compose_user_api_content(
@@ -1302,6 +1369,7 @@ def build_api_messages(
                 )
                 if _composed is not None:
                     api_msg["content"] = _composed
+                    sidecar_rows.add(len(api_messages))
         elif (
             isinstance(_api_content, str) and _api_content
             and msg.get("role") in ("user", "assistant")
@@ -1310,6 +1378,7 @@ def build_api_messages(
             # prefix stays byte-stable. User rows carry the injection sidecar; user
             # and assistant rows may carry a sanitize-divergence sidecar.
             api_msg["content"] = _api_content
+            sidecar_rows.add(len(api_messages))
 
         # Replay stored reasoning on every carrier the active route reads (and strip the
         # rest): message_sanitization.reasoning_replay_route owns the decision.
@@ -1345,12 +1414,16 @@ def build_api_messages(
     from agent.anthropic_thinking_replay import apply_rejected_thinking_suppression
     apply_rejected_thinking_suppression(agent, api_messages)
 
+    # A note a provider already received stays as sent in history; a protected route's copy is projected.
+    from agent.skills_index_delivery import project_skills_notes, remember_newest_skills_note
+    remember_newest_skills_note(agent, api_messages, sidecar_rows)
+    api_messages = project_skills_notes(agent, api_messages, sidecar_rows)
+
     # Final system message = cached prompt + ephemeral additions (API-time only).
     # Plugin/recall context goes into the user message, never the system prompt: the
     # prompt is built ONCE per session and replayed verbatim (stable cache prefix).
-    effective_system = active_system_prompt or ""
-    if agent.ephemeral_system_prompt:
-        effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+    effective_system = compose_task_system_prompt(agent, active_system_prompt)
     if effective_system:
-        api_messages = [{"role": "system", "content": effective_system}] + api_messages
+        from agent.llm_egress_lineage import generated
+        api_messages = [generated({"role": "system", "content": effective_system})] + api_messages
     return api_messages, effective_system

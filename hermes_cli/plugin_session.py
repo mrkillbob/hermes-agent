@@ -7,6 +7,26 @@ and recorded working directory instead.
 from __future__ import annotations
 
 import os
+from contextvars import ContextVar
+from functools import wraps
+
+_cli_command_cwd = ContextVar("plugin_cli_command_cwd", default="")
+
+
+def attach_cli_handler(parser, handler):
+    """Only the real top-level CLI dispatch may supply its process cwd."""
+    if handler is None:
+        return
+
+    @wraps(handler)
+    def invoke(args):
+        token = _cli_command_cwd.set(os.getcwd())
+        try:
+            return handler(args)
+        finally:
+            _cli_command_cwd.reset(token)
+
+    parser.set_defaults(func=invoke)
 
 
 def _active_policy():
@@ -42,9 +62,17 @@ def session_cwd() -> str:
 
 def context_surface(manager) -> str:
     """``session_surface()`` for a plugin context: the classic CLI process itself is ``cli``."""
-    return "cli" if manager._cli_ref is not None else session_surface()
+    return "cli" if _cli_command_cwd.get() or manager._cli_ref is not None else session_surface()
 
 
-def context_cwd(manager) -> str:
+def context_cwd(manager, *, require_session=False) -> str:
     """``session_cwd()`` for a plugin context: the classic CLI process keeps its launch directory."""
-    return os.getcwd() if manager._cli_ref is not None else session_cwd()
+    if _cli_command_cwd.get():
+        return _cli_command_cwd.get()
+    if manager._cli_ref is not None:
+        return os.getcwd()
+    if require_session:
+        from agent.runtime_cwd import scoped_session_cwd
+        policy = _active_policy()
+        return scoped_session_cwd() or (policy.cwd if policy is not None else "")
+    return session_cwd()

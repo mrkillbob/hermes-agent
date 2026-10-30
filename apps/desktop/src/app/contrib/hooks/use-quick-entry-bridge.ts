@@ -13,11 +13,18 @@ import { sessionTileDelegate } from '@/store/session-states'
 import { isAuxiliaryWindow } from '@/store/windows'
 
 interface QuickEntryBridgeParams {
-  submitText: (
+  submitText: (text: string, options?: QuickEntryDispatchOptions) => Promise<boolean> | boolean
+  submitTextToNewSession: (
     text: string,
-    options?: { onAccepted?: (identity: QuickEntryAcceptedIdentity) => void }
-  ) => Promise<boolean> | boolean
-  submitTextToNewSession: (text: string, owner?: string) => Promise<{ runtimeSessionId: string; sessionId: string }>
+    owner?: string,
+    options?: QuickEntryDispatchOptions
+  ) => Promise<{ runtimeSessionId: string; sessionId: string }>
+}
+
+interface QuickEntryDispatchOptions {
+  onAccepted?: (identity: QuickEntryAcceptedIdentity) => void
+  /** Fired before the gateway RPC, whose failure may not prove non-acceptance. */
+  onDispatched?: () => void
 }
 
 /** Exact session identity that accepted a prompt (runtime + durable stored id). */
@@ -39,7 +46,7 @@ export function quickEntrySubmitAck(
   submitted: boolean,
   identity?: null | QuickEntryAcceptedIdentity
 ): QuickEntrySubmitResult {
-  if (!submitted) {
+  if (!submitted && !identity) {
     return {
       code: 'submit-rejected',
       message: 'The prompt was not accepted.',
@@ -106,22 +113,37 @@ export function useQuickEntryBridge({ submitText, submitTextToNewSession }: Quic
         }
 
         acknowledged = true
-        window.hermesDesktop?.quickEntry.ackSubmit(correlationId, result)
+        window.hermesDesktop?.quickEntry?.ackSubmit(correlationId, result)
       }
+
+      let acceptedIdentity: null | QuickEntryAcceptedIdentity = null
+      let promptDispatched = false
+      const progress: QuickEntryDispatchOptions = {
+        onAccepted: identity => {
+          acceptedIdentity = identity
+        },
+        onDispatched: () => {
+          promptDispatched = true
+        }
+      }
+      const failed = (error: unknown): QuickEntrySubmitResult =>
+        acceptedIdentity
+          ? quickEntrySubmitAck(true, acceptedIdentity)
+          : {
+              code: 'submit-failed',
+              message: error instanceof Error ? error.message : String(error),
+              ok: false,
+              retryable: !promptDispatched
+            }
 
       if (target === QUICK_TARGET_NEW) {
         // Create and submit as one route-neutral operation so drift cannot
         // orphan the new session (#85590).
         try {
-          const created = await submitNewRef.current(text, correlationId)
+          const created = await submitNewRef.current(text, correlationId, progress)
           ack({ ok: true, runtimeSessionId: created.runtimeSessionId, sessionId: created.sessionId })
         } catch (error) {
-          ack({
-            code: 'submit-failed',
-            message: error instanceof Error ? error.message : String(error),
-            ok: false,
-            retryable: true
-          })
+          ack(failed(error))
         }
 
         return
@@ -168,12 +190,7 @@ export function useQuickEntryBridge({ submitText, submitTextToNewSession }: Quic
               return
             }
 
-            ack({
-              code: 'submit-failed',
-              message: error instanceof Error ? error.message : String(error),
-              ok: false,
-              retryable: true
-            })
+            ack(failed(error))
           }
 
           return
@@ -189,23 +206,17 @@ export function useQuickEntryBridge({ submitText, submitTextToNewSession }: Quic
         return
       }
 
-      let acceptedIdentity: null | QuickEntryAcceptedIdentity = null
-
       try {
-        const submitted = await submitTextRef.current(text, {
-          onAccepted: identity => {
-            acceptedIdentity = identity
-          }
-        })
-
-        ack(quickEntrySubmitAck(submitted, acceptedIdentity))
+        const submitted = await submitTextRef.current(text, progress)
+        ack(
+          acceptedIdentity
+            ? quickEntrySubmitAck(true, acceptedIdentity)
+            : !submitted && promptDispatched
+              ? failed('The prompt was dispatched, but backend acceptance is unknown.')
+              : quickEntrySubmitAck(submitted)
+        )
       } catch (error) {
-        ack({
-          code: 'submit-failed',
-          message: error instanceof Error ? error.message : String(error),
-          ok: false,
-          retryable: true
-        })
+        ack(failed(error))
       }
     })
 

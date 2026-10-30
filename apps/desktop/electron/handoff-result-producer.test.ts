@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { type ChildProcess, spawn } from 'node:child_process'
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -34,6 +34,21 @@ test.skipIf(process.platform === 'win32').each(['legacy', 'protocol-2'])(
       fs.mkdirSync(dir, { recursive: true })
     }
 
+    // Failure notification is part of this real producer path, including with --no-ui.
+    // Stub host commands (also the absolute macOS path), never the production notifier.
+    const notifications = path.join(fixture, 'notifications')
+    const bashEnv = path.join(fixture, 'notification-host.sh')
+    fs.writeFileSync(bashEnv, [
+      String.raw`fixture_notification() { printf '%s\n' "$@" >> "$TEST_NOTIFICATION_LOG"; }`,
+      ...['/usr/bin/osascript', 'osascript', 'notify-send', 'zenity', 'kdialog']
+        .map(command => 'function ' + command + ' { fixture_notification "$@"; }')
+    ].join('\n'))
+    const notificationEnv = { BASH_ENV: bashEnv, TEST_NOTIFICATION_LOG: notifications }
+    const notificationHost = spawnSync('bash', ['-c',
+      'declare -F /usr/bin/osascript >/dev/null && declare -F notify-send >/dev/null'
+    ], { env: { ...process.env, ...notificationEnv } })
+    assert.equal(notificationHost.status, 0, 'notification isolation must load before the producer')
+
     // No launcher: the actual hand-off fails without invoking an update, gateway or app.
     const script = path.resolve(__dirname, '../../../scripts/desktop-update/posix.sh')
     const desktop = spawn('sleep', ['60'])
@@ -59,6 +74,7 @@ test.skipIf(process.platform === 'win32').each(['legacy', 'protocol-2'])(
       {
         env: {
           ...process.env,
+          ...notificationEnv,
           HOME: fixture,
           HERMES_HOME: home,
           TMPDIR: temp,
@@ -123,6 +139,10 @@ test.skipIf(process.platform === 'win32').each(['legacy', 'protocol-2'])(
       await stop(desktop)
       const [code] = await exited
       assert.equal(code, 3, output)
+      const notification = fs.readFileSync(notifications, 'utf8')
+      assert.match(notification, /Hermes update/)
+      assert.match(notification, /Update aborted:/)
+      assert.ok(notification.includes(root), 'the fixture captures its own failure notification')
       const receipt = JSON.parse(fs.readFileSync(handoffResultPath(home), 'utf8'))
       assert.equal(receipt.started_at, startedAt)
 

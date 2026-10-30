@@ -22,18 +22,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from gateway.run_shutdown import _log_suppressed
-from utils import file_signature
+from hermes_cli.config_backend import ConfigBackendUnavailable
+from utils import file_cache_version
 
 logger = logging.getLogger(__name__)
 
 _PROFILE_RESCAN_INTERVAL_SECS = 30.0
-_PROFILE_SIGNATURE_FILES = ("config.yaml", ".env")
+_PROFILE_SIGNATURE_FILES = (".env",)  # config.yaml: the config backend's version, below
 # Bound for one own-gateway liveness probe (``live_gateway_pid_for_home``): the control-socket
 # read it can end in has no timeout of its own — on Windows the named pipe stalls there until
 # its peer answers — so the await needs one. A healthy identify answers in milliseconds.
@@ -42,21 +42,42 @@ _OWN_GATEWAY_PROBE_TIMEOUT_SECS = 5.0
 
 def _stat_signature(path: Path) -> Optional[tuple]:
     try:
-        return file_signature(os.stat(path))
+        return file_cache_version(path, always_digest=True)  # stored, compared on a later tick
     except OSError:
         return None
 
 
 def profile_serve_signature(home: Path) -> tuple:
-    """Cheap change detector for a served profile's credentials/config: file signature per file."""
-    sig = []
+    """Change detector for a served profile's credentials/config: the config backend's signature
+    of its config layer, then ``file_cache_version`` of ``.env``. Each is hashed every time
+    (``always_digest``) where it is a file: it is compared long after it was taken, and a racy
+    digest going empty would read as a change and reconnect the profile's adapters. A remote layer
+    changes with no local file change, so its signature is the backend's version. A config backend
+    outage raises ``ConfigBackendUnavailable``; the reconcile cycle contains it and retries."""
+    from hermes_cli.config_backend import config_version_or_none, supports_file_tooling
+    cfg = Path(home) / "config.yaml"
+    sig = [_stat_signature(cfg) if supports_file_tooling() else config_version_or_none(cfg)]
     for name in _PROFILE_SIGNATURE_FILES:
         try:
-            st = os.stat(Path(home) / name)
-            sig.append(file_signature(st))
+            sig.append(file_cache_version(Path(home) / name, always_digest=True))
         except OSError:
             sig.append(None)
     return tuple(sig)
+
+
+def _profile_signature_snapshot(homes: dict[str, Path]) -> dict[str, tuple]:
+    """Read one reconciliation's metadata off-loop, without caching or reading secrets."""
+    return {name: profile_serve_signature(home) for name, home in homes.items()}
+
+
+def _added_profile_blocker(launch: Path) -> Optional[str]:
+    """Why a single-profile boot must not start multiplexing now that a second profile exists: the
+    ``gateway.auto_multiplex_migration: false`` opt-out on the default profile, else boot's preflight."""
+    from hermes_cli.gateway_migrate_guards import auto_migration_opted_out
+    from hermes_cli.gateway_multiplex_mode import AUTO_MIGRATION_OPTED_OUT_REASON, implicit_multiplex_blocker
+    if auto_migration_opted_out(launch):
+        return AUTO_MIGRATION_OPTED_OUT_REASON
+    return implicit_multiplex_blocker()
 
 
 class GatewayProfileReconcileMixin:
@@ -68,6 +89,7 @@ class GatewayProfileReconcileMixin:
     _profile_own_gateway_warned: Optional[set[str]] = None
     _profile_probe_timeout_warned: Optional[set[str]] = None
     _hook_consent_signatures: Optional[dict[str, Optional[tuple]]] = None
+    _single_profile_blocker_logged: Optional[str] = None
 
     # ── state helpers ─────────────────────────────────────────────────────────────────────────────
 
@@ -90,23 +112,36 @@ class GatewayProfileReconcileMixin:
         self._served_profile_signatures = {name: sigs.get(name) or profile_serve_signature(home)
                                            for name, home in homes.items()}
 
+    async def _record_profiles_with_metadata(self, active, profile_homes):
+        """Prepare missing metadata off-loop; publish runtime bookkeeping on its owner loop."""
+        homes = list(profile_homes)
+        sigs = dict(self._served_profile_signatures or {})
+        missing = {name: home for name, home in homes if not sigs.get(name)}
+        if missing:
+            sigs.update(await self._run_housekeeping_in_executor(_profile_signature_snapshot, missing))
+        self._served_profile_signatures = sigs
+        self._record_served_profiles(active, homes)
+
     # ── watcher ───────────────────────────────────────────────────────────────────────────────────
 
     async def _profile_reconcile_watcher(self, interval: float = _PROFILE_RESCAN_INTERVAL_SECS) -> None:
         """Supervised safety net, every ``interval`` seconds: re-sync shell hooks whose consent changed
         (every gateway), then rescan ``profiles/`` when multiplexing (creators signal the control
-        socket for an immediate rescan)."""
+        socket for an immediate rescan); a gateway standalone only because the host had one profile
+        starts multiplexing here once a second one exists."""
         while self._running:
             await asyncio.sleep(interval)
             if not self._running:
                 return
             try:
                 await self._sync_hooks_on_consent_change()
-                if self._multiplex_on():
+                # A standalone gateway never runs a profile reconcile from the watcher, unless it is the
+                # single-profile boot that starts multiplexing in place for a newly created profile.
+                if self._multiplex_on() or await self._multiplex_for_added_profile():
                     await self.reconcile_served_profiles(reason="watcher")
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except (Exception, ConfigBackendUnavailable):  # a config outage is a SystemExit by design
                 logger.warning("Served-profile reconcile failed; retrying next cycle", exc_info=True)
 
     async def _sync_hooks_on_consent_change(self) -> None:
@@ -156,14 +191,16 @@ class GatewayProfileReconcileMixin:
         from gateway.run import MultiplexConfigError
         from hermes_cli.profiles import profiles_to_serve
         result: dict[str, Any] = {"added": [], "removed": [], "rescanned": [], "parked": [], "reason": reason}
-        if not self._multiplex_on():
+        if not self._multiplex_on() and not await self._multiplex_for_added_profile():
             return {**result, "multiplex": False, "served_profiles": self.served_profile_names()}
         if not self._running or self._served_profile_homes is None:
             # Startup enumerates profiles/ itself; a rescan before it finishes has nothing to diff against.
             return {**result, "pending": True, "served_profiles": self.served_profile_names()}
         async with self._reconcile_lock():
             active = getattr(self, "_primary_profile_name", None) or "default"
-            live = {str(name): Path(home) for name, home in profiles_to_serve(multiplex=True)}
+            profile_homes = await self._run_housekeeping_in_executor(
+                partial(profiles_to_serve, multiplex=True))
+            live = {str(name): Path(home) for name, home in profile_homes}
             listed = set(live)  # a probe skip below is not a deletion: it never clears a parked verdict
             known = dict(self._served_profile_homes or {})
             from gateway.status import live_gateway_pid_for_home
@@ -212,8 +249,9 @@ class GatewayProfileReconcileMixin:
             retry_parked = reason == "control-socket"
             added = [n for n in live if n not in known and n != active and (retry_parked or n not in parked)]
             removed = [n for n in known if n not in live and n != active]
-            changed = [n for n in live if n in known and n != active and n not in added
-                       and profile_serve_signature(live[n]) != sigs.get(n)]
+            candidates = {n: live[n] for n in live if n in known and n != active and n not in added}
+            signatures = await self._run_housekeeping_in_executor(_profile_signature_snapshot, candidates)
+            changed = [n for n in candidates if signatures[n] != sigs.get(n)]
             current = {n: h for n, h in live.items() if n in known or n == active}
             return await self._apply_profile_changes(
                 current, added, removed, changed, reason=reason, live=live, result=result)
@@ -252,7 +290,8 @@ class GatewayProfileReconcileMixin:
         for name in added + changed:
             # Only acknowledge the configuration observed before connecting;
             # a setup save during an awaited handshake needs another scan.
-            scan_signature = profile_serve_signature(current[name])
+            scan_signature = await self._run_housekeeping_in_executor(
+                profile_serve_signature, current[name])
             try:
                 connected = await self._start_one_profile_adapters(name, current[name], claimed)
             except MultiplexConfigError as exc:
@@ -285,12 +324,14 @@ class GatewayProfileReconcileMixin:
         self._served_profile_signatures = sigs
         # A profile deleted while an adapter above was still connecting must not be recorded back
         # (the deleter's signal timed out against this lock and rmtree already ran).
-        live_now = {str(name) for name, _home in profiles_to_serve(multiplex=True)}
+        live_homes_now = await self._run_housekeeping_in_executor(
+            partial(profiles_to_serve, multiplex=True))
+        live_now = {str(name) for name, _home in live_homes_now}
         for name in [n for n in current if n not in live_now and n != active]:
             await self._unserve_profile(name, current.pop(name))
             result["removed"].append(name)
             added = [n for n in added if n != name]
-        self._record_served_profiles(active, list(current.items()))
+        await self._record_profiles_with_metadata(active, current.items())
         # ``_note_served_profiles`` fills a missing signature with the current one; that refill
         # would park a transiently-failed profile exactly like the config-error case above.
         for name in transient_failed:
@@ -301,18 +342,98 @@ class GatewayProfileReconcileMixin:
             configs = getattr(self, "_profile_configs", None)
             if isinstance(configs, dict):
                 configs.pop(name, None)
-        if added:
+        if added or changed:
             from gateway.run_runtime import recover_served_native_rows
             await recover_served_native_rows(self)
-            await self._after_profiles_added([(n, current[n]) for n in added])
+            await self._after_profiles_added([(n, current[n]) for n in added + changed if n in current])
         result["served_profiles"] = self.served_profile_names()
         return result
+
+    async def _reset_profile_adapters_for_rescan(self, profile_name: str) -> None:
+        """Tear down a changed profile's old adapters before rebuilding from its new config."""
+        pending = (getattr(self, "_profile_failed_platforms", None) or {}).pop(profile_name, None) or {}
+        tasks = [task for task in pending.values() if isinstance(task, asyncio.Task) and not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=self._adapter_disconnect_timeout_secs())
+        adapters = (getattr(self, "_profile_adapters", None) or {}).pop(profile_name, None) or {}
+        for platform, adapter in adapters.items():
+            await self._bounded_adapter_teardown(adapter, platform, profile=profile_name)
+
+        from gateway.run import _write_runtime_status_quiet
+        _write_runtime_status_quiet(drop_profile_platforms=profile_name)
 
     def _parked_profile_names(self) -> list:
         """Profiles that exist but could not be served (unusable store, home owned elsewhere); boot's
         ``initialize_gateway_runtime`` parks into the same published ``name -> reason`` map."""
         from gateway.run_runtime import parked_profile_map
         return list(parked_profile_map(self))
+
+    async def _multiplex_for_added_profile(self) -> bool:
+        """Start multiplexing in place when this gateway booted standalone ONLY because the host had
+        one profile and a second now exists (#141623). Boot settles the mode once, so without this a
+        profile created afterwards (Desktop's New Agent, ``hermes profile create``) was never served:
+        every ticket, session and delete for it was refused until a manual restart.
+
+        No restart and no drain: the launch env is frozen and unscoped secret reads fail closed
+        (``activate_multi_profile_hosting``, the hosted-room precedent), the launch home becomes the
+        first entry of the reservation, and the caller's ordinary hot-serve reconcile serves the new
+        profile. Turns already running keep their bound scope; the launch profile's later work binds
+        its own scope through ``_standalone_launch_scope`` and the re-wired primary handlers. Any
+        other standalone verdict, or a preflight blocker now, leaves the gateway as it is; nothing is
+        latched, so the next rescan or watcher tick retries once the blocker clears. The switch is an
+        automatic migration, so ``gateway.auto_multiplex_migration: false`` holds it back the same way
+        (re-read on every rescan: setting it back to true converges without a restart). True when armed."""
+        from hermes_cli.gateway_multiplex_mode import (
+            AUTO_MIGRATION_OPTED_OUT_REASON, SINGLE_PROFILE_REASON, MultiplexDecision, log_multiplex_decision,
+            record_multiplex_decision, recorded_standalone_reason)
+        from hermes_cli.profiles import profiles_to_serve
+        from hermes_constants import get_default_hermes_root, get_process_hermes_home
+        # Serialized with reconcile: a second rescan (watcher + creator) resuming mid-activation
+        # reset the reservation the first one's reconcile had already grown.
+        async with self._reconcile_lock():
+            if self._multiplex_on():
+                return True  # a concurrent rescan activated while this one waited
+            if not self._running or getattr(self, "_draining", False):
+                return False  # shutdown began: never arm fail-closed secrets under drain-time work
+            if recorded_standalone_reason() not in (SINGLE_PROFILE_REASON, AUTO_MIGRATION_OPTED_OUT_REASON):
+                return False
+            launch = get_process_hermes_home().resolve()
+            if launch != get_default_hermes_root().resolve():
+                return False  # only the default home runs the multiplexer (``_launch_home_may_multiplex``)
+            if len(profiles_to_serve(multiplex=True, include_parked=True)) < 2:
+                return False
+            blocker = await self._run_housekeeping_in_executor(_added_profile_blocker, launch)
+            if blocker is not None:
+                if blocker != self._single_profile_blocker_logged:
+                    logger.warning("[MULTIPLEX] A new profile exists but this gateway stays standalone: %s", blocker)
+                    self._single_profile_blocker_logged = blocker
+                if blocker == AUTO_MIGRATION_OPTED_OUT_REASON:
+                    # Published so `gateway ensure` refuses the new profile naming the opt-out (Desktop shows
+                    # that detail) instead of "only one profile exists".
+                    record_multiplex_decision(MultiplexDecision(False, "guard", blocker))
+                return False
+            if not self._running or getattr(self, "_draining", False):
+                return False  # shutdown began during the preflight await
+            from hermes_constants import hermes_home_key
+            from tools.mcp_tool_scope import rekey_unscoped_connections
+            from tui_gateway.launch_profile_policy import activate_multi_profile_hosting
+            activate_multi_profile_hosting()
+            rekey_unscoped_connections(hermes_home_key(launch))
+            self.config.multiplex_profiles = True
+            self.config._runtime_profile_homes = (("default", launch),)
+            registry = getattr(self, "session_authorities", None)
+            if registry is not None:
+                registry.multiplexed = True
+            for adapter in list(self.adapters.values()):
+                adapter.set_message_handler(self._primary_message_handler())
+                adapter.set_busy_session_handler(self._primary_busy_session_handler())
+                adapter.set_platform_event_handler(self._primary_platform_event_handler())
+            self._record_served_profiles("default", [("default", launch)])
+            log_multiplex_decision(MultiplexDecision(True, "default", "a second profile was created"))
+            logger.info("[MULTIPLEX] A second profile exists; serving every profile from this process (no restart)")
+            return True
 
     async def _serve_profile_runtime(self, name: str, home: Path) -> Optional[str]:
         """Grow the reservation by *home* and build its session authority (boot's per-secondary
@@ -330,7 +451,7 @@ class GatewayProfileReconcileMixin:
             return None
         try:
             await serve_profile_runtime(self, name, home)
-        except Exception as exc:
+        except (Exception, ConfigBackendUnavailable) as exc:  # unservable now: parked, retried by rescan
             if self.session_authorities.for_home(home) is not None:
                 # Retirement of the failed attempt missed its deadline: its writer may still use
                 # this home, so the reservation and authority stay; the profile is parked (no
@@ -362,7 +483,7 @@ class GatewayProfileReconcileMixin:
         from gateway.run import _enable_multiplex_log_routing, _profile_runtime_scope
         from contextvars import copy_context
         with _log_suppressed(logging.DEBUG, "log routing refresh failed", exc_info=True):
-            _enable_multiplex_log_routing(self.config)
+            await self._run_housekeeping_in_executor(_enable_multiplex_log_routing, self.config)
         from tools.mcp_oauth import suppress_interactive_oauth
         loop = asyncio.get_running_loop()
         for profile_name, profile_home in profile_homes:
@@ -388,6 +509,7 @@ class GatewayProfileReconcileMixin:
         profile's). Secrets are not re-hydrated: teardown must not block the loop on a source fetch.
         """
         from gateway.run import _profile_runtime_scope, _write_runtime_status_quiet
+        from hermes_constants import hermes_home_key
         from gateway.run_runtime import release_profile_home, unserve_profile_runtime
         # Retire before teardown; a False verdict (writer outlived its Stop) is honoured below.
         retired = getattr(self, 'session_authorities', None) is None or await unserve_profile_runtime(self, home)
@@ -401,10 +523,18 @@ class GatewayProfileReconcileMixin:
             adapters = (getattr(self, "_profile_adapters", None) or {}).pop(name, None) or {}
             for platform, adapter in list(adapters.items()):
                 await self._bounded_adapter_teardown(adapter, platform, profile=name)
+            with _log_suppressed(logging.DEBUG, "MCP scope cleanup failed for deleted profile", exc_info=True):
+                from tools.mcp_tool_lifecycle import shutdown_mcp_servers
+                await asyncio.to_thread(shutdown_mcp_servers, scope=hermes_home_key(home))
+            # Plugin teardown touches importlib locks and module caches — run it on a
+            # worker thread so it can't stall the gateway event loop.
+            from hermes_cli.plugins_lifecycle import evict_profile_plugins
+            await asyncio.to_thread(evict_profile_plugins, home)
             # Its ``<name>:<platform>`` runtime entries describe a profile that no longer exists.
             _write_runtime_status_quiet(drop_profile_platforms=name)
             for attr in ("pairing_stores", "_busy_text_modes_by_profile", "_busy_input_modes_by_profile",
-                         "_busy_text_timing_by_profile", "_human_delay_by_profile", "_profile_configs"):
+                         "_busy_text_timing_by_profile", "_human_delay_by_profile", "_profile_configs",
+                         "_profile_bot_platforms"):
                 store = getattr(self, attr, None)
                 if isinstance(store, dict):
                     store.pop(name, None)
@@ -433,20 +563,14 @@ class GatewayProfileReconcileMixin:
                 with _log_suppressed(logging.DEBUG, "memory-store release failed", exc_info=True):
                     from plugins.memory import import_provider_module  # catalog plugin since it left core
                     import_provider_module("holographic", "store").MemoryStore.release_all_under(home)
-                # The gateway process is a second holder the CLI-side delete cannot reach: its routed
-                # log files (logs/.__agent.lock, logs/.__errors.lock) and its scoped MCP servers'
-                # mcp-stderr.log handle live HERE, so unserve must release them in this process too
-                # (#130244) — the same two calls ``delete_profile`` makes for the deleting process.
-                # Both calls BLOCK (the log release stops/joins the QueueListener, which can be inside
-                # a ConcurrentRotatingFileHandler emit waiting on another process's rotation lock; the
-                # MCP shutdown waits on future.result for the MCP loop), so they run off the loop in a
-                # worker thread — otherwise every other served profile's events stall behind them.
+                # The gateway's routed log files are a second holder the CLI-side delete cannot
+                # reach (#130244). MCP handles were released before plugin eviction above; release
+                # these log handles after the remaining teardown hooks finish writing.
+                # The log release stops/joins the QueueListener, which can be inside a
+                # ConcurrentRotatingFileHandler emit waiting on another process's rotation lock,
+                # so run it off the loop to keep every other served profile's events moving.
                 # ``asyncio.to_thread`` copies the context, so the surrounding
                 # ``_profile_runtime_scope`` home/secret override stays visible in the worker.
-                with _log_suppressed(logging.DEBUG, "scoped MCP shutdown failed", exc_info=True):
-                    from hermes_constants import hermes_home_key
-                    from tools.mcp_tool_lifecycle import shutdown_mcp_servers
-                    await asyncio.to_thread(shutdown_mcp_servers, scope=hermes_home_key(home))
                 with _log_suppressed(logging.DEBUG, "profile log handler release failed", exc_info=True):
                     from hermes_logging import release_profile_log_handlers
                     await asyncio.to_thread(release_profile_log_handlers, home)
@@ -472,12 +596,14 @@ def _profile_lifecycle_verb(runner, *, serve: bool):
                 if name not in known:
                     return {"error": f"profile '{name}' is not served"}
                 await runner._unserve_profile(name, known.pop(name))
-                runner._record_served_profiles(active, list(known.items()))
+                await runner._record_profiles_with_metadata(active, known.items())
                 return {"unserved": name, "served_profiles": runner.served_profile_names()}
-            installed = dict(profiles_to_serve(True, include_parked=True))
+            installed = dict(await runner._run_housekeeping_in_executor(
+                partial(profiles_to_serve, True, include_parked=True)))
             if name not in installed:
                 return {"error": f"unknown profile '{name}'"}
-            if name != "default" and profile_is_parked(installed[name]):
+            if name != "default" and await runner._run_housekeeping_in_executor(
+                    profile_is_parked, installed[name]):
                 return {"error": f"profile '{name}' is parked (gateway.parked)"}
             if name in known:
                 return {"error": f"profile '{name}' is already served"}

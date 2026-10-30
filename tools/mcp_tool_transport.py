@@ -12,11 +12,12 @@ from typing import Dict, Optional, Set
 from utils import normalize_proxy_url
 from agent.proxy_bypass import is_loopback_host, should_bypass_proxy
 from agent import runtime_cwd as _runtime_cwd
-from tools.mcp_tool_errors import NonMcpEndpointError, _apply_identity_header, _describe_http_failure, _handshake_answered_with_unsupported_version, _handshake_rejected_as_modern, _is_streamable_http_rejection, _make_http_rejection_recorder, _make_mcp_body_cap_transport, _make_redirect_header_stripper, _resolve_client_cert, _unwrap_exception_group
+from tools.mcp_tool_errors import _MCP_HTTP_MAX_BODY_BYTES, NonMcpEndpointError, _apply_identity_header, _describe_http_failure, _handshake_answered_with_unsupported_version, _handshake_rejected_as_modern, _is_streamable_http_rejection, _make_http_rejection_recorder, _make_mcp_body_cap_transport, _make_redirect_header_stripper, _resolve_client_cert, _unwrap_exception_group
 from tools.mcp_tool_lifecycle import _filter_mcp_children, _leader_start_time, _orphan_stdio_pid_servers, _orphan_stdio_pids, _stdio_pgids, _stdio_pids, _stdio_starttimes
 from tools.mcp_tool_common import _core
 from tools.mcp_tool_node_abi import node_abi_error
 from tools import mcp_tool_config as _config
+from tools import mcp_tool_events as _events
 from tools import mcp_tool_lifecycle as _lifecycle
 from tools import mcp_tool_registration as _registration
 
@@ -113,7 +114,7 @@ def _live_endpoint(server_name: str) -> Optional[tuple[str, dict]]:
 
 
 def _http_endpoint(server_name: str, config: dict) -> tuple[str, dict]:
-    """URL + configured headers, overlaid by a ``server_json`` live endpoint's URL and bearer."""
+    """Resolve the HTTP route and headers, including a profile-owned live endpoint."""
     url, headers = config["url"], dict(config.get("headers") or {})
     live = _live_endpoint(server_name)
     if live is not None:
@@ -123,13 +124,11 @@ def _http_endpoint(server_name: str, config: dict) -> tuple[str, dict]:
 
 
 def _stdio_launch(config: dict) -> tuple:
-    """(command, env, cwd) a stdio child is spawned with, resolved in the current profile's scope."""
-    command, env = _config._resolve_stdio_command(config["command"], _config._build_safe_env(config.get("env")))
-    # A stdio child inherits this process's cwd when none is configured. Hosted sessions (ACP,
-    # gateway) pin a logical cwd via agent.runtime_cwd; without it the child resolves relative
-    # paths against the daemon's launch dir, not the session workspace. Explicit config always
-    # wins; an existing session/TERMINAL_CWD anchor becomes the default; else native (None).
-    # The resolved default is fixed for the connection's lifetime.
+    """Resolve the command, environment and cwd used to start a stdio server."""
+    command, env = _config._resolve_stdio_command(
+        config["command"],
+        _config._build_safe_env(config.get("env"), external_env=config.get(_config._CONNECTION_EXTERNAL_ENV_KEY)),
+    )
     cwd = config.get("cwd")
     if cwd is None:
         cwd = _runtime_cwd.resolve_context_cwd() or None
@@ -137,11 +136,7 @@ def _stdio_launch(config: dict) -> tuple:
 
 
 def _connect_inputs(server_name: str, config: dict) -> tuple[list, set]:
-    """What a connection is opened with, resolved in the current profile's scope: stdio
-    ``[command, env, cwd]``; HTTP ``[url, headers]`` after the live endpoint and the identity
-    header. The owner hashes this very list and an adopter recomputes it, so both digests are
-    built from one code path. Also returns the configured header names (HTTP only), captured
-    before the identity header is merged in, for the strict-redirect boundary."""
+    """Resolve the exact connection inputs for identity comparison and transport setup."""
     if "url" in config:
         url, headers = _http_endpoint(server_name, config)
         configured_header_names = {key.lower() for key in headers}
@@ -167,7 +162,7 @@ class MCPServerTransportMixin:
         return caps is None or getattr(caps, "tools", None) is not None
 
     def _session_kwargs(self) -> dict:
-        """ClientSession kwargs: sampling, elicitation, notification + logging callbacks."""
+        """ClientSession kwargs: client identity, sampling, elicitation, notification + logging callbacks."""
         kwargs = {}
         for handler in (self._sampling, self._elicitation):
             if handler:
@@ -176,6 +171,11 @@ class MCPServerTransportMixin:
             kwargs["message_handler"] = self._make_message_handler()
         if _core._MCP_LOGGING_CALLBACK_SUPPORTED:
             kwargs["logging_callback"] = self._make_logging_callback()
+        if _core._client_session_accepts("client_info"):
+            # Servers key logs/behaviour on clientInfo; the SDK default is "mcp"/"0.1.0".
+            from mcp.types import Implementation
+            from hermes_cli.version_info import get_version_info
+            kwargs["client_info"] = Implementation(name="hermes-agent", version=get_version_info().base_version)
         return kwargs
 
     async def _negotiate_session(self, session, connect_timeout: float):
@@ -274,7 +274,12 @@ class MCPServerTransportMixin:
         # recovery isn't gated on a stale consecutive-failure count (#16788).
         # Unproven until keepalive/tool-call success (#62212).
         self._session_proven = False
-        reason = await self._wait_for_lifecycle_event()
+        events_task = _events.start_refresh_task(self)
+        try:
+            reason = await self._wait_for_lifecycle_event()
+        finally:
+            if events_task is not None:
+                events_task.cancel()
         if label and reason == "reconnect":
             logger.info("MCP server '%s': reconnect requested — tearing down %s session", self.name, label)
         return reason
@@ -359,11 +364,9 @@ class MCPServerTransportMixin:
         if not _core._ensure_mcp_sdk():
             raise ImportError(f"MCP server '{self.name}' requires the 'mcp' Python SDK, but "
                               "it is not installed. Run `hermes setup` to install MCP support, then retry.")
-        command = config.get("command")
-        if not command:
+        if not config.get("command"):
             raise ValueError(f"MCP server '{self.name}' has no 'command' in config")
         inputs, _ = _connect_inputs(self.name, config)
-        # Hash the inputs this attempt spawns with, never a second resolution of them.
         self._resolved_identity = _registration._identity_digest(inputs)
         command, safe_env, stdio_cwd = inputs
         # OSV malware preflight, then the cached-npx swap (ordering enforced there).
@@ -400,6 +403,8 @@ class MCPServerTransportMixin:
         _config._write_stderr_log_header(self.name)
         stderr = _config._StderrTee(_config._get_mcp_stderr_log())
         try:
+            from hermes_cli.startup_hold import mark_uncertain_children
+            mark_uncertain_children()
             async with _core.stdio_client(server_params, errlog=stderr.sink) as (read_stream, write_stream):
                 # New PIDs for force-kill cleanup, minus non-MCP children (slash_worker, LSP) racing
                 # into the window: they share the TUI's pgid — leaking them would killpg() the TUI.
@@ -578,7 +583,11 @@ class MCPServerTransportMixin:
         @asynccontextmanager
         async def _owned_client_streams():  # the SDK skips cleanup when http_client is provided
             async with _build_client(**client_kwargs) as http_client:
-                async with _core.streamable_http_client(url, http_client=http_client) as streams:
+                # Without max_sse_event_size the SDK parses each event against httpx2's 1 MiB default,
+                # a tighter second cap under our wire cap: a large tools/list or tool result (an
+                # editor screenshot) failed outright.
+                async with _core.streamable_http_client(url, http_client=http_client,
+                                                        max_sse_event_size=_MCP_HTTP_MAX_BODY_BYTES) as streams:
                     yield streams
         return _owned_client_streams()
 
@@ -589,15 +598,13 @@ class MCPServerTransportMixin:
             raise ImportError(f"MCP server '{self.name}' requires HTTP transport but "
                               "mcp.client.streamable_http is not available. "
                               "Upgrade the mcp package to get HTTP support.")
-        # Agent Plugins v1 strict_redirect_headers: configured headers MUST NOT follow a cross-origin
-        # redirect — their names are captured BEFORE client-generated headers are merged in.
         inputs, configured_header_names = _connect_inputs(self.name, config)
-        # Hash the endpoint this attempt connects to: a second read of the runtime file could
-        # publish another endpoint's identity alongside this session.
         self._resolved_identity = _registration._identity_digest(inputs)
         url, headers = inputs
         logger.debug("MCP server '%s': connecting to %s", self.name, url)
         self._http_rejection = {}  # last 4xx/5xx the owned client saw this attempt (recorder hook)
+        # Agent Plugins v1 strict_redirect_headers: configured headers MUST NOT follow a cross-origin
+        # redirect — capture their names BEFORE client-generated headers are merged in.
         # Seed MCP-Protocol-Version (user override wins) from the HANDSHAKE version, not the latest: a
         # 2026-07-28 header routes the handshake-era ``initialize()`` onto the envelope ladder, which rejects it.
         if not any(key.lower() == "mcp-protocol-version" for key in headers):

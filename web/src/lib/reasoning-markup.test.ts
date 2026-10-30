@@ -66,4 +66,16 @@ describe("reasoning markup parsing", () => {
     expect(shouldRenderStructuredReasoning("tool", content)).toBe(false);
     expect(shouldRenderStructuredReasoning("system", content)).toBe(false);
   });
+
+  it("treats tilde and indented fences as code, honoring fence length", () => {
+    const tilde = "~~~xml\n<thinking>x</thinking>\n~~~";
+    const indented = "   ```\n<action>a</action>\n   ```";
+    const longer = "````\n```\n<thinking>x</thinking>\n```\n````";
+
+    for (const content of [tilde, indented, longer]) {
+      expect(hasReasoningMarkup(content)).toBe(false);
+    }
+    expect(hasReasoningMarkup("~~~\n```\n<thinking>x</thinking>\n~~~")).toBe(false);
+    expect(hasReasoningMarkup("    ```\n<thinking>x</thinking>\n    ```")).toBe(true);
+  });
 });

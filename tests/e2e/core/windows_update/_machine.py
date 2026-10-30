@@ -64,6 +64,8 @@ from tests.e2e.core.windows._helpers import (
     wait_until,
 )
 from tests.fakes.fake_llm_provider import write_hermes_home
+from tests.e2e.core.windows_update._command_evidence import CommandEvidence
+from tests.e2e.core.windows_update._process_evidence import CleanupEvidence, note_identity, note_unclassified
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 OPT_IN_ENV = "HERMES_E2E_WINDOWS_INSTALL"
@@ -122,6 +124,36 @@ def _hkcu_path() -> tuple[str, int] | None:
             return str(value), int(kind)
     except OSError:
         return None
+
+
+def _runtime_metadata_diagnostic(path: Path) -> str:
+    """Return bounded parse health and schema shape without publishing runtime values."""
+    limit = 64 * 1024
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(limit + 1)
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        return f"unreadable error={type(exc).__name__}"
+    if len(data) > limit:
+        return f"oversized bytes>{limit}"
+    if not data.strip():
+        return "empty"
+    try:
+        raw = data.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        return f"invalid-utf8 bytes={len(data)}"
+    try:
+        record = json.loads(raw)
+    except json.JSONDecodeError:
+        return f"invalid-json bytes={len(data)}"
+    if not isinstance(record, dict):
+        return f"json={type(record).__name__}"
+    allowed_keys = {"pid", "start_time", "kind", "argv", "hermes_home"}
+    keys = sorted(key for key in record if isinstance(key, str) and key in allowed_keys)
+    unknown_count = sum(not isinstance(key, str) or key not in allowed_keys for key in record)
+    return f"json=dict keys={keys} unknown_keys={unknown_count}"
 
 
 def _restore_hkcu_path(saved: tuple[str, int] | None) -> None:
@@ -355,6 +387,7 @@ class Machine:
         chunks: list[bytes] = []
         proc = subprocess.Popen(argv, cwd=cwd or self.profile, env=self.env(env_extra),
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        status = CommandEvidence(log.with_suffix(".status.json"), started, timeout)
 
         def pump() -> None:
             # Every transcript line carries its offset: install.ps1 prints no timestamps, and
@@ -363,22 +396,33 @@ class Machine:
             with log.open("w", encoding="utf-8") as fh:
                 for raw in iter(proc.stdout.readline, b""):
                     chunks.append(raw)
-                    fh.write(f"[{time.monotonic() - started:7.1f}s] {_decode(raw).rstrip()}\n")
+                    elapsed, line = time.monotonic() - started, _decode(raw).rstrip()
+                    status.observe_line(line, elapsed)
+                    fh.write(f"[{elapsed:7.1f}s] {line}\n")
                     fh.flush()
 
         reader = threading.Thread(target=pump, name=f"pump-{label}", daemon=True)
         reader.start()
         try:
-            code = proc.wait(timeout=timeout)
-            self.timings.append((label, round(time.monotonic() - started, 1)))
-        except subprocess.TimeoutExpired:
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=60, check=False)
-            proc.wait(timeout=60)
-            reader.join(timeout=10)
-            raise AssertionError(
-                f"{label} did not finish within {timeout:.0f}s\n{self._tail(log)}\n{self.evidence()}") from None
-        reader.join(timeout=20)
-        return Run(code, _decode(b"".join(chunks)), "")
+            try:
+                code = proc.wait(timeout=timeout)
+                self.timings.append((label, round(time.monotonic() - started, 1)))
+            except subprocess.TimeoutExpired:
+                status.timeout_reached_s = round(time.monotonic() - started, 3)
+                status.observed_returncode_before_cleanup = proc.returncode
+                status.termination_started = True
+                status.save(returncode=proc.returncode, reader_finished=not reader.is_alive())
+                killed = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                        capture_output=True, timeout=60, check=False)
+                status.taskkill_returncode = killed.returncode
+                proc.wait(timeout=60)
+                reader.join(timeout=10)
+                raise AssertionError(
+                    f"{label} did not finish within {timeout:.0f}s\n{self._tail(log)}\n{self.evidence()}") from None
+            reader.join(timeout=20)
+            return Run(code, _decode(b"".join(chunks)), "")
+        finally:
+            status.save(returncode=proc.returncode, reader_finished=not reader.is_alive())
 
     @staticmethod
     def _tail(path: Path, n: int = 6000) -> str:
@@ -403,10 +447,15 @@ class Machine:
         cwd = self.root / "install-cwd"
         cwd.mkdir(parents=True, exist_ok=True)
         run = self._run_logged(
-            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-NonInteractive"],
-            "install", timeout=INSTALL_TIMEOUT, cwd=cwd,
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                "-NonInteractive", "-SkipBrowser",
+            ],
+            # Stream existing Node/npm diagnostics before an outer timeout kills
+            # the process tree; contained child output otherwise disappears.
             # serve.git carries this checkout's release tags; install main, not the latest release.
-            env_extra={"HERMES_INSTALL_CHANNEL": "main"}, as_user=as_user)
+            "install", timeout=INSTALL_TIMEOUT, cwd=cwd,
+            env_extra={"HERMES_VERBOSE": "1", "HERMES_INSTALL_CHANNEL": "main"}, as_user=as_user)
         if run.returncode == 0 and self.hermes_exe.is_file():
             # advance() lands NEXT on main and publishes no release: follow main, not the stable
             # default an official-origin checkout gets (channel resolution has its own suites).
@@ -521,7 +570,7 @@ class Machine:
 
     # -- diagnostics ----------------------------------------------------------
 
-    def owned_processes(self) -> list[Any]:
+    def owned_processes(self, *, observation=None) -> list[Any]:
         """Live processes of this machine: exe/cwd/argv under its root, or its HERMES_HOME."""
         import psutil
 
@@ -531,15 +580,20 @@ class Machine:
         owned = []
         for proc in psutil.process_iter():
             try:
-                if proc.pid == me or proc.create_time() < self.started - 1.0:
+                if proc.pid == me:
+                    continue
+                birth = proc.create_time()
+                if birth < self.started - 1.0:
                     continue
                 env = {k.upper(): v for k, v in proc.environ().items()}
                 hh = os.path.normcase(os.path.normpath(env.get("HERMES_HOME", "") or "-"))
                 blob = os.path.normcase(" ".join([proc.exe() or "", proc.cwd() or "", *proc.cmdline()]))
-            except (psutil.Error, OSError):
+            except (psutil.Error, OSError) as error:
+                note_unclassified(observation, error)
                 continue
             if hh == home or any(root in blob for root in roots):
                 owned.append(proc)
+                note_identity(observation, proc, birth)
         return owned
 
     def evidence(self) -> str:
@@ -550,7 +604,11 @@ class Machine:
         if receipt.is_file():
             parts.append(self._tail(receipt, 4000))
         parts.append(f"gateway_state.json: {self.gateway_state()}")
-        parts.append(f"gateway.pid present: {(self.hermes_home / 'gateway.pid').exists()}")
+        # Report parse health and shape only: runtime records contain local paths and process
+        # identity values. A failed strict updater probe must identify which file was partial or
+        # unreadable without copying those values into a public CI artifact.
+        for name in ("gateway.pid", "gateway.lock"):
+            parts.append(f"{name} diagnostic: {_runtime_metadata_diagnostic(self.hermes_home / name)}")
         logs = self.hermes_home / "logs"
         for name in ("gateway.log", "gateway-stdio.log", "errors.log", "agent.log", "update.log",
                      "desktop-update-handoff.log"):
@@ -564,10 +622,19 @@ class Machine:
 
     def kill_owned(self) -> None:
         """Hard-stop every live process of this machine (end of a gateway phase, teardown)."""
-        kill_tree(self.owned_processes())
-        for proc in self._spawned:
-            if proc.poll() is None:
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=60, check=False)
+        scan = {}
+        owned = self.owned_processes(observation=scan)
+        evidence = CleanupEvidence(self.root / "transcripts" / "process-cleanup.jsonl", scan)
+        try:
+            kill_tree(owned, observe=evidence.observe)
+            for proc in self._spawned:
+                code = proc.poll()
+                evidence.tracked(proc, "tracked_poll", code)
+                if code is None:
+                    result = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=60, check=False)
+                    evidence.tracked(proc, "tracked_taskkill_returned", result.returncode)
+        finally:
+            evidence.finish()
 
     def teardown(self) -> None:
         self.kill_owned()
@@ -576,16 +643,46 @@ class Machine:
         except OSError:
             pass
         artifacts = os.environ.get("HERMES_E2E_ARTIFACTS")
-        if artifacts:
-            dest = Path(artifacts) / self.root.name
-            shutil.copytree(self.logs, dest / "transcripts", dirs_exist_ok=True)
-            for sub in ("logs",):
-                src = self.hermes_home / sub
-                if src.is_dir():
-                    shutil.copytree(src, dest / sub, dirs_exist_ok=True,
-                                    ignore=shutil.ignore_patterns("*.db", "*.db-*"))
-            (dest / "evidence.txt").write_text(self.evidence(), encoding="utf-8", errors="replace")
-            (dest / "timings.json").write_text(json.dumps(self.timings, indent=1), encoding="utf-8")
+        try:
+            if artifacts:
+                dest = Path(artifacts) / self.root.name
+                shutil.copytree(self.logs, dest / "transcripts", dirs_exist_ok=True)
+                for sub in ("logs",):
+                    src = self.hermes_home / sub
+                    if src.is_dir():
+                        shutil.copytree(src, dest / sub, dirs_exist_ok=True,
+                                        ignore=shutil.ignore_patterns("*.db", "*.db-*"))
+                (dest / "evidence.txt").write_text(self.evidence(), encoding="utf-8", errors="replace")
+                (dest / "timings.json").write_text(json.dumps(self.timings, indent=1), encoding="utf-8")
+        finally:
+            # Every machine is a full install (checkout, venv with every extra, PM tools, caches) on
+            # the runner's only drive; kept, they add up past its free space before the last file
+            # runs. A failed artifact copy (a full disk) must not keep the install. The transcripts
+            # stay (small, and the only record when no artifacts dir is set).
+            leftovers = [note for tree in (self.profile, self.serve) if (note := _remove_tree(tree))]
+            if leftovers:  # the job's "No machine install left behind" step names these
+                dest = Path(artifacts) / self.root.name if artifacts else self.logs
+                dest.mkdir(parents=True, exist_ok=True)
+                (dest / "teardown-leftovers.txt").write_text("\n".join(leftovers) + "\n", encoding="utf-8")
+
+
+def _remove_tree(path: Path) -> str | None:
+    """Delete ``path``; ``None`` when gone, else what stopped it.
+
+    The ``\\\\?\\`` prefix reaches past MAX_PATH (the checkout carries 159-character paths); a
+    just-killed process can hold a handle for a moment, so a failure is retried."""
+    from utils import rmtree_readonly
+
+    error: OSError | None = None
+    for _ in range(5):
+        if not path.exists():
+            return None
+        try:
+            rmtree_readonly("\\\\?\\" + str(path.resolve()))
+        except OSError as exc:
+            error = exc
+            time.sleep(2)
+    return None if not path.exists() else f"{path}: {error}"
 
 
 def new_machine(tmp_root: Path, base_url: str, *, label: str, person: str = "",
@@ -623,6 +720,11 @@ class Journey:
 
     def ok(self, name: str) -> bool:
         return name in self.results and not isinstance(self.results[name], BaseException)
+
+    def require_steps(self, *names: str) -> None:
+        """A dependent cell names its prerequisites, so their original failure is surfaced first."""
+        for name in names:
+            self[name]
 
     def __getitem__(self, name: str) -> Any:
         if name not in self.results:

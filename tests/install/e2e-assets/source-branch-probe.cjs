@@ -24,6 +24,16 @@ function sourceProbeGit(userData, realGit, stagedUrl, platform = process.platfor
   return file
 }
 
+// The staged E2E origin is reported as the official repository (installer-common.sh), and an
+// unconfigured official checkout now defaults to the stable release channel. The Desktop applies
+// whatever channel its check reported (`--channel stable`), which resolves the latest published
+// upstream release instead of this staged, unpublished main -- so the click never reaches the
+// staged commit. Selecting `main` for the PM source check keeps the report channel-less, and the
+// Desktop falls back to `--branch main` for the apply, exactly as before the default changed. Only
+// the PM launcher's `--run-module` invocations get it: a historical `runpy` source_check.py has no
+// channel concept and may not parse the flag. An explicit channel is never overridden.
+const CHANNEL_FLAGS = ['--channel', 'main']
+
 function prepareSourceBranchEnvironment(root, expectedSha, realGit, capturedEnv, launchEnv) {
   if (!realGit || !path.isAbsolute(realGit) || !fs.existsSync(realGit)) {
     throw new Error('source app-update requires HERMES_E2E_REAL_GIT for staged main')
@@ -72,8 +82,17 @@ check_root() {
   done
   return 1
 }
+has_channel() {
+  for arg in "$@"; do
+    case "$arg" in --channel|--set-channel) return 0 ;; esac
+  done
+  return 1
+}
 if [ "$1" = '--run-module' ] && [ "$2" = 'hermes_cli.source_check' ] && check_root "$@"; then
-  exec ${quote(original)} "$@" --git ${quote(launchEnv.HERMES_E2E_SOURCE_GIT)} --branch main
+  if has_channel "$@"; then
+    exec ${quote(original)} "$@" --git ${quote(launchEnv.HERMES_E2E_SOURCE_GIT)} --branch main
+  fi
+  exec ${quote(original)} "$@" --git ${quote(launchEnv.HERMES_E2E_SOURCE_GIT)} --branch main ${CHANNEL_FLAGS.join(' ')}
 fi
 exec ${quote(original)} "$@"
 `, { mode: 0o700 })
@@ -105,7 +124,8 @@ function branchProbeArgs(args, root, realGit) {
       !command.endsWith('"') ||
       [...command.matchAll(/"--git" "[^"\r\n]+"/g)].length !== 1
     ) return args
-    const selected = command.slice(0, -1).replace(/"--git" "[^"\r\n]+"/, `"--git" "${realGit}"`) + ' "--branch" "main""'
+    const channel = /"--(?:set-)?channel"/.test(command) ? '' : ` ${CHANNEL_FLAGS.map(flag => `"${flag}"`).join(' ')}`
+    const selected = command.slice(0, -1).replace(/"--git" "[^"\r\n]+"/, `"--git" "${realGit}"`) + ` "--branch" "main"${channel}"`
     return [...args.slice(0, 4), selected]
   }
   const legacy = args[0] === '-c' && args[1]?.includes('runpy.run_path(str(p))')
@@ -116,7 +136,8 @@ function branchProbeArgs(args, root, realGit) {
       || !args.includes('--git') || args.includes('--branch')) return args
   const selected = [...args]
   selected[selected.indexOf('--git') + 1] = realGit
-  return [...selected, '--branch', 'main']
+  const channel = managed && !args.some(arg => arg === '--channel' || arg === '--set-channel') ? CHANNEL_FLAGS : []
+  return [...selected, '--branch', 'main', ...channel]
 }
 
 if (process.env.HERMES_E2E_SOURCE_ROOT && process.env.HERMES_E2E_SOURCE_GIT) {

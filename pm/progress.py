@@ -150,17 +150,19 @@ def run_contained(command: Sequence[str], label: str, *, stream: Optional[IO[str
                   hide: Optional[Callable[[str], bool]] = None, indent: str = "",
                   **kwargs) -> subprocess.CompletedProcess:
     """``subprocess.run(check=True)`` under the output policy."""
+    from pm.lifetime_launch import run, popen
+
     if verbose_output():
         out = sys.stdout if stream is None else stream
         out.write(f"{indent}→ {label}…\n")
         out.flush()
-        return subprocess.run(command, check=True, **kwargs)
+        return run(command, check=True, **kwargs)
     tail = LiveTail(label, stream, hide=hide, indent=indent)
     captured = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                     encoding="utf-8", errors="replace")
     if not tail.live:
         try:
-            result = subprocess.run(command, check=True, **captured, **kwargs)
+            result = run(command, check=True, **captured, **kwargs)
         except subprocess.CalledProcessError as exc:
             tail.write(exc.output or "")
             tail.close(False)
@@ -171,7 +173,7 @@ def run_contained(command: Sequence[str], label: str, *, stream: Optional[IO[str
         tail.close(True)
         return result
     try:
-        with subprocess.Popen(command, **captured, **kwargs) as proc:
+        with popen(command, **captured, **kwargs) as proc:
             assert proc.stdout is not None  # stdout=PIPE above.
             for line in proc.stdout:
                 tail.write(line)

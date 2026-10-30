@@ -146,6 +146,25 @@ def test_apply_wal_with_fallback_defaults_to_wal(monkeypatch, tmp_path):
         conn.close()
 
 
+def test_startup_hold_preserves_existing_delete_even_on_fixed_sqlite(monkeypatch, tmp_path):
+    from hermes_state_wal import WalUnsupportedError, apply_wal_with_fallback
+
+    _disable_vulnerable_gate(monkeypatch)
+    monkeypatch.setattr("hermes_cli.startup_hold.active", lambda: True)
+    db_path = tmp_path / "held-delete.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE witness (value INTEGER)")
+        conn.commit()
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
+        assert apply_wal_with_fallback(conn, db_label="held-delete.db") == "delete"
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
+        with pytest.raises(WalUnsupportedError, match="startup hold"):
+            apply_wal_with_fallback(conn, db_label="held-delete.db", require_wal=True)
+    finally:
+        conn.close()
+
+
 def test_configured_delete_validates_vulnerable_sqlite_result(monkeypatch, tmp_path):
     """The safety gate must not report DELETE when SQLite returns MEMORY."""
     from hermes_state_wal import apply_wal_with_fallback

@@ -6,7 +6,6 @@ Intentionally does NOT smoke-test the webhook: the gateway and the tunnel both r
 processes the user starts AFTER this wizard exits, so any in-wizard probe would fail."""
 
 from __future__ import annotations
-from hermes_cli.cli_output import line_input
 
 import re
 import secrets
@@ -92,6 +91,8 @@ def _prompt(message: str, default: Optional[str] = None, secret: bool = False) -
     """Read one line; "" on EOF / Ctrl+C / empty. ``default`` is shown but NOT auto-applied so a
     real value stays distinguishable from a masked preview; ``secret`` reads via ``getpass``."""
     try:
+        from hermes_cli.cli_output import line_input
+
         suffix = f" [{default}]" if default else ""
         if secret and sys.stdin.isatty():
             import getpass
@@ -267,6 +268,7 @@ def _step_verify_token() -> str:
 def _step_allowlist() -> None:
     """STEP 6: recipient allowlist (spaces/dashes/'+' stripped from each entry)."""
     from hermes_cli.config import get_env_value, save_env_value
+    from hermes_cli.cli_output import line_input
     _header("STEP 6 — Recipient Allowlist")
     _lines(
         "", "  Who is allowed to message the bot? (Comma-separated phone",

@@ -134,4 +134,3 @@ class TestMemoryManagerUserIdThreading:
         )
         assert provider._init_kwargs["cwd"] == str(tmp_path)
         agent.close()
-

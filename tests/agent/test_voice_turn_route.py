@@ -7,6 +7,7 @@ server actually received rather than on agent attributes.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,7 +23,8 @@ def _agent(home: Path, main_url: str):
 
 
 @pytest.mark.parametrize("voice_window_ok", [True, False])
-def test_voice_turn_routes_then_restores(tmp_path, monkeypatch, voice_window_ok):
+@pytest.mark.parametrize("local_only", [True, False])
+def test_voice_turn_routes_then_restores(tmp_path, monkeypatch, voice_window_ok, local_only):
     with FakeLLMServer([Text("main one"), Text("main two")]) as main, \
             FakeLLMServer([Text("voice reply")]) as voice:
         context = "128000" if voice_window_ok else "1000"
@@ -33,6 +35,10 @@ def test_voice_turn_routes_then_restores(tmp_path, monkeypatch, voice_window_ok)
             f"    base_url: {voice.base_url}\n    models:\n      voice-model:\n        context_length: {context}\n"
         ))
         monkeypatch.setenv("HERMES_HOME", str(home))
+        if local_only:
+            monkeypatch.setenv("HERMES_KANBAN_LOCAL_ONLY", "1")
+        else:
+            monkeypatch.delenv("HERMES_KANBAN_LOCAL_ONLY", raising=False)
         agent = _agent(home, main.base_url)
 
         first = agent.run_conversation("typed question")
@@ -42,14 +48,14 @@ def test_voice_turn_routes_then_restores(tmp_path, monkeypatch, voice_window_ok)
 
         main_models = [r["model"] for r in main.main_requests()]
         voice_models = [r["model"] for r in voice.main_requests()]
-        if voice_window_ok:
+        if voice_window_ok and not local_only:
             assert voice_models == ["voice-model"]
             # Unconfigured effort: the voice turn goes out with reasoning off, the main turns untouched.
             assert voice.main_requests()[0]["reasoning_effort"] == "none"
             assert {r["reasoning_effort"] for r in main.main_requests()} == {"medium"}
             assert main_models == ["fake-model", "fake-model"]
             assert spoken["model"] == "voice-model"
-        else:  # too large for the voice model's window: the main model answers, nothing compacts
+        else:  # a fixed local worker or a smaller voice window keeps every request on main
             assert voice_models == []
             assert main_models == ["fake-model"] * 3
         assert agent.model == "fake-model"
@@ -72,6 +78,25 @@ def test_reasoning_off_falls_to_the_lowest_valid_level(model, api_mode, expected
                             base_url="https://api.openai.com/v1" if "gpt" in model else "https://api.anthropic.com")
     got = _voice_reasoning(agent, {"enabled": False})
     assert got == ({"enabled": True, "effort": expected} if expected else {"enabled": False})
+
+
+def test_session_runtime_view_preserves_requested_provider_during_voice_turn():
+    from agent.voice_turn_route import session_runtime_view
+
+    main = SimpleNamespace(
+        model="voice-model", provider="custom", requested_provider="custom:voice",
+        base_url="https://voice.example/v1", api_mode="chat_completions",
+        reasoning_config={"enabled": False}, _voice_route_state=None,
+    )
+    main._voice_route_state = {
+        "snapshot": {
+            "model": "main-model", "provider": "custom", "requested_provider": "custom:main",
+            "base_url": "https://main.example/v1", "api_mode": "chat_completions",
+        },
+        "reasoning_config": {"enabled": True},
+    }
+    view = session_runtime_view(main)
+    assert (view.provider, view.requested_provider) == ("custom", "custom:main")
 
 
 def test_voice_usage_never_becomes_the_session_route(tmp_path):

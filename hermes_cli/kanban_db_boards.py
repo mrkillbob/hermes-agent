@@ -66,7 +66,60 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
     return meta
 
 
+def board_ownership_lock(board: Optional[str]):
+    """Coordinate board ownership writers and audit creation across processes.
+
+    Reads remain unlocked; the same metadata mutation fence runs before a lock
+    file is created. This does not grant board access or serialize other boards.
+    """
+    from hermes_cli.active_sessions import _FileLock
+
+    slug = _kb._slug_or_default(board)
+    directory = _kb.board_dir(slug)
+    _kb._assert_not_delegated_child_mutation(directory)
+    # A board directory is renamed on archive and removed on hard delete. Keep
+    # the lock inode outside that lifecycle so recreating the slug cannot split
+    # concurrent writers onto different locks.
+    return _FileLock(_kb.kanban_home() / "runtime" / "board-ownership" / f"{slug}.lock")
+
+
+def board_project_ownership_lock(board: Optional[str] = None):
+    """Serialize board-catalog/project-owner publication with exact reconciliation.
+
+    Per-slug locks cannot fence a publisher that creates a new board slug while a
+    registry reconciliation is validating the complete board inventory. This
+    stable root-scoped lock coordinates supported catalog publishers with that
+    operator repair; it does not grant board access or project authorization.
+    """
+    from hermes_cli.active_sessions import _FileLock
+
+    # Resolve None to the default board before the guard so refusal occurs
+    # before this process creates any lock-file or runtime directory.
+    _kb._assert_not_delegated_child_mutation(
+        _kb.board_dir(_kb._slug_or_default(board))
+    )
+    # Keep this lock in its own namespace: "catalog" is a valid board slug
+    # and already owns runtime/board-ownership/catalog.lock.
+    return _FileLock(_kb.kanban_home() / "runtime" / "board-project-catalog.lock")
+
+
 def write_board_metadata(
+    board: Optional[str], *, name: Optional[str] = None, description: Optional[str] = None,
+    icon: Optional[str] = None, color: Optional[str] = None, archived: Optional[bool] = None,
+    default_workdir: Optional[str] = None, project_id: Optional[str] = None,
+) -> dict:
+    """Serialize metadata's read/modify/write with project-bound audit creation."""
+    # Every metadata write can publish a board marker on a DB-only directory,
+    # changing the complete inventory reviewed by reconciliation. Fence all
+    # public writes, including display-only updates whose project_id is None.
+    with board_project_ownership_lock(board):
+        with board_ownership_lock(board):
+            return _write_board_metadata(
+                board, name=name, description=description, icon=icon, color=color,
+                archived=archived, default_workdir=default_workdir, project_id=project_id)
+
+
+def _write_board_metadata(
     board: Optional[str], *, name: Optional[str] = None, description: Optional[str] = None,
     icon: Optional[str] = None, color: Optional[str] = None, archived: Optional[bool] = None,
     default_workdir: Optional[str] = None, project_id: Optional[str] = None,
@@ -74,8 +127,8 @@ def write_board_metadata(
     """Create/update ``board.json``; unmentioned fields are preserved, ``created_at``
     set on first write. ``project_id``/``default_workdir``: ``None`` = unchanged,
     "" = clear (``project_id`` is not validated here)."""
-    _kb._assert_not_delegated_child_mutation()
     slug = _kb._slug_or_default(board)
+    _kb._assert_not_delegated_child_mutation(_kb.board_dir(slug))
     meta = read_board_metadata(slug)
     # db_path is derived on every read; never persist it into board.json.
     meta.pop("db_path", None)
@@ -107,15 +160,18 @@ def create_board(
 ) -> dict:
     """Create board dir + DB + metadata (``mkdir -p`` semantics: existing board returns its metadata)."""
     normed = _kb._require_slug(slug)
+    _kb._enforce_configured_board_allowlist(normed)
     # Explicit creation clears any archived tombstone at this slug (left by
     # remove_board(archive=True)) — otherwise _kb.init_db() below would rightly
     # refuse to recreate the archived board's DB (#43243).
-    meta = write_board_metadata(
-        normed, name=name, description=description, icon=icon, color=color,
-        default_workdir=default_workdir, project_id=project_id, archived=False,
-    )
-    # Touch the DB so list_boards() sees it immediately.
-    _kb.init_db(board=normed)
+    with board_project_ownership_lock(normed):
+        with board_ownership_lock(normed):
+            meta = _write_board_metadata(
+                normed, name=name, description=description, icon=icon, color=color,
+                default_workdir=default_workdir, project_id=project_id, archived=False,
+            )
+            # Touch the DB so list_boards() sees it immediately.
+            _kb.init_db(board=normed)
     return meta
 
 
@@ -143,16 +199,40 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
     return entries
 
 
+def _require_archive_identity(directory: Path, slug: str) -> None:
+    """Do not publish an archive that the workspace ownership census will refuse."""
+    from hermes_cli.kanban_db_workspace import _read_archived_board_marker
+
+    try:
+        database = directory / "kanban.db"
+        if directory.is_symlink() or database.is_symlink() or not database.is_file():
+            raise ValueError("non-regular board directory or database")
+        if _kb._require_slug(_read_archived_board_marker(directory / "board.json")) != slug:
+            raise ValueError("board marker does not match directory")
+    except (OSError, UnicodeError, ValueError, TypeError):
+        raise ValueError("archive requires a stable matching board identity and regular database") from None
+
+
 def remove_board(slug: str, *, archive: bool = True) -> dict:
     """Archive (to ``boards/_archived/<slug>-<ts>/``) or delete a board;
     ``default`` cannot be removed. Returns ``{"slug", "action", "new_path"}``."""
-    _kb._assert_not_delegated_child_mutation()
     normed = _kb._require_slug(slug)
+    with board_project_ownership_lock(normed):
+        with board_ownership_lock(normed):
+            return _remove_board(normed, archive=archive)
+
+
+def _remove_board(slug: str, *, archive: bool = True) -> dict:
+    """Remove a board while the caller holds its stable ownership lock."""
+    normed = _kb._require_slug(slug)
+    _kb._assert_not_delegated_child_mutation(_kb.board_dir(normed))
     if normed == _kb.DEFAULT_BOARD:
         raise ValueError("the 'default' board cannot be removed")
     d = _kb.board_dir(normed)
     if not d.exists():
         raise ValueError(f"board {normed!r} does not exist")
+    if archive:
+        _require_archive_identity(d, normed)
 
     # If the user removed the currently-active board, revert to default.
     if _kb.get_current_board() == normed:
@@ -179,7 +259,7 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
         # tabs / gateway pollers can keep calling connect(board=slug) after the
         # archive; without a marker the resurrect-guard cannot tell an archived
         # slug from a brand-new one and an empty board would reappear (#43243).
-        write_board_metadata(
+        _write_board_metadata(
             normed,
             name=prior_meta.get("name"),
             description=prior_meta.get("description"),

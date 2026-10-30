@@ -17,7 +17,7 @@ from tests.scripts.desktop_update.windows_handoff_support import (
     POWERSHELL,
     HOLD_CLI,
     _creation_time,
-    _alive,
+    _ProcessWatch,
     _dead_pid,
     _script,
     _finish,
@@ -101,7 +101,8 @@ FIND_UPDATE_CHILD = r"""
 param([int]$Parent, [int]$Seconds)
 $deadline = (Get-Date).AddSeconds($Seconds)
 while ((Get-Date) -lt $deadline) {
-    $row = Get-CimInstance Win32_Process -Filter "ParentProcessId=$Parent" |
+    $row = Get-CimInstance Win32_Process -Filter "ParentProcessId=$Parent" `
+        -OperationTimeoutSec 5 -Property ProcessId,CommandLine |
         Where-Object { $_.CommandLine -match '--yes' } | Select-Object -First 1
     if ($row) { [Console]::Out.Write($row.ProcessId); exit 0 }
     Start-Sleep -Milliseconds 100
@@ -136,13 +137,17 @@ def test_script_killed_before_publishing_the_delegate_runs_no_update(tmp_path: P
         child = subprocess.run([POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(finder),
                                 '-Parent', str(script.pid), '-Seconds', '60'],
                                capture_output=True, text=True, timeout=90, check=False)
-        assert child.returncode == 0, 'the update child never appeared'
-        child_pid = int(child.stdout)
-        subprocess.run(['taskkill', '/F', '/PID', str(script.pid)], capture_output=True, check=True)
-        script.wait(timeout=30)
-        time.sleep(3)
+        assert child.returncode == 0, ('the update child never appeared', child.stdout, child.stderr)
+        watch = _ProcessWatch(int(child.stdout))
+        try:
+            subprocess.run(['taskkill', '/F', '/PID', str(script.pid)], capture_output=True, check=True)
+            script.wait(timeout=30)
+            # The script's death closes the child's job; kill-on-close then terminates the child
+            # asynchronously, so await its exit. Once it is gone it can never write `ran`.
+            assert watch.exited_within(60), 'the never-resumed update child outlived its script'
+        finally:
+            watch.close()
         assert not ran.exists(), 'the update child ran before it was published as the delegate'
-        assert not _alive(child_pid), 'the never-resumed update child outlived its script'
         lines = marker.read_bytes().decode().split('\n')
         assert lines[0] == _custodian(home, script.pid), lines
         assert not any(line.startswith('delegate:') for line in lines), lines

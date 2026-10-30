@@ -83,6 +83,8 @@ export function QuickEntryApp() {
 
     const offLateResult = api?.onLateResult(payload => {
       dispatch({
+        correlationId: payload.correlationId,
+        retryable: payload.result.retryable,
         message: payload?.result?.message ?? 'Hermes could not deliver the prompt.',
         ok: payload?.result?.ok === true,
         type: 'late-result'

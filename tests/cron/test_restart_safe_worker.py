@@ -695,6 +695,10 @@ def _commit_generation(repo_root: Path, name: str, *, with_site_packages: bool) 
     import pm.environments
 
     version = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    from pm.lifetime import activity
+
+    with activity(pm.environments.install_state_dir(repo_root), create=True):
+        pass
     venv = pm.environments.install_state_dir(repo_root) / "environments" / name / "venv"
     (venv / "lib" / f"python{version}").mkdir(parents=True)
     (venv / "pyvenv.cfg").write_text(f"version = {version}\n", encoding="utf-8")

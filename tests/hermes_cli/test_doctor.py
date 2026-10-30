@@ -25,7 +25,6 @@ from hermes_cli import doctor_tools
 from hermes_cli import doctor_state
 from hermes_cli import doctor_platform
 from hermes_cli import doctor_config
-from tools import browser_tool_install as bt_install
 
 
 @pytest.fixture(autouse=True)
@@ -418,12 +417,40 @@ class TestDoctorMemoryProviderSection:
         assert "Mem0" not in out
 
 
-    def test_catalog_provider_not_installed_names_install_command(self, monkeypatch, tmp_path):
-        # mem0 left core for the plugin catalog: a home still configured for it gets the exact command.
+    @pytest.mark.parametrize("catalog_available", [True, False], ids=["catalog-entry", "no-entry"])
+    def test_missing_provider_recovery_matches_catalog_availability(
+        self, monkeypatch, tmp_path, catalog_available
+    ):
+        import hermes_yaml as yaml
+        import plugins.memory as memory_plugins
+
+        # Recovery advice depends on usable catalog data, not the checkout's current pins.
+        catalog = tmp_path / "plugin-catalog"
+        catalog.mkdir()
+        monkeypatch.setenv("HERMES_PLUGIN_CATALOG", str(catalog))
+        if catalog_available:
+            (catalog / "mem0.yaml").write_text(
+                yaml.safe_dump({
+                    "name": "mem0",
+                    "repo": "https://example.invalid/mem0.git",
+                    "sha": "a" * 40,
+                    "category": "memory",
+                }),
+                encoding="utf-8",
+            )
+        monkeypatch.setattr(memory_plugins, "load_memory_provider", lambda name: None)
+        monkeypatch.setattr(memory_plugins, "find_provider_dir", lambda name: None)
+
         out = self._run_doctor_and_capture(monkeypatch, tmp_path, provider="mem0")
         section = out.split("Memory Provider", 1)[1][:600]
         assert "Built-in memory active" not in out
-        assert "mem0 plugin not found" in section and "plugins install mem0" in section
+        assert "mem0 plugin not found" in section
+        if catalog_available:
+            assert "plugins install mem0" in section
+            assert "run: hermes memory setup" not in section
+        else:
+            assert "run: hermes memory setup" in section
+            assert "plugins install mem0" not in section
 
     @pytest.mark.parametrize("memory_enabled", [False, True])
     def test_stale_builtin_files_reported_only_when_store_enabled(
@@ -584,6 +611,93 @@ def test_run_doctor_accepts_bare_custom_provider(monkeypatch, tmp_path):
 
     out = buf.getvalue()
     assert "model.provider 'custom' is not a recognised provider" not in out
+
+
+def test_run_doctor_rejects_disabled_custom_provider(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(
+        "model:\n  provider: my-custom\n  default: local-model\n"
+        "providers:\n  my-custom:\n    api: http://localhost:8000/v1\n    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+    monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", tmp_path / "project")
+    monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+    (tmp_path / "project").mkdir(exist_ok=True)
+
+    fake_model_tools = types.SimpleNamespace(
+        check_tool_availability=lambda *a, **kw: ([], []),
+        TOOLSET_REQUIREMENTS={},
+    )
+    monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        doctor_mod.run_doctor(Namespace(fix=False))
+
+    out = buf.getvalue()
+    assert "model.provider 'my-custom' is unknown" in out
+
+
+def test_run_doctor_rejects_disabled_builtin_provider(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(
+        "model:\n  provider: anthropic\n  default: claude-test\n"
+        "providers:\n  anthropic:\n    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+    monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", tmp_path / "project")
+    monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+    (tmp_path / "project").mkdir(exist_ok=True)
+
+    fake_model_tools = types.SimpleNamespace(
+        check_tool_availability=lambda *a, **kw: ([], []),
+        TOOLSET_REQUIREMENTS={},
+    )
+    monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        doctor_mod.run_doctor(Namespace(fix=False))
+
+    assert "model.provider 'anthropic' is unknown" in buf.getvalue()
+
+
+def test_run_doctor_accepts_llamacpp_alias_before_local_server_is_running(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(
+        "model:\n"
+        "  provider: llamacpp\n"
+        "  default: local-model\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+    monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", tmp_path / "project")
+    monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+    (tmp_path / "project").mkdir(exist_ok=True)
+    from hermes_cli.local_runtime import endpoint
+    monkeypatch.setattr(endpoint, "resolve_llamacpp_endpoint", lambda wait_for_boot_s=0: None)
+
+    fake_model_tools = types.SimpleNamespace(
+        check_tool_availability=lambda *a, **kw: ([], []),
+        TOOLSET_REQUIREMENTS={},
+    )
+    monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        doctor_mod.run_doctor(Namespace(fix=False))
+
+    out = buf.getvalue()
+    assert "model.provider 'llamacpp' is not a recognised provider" not in out
+    assert "model.provider 'llamacpp' is unknown" not in out
 
 
 def test_run_doctor_flags_missing_credentials_for_active_openrouter_provider(monkeypatch, tmp_path):
@@ -824,9 +938,8 @@ def test_run_doctor_accepts_kimi_coding_cn_provider(monkeypatch, tmp_path):
     assert "model.provider 'kimi-coding-cn' is not a recognised provider" not in out
 
 
-def _doctor_env_for_agent_browser(monkeypatch, tmp_path):
-    """Shared fixture setup for the agent-browser npx-resolution
-    branch in run_doctor (hermes_cli/doctor.py ~1557-1605)."""
+def _doctor_env_for_browser(monkeypatch, tmp_path):
+    """Shared fixture setup for the Node + Chromium rows of run_doctor."""
     home = tmp_path / ".hermes"
     home.mkdir(parents=True, exist_ok=True)
     (home / "config.yaml").write_text("memory: {}\n", encoding="utf-8")
@@ -858,61 +971,80 @@ def _doctor_env_for_agent_browser(monkeypatch, tmp_path):
         pass
 
 
-def test_run_doctor_reports_installed_agent_browser(monkeypatch, tmp_path):
-    _doctor_env_for_agent_browser(monkeypatch, tmp_path)
+def test_run_doctor_reports_installed_chromium(monkeypatch, tmp_path):
+    _doctor_env_for_browser(monkeypatch, tmp_path)
 
-    monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "/pm/agent-browser")
+    monkeypatch.setattr("hermes_cli.browser_runtime.chromium_executable", lambda **_kw: "/pm/chromium/chrome")
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         doctor_mod.run_doctor(Namespace(fix=False))
     out = buf.getvalue()
 
-    assert "agent-browser" in out
-    assert "/pm/agent-browser" in out
-    assert "agent-browser not installed" not in out
+    assert "Chromium" in out
+    assert "/pm/chromium/chrome" in out
+    assert "Chromium not installed" not in out
 
 
 def test_doctor_fix_does_not_claim_success_without_published_binary(monkeypatch, tmp_path):
     from hermes_cli import doctor_tools
-    _doctor_env_for_agent_browser(monkeypatch, tmp_path)
+    _doctor_env_for_browser(monkeypatch, tmp_path)
 
-    def missing(**kwargs):
-        raise FileNotFoundError("no published browser")
-
-    monkeypatch.setattr(bt_install, "_find_agent_browser", missing)
+    monkeypatch.setattr("hermes_cli.browser_runtime.chromium_executable", lambda **_kw: None)
+    monkeypatch.setattr("hermes_cli.doctor_tools._is_termux", lambda: False)
     monkeypatch.setattr("pm.ensure", lambda *a, **kw: None)
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        assert doctor_tools._check_agent_browser(True) is False
+        doctor_tools._check_chromium(True)
     out = buf.getvalue()
 
-    assert "agent-browser install failed" in out
-    assert "no published browser" in out
+    assert "Chromium not installed" in out
+    assert "hermes pm install chromium" in out
 
 
 def test_doctor_fix_reports_pm_install_failure(monkeypatch, tmp_path):
     from hermes_cli import doctor_tools
     import pm
-    _doctor_env_for_agent_browser(monkeypatch, tmp_path)
-
-    def missing(**kwargs):
-        raise FileNotFoundError("no published browser")
+    _doctor_env_for_browser(monkeypatch, tmp_path)
 
     def refuse(*args, **kwargs):
-        raise pm.InstallError("agent-browser", "offline")
+        raise pm.InstallError("chromium", "offline")
 
-    monkeypatch.setattr(bt_install, "_find_agent_browser", missing)
+    monkeypatch.setattr("hermes_cli.browser_runtime.chromium_executable", lambda **_kw: None)
+    monkeypatch.setattr("hermes_cli.doctor_tools._is_termux", lambda: False)
     monkeypatch.setattr(pm, "ensure", refuse)
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        assert doctor_tools._check_agent_browser(True) is False
+        doctor_tools._check_chromium(True)
     out = buf.getvalue()
 
-    assert "agent-browser install failed" in out
+    assert "Chromium install failed" in out
     assert "offline" in out
+
+
+@pytest.mark.parametrize("browser_yaml,reason", [
+    ("browser:\n  cdp_url: http://127.0.0.1:9222\n", "CDP override"),
+    ("browser:\n  engine: lightpanda\n", "lightpanda"),
+    ("browser:\n  cloud_provider: browserbase\n", "browserbase"),
+])
+def test_missing_chromium_is_info_when_config_needs_none(monkeypatch, tmp_path, browser_yaml, reason):
+    """A CDP override, Lightpanda or a cloud provider runs no local Chromium: no warning row."""
+    from hermes_cli import doctor_tools
+    from hermes_constants import get_hermes_home
+
+    (get_hermes_home() / "config.yaml").write_text(browser_yaml, encoding="utf-8")
+    monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+    monkeypatch.setattr("hermes_cli.browser_runtime.chromium_executable", lambda **_kw: None)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        doctor_tools._check_chromium(False)
+    out = buf.getvalue()
+
+    assert "not needed" in out and reason in out
+    assert "hermes pm install chromium" not in out
 
 
 def test_run_doctor_kimi_cn_env_is_detected_and_probe_is_null_safe(monkeypatch, tmp_path):
@@ -1076,8 +1208,94 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
 class TestGitHubTokenCheck:
     """Tests for GitHub token / gh auth detection in doctor."""
 
+    @staticmethod
+    def _isolate_home(monkeypatch, home):
+        """Point doctor at the temp HERMES_HOME.
+
+        ``run_doctor`` reads the module-level ``HERMES_HOME`` constant (cached
+        at import time), NOT the env var — so ``setenv("HERMES_HOME")`` alone
+        leaves doctor probing the REAL ~/.hermes. On a dev machine with a
+        large state.db that meant a multi-minute ``PRAGMA integrity_check``
+        that blew the 300s per-file budget and killed the whole file.
+        """
+        monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+        monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+    def test_dedicated_hermes_bot_token_shows_ok_without_shared_token(self, monkeypatch, tmp_path):
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True, exist_ok=True)
+        self._isolate_home(monkeypatch, home)
+        monkeypatch.setenv("PATH", "/nonexistent")  # gh not found
+        monkeypatch.setenv("HERMES_GITHUB_BOT_TOKEN", "bot-secret")
+        monkeypatch.setenv("HERMES_GITHUB_BOT_LOGIN", "mrkillbobbot")
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+
+        from hermes_cli.doctor import run_doctor
+        import io, contextlib
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            run_doctor(Namespace(fix=False))
+        out = buf.getvalue()
+
+        assert "Dedicated Hermes GitHub automation token configured (mrkillbobbot)" in out
+        assert "No GITHUB_TOKEN" in out
+        assert "bot-secret" not in out
 
 
+    def test_dedicated_hermes_bot_token_without_login_does_not_claim_ready(self, monkeypatch, tmp_path):
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True, exist_ok=True)
+        self._isolate_home(monkeypatch, home)
+        monkeypatch.setenv("PATH", "/nonexistent")
+        monkeypatch.setenv("HERMES_GITHUB_BOT_TOKEN", "bot-secret")
+        monkeypatch.delenv("HERMES_GITHUB_BOT_LOGIN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+
+        from hermes_cli.doctor import run_doctor
+        import io, contextlib
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            run_doctor(Namespace(fix=False))
+        out = buf.getvalue()
+
+        assert "Dedicated Hermes GitHub automation token is incomplete" in out
+        assert "Dedicated Hermes GitHub automation token configured (mrkillbobbot)" not in out
+        assert "No GITHUB_TOKEN" in out
+
+    def test_dedicated_hermes_bot_token_reports_configured_login(self, monkeypatch, tmp_path):
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True, exist_ok=True)
+        self._isolate_home(monkeypatch, home)
+        monkeypatch.setenv("PATH", "/nonexistent")
+        monkeypatch.setenv("HERMES_GITHUB_BOT_TOKEN", "bot-secret")
+        monkeypatch.setenv("HERMES_GITHUB_BOT_LOGIN", "automation-account")
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+
+        from hermes_cli.doctor import run_doctor
+        import io, contextlib
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            run_doctor(Namespace(fix=False))
+        out = buf.getvalue()
+
+        assert "Dedicated Hermes GitHub automation token configured (automation-account)" in out
+        assert "configured (mrkillbobbot)" not in out
+
+
+    def test_gh_authenticated_without_env_token_shows_ok(self, monkeypatch, tmp_path):
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True, exist_ok=True)
+        self._isolate_home(monkeypatch, home)
+        # No GITHUB_TOKEN or GH_TOKEN
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
 
 
 
@@ -1485,10 +1703,10 @@ class TestStagedRuntimeVenv:
 def test_run_doctor_reports_shadowed_lightpanda_engine(monkeypatch, tmp_path):
     helper = TestDoctorMemoryProviderSection()
 
-    monkeypatch.setattr("tools.browser_tool_lightpanda_fallback._using_lightpanda_engine", lambda: True)
+    monkeypatch.setattr("tools.browser_lightpanda.using_lightpanda_engine", lambda: True, raising=False)
     monkeypatch.setattr(
-        "tools.browser_tool_lightpanda_fallback.lightpanda_engine_status",
-        lambda: (False, "cloud provider Browserbase is selected"),
+        "tools.browser_lightpanda.lightpanda_engine_status",
+        lambda: (False, "cloud provider Browserbase is selected"), raising=False,
     )
     out = helper._run_doctor_and_capture(monkeypatch, tmp_path)
     assert "browser.engine=lightpanda is shadowed" in out
@@ -1500,8 +1718,9 @@ def test_run_doctor_reports_shadowed_lightpanda_engine(monkeypatch, tmp_path):
 def test_run_doctor_warns_when_lightpanda_binary_missing(monkeypatch, tmp_path):
     helper = TestDoctorMemoryProviderSection()
 
-    monkeypatch.setattr("tools.browser_tool_lightpanda_fallback._using_lightpanda_engine", lambda: True)
-    monkeypatch.setattr("tools.browser_tool_lightpanda_fallback.lightpanda_engine_status", lambda: (True, "Browser Use mode"))
+    monkeypatch.setattr("tools.browser_lightpanda.using_lightpanda_engine", lambda: True, raising=False)
+    monkeypatch.setattr("tools.browser_lightpanda.lightpanda_engine_status",
+                        lambda: (True, "Hermes spawns `lightpanda serve`"), raising=False)
     monkeypatch.setattr("tools.browser_lightpanda.find_lightpanda_binary", lambda: None)
     out = helper._run_doctor_and_capture(monkeypatch, tmp_path)
     assert "Lightpanda selected but binary not found" in out

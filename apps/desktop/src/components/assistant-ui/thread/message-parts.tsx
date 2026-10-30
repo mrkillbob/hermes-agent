@@ -2,9 +2,7 @@ import {
   type ReasoningMessagePartComponent,
   type TextMessagePartProps,
   type ToolCallMessagePartProps,
-  useAuiState,
-  useMessagePartReasoning,
-  useMessagePartText
+  useAuiState
 } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type ComponentProps, type FC, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
@@ -13,7 +11,7 @@ import { useSessionView } from '@/app/chat/session-view'
 import { CatalogInstallTool } from '@/components/assistant-ui/catalog-install-tool'
 import { ClarifyTool } from '@/components/assistant-ui/clarify'
 import { ConnectorExecution, ConnectorTool } from '@/components/assistant-ui/connector-tool'
-import { MarkdownText, MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
+import { MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { McpSetupTool } from '@/components/assistant-ui/mcp-setup-tool'
 import { SetupBeatTool } from '@/components/assistant-ui/setup-beat/setup-beat-tool'
 import { setThemeCall } from '@/components/assistant-ui/theme-picker/args'
@@ -199,8 +197,10 @@ const PREVIEW_RELOCK_THRESHOLD_PX = 24
 
 type TimelineTextPartProps = TextMessagePartProps & { completedAt?: number; timestamp?: number }
 
-const TimelineMarkdownText: FC<TimelineTextPartProps> = ({ completedAt, timestamp }) => {
-  const { text } = useMessagePartText()
+const TimelineMarkdownText: FC<TimelineTextPartProps> = ({ completedAt, status, text, timestamp }) => {
+  // Keep the dispatched text/status snapshot together: the indexed part scope
+  // can advance while an earlier text consumer is still mounted.
+  const textDirection = useForcedTextDirection()
 
   // assistant-ui adds an empty continuation after a tool starts. It is not
   // prose yet and must not create paragraph spacing above pending approvals.
@@ -211,7 +211,7 @@ const TimelineMarkdownText: FC<TimelineTextPartProps> = ({ completedAt, timestam
   return (
     <>
       <TimelineTimestamp className="mb-0.5 block" completedAt={completedAt} timestamp={timestamp} />
-      <MarkdownText />
+      <MarkdownTextContent isRunning={status.type === 'running'} text={text} textDirection={textDirection} />
     </>
   )
 }
@@ -432,11 +432,9 @@ const ReasoningAccordionGroup: FC<{ children?: ReactNode; endIndex: number; star
   )
 }
 
-// Read the part from context, same contract as MarkdownText's
-// useMessagePartText — the reasoning-only smoothing wrapper (removed) stalled
-// the char-reveal at empty, blanking the widget.
-const ReasoningTextPart: ReasoningMessagePartComponent = () => {
-  const { status, text } = useMessagePartReasoning()
+// Use the dispatched snapshot, as for text above. MarkdownTextContent binds it
+// without smoothing: resetting the reveal on each part identity blanked reasoning.
+const ReasoningTextPart: ReasoningMessagePartComponent = ({ status, text }) => {
   const messageRunning = useAuiState(s => s.message.status?.type === 'running')
 
   // The group above already hides grouped parts; this covers a Reasoning part

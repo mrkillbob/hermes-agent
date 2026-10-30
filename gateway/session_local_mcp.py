@@ -497,9 +497,43 @@ async def prepare_branch_editor(authority, ref, servers, gate):
 
 
 @contextmanager
-def editor_mcp_scope(authority, policy):
-    if not policy.editor_mcp_json:
+def editor_mcp_inventory_scope(authority, policy, session_id):
+    """Observe only the owning session's registered overlay, without transport I/O.
+
+    Even an ordinary session clears an ambient execution overlay. A frozen
+    manifest cannot select another profile/session's ledger for an observer.
+    """
+    from tools.registry import session_tool_scope
+    from tools.tool_presentation import frozen_editor_tool_presentation
+
+    scope = None
+    data = None
+    if policy is not None and policy.editor_mcp_json:
+        data = json.loads(policy.editor_mcp_json)
+        scope = data.get('scope')
+        if (not isinstance(session_id, str) or not session_id or not isinstance(scope, str)
+                or not hmac.compare_digest(scope, session_scope(authority, session_id))):
+            raise RuntimeStoreError('acp_mcp_policy_conflict')
+    with session_tool_scope(scope), frozen_editor_tool_presentation(_direct_editor_names(policy, data)):
         yield
+
+
+def _direct_editor_names(policy, data):
+    """Only an explicit ACP selection consisting entirely of frozen editor toolsets is direct."""
+    if (policy is None or policy.source != 'acp' or not data or not policy.toolsets
+            or 'toolsets' not in json.loads(policy.request_json)
+            or not all(_frozen_toolset(data, name) for name in policy.toolsets)):
+        return None
+    return data['schemas']
+
+
+@contextmanager
+def editor_mcp_scope(authority, policy):
+    from tools.tool_presentation import frozen_editor_tool_presentation
+
+    if not policy.editor_mcp_json:
+        with frozen_editor_tool_presentation(None):
+            yield
         return
     data = json.loads(policy.editor_mcp_json)
     servers = getattr(authority, '_local_editor_mcp', {}).get(data['scope'])
@@ -509,4 +543,5 @@ def editor_mcp_scope(authority, policy):
         if schemas != data['schemas']:
             # Drift is re-frozen by the drain before a claim; inside an execution the manifest never changes.
             raise RuntimeStoreError('acp_mcp_schema_changed')
-        yield
+        with frozen_editor_tool_presentation(_direct_editor_names(policy, data)):
+            yield

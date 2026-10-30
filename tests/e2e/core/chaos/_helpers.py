@@ -111,14 +111,22 @@ def write_chaos_home(root: Path, base_url: str, **cfg: Any) -> tuple[Path, Path]
 def hermetic_env(home: Path, hermes_home: Path, tag: str) -> dict[str, str]:
     """Child env: fake HOME/HERMES_HOME, no real credentials, repo importable, and a
     tag every descendant inherits so the orphan scan can find it after reparenting."""
-    env = {
-        k: v for k, v in os.environ.items()
+    # os.environ.items() reads each key's value with a live lookup after listing the keys, so a
+    # concurrent os.environ mutation (pytest sets/clears PYTEST_CURRENT_TEST in the main thread as
+    # it moves between tests, while this runs in the scenario_futures thread pool) can delete a key
+    # out from under it and raise KeyError mid-iteration. Snapshot each key defensively.
+    env = {}
+    for k in list(os.environ):
+        try:
+            v = os.environ[k]
+        except KeyError:
+            continue
         if not (
             k.endswith(("_API_KEY", "_TOKEN", "_SECRET"))
             or k.startswith(("HERMES_", "OPENROUTER", "ANTHROPIC", "OPENAI", "NOUS_"))
             or k in {"PYTEST_CURRENT_TEST"}
-        )
-    }
+        ):
+            env[k] = v
     env.update({
         "HOME": str(home),
         "HERMES_HOME": str(hermes_home),

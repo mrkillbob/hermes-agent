@@ -180,7 +180,7 @@ def test_read_only_fetch_remembered_under_identity_slot(monkeypatch, tmp_path):
         fetch_account_usage("openai-codex", base_url=server.url, api_key=token,
                             read_only=True, identity_id="codex:acct-7:user-7")
 
-    snapshot = cached_account_usage("openai-codex", identity_id="codex:acct-7:user-7")
+    snapshot = cached_account_usage("openai-codex", identity_id="codex:acct-7:user-7", base_url=server.url)
     assert snapshot is not None and snapshot.windows[0].used_percent == 66.0
     assert cached_account_usage("openai-codex") is None, \
         "a per-credential snapshot must never pose as the provider-wide gauge"

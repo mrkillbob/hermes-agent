@@ -49,9 +49,11 @@ import {
 } from './collapse-duplicate-final'
 import { useGatewayEventHandler } from './gateway-event'
 import { handleServerRequest as dispatchServerRequest } from './gateway-event/server-requests'
-import { extendInterruptedReply } from './interrupted-reply'
+import { bindStoppedTurnReceipt, extendInterruptedReply } from './interrupted-reply'
+import { isPersistedInterimCompletion } from './persisted-completion'
 import { bindReceiptUserRows } from './receipt-user-rows'
 import { currentResponseParts, mergeCurrentResponseText } from './response-parts'
+import { admitSegmentDelta, admitSegmentSeal, type SegmentCursor, type SegmentStamp } from './segment-identity'
 import { completionErrorText, delegateTaskPayloads, MAX_STREAM_FLUSH_GAP_MS, STREAM_DELTA_FLUSH_MS } from './utils'
 
 interface MessageStreamOptions {
@@ -61,7 +63,7 @@ interface MessageStreamOptions {
     attempts?: number,
     storedSessionId?: string | null,
     runtimeSessionId?: string | null
-  ) => Promise<void>
+  ) => Promise<boolean | void>
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
   refreshSessions: () => Promise<void>
@@ -300,6 +302,9 @@ export function useMessageStream({
   const nativeSubagentSessionsRef = useRef<Set<string>>(new Set())
   // Turns that auto-compacted: skip post-turn hydrate so live scrollback survives.
   const compactedTurnRef = useRef<Set<string>>(new Set())
+  // Per session: how far the live turn's stamped reply has been applied, so a
+  // re-sent delta or seal upserts instead of painting a second copy.
+  const segmentCursorsRef = useRef<Map<string, SegmentCursor>>(new Map())
   // Last session we applied a session.info cwd for — lets us tell an agent
   // relocating the SAME session (follow it) from a session switch (don't yank).
   const lastCwdInfoSessionRef = useRef<null | string>(null)
@@ -516,9 +521,15 @@ export function useMessageStream({
   }, [flushQueuedDeltas])
 
   const appendAssistantDelta = useCallback(
-    (sessionId: string, delta: string, occurredAt?: number) => {
+    (sessionId: string, delta: string, occurredAt?: number, stamp?: null | SegmentStamp) => {
       if (!delta) {
         return
+      }
+
+      if (stamp) {
+        const admitted = admitSegmentDelta(segmentCursorsRef.current.get(sessionId), stamp, delta)
+        segmentCursorsRef.current.set(sessionId, admitted.cursor)
+        delta = admitted.text
       }
 
       queueDelta(sessionId, 'assistant', delta, occurredAt)
@@ -627,7 +638,17 @@ export function useMessageStream({
   )
 
   const finalizeInterimAssistantMessage = useCallback(
-    (sessionId: string, text: string, occurredAt = Date.now() / 1000) => {
+    (sessionId: string, text: string, occurredAt = Date.now() / 1000, stamp?: null | SegmentStamp) => {
+      if (stamp) {
+        const admitted = admitSegmentSeal(segmentCursorsRef.current.get(sessionId), stamp)
+        segmentCursorsRef.current.set(sessionId, admitted.cursor)
+
+        // A copy of a seal this turn already applied: its bubble is on screen.
+        if (!admitted.fresh) {
+          return
+        }
+      }
+
       updateSessionState(sessionId, state => {
         if (state.interrupted) {
           return state
@@ -756,8 +777,10 @@ export function useMessageStream({
         if (state.interrupted) {
           return {
             ...state,
-            messages:
+            messages: bindStoppedTurnReceipt(
               status === 'interrupted' ? extendInterruptedReply(state.messages, text, occurredAt) : state.messages,
+              persistedTurn
+            ),
             awaitingResponse: false,
             busy: false,
             needsInput: false,
@@ -892,6 +915,19 @@ export function useMessageStream({
           ? prev.findIndex((message, index) => message.id === streamId && (index > lastUserIndex || message.pending))
           : -1
 
+        const persistedAssistantRowId = persistedTurn?.final_assistant_row_id
+
+        const persistedAssistantIndex =
+          typeof persistedAssistantRowId === 'number' && Number.isSafeInteger(persistedAssistantRowId)
+            ? prev.findIndex(
+                (message, index) =>
+                  index > lastUserIndex &&
+                  message.role === 'assistant' &&
+                  message.rowId === persistedAssistantRowId &&
+                  index !== streamIndex
+              )
+            : -1
+
         const settleAt = (index: number) =>
           prev.map((message, messageIndex) => (messageIndex === index ? completeMessage(message) : message))
 
@@ -906,7 +942,22 @@ export function useMessageStream({
           interimBoundaryPending
         })
 
-        if (streamIndex >= 0) {
+        if (streamIndex >= 0 && persistedAssistantIndex >= 0) {
+          // Reconnect hydration can publish the durable row while its original
+          // live stream bubble is still on screen. The completion receipt names
+          // the exact durable row, so settle the richer stream into that
+          // identity and remove the duplicate instead of leaving both bubbles.
+          const durable = prev[persistedAssistantIndex]
+          const settledStream = completeMessage(prev[streamIndex])
+          nextMessages = prev
+            .filter((_message, index) => index !== streamIndex)
+            .map((message, index) =>
+              index === persistedAssistantIndex - (streamIndex < persistedAssistantIndex ? 1 : 0)
+                ? { ...durable, ...settledStream, id: durable.id, rowId: durable.rowId }
+                : message
+            )
+          collapsed = { keptId: durable.id, messages: nextMessages }
+        } else if (streamIndex >= 0) {
           collapsed =
             collapseDuplicateFinalAfterToolInterim(prev, streamIndex, {
               completeMessage,
@@ -967,14 +1018,7 @@ export function useMessageStream({
             // interim instead of painting a second bubble for one row
             // (#124128). A frame with no receipt keeps the rules below, so a
             // genuinely distinct reply still appends its own bubble.
-            const finalRowId = persistedTurn?.final_assistant_row_id
-
-            const settlesPersistedRow =
-              existing.interim === true &&
-              existing.rowId === undefined &&
-              typeof finalRowId === 'number' &&
-              Number.isSafeInteger(finalRowId) &&
-              finalRowId > 0
+            const settlesPersistedRow = isPersistedInterimCompletion(existing, persistedTurn)
 
             if (
               existing.pending ||
@@ -1099,6 +1143,7 @@ export function useMessageStream({
           messages: nextMessages,
           adoptedRunningTurn: false,
           heartbeatSettledStreamId: null,
+          heartbeatSettledAt: null,
           streamId: null,
           pendingBranchGroup: null,
           awaitingResponse: false,

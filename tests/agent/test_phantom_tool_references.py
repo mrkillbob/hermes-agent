@@ -21,7 +21,7 @@ class TestExecutionGuidanceText:
         from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE, execution_guidance_text
         assert execution_guidance_text(None) == OPENAI_MODEL_EXECUTION_GUIDANCE
         assert execution_guidance_text(
-            {"terminal", "execute_code", "read_file", "search_files"}
+            {"terminal", "execute_code", "read_file", "search_files", "web_search"}
         ) == OPENAI_MODEL_EXECUTION_GUIDANCE
 
     def test_lean_toolset_is_not_told_to_use_absent_tools(self):
@@ -32,7 +32,10 @@ class TestExecutionGuidanceText:
         mandatory = text.split("<mandatory_tool_use>")[1].split("</mandatory_tool_use>")[0]
         for tool in ("terminal", "execute_code", "read_file", "search_files", "Arithmetic"):
             assert tool not in mandatory
-        assert "an appropriate permitted retrieval/search tool" in mandatory
+        assert "an appropriate permitted retrieval/search tool" not in mandatory
+        web_text = execution_guidance_text({"web_search"})
+        assert "an appropriate permitted retrieval/search tool" in web_text
+        assert "web_search" not in web_text
         assert "run `date`" not in text.split("<act_dont_ask>")[1].split("</act_dont_ask>")[0]
 
 

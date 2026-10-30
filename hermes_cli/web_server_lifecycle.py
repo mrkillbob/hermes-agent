@@ -148,8 +148,8 @@ def _warm_gateway_module() -> None:
     """
     for mod in (
         "hermes_cli.gateway",
-        "hermes_cli.auth",  # provider auth state → copilot_auth → subprocess
-        "hermes_cli.copilot_auth",
+        "hermes_cli.auth",  # provider auth state
+        "providers",  # provider plugin discovery (below) imports every profile's module chain
         "hermes_cli.runtime_provider",
         "hermes_cli.skin_engine",  # resolve_skin() config + skin engine init
         "hermes_cli.inventory",  # provider catalogs + models.dev cache
@@ -157,8 +157,14 @@ def _warm_gateway_module() -> None:
     ):
         try:
             __import__(mod)
-        except Exception:
-            pass
+        except Exception:  # health: allow BLE001 -- best-effort warm-up; the real import reports
+            _log.debug("warm-up import of %s failed", mod, exc_info=True)
+    try:
+        # Provider plugins carry their own auth chains (token exchange, CLI probes): warm them too.
+        import providers
+        providers.list_providers()
+    except Exception:  # health: allow BLE001 -- best-effort warm-up; discovery reports on real use
+        _log.debug("warm-up provider discovery failed", exc_info=True)
 
 
 def _resolve_restart_drain_timeout() -> float:
@@ -562,10 +568,11 @@ def build_listener_server(served_app, host: str, port: int, *, auth_required: bo
     """
     import uvicorn
     from hermes_cli.config import load_config
+    from hermes_cli.startup_hold import active as startup_hold_active
     from hermes_cli.web_server_boundary import _DESKTOP_ATTACHMENT_WS_MAX_BYTES, _LOOPBACK_HOST_VALUES
 
     try:
-        dash_cfg = load_config().get("dashboard") or {}
+        dash_cfg = {} if startup_hold_active() else load_config().get("dashboard") or {}
     except Exception:  # health: allow BLE001 -- same fail-open read as web_server._build_uvicorn_server: a broken config.yaml must not stop the listener
         dash_cfg = {}
 

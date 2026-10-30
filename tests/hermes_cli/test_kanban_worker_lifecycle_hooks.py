@@ -183,3 +183,33 @@ def test_raising_callbacks_never_break_worker_lifecycle(
             conn.close()
     finally:
         mgr._hooks = saved
+
+
+@pytest.mark.parametrize("matches_worker", [True, False])
+def test_stale_claim_hostname_alias_requires_exact_worker_identity(
+    kanban_home, monkeypatch, matches_worker,
+):
+    from hermes_cli import kanban_worker_process as kwp
+
+    monkeypatch.setattr(kb, "_host_prefix", lambda: "new-host:")
+    monkeypatch.setattr(kwp, "pid_matches_task_worker", lambda pid, tid: matches_worker)
+    monkeypatch.setattr(kbd, "_worker_alive", lambda *args: True)
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="alias-worker", assignee="worker")
+        kb.claim_task(conn, tid)
+        now = int(time.time())
+        conn.execute("UPDATE tasks SET claim_lock = ?, worker_pid = ?, "
+                     "claim_expires = ?, last_heartbeat_at = ? WHERE id = ?",
+                     ("old-host:123", 4242, now - 1, now - 10, tid))
+        conn.commit()
+        reclaimed = kb.release_stale_claims(conn)
+        assert reclaimed == (0 if matches_worker else 1)
+        task = kb.get_task(conn, tid)
+        if matches_worker:
+            assert task.status == "running"
+            assert task.claim_expires > now
+        else:
+            assert task.status != "running"
+    finally:
+        conn.close()

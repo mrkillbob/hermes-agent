@@ -148,6 +148,19 @@ class ProfileCanonicalSession(Result):
     live_message_count: int | None = None
 
 
+class ProfileFederationRole(Result):
+    """Governed identity fields exposed by the profile roster."""
+
+    role_id: str | None = None
+    display_name: str | None = None
+    department: str | None = None
+    authority: str | None = None
+    schedule: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    toolsets: list[str] = Field(default_factory=list)
+    handoffs: list[str] = Field(default_factory=list)
+
+
 class ProfileRow(Result):
     """One roster row; the session fields are present only with ``include_sessions``."""
 
@@ -166,6 +179,7 @@ class ProfileRow(Result):
     ui_meta_revisions: dict[str, int] = Field(default_factory=dict)
     ui_meta: dict[str, JsonValue] | None = None
     has_avatar: bool = False
+    federation_role: ProfileFederationRole | None = None
 
 
 class ProfilesListParams(ProfileParams):
@@ -678,13 +692,37 @@ class SubagentIdParams(SessionParams):
     subagent_id: str
 
 
+class SubagentInterruptParams(SubagentIdParams):
+    expected_generation: str | None = None
+
+
 class SubagentInterruptResult(Result):
     found: bool
     subagent_id: str
 
 
-method("subagent.interrupt", params=SubagentIdParams, result=SubagentInterruptResult,
+method("subagent.interrupt", params=SubagentInterruptParams, result=SubagentInterruptResult,
        doc="Hard-interrupt one owned child; ``found`` is false when it already finished.")
+
+
+class SubagentStatusParams(SubagentIdParams):
+    pass
+
+
+class SubagentStatusEntry(OpenModel):
+    generation: str
+    subagent_id: str
+    parent_id: str | None = None
+    status: str
+
+
+class SubagentStatusResult(Result):
+    found: bool
+    subagent: SubagentStatusEntry | None = None
+
+
+method("subagent.status", params=SubagentStatusParams, result=SubagentStatusResult,
+       doc="Return the authority receipt for one owned child; ``found`` is false when not owned by this session.")
 
 
 class SubagentTailResult(Result):

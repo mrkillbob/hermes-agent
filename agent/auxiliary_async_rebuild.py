@@ -40,3 +40,11 @@ def configured_default_headers(sync_client: Any) -> dict[str, str]:
     """
     configured = getattr(sync_client, "_custom_headers", None) if isinstance(sync_client, OpenAI) else None
     return dict(configured) if isinstance(configured, Mapping) else {}
+
+
+def async_client_streams_internally(client: Any) -> bool:
+    """Async wire adapters aggregate their own stream rather than return chunks."""
+    from agent.auxiliary_client import (
+        AsyncCodexAuxiliaryClient, AsyncAnthropicAuxiliaryClient, AsyncBedrockAuxiliaryClient,
+    )
+    return isinstance(client, (AsyncCodexAuxiliaryClient, AsyncAnthropicAuxiliaryClient, AsyncBedrockAuxiliaryClient))

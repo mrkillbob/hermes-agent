@@ -86,6 +86,24 @@ def test_terminal_descendants_cannot_mutate_even_after_task_is_removed(tmp_path,
     conn.close()
 
 
+def test_task_shell_does_not_inherit_the_workers_kanban_source(tmp_path, monkeypatch):
+    """``hermes chat -q`` in a task shell would send ``kanban``, a label only the gateway mints."""
+    from agent.session_source import session_source_for
+    from gateway import session_context as sc
+
+    _worker_board(tmp_path, monkeypatch)
+    monkeypatch.setattr(sc, "_session_context_engaged", False)
+    sc.reset_session_vars()
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "kanban")
+    terminal = LocalEnvironment(cwd=str(tmp_path))
+    try:
+        result = terminal.execute('echo "source=${HERMES_SESSION_SOURCE-unset}"')
+    finally:
+        terminal.cleanup()
+    assert "source=unset" in result["output"], result
+    assert session_source_for("cli") == "kanban"
+
+
 def test_worker_cli_cannot_use_foreign_task_to_drop_run_scope(tmp_path, monkeypatch):
     conn, own, foreign = _worker_board(tmp_path, monkeypatch)
     assert "error" in json.loads(kanban_tools._handle_complete({"task_id": foreign, "summary": "no"}))
@@ -150,7 +168,9 @@ def test_child_shell_can_write_a_kanban_board_outside_its_lineage_root(tmp_path,
         finally:
             terminal.cleanup()
     output = result.get("output", "")
-    row = json.loads(next(line.split("SCOPE_RESULT=", 1)[1] for line in output.splitlines() if "SCOPE_RESULT=" in line))
+    row_line = next((line for line in output.splitlines() if "SCOPE_RESULT=" in line), None)
+    assert row_line is not None, f"child shell did not emit SCOPE_RESULT (rc={result.get('returncode')}):\n{output}"
+    row = json.loads(row_line.split("SCOPE_RESULT=", 1)[1])
     assert row["marker"] and row["marker"] != "1", row
     assert row["lineage"].startswith("fenced"), row
     assert row["scratch"], row

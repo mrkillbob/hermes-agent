@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- upstream sync: merges upstream's adapter-lifecycle changes with the fork's profile-scope and worktree handling; split is a follow-up refactor
 """Adapter connect/disconnect, fatal-error recovery, reconnect watcher and multiplex profile
 adapters for GatewayRunner (mixin bound via the MRO).
 
@@ -44,13 +45,7 @@ _UNSET = object()  # "no per-profile human_delay snapshot": fall back to the pri
 _MAX_PLUGIN_LOAD_REARMS = 3  # per queued platform: transient load failures heal, a broken plugin stops re-importing
 
 
-def _adapter_unavailable_message(platform: Platform, *, retrying: bool = True) -> str:
-    """Actionable ``adapter_unavailable`` status text, shared by startup and the reconnect watcher so
-    ``hermes status`` keeps the plugin/deps/credentials hint after the first retry."""
-    message = (
-        f"No adapter available for enabled {platform.value}; check the plugin, dependencies, and credentials."
-    )
-    return f"{message} Retrying in the background." if retrying else message
+from gateway.run_adapter_errors import (_adapter_unavailable_message)
 
 
 class _UnresolvedProfileHome:
@@ -65,6 +60,13 @@ class _UnresolvedProfileHome:
 
 
 UNRESOLVED_PROFILE_HOME = _UnresolvedProfileHome()
+
+
+def _profile_adapter_kept(platform, platform_config) -> bool:
+    """Whether a rescan keeps a profile's *platform* adapter. LOCAL belongs to the profile's session
+    authority, not to config.yaml: evicting it drops every restored session's policy, so resuming one
+    later is refused."""
+    return platform == Platform.LOCAL or (platform_config is not None and platform_config.enabled)
 
 
 class GatewayAdapterLifecycleMixin:
@@ -411,6 +413,8 @@ class GatewayAdapterLifecycleMixin:
                     adapter.platform.value,
                 )
                 self._ensure_reconnect_watcher_running()
+                return
+            if self._park_last_fatal_platform(adapter):
                 return
             self._exit_reason = adapter.fatal_error_message or "All messaging adapters disconnected"
             if adapter.fatal_error_retryable:
@@ -1254,6 +1258,10 @@ class GatewayAdapterLifecycleMixin:
     ) -> int:
         """Create+connect one profile's adapters under its runtime scope."""
         from gateway.run import _platform_has_bot_credential, _profile_runtime_scope
+        from gateway.config import PLATFORM_TOKEN_ENV_NAMES, _getenv
+        import hashlib
+        import json
+
         profile_cfg = await self._load_secondary_profile_config(profile_name, profile_home)
         # Keep the served profile's config: host-wide passes (planned-restart notices) must reach
         # every served profile's home channels, and this is the only place it is loaded.
@@ -1263,13 +1271,51 @@ class GatewayAdapterLifecycleMixin:
         configs[profile_name] = profile_cfg
         multiplex = self._multiplex_on()
         profile_map = self._profile_adapters.setdefault(profile_name, {})
+        signatures = getattr(self, "_profile_adapter_signatures", None)
+        if signatures is None:
+            signatures = self._profile_adapter_signatures = {}
+        profile_signatures = signatures.setdefault(profile_name, {})
         connected = 0
+        for platform, adapter in list(profile_map.items()):
+            platform_config = profile_cfg.platforms.get(platform)
+            if _profile_adapter_kept(platform, platform_config):
+                continue
+            profile_map.pop(platform, None)
+            profile_signatures.pop(platform, None)
+            for claim in (self._adapter_credential_claim(platform, adapter),
+                          self._adapter_listener_claim(platform, adapter)):
+                if claim is not None and claimed.get(claim) == profile_name:
+                    claimed.pop(claim, None)
+            await self._bounded_adapter_teardown(adapter, platform, profile=profile_name)
+            from gateway.run import _write_runtime_status_quiet
+            _write_runtime_status_quiet(drop_platforms=[f"{profile_name}:{platform.value}"])
         for platform, platform_config in profile_cfg.platforms.items():
             if not platform_config.enabled:
                 continue
-            # Runtime re-scan of a served profile (config/.env changed): only platforms that are not
-            # already live or queued for reconnect are built — never a second poller on the same bot.
-            if platform in profile_map or platform in (
+            # Fingerprint the platform's own config and credential only. A new Telegram
+            # token must not tear down an already-connected Discord adapter, while a
+            # rotation to Discord's own config/credential must still rebuild it.
+            token_env = PLATFORM_TOKEN_ENV_NAMES.get(platform)
+            with _profile_runtime_scope(profile_home, hydrate_secrets=False):
+                payload = {
+                    "config": platform_config.to_dict(),
+                    "credential": _getenv(token_env) if token_env else None,
+                }
+            signature = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            if platform in profile_map:
+                if profile_signatures.get(platform) in (None, signature):
+                    continue
+                previous = profile_map.pop(platform)
+                for claim in (self._adapter_credential_claim(platform, previous),
+                              self._adapter_listener_claim(platform, previous)):
+                    if claim is not None and claimed.get(claim) == profile_name:
+                        claimed.pop(claim, None)
+                await self._bounded_adapter_teardown(previous, platform, profile=profile_name)
+                profile_signatures.pop(platform, None)
+            # Existing reconnect attempts are retained when the platform signature is unchanged.
+            if platform in (
                     (getattr(self, "_profile_failed_platforms", None) or {}).get(profile_name) or {}):
                 continue
             # No credential in THIS profile's scope: an adapter would fan inbound across every such profile.
@@ -1323,6 +1369,9 @@ class GatewayAdapterLifecycleMixin:
                 owner_origin=owner_origin, incoming_origin=incoming_origin,
             ) or self._refuse_duplicate_claim(listener_claim, claimed, profile_name, platform, "listener"):
                 continue
+            # The profile owns this bot from here on, connected or not: cron and the delivery drain read
+            # ownership here from another thread, never from the live map a fatal error rewrites.
+            self._record_profile_bot_platform(profile_name, platform)
             self._configure_profile_adapter(adapter, profile_name, platform)
             try:
                 with _profile_runtime_scope(profile_home, hydrate_secrets=False):
@@ -1337,6 +1386,7 @@ class GatewayAdapterLifecycleMixin:
                 self._schedule_secondary_profile_startup_reconnect(profile_name, platform, adapter)
                 continue
             profile_map[platform] = adapter
+            profile_signatures[platform] = signature
             # Restore persisted /voice state for this bot (primary startup and reconnects do too).
             # See #84872.
             self._sync_voice_mode_state_to_adapter(adapter)
@@ -1346,6 +1396,13 @@ class GatewayAdapterLifecycleMixin:
             connected += 1
             logger.info("✓ %s connected (profile: %s)", platform.value, profile_name)
         return connected
+
+    def _record_profile_bot_platform(self, profile_name: str, platform: Platform) -> None:
+        """Keep bot ownership stable when the live adapter map changes after a fatal error."""
+        bot_platforms = getattr(self, "_profile_bot_platforms", None)
+        if bot_platforms is None:
+            bot_platforms = self._profile_bot_platforms = {}
+        bot_platforms.setdefault(profile_name, set()).add(platform)
 
     def _wire_adapter_handlers(
         self, adapter: BasePlatformAdapter, *, message_handler=None, fatal_error_handler=None,
@@ -1804,10 +1861,13 @@ class GatewayAdapterLifecycleMixin:
     def _standalone_scoped(self, handler):
         """Standalone twin of the ``_make_default_profile_*`` wrappers: run ``handler`` under
         ``_standalone_launch_scope`` so slash commands and turns keep resolving the launch profile's
-        credentials after a hosted room flipped the process-wide guard (#112878). Decided per event:
-        activation happens after the adapters were wired."""
+        credentials after a hosted room flipped the process-wide guard (#112878). The credential
+        body is marked at entry (``launch_body``): a turn already running when a second profile
+        switches this gateway to multiplexing keeps resolving its launch credentials."""
+        from tui_gateway.launch_profile_policy import launch_body
+
         async def _handler(*args):
-            with self._standalone_launch_scope():
+            with launch_body(), self._standalone_launch_scope():
                 return await handler(*args)
 
         return _handler

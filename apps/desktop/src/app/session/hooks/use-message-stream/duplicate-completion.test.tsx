@@ -1,9 +1,9 @@
 import type { GatewayEventName } from '@hermes/shared'
-import { act, cleanup } from '@testing-library/react'
+import { act, cleanup, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 
 import { appendMidTurnUserMessage } from '@/app/session/hooks/use-prompt-actions/rewind'
-import { chatMessageText, textPart } from '@/lib/chat-messages'
+import { type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
 
 import { renderMessageStream } from './test-harness'
 
@@ -49,6 +49,34 @@ it('settles identical tool-interim completion once while retaining every complet
     expect(hydrate).not.toHaveBeenCalled()
     cleanup()
   }
+})
+
+it('settles a live stream into the exact durable row published during reconnect', async () => {
+  const { stream, send } = mount()
+  await send('message.start')
+  await send('message.delta', { text: 'answer survived reconnect' })
+  await waitFor(() => expect(stream.state().messages.at(-1)).toBeDefined())
+
+  const live = stream.state().messages.at(-1)!
+
+  const durable: ChatMessage = {
+    id: '1790503219.6128294-17-assistant',
+    role: 'assistant',
+    rowId: 17,
+    parts: [{ type: 'text', text: 'answer survived reconnect' }]
+  }
+
+  stream.states.set(SID, { ...stream.state(), messages: [...stream.state().messages, durable] })
+
+  await send('message.complete', {
+    text: 'answer survived reconnect',
+    persisted_turn: { complete: true, final_assistant_row_id: 17, row_ids: [17] }
+  })
+
+  const messages = stream.state().messages
+  expect(messages.filter(message => chatMessageText(message).includes('answer survived reconnect'))).toHaveLength(1)
+  expect(messages.find(message => message.id === live.id)).toBeUndefined()
+  expect(messages.find(message => message.rowId === 17)).toMatchObject({ id: durable.id, durableComplete: true })
 })
 
 it('keeps distinct segments, user boundaries, and failures on their own side of completion', async () => {

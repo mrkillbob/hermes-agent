@@ -94,4 +94,3 @@ def test_all_pins_failing_leaves_lockfile_untouched(tmp_path, monkeypatch, capsy
     assert "✗ broken-pin pin failed" in out
     assert "every pin failed; lockfile untouched" in out
     assert lock.path.read_bytes() == before
-

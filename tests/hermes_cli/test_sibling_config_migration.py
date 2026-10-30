@@ -70,6 +70,22 @@ def test_sibling_behind_is_migrated_on_disk(monkeypatch, tmp_path):
     assert on_disk["model"]["provider"] == "nous"
 
 
+def test_profile_tree_migrates_profiles_under_configured_root(monkeypatch, tmp_path):
+    profiles_root = tmp_path / "isolated" / "profiles"
+    active = _write_profile(profiles_root, "default", _latest_version())
+    sibling = _write_profile(profiles_root, "work", 12)
+    _setup(monkeypatch, tmp_path, active)
+
+    import hermes_cli.profiles as profiles_mod
+
+    monkeypatch.setattr(profiles_mod, "_get_profiles_root", lambda: profiles_root)
+
+    migrated = update_cmd._migrate_sibling_profile_configs()
+
+    assert migrated == [("work", 12, _latest_version())]
+    assert yaml.safe_load((sibling / "config.yaml").read_text())["_config_version"] == _latest_version()
+
+
 def test_active_profile_is_skipped(monkeypatch, tmp_path):
     active = _write_profile(tmp_path / "profiles", "active", 12)
     _setup(monkeypatch, tmp_path, active)
@@ -165,3 +181,28 @@ def test_default_active_still_migrates_named_siblings(monkeypatch, tmp_path):
     on_disk = yaml.safe_load((sibling / "config.yaml").read_text())
     assert on_disk["_config_version"] == _latest_version()
     assert yaml.safe_load((default_home / "config.yaml").read_text())["_config_version"] == _latest_version()
+
+
+def test_sibling_step_notices_reach_the_update_output(monkeypatch, tmp_path, capsys):
+    """A sibling migrates quietly; what its steps changed (v52: `backend: off` gone, and how to turn
+    browsing off now) is printed under its profile line, as for the active profile. New default keys
+    are not changes and stay out."""
+    active = _write_profile(tmp_path / "profiles", "active", _latest_version())
+    work = tmp_path / "profiles" / "work"
+    work.mkdir(parents=True)
+    (work / "config.yaml").write_text("_config_version: 51\nbrowser:\n  backend: off\n", encoding="utf-8")
+    _setup(monkeypatch, tmp_path, active)
+    monkeypatch.setenv("HERMES_HOME", str(active))
+    monkeypatch.setattr(update_cmd_config, "_restore_snapshot_safety_nets", lambda _sid: None)
+    monkeypatch.setattr("hermes_cli.config.get_missing_env_vars", lambda **_: [])
+    monkeypatch.setattr("hermes_cli.config.get_missing_config_fields", lambda: [{"key": "display.new_option"}])
+
+    update_cmd_config._check_and_apply_config_migration()
+
+    out = capsys.readouterr().out
+    profile_line = out.index("Profile 'work': config format updated (v51")
+    notice = out.index("removed browser.backend: off")
+    assert profile_line < notice
+    assert "`browser` toolset in `hermes tools`" in out[notice:]
+    assert "display.new_option" not in out[profile_line:]
+    assert "backend" not in (yaml.safe_load((work / "config.yaml").read_text()).get("browser") or {})

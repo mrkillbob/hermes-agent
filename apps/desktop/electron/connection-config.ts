@@ -40,6 +40,13 @@ import { profileCollectionRoute, profileRouteSuffix } from './profile-routes'
 
 const AT_COOKIE_VARIANTS = ['__Host-hermes_session_at', '__Secure-hermes_session_at', 'hermes_session_at']
 const RT_COOKIE_VARIANTS = ['__Host-hermes_session_rt', '__Secure-hermes_session_rt', 'hermes_session_rt']
+// A gateway's Webapp follows each name with its gateway (`hermes_session_at_<16 hex digits>`), since
+// cookies are not scoped to a port; the dashboard keeps the bare names.
+const GATEWAY_COOKIE_SUFFIX = /_[0-9a-f]{16}$/
+
+function isCookieVariant(name: unknown, variants: string[]): boolean {
+  return typeof name === 'string' && (variants.includes(name) || variants.includes(name.replace(GATEWAY_COOKIE_SUFFIX, '')))
+}
 
 // Keep this aligned with hermes_cli.profiles.validate_profile_name(). `default`
 // is the built-in root alias; these names cannot be created as profiles.
@@ -225,11 +232,35 @@ async function withTransientRetries(run, options: any = {}) {
   throw lastError
 }
 
+function boundedTicketDiagnostic(error: unknown): string | undefined {
+  if (!(error instanceof Error) || error.message !== 'Gateway ticket bootstrap failed') {
+    return
+  }
+
+  const line = error.stack?.split('\n').at(-1)
+  const match = line?.match(/^\[gateway-ticket cause=(deadline|response_too_large|ECONNREFUSED|ECONNRESET|ENOENT|ENOTDIR|EACCES|EPERM|EPIPE|ETIMEDOUT|socket_error) elapsed_ms=(\d{1,5}) connected=(true|false) received_data=(true|false)\]$/)
+
+  if (match && 'reason' in error && error.reason === match[1] && Number(match[2]) <= 60_000) {
+    return match[0]
+  }
+}
+
 /** Serialize a fresh-WS-URL attempt across Electron's IPC boundary. */
-async function gatewayWsUrlIpcResult(resolveWsUrl: () => Promise<string>) {
+async function gatewayWsUrlIpcResult(resolveWsUrl: () => Promise<string>, reportTicketFailure?: (diagnostic: string) => void) {
   try {
     return { ok: true as const, wsUrl: await resolveWsUrl() }
   } catch (error) {
+    const diagnostic = boundedTicketDiagnostic(error)
+
+    if (diagnostic && reportTicketFailure) {
+      // Diagnostic sinks must not replace the connection failure sent to the renderer.
+      try {
+        reportTicketFailure(diagnostic)
+      } catch {
+        // Keep logging failure observational; the IPC result below remains authoritative.
+      }
+    }
+
     return {
       error: error instanceof Error ? error.message : String(error),
       ...(isGatewayAuthRejection(error) ? { needsOauthLogin: true as const } : {}),
@@ -706,7 +737,12 @@ const LOCAL_PRIMARY_SCOPED_ROUTES = new Set([
   'PUT /api/dashboard/theme',
   'GET /api/dashboard/font',
   'PUT /api/dashboard/font',
-  'GET /api/dashboard/plugins'
+  'GET /api/dashboard/plugins',
+  // Web Access: each handler takes `?profile=` and acts on the gateway serving it.
+  'GET /api/webapp-access/status',
+  'POST /api/webapp-access/start',
+  'POST /api/webapp-access/stop',
+  'POST /api/webapp-access/restart'
 ])
 
 function localPrimaryRequestScope(opts: ProfileRouteOptions): boolean | null {
@@ -1158,7 +1194,7 @@ function cookiesHaveSession(cookies) {
     return false
   }
 
-  return cookies.some(c => c && AT_COOKIE_VARIANTS.includes(c.name) && c.value)
+  return cookies.some(c => c && isCookieVariant(c.name, AT_COOKIE_VARIANTS) && c.value)
 }
 
 /**
@@ -1179,7 +1215,9 @@ function cookiesHaveLiveSession(cookies) {
     return false
   }
 
-  return cookies.some(c => c && c.value && (AT_COOKIE_VARIANTS.includes(c.name) || RT_COOKIE_VARIANTS.includes(c.name)))
+  return cookies.some(
+    c => c && c.value && (isCookieVariant(c.name, AT_COOKIE_VARIANTS) || isCookieVariant(c.name, RT_COOKIE_VARIANTS))
+  )
 }
 
 export {

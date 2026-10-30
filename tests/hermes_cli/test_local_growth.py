@@ -47,8 +47,7 @@ def test_corrupt_overrides_read_as_empty(hermes_home):
 
 
 def test_growth_declines_foreign_endpoints(hermes_home):
-    """Only the server THIS process supervises grows — a detected external
-    server or another process's endpoint returns None untouched."""
+    """A detected external endpoint cannot acquire managed pending grants."""
     from hermes_cli.local_runtime.growth import maybe_grow_window
 
     grown = maybe_grow_window(

@@ -8,6 +8,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+aiohttp = pytest.importorskip("aiohttp", reason="requires aiohttp [messaging] extra")
+if not isinstance(getattr(aiohttp, "__version__", None), str): pytest.skip("requires real aiohttp [messaging] extra", allow_module_level=True)
+
 from gateway.config import PlatformConfig
 from gateway.platforms import webhook_ingress
 from gateway.platforms.webhook import WebhookAdapter, _INSECURE_NO_AUTH

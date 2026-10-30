@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -31,8 +31,10 @@ test.skipIf(displayPrefix === null)(
   'real portal windows handle both providers, transitions and expired/rejected access',
   async () => {
     const root = await mkdtemp(join(tmpdir(), 'hermes-portal-session-'))
+    const cacheHome = join(root, '.cache')
 
     try {
+      await mkdir(join(cacheHome, 'fontconfig'), { recursive: true })
       const bundle = join(root, 'main.cjs')
       await build({
         entryPoints: [fileURLToPath(new URL('./portal-session-live-fixture/main.ts', import.meta.url))],
@@ -63,7 +65,13 @@ test.skipIf(displayPrefix === null)(
       try {
         stdout = (
           await promisify(execFile)(command, args, {
-            env: { ...env, HERMES_HOME: join(root, '.hermes'), XDG_CONFIG_HOME: join(root, 'config') },
+            env: {
+              ...env,
+              HOME: root,
+              HERMES_HOME: join(root, '.hermes'),
+              XDG_CACHE_HOME: cacheHome,
+              XDG_CONFIG_HOME: join(root, 'config')
+            },
             timeout: 45_000
           })
         ).stdout

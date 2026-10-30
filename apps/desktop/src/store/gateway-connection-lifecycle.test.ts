@@ -18,6 +18,10 @@ import { LIVENESS_REPROBE_DELAY_MS } from '@/lib/gateway-liveness-policy'
 const gatewayMocks = vi.hoisted(() => {
   const instances: {
     close: ReturnType<typeof vi.fn>
+    offEvent: ReturnType<typeof vi.fn>
+    offRequest: ReturnType<typeof vi.fn>
+    offState: ReturnType<typeof vi.fn>
+    emitEvent: (event: unknown) => void
     request: ReturnType<typeof vi.fn>
     connectionState: string
   }[] = []
@@ -39,6 +43,15 @@ vi.mock('@/hermes', () => ({
   setApiRequestConnection: vi.fn(),
   HermesGateway: class {
     connectionState = 'closed'
+    eventListeners = new Set<(event: unknown) => void>()
+    offEvent = vi.fn(() => this.eventListeners.clear())
+    offRequest = vi.fn()
+    offState = vi.fn()
+    emitEvent = (event: unknown): void => {
+      for (const handler of this.eventListeners) {
+        handler(event)
+      }
+    }
     close = vi.fn(() => {
       this.connectionState = 'closed'
     })
@@ -49,10 +62,12 @@ vi.mock('@/hermes', () => ({
     request = vi.fn(async (_method: string, _params: Record<string, unknown>) => ({}))
     onEvent = vi.fn((handler: (event: unknown) => void) => {
       gatewayMocks.eventHandlers.push(handler)
+      this.eventListeners.add(handler)
 
-      return () => {}
+      return this.offEvent
     })
-    onState = vi.fn(() => () => {})
+    onRequest = vi.fn(() => this.offRequest)
+    onState = vi.fn(() => this.offState)
     constructor() {
       gatewayMocks.instances.push(this as never)
     }

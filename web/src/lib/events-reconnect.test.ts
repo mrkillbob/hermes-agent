@@ -9,6 +9,7 @@ import {
   eventsReconnectingMessage,
   eventsRejectedMessage,
   isEventsAuthRejection,
+  isEventsAuthRejectionMessage,
   isEventsFeedMessage,
   shouldRetryEventsClose,
   EVENTS_DISCONNECTED_MESSAGE,
@@ -96,9 +97,35 @@ describe("isEventsFeedMessage", () => {
   });
 });
 
+describe("isEventsAuthRejectionMessage", () => {
+  it("identifies only the auth rejection messages that need a page reload", () => {
+    expect(isEventsAuthRejectionMessage(eventsRejectedMessage(4401))).toBe(true);
+    expect(isEventsAuthRejectionMessage(eventsRejectedMessage(4403))).toBe(true);
+    expect(isEventsAuthRejectionMessage(eventsRejectedMessage(4500))).toBe(false);
+    expect(isEventsAuthRejectionMessage(eventsGaveUpMessage())).toBe(false);
+    expect(isEventsAuthRejectionMessage(null)).toBe(false);
+  });
+});
+
 describe("reconnect message copy", () => {
   it("renders the delay in whole seconds", () => {
     expect(eventsReconnectingMessage(1_000)).toContain("1s");
     expect(eventsReconnectingMessage(30_000)).toContain("30s");
+  });
+
+  it("names the close code in the rejection message", () => {
+    expect(eventsRejectedMessage(4403)).toContain("4403");
+  });
+
+  it("does not reference the tools box removed in #51737", () => {
+    const messages = [
+      EVENTS_DISCONNECTED_MESSAGE,
+      eventsReconnectingMessage(1_000),
+      eventsRejectedMessage(4401),
+      eventsGaveUpMessage(),
+    ];
+    for (const message of messages) {
+      expect(message).not.toContain("tool calls");
+    }
   });
 });

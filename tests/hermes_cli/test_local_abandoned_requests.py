@@ -13,8 +13,8 @@ Three contracts, one per failure link:
    (a dead client then cancels decode at the first chunk write).
 2. Explicit caller max_tokens caps reach the managed local endpoint
    (title generation's 64-token cap must not be silently dropped).
-3. Supervisor teardown terminates the whole process tree, and a router
-   respawn reaps orphaned model children first (each holds GiB of VRAM).
+3. Supervisor replacement requires an owned containment handle; executable
+   names and parent absence never establish custody of unrecorded children.
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ def test_no_default_cap_policy_unchanged_for_remote(monkeypatch):
     assert "max_tokens" not in kwargs and "max_completion_tokens" not in kwargs
 
 
-# ── 3. teardown kills the tree; respawn reaps orphans ────────
+# ── 3. unrecorded process scans never establish tree custody ─
 
 
 class _FakeChild:
@@ -115,7 +115,7 @@ class _FakeChild:
 
 
 
-def test_reap_orphans_kills_only_our_parentless_binaries(tmp_path, monkeypatch):
+def test_unrecorded_parentless_binaries_never_confer_tree_custody(tmp_path, monkeypatch):
     exe = tmp_path / "llama-server.exe"
     exe.write_text("")
 
@@ -125,8 +125,8 @@ def test_reap_orphans_kills_only_our_parentless_binaries(tmp_path, monkeypatch):
         return p
 
     procs = [
-        _info(300, str(exe), 9999),          # dead parent -> reap
-        _info(301, str(exe), 1),             # live parent -> keep
+        _info(300, str(exe), 9999),          # dead parent does not prove ownership
+        _info(301, str(exe), 1),             # reparenting does not prove ownership
         _info(302, str(tmp_path / "other.exe"), 9999),  # foreign -> keep
     ]
     reaped = []
@@ -147,7 +147,8 @@ def test_reap_orphans_kills_only_our_parentless_binaries(tmp_path, monkeypatch):
     sup.binary = exe
     sup.proc = None
     sup._job = None
-    sup._reap_orphaned_children()
+    sup._owned_job_closed = False
+    with pytest.raises(RuntimeError, match="tree custody is unverified"):
+        sup._reap_orphaned_children()
 
-    expected = [] if __import__("sys").platform == "win32" else [300]
-    assert reaped == expected  # Windows uses retained job handles, never binary scans.
+    assert reaped == []  # Job ownership is required on every host; no executable/PPID guesses.

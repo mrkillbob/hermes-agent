@@ -16,15 +16,16 @@ import logging
 import re
 import sqlite3
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Literal, Optional
 
 from fastapi import (
-    APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
+    APIRouter, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -36,13 +37,145 @@ from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
+from plugins.kanban.dashboard import plugin_api_task_diagnostics as task_diagnostics
+from plugins.kanban.dashboard.plugin_api_diagnostics import warnings_summary
+from plugins.kanban.dashboard.plugin_api_estimate import run_estimate
 from hermes_cli.kanban_db import KANBAN_ATTACHMENT_MAX_BYTES, _collision_free_path, _safe_attachment_name
+from hermes_cli.kanban_completion_policy import CompletionPolicyError
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+class SpecialistApprovalInput(BaseModel):
+    """The scoped promotion decision submitted by an authenticated operator."""
+
+    candidate_id: str = Field(min_length=1, max_length=160)
+    verification_result_hash: str = Field(min_length=64, max_length=64)
+    target_state: Literal["staged", "active"]
+
+
+def _specialist_operator_subject(request: Request) -> str | None:
+    """Return the configured authenticated operator subject, else fail closed."""
+    try:
+        from gateway.operator_approval_authority import authenticated_operator_identity
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        kanban_cfg = cfg.get("kanban") if isinstance(cfg.get("kanban"), dict) else {}
+        approval_cfg = (
+            kanban_cfg.get("specialist_operator_approvals")
+            if isinstance(kanban_cfg.get("specialist_operator_approvals"), dict)
+            else {}
+        )
+        allowed_subjects = approval_cfg.get("allowed_subjects", ())
+        if not isinstance(allowed_subjects, (list, tuple)):
+            return None
+        return authenticated_operator_identity(
+            getattr(request.state, "session", None),
+            auth_required=bool(getattr(request.app.state, "auth_required", False)),
+            allowed_subjects=allowed_subjects,
+        )
+    except Exception:
+        return None
+
+
+@router.get("/specialist-approval-authority")
+def specialist_approval_authority(request: Request):
+    """Expose the current verified session subject for allowlist setup."""
+    try:
+        from gateway.operator_approval_authority import (
+            authenticated_operator_identity,
+            dashboard_session_subject,
+        )
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        kanban_cfg = cfg.get("kanban") if isinstance(cfg.get("kanban"), dict) else {}
+        approval_cfg = (
+            kanban_cfg.get("specialist_operator_approvals")
+            if isinstance(kanban_cfg.get("specialist_operator_approvals"), dict)
+            else {}
+        )
+        allowed_subjects = approval_cfg.get("allowed_subjects", ())
+        if not isinstance(allowed_subjects, (list, tuple)):
+            allowed_subjects = ()
+        auth_required = bool(getattr(request.app.state, "auth_required", False))
+        session = getattr(request.state, "session", None)
+        return {
+            "authenticated_subject": dashboard_session_subject(
+                session, auth_required=auth_required
+            ),
+            "approval_authorized": authenticated_operator_identity(
+                session, auth_required=auth_required, allowed_subjects=allowed_subjects
+            )
+            is not None,
+        }
+    except Exception:
+        return {"authenticated_subject": None, "approval_authorized": False}
+
+
+@router.post("/specialist-approvals")
+def record_specialist_approval(
+    payload: SpecialistApprovalInput, request: Request, board: Optional[str] = Query(None)
+):
+    """Record a durable approval from an authenticated, allowlisted operator."""
+    subject = _specialist_operator_subject(request)
+    if subject is None:
+        raise HTTPException(status_code=403, detail="authenticated operator approval required")
+    board = _resolve_board(board)
+    try:
+        from agent.profile_benchmark import CandidatePromotionGate, OperatorApproval
+        from gateway.candidate_profile_requests import CandidateProfileRequests
+        from gateway.capability_registry import CapabilityRegistry
+        from gateway.configured_board import configured_board_db_path
+
+        effective_board = board or kanban_db.get_current_board()
+        db_path = configured_board_db_path(effective_board)
+        approval = OperatorApproval(
+            candidate_id=payload.candidate_id,
+            approval_id=f"dashboard-{uuid.uuid4().hex}",
+            operator_identity=subject,
+            verification_result_hash=payload.verification_result_hash,
+            target_state=payload.target_state,
+            approved=True,
+            issued_at=int(time.time()),
+        )
+        gate = CandidatePromotionGate(
+            CandidateProfileRequests(db_path=db_path, board=effective_board),
+            CapabilityRegistry(db_path=db_path, board=effective_board),
+        )
+        if not gate.record_operator_approval(
+            approval, authenticated_operator_identity=subject
+        ):
+            raise HTTPException(status_code=409, detail="operator approval was not recorded")
+    except HTTPException:
+        raise
+    except Exception:
+        log.warning("specialist operator approval failed", exc_info=True)
+        raise HTTPException(status_code=400, detail="invalid specialist approval")
+    return {
+        "approval_id": approval.approval_id,
+        "candidate_id": approval.candidate_id,
+        "target_state": approval.target_state,
+        "operator_identity": approval.operator_identity,
+        "status": "recorded",
+    }
+
 _BOARD_Q = Query(None, description="Kanban board slug (omit for current)")
+
+
+# Keep the desktop's boot gate on the same strict dispatcher contract as the
+# CLI and gateway. This endpoint is intentionally read-only: it reports the
+# live gateway-owned worker state and never starts or mutates anything.
+@router.get("/dispatcher-readiness")
+def get_dispatcher_readiness():
+    """Return strict readiness for the gateway-owned Kanban dispatcher."""
+    from hermes_cli.kanban import _dispatcher_readiness
+    from hermes_constants import get_hermes_home
+
+    return _dispatcher_readiness(hermes_home=get_hermes_home())
 
 
 # --- Connection / board helpers ---------------------------------------------
@@ -188,8 +321,7 @@ def _task_dict(task: kanban_db.Task, *, latest_summary: Optional[str] = None,
         d["age"] = {"created_age_seconds": None, "started_age_seconds": None, "time_to_complete_seconds": None}
     # Latest non-null run summary (workers hand off via ``task_runs.summary``, not ``tasks.result``).
     d["latest_summary"] = latest_summary
-    # Start of the current task_runs row (``tasks.started_at`` is the FIRST-EVER
-    # start; after a retry the run clock must tick from the fresh run).
+    # ``tasks.started_at`` is the first-ever start; retries have their own run clock.
     d["current_run_started_at"] = current_run_started_at
     return d
 
@@ -206,64 +338,15 @@ def _placeholders(ids: list) -> str:
 
 
 def _compute_task_diagnostics(conn: sqlite3.Connection, task_ids: Optional[list[str]] = None) -> dict[str, list[dict]]:
-    """``{task_id: [diagnostic_dict, ...]}`` (tasks with none omitted) via three aggregate
-    queries (tasks, events, runs) — slurps the board; paginate if profiling shows a hotspot."""
-    from hermes_cli.config import load_config
-
-    if task_ids is not None and not task_ids:
-        return {}
-    diag_config = kd.config_from_runtime_config(load_config())
-    if task_ids is not None:
-        rows = conn.execute(f"SELECT * FROM tasks WHERE id IN ({_placeholders(task_ids)})", tuple(task_ids)).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM tasks WHERE status != 'archived'").fetchall()
-    if not rows:
-        return {}
-    row_ids = [r["id"] for r in rows]
-
-    def _rows_by_task(table: str) -> dict[str, list]:
-        by_task: dict[str, list] = {tid: [] for tid in row_ids}
-        for row in conn.execute(
-            f"SELECT * FROM {table} WHERE task_id IN ({_placeholders(row_ids)}) ORDER BY id", tuple(row_ids)):
-            by_task.setdefault(row["task_id"], []).append(row)
-        return by_task
-
-    events_by_task = _rows_by_task("task_events")
-    runs_by_task = _rows_by_task("task_runs")
-    graph_by_task = kanban_db.task_graph_contexts(conn, row_ids)
-    out: dict[str, list[dict]] = {}
-    for r in rows:
-        tid = r["id"]
-        diags = kd.compute_task_diagnostics(
-            r, events_by_task[tid], runs_by_task[tid], config=diag_config, graph=graph_by_task.get(tid))
-        if diags:
-            out[tid] = [d.to_dict() for d in diags]
-    return out
-
-
-def _warnings_summary_from_diagnostics(diagnostics: list[dict]) -> Optional[dict]:
-    """Compact card badge summary ``{count, kinds, latest_at, highest_severity}``; None when empty."""
-    if not diagnostics:
-        return None
-    kinds: dict[str, int] = {}
-    count = latest = 0
-    highest_idx, highest_sev = -1, None
-    for d in diagnostics:
-        n = d.get("count", 1)
-        kinds[d["kind"]] = kinds.get(d["kind"], 0) + n
-        count += n
-        latest = max(latest, d.get("last_seen_at") or 0)
-        sev = d.get("severity")
-        if sev in kd.SEVERITY_ORDER and kd.SEVERITY_ORDER.index(sev) > highest_idx:
-            highest_idx, highest_sev = kd.SEVERITY_ORDER.index(sev), sev
-    return {"count": count, "kinds": kinds, "latest_at": latest, "highest_severity": highest_sev}
+    return task_diagnostics.compute_task_diagnostics(
+        conn, task_ids, kanban_db=kanban_db, diagnostics=kd, placeholders=_placeholders)
 
 
 def _attach_diagnostics(task_d: dict, diags: Optional[list[dict]]) -> None:
     """Full list in the payload (drawer renders without a second round-trip); card badge gets the summary."""
     if diags:
         task_d["diagnostics"] = diags
-        task_d["warnings"] = _warnings_summary_from_diagnostics(diags)
+        task_d["warnings"] = warnings_summary(diags)
 
 
 def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
@@ -391,7 +474,8 @@ def get_task(
         # Drawer returns the FULL summary (cards on /board carry a 200-char preview).
         task_d = _task_dict(
             task, latest_summary=kanban_db.latest_summary(conn, task_id),
-            current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id))
+            current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id),
+        )
         links = _links_for(conn, task_id)
         child_summaries = kanban_db.latest_summaries(conn, links["children"])
         children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))
@@ -588,21 +672,6 @@ def _drag_to(conn, task_id: str, s: str) -> bool:
     return _set_status_direct(conn, task_id, s)
 
 
-# Status verb dispatch shared by PATCH /tasks/{id} and POST /tasks/bulk: (conn, task_id,
-# payload) -> ok. ``review`` uses request_review (never a block, so it can't trip unblock-loop
-# detection) and ``done`` pass ``force=True``: a dashboard action is a human override of a live worker claim.
-_STATUS_HANDLERS: dict[str, Any] = {
-    "done": lambda conn, tid, p: kanban_db.complete_task(
-        conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True),
-    "blocked": lambda conn, tid, p: kanban_db.block_task(conn, tid, reason=getattr(p, "block_reason", None)),
-    "scheduled": lambda conn, tid, p: kanban_db.schedule_task(conn, tid, reason=getattr(p, "block_reason", None)),
-    "review": lambda conn, tid, p: kanban_db.request_review(
-        conn, tid, summary=p.summary, metadata=p.metadata, reviewer=(p.assignee or None), force=True),
-    "ready": lambda conn, tid, p: _drag_to(conn, tid, "ready"),
-    "todo": lambda conn, tid, p: _drag_to(conn, tid, "todo"),
-    "triage": lambda conn, tid, p: _drag_to(conn, tid, "triage")}
-
-
 def _apply_status(conn, task_id: str, s: str, p, unknown_detail: str) -> bool:
     """Dispatch a status verb; raises ``_StatusRejected`` (user-facing message)
     for ``running`` or an unknown status (``unknown_detail``)."""
@@ -612,6 +681,32 @@ def _apply_status(conn, task_id: str, s: str, p, unknown_detail: str) -> bool:
     if handler is None:
         raise _StatusRejected(unknown_detail)
     return handler(conn, task_id, p)
+
+
+def _request_review_status(conn, task_id: str, payload) -> bool:
+    """Preserve completion-policy rejection reasons for dashboard callers."""
+    result = kanban_db.request_review(
+        conn, task_id, summary=payload.summary, metadata=payload.metadata,
+        reviewer=(payload.assignee or None), force=True, with_reason=True)
+    ok, reason = result if isinstance(result, tuple) else (result, None)
+    if not ok:
+        if reason == "parent dependencies are not satisfied":
+            reason = _open_parent_refusal(conn, task_id, "review") or reason
+        raise CompletionPolicyError(reason or "review transition refused")
+    return True
+
+
+# Status verb dispatch shared by PATCH /tasks/{id} and POST /tasks/bulk: (conn, task_id,
+# payload) -> ok. ``review`` uses request_review (never a block, so it can't trip unblock-loop
+# detection) with ``force=True``: a dashboard action is a human override of a live worker claim.
+_STATUS_HANDLERS: dict[str, Any] = {
+    "done": lambda conn, tid, p: kanban_db.complete_task(conn, tid, result=p.result, summary=p.summary, metadata=p.metadata),
+    "blocked": lambda conn, tid, p: kanban_db.block_task(conn, tid, reason=getattr(p, "block_reason", None)),
+    "scheduled": lambda conn, tid, p: kanban_db.schedule_task(conn, tid, reason=getattr(p, "block_reason", None)),
+    "review": _request_review_status,
+    "ready": lambda conn, tid, p: _drag_to(conn, tid, "ready"),
+    "todo": lambda conn, tid, p: _drag_to(conn, tid, "todo"),
+    "triage": lambda conn, tid, p: _drag_to(conn, tid, "triage")}
 
 
 def _set_priority(conn, task_id: str, priority: int, board: Optional[str]) -> None:
@@ -643,7 +738,8 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
         ok = kanban_db.archive_task(conn, task_id)
     else:
         with _map_errors(400, _StatusRejected, ValueError):
-            ok = _apply_status(conn, task_id, s, payload, f"unknown status: {s}")
+            with _map_errors(409, CompletionPolicyError):
+                ok = _apply_status(conn, task_id, s, payload, f"unknown status: {s}")
         if s == "review" and ok and review_assignee_deferred and not payload.assignee:
             ok = kanban_db.assign_task(conn, task_id, None)
     if ok:
@@ -661,6 +757,15 @@ def _open_parent_refusal(conn, task_id: str, s: str) -> Optional[str]:
     if s not in ("done", "review"):
         return None
     blockers = kanban_db.unsatisfied_parents(conn, task_id)
+    if not blockers:
+        # Preserve useful blocker details on older DB adapters and board shims
+        # that expose parent_ids but not the diagnostic query.
+        blockers = [
+            (parent_id, parent.status)
+            for parent_id in kanban_db.parent_ids(conn, task_id)
+            if (parent := kanban_db.get_task(conn, parent_id)) is not None
+            and parent.status not in ("done", "archived")
+        ]
     if not blockers:
         return None
     detail = ", ".join(f"{pid} ({status})" for pid, status in blockers)
@@ -933,6 +1038,75 @@ def list_active_workers(board: Optional[str] = _BOARD_Q):
         return {"workers": workers, "count": len(workers), "checked_at": int(time.time())}
 
 
+# --- Federated runner pool ---------------------------------------------------
+
+@router.get("/fleet/status")
+def fleet_status():
+    """Read-only status for the shared Mac/Windows runner pool.
+
+    The coordinator remains authoritative for runner liveness and task claims;
+    the dashboard backend only proxies a sanitized snapshot through the normal
+    authenticated plugin route.  The bearer token never crosses into the
+    renderer.
+    """
+    try:
+        from hermes_cli.config import get_env_value_prefer_dotenv, load_config_readonly
+        from hermes_cli.fleet_client import FleetClient
+
+        config = load_config_readonly() or {}
+        kanban_config = config.get("kanban") if isinstance(config, dict) else None
+        federated = kanban_config.get("federated") if isinstance(kanban_config, dict) else None
+        if not isinstance(federated, dict) or federated.get("enabled") is not True:
+            return {"enabled": False, "reachable": False, "runners": [], "tasks": []}
+
+        url = str(federated.get("coordinator_url") or "").strip()
+        token = (get_env_value_prefer_dotenv("HERMES_FLEET_TOKEN") or "").strip()
+        if not url or not token:
+            return {
+                "enabled": True,
+                "reachable": False,
+                "error": "coordinator URL or fleet token is not configured",
+                "runners": [],
+                "tasks": [],
+            }
+
+        client = FleetClient(url, token=token, timeout=2.0)
+        client.health()
+        tasks = client.list_tasks()
+        return {
+            "enabled": True,
+            "reachable": True,
+            "runners": client.list_runners(),
+            "tasks": [
+                {
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "status": task.status,
+                    "node_id": task.node_id,
+                    "runner_profile": task.runner_profile,
+                    "attempt": task.attempt,
+                    "updated_at": task.updated_at,
+                    "error": task.error,
+                    "output_tokens": getattr(task, "output_tokens", None),
+                    "duration_ms": getattr(task, "duration_ms", None),
+                    "output_tps": getattr(task, "output_tps", None),
+                }
+                for task in tasks
+            ],
+        }
+    except Exception as exc:
+        # Status is an observability surface. A sleeping Windows machine or a
+        # briefly restarting coordinator should render as degraded instead of
+        # taking the Kanban page down with a 500.
+        return {
+            "enabled": True,
+            "reachable": False,
+            "error": str(exc)[:240],
+            "runners": [],
+            "tasks": [],
+        }
+
+
 @router.get("/runs/{run_id}")
 def get_run_endpoint(run_id: int, board: Optional[str] = _BOARD_Q):
     """``{run: {...}}`` with the same serialisation as ``GET /tasks/{id}``; 404 if unknown."""
@@ -1050,19 +1224,6 @@ def reassign_task_endpoint(task_id: str, payload: ReassignBody, board: Optional[
         return {"ok": True, "task_id": task_id, "assignee": payload.profile or None}
 
 
-# Estimate: rough token/complexity read via the auxiliary model. NOT a dollar cost.
-_ESTIMATE_SYSTEM_PROMPT = (
-    "You estimate how much work an autonomous coding agent will spend on a "
-    "kanban task. Given the task title and description, respond with STRICT "
-    "JSON only (no prose, no code fence):\n"
-    '{"est_tokens": <integer total tokens across the whole run>, '
-    '"complexity": "S"|"M"|"L", '
-    '"rationale": "<one short sentence>"}\n'
-    "Base the token figure on a realistic multi-turn agent run (reading files, "
-    "tool calls, edits, retries) — not a single reply. S≈small/localized, "
-    "M≈multi-file, L≈broad or ambiguous. Be honest that this is a rough guess.")
-
-
 class EstimateBody(BaseModel):
     title: str = ""
     body: Optional[str] = None
@@ -1071,7 +1232,7 @@ class EstimateBody(BaseModel):
 @router.post("/estimate")
 def estimate_text_endpoint(payload: EstimateBody):
     """Estimate from raw title/body (create dialog, before a task exists)."""
-    return _run_estimate(payload.title, payload.body, task_id=None)
+    return run_estimate(payload.title, payload.body, task_id=None)
 
 
 @router.post("/tasks/{task_id}/estimate")
@@ -1079,61 +1240,7 @@ def estimate_task_endpoint(task_id: str, board: Optional[str] = Query(None)):
     """Estimate for an existing task; ``{ok, est_tokens, complexity, rationale, model}``."""
     with _board_conn(board) as (board, conn):
         task = _require_task(conn, task_id)
-    return _run_estimate(task.title, task.body, task_id=task_id)
-
-
-def _cap(s: Optional[str], n: int) -> str:
-    s = (s or "").strip()
-    return s if len(s) <= n else s[:n] + "…"
-
-
-def _run_estimate(title: str, body: Optional[str], *, task_id: Optional[str]) -> dict:
-    """Never raises — config/parse/API errors become ``{"ok": False, "reason"}`` so the UI renders them inline."""
-    if not (title or "").strip():
-        return {"ok": False, "reason": "a title is required to estimate"}
-    try:
-        from agent.auxiliary_client import call_llm
-    except Exception:
-        return {"ok": False, "reason": "auxiliary client unavailable"}
-    user_msg = f"Title: {_cap(title, 400)}\n\nDescription:\n{_cap(body, 4000) or '(none)'}"
-    # Headless like specify/decompose's _call_aux: without a bound affinity scope the relay-affinity
-    # headers are omitted and the OpenCode Go relay answers 400 MissingSessionID (#112043). The
-    # create dialog has no task yet, so it shares one stable key.
-    from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
-    affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{task_id or 'estimate'}")
-    try:
-        resp = call_llm(
-            task="kanban_estimator",
-            messages=[{"role": "system", "content": _ESTIMATE_SYSTEM_PROMPT}, {"role": "user", "content": user_msg}],
-            temperature=0.0, max_tokens=300, timeout=60)
-    except Exception as exc:
-        return {"ok": False, "reason": f"LLM error: {type(exc).__name__}"}
-    finally:
-        if affinity_token is not None:
-            reset_affinity_scope(affinity_token)
-    try:
-        raw = (resp.choices[0].message.content or "").strip()
-        model = getattr(resp, "model", None)
-    except Exception:
-        raw, model = "", None
-
-    # Same tolerant JSON-blob extraction the specifier uses.
-    try:
-        m = None if raw.lstrip().startswith("{") else re.search(r"\{.*\}", raw, re.DOTALL)
-        obj = json.loads(m.group(0) if m else raw)
-        parsed = obj if isinstance(obj, dict) else None
-    except Exception:
-        parsed = None
-    if not parsed:
-        return {"ok": False, "reason": "could not parse an estimate from the model"}
-    try:
-        est_tokens = int(parsed.get("est_tokens") or 0)
-    except (TypeError, ValueError):
-        est_tokens = 0
-    complexity = str(parsed.get("complexity") or "").strip().upper()
-    return {
-        "ok": True, "est_tokens": est_tokens, "complexity": complexity if complexity in {"S", "M", "L"} else None,
-        "rationale": str(parsed.get("rationale") or "").strip() or None, "model": model}
+    return run_estimate(task.title, task.body, task_id=task_id)
 
 
 # --- Plugin config ----------------------------------------------------------
@@ -1268,9 +1375,22 @@ def get_task_log(task_id: str, tail: Optional[int] = Query(None, ge=1, le=2_000_
 
 @router.post("/dispatch")
 def dispatch(dry_run: bool = Query(False), max_n: int = Query(8, alias="max"), board: Optional[str] = Query(None)):
-    """Dispatch nudge so the UI doesn't wait out the 60 s dispatcher tick."""
+    """Dispatch nudge so the UI doesn't wait out the 60 s dispatcher tick.
+
+    Runs under the same ``kanban.*`` caps and ``default_assignee`` as the gateway loop; a bare
+    ``dispatch_once`` would be uncapped.
+    """
+    from hermes_cli.kanban_dispatch_tick import configured_dispatch_kwargs
+
+    try:
+        limits = configured_dispatch_kwargs()
+    except Exception:
+        log.exception("kanban dispatch nudge: configuration unavailable")
+        raise HTTPException(status_code=503, detail="kanban configuration unavailable; dispatch not attempted")
+    # The request's ``max`` can only tighten kanban.max_spawn.
+    limits["max_spawn"] = min(max_n, limits["max_spawn"] or max_n)
     with _board_conn(board) as (board, conn):
-        result = kbd.dispatch_once(conn, dry_run=dry_run, max_spawn=max_n, board=board)
+        result = kbd.dispatch_once(conn, dry_run=dry_run, board=board, **limits)
         try:
             return asdict(result)  # DispatchResult is a dataclass
         except TypeError:
@@ -1772,6 +1892,12 @@ class _EventTail:
             out.append({**dict(r), "payload": payload})
         return (rows[-1]["id"] if rows else cursor), out
 
+    def _current_max(self) -> int:
+        if self._conn is None:
+            self._conn = kbc.connect(board=self._board)
+        row = self._conn.execute("SELECT MAX(id) AS m FROM task_events").fetchone()
+        return int(row["m"] or 0) if row is not None else 0
+
     def _close(self) -> None:
         if self._conn is not None:
             self._conn.close()
@@ -1788,11 +1914,24 @@ class _EventTail:
     async def poll(self, cursor: int) -> tuple[int, list[dict]]:
         return await self._run(self._fetch, cursor)
 
+    async def baseline(self) -> int:
+        """Current max event id, for a fresh socket with no ``since``: starting the tail there
+        (not 0) means it streams only NEW events instead of replaying the entire ledger."""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kanban-events")
+        return await asyncio.get_running_loop().run_in_executor(self._executor, self._current_max)
+
     async def shutdown(self) -> None:
         if self._executor is None:
             return
         try:
-            await asyncio.get_running_loop().run_in_executor(self._executor, self._close)
+            # A blocking call, not an ``await`` -- a cancellation already pending on this
+            # task (the common case: shutdown() runs from stream_events()'s ``finally``
+            # after a cancelled turn) would otherwise let asyncio skip straight past an
+            # ``await run_in_executor(...)`` here without ever running _close(), leaking
+            # the thread-affine sqlite connection. The executor thread itself can't be
+            # interrupted anyway, so waiting on it synchronously costs nothing extra.
+            self._executor.submit(self._close).result(timeout=10)
         except Exception as exc:
             log.warning("Kanban event stream connection cleanup failed: %s", exc)
         finally:
@@ -1844,4 +1983,13 @@ async def stream_events(ws: WebSocket):
         except Exception:
             pass
     finally:
-        await tail.shutdown()
+        # A cancellation delivered while ``await run_in_executor(...)`` (baseline/poll) was
+        # mid-flight on the executor thread can leave a second CancelledError pending for the
+        # very next await -- landing here, outside the try/except above (a `finally` body's own
+        # exceptions are never caught by its own try's `except` clauses). Swallow it exactly like
+        # the sibling ``except asyncio.CancelledError: return`` above: this is still just a normal
+        # shutdown, not a crash.
+        try:
+            await tail.shutdown()
+        except asyncio.CancelledError:
+            pass

@@ -22,6 +22,7 @@ from pm.filesystem import (
     durable_write_bytes as _atomic_bytes,
     file_digest as _digest,
     lock_fd as _lock,
+    lock_path,
     read_bytes_or_none as _bytes,
 )
 
@@ -37,23 +38,39 @@ INSTALL_LOCK_TIMEOUT_SECONDS = 10.0
 # A lease file younger than this is never a prune candidate: its creator may still sit between
 # ``O_CREAT|O_EXCL`` and ``flock`` (two syscalls; the window is microseconds, the margin generous).
 @contextmanager
-def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_SECONDS):
-    """Hold the per-install dependency lock; yields True when held, False when the wait expired.
+def runtime_lock(project: Path, *, timeout: float | None = INSTALL_LOCK_TIMEOUT_SECONDS,
+                 stable_identity=False):
+    """Acquire lifetime protection and the install mutex within one wait budget.
+
+    Raises LifetimeUnavailable if registration times out: an unregistered reader
+    cannot safely fall back. Yields False only for a busy install mutex, while
+    the activity still protects the caller's selection and generation lease.
 
     Callers decide what a lost race means: readers skip the work the lock guards and carry on
     (``activate_dependencies`` still selects and leases the committed generation), writers that
     cannot be skipped pass ``timeout=None`` — an install the user asked for is theirs to wait on.
     """
+    from pm.lifetime import activity
+
+    deadline = None if timeout is None else time.monotonic() + timeout
     state = install_state_dir(project)
-    state.mkdir(parents=True, exist_ok=True)
-    fd = os.open(state / ".install.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    def remaining():
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+    with activity(state, create=True, deadline=deadline, stable_identity=stable_identity):
+        with _install_mutex(state, timeout=remaining()) as held:
+            yield held
+
+
+@contextmanager
+def _install_mutex(state: Path, *, timeout=INSTALL_LOCK_TIMEOUT_SECONDS):
+    """Internal mutex; maintenance already owns the outside-state gate."""
+    lock = state / ".install.lock"
+    fd = lock_path(lock, timeout=timeout, create_dir=True)
+    if fd is None:
+        LOG.warning("dependency lock still held after %ss; continuing without it (%s)", timeout, lock)
+        yield False
+        return
     try:
-        if not _lock(fd, wait=True, timeout=timeout):
-            LOG.warning(
-                "dependency lock still held after %ss; continuing without it (%s)",
-                timeout, state / ".install.lock")
-            yield False
-            return
         yield True
     finally:
         os.close(fd)
@@ -147,6 +164,32 @@ def lease_generation(environment: Path) -> Callable[[], None]:
 
 
 def lease_directory(generation: Path) -> Callable[[], None]:
+    """Pin managed readers through the shared domain before touching generation leases."""
+    from pm.lifetime import acquire_activity, domain_for_generation, Gate, LifetimeUnavailable
+
+    generation = Path(generation)
+    if not generation.is_dir():
+        raise LifetimeUnavailable("dependency generation no longer exists")
+    managed = (generation / ".lease-managed").is_file()
+    domain = domain_for_generation(generation)
+    if not managed and not Gate(domain).marker.exists():
+        return lambda: None  # untouched external/legacy generations stay unqualified
+    owned = acquire_activity(domain, generation=generation)
+    try:
+        release_files = _lease_files(generation) if managed else lambda: None
+    except BaseException:
+        owned.close()
+        raise
+
+    def release():
+        try:
+            release_files()
+        finally:
+            owned.close()
+    return release
+
+
+def _lease_files(generation: Path) -> Callable[[], None]:
     """Pin a lease-managed generation directory for this process's lifetime."""
     if not (generation / ".lease-managed").is_file():
         return lambda: None  # Generations produced before leases stay conservatively retained.
@@ -188,29 +231,67 @@ def collect_generations(project: Path, *, min_age_seconds: float = 86400) -> lis
     root = install_state_dir(project)
     if not root.exists():
         return removed
-    with runtime_lock(project) as held:
-        if not held:
-            return removed  # maintenance: another process owns the install, skip rather than queue
-        recover_publication(project)
-        selected = selected_venv(project).parent.resolve()
-        generations = root / "environments"
-        if not generations.is_dir():
+    from pm.lifetime import collection_gate
+
+    with collection_gate(root) as guard:
+        if guard is None or not guard.qualified or guard.held(writers_only=True):
             return removed
-        for generation in generations.iterdir():
-            if generation.is_symlink() or not generation.is_dir() or generation.resolve() == selected:
-                continue
-            marker = generation / ".lease-managed"
-            if not marker.is_file() or time.time() - marker.stat().st_mtime < min_age_seconds:
-                continue
-            if not leases_held(generation):
-                shutil.rmtree(generation)
-                removed.append(generation)
+        with _install_mutex(root, timeout=0) as held:
+            if not held:
+                return removed
+            recover_publication(project)
+            selected = selected_venv(project).parent.resolve()
+            generations = root / "environments"
+            if not generations.is_dir():
+                return removed
+            for generation in generations.iterdir():
+                if generation.is_symlink() or not generation.is_dir() or generation.resolve() == selected:
+                    continue
+                marker = generation / ".lease-managed"
+                if not marker.is_file() or time.time() - marker.stat().st_mtime < min_age_seconds:
+                    continue
+                if not guard.held(generation=generation) and not leases_held(generation):
+                    shutil.rmtree(generation)
+                    removed.append(generation)
     return removed
 
 
 def leases_held(generation: Path) -> bool:
     """True while any process still holds a lease taken by ``lease_directory``."""
     return _prune_unlocked_leases(generation / ".leases")
+
+
+def _open_lease_probe(lease: Path) -> int:
+    """Let a Windows pruner unlink while still holding its exclusion lock.
+
+    Creator handles deliberately keep their ordinary sharing: an open creator
+    between O_EXCL and locking must still prevent a peer from deleting its lease.
+    """
+    if os.name != "nt":
+        return os.open(lease, os.O_RDWR)
+
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    # GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | WRITE | DELETE, OPEN_EXISTING.
+    handle = kernel32.CreateFileW(str(lease), 0xC0000000, 0x7, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        # The CRT owns the handle after conversion; os.close releases it and its lock.
+        return msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY | os.O_NOINHERIT)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
 
 
 def _prune_unlocked_leases(leases: Path) -> bool:
@@ -220,13 +301,18 @@ def _prune_unlocked_leases(leases: Path) -> bool:
     ``atexit``. Cleaning those unlocked files whenever a reader arrives bounds leaks in
     the selected generation too, which generation GC intentionally never visits.
 
-    Fail closed: a lease this user cannot open (root-owned 0o600 from a ``sudo hermes`` on the
-    same checkout) is held, never a boot failure.
+    Fail closed: a lease this user cannot open or remove is held, never a boot failure.
     """
+    try:
+        entries = list(leases.iterdir())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # an unreadable/replaced namespace is not proof of no readers
     held = False
-    for lease in leases.glob("*"):
+    for lease in entries:
         try:
-            fd = os.open(lease, os.O_RDWR)
+            fd = _open_lease_probe(lease)
         except FileNotFoundError:
             continue
         except OSError:
@@ -236,8 +322,12 @@ def _prune_unlocked_leases(leases: Path) -> bool:
             if not _lock(fd, wait=False):
                 held = True
             else:
-                with suppress(OSError):
+                try:
                     lease.unlink()
+                except FileNotFoundError:
+                    pass  # A peer already removed it.
+                except OSError:
+                    held = True
         finally:
             os.close(fd)
     return held

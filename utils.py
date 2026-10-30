@@ -1,12 +1,14 @@
 """Shared utility functions for hermes-agent."""
 
 import errno
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -58,6 +60,63 @@ RACY_MTIME_WINDOW_NS = 2_000_000_000
 def mtime_is_racy(mtime_ns: int) -> bool:
     """True while ``mtime_ns`` is too recent to rule out a same-tick write after the stat."""
     return time.time_ns() - mtime_ns < RACY_MTIME_WINDOW_NS
+
+
+def content_digest(data: bytes) -> str:
+    """Short digest of ``data`` for cache keys (not a security primitive)."""
+    return hashlib.blake2b(data, digest_size=16).hexdigest()
+
+
+def _frozen_config_worker(path: str | Path) -> bool:
+    """True for a ``config.yaml`` read inside a worker whose config is a frozen snapshot: such a
+    worker never opens a profile config file, so a cache key there stays stat-only."""
+    if Path(path).name != "config.yaml":
+        return False
+    policy = sys.modules.get("agent.safe_worker_policy")  # binding a snapshot imports it first
+    return policy is not None and policy.worker_config_snapshot() is not None
+
+
+def _file_digest(path: str | Path) -> str:
+    """:func:`content_digest` of the file's bytes. A file that stats but cannot be read here
+    (permission, removed since the stat, a directory) gets ``<ErrorName>``, which no hex digest
+    matches: the key differs from any cached one, so the caller's own read runs and meets the error
+    in its normal recovery, as it did when the key was stat-only and never opened the file."""
+    try:
+        with open(path, "rb") as f:
+            return content_digest(f.read())
+    except OSError as exc:
+        return f"<{type(exc).__name__}>"
+
+
+def racy_content_digest(path: str | Path, sig: tuple[int, int, int, int]) -> str:
+    """``""`` once the :func:`file_signature` ``sig`` has settled; while it is racy, a digest of the
+    file's bytes (:func:`_file_digest`, so it never raises). A cache keyed on a stat signature appends
+    it, because two same-size in-place writes in one timestamp tick share mtime, ctime, size and inode
+    (kernels without multigrain timestamps). Racy is judged on the later of mtime and ctime: userland
+    can restore an older mtime after a write (``cp -p``, ``rsync --inplace -t``), never ctime. Read
+    before the parse it guards: a write in between then costs one re-parse instead of pinning the
+    older content."""
+    if not mtime_is_racy(max(sig[0], sig[3])) or _frozen_config_worker(path):
+        return ""
+    return _file_digest(path)
+
+
+def file_cache_version(path: str | Path, st: os.stat_result | None = None, *,
+                       always_digest: bool = False) -> tuple[Any, ...]:
+    """Key for anything derived from a file's content: :func:`file_signature` plus a content digest.
+
+    The digest is :func:`racy_content_digest` (empty once the file is 2 s old), which suits a cache
+    re-validated on every read: a racily-stored entry costs one re-parse when the file settles.
+    ``always_digest`` hashes on every call, for a signature stored and compared much later (a
+    change detector whose false "changed" restarts something, or a "still the broken file" record),
+    where the racy digest turning empty would read as a change. A worker with a frozen config
+    snapshot never hashes a ``config.yaml`` (the key is stat-only there, as before). Raises
+    ``OSError`` only from the stat (none given ``st``): a file that cannot be read gets the error's
+    name as its digest (:func:`_file_digest`)."""
+    sig = file_signature(Path(path).stat() if st is None else st)
+    if always_digest and not _frozen_config_worker(path):
+        return (*sig, _file_digest(path))
+    return (*sig, racy_content_digest(path, sig))
 
 
 def _preserve_file_mode(path: Path) -> int | None:
@@ -263,6 +322,25 @@ def fsync_directory(path: str | Path) -> None:
         os.close(fd)
 
 
+def unlink_files_older_than(directory: str | Path, pattern: str, max_age_seconds: float, *,
+                            now: float | None = None) -> int:
+    """Delete regular files in *directory* matching *pattern* whose mtime is more than
+    *max_age_seconds* before *now* (default: the current time); return how many were removed.
+
+    The one age-based cache sweep. Never raises: a missing directory, or an entry that cannot be
+    stat'ed or unlinked, is skipped (the next sweep retries it).
+    """
+    cutoff = (time.time() if now is None else now) - max_age_seconds
+    removed = 0
+    with suppress(OSError):
+        for path in Path(directory).glob(pattern):
+            with suppress(OSError):
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+    return removed
+
+
 def rmtree_readonly(path: str | Path, *, ignore_errors: bool = False) -> None:
     """``shutil.rmtree`` that can also delete read-only trees.
 
@@ -415,6 +493,41 @@ def read_json_or_empty(path: str | Path) -> dict:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _open_credential_permission_descriptor(path: Path) -> int:
+    """Never create/truncate or follow the final entry; allow write-only legacy recovery."""
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK") or not hasattr(os, "fchmod"):
+        raise OSError(errno.ENOTSUP, "Descriptor-bound permission repair is unavailable")
+    flags = os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        return os.open(path, os.O_RDONLY | flags)
+    except PermissionError:
+        return os.open(path, os.O_WRONLY | flags)
+
+
+def restrict_credential_file_permissions(path: str | Path, *, file_stat: os.stat_result | None = None) -> None:
+    """Repair only the observed regular inode; inaccessible legacy files stay untouched."""
+    if os.name != "posix":
+        return  # Windows ACLs do not map to these mode bits.
+    p = Path(path)
+    try:
+        # A caller's cached stat may have followed a symlink; inspect the entry itself.
+        observed = p.lstat()
+        if not stat.S_ISREG(observed.st_mode) or not observed.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            return
+        fd = _open_credential_permission_descriptor(p)
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
+                raise OSError(errno.EAGAIN, "Credential file identity changed before permission repair")
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.warning("Could not restrict credential file permissions for %s: %s; operator repair may be required", p, exc)
 
 
 def warn_if_credential_file_broadly_readable(path: str | Path, *, label: str = "", log: logging.Logger | None = None) -> bool:
@@ -616,12 +729,12 @@ _YAML_FILE_CACHE_LOCK = threading.Lock()
 
 
 def load_yaml_file_readonly(path: str | Path) -> Any:
-    """``fast_safe_load`` of a file, re-parsed only when its :func:`file_signature` changes.
+    """``fast_safe_load`` of a file, re-parsed only when its :func:`file_cache_version` changes.
 
     Returns the cached object itself — callers must never mutate it. Parse errors propagate and
     are not cached; a missing file raises ``FileNotFoundError`` like ``open`` does."""
     path = Path(path)
-    sig = file_signature(path.stat())
+    sig = file_cache_version(path)
     key = str(path)
     with _YAML_FILE_CACHE_LOCK:
         cached = _YAML_FILE_CACHE.get(key)

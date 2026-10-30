@@ -101,7 +101,7 @@ class CodexAppServerClient:
         # Modal/Daytona infra tokens, the dashboard session token, AUXILIARY_* side-LLM keys,
         # GATEWAY_RELAY_* auth — none of which a coding subprocess has any use for. Route through the
         # centralized helper so Tier-1 + dynamic-internal secrets are always stripped while provider creds
-        # still flow, matching copilot_acp_client (#29157 sibling spawn-site gap).
+        # still flow, matching the ACP client (#29157 sibling spawn-site gap).
         spawn_env = hermes_subprocess_env(inherit_credentials=True)
         if env:
             spawn_env.update(env)
@@ -281,9 +281,14 @@ class CodexAppServerClient:
 
     def stderr_tail(self, n: int = 20) -> list[str]:
         """Return last n lines of codex's stderr (for error reports)."""
+        # The stdout reader can observe EOF and report the transport loss just
+        # before the stderr reader has drained the child's final diagnostics.
+        # Join only after process exit, and only for a bounded interval, so
+        # crash reports include the useful tail without delaying live calls.
         if self._proc.poll() is not None:
-            # The reader can still hold the crash text when the exit is first observed (#121467).
-            self._stderr_reader.join(timeout=1.0)
+            reader = getattr(self, "_stderr_reader", None)
+            if reader is not None and reader.is_alive():
+                reader.join(timeout=0.5)
         with self._stderr_lock:
             return list(self._stderr_lines[-n:])
 

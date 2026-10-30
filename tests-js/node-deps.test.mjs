@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -46,7 +46,7 @@ test.each(['npm', 'npm-fixture'])('prepared npm discovers lib/%s without npm_exe
   delete env.npm_execpath
   const [selectedNode, cli] = npmCommand({ env })
   expect(selectedNode).toBe(node)
-  expect(cli).toBe(join(root, 'lib', directory, 'bin/npm-cli.js'))
+  expect(cli).toBe(join(realpathSync(root), 'lib', directory, 'bin/npm-cli.js'))
   const version = execFileSync(selectedNode, [cli, '--version'], { cwd: tmpdir(), env, encoding: 'utf8' }).trim()
   expect(version).toMatch(/^\d+\.\d+\.\d+/)
 })
@@ -116,6 +116,20 @@ test('one locked preparation retains the requested union without provisioning de
   expect(readFileSync(join(source, 'package-lock.json'))).toEqual(lock)
   execFileSync(process.execPath, [join(repo, 'scripts/build/node-deps.mjs'), '--source', source, '--workspace', 'ui-tui', '--workspace', 'web'], { cwd: tmpdir(), env: { ...process.env, npm_config_offline: 'true', npm_config_cache: join(source, '.npm-cache') }, stdio: 'pipe' })
   expect(createRequire(join(source, 'web/package.json'))('web-only')).toBe('web-only')
+}, 30000)
+
+test('electron: false installs Desktop without preparing its Electron binary', async () => {
+  const { prepareNodeDependencies } = await import('../scripts/build/node-deps.mjs')
+  const source = fixture()
+  const env = { ...process.env, npm_config_offline: 'true', npm_config_cache: join(source, '.npm-cache') }
+  json(join(source, 'vendor/electron/package.json'), { name: 'electron', version: '1.0.0' })
+  json(join(source, 'apps/desktop/package.json'), { name: 'desktop', version: '1.0.0', devDependencies: { electron: 'file:../../vendor/electron' } })
+  const [node, npm] = npmCommand()
+  execFileSync(node, [npm, 'install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund', '--offline'], { cwd: source, env, stdio: 'pipe' })
+  // Electron preparation runs after the install: this fake is not the version Desktop pins.
+  expect(() => prepareNodeDependencies({ source, workspaces: ['apps/desktop'], env })).toThrow(/lock-pinned/)
+  prepareNodeDependencies({ source, workspaces: ['apps/desktop'], env, electron: false })
+  expect(existsSync(join(source, 'node_modules/electron/package.json'))).toBe(true)
 }, 30000)
 
 test('web-only selection excludes siblings and rejects stale locks without rewriting them', async () => {

@@ -90,7 +90,7 @@ def test_memory_context_injected_into_iterative_summary_prompt():
         )
 
     assert len(prompts) == 1
-    assert "PREVIOUS SUMMARY:\nPrevious checkpoint." in prompts[0]
+    assert "Previous summary:\nPrevious checkpoint." in prompts[0]
     assert "MEMORY PROVIDER CONTEXT" in prompts[0]
     assert "Checkpoint id: ctx-123" in prompts[0]
 
@@ -163,7 +163,6 @@ def test_whitespace_memory_context_is_not_injected():
 
     assert len(prompts) == 1
     assert "MEMORY PROVIDER CONTEXT" not in prompts[0]
-
 
 
 

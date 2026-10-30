@@ -493,7 +493,7 @@ def owner_worker(tmp_path, clear_kanban_env, monkeypatch):
             def get_messages_as_conversation(self, _sid):
                 return [{"role": "user", "content": "from-store"}]
 
-            def run_conversation(self, message, conversation_history=None):
+            def run_conversation(self, message, conversation_history=None, **_kwargs):
                 entered.append(message)
                 result = script() if callable(script) else script[seen["n"]]
                 seen["n"] += 1
@@ -615,7 +615,7 @@ def test_worker_client_reports_the_owner_exit_and_reply(owner_worker, monkeypatc
                        ("HERMES_KANBAN_DB", context["db"])):
         monkeypatch.setenv(key, value)
     capsys.readouterr()
-
+    monkeypatch.setattr('sys.argv', ['hermes_cli.kanban_worker_client'])
     assert kanban_worker_client.main() == KANBAN_RATE_LIMIT_EXIT_CODE
     out, err = capsys.readouterr()
     assert submitted == ["kanban.run"]  # the client never re-enters the model itself

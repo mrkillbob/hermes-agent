@@ -41,7 +41,9 @@ def stage_runtime(uv: Path, python: Path, destination: Path, *,
                              no_install_project=True, timeout=600)
         else:
             environment.install_wheelhouse(snapshot, wheelhouse, timeout=600)
-    checked = subprocess.run(
+    from pm.lifetime_launch import run
+
+    checked = run(
         [str(environment.executable), "-I", "-B", "-c",
          "import packaging, tomli_w, truststore; from ruamel.yaml import YAML"],
         env=env, capture_output=True, text=True, timeout=30,

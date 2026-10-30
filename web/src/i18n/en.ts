@@ -115,14 +115,21 @@ export const en: Translations = {
     dismiss: "Dismiss",
     sharedMetricsTitle: "Help improve Hermes?",
     sharedMetricsBody:
-      "Shared metrics are bounded counters, never prompts, files, paths or error text. Collection stays on this machine; sending to Nous is a separate choice.",
+      "Shared metrics are bounded counters, never prompts, files, paths or error text. Sharing sends them to Nous once a day.",
     sharedMetricsReaskBody:
       "Asking once more: an earlier version could save \"No thanks\" before you saw this question.",
-    sharedMetricsShare: "Send to Nous",
-    sharedMetricsLocal: "Local only",
+    sharedMetricsShare: "Share with Nous",
     sharedMetricsOff: "No thanks",
     sharedMetricsDetails: "Details",
     sharedMetricsSaveFailed: "Couldn't save your choice",
+  },
+
+  // ── System page: Memory section ──
+  systemMemory: {
+    activeProvider: "Active memory provider",
+    noProvider: "none — built-in only",
+    builtinLayer: "Built-in layer",
+    builtinNote: "MEMORY.md and USER.md are Hermes's own memory, separate from any external provider. Both load into sessions by default; the config toggles (memory.memory_enabled / memory.user_profile_enabled) turn each off. A provider adds to them; it never replaces them.",
   },
 
   status: {
@@ -272,11 +279,7 @@ export const en: Translations = {
   },
 
   cron: {
-    loadWhat: "cron jobs",
-    // Script-only mode on, Script field empty. `no_agent` is the config key, not a term the
-    // user has seen; name the field they must fill instead.
-    scriptRequired:
-      "Script-only jobs need a script path. Fill in the Script field or switch the job back to prompt mode.",
+    loadWhat: "scheduled jobs",
     confirmDeleteMessage:
       "This removes the job from the schedule. This cannot be undone.",
     confirmDeleteTitle: "Delete scheduled job?",
@@ -404,7 +407,7 @@ export const en: Translations = {
     modelOptional: "Model (optional)",
     modelInherit: "Inherit from clone / default",
     modelLoading: "Loading models…",
-    modelNone: "No model providers are set up yet. Add an API key under Keys or sign in to a provider under Models.",
+    modelNone: "No authenticated providers — set a key first",
     editModel: "Change model",
     modelSaved: "Model updated",
     modelSelect: "Select a model",
@@ -451,6 +454,10 @@ export const en: Translations = {
     updateGit: "Git pull",
     updateConsentBody: (name: string, sha: string) =>
       `The new catalog pin of ${name} (${sha}) adds surfaces the installed version does not have. Apply it only if you trust them:`,
+    updateScanBody: (name: string, count: number) =>
+      `The security scan flagged ${count} finding${count === 1 ? "" : "s"} in the new code of ${name}. Update anyway only if you trust the source:`,
+    updateScanBlocked: (name: string) =>
+      `The security scan rated the new code of ${name} dangerous. The update was not applied.`,
     versionBadge: "Version",
     showInSidebar: "Show in sidebar",
     hideFromSidebar: "Hide from sidebar",
@@ -472,16 +479,14 @@ export const en: Translations = {
   },
 
   skills: {
+    loadWhat: "skills",
     title: "Skills",
     searchPlaceholder: "Search skills and toolsets...",
-    loadWhat: "skills",
-    browseHub: "Browse skills hub",
-    createSkill: "Create skill",
     enabledOf: "{enabled}/{total} enabled",
     all: "All",
     categories: "Categories",
     filters: "Filters",
-    noSkills: "No skills installed yet. Browse the skills hub or create one here; from a terminal you can also run `hermes skills search <topic>`.",
+    noSkills: "No skills found. Skills are loaded from ~/.hermes/skills/",
     noSkillsMatch: "No skills match your search or filter.",
     skillCount: "{count} skill{s}",
     resultCount: "{count} result{s}",

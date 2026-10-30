@@ -8,13 +8,16 @@ call site and test patch seam keeps working unchanged.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 
 class SessionApiContentMixin:
     """``SessionDB`` mixin: the ``api_content`` sidecar backfills."""
 
-    def set_latest_user_api_content(self, session_id: str, content: Any, api_content: str) -> int:
+    def set_latest_user_api_content(
+        self, session_id: str, content: Any, api_content: str,
+        display_metadata: Optional[dict[str, Any]] = None,
+    ) -> int:
         """Backfill the ``api_content`` sidecar onto the newest ACTIVE user row (0/1 rows). Preflight compaction
         inserts that row BEFORE the sidecar exists and the later persist identity-skips compacted dicts;
         without this a reload reopens the prompt-cache divergence. ``content`` match guards a racing rewrite.
@@ -33,13 +36,16 @@ class SessionApiContentMixin:
         """
         from hermes_state_messages import _scrub_surrogates
         return self._write_rowcount(
-            "UPDATE messages SET api_content = ? WHERE id = (SELECT id FROM messages "
+            "UPDATE messages SET api_content = ?, display_metadata = COALESCE(?, display_metadata) "
+            "WHERE id = (SELECT id FROM messages "
             "WHERE session_id = ? AND role = 'user' AND active = 1 ORDER BY id DESC LIMIT 1"
             ") AND content IS ?",
-            (_scrub_surrogates(api_content), session_id, self._encode_content(content)))
+            (_scrub_surrogates(api_content), self._encode_display_metadata(display_metadata),
+             session_id, self._encode_content(content)))
 
     def set_message_api_content(
-        self, session_id: str, row_id: int, content: Any, api_content: str
+        self, session_id: str, row_id: int, content: Any, api_content: str,
+        display_metadata: Optional[dict[str, Any]] = None,
     ) -> int:
         """Backfill the ``api_content`` sidecar onto ONE known durable row.
 
@@ -54,6 +60,10 @@ class SessionApiContentMixin:
         The crash persist then marker-skips that message, so this is the only
         way the stamped bytes reach the store.
 
+        When ``display_metadata`` is supplied, it is written in the same row-addressed
+        transaction. This matters for trusted display-only markers staged after a close
+        or preflight flush already materialized the row.
+
         ``active = 1`` and the ``content`` match stay as defensive guards: a
         row the compaction archived, or one a racing rewrite changed, is left
         untouched.
@@ -61,7 +71,9 @@ class SessionApiContentMixin:
         from hermes_state_messages import _scrub_surrogates
         if not session_id or isinstance(row_id, bool) or not isinstance(row_id, int) or row_id <= 0:
             return 0
+        encoded_metadata = self._encode_display_metadata(display_metadata)
         return self._write_rowcount(
-            "UPDATE messages SET api_content = ? WHERE id = ? AND session_id = ? "
+            "UPDATE messages SET api_content = ?, display_metadata = COALESCE(?, display_metadata) "
+            "WHERE id = ? AND session_id = ? "
             "AND role = 'user' AND active = 1 AND content IS ?",
-            (_scrub_surrogates(api_content), row_id, session_id, self._encode_content(content)))
+            (_scrub_surrogates(api_content), encoded_metadata, row_id, session_id, self._encode_content(content)))

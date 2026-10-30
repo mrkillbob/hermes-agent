@@ -1,0 +1,126 @@
+"""Bounded current-attempt provider diagnostics for worker supervision."""
+from __future__ import annotations
+import os
+import re
+from hermes_cli import kanban_db as kb
+from agent.llm_egress_request_diagnostics import (
+    PUBLIC_EGRESS_DENIAL_REASON_CODES as _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS,
+)
+
+_PROVIDER_EGRESS_BLOCK_RE = re.compile(
+    r"LLM\s+egress\s+blocked\s*:\s*([A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*)",
+    re.IGNORECASE,
+)
+
+
+_PROVIDER_UNSUPPORTED_THINKING_RE = re.compile(
+    r"(?:does\s+not\s+support\s+thinking|thinking\s+is\s+not\s+supported|unsupported\s+thinking)",
+    re.IGNORECASE,
+)
+
+_PROVIDER_UNRESPONSIVE_RE = re.compile(
+    r"Provider\s+has\s+been\s+unresponsive.*?aborting\s+this\s+call",
+    re.IGNORECASE | re.DOTALL,
+)
+
+def _current_worker_log_tail(task_id: str) -> str | None:
+    """Read only the current worker session from the shared task log.
+
+    Task logs are append-only across retries.  Looking for a terminal provider
+    error in the whole tail can therefore attribute an old egress denial to a
+    newer, unrelated run (for example a local-model timeout).  Workers emit
+    ``Initializing agent...`` at the start of each process; use the last such
+    marker as the run boundary.  Keep the unmarked fallback for older logs and
+    small callers/tests that predate the marker.
+    """
+    try:
+        log_path = kb.worker_log_path(task_id)
+        with log_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - 16_384))
+            tail = handle.read().decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return None
+
+    marker = "Initializing agent..."
+    marker_index = tail.rfind(marker)
+    if marker_index >= 0:
+        return tail[marker_index:]
+    return tail
+
+def _provider_egress_error_text(task_id: str) -> str | None:
+    """Classify a typed firewall denial before ordinary retry logic."""
+
+    tail = _current_worker_log_tail(task_id)
+    if tail is None:
+        return None
+    match = _PROVIDER_EGRESS_BLOCK_RE.search(tail)
+    if match is None:
+        return None
+    reasons = tuple(dict.fromkeys(match.group(1).casefold().split(",")))
+    if not reasons or not all(
+        reason in _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS for reason in reasons
+    ):
+        return None
+    return f"provider egress blocked: LLM egress blocked: {','.join(reasons)}"
+
+def _provider_terminal_error_text(task_id: str) -> tuple[str, str] | None:
+    """Return a deterministic provider failure requiring a handoff."""
+
+    tail = _current_worker_log_tail(task_id)
+    if tail is None:
+        return None
+    return _terminal_error_from_text(tail)
+
+
+def bounded_egress_reason_codes(value: object) -> list[str]:
+    """Only typed public allowlisted codes may survive into recovery metadata."""
+    codes = value if isinstance(value, (list, tuple)) else ()
+    return list(dict.fromkeys(code for code in codes
+                             if isinstance(code, str) and code in _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS))
+
+
+def owner_failure_fields(result: object) -> dict:
+    """Persist only the owner's typed policy verdict and bounded public reason codes."""
+    if (not isinstance(result, dict) or result.get('interrupted')
+            or result.get('failure_reason') != 'egress_policy_blocked'
+            or not (result.get('failed') or result.get('partial') or result.get('completed') is False)):
+        return {}
+    reasons = bounded_egress_reason_codes(result.get('egress_reason_codes'))
+    return {'failure_class': 'provider_egress_blocked', 'egress_reason_codes': reasons}
+
+
+def owner_terminal_error(result: dict) -> tuple[str, str] | None:
+    """An exact-attempt result dominates append-only output from older attempts."""
+    if result.get('failure_class') == 'provider_egress_blocked':
+        reasons = bounded_egress_reason_codes(result.get('egress_reason_codes'))
+        reason = ','.join(reasons) or 'policy_denied'
+        return f'provider egress blocked: LLM egress blocked: {reason}', 'provider_egress_blocked'
+    output = result.get('last_output')
+    return _terminal_error_from_text(output if isinstance(output, str) else '')
+
+
+def _terminal_error_from_text(tail: str) -> tuple[str, str] | None:
+    match = _PROVIDER_EGRESS_BLOCK_RE.search(tail)
+    if match is not None:
+        reasons = tuple(dict.fromkeys(match.group(1).casefold().split(",")))
+    else:
+        reasons = ()
+    if reasons and all(
+        reason in _KNOWN_PROVIDER_EGRESS_BLOCK_REASONS for reason in reasons
+    ):
+        return (
+            f"provider egress blocked: LLM egress blocked: {','.join(reasons)}",
+            "provider_egress_blocked",
+        )
+    if _PROVIDER_UNSUPPORTED_THINKING_RE.search(tail):
+        return (
+            "provider rejected reasoning: selected model does not support thinking",
+            "unsupported_thinking",
+        )
+    if _PROVIDER_UNRESPONSIVE_RE.search(tail):
+        return (
+            "provider unresponsive: aborted after repeated stale attempts",
+            "provider_unresponsive",
+        )
+    return None

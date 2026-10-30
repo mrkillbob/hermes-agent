@@ -24,8 +24,12 @@ DISCONNECTED = ("Gateway disconnected; turn outcome is unknown. Resume the print
                 "whether it completed or was interrupted; do not resend the work.")
 # A request refused before it reached any socket: nothing is in doubt, so never the copy above.
 NOT_SENT = "Gateway disconnected before the request was sent; nothing was sent."
-# Resume refusals meaning the session itself is gone for this viewer (gateway/session_controls).
-_GONE = frozenset({"not_found", "permission_denied", "profile_mismatch"})
+# ``session.resume`` refusals that mean "this viewer may not open that session": the caller keeps the
+# session it is on instead of adopting the target (startup resume, bare -c fallback).
+RESUME_REFUSALS = frozenset({"not_found", "permission_denied"})
+# Resume refusals meaning the session itself is gone for this viewer (gateway/session_controls): the
+# above plus profile_mismatch, raised for another profile's session (reconnect, /resume switch).
+RESUME_GONE = RESUME_REFUSALS | {"profile_mismatch"}
 # Keyed-resume refusals a plain resume answers as main did: the key does not apply to this session
 # (``rebind_launch_key``: keyless or non-local, another key held, another fingerprint), or the viewer
 # lacks the ``session:control`` a rebind needs but may still read. Any other refusal is the resume's.
@@ -64,7 +68,7 @@ class SessionState:
         self.session_id = session_id
         self.info: dict = {}
         self.title: str | None = None
-        self.todos: list = []
+        self.todo_state: dict | None = None  # the session's {todos, revision}: resume snapshot, then todo.updated
         self.revision = None
         self.subscription_id = None
         self.execution_generation = None
@@ -106,6 +110,9 @@ class SessionState:
         self.subscription_id = snapshot.get("subscription_id", self.subscription_id)
         self.execution_generation = snapshot.get("execution_generation", self.execution_generation)
         self.messages = list(snapshot.get("messages") or [])
+        if "todo_state" in snapshot:  # null clears an earlier plan; a missing key (older gateway) keeps it
+            todo_state = snapshot["todo_state"]
+            self.todo_state = dict(todo_state) if isinstance(todo_state, dict) else None
         if isinstance(snapshot.get("pending"), list):
             self.pending = list(snapshot["pending"])
             self.pending_seq += 1  # a (re)attach replays no frames: the idle tick checks this viewer's /queue rows
@@ -127,7 +134,7 @@ class SessionState:
             if payload.get("title"):
                 self.title = payload["title"]
         elif kind == "todo.updated" and isinstance(payload, dict):
-            self.todos = list(payload.get("todos") or [])
+            self.todo_state = {"todos": list(payload.get("todos") or []), "revision": payload.get("revision")}
         elif kind == "session.usage" and isinstance(payload, dict):
             # The gateway's frame carries the flat counters next to a nested TUI ``usage`` view this
             # reader can't map (``session_usage.usage_frame``): the counters win when present.
@@ -208,16 +215,20 @@ class GatewayConnection:
     def start(self, timeout=90):
         deadline = time.monotonic() + timeout
         while True:
-            with self._start_lock:
+            if not self._start_lock.acquire(timeout=max(deadline - time.monotonic(), 0)):
+                raise GatewayClientError("Gateway connection timed out; no local fallback")
+            try:
                 if self.final:
                     if self._error is not None:
                         raise self._error
                     return
                 thread = self._thread
-                if thread is not None and self.closed and thread.is_alive() and thread is not threading.current_thread():
-                    # ``_run`` reports ready before its thread returns: that life is over, so let it
-                    # end instead of reading it as a dial in progress (and re-raising its stale error).
+                if thread is not None and self.closed and thread is not threading.current_thread():
+                    # A completed dial publishes its error before its loop thread exits. Do not
+                    # mistake that final teardown for a dial in progress, or reuse its stale error.
                     thread.join(max(deadline - time.monotonic(), 0))
+                    if thread.is_alive():
+                        raise GatewayClientError("Gateway connection timed out; no local fallback")
                 if thread is None or not thread.is_alive():
                     from agent.memory_provider import spawn_context_thread
 
@@ -229,6 +240,8 @@ class GatewayConnection:
                         self.closed = False
                     thread = self._thread = spawn_context_thread(self._run, name="hermes-gateway-loop")
                     thread.start()
+            finally:
+                self._start_lock.release()
             # Every caller waits out a dial in progress, its own or another thread's.
             if not self._ready.wait(max(deadline - time.monotonic(), 0)):
                 raise GatewayClientError("Gateway connection timed out; no local fallback")
@@ -297,7 +310,7 @@ class GatewayConnection:
             try:
                 state.adopt_snapshot(await self._resume(client, session_id))
             except GatewayClientError as exc:
-                if str(exc) not in _GONE:
+                if str(exc) not in RESUME_GONE:
                     raise
                 logger.debug("session.resume %s after reconnect: %s", session_id, exc)
                 state.subscription_id = None

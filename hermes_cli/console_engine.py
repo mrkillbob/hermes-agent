@@ -290,6 +290,7 @@ _CLI_FAMILIES: dict[str, tuple[_CliSurface, str]] = {
         _sub("mcp", "build_mcp_parser", "cmd_mcp"),
         "list, catalog, test, *add, *remove, *install, *login, *reauth, *configure, *picker"),
     "memory": (_sub("memory", "build_memory_parser", "cmd_memory"), "status, *off, *reset"),
+    "engineering-memory": (_sub("engineering_memory", "build_engineering_memory_parser", "cmd_engineering_memory"), "propose, review, search, rebuild, verify"),
     "auth": (
         _sub("auth", "build_auth_parser", "cmd_auth"),
         "list, status, *reset, *priority, *refresh, *add, *remove, *logout"),
@@ -355,7 +356,6 @@ _BLOCKED_TOP = frozenset(
 
 _BLOCKED_PAIRS = {
     ("config", "edit"): "`config edit` opens an editor and is not available in Hermes Console.",
-    ("mcp", "serve"): "`mcp serve` starts a server and is not available in Hermes Console.",
     ("profile", "alias"): "`profile alias` creates shell wrappers and is not available in Hermes Console.",
     ("skills", "config"): "`skills config` is interactive and is not available in Hermes Console.",
     ("skills", "publish"): "`skills publish` is not available in Hermes Console.",

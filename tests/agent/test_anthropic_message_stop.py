@@ -46,6 +46,13 @@ def _agent():
         skip_memory=True,
     )
     agent.api_mode = "anthropic_messages"
+    # anthropic is a protected-egress provider: every physical request now goes through
+    # the egress firewall, which requires a request identity.
+    agent.session_id = "session-1"
+    agent._current_turn_id = "turn-1"
+    agent._current_api_request_id = "turn-1:api:1"
+    from hashlib import sha256
+    agent._llm_egress_policy_digest = sha256(b"policy").hexdigest()
     agent._interrupt_requested = False
     agent._anthropic_client = MagicMock()
     agent._anthropic_api_key = "test-key"

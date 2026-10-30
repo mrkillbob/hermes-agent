@@ -135,6 +135,9 @@ class TestStreamStaleCircuitBreaker:
         def _stream_side_effect(*args, **kwargs):
             cm = MagicMock()
             stream = MagicMock()
+            # Socket shutdown walks real SDK response wrappers. MagicMock would
+            # fabricate an unbounded tree of private connection attributes.
+            stream.response = None
             stream.__iter__ = MagicMock(return_value=_blocking_gen())
             cm.__enter__ = MagicMock(return_value=stream)
             cm.__exit__ = MagicMock(return_value=False)
@@ -198,5 +201,5 @@ class TestStreamStaleCircuitBreaker:
             agent._interruptible_streaming_api_call({})
 
         kills = sum("Stream stale for" in r.getMessage() for r in caplog.records)
-        assert kills >= 2, f"scenario needs the timer to re-fire; saw {kills} kill(s)"
+        assert kills == 1, f"one stream attempt should be killed once; saw {kills} kill(s)"
         assert agent._consecutive_stale_streams == 1

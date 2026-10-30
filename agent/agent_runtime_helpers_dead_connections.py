@@ -1,5 +1,5 @@
 """Pre-turn dead-connection sweep over an agent's OpenAI client pools (primary + cached request
-client). Sibling of ``agent.agent_runtime_helpers``, which owns the pool-socket walk."""
+client). Uses ``agent.agent_runtime_helpers_connections`` for the pool-socket walk."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _socket_is_dead(sock) -> bool:
 
 def _count_dead_pool_sockets(client: Any) -> int:
     """Return the number of sockets in ``client``'s pool that have reached EOF (CLOSE-WAIT)."""
-    from agent.agent_runtime_helpers import _iter_pool_sockets
+    from agent.agent_runtime_helpers_connections import _iter_pool_sockets
     return sum(1 for sock in _iter_pool_sockets(client) if _socket_is_dead(sock))
 
 

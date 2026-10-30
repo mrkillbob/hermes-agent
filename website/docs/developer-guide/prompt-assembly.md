@@ -34,6 +34,33 @@ The cached system prompt is assembled as three ordered tiers (see `agent/system_
 
 The final system prompt is then joined as: `stable` → `context` → `volatile`.
 
+Dispatcher-owned tasks on remote or unresolved inference routes use the default identity,
+generated execution guidance and their supplied assignment instead of ambient `SOUL.md`,
+project context, memory, auto-loaded skills, the local skills inventory or plugin prose.
+Include needed public instructions in the assignment. The renderer omits host/profile paths
+and directs tools to use relative paths in the assigned workspace. Local inference routes,
+interactive operators and inherited nonowner contexts retain the usual context selection.
+
+This selection is paired with the existing final source-bound request authorization on owned
+remote task routes, including providers outside the provider-wide protected list. Explicit
+tools still execute normally against the real workspace; their local results and task records
+are preserved. Only the provider replay is projected, and unapproved content can still stop a
+request. Disabling egress enforcement retains the operator's explicit bypass; it cannot qualify
+a private-data-free remote worker. A path-neutral prompt alone is not worker acceptance.
+
+A local task's cached prompt cannot become a public task prompt by switching providers.
+Remote fallback and restored prompts without verified public-context construction stop before
+dispatch rather than rewriting history. Retained history is also held after a local task turn,
+history restore or compression attempt, including an aborted compression, until a fresh task
+agent/session is constructed. Start that new session with its public brief. Remote-to-remote
+fallback can likewise stop if a model-identity rewrite no longer matches the verified prompt.
+
+Owned Bedrock Converse and Codex app-server calls stop until their native transports have
+supported request authorization; unrelated loopback metadata cannot prove those routes local.
+Owned remote auxiliary calls also stop because flattened canonical history does not carry the
+source-bound input proof used by main-turn tool replay. Supported main-turn relative tools and
+demonstrably local auxiliary routes retain their normal execution semantics.
+
 This ordering matters for precedence discussions:
 - skills are part of the **stable** tier
 - memory/profile snapshots are part of the **volatile** tier
@@ -60,6 +87,25 @@ the same one-shot note channel, sent only when the difference changes. The in-pr
 keyed on the skill files' signatures, so a change written by another process is seen too. The index
 itself converges at the next rebuild boundary (compaction). Legacy prompts retain their original
 host-before-context anchor, so prompts persisted before the reorder still validate.
+
+On routes protected by the egress firewall, skill-change rows pass the same strict sanitized-text
+checks as other user-message context. A rejected description becomes a names-only row; a rejected
+name is replaced by a content-free omission notice. Change accounting uses that projected index,
+so unchanged projected rows are announced once, including after a fresh agent loads the transcript.
+The complete note is scanned across row boundaries and may use at most one quarter of the smaller
+sanitized-aggregate or serialized-request byte cap (64 KiB with default settings), reserving space
+for user text, history and framing. The transport can split admissible large notes into independently
+bounded segments. This producer budget does not guarantee that other context fits; the final gate
+still scans and limits the complete request. Over-budget optional notes remain withheld.
+The producer does not grant generated-context trust to skill-file text. Existing sidecars retain
+their original bytes and do not acquire trust retroactively; an old rejected sidecar can still
+block its session. Newly emitted notes use the projection without changing the cached system prompt.
+Voice and fallback routes bind after turn assembly. A process-local producer record binds the
+new note to its exact current-turn sidecar or multimodal text part. Request construction rechecks
+that owned span against the actual route, making any projection sticky for the rest of the turn
+and backfilling its addressed durable row before sending. Copied or changed envelopes expire
+ownership; historical markers cannot recreate it. Unrelated user and hook bytes are untouched.
+A failed or mismatched durable write stops the request rather than diverging from replay.
 
 When `skip_context_files` is set (e.g., subagent delegation), SOUL.md is not loaded and the hardcoded `DEFAULT_AGENT_IDENTITY` is used instead.
 

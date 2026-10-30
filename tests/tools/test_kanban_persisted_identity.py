@@ -20,7 +20,7 @@ from hermes_constants import reset_hermes_home_override, set_hermes_home_overrid
 def board_env(tmp_path, monkeypatch):
     """A root-profile board with two served profiles beside it and no env pin at all."""
     root = tmp_path / "hroot"
-    for name in ("alpha", "beta"):
+    for name in ("alpha", "beta", "peer"):
         (root / "profiles" / name).mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(root))
     for var in ("HERMES_PROFILE", "HERMES_PROFILE_NAME", "HERMES_SESSION_ID", "HERMES_KANBAN_DB",

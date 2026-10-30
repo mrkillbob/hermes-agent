@@ -31,6 +31,8 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
+from agent.pruned_tool_arguments import _context_pruned_argument_paths
+from agent.tool_executor_arguments import _parse_tool_arguments
 from agent.interrupt_control import _REASON_USER_INTERRUPT, interrupt_skip_wording
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.onboarding import observe_tool_result as observe_onboarding_result
@@ -43,13 +45,14 @@ from agent.inline_tool_executors import (
     emit_terminal_post_tool_call,
     tool_hook_ids,
 )
+from agent.message_metadata import stamp_data_use
+from agent.session_persistence import sync_rewritten_tool_rows
 from agent.tool_dispatch_helpers import (
     _NEVER_PARALLEL_TOOLS,
     _is_destructive_command,
     _is_multimodal_tool_result,
     _multimodal_text_summary,
     _append_subdir_hint_to_multimodal,
-    _context_pruned_argument_paths,
     _plan_tool_batch_segments,
     make_tool_result_message,
 )
@@ -168,20 +171,6 @@ def _authorization_gate_lock_timeout() -> float:
 class _BatchAbandoned(BaseException):
     """Raised inside a worker when the batch was abandoned before dispatch; a BaseException
     so ``except Exception`` handlers in the middleware chain can't swallow it."""
-
-
-def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict, Optional[str]]:
-    """Parse model-emitted arguments without repairing or coercing them."""
-    try:
-        arguments = json.loads(raw_arguments)
-    except (json.JSONDecodeError, TypeError):
-        arguments = None
-    if isinstance(arguments, dict):
-        return arguments, None
-    return {}, json.dumps(
-        {"error": "Invalid tool arguments", "message": "Tool arguments must be a valid JSON object; tool was not executed."},
-        ensure_ascii=False,
-    )
 
 
 def _resolve_concurrent_tool_timeout() -> float | None:
@@ -423,10 +412,7 @@ def _unwrap_tool_search_call(
         if underlying not in _tool_search_scoped_names(agent):
             # Session-gated GUI tools name their missing surface (#120413);
             # anything else keeps the generic block.
-            return function_name, function_args, (
-                _ts.out_of_scope_reason(underlying)
-                or f"'{underlying}' is not available in this session. Use tool_search to find tools you can call."
-            )
+            return function_name, function_args, _ts.scope_block_reason(underlying)
         # Validate before unwrapping: the generic bridge hides the concrete
         # parameter schema from provider-native tool-call validation.
         scope_block = _ts.validate_deferred_call_args(underlying, underlying_args)
@@ -475,6 +461,7 @@ class _ManagedToolResult:
     middleware_trace: list[dict[str, Any]]
     blocked: bool
     dispatched: bool
+    data_use: frozenset[str] = frozenset()
 
 
 class _ToolTimeoutResult(str):
@@ -752,7 +739,17 @@ def _dispatch_authorized_once(
     from agent.terminal_approval_batch import prepare_current_terminal
     prepare_current_terminal(ref)
     _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
-    return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+
+    from agent.source_provenance_tools import execute_with_source_provenance
+
+    from agent.tool_progress_relay import bound_tool_progress
+    from tools.connectors.data_use import collect_data_use
+    with bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use:
+        try:
+            return _run_with_activity_heartbeat(agent, ref.name, lambda: execute_with_source_provenance(
+                agent, ref.name, ref.call_id, execute, ref.args))
+        finally:
+            state.data_use = frozenset(data_use)
 
 
 def _run_agent_tool_execution_middleware(
@@ -777,6 +774,15 @@ def _run_agent_tool_execution_middleware(
     )
 
     trace = middleware_trace if middleware_trace is not None else []
+    from agent.native_metadata_capture import native_metadata_argument_digest, execute_with_native_metadata_capture
+
+    original_digest = native_metadata_argument_digest(agent, function_name, function_args)
+
+    def capture_execute(arguments):
+        return execute_with_native_metadata_capture(
+            agent, function_name, tool_call_id, original_digest, execute, arguments,
+        )
+
     state = _ManagedToolResult(result=None, args=function_args, middleware_trace=trace, blocked=False, dispatched=False)
     dispatch_lock = threading.Lock()
 
@@ -791,7 +797,7 @@ def _run_agent_tool_execution_middleware(
             agent,
             state,
             _ToolCallRef(function_name, final_args, effective_task_id, tool_call_id, trace),
-            execute=execute,
+            execute=capture_execute,
             scope_block=scope_block,
             display_index=display_index,
             begin_execution=begin_execution,
@@ -832,6 +838,9 @@ def _run_agent_tool_execution_middleware(
             "tool_call_id": tool_call_id or "",
         },
     )
+    from agent.native_metadata_capture import settle_native_metadata_execution
+    settle_native_metadata_execution(agent, tool_call_id, state.result,
+                                    blocked=state.blocked, dispatched=state.dispatched)
     return state
 
 
@@ -1076,6 +1085,7 @@ def _commit_tool_result(
     blocked: bool,
     effect_disposition,
     observed: bool = False,
+    data_use: frozenset[str] = frozenset(),
     error_preview: Callable[[Any], Any] = lambda result: result,
     success_log_chars: Optional[int] = None,
     verbose_text: Callable[[Any], Any] = lambda result: result,
@@ -1135,7 +1145,10 @@ def _commit_tool_result(
     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
     note_tool_result(agent, function_name, tool_call_id, function_result, persisted_result)
 
-    subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
+    from agent.source_provenance_tools import source_provenance_activation
+
+    with source_provenance_activation(agent, function_name):
+        subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
     if subdir_hints:
         if _is_multimodal_tool_result(persisted_result):
             # Hint goes on the text summary part so the model still sees it; image blocks untouched.
@@ -1146,7 +1159,18 @@ def _commit_tool_result(
     # Multimodal dicts become an OpenAI-style content list; text-only servers get a
     # string-safe fallback so a rejected image result never poisons history.
     _tool_content = agent._tool_result_content_for_active_model(function_name, persisted_result)
-    tool_message = make_tool_result_message(function_name, _tool_content, tool_call_id, effect_disposition=effect_disposition)
+    from agent.source_provenance_tools import attach_trusted_source_provenance_metadata
+
+    _source_provenance = attach_trusted_source_provenance_metadata(
+        agent, function_name, content=persisted_result, tool_call_id=tool_call_id
+    )
+    tool_message = make_tool_result_message(
+        function_name, _tool_content, tool_call_id, effect_disposition=effect_disposition,
+    )
+    # An in-flight pre-update worker may retain the older builder signature.
+    # Attach provenance here before persistence so that cached helper cannot lose it.
+    if _source_provenance is not None:
+        tool_message["_source_provenance"] = dict(_source_provenance)
     # A plugin that went live during this turn, and late LSP verdicts on this session's earlier edits,
     # are told on this new row (outside any untrusted-data wrapper).
     lsp_deferred.forward_to_agent(agent)
@@ -1162,8 +1186,13 @@ def _commit_tool_result(
                 tool_message["display_metadata"] = metadata
         except Exception as callback_error:
             logging.debug("Tool result metadata callback error: %s", callback_error)
+    stamp_data_use(tool_message, sorted(data_use))
     messages.append(tool_message)
-    if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
+    committed = _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}")
+    from agent.native_metadata_capture import commit_native_metadata_presentation
+    commit_native_metadata_presentation(agent, tool_call_id, function_result, tool_message.get("content"),
+                                       blocked=blocked, is_error=is_error, committed=committed)
+    if not committed:
         return None
 
     if not blocked:
@@ -1218,6 +1247,7 @@ def _finalize_tool_batch(agent, messages: list, effective_task_id: str, num_tool
     contents_before = [message.get("content") for message in batch]
     enforce_turn_budget(batch, env=get_active_env(effective_task_id), config=budget)
     plugin_live_notes.keep_after_turn_budget(agent, batch)
+    sync_rewritten_tool_rows(agent, batch, contents_before)
     record_tool_batch(agent, batch, contents_before)
     agent._apply_pending_steer_to_tool_results(messages, num_tools)
 
@@ -1251,6 +1281,7 @@ class _ToolOutcome:
     duration: float
     is_error: bool
     blocked: bool
+    data_use: frozenset[str] = frozenset()
 
 
 def _start_order_gate_timeout(batch_timeout: float | None) -> float:
@@ -1343,6 +1374,7 @@ class _ConcurrentBatch:
         # propagate_context_to_thread() at the submit site below (GHSA-qg5c-hvr5-hjgr, #13617).
         start = time.time()
         blocked = dispatched = False
+        data_use: frozenset[str] = frozenset()
         try:
             managed = _run_agent_tool_execution_middleware(
                 agent,
@@ -1361,7 +1393,7 @@ class _ConcurrentBatch:
                 authorization_gate=self.authorization_gate,
             )
             result, ref.args, ref.trace = managed.result, managed.args, managed.middleware_trace
-            blocked, dispatched = managed.blocked, managed.dispatched
+            blocked, dispatched, data_use = managed.blocked, managed.dispatched, managed.data_use
         except _BatchAbandoned:
             logger.info("tool %s abandoned at start-order gate; skipping dispatch", ref.name)
             return None
@@ -1386,7 +1418,7 @@ class _ConcurrentBatch:
             logger.info(
                 "tool %s completed (%.2fs, %d chars)", ref.name, duration, result_chars
             )
-        return _ToolOutcome(ref, result, duration, is_error, blocked)
+        return _ToolOutcome(ref, result, duration, is_error, blocked, data_use)
 
     def run_worker(self, index: int, start_order: int) -> None:
         """Worker function executed in a thread."""
@@ -1556,7 +1588,7 @@ def _append_batch_results(agent, messages: list, effective_task_id: str, batch: 
         committed = _commit_tool_result(
             agent, messages, ref, function_result,
             budget=budget, tool_duration=tool_duration, is_error=is_error, blocked=blocked,
-            effect_disposition=effect_disposition, observed=r is not None,
+            effect_disposition=effect_disposition, observed=r is not None, data_use=r.data_use if r else frozenset(),
             error_preview=lambda res: _multimodal_text_summary(res)[:200],
         )
         if committed is None:
@@ -1577,6 +1609,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     """Execute tool calls concurrently; results are appended in original call order.
     ``finalize=False`` skips end-of-batch budget enforcement and /steer injection (the
     segmented dispatcher owns turn-end work)."""
+    from agent.local_text_policy import require_tools_allowed
+    require_tools_allowed()
     tool_calls = assistant_message.tool_calls
     num_tools = len(tool_calls)
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
@@ -1831,7 +1865,7 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
     committed = _commit_tool_result(
         agent, messages, ref, function_result,
         budget=budget, tool_duration=tool_duration, is_error=_is_error_result, blocked=managed.blocked,
-        effect_disposition="unknown" if _execution_timed_out else None, observed=True,
+        effect_disposition="unknown" if _execution_timed_out else None, observed=True, data_use=managed.data_use,
         error_preview=lambda res: res[:200] if isinstance(res, str) and not agent.verbose_logging else res,
         success_log_chars=_result_len,
         verbose_text=_multimodal_text_summary,
@@ -1854,6 +1888,8 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
 
 
 def execute_tool_calls_sequential(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0, *, finalize: bool = True) -> None:
+    from agent.local_text_policy import require_tools_allowed
+    require_tools_allowed()
     from types import SimpleNamespace
     from agent.terminal_approval_batch import terminal_approval_batch, terminal_approval_runs
     for calls in terminal_approval_runs(agent, assistant_message.tool_calls):
@@ -1869,6 +1905,8 @@ def _execute_tool_calls_sequential(agent, assistant_message, messages: list, eff
     """Execute tool calls sequentially (single calls or interactive tools). ``finalize=False``
     skips end-of-batch budget enforcement and /steer injection (the segmented dispatcher
     owns turn-end work)."""
+    from agent.local_text_policy import require_tools_allowed
+    require_tools_allowed()
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
     tool_calls = assistant_message.tool_calls
 
@@ -1929,6 +1967,8 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
     boundaries exactly as fully-sequential execution. Turn-end work (budget + /steer) runs
     once here (segments run with ``finalize=False``); each segment executor checks the
     interrupt flag up front, so an interrupt drains later segments with one result per call."""
+    from agent.local_text_policy import require_tools_allowed
+    require_tools_allowed()
     from types import SimpleNamespace
 
     if segments is None:

@@ -24,9 +24,6 @@ import threading
 logger = logging.getLogger(__name__)
 
 MAX_FRAME = 4 * 1024 * 1024
-# Toolsets a managed worker turn never offers (subtracted last, so the tool_search bridge and a
-# restored tools[] pin drop them too): delegate_task's child has no owner registration here.
-WORKER_DISABLED_TOOLSETS = ('delegation',)
 BOOTSTRAP_FIELDS = {'version', 'home', 'scope', 'policy', 'api_key', 'text', 'route', 'user_id', 'chat_id',
                     'turn_author', 'safe_mode', 'ignore_user_config'}
 # The bounded run_conversation fields a turn receipt keeps (outcome, exit reason, tokens, cost,
@@ -36,27 +33,82 @@ RESULT_FIELDS = ('final_response', 'failed', 'interrupted', 'completed', 'partia
                  'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens',
                  'estimated_cost_usd', 'cost_status', 'cost_source', 'service_tier', 'failure_reason',
                  'session_id', 'requested_model', 'served_model', '_turn_input_tokens', '_turn_output_tokens',
-                 'billing_block')
-# ``billing_block`` (``agent/billing_links.BillingBlock`` plus ``unverified``) is the one structured field.
+                 'failure_retryable', 'failure_resets_at', 'billing_block', 'free_tier', 'usage_window_message', 'usage_limit')
+# The structured fields and their allowed keys: ``billing_block`` (``agent/billing_links.BillingBlock``
+# plus ``unverified``) and ``free_tier`` (``agent/turn_recovery._stamp_free_tier``). With
+# ``failure_reason``, ``failure_retryable`` and ``failure_resets_at`` they are what
+# ``agent.error_surface.build_error_surface_from_result`` reads for the owner's error card.
 BILLING_FIELDS = ('provider', 'provider_label', 'model', 'billing_url', 'is_nous', 'message', 'unverified')
+USAGE_LIMIT_TEXT = ('gauge_id', 'scope', 'limit_name', 'message', 'current_model')
+USAGE_LIMIT_FIELDS = (*USAGE_LIMIT_TEXT, 'resets_at_ms', 'suggestions', 'credits')
+SUGGESTION_FIELDS = ('model', 'label', 'note', 'provider')
+STRUCTURED_FIELDS = {'billing_block': BILLING_FIELDS, 'free_tier': ('kind', 'message'),
+                     'usage_limit': USAGE_LIMIT_FIELDS}
 
 
 def _scalar(value):
     return value is None or type(value) in (bool, int, float) or (isinstance(value, str) and len(value) <= 4096)
 
 
-def _billing_block(value):
-    return isinstance(value, dict) and not set(value) - set(BILLING_FIELDS) and all(map(_scalar, value.values()))
+def _text_fields(value, allowed, required):
+    return (isinstance(value, dict) and set(required) <= set(value) <= set(allowed)
+            and all(isinstance(v, str) and len(v) <= 4096 for v in value.values()))
+
+
+def _usage_limit(value):
+    # The existing LimitHit wire shape, not an arbitrary nested worker object. Keep the
+    # plan's at-most-two suggestions and the same per-string bound as other result fields.
+    if not isinstance(value, dict) or set(value) - set(USAGE_LIMIT_FIELDS):
+        return False
+    text = {k: v for k, v in value.items() if k in USAGE_LIMIT_TEXT}
+    if not _text_fields(text, USAGE_LIMIT_TEXT, ('gauge_id', 'scope', 'limit_name', 'message')):
+        return False
+    reset = value.get('resets_at_ms')
+    if reset is not None and (type(reset) is not int or not 0 <= reset <= 2**63 - 1):
+        return False
+    suggestions = value.get('suggestions', [])
+    if not isinstance(suggestions, list) or len(suggestions) > 2 or any(
+            not _text_fields(s, SUGGESTION_FIELDS, ('model', 'label', 'note')) for s in suggestions):
+        return False
+    credits = value.get('credits')
+    return credits is None or _text_fields(credits, ('action',), ('action',))
+
+
+def _usage_limit_frame(value):
+    if not isinstance(value, dict):
+        return None
+    def project(row, fields):
+        return {k: v[:4096] if isinstance(v, str) else v for k, v in row.items() if k in fields}
+    frame = project(value, USAGE_LIMIT_FIELDS)
+    if isinstance(suggestions := frame.get('suggestions'), list):
+        if len(suggestions) > 2 or any(not isinstance(s, dict) for s in suggestions):
+            return None
+        frame['suggestions'] = [project(s, SUGGESTION_FIELDS) for s in suggestions]
+    if isinstance(credits := frame.get('credits'), dict):
+        frame['credits'] = project(credits, ('action',))
+    return frame if _usage_limit(frame) else None
+
+
+def _structured(key, value):
+    if key == 'usage_limit':
+        return _usage_limit(value)
+    return isinstance(value, dict) and not set(value) - set(STRUCTURED_FIELDS[key]) and all(map(_scalar, value.values()))
 
 
 def result_frame(result):
-    """Worker side: the receipt fields of ``run_conversation``'s result, scalars only, text bounded."""
+    """Worker side: the receipt fields of ``run_conversation``'s result, with bounded structured failures."""
+    from agent.managed_request_budget import stamp_request_budget_result
+    result = stamp_request_budget_result(result)
     frame = {k: (v[:4096] if isinstance(v, str) and k != 'final_response' else v) for k, v in result.items()
-             if k in RESULT_FIELDS and k != 'billing_block' and (v is None or type(v) in (bool, int, float, str))}
-    block = result.get('billing_block')
-    if isinstance(block, dict):
-        frame['billing_block'] = {k: v[:4096] if isinstance(v, str) else v for k, v in block.items()
-                                  if k in BILLING_FIELDS and (v is None or type(v) in (bool, int, float, str))}
+             if k in RESULT_FIELDS and k not in STRUCTURED_FIELDS and (v is None or type(v) in (bool, int, float, str))}
+    for key, fields in STRUCTURED_FIELDS.items():
+        if key == 'usage_limit':
+            if (block := _usage_limit_frame(result.get(key))) is not None:
+                frame[key] = block
+            continue
+        if isinstance(block := result.get(key), dict):
+            frame[key] = {k: v[:4096] if isinstance(v, str) else v for k, v in block.items()
+                          if k in fields and (v is None or type(v) in (bool, int, float, str))}
     return frame
 
 
@@ -64,13 +116,15 @@ def accept_result(result):
     """Owner side of the worker's result frame: ``(result, usage)`` in the in-process turn's shape
     (gateway projection: prompt/completion tokens as input/output), or ValueError."""
     if (not isinstance(result, dict) or set(result) - set(RESULT_FIELDS) or not isinstance(result.get('final_response'), str)
-            or result.get('billing_block') is not None and not _billing_block(result['billing_block'])
-            or any(not _scalar(value) for key, value in result.items() if key not in ('final_response', 'billing_block'))):
+            or any(result.get(key) is not None and not _structured(key, result[key]) for key in STRUCTURED_FIELDS)
+            or any(not _scalar(value) for key, value in result.items()
+                   if key != 'final_response' and key not in STRUCTURED_FIELDS)):
         raise ValueError('invalid_worker_result')
     accepted = dict(result)
-    if accepted.get('billing_block') is None:
-        # Every failure other than a billing wall carries no block.
-        accepted.pop('billing_block', None)
+    for key in STRUCTURED_FIELDS:
+        if accepted.get(key) is None:
+            # A failure other than a billing wall or a free-tier refusal carries no block.
+            accepted.pop(key, None)
     turn_in, turn_out = accepted.pop('_turn_input_tokens', None), accepted.pop('_turn_output_tokens', None)
     if any(value is not None and (type(value) is not int or value < 0) for value in (turn_in, turn_out)):
         raise ValueError('invalid_worker_result')
@@ -131,13 +185,21 @@ def bind_worker_policy(frame):
     server definitions included). Ordinary sessions keep plugins, MCP and hooks; bypass sessions
     also bind the safe / ignore-user-config policy.
     """
+    from agent.managed_request_budget import bind_worker_request_budget
+    from agent.local_text_policy import restricted_policy
+    restricted = restricted_policy(frame['policy'])
+    if restricted and (frame['safe_mode'] is not True or frame['ignore_user_config'] is not True):
+        raise ValueError('invalid_local_text_policy')
+    bind_worker_request_budget(frame)
     config = json.loads(frame['policy']['config_json'])
     if not frame['ignore_user_config']:
         from agent.safe_worker_policy import _bind_worker_config
         _bind_worker_config(config)
         return
     from agent.safe_worker_policy import _bind_safe_worker_policy
-    _bind_safe_worker_policy(safe_mode=frame['safe_mode'], ignore_user_config=True, config=config)
+    restriction = {'local_text_only': True} if restricted else {}
+    _bind_safe_worker_policy(safe_mode=frame['safe_mode'], ignore_user_config=True,
+                             config=config, **restriction)
 
 
 class WorkerChannel:
@@ -183,6 +245,8 @@ class WorkerControls:
         self.reader.start()
 
     def stop(self):
+        from agent.managed_request_budget import stop_provider_requests
+        stop_provider_requests()
         self.stopped.set()
         if self.agent is not None:
             from agent.interrupt_compat import request_hard_interrupt
@@ -289,6 +353,9 @@ def discover_profile_mcp(policy):
     """The owner's MCP registry never crosses into this fresh interpreter; connect the profile's
     configured servers here, filtered to the frozen toolset selection, before tool discovery snapshots
     agent.tools. Safe mode keeps its deliberate no-MCP policy (discover_mcp_tools returns [])."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return
     from tools.mcp_oauth import suppress_interactive_oauth
     from tools.mcp_tool_discovery import discover_mcp_tools
     with suppress_interactive_oauth():
@@ -339,8 +406,10 @@ def execute(frame, channel):
     bind_worker_context(frame)
     # Background processes a previous admission of this session started outlive that worker
     # (F24); adopt them so process_manage in this turn can poll and kill them.
-    from tools.process_registry import process_registry
-    process_registry.recover_from_checkpoint()
+    from agent.local_text_policy import local_text_only
+    if not local_text_only():
+        from tools.process_registry import process_registry
+        process_registry.recover_from_checkpoint()
     # Store construction binds the delegation ledger before tool discovery.
     from gateway.session_policy import restore_policy, policy_scope, register_worker_hooks
     policy = restore_policy(frame['policy'])
@@ -354,16 +423,17 @@ def execute(frame, channel):
     from gateway.session_worker_construct import checkpoint_agent_kwargs, construct_kwargs, routing_agent_kwargs
     construct = {'ephemeral_system_prompt': policy.skills_prompt, **construct_kwargs(frame)}
     controls = WorkerControls(channel, frame['route'])
+    from agent.managed_request_budget import register_request_stop
+    register_request_stop(lambda: controls.stop())
     register_gateway_notify(frame['route'], controls.approval)
     agent = None
     try:
         with policy_scope(policy):
             agent = _construct_agent(frame, AIAgent, policy, model=policy.model, provider=policy.provider, base_url=policy.base_url,
                 api_key=frame['api_key'], session_db=store, session_id=scope['session_id'],
+                # delegate_task stays offered: each child is reserved by the owner under this
+                # execution (agent/runtime_session_child.py) and retires with it.
                 enabled_toolsets=list(policy.toolsets), max_iterations=policy.max_turns,
-                # A delegated child needs its own owner-registered execution, which this single-turn
-                # worker cannot reserve; never offer a tool whose only outcome here is a refusal.
-                disabled_toolsets=list(WORKER_DISABLED_TOOLSETS),
                 reasoning_config=policy.reasoning_config,
                 # ``tool`` / ``oneshot`` are storage labels for a CLI-surface agent (session_policy.SURFACES).
                 platform=policy.platform if policy.source in ('tool', 'oneshot') else policy.source,
@@ -378,6 +448,9 @@ def execute(frame, channel):
                 tool_start_callback=lambda call_id, name, args: channel.send('tool.start', **tool_frame(call_id, name, args)),
                 tool_complete_callback=lambda call_id, name, args, result: channel.send('tool.complete',
                                                                                          **tool_frame(call_id, name, args, result)))
+            # Keep launch-selected skills distinct from the ambient gateway /
+            # personality additions in construct_v1 for remote task projection.
+            agent._remote_task_ephemeral_system_prompt = policy.skills_prompt
             controls.agent = agent
             if controls.stopped.is_set():
                 from agent.interrupt_compat import request_hard_interrupt
@@ -395,7 +468,9 @@ def execute(frame, channel):
                 frame = {**frame, 'text': content}
             before = (getattr(agent, 'session_prompt_tokens', 0) or 0,
                       getattr(agent, 'session_completion_tokens', 0) or 0)
-            result = run_worker_turns(agent, frame, history)
+            # Most failed results name no provider or model; the owner's error card needs the agent's.
+            result = {'provider': getattr(agent, 'provider', None), 'model': getattr(agent, 'model', None),
+                      **run_worker_turns(agent, frame, history)}
             result['_turn_input_tokens'] = max(0, (getattr(agent, 'session_prompt_tokens', 0) or 0) - before[0])
             result['_turn_output_tokens'] = max(0, (getattr(agent, 'session_completion_tokens', 0) or 0) - before[1])
             retire_agent(agent)
@@ -427,10 +502,8 @@ def _construct_agent(frame, factory, policy, **kwargs):
     """Agent construction resolves the provider credentials; a Kanban attempt that fails here
     still books the one-shot exit mapping (quota wall 75, re-login 78) before the crash."""
     try:
-        if kwargs['api_key'] is None:
-            from gateway.session_worker_construct import worker_api_key
-            kwargs['api_key'] = worker_api_key(policy, kwargs)
-        return factory(**kwargs)
+        from gateway.session_worker_construct import worker_route
+        return factory(**{**kwargs, **worker_route(policy, kwargs)})
     except Exception as exc:
         from gateway.session_kanban import record_start_failure
         record_start_failure(frame, exc)
@@ -442,9 +515,9 @@ def hello():
     the ancestor chain it observes. Launchers (uv's venv python.exe) put the owner's Popen
     handle one or two hops above; the owner, never this process, decides whether they match."""
     import psutil
-    from hermes_cli.process_identity import process_birth
+    from hermes_cli.process_identity import worker_birth
     me = psutil.Process()
-    return {'pid': me.pid, 'birth': process_birth(me), 'ancestors': [p.pid for p in me.parents()[:3]]}
+    return {'pid': me.pid, 'birth': worker_birth(me), 'ancestors': [p.pid for p in me.parents()[:3]]}
 
 
 def main():

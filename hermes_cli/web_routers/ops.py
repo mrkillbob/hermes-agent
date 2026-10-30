@@ -238,7 +238,7 @@ async def create_webhook(body: WebhookCreate, profile: Optional[str] = None):
     def _save():
         try:
             published = wh._replace_subscription(name, route, expected)
-        except wh.SubscriptionMutationConflict as exc:
+        except (wh.SubscriptionMutationConflict, wh.SubscriptionStoreReadError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _webhook_route_summary(name, published, wh._get_webhook_base_url())
 
@@ -265,7 +265,10 @@ async def delete_webhook(name: str, profile: Optional[str] = None):
         def remove(subscriptions):
             del subscriptions[_webhook_key_in(subscriptions, name)]
 
-        wh._mutate_subscriptions(remove)
+        try:
+            wh._mutate_subscriptions(remove)
+        except wh.SubscriptionStoreReadError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     await config_scoped_to_thread(profile, _run)
     return {"ok": True}
@@ -283,7 +286,10 @@ async def set_webhook_enabled(name: str, body: WebhookEnabledToggle, profile: Op
             subscriptions[key]["enabled"] = bool(body.enabled)
             return key
 
-        return wh._mutate_subscriptions(toggle)
+        try:
+            return wh._mutate_subscriptions(toggle)
+        except wh.SubscriptionStoreReadError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     key = await config_scoped_to_thread(profile, _run)
     return {"ok": True, "name": key, "enabled": bool(body.enabled)}
@@ -295,34 +301,43 @@ async def set_webhook_enabled(name: str, body: WebhookEnabledToggle, profile: Op
 
 @router.post("/api/gateway/start")
 async def start_gateway(profile: Optional[str] = None):
-    from hermes_cli.web_server_gateway import multiplexed_profile_refusal
+    from hermes_cli.gateway import named_profile_served_by_running_multiplexer
     # The spawned `hermes -p X gateway start` would refuse with exit 78 into an action log nobody reads;
     # surface the same refusal here so the UI can point at the multiplexer instead of showing "started".
-    refusal = await asyncio.to_thread(multiplexed_profile_refusal, profile, "start")
-    if refusal:
-        raise HTTPException(status_code=409, detail=refusal)
+    if profile and profile != "default" and await asyncio.to_thread(named_profile_served_by_running_multiplexer, profile):
+        raise HTTPException(
+            status_code=409,
+            detail=f"The default gateway already serves profile '{profile}' as a multiplexer; "
+                   "restart it from the default profile instead of starting a separate gateway.",
+        )
+    # A fresh Desktop/profile home often has no installed service yet. On Linux,
+    # `gateway start` otherwise routes to systemd merely because systemd exists,
+    # then reports success only at spawn time while the missing unit leaves the
+    # dispatcher offline. Start a detached foreground gateway in that case.
+    with _config_profile_scope(profile):
+        from hermes_cli.gateway import _installed_service_kind
+
+        verb = "start" if _installed_service_kind() is not None else "run"
     with http_failure("Failed to spawn gateway start", 500, "Failed to start gateway"):
-        proc = _spawn_hermes_action(_gateway_subcommand(profile, "start"), "gateway-start")
+        proc = _spawn_hermes_action(_gateway_subcommand(profile, verb), "gateway-start")
     return {"ok": True, "pid": proc.pid, "name": "gateway-start"}
 
 
 @router.post("/api/gateway/stop")
-async def stop_gateway(profile: Optional[str] = None):
-    from hermes_cli.web_server_gateway import multiplexed_profile_refusal
-    # A served profile has no gateway of its own to stop: the child prints "No gateway running for this
-    # profile" (exit 0) while the multiplexer keeps serving it and the UI flips to "stopped".
-    refusal = await asyncio.to_thread(multiplexed_profile_refusal, profile, "stop")
-    if refusal:
+async def stop_gateway(profile: Optional[str] = None, interrupt: bool = False):
+    from hermes_cli.web_server_gateway import live_session_refusal
+    # Live sessions refuse a stop unless the caller interrupts them deliberately (`?interrupt=true`).
+    if not interrupt and (refusal := await asyncio.to_thread(live_session_refusal, profile, "stop")):
         raise HTTPException(status_code=409, detail=refusal)
     with http_failure("Failed to spawn gateway stop", 500, "Failed to stop gateway"):
-        proc = _spawn_hermes_action(_gateway_subcommand(profile, "stop"), "gateway-stop")
+        proc = _spawn_hermes_action(_gateway_subcommand(profile, "stop") + ["--interrupt"] * interrupt, "gateway-stop")
     return {"ok": True, "pid": proc.pid, "name": "gateway-stop"}
 
 
 # --- Credential pool (auth.json -> credential_pool.<provider>[]): secrets are
 # redacted on read; only the agent sees raw values at session start.
 #
-# load_pool() may hit the network synchronously (Copilot token exchange over raw
+# load_pool() may hit the network synchronously (a provider token exchange over raw
 # urllib, whose timeout does NOT bound DNS resolution) — on a networkless host it
 # once froze the uvicorn loop for 17 minutes. Every pool load below runs off-loop.
 

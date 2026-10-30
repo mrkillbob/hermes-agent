@@ -72,6 +72,61 @@ timeouts are explicitly rejected until Hermes can
 support them without weakening isolation. Use `allowed_toolsets` to narrow a
 child; Hermes's existing unsafe-tool block remains enforced.
 
+`allowed_toolsets` narrows the names passed into child resolution; it does not
+guarantee that the final child schema contains only those named sets. By
+default, `delegation.inherit_mcp_toolsets` appends every MCP toolset held by the
+parent to a narrowed child request. Setting it to `false` disables only that
+automatic append: a parent MCP toolset named explicitly in `allowed_toolsets`
+is still available, and synchronous `delegate_task` children inherit the
+parent's toolsets. The parent’s `disabled_toolsets` and the child role’s blocked
+tools are applied after expansion. The public lifecycle API also rejects
+unknown toolset names and, when the parent has an explicit enabled set, names
+outside that set before constructing a child.
+
+## Workforce governance
+
+For specialist workers, `governance` carries the reusable controls inspired by
+the fictional workforce patterns analyzed for Hermes. It is passive metadata
+and validation; the host's tool and authority boundaries remain authoritative.
+
+```python
+from agent.subagent_lifecycle import SubagentLaunchRequest
+from agent.worker_contract import (
+    ContextProfile,
+    ExecutionEnvelope,
+    MemoryPolicy,
+    PrivacyPolicy,
+    RoleSeparation,
+    WorkforceGovernance,
+)
+
+governance = WorkforceGovernance(
+    memory=MemoryPolicy(purpose="task-local evidence", retention="bounded"),
+    execution=ExecutionEnvelope(lane="simulation"),
+    roles=RoleSeparation(planner_id="planner", critic_id="critic"),
+    context=ContextProfile(
+        profile="reviewer",
+        assumptions=("the source revision is current",),
+        assumption_warnings=("verify source freshness",),
+    ),
+    privacy=PrivacyPolicy(allowed_scopes=("task",)),
+)
+handle = ctx.subagent_lifecycle.launch(SubagentLaunchRequest(
+    goal="Analyze the supplied evidence.",
+    governance=governance,
+))
+```
+
+The envelope provides bounded memory retention, dimensioned trust decay,
+lineage and quarantine state, explicit simulation/canary/production lanes,
+visible degraded capability states, planner/critic/executor separation,
+missing-context warnings, privacy disclosure decisions, hostile-input
+assessment, and probabilistic scenario ensembles. Production governance with
+an executor requires a distinct critic that has accepted the work and an
+explicit execution approval. Simulation and canary governance cannot permit
+side effects. These checks do not turn model-facing text into authority: the
+runtime still decides which tools and destinations are available.
+
 ## Routing
 
 Children follow the `delegation` config (`provider`, `model`, `base_url`,
@@ -82,3 +137,7 @@ delegation config > parent; the selected provider supplies its own credential
 bundle. An unresolvable provider raises `SubagentLifecycleError` before launch.
 Core does not expose `provider` to the model: the plugin chooses it, for example
 from operator config.
+
+The lifecycle API does not consult `delegation.backend`: the plugin that launches a child already chooses
+its route. To change how `delegate_task` routes the model's subagents, write a
+[delegation provider plugin](delegation-provider-plugin.md).

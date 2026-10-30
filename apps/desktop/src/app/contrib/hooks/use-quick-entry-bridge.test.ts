@@ -3,7 +3,10 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type * as QuickEntryModule from '@/store/quick-entry'
+import { initialQuickComposerState, quickComposerReducer, quickEntryResultEvent } from '@/store/quick-entry'
 import { sessionTileDelegate } from '@/store/session-states'
+
+import { createQuickEntrySubmitRelay } from '../../../../electron/quick-entry'
 
 import { quickEntrySubmitAck, useQuickEntryBridge } from './use-quick-entry-bridge'
 
@@ -46,6 +49,11 @@ describe('quickEntrySubmitAck', () => {
       runtimeSessionId: 'rt-1',
       sessionId: 'st-1'
     })
+    expect(quickEntrySubmitAck(false, { runtimeSessionId: 'rt-1', storedSessionId: 'st-1' })).toEqual({
+      ok: true,
+      runtimeSessionId: 'rt-1',
+      sessionId: 'st-1'
+    })
     expect(quickEntrySubmitAck(true)).toEqual({ ok: true })
   })
 })
@@ -55,7 +63,7 @@ describe('useQuickEntryBridge', () => {
   let root: Root | null = null
 
   afterEach(() => {
-    root?.unmount()
+    act(() => root?.unmount())
     root = null
     window.hermesDesktop = originalHermesDesktop
     vi.clearAllMocks()
@@ -86,6 +94,69 @@ describe('useQuickEntryBridge', () => {
 
     return { container, submit: registeredSubmitHandler.current! }
   }
+
+  it.each(['current', 'new', 'picked'])(
+    'keeps %s post-dispatch outcomes blocked through relay and composer',
+    async target => {
+      let state = quickComposerReducer(
+        { ...initialQuickComposerState, connected: true, draft: 'one prompt', target },
+        { submitId: 1, type: 'submit' }
+      ).state
+      const relay = createQuickEntrySubmitRelay({ onSuccess: vi.fn() })
+      window.hermesDesktop = { quickEntry: { ackSubmit: relay.acknowledge, pushState: vi.fn() } } as never
+      const submitText: SubmitTextForBridge = async (_text, options) => {
+        options?.onDispatched?.()
+        return false // real prompt pipeline catches an RPC timeout and returns false
+      }
+      const submitNew: SubmitTextToNewSessionForBridge = async (_text, _owner, options) => {
+        options?.onDispatched?.()
+        throw new Error('timeout after dispatch')
+      }
+      vi.mocked(sessionTileDelegate).mockReturnValue({
+        resumeTile: async () => 'rt-picked',
+        submitToSession: async () => ({ runtimeSessionId: 'rt-picked', storedSessionId: 'different' })
+      } as never)
+      const { submit, container } = await renderBridge(submitText, submitNew)
+      const result = await relay.begin(correlationId => {
+        void submit({ correlationId, target, text: 'one prompt' })
+      })
+      state = quickComposerReducer(state, quickEntryResultEvent(result, 1)).state
+      expect(quickComposerReducer(state, { submitId: 2, type: 'submit' }).send).toBeNull()
+      expect(state.draft).toBe('one prompt')
+      container.remove()
+    }
+  )
+
+  it.each(['current', 'new'])('honors %s acceptance even if local cleanup fails', async target => {
+    const relay = createQuickEntrySubmitRelay({ onSuccess: vi.fn() })
+    window.hermesDesktop = { quickEntry: { ackSubmit: relay.acknowledge, pushState: vi.fn() } } as never
+    const identity = { runtimeSessionId: 'accepted-runtime', storedSessionId: 'accepted-stored' }
+    const current: SubmitTextForBridge = async (_text, options) => {
+      options?.onAccepted?.(identity)
+      return false
+    }
+    const fresh: SubmitTextToNewSessionForBridge = async (_text, _owner, options) => {
+      options?.onAccepted?.(identity)
+      throw new Error('navigation failed after acceptance')
+    }
+    const { submit, container } = await renderBridge(current, fresh)
+    const result = await relay.begin(correlationId => {
+      void submit({ correlationId, target, text: 'accepted once' })
+    })
+    expect(result).toMatchObject({
+      ok: true,
+      runtimeSessionId: identity.runtimeSessionId,
+      sessionId: identity.storedSessionId
+    })
+    const pending = quickComposerReducer(
+      { ...initialQuickComposerState, connected: true, draft: 'accepted once' },
+      { submitId: 1, type: 'submit' }
+    ).state
+    const accepted = quickComposerReducer(pending, quickEntryResultEvent(result, 1)).state
+    expect(accepted.draft).toBe('')
+    expect(accepted.visible).toBe(false)
+    container.remove()
+  })
 
   it('acknowledges a current-chat submit with the identity the pipeline accepted', async () => {
     const correlationId = 'current-submit-correlation'
@@ -145,7 +216,10 @@ describe('useQuickEntryBridge', () => {
       await submit({ correlationId, target: 'new', text: 'Send to a new chat' })
     })
 
-    expect(submitTextToNewSession).toHaveBeenCalledWith('Send to a new chat', correlationId)
+    expect(submitTextToNewSession).toHaveBeenCalledWith('Send to a new chat', correlationId, {
+      onAccepted: expect.any(Function),
+      onDispatched: expect.any(Function)
+    })
     expect(ackSubmit).toHaveBeenCalledTimes(1)
     expect(ackSubmit).toHaveBeenCalledWith(correlationId, {
       ok: true,

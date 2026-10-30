@@ -504,6 +504,12 @@ def _print_ticker_health(pids: list, restart_command: str = "hermes gateway rest
             elif _cron_is_fd_exhaustion_text(last_error):
                 print(color(_FD_EXHAUSTION_HINT, Colors.YELLOW))
         print("  Check the gateway log for 'Cron tick error'.")
+    elif ok_age is None and pid_line is None:
+        # A fresh heartbeat with no PID (Desktop-embedded ticker, #87033) and no success marker
+        # ever recorded is liveness only, not proof jobs can fire — unlike a PID-bearing gateway
+        # just past a restart, there is no "process just started" grace period to lean on here.
+        _warn("⚠ A cron ticker is alive, but no tick has succeeded yet.")
+        print("  Cron jobs will fire once the first tick succeeds.")
     else:
         print(color("✓ Gateway is running — cron jobs will fire automatically", Colors.GREEN))
         if pid_line:

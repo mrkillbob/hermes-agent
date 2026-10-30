@@ -104,6 +104,118 @@ test('notifyError posts the full error to desktop.log, not the summary', () => {
   }
 })
 
+test('storage RPC logging keeps allowlisted diagnostics and excludes raw gateway details', () => {
+  const logLine = vi.fn()
+  const previous = (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+
+  const error = new JsonRpcGatewayError('Session storage is unavailable', {
+    code: 5000,
+    data: {
+      code: 'storage_unavailable',
+      cause: 'unknown',
+      details: 'C:\\private\\state.db prompt=private prompt session_id=private-session token=secret'
+    },
+    method: 'session.create'
+  })
+
+  ;(window as unknown as { hermesDesktop: { logLine: typeof logLine } }).hermesDesktop = { logLine }
+
+  try {
+    notifyError(error, 'Session unavailable')
+
+    const line = logLine.mock.calls[0]?.[0] as string
+    expect(line).toContain('rpc_code=5000')
+    expect(line).toContain('storage_category=storage_unavailable')
+    expect(line).toContain('storage_cause=unknown')
+    expect(line).toContain('rpc_method=session.create')
+    expect(line).not.toContain('state.db')
+    expect(line).not.toContain('private prompt')
+    expect(line).not.toContain('private-session')
+    expect(line).not.toContain('secret')
+    expect(lastMessage()).toBe('Session storage is unavailable')
+  } finally {
+    if (previous === undefined) {
+      delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    } else {
+      ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = previous
+    }
+  }
+})
+
+test.each([4001, 5001])('storage RPC diagnostics recognize canonical wire reason with code %s', code => {
+  const logLine = vi.fn()
+
+  const previous = (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+
+  ;(window as unknown as { hermesDesktop: { logLine: typeof logLine } }).hermesDesktop = { logLine }
+
+  try {
+    notifyError(
+      new JsonRpcGatewayError('storage_unavailable', {
+        code,
+        data: { reason: 'storage_unavailable', cause: 'locked', detail: 'C:\\private\\state.db token=secret' },
+        method: 'prompt.submit'
+      }),
+      'Session unavailable'
+    )
+
+    const line = logLine.mock.calls[0]?.[0] as string
+    expect(line).toContain(`rpc_code=${code}`)
+    expect(line).toContain('storage_category=storage_unavailable')
+    expect(line).toContain('storage_cause=locked')
+    expect(line).toContain('rpc_method=prompt.submit')
+    expect(line).not.toContain('state.db')
+    expect(line).not.toContain('secret')
+  } finally {
+    if (previous === undefined) {
+      delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    } else {
+      ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = previous
+    }
+  }
+})
+
+test('storage RPC logging rejects unrecognized codes and redacts invalid causes', () => {
+  const logLine = vi.fn()
+
+  const previous = (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+
+  ;(window as unknown as { hermesDesktop: { logLine: typeof logLine } }).hermesDesktop = { logLine }
+
+  try {
+    notifyError(
+      new JsonRpcGatewayError('Session storage is unavailable', {
+        code: 5000,
+        data: { code: 'storage_unavailable', cause: 'C:\\private\\state.db token=secret' },
+        method: 'C:\\private\\state.db token=secret'
+      }),
+      'Session unavailable'
+    )
+
+    const storageLine = logLine.mock.calls[0]?.[0] as string
+    expect(storageLine).toContain('storage_cause=unclassified')
+    expect(storageLine).toContain('rpc_method=unknown')
+    expect(storageLine).not.toContain('state.db')
+    expect(storageLine).not.toContain('secret')
+
+    notifyError(
+      new JsonRpcGatewayError('Session storage is unavailable', {
+        code: 4001,
+        data: { code: 'invalid_params', cause: 'unknown' }
+      }),
+      'Session unavailable'
+    )
+
+    expect(logLine.mock.calls[1]?.[0]).not.toContain('storage_rpc')
+  } finally {
+    if (previous === undefined) {
+      delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    } else {
+      ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = previous
+    }
+  }
+})
+
 test.each(['missing', 'closed'] as const)(
   'notifyError still shows a toast when the log bridge is %s',
   (state: 'missing' | 'closed'): void => {
@@ -199,4 +311,30 @@ test('an unrelated invalid_params keeps the generic toast', () => {
     'Edit failed'
   )
   expect(lastMessage()).toBe('invalid_params')
+})
+
+// #143133: a model pick or option change on a chat whose launch API key changed showed the raw
+// `launch_credentials_unavailable` code. Every retry repeats it; a new chat runs on the current key.
+test('a launch-credentials refusal says the key changed and offers a new chat', () => {
+  notifyError(
+    new JsonRpcGatewayError('launch_credentials_unavailable', {
+      code: 4001,
+      data: {
+        reason: 'launch_credentials_unavailable',
+        field: 'model.api_key',
+        detail: 'changed in config.yaml since this session started'
+      }
+    }),
+    en.shell.modelOptions.updateFailed
+  )
+
+  const toast = $notifications.get()[0]
+  expect(toast?.message).toBe(en.assistant.thread.errorCodes.launch_credentials_unavailable.body)
+  expect(toast?.message).not.toContain('launch_credentials_unavailable')
+  expect(toast?.action?.label).toBe(en.assistant.thread.errorStartNewSession)
+
+  // A deferred pick's refusal event carries only the bare code.
+  clearNotifications()
+  notifyError(new Error('launch_credentials_unavailable'), en.desktop.modelSwitchFailed)
+  expect(lastMessage()).toBe(en.assistant.thread.errorCodes.launch_credentials_unavailable.body)
 })

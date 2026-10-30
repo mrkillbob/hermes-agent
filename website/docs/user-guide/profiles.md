@@ -84,11 +84,11 @@ Copies your current profile's `config.yaml`, `.env`, `SOUL.md`, skills, and the 
 
 #### Keep a clone's imported agent setups synced (`--sync-imports`)
 
-If the source profile has run [`hermes import-agent`](./import-from-other-agents.md), its `import-sync.json` records which external Claude Code / Codex trees it imported. `--clone` leaves that manifest behind, so the clone gets a one-off copy of those skills and memories and stops there. Add `--sync-imports` to carry the manifest over:
+If the source profile has run [`hermes import-agent`](./import-from-other-agents.md) (the `agent-importers` plugin), its `import-sync.json` records which external Claude Code / Codex / Cursor trees it imported. `--clone` leaves that manifest behind, so the clone gets a one-off copy of those skills and memories and stops there. Add `--sync-imports` to carry the manifest over:
 
 ```bash
 hermes profile create work --clone --sync-imports
-hermes -p work import-agent --sync        # pulls changes from the same ~/.claude / ~/.codex
+hermes -p work import-agent --sync        # pulls changes from the same ~/.claude / ~/.codex / ~/.cursor
 ```
 
 This is explicit, opt-in and one-directional, and it links the clone to the **external agent trees only** — never to the source profile. Both profiles stay independent islands: editing the source's `config.yaml`, `SOUL.md` or skills afterwards never reaches the clone. `--clone-all` copies the manifest as part of the full copy.
@@ -104,6 +104,16 @@ Copies **everything** — config, API keys, personality, all memories, skills, p
 :::note OAuth logins are shared, not copied
 Anthropic (Claude Pro/Max), OpenAI Codex, and xAI OAuth logins use **single-use refresh tokens** — a copy of one is not a second credential, it is the same credential with two owners, and the first profile to refresh it revokes it for every other copy. `--clone-all` (and the dashboard's credential mirroring) therefore drops those OAuth rows from the clone. The new profile keeps reading the login from the root `~/.hermes/auth.json`, and a token refresh performed inside any profile is written back to root, so all profiles stay signed in. Static API keys are copied as usual. To give a profile its own separate OAuth login, run `hermes -p <name> auth add <provider>` inside it. That login is saved in the profile's own `auth.json`, also when root has no login for the provider yet, and from then on the profile uses it instead of the root login; root's `auth.json` is not changed. If the login cannot be saved, the command fails with an error instead of printing `Added`.
 :::
+
+### Profile credentials
+
+Cloud model-provider API keys and endpoint overrides are stored once in the
+installation root `.env` and are available to every named profile. A profile's
+own `.env` can override a model-provider key, while platform, relay, and other
+service credentials remain private to that profile. OAuth logins and credential
+pools stay in each profile's `auth.json`; a token refresh never writes to the
+root store. A profile with no usable provider key is still asked to set one up
+(`hermes -p <name> model`, or `hermes -p <name> auth add <provider>`).
 
 ### Clone from a specific profile
 
@@ -463,3 +473,66 @@ hermes profile update research-bot
 ```
 
 Use an export file for a one-time handoff or a move; use a distribution for an agent you'll keep shipping. See **[Profile Distributions: Share a Whole Agent](./profile-distributions.md)** for both — the comparison table, authoring, publishing, update semantics, and the security model.
+
+## Repair an existing canonical project binding
+
+Project registries belong to individual profiles. When a scheduled job moves into
+its assigned profile, an operator can adopt an already registered root project
+without creating a new project ID or rebinding its shared board:
+
+```bash
+hermes -p default project adopt-canonical PROJECT_ID \
+  --target-profile PROFILE \
+  --expected-root /absolute/canonical/repository \
+  --expected-board BOARD_SLUG
+```
+
+The named profile and both registry files must already exist. The command checks
+the exact canonical project, Git root and shared-board owner, preserves unrelated
+projects and active selection, and refuses conflicting registrations. Run it from
+the root profile outside a dispatched task or delegated child. It does not enable
+schedules, change model assignments, create credentials or run the project.
+
+A separate `HERMES_KANBAN_HOME` may hold shared board data. The canonical project
+registry and named profiles remain under the configured root profile home; the
+command validates the board through its configured shared-data location.
+
+For the exceptional case where that profile already has a second project row
+with the same slug and repository root but a different ID, use the narrower
+duplicate-reconciliation command only with an operator-reviewed expectation
+file and a new private receipt path. Set `RECEIPT_DIR` to an existing private
+directory given by its absolute canonical path (no symlink components), then
+choose a receipt filename there that does not already exist. The command
+creates the receipt without overwriting an existing file.
+
+```bash
+RECEIPT_DIR="/absolute/path/to/existing-private-directory"
+hermes -p default project canonicalize-duplicate LEGACY_PROJECT_ID \
+  --target-profile PROFILE \
+  --expectations ./reviewed-project-state.json \
+  --receipt "$RECEIPT_DIR/private-reconciliation-receipt.json"
+```
+
+The JSON file must contain exactly `expected_project_id`, `expected_root`,
+`expected_board`, `expected_legacy_project` (the complete legacy project row),
+`expected_legacy_folders` (the complete folder rows), `expected_active_id`
+(`null` when there is no selection), `expected_boards` (the complete board
+inventory), and `expected_references` (the reviewed terminal task summaries
+for each board). The command refuses active or unknown history, archived-board
+inventories, mismatched rows, and registry or history drift. It retires only
+the specified duplicate, preserves its historical task/run records, and adopts
+the existing canonical ID. It does not grant execution or model/RPC access,
+rewrite cards or shared-board ownership, or create a missing profile. The
+receipt is recovery evidence rather than an automatic rollback. A receipt-publication
+error occurs before registry commit; if the receipt was already linked, it is
+retained and its path must not be reused. A later uncertain-commit error requires
+inspecting the recorded registry outcome before retrying. Windows flushes the
+receipt file before linking it but does not attempt POSIX directory fsync. Run it
+from the root profile outside a dispatched task or delegated child.
+
+An uninitialized board with reviewed empty references remains uninitialized.
+Reconciliation reserves its existing database-initialization lock through registry
+commit. A concurrent missing-board `connect()` waits up to the existing init-lock
+deadline, then refuses without creating a database if the reservation is still
+held; retry after the holder releases. Existing-database connections keep their
+normal fast path and bounded initialization fallback.

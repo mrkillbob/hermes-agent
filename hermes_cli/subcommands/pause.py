@@ -3,7 +3,10 @@
 ``pause`` writes the ESTOP sentinel at ``$HERMES_HOME/ESTOP``; cron, kanban and new gateway
 turns halt on their next check (in-flight work is never killed). Every local turn is a gateway
 turn, so interactive CLI, TUI and Desktop turns are held too, with ``agent.estop.paused_reply``'s
-notice. ``resume`` removes it and operation resumes on the next tick — no restart. Ported from gastownhall/gastown estop.go (MIT).
+notice. ``resume`` removes it and operation resumes on the next tick — no restart.
+Automatic post-sync dependency generation cleanup also defers while paused; it retries
+on a later unpaused sync. Explicit ``hermes pm gc`` remains operator-directed. Already
+running cleanup is not interrupted. Ported from gastownhall/gastown estop.go (MIT).
 """
 
 from __future__ import annotations

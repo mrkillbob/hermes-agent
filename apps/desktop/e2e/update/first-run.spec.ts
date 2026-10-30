@@ -20,6 +20,7 @@ import * as path from 'node:path'
 import { expect, test } from '@playwright/test'
 
 import { recordWebSockets, send, waitForInteractive } from '../core/harness'
+import { observeTransportEvidence } from '../core/transport-evidence-cdp'
 
 import {
   backendServeProcesses,
@@ -78,8 +79,11 @@ test('a healthy local install opens straight to chat on every launch: no setup c
 
         const installer = startInstallerSampler(facts)
         const { app, page, logTail } = await launchInstalledApp(facts, env)
+        let evidence: Awaited<ReturnType<typeof observeTransportEvidence>> | undefined
+        let failed = false
 
         try {
+          evidence = await observeTransportEvidence(page, launch === 1 ? 'first-run-launch-1' : 'first-run-launch-2')
           await installFirstRunSampler(page)
           const ws = recordWebSockets(page)
           await waitForInteractive(app, page, 180_000).catch(error => {
@@ -108,7 +112,11 @@ test('a healthy local install opens straight to chat on every launch: no setup c
             installer.stop(),
             `launch ${launch} of a healthy install started the bootstrap installer\n${diagnostics(facts, logTail())}`
           ).toEqual([])
+        } catch (error) {
+          failed = true
+          throw error
         } finally {
+          await evidence?.finish(test.info(), failed)
           installer.stop()
           await closeQuietly(app)
         }

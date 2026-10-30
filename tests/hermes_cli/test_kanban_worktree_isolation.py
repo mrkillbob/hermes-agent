@@ -16,6 +16,7 @@ Two-part fix under test:
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -104,9 +105,18 @@ def test_decompose_worktree_children_get_own_workspace(kanban_home):
 
 
 
-def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
+@pytest.mark.parametrize("placement", ["default", "configured", "external_sibling"])
+def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path, placement):
     repo = _make_repo(tmp_path)
-    occupied = _add_worktree(repo, repo / ".worktrees" / "sibling", "wt/sibling")
+    workspace_root = repo / ".worktrees"
+    if placement != "default":
+        workspace_root = tmp_path / "configured-workspaces"
+        (kanban_home / "config.yaml").write_text(json.dumps({
+            "kanban": {"worktree_roots": {str(repo.resolve()): str(workspace_root)}}
+        }))
+    sibling_root = workspace_root if placement == "external_sibling" else repo / ".worktrees"
+    occupied = _add_worktree(repo, sibling_root / "sibling", "wt/sibling")
+    (occupied / "sibling-work.txt").write_text("unfinished sibling work\n")
 
     with kbc.connect() as conn:
         tid = kb.create_task(
@@ -118,7 +128,7 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
         task = kb.get_task(conn, tid)
 
     workspace, branch = kbw._resolve_worktree_workspace(task)
-    assert workspace == (repo / ".worktrees" / tid).resolve()
+    assert workspace == (workspace_root / tid).resolve()
     assert branch == f"wt/{tid}"
     # The sibling's checkout is untouched, still on its own branch.
     assert (occupied / "README.md").exists()
@@ -127,7 +137,117 @@ def test_resolve_worktree_falls_back_when_path_occupied(kanban_home, tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert head == "wt/sibling"
+    assert (occupied / "sibling-work.txt").read_text() == "unfinished sibling work\n"
+    assert kbw._resolve_worktree_workspace(task) == (workspace, branch)
+    if placement != "default":
+        assert not (repo / ".worktrees" / tid).exists()
+
+
+def test_occupied_worktree_rejects_invalid_location_policy(kanban_home, tmp_path):
+    repo = _make_repo(tmp_path)
+    occupied = _add_worktree(repo, repo / ".worktrees" / "sibling", "wt/sibling")
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="second sibling", workspace_kind="worktree", workspace_path=str(occupied),
+        )
+        task = kb.get_task(conn, tid)
+    (kanban_home / "config.yaml").write_text(json.dumps({
+        "kanban": {"worktree_roots": {str(repo.resolve()): "relative-location"}}
+    }))
+
+    with pytest.raises(ValueError, match="absolute separate directory"):
+        kbw._resolve_worktree_workspace(task)
+    assert not (repo / ".worktrees" / tid).exists()
+    assert (occupied / "README.md").read_text() == "base\n"
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_configured_fallback_alias_preserves_occupied_worktree(kanban_home, tmp_path):
+    repo = _make_repo(tmp_path)
+    occupied = _add_worktree(repo, repo / ".worktrees" / "sibling", "wt/sibling")
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="second sibling", workspace_kind="worktree", workspace_path=str(occupied),
+        )
+        task = kb.get_task(conn, tid)
+    root = tmp_path / "configured-workspaces"
+    root.mkdir()
+    alias = root / tid
+    alias.symlink_to(occupied, target_is_directory=True)
+    (kanban_home / "config.yaml").write_text(json.dumps({
+        "kanban": {"worktree_roots": {str(repo.resolve()): str(root)}}
+    }))
+
+    with pytest.raises(ValueError, match="occupied"):
+        kbw._resolve_worktree_workspace(task)
+    assert alias.is_symlink()
+    assert (occupied / "README.md").read_text() == "base\n"
+    assert not (repo / ".worktrees" / tid).exists()
 
 
 
 
+
+@pytest.mark.parametrize("entry", ["anchor", "fallback"])
+@pytest.mark.parametrize("detached", [False, True])
+def test_canonical_target_never_reuses_another_assignment(
+    kanban_home, tmp_path, entry, detached, monkeypatch,
+):
+    repo = _make_repo(tmp_path)
+    root = tmp_path / "external-workspaces"
+    (kanban_home / "config.yaml").write_text(json.dumps({
+        "kanban": {"worktree_roots": {str(repo.resolve()): str(root)}}
+    }))
+    requested = repo
+    if entry == "fallback":
+        requested = _add_worktree(repo, tmp_path / "sibling", "wt/sibling")
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="isolated assignment", workspace_kind="worktree",
+            workspace_path=str(requested),
+        )
+        task = kb.get_task(conn, tid)
+    occupied = _add_worktree(repo, root / tid, "wt/foreign")
+    if detached:
+        _git(occupied, "checkout", "--detach")
+    (occupied / "unfinished.txt").write_text("foreign unfinished work\n")
+    from hermes_cli import worktree_environment
+    bootstraps = []
+    monkeypatch.setattr(worktree_environment, "bootstrap_worktree_environments",
+                        lambda *args, **kwargs: bootstraps.append(args))
+
+    with pytest.raises(ValueError, match="occupied"):
+        kbw._resolve_worktree_workspace(task)
+
+    assert not bootstraps
+    assert (occupied / "unfinished.txt").read_text() == "foreign unfinished work\n"
+    actual = subprocess.run(
+        ["git", "-C", str(occupied), "branch", "--show-current"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert actual == ("" if detached else "wt/foreign")
+    metadata = subprocess.run(
+        ["git", "-C", str(repo), "config", "--get",
+         f"branch.wt/{tid}.hermes-kanban-base-sha"],
+        capture_output=True, text=True, check=False,
+    )
+    assert metadata.returncode == 1
+
+@pytest.mark.parametrize("entry", ["resolver", "allocator"])
+def test_worktree_subdirectory_is_not_an_assignment_root(kanban_home, tmp_path, entry):
+    repo = _make_repo(tmp_path)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="exact assignment root", workspace_kind="worktree")
+        branch = f"wt/{tid}"
+        checkout = _add_worktree(repo, tmp_path / "checkout", branch)
+        nested = checkout / "nested"
+        nested.mkdir()
+        (nested / "work.txt").write_text("preserve\n")
+        kbw.set_workspace_path(conn, tid, nested)
+        task = kb.get_task(conn, tid)
+    with pytest.raises(ValueError, match="checkout root"):
+        if entry == "resolver":
+            kbw._resolve_worktree_workspace(task)
+        else:
+            kbw._ensure_git_worktree(repo, nested, branch)
+    assert (nested / "work.txt").read_text() == "preserve\n"

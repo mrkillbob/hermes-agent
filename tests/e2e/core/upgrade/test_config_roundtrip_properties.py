@@ -263,7 +263,7 @@ def _before_version(text: str, block: str) -> str:
 
 
 def gen_case(seed: int, *, long: bool = False, n_sections: tuple = (5, 11), exclude_top: set = frozenset(),
-             null_leaves: bool = True) -> Case:
+             null_leaves: bool = True, require_null_leaf: bool = False) -> Case:
     rng = random.Random(seed)
     env: dict[str, str] = {}
     by_section: dict[str, list] = {}
@@ -286,6 +286,10 @@ def gen_case(seed: int, *, long: bool = False, n_sections: tuple = (5, 11), excl
         sec = sections[0]
         leaf = next(p for p in _leaves(tree) if p[0] == sec)
         _set(tree, leaf, "A" * 76 + "D:\\CentBrowserPortable " + "B" * 60)
+    if require_null_leaf and not any(v is None for v in _leaves(tree).values()):
+        # Schema changes shift seeded samples. Null-specific properties need an
+        # explicit null on a generated documented scalar, before text/oracle emission.
+        _set(tree, next(reversed(_leaves(tree))), None)
     if null_leaves and not any(v is None for v in _leaves(tree).values()):
         # The draw depends on DEFAULT_CONFIG's leaf population, so a new default key reshuffles
         # every seed; the explicit-null property must not hinge on which seed happened to roll one.
@@ -388,15 +392,16 @@ def _quiet():
 
 class ReadFaults:
     """Counts every read of config.yaml through the lowest-level YAML read seam
-    (``hermes_cli.config.fast_safe_load`` — every config.yaml reader in hermes_cli.config,
-    ``read_user_config_raw`` and therefore tui_gateway go through it) and fails chosen reads with
-    a transient ``EMFILE`` on an otherwise intact file."""
+    (``utils.fast_safe_load``, called by the file config backend that every config.yaml reader —
+    hermes_cli.config, ``read_user_config_raw`` and therefore tui_gateway — goes through) and fails
+    chosen reads with a transient ``EMFILE`` on an otherwise intact file."""
 
     def __init__(self, monkeypatch, config_path: Path):
         self.path = os.path.abspath(str(config_path))
         self.count = 0
         self.fail_at: set[int] = set()
-        real = C.fast_safe_load
+        import utils
+        real = utils.fast_safe_load
 
         def wrapped(stream):
             name = getattr(stream, "name", None)
@@ -405,7 +410,7 @@ class ReadFaults:
                 if self.count in self.fail_at:
                     raise OSError(errno.EMFILE, "Too many open files (C18 injected)")
             return real(stream)
-        monkeypatch.setattr(C, "fast_safe_load", wrapped)
+        monkeypatch.setattr(utils, "fast_safe_load", wrapped)
 
     def arm(self, *ks: int) -> None:
         self.count, self.fail_at = 0, set(ks)
@@ -441,9 +446,9 @@ def test_p1_noop_save_is_byte_identical(seed, home, monkeypatch):
     _noop_save_roundtrip(gen_case(seed, null_leaves=False), monkeypatch)
 
 
-@pytest.mark.parametrize("seed", [101, 102])
+@pytest.mark.parametrize("seed", [101, 103])
 def test_p1_explicit_null_leaves_survive_a_noop_save(seed, home, monkeypatch):
-    case = gen_case(seed)
+    case = gen_case(seed, require_null_leaf=True)
     assert any(v is None for v in _leaves(case.tree).values()), f"seed {seed} generated no null leaf"
     _noop_save_roundtrip(case, monkeypatch)
 
@@ -792,7 +797,7 @@ def test_p2_dashboard_partial_put_adds_no_phantom_section(web_app, home, monkeyp
 
 @pytest.mark.parametrize("seed", [607])
 def test_p2_dashboard_noop_put_keeps_explicit_nulls(seed, web_app, home, monkeypatch):
-    case = gen_case(seed)
+    case = gen_case(seed, require_null_leaf=True)
     assert any(v is None for v in _leaves(case.tree).values())
     _dashboard_roundtrip(case, web_app, monkeypatch)
 

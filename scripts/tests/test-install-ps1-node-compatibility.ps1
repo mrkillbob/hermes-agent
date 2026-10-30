@@ -39,6 +39,7 @@ echo %* > "$pythonArgsFile"
 exit /b 0
 "@ | Set-Content -LiteralPath $fakePython -Encoding Ascii
     function Get-Uv { return $fakeUv }
+    function Get-PinnedGit { return (Join-Path $testRoot 'git\cmd\git.exe') }
 
     $failed = $false
     try { Invoke-BootstrapPm } catch { $failed = $true }

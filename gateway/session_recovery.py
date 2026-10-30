@@ -33,6 +33,54 @@ def _origin_json(source) -> Optional[str]:
 class SessionRecoveryMixin:
     """SessionStore durable-row recovery and the SQLite side of routing transitions."""
 
+    def rekey_profile_routing(self, old_profile: str, new_profile: str) -> int:
+        """Re-key and persist in-memory routes when a served profile is renamed."""
+        old_name, new_name = str(old_profile or "").strip(), str(new_profile or "").strip()
+        if not old_name or not new_name or old_name == new_name:
+            return 0
+        old_prefix, new_prefix = f"agent:{old_name}:", f"agent:{new_name}:"
+        with self._lock:
+            self._ensure_loaded_locked()
+            moves = [
+                (key, new_prefix + key[len(old_prefix):], entry)
+                for key, entry in self._entries.items()
+                if key.startswith(old_prefix)
+                and getattr(getattr(entry, "origin", None), "profile", None) == old_name
+            ]
+            moving_keys = {old_key for old_key, _new_key, _entry in moves}
+            for _old_key, new_key, _entry in moves:
+                if new_key in self._entries and new_key not in moving_keys:
+                    raise ValueError(f"routing collision: {new_key}")
+            if not moves:
+                return 0
+            from dataclasses import replace
+            for old_key, new_key, entry in moves:
+                del self._entries[old_key]
+                entry.session_key = new_key
+                if entry.origin is not None:
+                    entry.origin = replace(entry.origin, profile=new_name)
+                self._entries[new_key] = entry
+            self._save()
+            return len(moves)
+
+    def purge_profile_routing(self, profile: str) -> int:
+        """Remove and persist routing entries whose recorded origin belongs to *profile*."""
+        name = str(profile or "").strip()
+        if not name:
+            return 0
+        with self._lock:
+            self._ensure_loaded_locked()
+            removed = [
+                key for key, entry in self._entries.items()
+                if getattr(getattr(entry, "origin", None), "profile", None) == name
+            ]
+            if not removed:
+                return 0
+            for key in removed:
+                self._entries.pop(key, None)
+            self._save()
+            return len(removed)
+
     def _resolve_profile_for_key(self, source: Optional[SessionSource] = None) -> Optional[str]:
         """Profile namespace for session keys: None when multiplexing is off (legacy
         ``agent:main``), else the pinned identity's runtime profile, ``source.profile`` or the
@@ -266,7 +314,9 @@ class SessionRecoveryMixin:
         ``migrated_legacy`` tells the caller to rewrite the peer row to the scoped key."""
         legacy_key = self._legacy_slack_session_key(source)
         recovered = self._find_gateway_session_row(
-            session_key=session_key, source=source, allow_peer_fallback=legacy_key is None,
+            session_key=session_key, source=source,
+            allow_peer_fallback=legacy_key is None and not bool(
+                str(getattr(source, "_session_key_lane", "") or "").strip()),
             raise_on_lookup_error=raise_on_lookup_error)
         migrated_legacy = False
         if not recovered and legacy_key and self._claim_legacy_slack_key(legacy_key):
@@ -300,6 +350,8 @@ class SessionRecoveryMixin:
                 promote(session_id, reason)
             else:
                 db.end_session(session_id, reason)
+            from gateway.session_bot import release_superseded_bot_chat
+            release_superseded_bot_chat(db, self, session_key, session_id)
             # Stop the departed conversation's schedule in its owning profile, even when
             # the in-memory watch still holds a pre-reset session id.
             heartbeat_key = f"heartbeat:{session_id}"
@@ -409,6 +461,19 @@ class SessionRecoveryMixin:
                     "self-healing peer refresh on the next turn",
                     create_kwargs.get("session_id"), session_key, during, e),
             )
+
+    def _announce_route(self, session_key: str, entry) -> None:
+        """*session_key* now names *entry*'s conversation: tell the owner (``route_named``), so a
+        live conversation still on that route leaves it before anything else can run there."""
+        listener = getattr(self, "route_named", None)
+        if listener is not None and entry is not None:
+            listener(session_key, entry.session_id, entry.origin)
+
+    def _row_settled(self, session_id: str) -> None:
+        """The route transition that published *session_id* returned (its state.db half done or
+        failed): from here a missing or ended row is real again (see ``_is_session_ended_in_db``)."""
+        with self._lock:
+            self._rows_pending.discard(session_id)
 
     @staticmethod
     def _session_create_kwargs(

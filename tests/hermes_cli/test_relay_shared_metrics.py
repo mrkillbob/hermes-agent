@@ -161,7 +161,14 @@ def _record_client_active_in_process(
 ) -> None:
     store = SharedMetricsStore(Path(database_path), Path(outbox_directory))
     start_barrier.wait()
-    store.record_client_active(_resource())
+    try:
+        store.record_client_active(_resource())
+    except sqlite3.OperationalError as exc:
+        # The subscriber treats a busy database as best-effort telemetry. One
+        # concurrent process must still commit the install record; the parent
+        # asserts that invariant after both workers exit.
+        if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+            raise
 
 
 def test_model_call_counter_survives_restart_and_exports_only_new_deltas(tmp_path):
@@ -521,6 +528,7 @@ def test_client_resource_classification_is_bounded():
     assert client_install_method("Homebrew") == "homebrew"
     assert client_install_method("nix") == "nixos"
     assert client_install_method("apt") == "apt"
+    assert client_install_method("microsoft-store") == "microsoft-store"
 
     assert client_resource(
         "",
@@ -533,6 +541,19 @@ def test_client_resource_classification_is_bounded():
         architecture="unknown",
         install_method="unknown",
     )
+
+def test_microsoft_store_stamp_reports_its_own_install_method(tmp_path, monkeypatch):
+    """The Store build's stamp is the only place it is named; ``detect_install_method`` has no word for it."""
+    from hermes_cli.observability.shared_metrics_install import detect_client_install_method
+
+    monkeypatch.setattr("hermes_cli.config.get_project_root", lambda: tmp_path)
+    stamp = tmp_path / "install-stamp.json"
+    stamp.write_text(json.dumps({"updateMechanism": "microsoft-store"}), encoding="utf-8")
+    assert detect_client_install_method() == "microsoft-store"
+
+    stamp.write_text(json.dumps({"updateMechanism": "app-installer"}), encoding="utf-8")
+    assert detect_client_install_method() == "unknown"
+
 
 def test_package_schema_matches_the_client_resource_contract():
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -1526,15 +1547,22 @@ def test_concurrent_package_builders_commit_one_delta(tmp_path):
         ready.wait(timeout=5)
         return worker_store.create_and_export_package()
 
+    busy_calls = 0
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(export) for _ in range(2)]
-    for future in futures:
-        try:
-            future.result()
-        except sqlite3.OperationalError as exc:
-            # Interactive exports fail fast on contention; a later export retries.
-            assert exc.sqlite_errorcode == sqlite3.SQLITE_BUSY
-            store.create_and_export_package()
+        for future in futures:
+            try:
+                future.result()
+            except sqlite3.OperationalError as exc:
+                assert exc.sqlite_errorcode == sqlite3.SQLITE_BUSY
+                busy_calls += 1
+
+    # Interactive package creation can fail fast on a contended write. At
+    # least one racing builder must commit; retry after the lock is released
+    # if its peer reported the expected SQLITE_BUSY result.
+    assert busy_calls < len(futures)
+    if busy_calls:
+        store.create_and_export_package()
 
     with sqlite3.connect(database_path) as connection:
         [outbox_count] = connection.execute(

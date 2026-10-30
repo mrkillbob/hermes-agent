@@ -19,7 +19,11 @@ from agent.conversation_compression_archive import MERGED_DURABLE_ROWS, RETIRED_
 # stored-row CAS digest and the durable row adopted onto the live dict. Never transcript payload.
 DB_ROW_SNAPSHOT = "_db_row_snapshot"
 CANONICAL_ROW = "_canonical_row"
-REPAIR_BOOKKEEPING_FIELDS = frozenset({DB_ROW_SNAPSHOT, CANONICAL_ROW})
+# Set by the agent flush on a batch row (never a live dict) whose ``message_uid`` the agent itself saw durable in
+# this session (written by an earlier flush, or loaded from the store with its marker). Only such a row, with no
+# row address or snapshot, may be skipped as a re-insert of an ACTIVE uid; a bare copied uid proves nothing.
+RESTORED_FROM_STORE = "_restored_from_store"
+REPAIR_BOOKKEEPING_FIELDS = frozenset({DB_ROW_SNAPSHOT, CANONICAL_ROW, RESTORED_FROM_STORE})
 # Unanswered text a merged user row held before the current turn was absorbed
 # (agent_runtime_helpers._merge_consecutive_users); the persist override keeps it.
 # It repeats the row's own content, so pricing it would double the estimate.
@@ -39,21 +43,59 @@ ABSORBED_MESSAGE_UIDS = "_absorbed_message_uids"
 # (``messages.tool_call_uid``). The provider-facing ``id`` is untouched; these never reach the wire.
 TOOL_CALL_UIDS = "_tool_call_uids"
 TOOL_CALL_UID = "_tool_call_uid"
+# Set on a multimodal user row when an agent appended a skills note part to it: the part list carries no other
+# proof the note is the agent's rather than text the user pasted (a string turn proves it through its sidecar).
+SKILLS_NOTE_CARRIER = "_skills_note_carrier"
 PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset(
     # Membership is the real contract, NOT the leading underscore: the chat-completions transport happens
     # to sweep underscore keys, but turn_context.py pops this set from every outgoing copy and a strict
     # backend 400s on any key it does not know.
     {"timestamp", "display_kind", "display_metadata", "_row_id", "_submit_row_session_id",
-     MERGED_TURN_PREFIX, MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID,
+     MERGED_TURN_PREFIX, MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID, SKILLS_NOTE_CARRIER,
      # The alternation repair's row counts: an in-place compaction reads them off the live dict.
      MERGED_DURABLE_ROWS, UNNAMED_DURABLE_ROWS, RETIRED_DURABLE_ROWS}
 ) | REPAIR_BOOKKEEPING_FIELDS
 
 
+# Connector data-use requirement on a tool message; persisted inside ``display_metadata``, never sent to a model.
+DATA_USE = "data_use"
+
+
+def data_use_requirement(messages: Any) -> frozenset[str]:
+    """The union of ``data_use`` over *messages*: what the model receiving them must guarantee."""
+    return frozenset(r for m in messages or () if isinstance(m, Mapping) for r in m.get(DATA_USE) or ())
+
+
+def stamp_data_use(message: MutableMapping[str, Any], requires: list[str]) -> None:
+    """Mark a tool message with its requirement. The ``display_metadata`` copy is the durable one: that
+    column already rides every writer, branch and compaction copy, and replay lifts it back (SessionDB)."""
+    if not requires:
+        return
+    message[DATA_USE] = list(requires)
+    metadata = message.get("display_metadata")
+    message["display_metadata"] = {**(metadata if isinstance(metadata, dict) else {}), DATA_USE: list(requires)}
+
+
+def lift_data_use(message: MutableMapping[str, Any]) -> None:
+    """Restore a replayed row's ``data_use`` key from its durable ``display_metadata`` copy."""
+    metadata = message.get("display_metadata")
+    if isinstance(metadata, dict) and metadata.get(DATA_USE):
+        message[DATA_USE] = list(metadata[DATA_USE])
+
+
 # Replay carriers the preflight estimate prices at 0, exactly as the compaction tail walk does (opaque signatures,
 # duplicate reasoning copies, ordered sidecars); a mismatch between the two estimates loops compaction.
-UNPRICED_REPLAY_FIELDS = frozenset({"_anthropic_content_blocks", "reasoning_details", "extra_content",
-                                    "reasoning_opaque", "reasoning_text", "bedrock_content_blocks"})
+_UNPRICED_CORE_FIELDS = frozenset({"_anthropic_content_blocks", "reasoning_details", "extra_content",
+                                   "bedrock_content_blocks", DATA_USE})
+
+
+def unpriced_replay_fields() -> frozenset[str]:
+    """The core unpriced carriers plus every message carrier key a registered profile declares
+    (``ProviderProfile.message_carrier_*``). Resolve once per message, never per key."""
+    from agent.reasoning_carriers import declared_carrier_keys
+
+    opaque, text = declared_carrier_keys()
+    return _UNPRICED_CORE_FIELDS.union(opaque, text)
 
 
 def without_persistence_fields(msg: Mapping[str, Any]) -> Mapping[str, Any]:

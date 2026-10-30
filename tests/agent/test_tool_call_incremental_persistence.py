@@ -178,6 +178,66 @@ def test_run_conversation_flushes_assistant_tool_call_before_execution():
     assert result["final_response"] == "done"
 
 
+@pytest.mark.parametrize("tool_name", ["kanban_complete", "kanban_block", "kanban_schedule"])
+def test_kanban_worker_exits_after_durable_successful_completion(monkeypatch, tool_name):
+    """A completed worker must not make another provider call and keep working."""
+    from tools import kanban_tools
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_completed")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "715")
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+    # This test's "t_completed"/715 have no real board row, so the real auto-heartbeat/
+    # comment-injection bridges (agent._touch_activity -> heartbeat_current_worker_from_env /
+    # inject_new_comments_from_env) would either hard-interrupt the turn on a "lease lost"
+    # false positive or block opening a real board connection -- both unrelated to what this
+    # test actually exercises (kanban_complete tool-call persistence ordering).
+    monkeypatch.setattr(kanban_tools, "heartbeat_current_worker_from_env", lambda **kwargs: False)
+    monkeypatch.setattr(kanban_tools, "inject_new_comments_from_env", lambda *args, **kwargs: False)
+    agent = _make_agent()
+    # This owned remote fixture needs the real public-context attestation;
+    # the generic helper's manually cached operator prompt has no provenance.
+    agent._cached_system_prompt = agent._build_system_prompt()
+    agent.valid_tool_names.add(tool_name)
+    tool_call = _mock_tool_call(name=tool_name, call_id="terminal-1")
+    agent.client.chat.completions.create.return_value = _mock_response(
+        content="", finish_reason="tool_calls", tool_calls=[tool_call]
+    )
+
+    persisted_roles: list[list[str]] = []
+
+    def _record_flush(messages, conversation_history=None):
+        persisted_roles.append([message["role"] for message in messages])
+        return True
+
+    agent._flush_messages_to_session_db = MagicMock(side_effect=_record_flush)
+
+    def _fake_execute(assistant_message, messages, effective_task_id, api_call_count=0):
+        messages.append(
+            make_tool_result_message(
+                tool_name,
+                '{"ok": true, "task_id": "t_completed", "run_id": 715}',
+                "terminal-1",
+            )
+        )
+        # Match the real executor contract: the tool-result row is durable
+        # before control returns to the conversation loop.
+        agent._flush_messages_to_session_db(messages, [])
+
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_execute_tool_calls", side_effect=_fake_execute),
+    ):
+        result = agent.run_conversation("finish the kanban task")
+
+    assert persisted_roles[-1][-1] == "tool"
+    assert agent.client.chat.completions.create.call_count == 1
+    assert result["completed"] is True
+    assert result["turn_exit_reason"] == "kanban_terminal_transition"
+
+
 def test_interim_assistant_is_durable_before_ui_projection_on_abnormal_exit(tmp_path):
     """A visible interim assistant row must survive an immediate process exit.
 
@@ -500,6 +560,39 @@ def test_tool_result_is_durable_before_ui_completion_on_abnormal_exit(
     assert [message["role"] for message in durable] == expected_roles
     assert durable[2]["tool_call_id"] == "visible-call"
     assert durable[2]["content"] == "repository result"
+
+
+@pytest.mark.parametrize("executor_mode", ["sequential", "concurrent"])
+def test_connector_data_use_rides_the_tool_message_and_survives_a_reload(tmp_path, executor_mode):
+    """A requirement recorded during dispatch lands on the tool message as metadata (content untouched)
+    and comes back from the session DB on resume."""
+    from tools.connectors.data_use import record_data_use
+
+    agent = _make_agent()
+    db_path = tmp_path / "state.db"
+    db = _attach_real_session_db(agent, db_path, "data-use")
+    messages = [{"role": "user", "content": "read my mail"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "mail-call", "type": "function", "function": {"name": "web_search", "arguments": "{}"}}]}]
+    agent._flush_messages_to_session_db(messages)
+
+    def _dispatch(name, args, task_id, **kwargs):
+        record_data_use(["no_training"])
+        return '{"results": [{"response": "inbox"}]}'
+
+    try:
+        with (patch("model_tools.handle_function_call", side_effect=_dispatch),
+              patch("agent.tool_executor.maybe_persist_tool_result", side_effect=lambda **kw: kw["content"])):
+            getattr(agent, f"_execute_tool_calls_{executor_mode}")(
+                SimpleNamespace(content="", tool_calls=[_mock_tool_call(call_id="mail-call")]), messages, "task-1")
+    finally:
+        db.close()
+
+    plain = make_tool_result_message("web_search", '{"results": [{"response": "inbox"}]}', "mail-call")
+    assert messages[-1]["content"] == plain["content"]
+    assert messages[-1]["data_use"] == ["no_training"]
+    durable = _durable_messages(db_path, "data-use")[-1]
+    assert (durable["content"], durable["data_use"]) == (messages[-1]["content"], ["no_training"])
 
 
 @pytest.mark.parametrize("executor_mode", ["sequential", "concurrent"])
@@ -1024,4 +1117,3 @@ def test_flush_concurrent_nonblank_winner_adopts_canonical_content(tmp_path):
     assert messages[-1]["content"] == "Canonical winner answer from sibling"
     assert messages[-1]["_db_persisted"] is True
     assert messages[-1]["_row_id"] == row_id
-

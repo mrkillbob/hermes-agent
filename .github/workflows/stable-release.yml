@@ -32,13 +32,14 @@ concurrency:
 
 jobs:
   admit:
+    if: ${{ github.repository == 'NousResearch/hermes-agent' }}
     name: Admit the claim
     # A read token cannot see a draft release, so gh release view answers
     # "release not found" for a draft that exists. Write is the permission
     # that can read it.
     permissions:
       contents: write
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     outputs:
       claim-tag: ${{ steps.admit.outputs.claim-tag }}
       claim-object: ${{ steps.admit.outputs.claim-object }}
@@ -53,10 +54,11 @@ jobs:
       lanes: ${{ steps.admit.outputs.lanes }}
       jobs: ${{ steps.admit.outputs.jobs }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
       - uses: ./.github/actions/setup-pm
         with:
           cache-python: false
@@ -69,7 +71,7 @@ jobs:
   ci:
     name: Full CI pipeline
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['ci']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['ci']) }}
     permissions:
       contents: read
       pull-requests: write
@@ -86,8 +88,7 @@ jobs:
     # The image publish-docker pushes is built here, so a claim that skipped
     # tests still runs this job with its tests off. It builds alongside the
     # gates; only the acceptance join waits for CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['docker']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['docker']) }}
     uses: ./.github/workflows/docker.yml
     secrets: inherit
     with:
@@ -100,7 +101,7 @@ jobs:
   nix:
     needs: admit
     # The claim's policy removes it, not a gate it happens to need.
-    if: fromJSON(needs.admit.outputs.jobs)['nix']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['nix']) }}
     uses: ./.github/workflows/nix.yml
     with:
       commit: ${{ needs.admit.outputs.commit }}
@@ -109,7 +110,7 @@ jobs:
 
   pm-bundle:
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['pm-bundle']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['pm-bundle']) }}
     uses: ./.github/workflows/pm-bundle.yml
     with:
       release: true
@@ -117,7 +118,7 @@ jobs:
 
   termux-checks:
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['termux-checks']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['termux-checks']) }}
     permissions:
       contents: read
       actions: read
@@ -129,7 +130,7 @@ jobs:
 
   windows-live:
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['windows-live']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['windows-live']) }}
     uses: ./.github/workflows/windows-venv-e2e.yml
     with:
       commit: ${{ needs.admit.outputs.commit }}
@@ -138,7 +139,7 @@ jobs:
   install-e2e:
     name: Install and update E2E
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['install-e2e']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['install-e2e']) }}
     permissions:
       contents: read
       actions: read
@@ -154,8 +155,7 @@ jobs:
     name: Build signed release candidates (darwin-arm64)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-darwin-arm64']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-darwin-arm64']) }}
     permissions:
       contents: write
       actions: read
@@ -177,8 +177,7 @@ jobs:
     # Starts with the gates; the acceptance join is what requires CI.
     # macOS Intel is off by default: unsupported on main, and its macos-15-intel
     # runner adds over an hour to the release.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-darwin-x64']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-darwin-x64']) }}
     permissions:
       contents: write
       actions: read
@@ -198,8 +197,7 @@ jobs:
     name: Build signed release candidates (win32-arm64)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-arm64']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-arm64']) }}
     permissions:
       contents: write
       actions: read
@@ -222,8 +220,7 @@ jobs:
     name: Build signed release candidates (win32-x64)
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-x64']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-x64']) }}
     permissions:
       contents: write
       actions: read
@@ -246,10 +243,7 @@ jobs:
     name: Build signed release candidates (win32-bundle)
     needs: [admit, candidates-win32-arm64, candidates-win32-x64]
     # Starts with the gates; the acceptance join is what requires CI.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-bundle']
-      && needs.candidates-win32-arm64.result == 'success'
-      && needs.candidates-win32-x64.result == 'success'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-win32-bundle'] && needs.candidates-win32-arm64.result == 'success' && needs.candidates-win32-x64.result == 'success') }}
     permissions:
       contents: write
       actions: read
@@ -273,8 +267,7 @@ jobs:
     needs: admit
     # Starts with the gates; the acceptance join is what requires CI.
     # Termux is off by default.
-    if: >-
-      !cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-termux']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && needs.admit.result == 'success' && fromJSON(needs.admit.outputs.jobs)['candidates-termux']) }}
     permissions:
       contents: write
       actions: read
@@ -293,18 +286,19 @@ jobs:
   transitions-darwin-arm64:
     name: Pin actual OLD and NEW signed packages (darwin-arm64)
     needs: [admit, candidates-darwin-arm64]
-    if: fromJSON(needs.admit.outputs.jobs)['transitions-darwin-arm64']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['transitions-darwin-arm64']) }}
+    runs-on: ubuntu-24.04
     environment: release-signing
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
       macos: ${{ steps.plan.outputs.macos }}
       baseline: ${{ steps.plan.outputs.baseline }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
       - uses: ./.github/actions/setup-pm
         with:
           cache-python: false
@@ -328,18 +322,19 @@ jobs:
   transitions-darwin-x64:
     name: Pin actual OLD and NEW signed packages (darwin-x64)
     needs: [admit, candidates-darwin-x64]
-    if: fromJSON(needs.admit.outputs.jobs)['transitions-darwin-x64']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['transitions-darwin-x64']) }}
+    runs-on: ubuntu-24.04
     environment: release-signing
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
       macos: ${{ steps.plan.outputs.macos }}
       baseline: ${{ steps.plan.outputs.baseline }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
       - uses: ./.github/actions/setup-pm
         with:
           cache-python: false
@@ -363,18 +358,19 @@ jobs:
   transitions-win32:
     name: Pin actual OLD and NEW signed packages (win32)
     needs: [admit, candidates-win32-bundle]
-    if: fromJSON(needs.admit.outputs.jobs)['transitions-win32']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['transitions-win32']) }}
+    runs-on: ubuntu-24.04
     environment: release-signing
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
       macos: ${{ steps.plan.outputs.macos }}
       baseline: ${{ steps.plan.outputs.baseline }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
       - uses: ./.github/actions/setup-pm
         with:
           cache-python: false
@@ -401,10 +397,10 @@ jobs:
     # The recorded smoke results are the calls' own workflow results: a
     # call's stable-phase-result fails when its smokes fail, so a failed
     # smoke fails this job's RELEASE_NEEDS check and stages no manifest.
-    if: always() && fromJSON(needs.admit.outputs.jobs)['candidate-manifest']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (always() && fromJSON(needs.admit.outputs.jobs)['candidate-manifest']) }}
     needs: [admit, candidates-darwin-arm64, candidates-darwin-x64, candidates-win32-arm64,
             candidates-win32-x64, candidates-win32-bundle, candidates-termux]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     environment: release-signing
     timeout-minutes: 90
     outputs:
@@ -421,10 +417,11 @@ jobs:
       CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
       CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
           fetch-tags: true
       - uses: ./.github/actions/setup-pm
         with:
@@ -436,7 +433,7 @@ jobs:
     name: Windows signed-package acceptance
     needs: [admit, transitions-win32]
     # Without a published stable baseline there is no OLD package to upgrade from.
-    if: fromJSON(needs.admit.outputs.jobs)['windows-packaged'] && needs.transitions-win32.outputs.baseline != 'none'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['windows-packaged'] && needs.transitions-win32.outputs.baseline != 'none') }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.transitions-win32.outputs.windows) }}
@@ -455,7 +452,7 @@ jobs:
     name: macOS arm64 signed-package acceptance
     needs: [admit, transitions-darwin-arm64]
     # Without a published stable baseline there is no OLD package to upgrade from.
-    if: fromJSON(needs.admit.outputs.jobs)['macos-packaged-arm64'] && needs.transitions-darwin-arm64.outputs.baseline != 'none'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['macos-packaged-arm64'] && needs.transitions-darwin-arm64.outputs.baseline != 'none') }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.transitions-darwin-arm64.outputs.macos) }}
@@ -474,7 +471,7 @@ jobs:
     name: macOS x64 signed-package acceptance
     needs: [admit, transitions-darwin-x64]
     # Without a published stable baseline there is no OLD package to upgrade from.
-    if: fromJSON(needs.admit.outputs.jobs)['macos-packaged-x64'] && needs.transitions-darwin-x64.outputs.baseline != 'none'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['macos-packaged-x64'] && needs.transitions-darwin-x64.outputs.baseline != 'none') }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.transitions-darwin-x64.outputs.macos) }}
@@ -492,10 +489,10 @@ jobs:
   bootstrap-version:
     name: Bootstrap installer release identity
     needs: admit
-    if: fromJSON(needs.admit.outputs.jobs)['bootstrap-version']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['bootstrap-version']) }}
+    runs-on: ubuntu-24.04
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ needs.admit.outputs.commit }}
       - name: Stamp and verify the Cargo and Tauri release identity
@@ -525,16 +522,16 @@ jobs:
 
   acceptance:
     name: All release acceptance checks pass
-    if: always()
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (always()) }}
     needs: [admit, ci, docker, nix, pm-bundle, termux-checks, windows-live, install-e2e,
             candidates-darwin-arm64, candidates-darwin-x64, candidates-win32-arm64,
             candidates-win32-x64, candidates-win32-bundle, candidates-termux,
             candidate-manifest, transitions-darwin-arm64, transitions-darwin-x64,
             transitions-win32, windows-packaged, macos-packaged-arm64, macos-packaged-x64,
             bootstrap-version]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
       - uses: ./.github/actions/setup-pm
@@ -550,7 +547,7 @@ jobs:
     # B5: this job pushes only the immutable attempt-ref image tags; the
     # stable/latest aliases move in the ordered publication pass.
     needs: [admit, docker]
-    if: fromJSON(needs.admit.outputs.jobs)['publish-docker']
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (fromJSON(needs.admit.outputs.jobs)['publish-docker']) }}
     uses: ./.github/workflows/docker.yml
     secrets: inherit
     with:
@@ -565,9 +562,7 @@ jobs:
     # acceptance's own needs include signed-package arms that skip when there is no published
     # baseline (the first bundled release). Without !cancelled() that skip propagates here and
     # publication then refuses publish-bundles=skipped. acceptance itself is the gate.
-    if: >-
-      !cancelled() && fromJSON(needs.admit.outputs.jobs)['publish-bundles']
-      && needs.acceptance.result == 'success' && needs.candidate-manifest.result == 'success'
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (!cancelled() && fromJSON(needs.admit.outputs.jobs)['publish-bundles'] && needs.acceptance.result == 'success' && needs.candidate-manifest.result == 'success') }}
     permissions:
       contents: write
       actions: read
@@ -585,11 +580,11 @@ jobs:
 
   publication:
     name: All artifact publication succeeded
-    if: always()
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (always()) }}
     needs: [admit, acceptance, publish-docker, publish-bundles]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
       - uses: ./.github/actions/setup-pm
@@ -602,19 +597,20 @@ jobs:
 
   complete:
     name: Stable release is green
-    if: always()
+    if: ${{ github.repository == 'NousResearch/hermes-agent' && (always()) }}
     needs: [admit, ci, docker, acceptance, candidate-manifest, publication, publish-docker,
             windows-packaged, macos-packaged-arm64, macos-packaged-x64]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     environment: release-signing
     permissions:
       contents: write
       actions: read
     steps:
-      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          filter: blob:none
       - uses: ./.github/actions/setup-pm
         with:
           cache-python: false
@@ -668,7 +664,7 @@ jobs:
             --candidate-manifest-sha256 "$CANDIDATE_MANIFEST_SHA256" --candidate-commit "$RELEASE_COMMIT" \
             "${args[@]}"
       - name: Set up Docker Buildx for ordered alias promotion
-        uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184  # v2
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Log in to Docker Hub for ordered alias promotion
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
@@ -685,3 +681,8 @@ jobs:
           CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
           CLOUDFLARE_R2_BUCKET: ${{ vars.CLOUDFLARE_R2_BUCKET }}
           CLOUDFLARE_R2_PUBLIC_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_URL }}
+          # The pass commits this release's Store draft (scripts/releases/store.py).
+          MS_STORE_TENANT_ID: ${{ secrets.MS_STORE_TENANT_ID }}
+          MS_STORE_CLIENT_ID: ${{ secrets.MS_STORE_CLIENT_ID }}
+          MS_STORE_CLIENT_SECRET: ${{ secrets.MS_STORE_CLIENT_SECRET }}
+          MS_STORE_PRODUCT_ID: ${{ vars.MS_STORE_PRODUCT_ID }}

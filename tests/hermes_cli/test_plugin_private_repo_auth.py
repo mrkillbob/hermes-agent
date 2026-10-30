@@ -9,7 +9,6 @@ that ``GIT_TERMINAL_PROMPT=0`` blocks with "could not read Username ... terminal
 
 import base64
 import subprocess
-import sys
 
 import pytest
 
@@ -226,7 +225,10 @@ def test_credential_fill_uses_stored_helper_and_never_prompts(tmp_path, monkeypa
     helper.write_text("#!/bin/sh\n[ \"$1\" = get ] && printf 'username=bob\\npassword=pw-from-helper\\n'\n", encoding="utf-8")
     helper.chmod(0o755)
     gitconfig = tmp_path / "gitconfig"
-    gitconfig.write_text(f'[credential "https://git.example.test"]\n\thelper = !{helper}\n', encoding="utf-8")
+    gitconfig.write_text(
+        f'[credential]\n\tuseHttpPath = true\n'
+        f'[credential "https://git.example.test/acme/x.git"]\n\thelper = !{helper}\n',
+        encoding="utf-8")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
     monkeypatch.setenv("GIT_ASKPASS", "/nonexistent/askpass-must-not-run")
 

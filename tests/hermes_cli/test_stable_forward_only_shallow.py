@@ -55,23 +55,28 @@ def test_full_history_behind_release_is_proof(history, tmp_path, monkeypatch):
 def _timeout_git_probe(monkeypatch, subcommand: str):
     """Simulate only the unanswered probe; other commands keep real git and their normal bounds.
 
-    Inject TimeoutExpired instead of shortening a shared timeout: the strict HEAD read must not
-    become load-sensitive before the test reaches the ancestry probe.
+    Return the bounded probe's no-answer result instead of shortening a shared timeout: the
+    strict HEAD read must not become load-sensitive before the test reaches ancestry. The
+    source-channel wrapper converts that result to TimeoutExpired itself.
     """
-    real_run = subprocess.run
+    from hermes_cli import _subprocess_compat
+
+    real_run = _subprocess_compat.bounded_probe_run
     timed_out = []
 
     def run(cmd, *args, **kwargs):
         if cmd[:2] == ["git", subcommand]:
             timed_out.append(cmd)
-            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            return None
         return real_run(cmd, *args, **kwargs)
 
-    monkeypatch.setattr(source_releases.subprocess, "run", run)
+    monkeypatch.setattr(_subprocess_compat, "bounded_probe_run", run)
     return timed_out
 
 
-@pytest.mark.parametrize("compare, keeps_head", [({"status": "ahead"}, True), ({"status": "behind"}, False)])
+@pytest.mark.parametrize("compare, keeps_head", [
+    (None, True), ({"status": "ahead"}, True), ({"status": "behind"}, False),
+])
 def test_a_probe_that_never_answered_leaves_the_relation_unknown(history, monkeypatch, compare, keeps_head):
     """A killed probe is an unknown relation, not a reason to refuse the channel (#137646)."""
     origin, shas = history

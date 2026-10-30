@@ -183,8 +183,10 @@ gateway:
 convenience.) When multiplexing, the default gateway enumerates every profile,
 brings up each profile's enabled platforms under that profile's own
 credentials, and routes each inbound message to the profile it belongs to. Each
-turn resolves the routed profile's config, skills, memory, SOUL, **and provider
-keys** — credentials are never shared across profiles.
+turn resolves the routed profile's config, skills, memory, SOUL, and model route.
+Cloud model-provider credentials are read once from the installation root and are
+available to every named profile; platform, relay, and other service credentials
+remain profile-scoped.
 
 The host automatically serves unparked secondary profiles. Use `gateway start`
 on a parked profile to bring it back online.
@@ -379,14 +381,6 @@ the plain restart. `/api/status?profile=coder` carries the same list as
 default home's `gateway_state.json`), so it stays correct when the multiplexer was
 enabled only through `GATEWAY_MULTIPLEX_PROFILES` in the default profile's
 environment, or when profiles were added after the gateway started.
-
-The setup flows follow the same rule: `hermes -p coder setup gateway`, `hermes -p coder setup`,
-`hermes -p coder gateway setup` and `hermes -p coder import` configure the profile's bots but
-skip the "install the gateway background service" step for a served profile, printing
-*"Profile 'coder' is already served by the default multiplexer"* instead of registering a
-stray unit or plist that could only sit dead. Add the bot token and the running multiplexer
-picks it up.
-
 The multiplexer is the single inbound process; a second profile gateway would
 double-bind that profile's platforms. A profile that deliberately wants a
 separate process opts out with `gateway.standalone: true` (see
@@ -473,62 +467,10 @@ silently dropping the unsafe profile.
 
 #### Inbound-port platforms under the multiplexer
 
-A standalone `hermes -p coder gateway run` binds coder's Twilio, LINE, Teams,
-… webhook servers on their own ports. Under the multiplexer those adapters are
-still coder's — same credentials from `profiles/coder/.env`, same
-`config.yaml`, replies sent through coder's channel — but they bind **no port**.
-The default profile's shared listener forwards `/p/coder/<path>` to them, where
-`<path>` is exactly the path the adapter would serve standalone. The request is
-verified by **coder's** adapter with **coder's** secret (Twilio auth token, LINE
-channel secret, Teams app credentials, BlueBubbles password, …) and runs under
-coder's runtime scope; the default profile's own `/path` is untouched, and a
-profile that has no adapter for a path gets `404`, never another profile's bot.
-
-| Platform | Secondary profile's callback URL on the shared listener | Verified with the named profile's |
-|---|---|---|
-| Twilio SMS (`sms`) | `https://<host>/p/<profile>/webhooks/twilio` | `TWILIO_AUTH_TOKEN` signature (`SMS_WEBHOOK_URL` must be this URL) |
-| LINE (`line`) | `https://<host>/p/<profile>/line/webhook` (media: `/p/<profile>/line/media/...`) | `LINE_CHANNEL_SECRET` |
-| Microsoft Teams (`teams`) | `https://<host>/p/<profile>/api/messages` | Bot Framework token for `TEAMS_CLIENT_ID` |
-| BlueBubbles (`bluebubbles`) | `http://<host>/p/<profile>/bluebubbles-webhook` (registered with the server automatically) | `BLUEBUBBLES_PASSWORD` |
-| Microsoft Graph (`msgraph_webhook`) | `https://<host>/p/<profile>/msgraph/webhook` | `extra.client_state` |
-| WhatsApp Cloud (`whatsapp_cloud`) | `https://<host>/p/<profile>/whatsapp/webhook` | `WHATSAPP_CLOUD_APP_SECRET` / verify token |
-| WeCom callback (`wecom_callback`) | `https://<host>/p/<profile>/wecom/callback` | the app's callback token / AES key |
-| Feishu webhook mode (`feishu`) | `https://<host>/p/<profile>/feishu/webhook` | `FEISHU_VERIFICATION_TOKEN` / `FEISHU_ENCRYPT_KEY` |
-
-`<host>` is the public hostname (tunnel, reverse proxy) in front of the default
-profile's listener; a custom `webhook_path` in the profile's config moves the
-path after `/p/<profile>` accordingly. The gateway logs the exact URL at
-startup:
-
-```
-[sms] profile 'coder' is served on the default profile's shared listener:
-http://127.0.0.1:8642/p/coder/webhooks/twilio (point the vendor's callback URL at this path ...)
-```
-
-and every status surface repeats it, so you know what to paste into the vendor
-console:
-
-```
-$ hermes -p coder gateway status
-✓ Gateway is running via the default-profile multiplexer
-  Manage it from the default profile: hermes gateway status
-
-Inbound callback URLs on the shared listener:
-  line: http://127.0.0.1:8642/p/coder/line/webhook
-  sms: http://127.0.0.1:8642/p/coder/webhooks/twilio
-```
-
-`hermes gateway status` and `hermes status` on the default profile list the same
-URLs per served profile, and the dashboard's Channels page and the Desktop
-Messaging page show them as each platform's `ingress_url` when viewing that
-profile. The default's own `api_server` and `webhook` are reported the same way
-for a served profile — as **connected** with `ingress_url`
-`http://127.0.0.1:8642/p/coder/v1` (respectively `.../p/coder/webhooks/<route>`) —
-since the profile has no adapter of its own for them; it is the default's listener
-answering under the `/p/coder/` prefix. A per-profile
-`SMS_WEBHOOK_PORT`, `LINE_PORT`, `TEAMS_PORT`, … in a secondary's `.env` is
-ignored under the multiplexer (nothing binds); it applies again the moment that
-profile runs its own standalone gateway.
+Only `api_server` and `webhook` currently have a verified shared-listener
+implementation. Other inbound-port adapters may declare future compatibility,
+but until their forwarding and profile-scoped verification is implemented they
+remain standalone-only and are blocked by the multiplexer preflight.
 
 #### 3. Per-credential platforms still need their own token per profile
 
@@ -662,7 +604,8 @@ profile and never shares with the default or any sibling:
 
 | Concern | Resolved from | Behaviour when the profile lacks it |
 |---|---|---|
-| Provider keys, bot tokens, `${VAR}` refs in `config.yaml` | The profile's own `.env` (its secret scope) | Unresolved / no adapter — never the default profile's value |
+| Model-provider keys and base URLs, `${VAR}` refs for model providers in `config.yaml` | Shared model-provider entries from the installation root `.env`, overlaid by the profile's own `.env` | Unresolved only when neither store defines the provider key; platform and bot-token credentials never fall through from the root |
+| Provider logins and the credential pool (`auth.json`: OAuth tokens, `hermes auth add` keys) | The profile's own `auth.json` | "Not connected to any AI provider" with the `hermes -p <name> model` hint — never the default profile's login, and a refresh never writes to the root store |
 | Authorization (`GATEWAY_ALLOW_ALL_USERS`, `GATEWAY_ALLOWED_USERS`, per-platform allowlists and allow-all opt-ins) | The owning profile's `.env` and `config.yaml` | Closed — a default-profile opt-in never opens a secondary's bot |
 | Slash-command gating (`allow_admin_from`, `user_allowed_commands`, `group_allow_admin_from`; see [Slash commands](../reference/slash-commands.md)) | The profile whose bot received the message — a secondary's own platform `extra` block governs its bots, not the default profile's | Fail closed: a served profile whose config the multiplexer has not loaded is gated with an **empty** admin list and no user-enabled commands, so only the always-allowed floor (`/help`, `/whoami`) runs — never the default profile's open policy |
 | HTTP endpoints (`/p/<profile>/api/...`, `/p/<profile>/webhooks/...`, platform event callbacks) | The named profile's `API_SERVER_KEY`, `profile:`-bound webhook routes, and its own adapter | `401`/`404`; delivery without an adapter is `502`/`503`, never another profile's bot |
@@ -677,7 +620,7 @@ profile and never shares with the default or any sibling:
 | Working directory of a turn (unset `terminal.cwd`) | Same rule as a standalone gateway: `$HOME` for the local backend, sandbox default otherwise | Never the directory the multiplexer process was launched from |
 | Command approvals (`command_allowlist`, "always" choices) | The profile's own `config.yaml` | A default-profile "always" never pre-approves a secondary's command; a secondary's choice is saved to its own config |
 | Sandbox credential-file mounts (`terminal.credential_files`), `security.redact_secrets`, `browser.*` engine/headed flags, `lsp.*`, auxiliary-provider health marks, `logs/mcp-stderr.log` | The profile's own `config.yaml` / `.env` | Documented default — never the launch profile's cached value |
-| Cloud-SDK credential clients (Bedrock boto3 clients + model discovery, Azure Entra credential), credential-fetched catalogs (DeepInfra, Copilot context limits, Nous reasoning caps, Ramp Router efforts, xAI / OpenRouter image models, custom-endpoint `/models`), Camofox VNC address, computer-use aux-vision routing, remote-backend probe text, learned image token costs, `display.skin`, guest-mint back-off, banner skills, Yuanbao "active" adapter, Langfuse client | The profile's own `.env` / `config.yaml` / `<home>/cache` | Documented default — never the launch profile's cached value or its credentials |
+| Cloud-SDK credential clients (Bedrock boto3 clients + model discovery, Azure Entra credential), credential-fetched catalogs (DeepInfra, plugin-provider context limits, Nous reasoning caps, Ramp Router efforts, xAI / OpenRouter image models, custom-endpoint `/models`), computer-use aux-vision routing, remote-backend probe text, learned image token costs, `display.skin`, guest-mint back-off, banner skills, Yuanbao "active" adapter, Langfuse client | The profile's own `.env` / `config.yaml` / `<home>/cache` | Documented default — never the launch profile's cached value or its credentials |
 | Session-search knobs (`sessions.cjk_fts`, `sessions.search_slow_ms`) | The profile's `config.yaml` | Documented default — never the default profile's bridged value |
 | RoomLink capability catalog and the signed execution policy it advertises to a remote Bot (`approvals.mode`, `agent.max_turns`, `platform_toolsets.api_server`) | The served profile named by the request (`/p/<profile>/v1/room-members/...`, the RPC `profile` param); `target_profile` is **required** on every catalog — there is no `HERMES_PROFILE` fallback | Invitation/capabilities fail with the offending `target_profile` named; a profile that does not exist is refused, never resolved from the launch profile's config |
 | Platform proxies (`TELEGRAM_PROXY`, `DISCORD_PROXY`, `HTTPS_PROXY`, …) | The profile's own `.env` | Direct connection — never the default profile's proxy |
@@ -1190,6 +1133,15 @@ wins over the profile's own file. It governs the **automatic** path only:
 `hermes gateway migrate --multiplex` is an explicit request and still migrates
 (and is the supported way to opt back in). Absent or `true` keeps the default
 behaviour described above.
+
+The same setting covers a gateway that booted with only the default profile.
+Normally, once you create a second profile (Desktop's New Agent or
+`hermes profile create`), that gateway starts serving every profile in place,
+with no restart. With `auto_multiplex_migration: false` it keeps serving only
+its own profile, and the new profile is refused with that reason until you run
+`hermes gateway migrate --multiplex` or set the key back to `true`. The key is
+re-read on every profile rescan, so setting it back takes effect within about
+30 seconds, with no restart.
 
 The explicit command is different: `hermes gateway migrate --multiplex` with
 two or more profiles and **no** standalone secondary gateway still applies the

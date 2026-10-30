@@ -1,9 +1,16 @@
 """Assemble the "learning made visible" graph for desktop.
 
-Scoped to what a user actually learns over time: non-base, learned/profile
-skills (agent-created or used) plus ``MEMORY.md`` / ``USER.md`` chunks as
-first-class nodes. Skill links come from declared ``related_skills``;
-memory→skill links are derived from lexical overlap.
+This graph is intentionally scoped to what a user actually learns over time:
+- non-base, learned/profile skills (agent-created or used),
+- memory chunks from ``MEMORY.md`` / ``USER.md`` as first-class nodes.
+
+Skill links come from declared ``related_skills``. Memory-to-skill links are
+derived from lexical overlap so the graph can answer "which learned skills are
+connected to the things I remember?".
+
+Run as a module to print edge-density stats against real data:
+
+    python -m agent.learning_graph
 """
 
 from __future__ import annotations
@@ -11,7 +18,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, UTC
 from pathlib import Path
@@ -37,24 +43,61 @@ class SkillNode:
 
 
 def _fm_field(fm: dict[str, Any], key: str) -> Any:
-    """Top-level ``key`` or ``metadata.hermes.<key>``; tolerant of the string-valued
-    frontmatter that ``parse_frontmatter``'s malformed-YAML fallback produces."""
+    """Read a top-level skill field or its ``metadata.hermes`` fallback."""
     if fm.get(key):
         return fm[key]
-    meta = fm.get("metadata")
-    hermes = meta.get("hermes") if isinstance(meta, dict) else None
+    metadata = fm.get("metadata")
+    hermes = metadata.get("hermes") if isinstance(metadata, dict) else None
     return hermes.get(key) if isinstance(hermes, dict) else None
 
 
+def _frontmatter(text: str) -> dict[str, Any]:
+    try:
+        from agent.skill_utils import parse_frontmatter
+
+        fm, _ = parse_frontmatter(text)
+        return fm or {}
+    except Exception:
+        return {}
+
+
+def _hermes_meta(fm: dict[str, Any]) -> dict[str, Any]:
+    """``metadata.hermes`` as a dict, tolerant of the string-valued frontmatter
+    that ``parse_frontmatter``'s malformed-YAML fallback produces."""
+    meta = fm.get("metadata")
+    hermes = meta.get("hermes") if isinstance(meta, dict) else None
+    return hermes if isinstance(hermes, dict) else {}
+
+
 def _related(fm: dict[str, Any]) -> list[str]:
-    raw = _fm_field(fm, "related_skills")
-    raw = raw.strip("[]").split(",") if isinstance(raw, str) else raw
-    return [str(r).strip() for r in raw if str(r).strip()] if isinstance(raw, list) else []
+    raw = fm.get("related_skills") or _hermes_meta(fm).get("related_skills")
+    if isinstance(raw, list):
+        return [str(r).strip() for r in raw if str(r).strip()]
+    if isinstance(raw, str):
+        return [r.strip() for r in raw.strip("[]").split(",") if r.strip()]
+    return []
+
+
+def _category(fm: dict[str, Any], skill_md: Path) -> str:
+    cat = fm.get("category") or _hermes_meta(fm).get("category")
+    if cat:
+        return str(cat)
+    # …/skills/<category>/<skill>/SKILL.md
+    parts = skill_md.parts
+    return parts[-3] if len(parts) >= 3 else "general"
+
+
+def _iter_skill_files(roots: list[tuple[str, Path]]):
+    for source, root in roots:
+        if root.exists():
+            for path in root.rglob("SKILL.md"):
+                yield source, path
 
 
 def _load_usage() -> dict[str, dict[str, Any]]:
     try:
         from tools.skill_usage import load_usage
+
         return load_usage()
     except Exception:
         try:
@@ -64,19 +107,31 @@ def _load_usage() -> dict[str, dict[str, Any]]:
 
 
 def _to_int_ts(value: Any) -> Optional[int]:
-    """Epoch seconds from a number, numeric string, or ISO timestamp; None otherwise."""
     try:
-        if value is None or not (s := str(value).strip()):
+        if value is None:
             return None
         if isinstance(value, (int, float)):
             return int(value)
+        s = str(value).strip()
+        if not s:
+            return None
         try:
             return int(float(s))
         except ValueError:
             parsed = datetime.fromisoformat(s)
-            return int((parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)).timestamp())
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            return int(parsed.timestamp())
     except Exception:
         return None
+
+
+def _usage_timestamp(rec: dict[str, Any]) -> Optional[int]:
+    for key in ("last_activity_at", "last_used_at", "last_viewed_at", "last_patched_at", "created_at"):
+        ts = _to_int_ts(rec.get(key))
+        if ts is not None:
+            return ts
+    return None
 
 
 def build_skill_nodes(skill_roots: list[tuple[str, Path]]) -> dict[str, SkillNode]:
@@ -123,17 +178,36 @@ def build_skill_nodes(skill_roots: list[tuple[str, Path]]) -> dict[str, SkillNod
 
 
 def build_edges(nodes: dict[str, SkillNode]) -> list[tuple[str, str]]:
-    """Undirected related_skills edges where BOTH endpoints exist (deduped, first-seen order)."""
-    return list(dict.fromkeys(
-        (min(node.name, target), max(node.name, target)) for node in nodes.values() for target in node.related if target in nodes and target != node.name
-    ))
+    """Undirected related_skills edges where BOTH endpoints exist (deduped)."""
+    seen: set[tuple[str, str]] = set()
+    edges: list[tuple[str, str]] = []
+    for node in nodes.values():
+        for target in node.related:
+            if target in nodes and target != node.name:
+                a, b = sorted((node.name, target))
+                key = (a, b)
+                if key not in seen:
+                    seen.add(key)
+                    edges.append(key)
+    return edges
 
 
 def density_stats(nodes: dict[str, SkillNode], edges: list[tuple[str, str]]) -> dict[str, Any]:
-    linked, cats, n = {x for edge in edges for x in edge}, Counter(x.category for x in nodes.values()), len(nodes) or 1
+    linked: set[str] = set()
+    for a, b in edges:
+        linked.add(a)
+        linked.add(b)
+    cats: dict[str, int] = {}
+    for n in nodes.values():
+        cats[n.category] = cats.get(n.category, 0) + 1
+    n = len(nodes) or 1
     return {
-        "nodes": len(nodes), "related_edges": len(edges), "edges_per_node": round(len(edges) / n, 3),
-        "linked_nodes": len(linked), "isolated_pct": round(100 * (n - len(linked)) / n, 1), "categories": len(cats),
+        "nodes": len(nodes),
+        "related_edges": len(edges),
+        "edges_per_node": round(len(edges) / n, 3),
+        "linked_nodes": len(linked),
+        "isolated_pct": round(100 * (n - len(linked)) / n, 1),
+        "categories": len(cats),
         "agent_created": sum(1 for x in nodes.values() if x.created_by == "agent"),
         "used": sum(1 for x in nodes.values() if x.use_count > 0),
         "top_categories": sorted(cats.items(), key=lambda kv: -kv[1])[:8],
@@ -190,7 +264,6 @@ def _tokenize(text: str) -> set[str]:
 
 
 def _memory_skill_edges(memory_cards: list[dict[str, Any]], skills: list[SkillNode]) -> list[tuple[str, str]]:
-    """Top-4 lexically overlapping skills per memory card (name hit weighs 6)."""
     edges: list[tuple[str, str]] = []
     skill_meta = [(s.name, _tokenize(s.name), s.name.lower()) for s in skills]
     for idx, card in enumerate(memory_cards):
@@ -204,35 +277,135 @@ def _memory_skill_edges(memory_cards: list[dict[str, Any]], skills: list[SkillNo
     return edges
 
 
-def _has_learning_signal(node: SkillNode) -> bool:
-    """Graph-worthy: agent-created, user-taught (/learn), or actually used.
+def _skill_roots() -> list[tuple[str, Path]]:
+    repo = Path(__file__).resolve().parent.parent
+    home_skills = get_hermes_home() / "skills"
+    return [("base", repo / "skills"), ("profile", home_skills)]
 
-    ``created_by="learn"`` is a learning-signal marker only — curator management stays keyed
-    strictly on ``"agent"`` (see ``tools.skill_usage._is_curator_managed_record``). External
-    mounts are never a learning milestone: they were configured by the user, not learned, so
-    even a used external skill stays out of the journey graph (#108032).
-    """
+
+def _shared_catalog_config() -> tuple[bool, Path | None, list[str]]:
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        config = load_config_readonly() or {}
+        learning = config.get("learning") or {}
+        if not isinstance(learning, dict) or not bool(
+            learning.get("shared_catalog_enabled")
+        ):
+            return False, None, []
+        raw_vault = str(learning.get("vault_dir") or "").strip()
+        if not raw_vault:
+            return True, None, ["vault_dir_required"]
+        vault = Path(raw_vault).expanduser()
+        if not vault.is_absolute():
+            return True, None, ["vault_dir_not_absolute"]
+        return True, vault, []
+    except Exception:
+        return True, None, ["shared_catalog_config_unreadable"]
+
+
+def _shared_catalog():
+    enabled, vault, diagnostics = _shared_catalog_config()
+    if not enabled:
+        return False, [], diagnostics
+    if vault is None:
+        return True, [], diagnostics
+    try:
+        from agent.learning_vault import read_vault_learning
+
+        nodes, read_diagnostics = read_vault_learning(vault)
+        diagnostics.extend(item.reason_code for item in read_diagnostics[:100])
+        return True, nodes, diagnostics
+    except Exception:
+        diagnostics.append("shared_catalog_unreadable")
+        return True, [], diagnostics
+
+
+def _vault_node_id(node) -> str:
+    prefix = "vault-skill" if node.kind == "skill-reference" else "vault-memory"
+    return f"{prefix}:{node.record_id}"
+
+
+def _shared_edges(
+    shared_nodes, learned_skills: dict[str, SkillNode]
+) -> list[tuple[str, str]]:
+    ids = {node.record_id: _vault_node_id(node) for node in shared_nodes}
+    edges: set[tuple[str, str]] = set()
+    for node in shared_nodes:
+        source = ids[node.record_id]
+        for related_id in node.related_record_ids:
+            target = ids.get(related_id)
+            if target and target != source:
+                edges.add((source, target))
+
+    skill_meta = [
+        (skill.name, _tokenize(skill.name), skill.name.lower())
+        for skill in learned_skills.values()
+    ]
+    for node in shared_nodes:
+        if node.kind != "shared-memory":
+            continue
+        text = f"{node.label}\n{node.summary}".lower()
+        tokens = _tokenize(text)
+        scored: list[tuple[int, str]] = []
+        for name, skill_tokens, lower_name in skill_meta:
+            score = (6 if lower_name in text else 0) + len(tokens & skill_tokens)
+            if score > 0:
+                scored.append((score, name))
+        for _, name in sorted(scored, key=lambda item: (-item[0], item[1]))[:2]:
+            edges.add((_vault_node_id(node), name))
+    return sorted(edges)
+
+
+def _has_learning_signal(node: SkillNode) -> bool:
+    """Profile-created, taught, or used skills; configured mounts are not learning."""
     return node.source != "external" and (node.created_by in {"agent", "learn"} or node.use_count > 0)
 
 
 def build_learning_graph() -> dict[str, Any]:
-    """Full payload for the desktop learning panel: non-base skills with real
-    learning signal (agent-created or used) plus memory chunks as graph nodes."""
-    roots = [("base", Path(__file__).resolve().parent.parent / "skills"), ("profile", get_hermes_home() / "skills")]
+    """Full payload for the desktop learning panel.
+
+    Focus on what is profile-learned and actionable:
+    - skills that are NOT base-installed and show real learning signal
+      (agent-created or used),
+    - memory chunks as first-class graph nodes connected to those learned skills.
+    """
+    all_skills = build_skill_nodes(_skill_roots())
     learned_skills = {
-        name: node for name, node in build_skill_nodes(roots).items()
+        name: node
+        for name, node in all_skills.items()
         if node.source != "base" and _has_learning_signal(node)
     }
-    skill_edges, memory_cards = build_edges(learned_skills), _memory_cards()
+    skill_edges = build_edges(learned_skills)
+    memory_cards = _memory_cards()
     memory_edges = _memory_skill_edges(memory_cards, list(learned_skills.values()))
-    clusters = Counter(node.category for node in learned_skills.values())
+    shared_enabled, shared_nodes, shared_diagnostics = _shared_catalog()
+    shared_edges = _shared_edges(shared_nodes, learned_skills)
+
+    edges = skill_edges + memory_edges + shared_edges
+    clusters: dict[str, int] = {}
+    for node in learned_skills.values():
+        clusters[node.category] = clusters.get(node.category, 0) + 1
     if memory_cards:
         clusters["memory"] = len(memory_cards)
+    for node in shared_nodes:
+        clusters[f"shared:{node.area}"] = clusters.get(f"shared:{node.area}", 0) + 1
+        origin = f"shared-origin:{node.origin_agent}"
+        clusters[origin] = clusters.get(origin, 0) + 1
+        status = f"shared-status:{node.status}"
+        clusters[status] = clusters.get(status, 0) + 1
 
     graph_nodes = [
         {
-            "id": n.name, "label": n.name, "kind": "skill", "timestamp": n.timestamp, "category": n.category,
-            "useCount": n.use_count, "state": n.state, "createdBy": n.created_by, "pinned": n.pinned,
+            "id": n.name,
+            "label": n.name,
+            "kind": "skill",
+            "timestamp": n.timestamp,
+            "category": n.category,
+            "useCount": n.use_count,
+            "state": n.state,
+            "createdBy": n.created_by,
+            "pinned": n.pinned,
         }
         for n in learned_skills.values()
     ] + [
@@ -243,13 +416,63 @@ def build_learning_graph() -> dict[str, Any]:
         }
         for i, card in enumerate(memory_cards)
     ]
-    return {
+    for node in shared_nodes:
+        graph_nodes.append({
+            "id": _vault_node_id(node),
+            "label": node.label,
+            "kind": node.kind,
+            "originAgent": node.origin_agent,
+            "area": node.area,
+            "status": node.status,
+            "executionStatus": node.execution_status,
+            "timestamp": node.timestamp,
+            "category": f"shared:{node.area}",
+            "useCount": 0,
+            "state": "active",
+            "createdBy": node.origin_agent,
+            "pinned": False,
+        })
+
+    payload = {
         "nodes": graph_nodes,
-        "edges": [{"source": a, "target": b} for a, b in skill_edges + memory_edges],
-        "clusters": [{"category": c, "count": n} for c, n in sorted(clusters.items(), key=lambda kv: -kv[1])],
+        "edges": [{"source": a, "target": b} for a, b in edges],
+        "clusters": [
+            {"category": c, "count": n}
+            for c, n in sorted(clusters.items(), key=lambda kv: -kv[1])
+        ],
         "memory": memory_cards,
         "stats": {
             **density_stats(learned_skills, skill_edges),
-            "memory_nodes": len(memory_cards), "memory_skill_edges": len(memory_edges), "learned_skills": len(learned_skills),
+            "memory_nodes": len(memory_cards),
+            "memory_skill_edges": len(memory_edges),
+            "learned_skills": len(learned_skills),
         },
     }
+    if shared_enabled:
+        by_origin: dict[str, int] = {}
+        by_area: dict[str, int] = {}
+        by_status: dict[str, int] = {}
+        by_kind: dict[str, int] = {}
+        for node in shared_nodes:
+            for counts, key in (
+                (by_origin, node.origin_agent),
+                (by_area, node.area),
+                (by_status, node.status),
+                (by_kind, node.kind),
+            ):
+                counts[key] = counts.get(key, 0) + 1
+        payload["shared_catalog"] = {
+            "nodes": len(shared_nodes),
+            "edges": len(shared_edges),
+            "byOrigin": by_origin,
+            "byArea": by_area,
+            "byStatus": by_status,
+            "byKind": by_kind,
+            "diagnostics": shared_diagnostics,
+        }
+    return payload
+
+
+if __name__ == "__main__":
+    nodes = build_skill_nodes(_skill_roots())
+    print(json.dumps(density_stats(nodes, build_edges(nodes)), indent=2))

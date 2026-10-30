@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -11,9 +12,20 @@ import { sourceRuntimeSettleCommand } from '../../tests/install/e2e-assets/sourc
 import { assertUpdateWindowBackendOrigin, assertUpdateWindowProcess } from '../../tests/install/e2e-assets/update-window-chat.mjs'
 
 import { assertChatCommit, newCompletedPair, readMockPrompts, type TranscriptMessage } from './desktop-chat-smoke.ts'
-import { assertBackendOrigin, localBackendProcess, readBundledBundleEnv, readInstallationCommit } from './desktop-smoke-process.ts'
+import { assertBackendOrigin, localBackendProcess, processStartTime, readBundledBundleEnv, readInstallationCommit } from './desktop-smoke-process.ts'
 import { writeEnvFile, writeMockProviderConfig } from './mock-provider-config.ts'
 import { MOCK_REPLY, startMockServer } from './mock-server.ts'
+
+test('a later CI step\'s mock rebinds the dead mock\'s port, so a gateway that outlived it still answers', async (): Promise<void> => {
+  // The detached gateway froze `http://127.0.0.1:<port>` at boot; the step that started that mock is gone.
+  const earlier = await startMockServer()
+  await earlier.close()
+  const later = await startMockServer({ port: earlier.port })
+
+  try {
+    expect(later.url).toBe(earlier.url)
+  } finally { await later.close() }
+})
 
 test('one server owns inference and a fresh, per-server prompt witness', async (): Promise<void> => {
   const first = await startMockServer()
@@ -62,6 +74,91 @@ test('one server owns inference and a fresh, per-server prompt witness', async (
 
   await expect(readMockPrompts(first.url)).rejects.toThrow()
 })
+
+test('journey mock resumes a persisted endpoint across phase restarts', async (): Promise<void> => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'journey-mock-'))
+  const urlFile = path.join(root, 'mock-url')
+  const wrapper = path.resolve(import.meta.dirname, '../../tests/install/e2e-assets/mock-provider.mjs')
+  let child: ReturnType<typeof spawn> | undefined
+
+  const stop = async (): Promise<void> => {
+    if (!child || child.exitCode !== null) { return }
+    const exited = new Promise<void>(resolve => child!.once('exit', (): void => resolve()))
+    child.kill()
+    await exited
+  }
+
+  const start = async (port = 0): Promise<string> => {
+    fs.rmSync(urlFile, { force: true })
+    child = spawn(process.execPath, [wrapper, urlFile, String(port)], { stdio: 'ignore' })
+    await expect.poll((): boolean => fs.existsSync(urlFile), { timeout: 15_000 }).toBe(true)
+
+    return fs.readFileSync(urlFile, 'utf8')
+  }
+
+  try {
+    const original = await start()
+    const port = Number(new URL(original).port)
+    await stop()
+    const resumed = await start(port)
+    expect(resumed).toBe(original)
+    expect(await readMockPrompts(original)).toEqual([])
+    const nonce = 'fresh NEW request through persisted OLD endpoint'
+
+    const reply = await fetch(`${original}/v1/chat/completions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: nonce }] }),
+    })
+
+    expect(reply.ok).toBe(true)
+    expect(await readMockPrompts(original)).toEqual([nonce])
+    await expect(startMockServer({ port })).rejects.toThrow('EADDRINUSE')
+  } finally {
+    await stop()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}, 40_000)
+
+test.runIf(process.platform === 'win32')('Windows journey mock retains its endpoint across driver invocations', (): void => {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'journey-mock-windows-'))
+  const assets = path.resolve(import.meta.dirname, '../../tests/install/e2e-assets')
+  const home = path.join(work, 'home')
+
+  const script = `
+    $ErrorActionPreference = 'Stop'
+    . (Join-Path $env:TEST_ASSETS 'desktop-smoke-windows.ps1')
+    $mock = Start-DesktopJourneyMock $env:TEST_NODE $env:TEST_ASSETS $env:TEST_WORK $env:TEST_HOME $env:TEST_WORK
+    try {
+      $before = Invoke-RestMethod -Uri "$env:HERMES_E2E_MOCK_URL/__e2e__/prompts"
+      if (@($before.receivedPrompts).Count -ne 0) { throw 'New phase must have a fresh witness' }
+      $body = @{ messages = @(@{role='user'; content=$env:TEST_NONCE}) } | ConvertTo-Json -Depth 5
+      Invoke-RestMethod -Uri "$env:HERMES_E2E_MOCK_URL/v1/chat/completions" -Method Post -ContentType 'application/json' -Body $body | Out-Null
+      $after = Invoke-RestMethod -Uri "$env:HERMES_E2E_MOCK_URL/__e2e__/prompts"
+      if (@($after.receivedPrompts).Count -ne 1 -or $after.receivedPrompts[0] -ne $env:TEST_NONCE) { throw 'Fresh phase prompt was not received' }
+      Write-Output "JOURNEY_URL=$env:HERMES_E2E_MOCK_URL"
+    } finally {
+      Stop-Process -Id $mock.Id
+      $mock.WaitForExit()
+    }
+  `
+
+  const phase = (nonce: string): string => {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
+      encoding: 'utf8', timeout: 45_000,
+      env: { ...process.env, TEST_ASSETS: assets, TEST_NODE: process.execPath, TEST_WORK: work, TEST_HOME: home, TEST_NONCE: nonce },
+    })
+
+    expect(result.status, result.stdout + result.stderr).toBe(0)
+    const url = /^JOURNEY_URL=(http:\/\/127\.0\.0\.1:[0-9]+)$/m.exec(result.stdout)?.[1]
+    expect(url).toBeDefined()
+
+    return url!
+  }
+
+  try { expect(phase('OLD checkpoint')).toBe(phase('NEW resumed checkpoint')) } finally {
+    fs.rmSync(work, { recursive: true, force: true })
+  }
+}, 100_000)
 
 test('provider reconfiguration preserves feed, plugins, history and explicit fixture options', (): void => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-config-'))
@@ -218,6 +315,248 @@ test.runIf(process.platform === 'linux' || process.platform === 'darwin')('a hos
   }
 })
 
+// Each Windows observation starts separate PowerShell processes for CIM and TCP ownership.
+test('a detached native gateway needs its machine ledger incarnation and exact live listener', async (): Promise<void> => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-native-gateway-'))
+  const home = path.join(root, 'profiles', 'work')
+  fs.mkdirSync(home, { recursive: true })
+  const script = 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>console.log(s.address().port))'
+  const child = spawn(process.execPath, ['-e', script], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const other = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'] })
+
+  try {
+    const [port, otherPort] = await Promise.all([child, other].map(listener => new Promise<number>((resolve, reject): void => {
+      listener.once('error', reject)
+      listener.once('exit', code => reject(new Error(`Listener exited before readiness: ${code}`)))
+      listener.stdout.once('data', (data: Buffer): void => resolve(Number(data.toString().trim())))
+    })))
+
+    const started = processStartTime(child.pid!)
+    const otherStarted = processStartTime(other.pid!)
+
+    if (started === null || otherStarted === null) {
+      throw new Error('Native listener creation time is unreadable')
+    }
+
+    // gateway.run registers before binding: the record has no host/port detail.
+    const record = { pid: child.pid, purpose: 'gateway', create_time: started, host: '', port: null,
+      hermes_home: home, isolated: false }
+
+    const ledger = path.join(root, 'spawn-ledger.json')
+    // A sibling process stands in for Desktop: the detached listener is not its child.
+    fs.writeFileSync(path.join(home, 'spawn-ledger.json'), JSON.stringify([record]))
+    expect(() => localBackendProcess(port, other.pid!, home)).toThrow('found 0')
+    fs.rmSync(path.join(home, 'spawn-ledger.json'))
+
+    for (const invalid of [{ ...record, create_time: null }, { ...record, create_time: started - 3600 },
+      { ...record, pid: other.pid, create_time: otherStarted }, { ...record, port: port + 1 }, { ...record, isolated: true },
+      { ...record, hermes_home: os.tmpdir() }, { ...record, purpose: 'update' },
+      { ...record, host: '192.0.2.1' }, { ...record, hermes_home: path.join(root, 'missing') }]) {
+      fs.writeFileSync(ledger, JSON.stringify([invalid]))
+      expect(() => localBackendProcess(port, other.pid!, home)).toThrow('found 0')
+    }
+
+    fs.writeFileSync(ledger, JSON.stringify([record]))
+    const backend = localBackendProcess(port, other.pid!, home)
+    expect(backend.pid).toBe(child.pid)
+    expect(backend.ownership).toBe('host-ledger')
+    expect(() => localBackendProcess(otherPort, other.pid!, home)).toThrow('found 0')
+    fs.writeFileSync(ledger, JSON.stringify([{ ...record, hermes_home: path.join(root, 'missing') }, record]))
+    expect(localBackendProcess(port, other.pid!, home).pid).toBe(child.pid)
+    // A gateway candidate cannot vouch for its installed tree through app identity.
+    expect(() => assertBackendOrigin(backend, root, 'source', { appReportedRoot: root })).toThrow('source tree')
+    expect(() => assertBackendOrigin(backend, root, 'bundled')).toThrow('agent-payload')
+  } finally {
+    await Promise.all([child, other].map(listener => new Promise<void>((resolve): void => {
+      if (listener.exitCode !== null || listener.signalCode !== null) {
+        resolve()
+
+        return
+      }
+
+      listener.once('exit', (): void => resolve())
+      listener.kill()
+    })))
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}, process.platform === 'win32' ? 120_000 : 30_000)
+
+test('a detached native gateway proves its source installation', async (): Promise<void> => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-python-gateway-'))
+  const home = path.join(root, 'profiles', 'work')
+  const source = path.join(root, 'source with spaces')
+  fs.mkdirSync(home, { recursive: true })
+  fs.mkdirSync(path.join(source, 'hermes_cli'), { recursive: true })
+  fs.writeFileSync(path.join(source, 'hermes_cli', '__init__.py'), '')
+  // A real module launch exposes only the shared interpreter and -m to CIM.
+  // Its self-computed install ID follows register_self's producer contract.
+  // This is a listener-ownership fixture, so startup must not depend on DNS.
+  fs.writeFileSync(path.join(source, 'hermes_cli', 'main.py'), [
+    'import hashlib, json, socket', 'from pathlib import Path',
+    'def no_hostname_lookup(*args): raise RuntimeError("source proof must not resolve hostnames")',
+    'socket.getfqdn = no_hostname_lookup',
+    'from socketserver import TCPServer, BaseRequestHandler',
+    'root = str(Path(__file__).resolve().parent.parent).lower()',
+    'server = TCPServer(("127.0.0.1", 0), BaseRequestHandler)',
+    'print(json.dumps({"port": server.server_address[1], "install": hashlib.sha256(root.encode("utf-8")).hexdigest()[:12]}), flush=True)',
+    'server.serve_forever()',
+  ].join('\n'))
+  const python = process.env.HERMES_PYTHON || (process.platform === 'win32' ? 'python.exe' : 'python3')
+
+  console.info('[native source proof] starting listener')
+
+  const child = spawn(python, ['-m', 'hermes_cli.main'], { cwd: source, detached: true,
+    env: { ...process.env, PYTHONPATH: source }, stdio: ['ignore', 'pipe', 'pipe'] })
+
+  try {
+    const identity = await new Promise<{ port: number; install: string }>((resolve, reject): void => {
+      child.once('error', reject)
+      child.once('exit', code => reject(new Error(`Python listener exited before readiness: ${code}`)))
+      child.stdout.once('data', (data: Buffer): void => resolve(JSON.parse(data.toString())))
+    })
+
+    console.info('[native source proof] listener ready')
+    const started = processStartTime(child.pid!)
+    expect(started).not.toBeNull()
+    console.info('[native source proof] process start observed')
+
+    const record = { pid: child.pid, purpose: 'gateway', create_time: started, host: '', port: null,
+      hermes_home: home, install: identity.install }
+
+    fs.writeFileSync(path.join(root, 'spawn-ledger.json'), JSON.stringify([record]))
+    const backend = localBackendProcess(identity.port, child.pid!, home)
+    console.info('[native source proof] listener ownership observed')
+    expect(backend.ownership).toBe('host-ledger')
+    expect(backend.registeredGatewayInstallId).toBe(identity.install)
+    expect(() => assertBackendOrigin(backend, source, 'source')).not.toThrow()
+    expect(() => assertBackendOrigin(backend, root, 'source', { appReportedRoot: root })).toThrow('source tree')
+    expect(() => assertBackendOrigin(backend, source, 'bundled')).toThrow('agent-payload')
+    fs.writeFileSync(path.join(root, 'spawn-ledger.json'), JSON.stringify([record, { ...record, install: '0123456789ab' }]))
+    expect(localBackendProcess(identity.port, child.pid!, home).registeredGatewayInstallId).toBeUndefined()
+  } finally {
+    console.info('[native source proof] stopping listener')
+
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve): void => { child.once('exit', () => resolve()); child.kill() })
+    }
+
+    console.info('[native source proof] listener stopped')
+
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}, process.platform === 'win32' ? 120_000 : 30_000)
+
+test('a registered gateway proves only its own source installation when process evidence is unreadable', (): void => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-ledger-origin-'))
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-other-origin-'))
+
+  try {
+    const installId = createHash('sha256').update(fs.realpathSync.native(root).toLowerCase(), 'utf8').digest('hex').slice(0, 12)
+
+    const backend = { pid: process.pid, parentPid: 1, executable: path.join(os.tmpdir(), 'python.exe'),
+      command: 'python.exe -m hermes_cli.main gateway run --quiet', ownership: 'host-ledger' as const,
+      registeredGatewayInstallId: installId }
+
+    expect(() => assertBackendOrigin(backend, root, 'source')).not.toThrow()
+
+    for (const id of [undefined, 'bad', '0123456789ab']) {
+      expect(() => assertBackendOrigin({ ...backend, registeredGatewayInstallId: id }, root, 'source', { appReportedRoot: root })).toThrow('source tree')
+    }
+
+    expect(() => assertBackendOrigin(backend, other, 'source', { appReportedRoot: other })).toThrow('source tree')
+
+    for (const evidence of [{ sourceRoot: other }, { cwd: other }, { pythonPath: other }, { virtualEnv: path.join(other, 'venv') }]) {
+      expect(() => assertBackendOrigin({ ...backend, ...evidence }, root, 'source')).toThrow('source tree')
+    }
+
+    expect(() => assertBackendOrigin(backend, root, 'bundled')).toThrow('agent-payload')
+    expect(() => assertBackendOrigin({ ...backend, ownership: 'child' }, root, 'source')).toThrow('source tree')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+    fs.rmSync(other, { recursive: true, force: true })
+  }
+})
+
+test.runIf(process.platform === 'linux' || process.platform === 'darwin')('the canonical gateway gateway_state.json names is the listener, for its own incarnation only', async (): Promise<void> => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-host-gateway-'))
+  // A named profile: the root's multiplexer serves it and records its own state there.
+  const home = path.join(root, 'profiles', 'work')
+  fs.mkdirSync(home, { recursive: true })
+  const spawnedAt = Date.now() / 1000
+  const child = spawn(process.execPath, ['-e', 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>console.log(s.address().port))'], { stdio: ['ignore', 'pipe', 'pipe'] })
+
+  try {
+    const port = await new Promise<number>((resolve, reject): void => {
+      child.once('error', reject)
+      child.stdout.once('data', (data: Buffer): void => resolve(Number(data.toString().trim())))
+    })
+
+    // gateway.status._get_process_start_time: raw start ticks on Linux, centiseconds elsewhere.
+    const startTime = process.platform === 'linux'
+      ? Number(fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8').split(')').pop()!.trim().split(/\s+/)[19])
+      : Math.round(spawnedAt * 100)
+
+    const state = { pid: child.pid, kind: 'hermes-gateway', gateway_state: 'running', start_time: startTime }
+    const statePath = path.join(root, 'gateway_state.json')
+    // `gateway ensure` leaves the daemon outside the app's tree and out of the spawn ledger.
+    expect(() => localBackendProcess(port, child.pid!, home)).toThrow('found 0')
+
+    for (const invalid of [{ ...state, gateway_state: 'stopped' }, { ...state, kind: 'other' },
+      { ...state, pid: process.pid }, { ...state, start_time: startTime + 360_000 }, { ...state, start_time: undefined }, { ...state, start_time: null }]) {
+      fs.writeFileSync(statePath, JSON.stringify(invalid))
+      expect(() => localBackendProcess(port, child.pid!, home)).toThrow('found 0')
+    }
+
+    fs.writeFileSync(statePath, JSON.stringify(state))
+    const backend = localBackendProcess(port, child.pid!, home)
+    expect(backend.pid).toBe(child.pid)
+    expect(backend.ownership).toBe('host-gateway')
+    // The gateway is not tied to the app by ancestry: its own tree evidence is still required.
+    expect(() => assertBackendOrigin(backend, root, 'source', { appReportedRoot: root })).toThrow('source tree')
+    fs.writeFileSync(statePath, 'invalid')
+    expect(() => localBackendProcess(port, child.pid!, home)).toThrow('found 0')
+  } finally {
+    child.kill()
+    await new Promise<void>((resolve): void => { child.once('exit', (): void => resolve()) })
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a canonical gateway proves its tree by the cwd `gateway ensure` starts it in', (): void => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-gateway-origin-'))
+
+  try {
+    // spawn_unmanaged_gateway: `sys.executable -m hermes_cli.main --profile default gateway run`, cwd=<install root>.
+    // The interpreter is the managed one beside the checkout, so argv never names the root.
+    const executable = path.join(os.tmpdir(), 'hermes-tools', 'python', 'bin', 'python3.14')
+
+    const backend = { pid: 2, parentPid: 1, executable, cwd: root, ownership: 'host-gateway' as const,
+      command: [executable, '-m', 'hermes_cli.main', '--profile', 'default', 'gateway', 'run', '--quiet'].map(arg => JSON.stringify(arg)).join(' ') }
+
+    expect(() => assertBackendOrigin(backend, root, 'source', { appReportedRoot: root })).not.toThrow()
+    // The app's own report never vouches for a listener that is not its descendant.
+    expect(() => assertBackendOrigin({ ...backend, cwd: os.tmpdir() }, root, 'source', { appReportedRoot: root })).toThrow('different source tree')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a canonical gateway cannot prove its installation by a commit alone', (): void => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-gateway-sha-'))
+
+  try {
+    // Identical commits can exist in different installation directories.
+    const executable = path.join(os.tmpdir(), 'hermes-tools', 'python', 'python.exe')
+    const commit = 'a'.repeat(40)
+
+    const backend = { pid: 2, parentPid: 1, executable, ownership: 'host-gateway' as const, codeSha: commit,
+      command: [executable, '-m', 'hermes_cli.main', '--profile', 'default', 'gateway', 'run', '--quiet'].map(arg => JSON.stringify(arg)).join(' ') }
+
+    expect(() => assertBackendOrigin(backend, root, 'source', { appReportedRoot: root, installedCommit: commit })).toThrow('different source tree')
+    // A gateway started from another commit (or one that stamped none) is not vouched for.
+    expect(() => assertBackendOrigin({ ...backend, codeSha: 'b'.repeat(40) }, root, 'source', { appReportedRoot: root, installedCommit: commit })).toThrow('different source tree')
+    expect(() => assertBackendOrigin({ ...backend, codeSha: undefined }, root, 'source', { appReportedRoot: root, installedCommit: commit })).toThrow('different source tree')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
 test('a backend bound to the tree by environment needs no root in argv', (): void => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-env-origin-'))
 
@@ -315,7 +654,7 @@ test('OLD update-window source provenance carries its verified app identity to t
     fs.mkdirSync(other, { recursive: true })
 
     // As `localBackendProcess` reports a listener that descends from the app.
-    const backend = { pid: 2, parentPid: 1, executable: path.join(home, 'python.exe'), ownership: 'child',
+    const backend = { pid: 2, parentPid: 1, executable: path.join(home, 'python.exe'), ownership: 'child' as const,
       command: `"${path.join(home, 'python.exe')}" -m hermes_cli.main dashboard --port 0` }
 
     expect((): void => {

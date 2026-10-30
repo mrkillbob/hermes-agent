@@ -31,6 +31,11 @@ def worker_create(db, conn, session_id, payload):
     if config is not None and (not isinstance(config, dict) or set(config) - _CONSTRUCTOR_CONFIG):
         raise RuntimeStoreError('invalid_params')
     insert_session_row_in_transaction(db, conn, session_id, **payload)
+    if config:
+        # An owner-reserved child row already holds its lineage marker, so the keep-existing upsert
+        # would drop these facts; merge them beside it (keys are the constructor set only).
+        conn.execute("UPDATE sessions SET model_config=json_patch(model_config,?) WHERE id=? "
+                     "AND json_type(model_config,'$._delegate_from') IS NOT NULL", (json.dumps(config), session_id))
     return {'value': session_id}
 
 
@@ -161,12 +166,14 @@ def _row_id(payload):
 def worker_message_api_content(db, conn, session_id, payload):
     """Row-addressed sidecar backfill, same guards as ``SessionDB.set_message_api_content``."""
     from hermes_state_messages import _scrub_surrogates
-    if set(payload) != {'row_id', 'content', 'api_content'} or not isinstance(payload['api_content'], str):
+    if not {'row_id', 'content', 'api_content'} <= set(payload) <= {'row_id', 'content', 'api_content', 'display_metadata'} \
+            or not isinstance(payload['api_content'], str):
         raise RuntimeStoreError('invalid_params')
     return {'value': conn.execute(
-        "UPDATE messages SET api_content=? WHERE id=? AND session_id=? AND role='user' AND active=1 AND content IS ?",
-        (_scrub_surrogates(payload['api_content']), _row_id(payload), session_id,
-         db._encode_content(payload['content']))).rowcount}
+        "UPDATE messages SET api_content=?, display_metadata=COALESCE(?, display_metadata) "
+        "WHERE id=? AND session_id=? AND role='user' AND active=1 AND content IS ?",
+        (_scrub_surrogates(payload['api_content']), db._encode_display_metadata(payload.get('display_metadata')),
+         _row_id(payload), session_id, db._encode_content(payload['content']))).rowcount}
 
 
 def worker_user_content(db, conn, session_id, payload):
@@ -176,6 +183,25 @@ def worker_user_content(db, conn, session_id, payload):
     return {'value': conn.execute(
         "UPDATE messages SET content=? WHERE id=? AND session_id=? AND role='user' AND active=1",
         (db._encode_content(payload['content']), _row_id(payload), session_id)).rowcount}
+
+
+def worker_user_projection(db, conn, session_id, payload):
+    """Addressed CAS of one live user row's content + sidecar, same guards as
+    ``SessionDB.compare_and_set_user_message_projection``."""
+    from hermes_state_messages import _scrub_surrogates
+    keys = {'row_id', 'expected_content', 'expected_api_content', 'content', 'api_content'}
+    if set(payload) != keys:
+        raise RuntimeStoreError('invalid_params')
+    content, api_content = payload['content'], payload['api_content']
+    expected, expected_api = payload['expected_content'], payload['expected_api_content']
+    expected_api = None if expected_api == expected else expected_api
+    api_content = None if api_content == content else api_content
+    return {'value': conn.execute(
+        "UPDATE messages SET content=?, api_content=? WHERE id=? AND session_id=? "
+        "AND role='user' AND active=1 AND content IS ? AND api_content IS ?",
+        (db._encode_content(content), _scrub_surrogates(api_content) if api_content is not None else None,
+         _row_id(payload), session_id, db._encode_content(expected),
+         _scrub_surrogates(expected_api) if expected_api is not None else None)).rowcount}
 
 
 WORKER_LIFECYCLE_HANDLERS = {
@@ -188,6 +214,7 @@ WORKER_LIFECYCLE_HANDLERS = {
     'session.api_content': worker_api_content,
     'session.message_api_content': worker_message_api_content,
     'session.user_content': worker_user_content,
+    'session.user_projection': worker_user_projection,
     'session.create': worker_create,
     'session.end': worker_end,
     'session.lifecycle': worker_lifecycle,
@@ -272,3 +299,6 @@ def insert_session_row_in_transaction(
         self._delete_unreferenced_system_prompts(conn)
     if parent_session_id:
         self._inherit_parent_session_metadata(conn, session_id)
+    # The upsert may have just filled a compression tip's created_source (update_token_counts).
+    from hermes_state_compression import stamp_compression_ancestors
+    stamp_compression_ancestors(conn, session_id)

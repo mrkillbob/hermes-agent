@@ -559,6 +559,16 @@ def _reconcile_cron_runs(
 
     by_execution = {s["cron_execution_id"]: s for s in session_runs if s.get("cron_execution_id")}
     legacy = [s for s in session_runs if not s.get("cron_execution_id")]
+    # A legacy session names no execution, so time is all that ties it to a doc or attempt: it stands
+    # for ONE of them, never for every script-only run that fires near it.
+    claimed_legacy: set[int] = set()
+
+    def claim_legacy(ts: float) -> bool:
+        for s in legacy:
+            if id(s) not in claimed_legacy and _doc_matches_session(ts, s, _SESSION_DOC_MATCH_SECONDS):
+                claimed_legacy.add(id(s))
+                return True
+        return False
     terminal = [(index, a) for index, a in enumerate(attempts) if a["status"] in ("completed", "failed")]
     represented = {index for index, a in terminal if a["id"] in by_execution}
     paired: set = set()
@@ -569,13 +579,13 @@ def _reconcile_cron_runs(
         candidates = [(index, a) for index, a in terminal
                       if index not in paired and _execution_contains(a, doc_ts)]
         if not candidates:
-            if not matches(doc_ts, session_runs):
+            if not (matches(doc_ts, list(by_execution.values())) or claim_legacy(doc_ts)):
                 merged.append(doc)
             continue
         index, attempt = min(candidates, key=lambda c: _doc_writer(doc_ts, c[1], by_execution.get(c[1]["id"])))
         paired.add(index)
         represented.add(index)
-        if attempt["id"] in by_execution or matches(doc_ts, legacy):
+        if attempt["id"] in by_execution or claim_legacy(doc_ts):
             continue
         merged.append({**doc, "title": _execution_status_title(attempt["status"], attempt["error"], doc["title"])})
 
@@ -586,7 +596,7 @@ def _reconcile_cron_runs(
         if index in represented:
             continue
         when = attempt["finished_at"] or attempt["claimed_at"]
-        if matches(when, legacy):
+        if claim_legacy(when):
             continue
         error = attempt["error"]
         merged.append({

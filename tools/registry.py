@@ -123,6 +123,9 @@ def discover_builtin_tools(tools_dir: Optional[Path] = None) -> list[str]:
     per-file AST scan costs ~145 ms over ~100 files, so verdicts are memoized on disk keyed
     by ``(mtime_ns, size)``; a mismatch or corrupt cache re-scans that file. The write is
     best-effort and atomic, so concurrent processes race harmlessly."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return []
     from agent.safe_worker_policy import safe_worker_enabled
     if safe_worker_enabled():
         # Toolset filtering happens AFTER import. Keep the troubleshooting worker's
@@ -267,10 +270,6 @@ _check_fn_core_drop_warned: set[tuple[Callable, Optional[str]]] = set()  # once-
 _check_fn_cache_lock = threading.Lock()
 CHECK_FN_CACHE_BYPASS = ""
 _NO_CACHE_CHECK_FNS: set[Callable] = set()
-_BROWSER_IDENTITY_KEYS = (
-    "HERMES_SESSION_ID",
-    "HERMES_BROWSER_CONTROL_PRINCIPAL",
-    "HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY")
 
 
 def no_cache_check_fn(fn: Callable) -> Callable:
@@ -296,23 +295,9 @@ def _prune_check_fn_caches(now: float) -> None:
 
 
 def check_fn_cache_scope() -> Optional[str]:
-    """Return the active profile key when availability is profile-scoped. Browser-controller
-    availability is request-bound (changes on every attach/detach), so a fully bound
-    browser-control request bypasses this cache AND model_tools' outer definition cache (same
-    sentinel) — one Browser session's live tools must not leak into another. Single-profile
+    """Return the active profile key when availability is profile-scoped. Single-profile
     processes keep the process-wide cache; a multiplex gateway installs a Hermes-home override
     per profile turn, so the canonical profile key is the boundary."""
-    try:
-        from gateway.session_context import get_session_env
-        if all(str(get_session_env(k, "") or "").strip() for k in _BROWSER_IDENTITY_KEYS):
-            # api_server binds a server-derived principal + transport family on EVERY request, so
-            # identity-present != controller-attached; only bypass when the extension-control
-            # feature is actually on (#79047).
-            from gateway.browser_control_broker import browser_control_enabled
-            if browser_control_enabled():
-                return CHECK_FN_CACHE_BYPASS
-    except Exception:
-        pass
     try:
         from agent.secret_scope import serves_routed_profile
         from hermes_constants import get_hermes_home_override
@@ -483,6 +468,11 @@ class ToolRegistry:
         return hermes_home_key()
 
     @staticmethod
+    def current_cache_scope_key() -> tuple[str, Optional[str]]:
+        """Read-side catalog identity; registration ownership remains profile-only."""
+        return hermes_home_key(), _session_slot_key()
+
+    @staticmethod
     def _grouped(entries: list[ToolEntry]) -> dict[str, list[ToolEntry]]:
         """``{toolset: entries}`` in first-appearance order."""
         groups: dict[str, list[ToolEntry]] = {}
@@ -563,8 +553,13 @@ class ToolRegistry:
     def get_all_entries(self) -> list[ToolEntry]:
         return self._snapshot_entries()
 
-    def get_tool_names_for_toolset(self, toolset: str) -> list[str]:
-        return sorted(e.name for e in self._grouped(self._snapshot_entries()).get(toolset, []))
+    def get_tool_names_for_toolset(self, toolset: str, *, scope: Optional[str] = None) -> list[str]:
+        """List names visible in the active profile's overlay, the current session's overlay (only
+        when no explicit *scope* is asked for) and the global registry."""
+        entries = self._merged_tools(scope if scope is not None else self.current_scope_key())
+        if scope is None:
+            entries = {**entries, **self._scoped_tools.get(_session_slot_key(), {})}
+        return sorted(e.name for e in self._grouped(entries.values()).get(toolset, []))
 
     def register_toolset_alias(self, alias: str, toolset: str) -> None:
         """Register an explicit alias for a canonical toolset name."""
@@ -843,6 +838,16 @@ class ToolRegistry:
             self._generation += 1
         logger.debug("Deregistered tool: %s", name)
 
+    def move_to_scope(self, names, scope: str) -> None:
+        """Move process-global registrations into *scope*'s overlay (a single-profile process that
+        starts multiplexing hands its launch profile's MCP tools to that profile's own scope)."""
+        scope = normalize_scope(scope)
+        with self._lock:
+            moved = {name: self._tools.pop(name) for name in names if name in self._tools}
+            if moved:
+                self._slot(scope, create=True).update(moved)
+                self._generation += 1
+
     def restore_registration(
         self, name: str, current: ToolEntry, previous: Optional[ToolEntry], *,
         scope: Optional[str] = None) -> bool:
@@ -937,6 +942,8 @@ class ToolRegistry:
         self, name: str, args: dict, *, scope: Optional[str] = None, **kwargs) -> str | dict:
         """Execute a tool handler by name: async handlers bridged via ``_run_async()``,
         results normalized, every exception returned as ``{"error": ...}``."""
+        from agent.local_text_policy import require_tools_allowed
+        require_tools_allowed()
         entry = self.get_entry(name, scope=scope)
         if not entry:
             return tool_error(f"Unknown tool: {name}")

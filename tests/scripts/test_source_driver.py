@@ -244,3 +244,19 @@ for (const [product, out] of [['tui', 'ui-tui/dist'], ['web', 'hermes_cli/web_di
     assert error in result.stderr
     assert "bootstrap must not run" not in result.stderr
     assert snapshot() == before
+
+def test_desktop_observer_ignores_retained_backup_without_accepting_it_as_active(tmp_path):
+    observer = runpy.run_path(str(ASSETS / "source_driver.py"))
+    root = tmp_path / "source"
+    release = root / "apps/desktop/release"
+    for name in ("win-unpacked", "win-unpacked.bak"):
+        output = release / name / "resources/app.asar.unpacked/dist"
+        output.mkdir(parents=True)
+        (output / "index.html").write_text(name, encoding="utf-8")
+        (release / name / "Hermes.exe").write_bytes(b"fixture executable")
+    assert observer["desktop_outputs"](root) == [release / "win-unpacked/resources/app.asar.unpacked/dist"]
+    observer["verify_products"](root, "present")
+    shutil.rmtree(release / "win-unpacked")
+    with pytest.raises(RuntimeError, match="packaged renderer"):
+        observer["verify_products"](root, "present")
+    assert (release / "win-unpacked.bak/resources/app.asar.unpacked/dist/index.html").read_text() == "win-unpacked.bak"

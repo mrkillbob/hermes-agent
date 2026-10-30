@@ -134,6 +134,7 @@ class Fixture {
     # Override acquisition only. Production Get-BootstrapPython, both native
     # find call sites, caching and Stage-PythonDeps still execute unchanged.
     function Get-Uv { return $env:UTF8_PROBE_PYTHON }
+    function Get-PinnedGit { return (Join-Path $testInstallDir 'git\cmd\git.exe') }
 
     foreach ($codePage in @(936, 437, 65001)) {
         [Console]::OutputEncoding = [Text.Encoding]::GetEncoding($codePage)

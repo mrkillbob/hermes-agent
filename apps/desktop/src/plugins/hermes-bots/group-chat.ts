@@ -9,7 +9,7 @@
  * store, one writer.
  */
 
-import { atom, host } from '@hermes/plugin-sdk'
+import { atom, host, randomUuid } from '@hermes/plugin-sdk'
 
 import { $botMeta, $lastRoster, botRosterKey } from './data'
 import { groupMemberReferencesConnection, markOrphanedGroupMemberDescriptor } from './hygiene'
@@ -381,6 +381,11 @@ export function groupChatSyncSnapshot(
         ...(member?.sourceScoped
           ? {
               sourceScoped: true
+            }
+          : {}),
+        ...(member?.hermesHandleTaken
+          ? {
+              hermesHandleTaken: true
             }
           : {})
       })),
@@ -1703,11 +1708,16 @@ export function setGroupChatImage(group: string, image: null | string | undefine
 }
 
 function groupChatEntryId(): string {
-  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID()
-  }
+  return randomUuid()
+}
 
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+let lastGroupChatEntryAt = 0
+
+function groupChatEntryAt(after = 0): number {
+  const at = Math.max(Date.now(), lastGroupChatEntryAt + 1, after + 1)
+  lastGroupChatEntryAt = at
+
+  return at
 }
 
 /** The agent loop's "(empty)" terminal sentinel (empty_response_exhausted) is
@@ -1742,7 +1752,7 @@ export function appendGroupChatEntry(
     // millisecond (or a clock step back) would come back shuffled — a user
     // follow-up landing under a member's watermark is lost, or a reply moved
     // past it is fed back as news and re-drives the member.
-    at: Math.max(Date.now(), Number(lastEntry?.at || 0) + 1),
+    at: groupChatEntryAt(Number(lastEntry?.at || 0)),
     from,
     // Stored bodies share the prompt's per-line cap (see trimGroupChatLog);
     // cutting here too keeps the duplicate-echo guard comparing like with like.

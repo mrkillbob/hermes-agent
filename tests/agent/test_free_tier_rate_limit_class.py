@@ -74,7 +74,7 @@ def test_anonymous_refusals_all_offer_sign_in(case_id, status, body, headers, ki
     assert is_long_welcome_rate_limit(classified.error_context) is breaker
     result = _result(agent, error, classified, status)
     assert result["free_tier"]["kind"] == kind
-    assert result["final_response"].endswith("To sign in: /login.")
+    assert result["final_response"].endswith("Sign in with a Nous account for the full catalog: /login.")
     assert "fallback add" not in result["final_response"]
     surface = build_error_surface_from_result(result, provider="nous", model=MODEL)
     assert surface["code"] == f"free_tier_{kind}"
@@ -88,7 +88,7 @@ def test_named_account_same_response_is_not_a_free_tier_refusal(case_id, status,
     assert "welcome_refusal" not in classified.error_context
     result = _result(agent, error, classified, status)
     assert "free_tier" not in result
-    assert "To sign in: /login." not in result["final_response"]
+    assert "Sign in with a Nous account for the full catalog: /login." not in result["final_response"]
 
 
 def test_anonymous_402_off_the_welcome_host_keeps_ordinary_402_handling():

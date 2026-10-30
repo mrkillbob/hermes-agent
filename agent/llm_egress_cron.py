@@ -1,0 +1,306 @@
+"""Exact-call-bound, content-free cron inventory projection for owned workers.
+
+This admits inventory counts only. Job prompts, paths, names and credentials
+never acquire provenance from a catalog bridge or a tool's claimed label.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections import Counter
+from hashlib import sha256
+from typing import Any, Mapping
+
+from agent.llm_egress_firewall import (
+    _contains_canonical_base64,
+    _generated_context_text_for_base64_scan,
+    GeneratedContextSegment,
+    OutboundText,
+    SanitizedSegment,
+    UntrustedProvenanceSegment,
+    validate_sanitized_text,
+)
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _json_object(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, str) or len(value.encode("utf-8")) > 32768:
+        return None
+    try:
+        parsed = json.loads(value, object_pairs_hook=_unique_object)
+    except (ValueError, TypeError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _inventory_arguments(args: Any) -> bool:
+    if not isinstance(args, dict) or args.get("action") != "list":
+        return False
+    if set(args) - {"action", "limit", "job"}:
+        return False
+    # The model handler ignores these legacy keys for list. Preserve the
+    # original argument bytes and their scans; they confer no result authority.
+    if "limit" in args and (type(args["limit"]) is not int or args["limit"] < 1):
+        return False
+    if "job" in args:
+        if not isinstance(args["job"], str) or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_-]{0,63}", args["job"]
+        ):
+            return False
+        try:
+            validate_sanitized_text(args["job"], max_bytes=256)
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _runs_arguments(args: Any) -> bool:
+    if not isinstance(args, dict) or args.get("action") != "runs":
+        return False
+    if set(args) != {"action", "job_id"} or not isinstance(args["job_id"], str):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", args["job_id"]):
+        return False
+    # The call is admitted as generated context (see ``_project_runs_arguments``), so
+    # the id gets that lane's scan: bounded kebab/snake atoms pass, encoded values do not.
+    return not _contains_canonical_base64(
+        _generated_context_text_for_base64_scan(args["job_id"])
+    )
+
+
+def _arguments_kind(args: Any) -> str | None:
+    if _inventory_arguments(args):
+        return "list"
+    return "runs" if _runs_arguments(args) else None
+
+
+def _cron_call_kind(call: Mapping[str, Any]) -> str | None:
+    """``"list"`` or ``"runs"`` for an exact cron read call, else ``None``."""
+    function = call.get("function")
+    if call.get("type") != "function" or not isinstance(function, Mapping):
+        return None
+    if set(function) != {"name", "arguments"}:
+        return None
+    args = _json_object(function.get("arguments"))
+    if function.get("name") == "cronjob_manage":
+        return _arguments_kind(args)
+    if function.get("name") != "tool_call" or not isinstance(args, dict):
+        return None
+    calls = args.get("calls")
+    if set(args) != {"calls"} or not isinstance(calls, list) or len(calls) != 1:
+        return None
+    nested = calls[0]
+    if (
+        isinstance(nested, dict)
+        and set(nested) == {"name", "arguments"}
+        and nested.get("name") == "cronjob_manage"
+    ):
+        return _arguments_kind(nested.get("arguments"))
+    return None
+
+
+def _bound_untrusted_result(typed: Any, content: Any) -> bool:
+    if not isinstance(content, str):
+        return False
+    digest = sha256(content.encode("utf-8")).hexdigest()
+    if isinstance(typed, UntrustedProvenanceSegment):
+        return typed.content_sha256 == digest
+    if not isinstance(typed, OutboundText) or len(typed.segments) != 2:
+        return False
+    marker, raw = typed.segments
+    # Only the classifier's exact diagnostic wrapper is replaceable, never
+    # adjacent source/private bytes or an arbitrary typed composition.
+    return (
+        isinstance(marker, UntrustedProvenanceSegment)
+        and marker.content_sha256 == digest
+        and isinstance(raw, SanitizedSegment)
+        and raw.text == content
+    )
+
+
+def _inventory_projection(content: Any) -> str | None:
+    result = _json_object(content)
+    if (
+        result is None
+        or not {"success", "count", "jobs"} <= set(result)
+        or set(result) - {"success", "count", "jobs", "gateway_running", "warning"}
+    ):
+        return None
+    if (
+        "gateway_running" in result
+        and result["gateway_running"] is not None
+        and type(result["gateway_running"]) is not bool
+    ):
+        return None
+    if "warning" in result and not isinstance(result["warning"], str):
+        return None
+    count, jobs = result["count"], result["jobs"]
+    if (
+        result["success"] is not True
+        or type(count) is not int
+        or not isinstance(jobs, list)
+        or count != len(jobs)
+        or any(not isinstance(job, dict) for job in jobs)
+    ):
+        return None
+    # Nonempty inventory must be reviewed locally: no job field is replayed.
+    projected = {"success": True, "count": count}
+    projected.update({"jobs": []} if not jobs else {"jobs_omitted": True})
+    return json.dumps(projected, separators=(",", ":"))
+
+
+def _runs_projection(content: Any) -> str | None:
+    """Re-emit a strictly validated ``action="runs"`` result: statuses and stamps only."""
+    from tools.cronjob_runs import RUN_STAMP, RUN_STATUSES, RUNS_LIMIT
+
+    result = _json_object(content)
+    if result is None or set(result) != {"success", "count", "runs"}:
+        return None
+    count, runs = result["count"], result["runs"]
+    if (
+        result["success"] is not True
+        or type(count) is not int
+        or not isinstance(runs, list)
+        or count != len(runs)
+        or count > RUNS_LIMIT
+    ):
+        return None
+    projected = []
+    for run in runs:
+        if not isinstance(run, dict) or not {"status", "claimed_at"} <= set(run):
+            return None
+        if set(run) - {"status", "claimed_at", "finished_at"}:
+            return None
+        if run["status"] not in RUN_STATUSES:
+            return None
+        stamps = [run[key] for key in ("claimed_at", "finished_at") if key in run]
+        if any(not isinstance(v, str) or not RUN_STAMP.fullmatch(v) for v in stamps):
+            return None
+        projected.append(dict(run))
+    return json.dumps(
+        {"success": True, "count": count, "runs": projected}, separators=(",", ":")
+    )
+
+
+_PROJECTIONS = {"list": _inventory_projection, "runs": _runs_projection}
+
+
+def _project_runs_arguments(
+    message: Mapping[str, Any], typed_message: Any, runs_ids: set[str]
+) -> Any:
+    """Re-type the arguments of exact runs calls as the generated context they are.
+
+    The bytes sent are the model's own, unchanged; only their scan lane moves from
+    free-text sanitizing (which rejects some kebab ids by chance) to generated context.
+    """
+    raw_calls, typed_calls = message.get("tool_calls"), (
+        typed_message.get("tool_calls") if isinstance(typed_message, Mapping) else None
+    )
+    if not isinstance(raw_calls, list) or not isinstance(typed_calls, list):
+        return typed_message
+    if len(raw_calls) != len(typed_calls):
+        return typed_message
+    rewritten = list(typed_calls)
+    for position, (raw, typed) in enumerate(zip(raw_calls, typed_calls)):
+        function = raw.get("function") if isinstance(raw, Mapping) else None
+        typed_function = typed.get("function") if isinstance(typed, Mapping) else None
+        if (
+            raw.get("id") not in runs_ids
+            or not isinstance(function, Mapping)
+            or not isinstance(function.get("arguments"), str)
+            or not isinstance(typed_function, Mapping)
+        ):
+            continue
+        rewritten[position] = {
+            **typed,
+            "function": {
+                **typed_function,
+                "arguments": GeneratedContextSegment(function["arguments"]),
+            },
+        }
+    return {**typed_message, "tool_calls": rewritten}
+
+
+def project_cron_list(
+    body: Mapping[str, Any],
+    typed_body: Mapping[str, Any],
+    enabled: bool,
+) -> Mapping[str, Any]:
+    """Replace only a refused exact inventory result with its validated count.
+
+    Requires one unique preceding call and one result with the same ID. No
+    generic tool_call admission, source grant, model invocation or mutation.
+    Other transports and unmatched content keep their original firewall verdict.
+    """
+    if not enabled:
+        return typed_body
+    messages, typed_messages = body.get("messages"), typed_body.get("messages")
+    if not isinstance(messages, list) or not isinstance(typed_messages, list):
+        return typed_body
+    if len(messages) != len(typed_messages):
+        return typed_body
+    call_counts: Counter[str] = Counter()
+    result_counts: Counter[str] = Counter()
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        if message.get("role") == "assistant":
+            calls = message.get("tool_calls")
+            for call in calls if isinstance(calls, list) else ():
+                if isinstance(call, Mapping) and isinstance(call.get("id"), str):
+                    call_counts[call["id"]] += 1
+        if message.get("role") == "tool" and isinstance(
+            message.get("tool_call_id"), str
+        ):
+            result_counts[message["tool_call_id"]] += 1
+    preceding: dict[str, str] = {}
+    output = list(typed_messages)
+    for index, message in enumerate(messages):
+        if not isinstance(message, Mapping):
+            continue
+        if message.get("role") == "assistant":
+            calls = message.get("tool_calls")
+            for call in calls if isinstance(calls, list) else ():
+                kind = _cron_call_kind(call) if isinstance(call, Mapping) else None
+                if kind is not None:
+                    call_id = call.get("id")
+                    if isinstance(call_id, str) and call_id:
+                        preceding[call_id] = kind
+            runs_ids = {c for c, k in preceding.items() if k == "runs" and call_counts[c] == 1}
+            if runs_ids:
+                output[index] = _project_runs_arguments(message, output[index], runs_ids)
+            continue
+        call_id = message.get("tool_call_id")
+        typed_message = typed_messages[index]
+        if (
+            message.get("role") != "tool"
+            or not isinstance(call_id, str)
+            or call_id not in preceding
+            or call_counts[call_id] != 1
+            or result_counts[call_id] != 1
+            or any(
+                message.get(label) not in (None, "cronjob_manage")
+                for label in ("name", "tool_name")
+            )
+            or not isinstance(typed_message, Mapping)
+            or not _bound_untrusted_result(
+                typed_message.get("content"), message.get("content")
+            )
+        ):
+            continue
+        projection = _PROJECTIONS[preceding[call_id]](message.get("content"))
+        if projection is not None:
+            output[index] = {
+                **typed_message,
+                "content": GeneratedContextSegment(projection),
+            }
+    return {**typed_body, "messages": output}

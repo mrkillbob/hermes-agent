@@ -83,7 +83,7 @@ import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
-import { apiErrorFromResponse, errorMessage } from "@/lib/api-error";
+import { searchSnippetMap } from "./SessionsPage_search";
 
 
 /** Render an FTS5 snippet with highlighted matches.
@@ -417,7 +417,7 @@ function SessionRow({
         if (!cancelled) setMessages(resp.messages);
       })
       .catch((err) => {
-        if (!cancelled) setError(errorMessage(err));
+        if (!cancelled) setError(String(err));
       });
     return () => {
       cancelled = true;
@@ -932,7 +932,7 @@ export default function SessionsPage() {
     };
   }, [loading, setAfterTitle, total]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setEnd(
       <Button
         outlined
@@ -1009,7 +1009,7 @@ export default function SessionsPage() {
         loadStats();
         refreshEmptyCount();
       } catch (error) {
-        showToast(`Import failed: ${errorMessage(error)}`, "error");
+        showToast(`Import failed: ${error}`, "error");
       } finally {
         setImportingSessions(false);
         if (importInputRef.current) importInputRef.current.value = "";
@@ -1434,9 +1434,7 @@ export default function SessionsPage() {
                 .__HERMES_SESSION_TOKEN__ ?? "",
           },
         });
-        if (!res.ok) {
-          throw apiErrorFromResponse(res.status, await res.text().catch(() => ""), res.url);
-        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -1476,14 +1474,7 @@ export default function SessionsPage() {
     ? sessions.find((s) => s.id === sessionDelete.pendingId)
     : null;
 
-  // Build snippet map from search results (session_id → snippet)
-  const snippetMap = new Map<string, string>();
-  if (searchResults) {
-    for (const r of searchResults) {
-      snippetMap.set(r.session_id, r.snippet);
-      snippetMap.set(r.id, r.snippet);
-    }
-  }
+  const snippetMap = searchSnippetMap(searchResults);
 
   const filtered = searchResults ?? sessions;
 

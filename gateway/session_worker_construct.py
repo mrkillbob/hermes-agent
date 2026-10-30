@@ -13,6 +13,9 @@ KEYS = frozenset({'fallback_model', 'ephemeral_system_prompt', 'prefill_messages
 
 def construct_inputs(authority, policy, chat_id):
     """Owner side, per turn (off the owner loop: config reads)."""
+    from agent.local_text_policy import restricted_policy
+    if restricted_policy(policy):
+        return {'fallback_model': {}, 'ephemeral_system_prompt': None, 'prefill_messages': None}
     from gateway.session_authorities import owner_scope
     with owner_scope(authority):
         return {'fallback_model': _fallback_chain(authority, policy),
@@ -134,11 +137,17 @@ def construct_kwargs(frame):
     """Child side: the validated ``AIAgent`` keyword arguments; a frame without the object
     (older owner) constructs exactly as before."""
     inputs = json.loads(frame['policy'].get('request_json') or '{}').get('construct_v1')
+    from agent.local_text_policy import restricted_policy
+    restricted = restricted_policy(frame['policy'])
     if inputs is None:
+        if restricted:
+            raise ValueError('invalid_managed_worker_bootstrap')
         return {}
     if (not isinstance(inputs, dict) or set(inputs) != KEYS
-            or not _dict_list(inputs['fallback_model']) or not _dict_list(inputs['prefill_messages'])
+            or not ((restricted and inputs['fallback_model'] == {}) or _dict_list(inputs['fallback_model'])) or not _dict_list(inputs['prefill_messages'])
             or not isinstance(inputs['ephemeral_system_prompt'], (str, type(None)))):
+        raise ValueError('invalid_managed_worker_bootstrap')
+    if restricted and inputs != {'fallback_model': {}, 'ephemeral_system_prompt': None, 'prefill_messages': None}:
         raise ValueError('invalid_managed_worker_bootstrap')
     return dict(inputs)
 
@@ -151,7 +160,7 @@ def route_runtime(policy, frozen, model, key, *, fallback=True):
     """``(runtime, fallback_entry)`` for a launch-policy route: the session's FROZEN config and launch
     credential, walking its own fallback chain on an AuthError unless ``fallback=False`` (a session
     control asking which route the session itself runs). The one resolver an in-process turn
-    (``_resolve_policy_agent_runtime``) and a key-less managed worker (``worker_api_key``) share."""
+    (``_resolve_policy_agent_runtime``) and a managed worker (``worker_route``) share."""
     from hermes_cli.runtime_provider import (
         frozen_runtime_config, resolve_runtime_provider, resolve_runtime_with_fallback,
     )
@@ -189,20 +198,39 @@ def route_runtime(policy, frozen, model, key, *, fallback=True):
             explicit_api_key=key, explicit_base_url=launch_url, target_model=model)
 
 
-def worker_api_key(policy, construct):
-    """Child side, for a worker launched without a key (every Kanban run): the route's own credential,
-    resolved as the in-process turn resolves it, from this process's profile home (its HERMES_HOME and
-    ``.env``). A fallback entry's key belongs to another provider and model, so the primary never
-    carries it; the agent's own fallback chain switches all three together (#139155).
+def worker_route(policy, construct):
+    """Child side: the ``api_key`` / ``base_url`` / ``api_mode`` overrides for the worker's agent, resolved
+    as the in-process turn resolves its route (``route_runtime`` with the launch key, if one was bound),
+    from this process's profile home (its HERMES_HOME and ``.env``). The frozen ``model.base_url`` alone
+    is not the route: a per-model api_mode (opencode-go Responses models) and a resolved endpoint
+    (Bedrock's regional URL) come only from resolution. A fallback entry's route belongs to another
+    provider and model, so the primary never carries it; the agent's own fallback chain switches them
+    together (#139155).
 
     A primary AuthError walks the chain the agent will actually get: the owner's per-turn
     ``construct_v1`` chain (an ordinary session's refreshed profile fallbacks) when it was sent,
     the frozen snapshot's otherwise (older owner)."""
     frozen, model = policy.effective()
+    from agent.local_text_policy import restricted_policy
+    if restricted_policy(policy):
+        from gateway.session_kanban_route import validate_local_worker_route
+        validate_local_worker_route({'provider':policy.provider,'model':model,'base_url':policy.base_url})
+        return {'api_key':'no-key-required','base_url':policy.base_url,'api_mode':'chat_completions'}
     if 'fallback_model' in construct:
         frozen = {**frozen, 'fallback_providers': construct['fallback_model'] or [], 'fallback_model': None}
-    runtime, fallback_entry = route_runtime(policy, frozen, model, None)
-    return runtime.get('api_key') if fallback_entry is None else None
+    runtime, fallback_entry = route_runtime(policy, frozen, model, construct['api_key'])
+    if fallback_entry is not None:
+        return {}
+    api_mode = runtime.get('api_mode')
+    # A built-in provider's chat_completions is the resolver's default unless model.api_mode set it: None
+    # leaves the agent's model-aware upgrade (GPT-5 on OpenRouter to Responses). A custom route's mode
+    # is its endpoint's own (providers.<name>/custom_providers[] or URL-detected), which the in-process
+    # turn's ``custom`` provider never upgrades; the worker's ``custom:<name>`` would.
+    if (api_mode == 'chat_completions' and runtime.get('provider') != 'custom'
+            and not (frozen.get('model') or {}).get('api_mode')):
+        api_mode = None
+    return {'api_key': construct['api_key'] or runtime.get('api_key'), 'base_url': runtime.get('base_url'),
+            'api_mode': api_mode}
 
 
 def checkpoint_agent_kwargs(config):

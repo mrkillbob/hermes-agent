@@ -89,6 +89,18 @@ def test_shutdown_reaches_socket_through_real_httpx_wrapper_shape():
         reader.close()
         writer.close()
 
+
+def test_stale_monitor_sample_cannot_cancel_a_new_retry_attempt():
+    call = _call(_agent())
+    first_attempt = call._start_stream_attempt()
+    retry_attempt = call._start_stream_attempt()
+
+    call._kill_stale_stream(elapsed=5.0, attempt_id=first_attempt)
+
+    assert call._stream_attempt_is_active(retry_attempt)
+    assert not call._stale_kill_requested
+
+
 # ── end to end: a reader parked on a silent provider must reconnect ──
 
 

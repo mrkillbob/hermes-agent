@@ -174,7 +174,10 @@ def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatc
 
     def assign(job, proc):
         children.append(proc)
-        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED
+        # Windows process status is not a reliable indication that its primary
+        # thread is suspended. Prove the child has not executed its first
+        # instruction while the job is assigned instead.
+        assert not _wait(marker.exists, timeout=0.25), 'child ran before job assignment'
         assert not marker.exists()
         # Query the actual kernel object, not implementation source/constants.
         limits = processes._ExtendedLimits()

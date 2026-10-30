@@ -1,4 +1,4 @@
-"""The real installer waits for bootstrap uv before it delegates to PM."""
+"""The real installer restores staged tools before delegating to PM (#343)."""
 import json
 import os
 from pathlib import Path
@@ -12,22 +12,27 @@ pytestmark = pytest.mark.platforms("windows")
 INSTALLER = Path(__file__).resolve().parents[3] / "scripts" / "install.ps1"
 
 
-@pytest.mark.parametrize("stage,exit_code,skip_browser", [
-    ("venv", 0, False), ("python-deps", 0, False), ("python-deps", 17, False),
+@pytest.mark.parametrize("stage,exit_code,skip_browser,git_available", [
+    ("venv", 0, False, True), ("python-deps", 0, False, True), ("python-deps", 17, False, True),
     # -SkipBrowser is PM's persisted opt-out, handed over as `--without`.
-    ("python-deps", 0, True),
+    ("python-deps", 0, True, True), ("python-deps", 0, False, False),
 ])
-def test_python_stage_delegates_to_pin_without_touching_existing_env(tmp_path, stage, exit_code, skip_browser):
+def test_python_stage_delegates_to_pin_without_touching_existing_env(tmp_path, stage, exit_code, skip_browser, git_available):
     powershell = shutil.which("powershell")
-    assert powershell
+    git = shutil.which("git")
+    assert powershell and git
+    pinned_git = Path(git).parent.parent / "cmd" / "git.exe"
+    assert pinned_git.is_file()
     install = tmp_path / "install with spaces"
     package = install / "pm"
     package.mkdir(parents=True)
     (package / "lock.json").write_text(json.dumps({"packages": {"python": {"version": "3.12.8+fixture"}}}), encoding="utf-8")
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "cli.py").write_text(
-        "import json, os, pathlib, sys\n"
+        "import json, os, pathlib, shutil, subprocess, sys\n"
         "assert not pathlib.Path(os.environ['UV_BUSY']).exists()\n"
+        "assert pathlib.Path(shutil.which('git') or '') == pathlib.Path(os.environ['PROBE_GIT'])\n"
+        "assert subprocess.check_output(['git', '--version'], text=True).startswith('git version ')\n"
         "pathlib.Path(os.environ['PM_LOG']).write_text(json.dumps(sys.argv[1:]))\n"
         "sys.exit(int(os.environ['PROBE_EXIT']))\n", encoding="utf-8",
     )
@@ -58,12 +63,22 @@ if ($env:PROBE_SKIP_BROWSER) { $installerArgs.SkipBrowser = $true }
 . $Installer @installerArgs
 # Dot-sourcing defines Get-Uv, so override only that acquisition boundary.
 function Get-Uv { return 'uv' }
+# Acquisition is the boundary; the real Ensure-Git must restore the child's PATH.
+function Get-PinnedGit { if ($env:PROBE_GIT) { return $env:PROBE_GIT }; return $null }
 Invoke-StageByName $env:PROBE_STAGE
 exit $LASTEXITCODE
 ''', encoding="utf-8-sig")
     # uv python find returns the distribution interpreter, not a venv launcher.
     env = dict(os.environ, PROBE_STAGE=stage, PROBE_EXIT=str(exit_code), BOOTSTRAP_PYTHON=sys._base_executable,
-               PM_LOG=str(pm_log), UV_BUSY=str(tmp_path / "uv-busy"), PATHEXT=".COM;.EXE;.BAT;.CMD")
+               PM_LOG=str(pm_log), UV_BUSY=str(tmp_path / "uv-busy"), PROBE_GIT=str(pinned_git) if git_available else "",
+               PATHEXT=".COM;.EXE;.BAT;.CMD")
+    # GUI stages are new processes: no PATH changes from prerequisites survive.
+    # Keep Windows utilities, but require the dependency stage to select Git.
+    poison = tmp_path / "poison"
+    poison.mkdir()
+    (poison / "git.cmd").write_text("@echo unpinned git invoked 1>&2 & exit /b 73\r\n", encoding="utf-8")
+    system_root = os.environ["SystemRoot"]
+    env["PATH"] = os.pathsep.join([str(poison), str(Path(system_root) / "System32"), system_root])
     env.pop("PYTHONPATH", None)
     env.pop("PROBE_SKIP_BROWSER", None)
     if skip_browser:
@@ -72,7 +87,13 @@ exit $LASTEXITCODE
                           "-Installer", str(INSTALLER), "-InstallDir", str(install), "-HomeDir", str(tmp_path / "home"), "-Log", str(log)],
                          cwd=tmp_path, env=env, stdin=subprocess.DEVNULL,
                          capture_output=True, text=True, timeout=120, check=False)
-    assert (run.returncode == 0) == (exit_code == 0), run.stdout + run.stderr
+    assert (run.returncode == 0) == (exit_code == 0 and git_available), run.stdout + run.stderr
+    if not git_available:
+        assert "no pinned Git artifact" in run.stdout + run.stderr
+        assert not pm_log.exists()
+        assert not log.exists()
+        assert existing.read_text(encoding="utf-8-sig") == "previous generation"
+        return
     from hermes_platform.host.facts import native_arch
 
     # The request names the machine's architecture: a bare version lets uv

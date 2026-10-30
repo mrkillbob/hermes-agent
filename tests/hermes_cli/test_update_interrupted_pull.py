@@ -21,8 +21,12 @@ from hermes_cli import update_cmd
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True,
-                          text=True, encoding="utf-8").stdout.strip()
+    try:
+        return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True,
+                              text=True, encoding="utf-8").stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        exc.add_note(f"synthetic git stderr: {exc.stderr}")
+        raise
 
 
 _MULTI = "top = 1\nx = 0\ny = 0\nz = 0\nend = 1\n"
@@ -130,15 +134,16 @@ def test_killed_pull_is_restored_on_next_launch_and_update_reruns(checkout, monk
 
     # A retry in a container gets the killed updater's pid: our own pid is never a live owner.
     marker.write_text(recorded, encoding="utf-8", newline="")
-    if sys.platform != "win32":  # a git dir that cannot lock (NFS without lockd) still repairs, unguarded
-        import errno
-        import fcntl
+    with monkeypatch.context() as recovery_locks:
+        if sys.platform != "win32":  # interrupted-pull recovery alone tolerates unavailable git locks
+            import errno
+            import fcntl
 
-        def no_locks(*_a):
-            raise OSError(errno.ENOLCK, "No locks available")
+            def no_locks(*_a):
+                raise OSError(errno.ENOLCK, "No locks available")
 
-        monkeypatch.setattr(fcntl, "flock", no_locks)
-    assert er.restore_interrupted_pull(root) is True, "restored files mean the caller must relaunch"
+            recovery_locks.setattr(fcntl, "flock", no_locks)
+        assert er.restore_interrupted_pull(root) is True, "restored files mean the caller must relaunch"
 
     assert _git(root, "rev-parse", "HEAD") == a
     assert _git(root, "status", "--porcelain", "--untracked-files=all") == "M other.py"

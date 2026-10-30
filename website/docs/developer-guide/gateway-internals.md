@@ -8,6 +8,92 @@ description: "How the messaging gateway boots, authorizes users, routes sessions
 
 The messaging gateway is the long-running process that connects Hermes to 20+ external messaging platforms through a unified architecture.
 
+## Managed local inference ownership
+
+After the root gateway wins its runtime lock and starts its runner, a non-idle-exit launch
+registers one process-local `RuntimeOwner`. Background boot reads that owner's home and
+captured context, so a routed profile cannot supply its backend, residency limit, environment
+expansion or frozen worker configuration. Automatic startup preserves `local_runtime.enabled`;
+no setting, provider assignment, engine installation or model download is implied. Named
+gateways, one-shot/cron workers and compatibility standalone HTTP lifespans only adopt the
+existing identity-verified endpoint. A main gateway must be running for managed cold start.
+An explicit root Local Models setup may retain an already-ready idle-exit gateway in the
+background through the existing authenticated HTTP boundary. It keeps the same process and
+accepted work, binds cleanup before publishing ownership, and disarms idle exit. Registration
+uses captured launch context and neither boots inference nor changes enabled settings.
+Named, standalone, draining and stopping gateways cannot acquire this capability.
+The explicit quickstart HTTP operation performs eligible retention before dispatching its
+synchronous planning worker, so Desktop and terminal use the same ownership contract.
+Explicit root Start and Activate can retain the same eligible gateway too. Stop does not
+acquire this capability from a consumer. Registration and activation lock waits run on
+worker threads, leaving the gateway loop able to dispatch Stop during a boot.
+
+Bootstrap serializes transitions inside the process and across processes. Unavailable or
+contended boot locks refuse mutation. A living or uncertain foreign owner is never replaced,
+including stale-preset and dead-child cases where its watchdog could restart the child.
+Even a verified live orphan remains available for adoption; only explicit stop may reclaim its
+tree under the existing process-birth and Windows containment guards. Implicit refresh never stops the shared router: an idle snapshot cannot fence off new
+HTTP requests from another process. Downloads and engine installs stay staged until an explicit
+default-profile owner stop/start. Activation checks the live model
+listing and refuses an unserved model without changing the existing assignment.
+
+Explicit Stop invalidates setup generations captured at acceptance, including downloading,
+paused and queued activation jobs. Those jobs cannot re-enable inference or assign a default
+after Stop. Stop also requests cooperative download cancellation: paused setup jobs become
+terminal immediately; active writers retain single-flight ownership until cleanup finishes.
+Cancelled jobs cannot resume, but their partial bytes remain available to a fresh setup.
+
+Gateway shutdown closes boot admission before draining consumers. Cancellation covers a queued
+worker, a boot-lock wait and health startup; cleanup also waits for an unpublished boot within
+the existing shutdown budget and tail reserve. Owned cleanup runs on a context-preserving daemon
+thread, never an executor worker that could strand `asyncio.run` on exit. A consumer with no
+supervisor or pending boot releases nothing. Windows kill-on-close jobs and the owner's idle
+unload/refit loop remain in place. These source guarantees do not establish model accuracy,
+native inference readiness or permission to enable a profile or update an installed runtime.
+Saved context-growth requests remain available to future eligible idle preset planning or an
+explicit restart; compression proceeds until a larger window is materialized. The existing
+idle refit's documented status-check-to-reload race is unchanged: this repair prevents implicit
+server termination and consumer-exit cleanup, not every possible inference interruption.
+
+## One bounded Kanban attempt under an external hold
+
+`hermes gateway drain begin --board BOARD --task-id TASK --seconds 900` extends the
+existing `.drain_request.json` marker with a one-attempt permission. ESTOP must be
+engaged, the exact card must already be ready and assigned, and the board idle.
+The marker writer reserves the existing canonical profile ownership locks through
+publication, refusing a live or uncertain owner. The command changes no job schedule,
+job history, assignment, model pin or ESTOP file. Host resource admission and operator
+approval remain separate prerequisites.
+
+Start the ordinary assigned-profile owner while paused. A held boot takes its normal
+ownership locks and advances the runtime epoch, but defers unrelated recovery,
+adapters, cron, housekeeping, keepalive and inference startup. It publishes
+`state=draining, drain_reason=kanban_once`; general clients cannot treat it as READY.
+`hermes gateway drain arm --window-id ID` binds permission to that identified owner.
+The operator may then resume and use the existing exact dispatcher with `--task-id TASK
+--max 1 --wall-seconds 120 --output-bytes 65536 --requests 4`. All three budget flags
+are required. Dispatch consumes the permission by binding the committed run and claim
+before launching its ordinary submitter. Other cards, subsequent runs, ordinary
+sessions, REST requests and profile rescan remain refused. Only the selected child's
+existing reservation, adoption and persistence protocol crosses this hold.
+
+`drain cancel --window-id ID` revokes permission without removing the hold. The existing
+drain watcher invokes the existing session Stop owner for cancellation or expiry;
+ManagedWorker remains the sole child lifecycle authority. Expiry uses both wall and
+monotonic deadlines and never releases other work. ESTOP retains its existing semantics:
+it prevents new admission, without itself interrupting an already admitted turn.
+A restart cannot inherit the previous owner's permission or replay its claim.
+
+After re-engaging ESTOP and stopping the owner, `drain restore --window-id ID` reserves
+canonical ownership locks again and restores the exact previous marker bytes. Errors,
+cancellation and restart preserve the hold. A booted held owner also stays held if its
+marker disappears; a persisted corrupt marker holds across restart without granting work.
+Ordinary drain writers cannot replace or clear an active or unclassifiable hold.
+`drain status` reports only grant metadata, excluding the saved previous marker.
+Source fixture qualification uses disposable homes and loopback peers; it establishes
+neither permission for live provider traffic nor remote cancellation, native inference
+readiness, resource quotas or installed activation.
+
 ## Canonical group metadata and profile discovery
 
 The authenticated canonical WebSocket exposes `groups.capabilities`, `groups.list`,
@@ -722,7 +808,7 @@ briefs are labelled user turns appended at a turn boundary, preserving role alte
 `GatewayLoginCommandsMixin` (`gateway/slash_commands_login.py`). It refuses outside a paired DM:
 `chat_type in {"dm","private"}`, a truthy `chat_id`, and a platform whose `"dm"` really is a paired
 conversation — ntfy, raft and a2a all report `chat_type="dm"` for a broadcast topic, a channel and
-an agent peer, so posting a consent link there would publish it.
+an agent peer, so posting a sign-in link and code there would publish them.
 
 **It binds the whole install.** The sign-in writes the singleton `providers.nous`, so whoever
 approves the code owns this gateway's inference and connectors for every chat it serves. Slash
@@ -730,15 +816,15 @@ gating is opt-in (`gateway/slash_access.py`): with no `allow_admin_from` set, ev
 DM the bot can run it. Operators of shared gateways must set it.
 
 The handler returns its ack at once and drains `anon_auth.run_sign_in` on a **private single-worker
-executor** (`_login_executor`), never the shared 10-thread gateway pool — a promotion wait can last
+executor** (`_login_executor`), never the shared 10-thread gateway pool — the token poll can last
 the code's full expiry, and a live worker in the shared pool makes shutdown skip the SessionDB
 close/checkpoint. One attempt per process, stamped with the identity that started it: the same
-identity's second `/login` supersedes (the loser ends with the superseded copy pushed into its own
-chat); a different identity is refused. `task.cancel()` cannot interrupt a blocking poll inside a
-worker thread, so shutdown and supersede both work through `attempt.cancelled`, which
-`wait_for_promotion` now polls on a ≤1 s tick. A shutdown-cancelled attempt pushes nothing — the
-task is dying and its adapters may already be gone — but if the server had already completed the
-transfer it still persists, because that transfer is irreversible.
+identity's second `/login` cancels the first (the loser ends with the cancelled copy pushed into its
+own chat); a different identity is refused. `task.cancel()` cannot interrupt a blocking poll inside
+a worker thread, so shutdown and the replacement both work through `attempt.cancelled`, which the
+token poll checks on a ≤1 s tick and once more before the save. A cancelled attempt saves nothing.
+A shutdown-cancelled attempt pushes nothing — the task is dying and its adapters may already be
+gone. The completion copy carries what the free tier's handoff moved.
 
 On completion the handler **evicts** every cached agent still on `nous/welcome` and clears any
 session model override pinned to it. It does not switch agents in place and does not write a model
@@ -791,3 +877,191 @@ Plugins that load after the adapters connected (install/enable from the CLI, Des
 - [ACP Internals](./acp-internals.md)
 - [Agent Loop Internals](./agent-loop.md)
 - [Messaging Gateway (User Guide)](../user-guide/messaging/index.md)
+
+Managed consumers can wait for an already queued or active root-owner boot before server state exists. The owner publishes a machine-root boot observation before scheduling its boot thread and removes it when requests settle or the owner closes. Readers verify the live process incarnation, executable and root. This observation grants no boot, reload, configuration or cleanup authority; missing or stale evidence keeps unavailable/fallback behavior prompt.
+
+Quickstart and Activate reject a busy boot transition instead of waiting to register an unobserved job. Their admission deadline is captured before threadpool dispatch and rechecked before job creation, so a delayed planning/admission worker cannot register setup beyond the request budget. Already accepted jobs retain their normal polling, Stop cancellation and generation fences.
+
+Quickstart reads the running router's model listing before accepting setup and again before transferring model weights after engine repricing. An unregistered selection, active boot or unavailable listing refuses setup without reloading or stopping the shared server. With no running server, normal staging and owner boot remain available. Final activation still verifies the live listing if server state changes after preflight.
+
+
+## Native startup hold without a task
+
+`hermes gateway drain hold` creates a targetless startup hold while ESTOP is
+engaged. Empty boards are valid: it neither opens Kanban storage nor selects a
+card. `hermes gateway drain status` reports its hold ID and `armed: false`.
+It cannot be armed, claimed, nested with another protected hold, or used for a
+one-card dispatch exception.
+
+`hermes gateway drain reconcile` performs an ESTOP-required, read-only legacy
+history assessment under the startup admission mutex and exclusive writer
+references. It returns fixed category counts and the SHA256 of the exact ledger
+bytes, with `mode: assessment_only` and `admission_granted: false`. No argv,
+home, PID, source path or receipt body is returned. Changed, malformed,
+nonregular, linked or oversized ledgers refuse; the command never prunes,
+quarantines, replaces or writes the ledger, marker or startup journal.
+
+An accepted reference covers only its exact departed writer incarnation. A
+parent reference does not cover helpers, and PID reuse, reboot, an empty current
+process tree or an operator's observed departure cannot produce descendant
+closure. Uncovered dead rows remain `closure_required`; uncertain identities
+remain `unknown`, and live identities remain `busy`. Repeating the assessment
+creates no evidence or admission capability. A future retirement operation still
+requires a separately reviewed producer-backed descendant-closure contract bound
+to the exact home, source, ledger bytes, entry identities and boot incarnation,
+with crash recovery and cross-process ledger serialization. This assessment does
+not implement that operation and cannot unblock uncovered legacy history.
+
+Plain startup writer refusals transport only the known
+`startup_hold_writers_busy`, `startup_hold_writers_unknown`,
+`startup_hold_requires_pause` and `startup_hold_ledger_changed` codes. Arbitrary
+exception text remains redacted as `kanban_window_refused`; exit status stays 6.
+
+Start the native owner explicitly with `hermes gateway run`. It reports
+`state=draining, drain_reason=startup_hold`; its authenticated native connection
+allows only `ping` and `runtime.describe`, with no session-creation capability.
+`gateway ensure --json` reports the hold with exit 6 and does not start, replace,
+attach or rescan an owner. Desktop continues to refuse a held runtime.
+Ensure is a transport operation: parent startup maintenance is deferred; any
+ordinary unmanaged native child reserves its own startup writer lifetime.
+
+Concurrent startup registrations may wait up to five seconds for the admission
+mutex; hold/control transactions still fail fast. Registration rechecks the hold
+under that mutex before any dependency/profile work. Planned POSIX interpreter
+re-entry retains the same locked writer reference, restores non-inheritance before
+recovery helpers run, and consumes an exact one-use same-process handoff. Failed
+exec restores the original reservation; uncertain or foreign descriptors remain
+debt and are never written or closed as if they were owned. Opaque-child debt
+survives re-entry. Windows retains its native sharing-based lifetime protection.
+
+The held owner skips provider and plugin discovery, private secret hydration,
+adapters, cron, hosted work, environment probes, collectors and automatic source
+or dependency recovery. Pending recovery debt refuses boot. Dependency selection
+and lifetime protection still apply. Existing malformed state databases refuse
+without automatic repair or quarantine. Config reads retain managed overlays,
+environment expansion, last-known-good settings and database durability options;
+they defer home/SOUL initialization and good/corrupt backup creation, migration
+and pruning. Parse diagnostics and refusal to overwrite unreadable config remain.
+Deferred reads do not suppress normal maintenance after the deferral ends.
+
+Allowed effects are native ownership/listener artifacts, logs and runtime status,
+required state schema and ownership epochs, and lifetime/coordination references.
+Shutdown closes those owned resources while preserving prior cron history, ACP
+session termination state, lifecycle evidence and deferred turn-recovery markers.
+Read-only source identity probes disable lazy fetching and filesystem-monitor hooks.
+Existing owner-conflict checks remain in place, including Windows's bounded local
+`schtasks /Query /TN <current-task>` registration observation. This read does not
+establish owner identity by itself; PID/profile locks still apply. It does not
+install, start, stop or refresh a service. The native witness permits only the
+trusted OS executable (resolved with [GetSystemDirectoryW](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemdirectoryw)) and that complete current-task query, retaining all other
+helper, provider, plugin and maintenance traps. The event loop's internal
+wakeup socket pair is also permitted only when the exact stdlib self-pipe and
+fallback code objects, connecting socket and live listener address all match.
+Ordinary loopback and external connections remain forbidden by the witness.
+
+The private `.startup-hold.json` journal is published before the drain marker.
+Its preparing/held/restoring phases keep the hold active after marker loss,
+process death or an interrupted restoration. Corrupt or uncertain state stays
+held. Publication refuses a prior marker that would exceed the bounded readers
+after JSON escaping.
+
+After the native owner and other backend writers have actually exited, restore
+with `hermes gateway drain restore --hold-id ID`. Restoration reserves checkout
+custody, dependency-publication, dispatcher, admission, marker and profile locks,
+rechecks recovery debt, and requires exact process-incarnation departure evidence.
+It restores the prior marker bytes or absence; it does not clear ESTOP or change
+cron schedules. A changed marker or stale ID refuses restoration. Interrupted
+preparation/restoration can be retried with the original journal identity.
+
+Standalone backends publish references before initialization, and native owners
+reserve before PM/env work or profile ownership. Abrupt departures, unavailable
+process inventories and opaque helper descendants retain uncertainty rather than
+being retired from PID death alone. Such debt requires separate verified operator
+reconciliation; deleting records is not part of this command.
+
+### Prospective local reboot reconciliation
+
+`gateway drain prepare-reboot-reconcile` is an explicit, ESTOP-required operator
+write, separate from the read-only `reconcile` assessment. It never reboots,
+starts a gateway, clears ESTOP, creates a writer-exit receipt, or changes the spawn
+ledger. Its required inputs are an exact ledger SHA256, one or more full-entry
+SHA256 selectors, the exact legacy install ID and spawner PID/birth. There is no
+wildcard retirement. Preparation refuses live/unknown relevant ledger identities,
+live native owners, existing unsettled writer references, and custody contention.
+
+The checkpoint binds canonical home/owner/inode, declared production source and
+input fingerprints, exact ledger bytes/inode/version, full selected row hashes,
+local host identity, and the kernel session observed during preparation. Source
+fingerprinting includes production Python/shell/PowerShell/TOML sources and the
+lock/entry inputs; excluded test, environment and build trees are not fingerprinted.
+Runtime and dependency artifact provenance remain separate qualification gates.
+Traversal errors, included directory links, nonregular files, and incomplete or
+unstable reads refuse rather than producing a partial fingerprint.
+
+New schema2 checkpoints also bind the nonzero local filesystem UUID, acquired
+with Darwin `fgetattrlist` from both the held home and ledger descriptors. Both
+must describe the same local filesystem. Current descriptor/path device and inode
+checks remain exact; only historical cross-boot device numbers may differ when
+the UUID and every other binding agree. This permits normal mount renumbering,
+not volume replacement. Unsupported attributes, network filesystems and changed
+inodes or ledger metadata refuse. Existing schema1 records keep their original
+strict device checks; they are never migrated, backdated or rebound.
+
+Preparation also opts its source-controller runtime custody into native local-volume
+lifetime identities. This requires a genuinely fresh PM domain and coordination
+namespace, or an already qualified version2 domain. Existing version1/unqualified
+state refuses; no control-root redirect, deletion or silent upgrade is supplied.
+The persisted lifetime gate must survive mount renumbering before the postboot
+transaction can even reach checkpoint validation. Operator qualification therefore
+includes the complete persisted checkout/runtime gate across a device-remap fixture,
+not only a simulated boot UUID. Default runtime lifetime acquisition is unchanged.
+
+A separately qualified external schema2 controller may manage hold and restore
+around an older runtime with the same journal/marker/writer protocol. That
+runtime must perform genuine owner registration under the normal ledger lock;
+the controller never prunes on its behalf. The older runtime must not be used
+to interpret a schema2 checkpoint. Source acceptance, controller custody and
+runtime artifact acceptance remain separate.
+
+The initial implementation supports native Darwin identities only. It reads
+`kern.bootsessionuuid`, which [XNU exposes read-only](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c), and the direct host-UUID syscall,
+avoiding [the public wrapper's callback fallback](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/gethostuuid.c).
+There is no uptime, epoch-time, environment-variable or gateway-PID fallback.
+A changed session on the same local kernel host proves local processes from the
+recorded session have departed, including detached/reparented descendants. This
+is a prospective kernel boundary, not a reconstructed historical shutdown receipt.
+Remote workers, external backends, shared network homes, cloned host identities,
+process-snapshot restoration and privileged/kernel compromise are outside this
+proof. It grants no clearance for those systems. Sleep, logout, app restart and
+an unchanged boot session do not satisfy it.
+
+After an independently authorized full host reboot, the normal hold/restore
+transaction can exempt only the exact selected departed helper rows. It retains
+checkout/runtime, dispatch, admission, writer, marker, profile, ledger and
+checkpoint custody through publication and rechecks the proof. Changed source,
+home, host, ledger or row bindings refuse. Other live, ambiguous or uncovered
+history still blocks; unsettled writer references remain blocking even after a
+reboot. The ledger gate also serializes maintained registrations, with a bounded
+five-second wait for ordinary writers and fail-fast acquisition for controls.
+Uncoordinated old producers must remain stopped; the operator must preserve
+supervisor and startup suppression across the reboot.
+
+A real held native owner's ordinary registration may prune departed entries and
+replace the ledger. If every selected full-row hash is then absent, the checkpoint
+returns **no exemption** and the ordinary current-row guard governs restoration,
+including after a later controller/source change. An expired checkpoint supplies
+no kernel-closure or other authority in that later context.
+If a changed ledger still contains any selected row, it refuses. Reconciliation
+itself never writes or prunes the ledger. Repeated validation of unchanged old
+history on later boot sessions is permitted; it is not a single-use or universal
+filesystem-rollback detector.
+
+Checkpoint creation is exclusive, mode0600, and uses complete writes plus strict
+file and parent-directory fsync. A `preparing` or malformed checkpoint is unusable
+and blocks retries; no automatic cleanup or overwrite occurs. Only `committed`
+records are usable. Loss of acknowledgement after commitment can leave a valid
+checkpoint: inspect its exact bytes/state before any retry rather than assuming
+failure meant absence. A successful preparation returns a checkpoint ID, count
+and `admission_granted:false`, without host IDs, paths or ledger contents.
+Production preparation, reboot, control-file cleanup and later native acceptance
+all require an exact operator procedure and their own authorization.

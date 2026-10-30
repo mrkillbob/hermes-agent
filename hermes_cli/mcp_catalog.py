@@ -431,6 +431,7 @@ def _run_bootstrap(cwd: Path, commands: list[str]) -> None:
     """Execute bootstrap commands in *cwd*. Raise CatalogError on first failure."""
     for cmd in commands:
         _say(f"  $ {cmd}", Colors.DIM)
+        # health: allow HX006 -- user-declared bootstrap command (installers); its duration is not ours to bound
         rc = subprocess.run(cmd, cwd=str(cwd), shell=True, check=False).returncode
         if rc != 0:
             raise CatalogError(f"bootstrap step failed (exit {rc}): {cmd}", failure_class="bootstrap_failed")

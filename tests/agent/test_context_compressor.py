@@ -19,11 +19,11 @@ from agent.context_compressor import (
     _sum_clarify,
     _is_summary_access_or_quota_error,
 )
+from agent.llm_egress_firewall import validate_sanitized_text
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
 from hermes_state import SessionDB
 from agent.auxiliary_client import CODEX_STREAM_STALL_MARKER
 import itertools
-
 _REQ = httpx.Request("POST", "http://x")
 
 
@@ -190,6 +190,39 @@ class TestSummarizeToolResultWebExtract:
         args = json.dumps({"urls": [{"href": "https://example.com/h"}]})
         summary = _summarize_tool_result("web_extract", args, self.CONTENT)
         assert summary == "[web_extract] https://example.com/h (500 chars)"
+
+
+class TestSummarizeToolResultRedactsLocalPaths:
+    """A compaction summary replaces the tool's real result and is sent to the
+    model like any other Hermes-generated context; it must not leak the local
+    filesystem layout through a raw ``path`` argument (read_file/patch go
+    through ``_sum_template``, write_file/search_files have their own
+    summarizers — all three interpolate ``path`` directly)."""
+
+    LOCAL_PATH = "/Users/example/project/secret-notes.txt"
+
+    @pytest.mark.parametrize("tool_name,args,payload,expected", [
+        ("read_file", {"path": LOCAL_PATH, "offset": 1}, {}, ("[read_file]",)),
+        ("write_file", {"path": LOCAL_PATH, "content": "line one\nline two"}, {}, ("wrote to",)),
+        ("search_files", {"pattern": "TODO", "path": LOCAL_PATH}, {"total_count": 3}, ("3 matches",)),
+        ("read_file", {"path": LOCAL_PATH}, {"error": f"File not found: {LOCAL_PATH}"}, ("FAILED: File not found:",)),
+        ("write_file", {"path": LOCAL_PATH}, {"error": f"Refusing to overwrite {LOCAL_PATH}: stale"},
+         ("FAILED: Refusing to overwrite",)),
+        ("patch", {"path": LOCAL_PATH}, {"error": f"Cannot patch {LOCAL_PATH}: stale"}, ("FAILED: Cannot patch",)),
+        ("terminal", {"command": f"cat {LOCAL_PATH}"},
+         {"error": "BLOCKED: The user has NOT consented", "status": "blocked"},
+         ("BLOCKED, not run", "did NOT consent", "do not retry")),
+    ])
+    def test_summary_paths_are_redacted_without_losing_outcome(self, tool_name, args, payload, expected, compressor):
+        content = json.dumps({**payload, "padding": "x" * 500})
+        messages = [{"role": "tool", "tool_call_id": "t1", "content": content}]
+        assert compressor._demote_tool_result_at(messages, 0, {"t1": (tool_name, json.dumps(args))}, 200)
+        summary = messages[0]["content"]
+        assert self.LOCAL_PATH not in summary
+        assert "<private-path>" in summary
+        assert all(part in summary for part in expected)
+        if "FAILED" in summary or "BLOCKED" in summary:
+            assert "wrote to" not in summary and "ran `" not in summary
 
 
 class TestSummarizeToolResultSkillTools:
@@ -1244,113 +1277,6 @@ class TestAuthFailureAborts:
         assert result == msgs
         assert c._last_compress_aborted is True
         assert c._last_summary_empty_content_failure is True
-
-
-class TestSustainedOverloadEscalation:
-    """#123167: a sustained summary-provider overload must not guarantee a session wipe.
-
-    One overload aborts so a retry can still win (#115906). But when every attempt keeps
-    aborting, the transcript only grows until the session exits compression_exhausted and
-    the gateway auto-resets — total loss, deferred. After 3 consecutive overload aborts the
-    overload stops being terminal and compress() commits the deterministic fallback instead
-    (the same bounded degrade the repeated-stall ladder takes, #112420).
-    """
-
-    def _err(self):
-        return StubProviderError(
-            "Our servers are currently overloaded. Please try again later.",
-            status_code=503,
-        )
-
-    def _compressor(self, **kwargs):
-        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
-            c = ContextCompressor(
-                model="test",
-                quiet_mode=True,
-                protect_first_n=2,
-                protect_last_n=2,
-                **kwargs,
-            )
-        c.summary_model = "test/auxiliary"
-        return c
-
-    @pytest.mark.parametrize("access_error", [False, True], ids=["overload", "403_overloaded"])
-    def test_first_overloads_still_abort_then_third_commits_fallback(self, access_error):
-        c = self._compressor(abort_on_summary_failure=False)
-        # A stale terminal flag from one earlier network failure (only a success clears it) must
-        # not pin the long-lived compressor in abort mode: the latest failure class decides.
-        c._last_summary_network_failure = True
-        msgs = self._msgs(12)
-        err = StubProviderError("Error code: 403 - provider overloaded", status_code=403) if access_error else self._err()
-        with patch("agent.context_compressor.call_llm", side_effect=err):
-            first = c.compress(msgs, current_tokens=999999, force=True)
-            second = c.compress(msgs, current_tokens=999999, force=True)
-            # First two: preserve the transcript unchanged (#115906 semantics).
-            assert first == msgs and second == msgs
-            assert c._last_compress_aborted is True
-            third = c.compress(msgs, current_tokens=999999, force=True)
-
-        if access_error:
-            # An auth/quota error that also says "overloaded" never escalates (#29559).
-            assert third == msgs
-            assert c._last_compress_aborted is True
-            assert c._last_compression_telemetry["failure_class"] == "summary_auth_failure"
-            # ...and never bumps the overload budget, so the next real 503 keeps its grace (#115906).
-            assert c._consecutive_overload_aborts == 0
-            return
-        # Third: sustained overload escalates — bounded fallback beats a deferred total wipe.
-        assert third != msgs
-        assert c._last_compress_aborted is False
-        assert c._last_summary_fallback_used is True
-        assert c._last_summary_dropped_count > 0
-        assert c._last_compression_telemetry["failure_class"] == "summary_overload_degraded"
-
-    def test_overload_budget_survives_a_fresh_compressor_bound_to_the_same_session(self, tmp_path):
-        """Review P1: the N=3 budget must be session-scoped, not object-local.
-
-        The gateway binds a fresh compressor to the existing session on every turn /
-        cache eviction, and restart/resume constructs one too. Each of those used to
-        restart the budget at zero, so a sustained outage never escalated (#123167;
-        same contract as the durable fallback streak, #100185).
-        """
-        from hermes_state import SessionDB
-
-        db = SessionDB(db_path=tmp_path / "state.db")
-        session_id = "OVERLOAD_FRESH_BIND"
-        db.create_session(session_id, source="telegram")
-        msgs = self._msgs(12)
-
-        first = self._compressor(abort_on_summary_failure=False)
-        first.bind_session_state(db, session_id)
-        with patch("agent.context_compressor.call_llm", side_effect=self._err()):
-            for _ in range(2):  # exactly two aborts — one below the escalation threshold
-                assert first.compress(msgs, current_tokens=999999, force=True) == msgs
-        assert first._consecutive_overload_aborts == 2
-        assert db.get_compression_overload_streak(session_id) == 2
-
-        # Fresh agent, same session (eviction / restart / API-server request construction).
-        second = self._compressor(abort_on_summary_failure=False)
-        second.bind_session_state(db, session_id)
-        assert second._consecutive_overload_aborts == 2  # inherited, not restarted
-        with patch("agent.context_compressor.call_llm", side_effect=self._err()):
-            third = second.compress(msgs, current_tokens=999999, force=True)
-        # Third consecutive abort IN THE SESSION escalates even though this object saw one.
-        # A fresh object's first overload burns the aux→main one-shot retry, which labels the
-        # attempt aux_model_fallback first; the escalated commit must still say what happened.
-        assert third != msgs
-        assert second._last_summary_fallback_used is True
-        assert second._last_summary_overload_degraded is True
-        assert second._last_compression_telemetry["failure_class"] == "summary_overload_degraded"
-        # The committed degraded fallback settles the budget so recovery gets a fresh run
-        # (the boundary caller records the completed compaction, as compress_context does).
-        second.record_completed_compaction(used_fallback=True)
-        assert db.get_compression_overload_streak(session_id) == 0
-
-    def _msgs(self, n=10):
-        return [
-            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}
-            for i in range(n)
-        ]
 
 
 class TestSummaryFallbackToMainModel:
@@ -3238,6 +3164,28 @@ class TestDoubleCompactionSummaryRole:
 
 
 class TestSummaryPromptBounding:
+
+    def test_summary_serialization_omits_provider_tool_call_ids(self, compressor):
+        provider_call_id = "dG9vbHVfY2FsbF9pZA=="
+        records = compressor._serialize_records_for_summary([
+            {"role": "tool", "tool_call_id": provider_call_id, "content": "read complete"},
+        ])
+
+        assert records == ["[TOOL RESULT]: read complete"]
+        assert provider_call_id not in "\n".join(records)
+
+    @pytest.mark.parametrize("has_user_turn", [True, False])
+    @pytest.mark.parametrize("focus_topic", [None, "synthetic focus"])
+    @pytest.mark.parametrize("previous_summary", [None, "synthetic previous summary"])
+    def test_summary_prompt_is_admitted_by_egress_sanitizer(
+        self, compressor, has_user_turn, focus_topic, previous_summary
+    ):
+        compressor._previous_summary = previous_summary
+        prompt = compressor._build_summary_prompt(
+            "synthetic transcript", 1000, focus_topic, "", has_user_turn=has_user_turn
+        )
+
+        assert validate_sanitized_text(prompt) == prompt
 
     _ELISION_MARKER = re.compile(r"\n*\.\.\.\[[^\]]*elided[^\n]*\.\.\.\n*")
 

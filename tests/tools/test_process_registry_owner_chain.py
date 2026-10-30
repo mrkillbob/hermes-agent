@@ -87,3 +87,24 @@ def test_list_entry_surfaces_wsl_chain_hint():
     (entry,) = reg.list_sessions(task_id="sa-1-abc123")
     assert entry["wsl_chain"] is True
     assert "wsl" in entry["wsl_note"].lower()
+
+
+def test_idle_reaper_keeps_the_environment_of_another_raw_owner(monkeypatch):
+    from unittest.mock import Mock
+    import tools.terminal_tool as terminal
+    import tools.process_registry as registry_module
+    from tools.terminal_tool_lifecycle import _cleanup_inactive_envs
+
+    reg = ProcessRegistry()
+    reg._running["proc_own1"] = _owned_session(container="shared-env", owner="delegate-owner")
+    busy, idle = Mock(), Mock()
+    monkeypatch.setattr(registry_module, "process_registry", reg)
+    monkeypatch.setattr(terminal, "_active_environments", {"shared-env": busy, "idle-env": idle})
+    monkeypatch.setattr(terminal, "_last_activity", {"shared-env": time.time() - 600, "idle-env": time.time() - 600})
+    monkeypatch.setattr(terminal, "_creation_locks", {})
+    assert not reg.has_active_processes("shared-env")  # termination remains raw-owner scoped
+    assert reg.has_active_processes("delegate-owner")
+    _cleanup_inactive_envs(lifetime_seconds=300)
+    assert terminal._active_environments == {"shared-env": busy}
+    busy.cleanup.assert_not_called()
+    idle.cleanup.assert_called_once_with()

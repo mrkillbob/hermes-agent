@@ -130,6 +130,18 @@ def test_reaching_the_model_resets_ladder_and_oneshots_never_retry(tmp_cron_home
     assert remaining is None or remaining.get(ur.STATE_KEY) is None
 
 
+def test_short_natural_schedule_yields_to_the_schedule(tmp_cron_home):
+    job = create_job("frequent report", "every 1m")
+    assert ur.will_retry(job) is False
+    assert mark_job_run(job["id"], False, "ConnectError: dns", model_unreachable=True)
+    job = get_job(job["id"])
+    assert job is not None
+    assert job.get(ur.STATE_KEY) is None
+    assert ur.will_retry(job) is False
+
+
+
+
 @pytest.mark.parametrize("rung_tail", ["finish", "crash", "worker", "ownership_lost"])
 def test_ladder_reruns_do_not_spend_extra_repeat_budget(tmp_cron_home, monkeypatch, rung_tail):
     """A ladder re-run repeats an occurrence that already counted toward ``repeat``, so it must

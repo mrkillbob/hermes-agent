@@ -1,4 +1,5 @@
 from __future__ import annotations
+from hermes_cli import kanban_db_dispatch as dispatch_impl
 
 import pytest
 import subprocess
@@ -25,7 +26,8 @@ def _make_task(kb, *, assignee: str):
     )
 
 
-def test_default_spawn_pins_assignee_profile_cli_toolsets(monkeypatch, tmp_path):
+@pytest.mark.parametrize('budget', [None, {'wall_seconds': 2, 'output_bytes': 1024, 'requests': 1}])
+def test_default_spawn_pins_assignee_profile_cli_toolsets(monkeypatch, tmp_path, budget):
     """The transport client reaches the assigned profile with its exact run claim."""
     root = tmp_path / ".hermes"
     profile = root / "profiles" / "elias"
@@ -69,16 +71,21 @@ agent:
         captured["cwd"] = kwargs.get("cwd")
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    pid = kbd._default_spawn(_make_task(kb, assignee="elias"), str(workspace))
+    pid = kbd._default_spawn(_make_task(kb, assignee="elias"), str(workspace), execution_budget=budget)
 
     assert pid == 4242
     assert captured["env"]["HERMES_HOME"] == str(profile)
     assert captured["env"]["HERMES_KANBAN_TASK"] == "t_spawn_tools"
-    assert captured["cmd"][-2:] == ["-m", "hermes_cli.kanban_worker_client"]
+    if budget is None:
+        assert captured["cmd"][-2:] == ["-m", "hermes_cli.kanban_worker_client"]
+    else:
+        import json
+        assert captured["cmd"][-2] == "--budget"
+        assert json.loads(captured["cmd"][-1]) == budget
     assert captured["env"]["HERMES_KANBAN_RUN_ID"] == "7"
     assert captured["env"]["HERMES_KANBAN_CLAIM_LOCK"] == "lock"
 
@@ -103,7 +110,7 @@ def test_default_spawn_does_not_pass_mutable_launch_overrides(monkeypatch, tmp_p
         captured["cmd"] = list(cmd)
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -145,7 +152,7 @@ def test_default_spawn_resolves_env_passthrough_under_multiplex(monkeypatch, tmp
         captured["env"] = dict(kwargs.get("env") or {})
         return FakeProc()
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -205,3 +212,37 @@ def test_worker_toolsets_come_from_the_assignee_profile_not_the_parent_config(tm
         build_kanban_policy(SimpleNamespace(authority=SimpleNamespace(profile_id=str(other_profile)),
                                             actor=actor, native_owner=True), params, root_only_kanban)
     assert json.loads(policy.kanban_json)["profile"] == "elias"
+
+
+def test_resolve_worker_cli_toolsets_expands_all_without_unrestricted_sentinel(
+    monkeypatch, tmp_path
+):
+    """Headless workers must not turn a CLI ``all`` entry into every surface.
+
+    The one-shot parser treats ``all``/``*`` as an unrestricted sentinel.  If
+    the dispatcher forwards that sentinel after resolving the CLI platform,
+    desktop-only toolsets such as ``desktop_ui`` are reintroduced and their
+    tools are sent to providers from a headless Kanban worker.
+    """
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "elias"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text(
+        "platform_toolsets:\n  cli:\n    - all\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    from hermes_cli import kanban_db as kb
+
+    resolved = dispatch_impl._resolve_worker_cli_toolsets(str(profile))
+
+    assert resolved is not None
+    assert "all" not in resolved
+    assert "*" not in resolved
+    assert "terminal" in resolved
+    # ``kanban`` is a configurable opt-in, not a native toolset recovered from
+    # the ``all`` composite. Dispatcher-owned lifecycle tools are appended by
+    # model_tools when the worker is assembled.
+    assert "kanban" not in resolved
+    assert "desktop_ui" not in resolved
+    assert "project" not in resolved

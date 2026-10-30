@@ -4,6 +4,7 @@ so a pytest-context process (env OR ancestry) can never open a production
 state.db; env-based so subprocess children are protected too."""
 
 import os
+import re
 import sys
 import threading
 import weakref
@@ -75,6 +76,13 @@ def _process_looks_like_pytest(proc: Any) -> bool:
         cmdline = proc.cmdline() or []
     except Exception:
         return False
+    if len(cmdline) > 1:
+        executable = str(cmdline[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+        entry = str(cmdline[1]).strip('"').strip("'").replace("\\", "/")
+        managed = (Path(__file__).resolve().parent / "scripts" / "managed_pytest.py").as_posix()
+        if (re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?(?:t)?(?:\.exe)?", executable)
+                and entry.casefold() == managed.casefold()):
+            return True
     for arg in cmdline:
         try:
             # Split on both separators on every host so the answer is platform-independent.

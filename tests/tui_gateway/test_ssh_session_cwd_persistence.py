@@ -126,7 +126,7 @@ def test_named_profile_resume_does_not_adopt_a_root_launch_dir(db):
     root = server.get_hermes_home()
     profile = root / "profiles" / "work"
     profile.mkdir(parents=True, exist_ok=True)
-    (profile / "config.yaml").write_text("terminal:\n  backend: ssh\n")
+    (profile / "config.yaml").write_text("terminal:\n  backend: ssh\n", encoding="utf-8")
     stale = _hermes_home_subdir("home")
     db.create_session("named", source="tui", model="m", cwd=stale)
     session = {"session_key": "named", "source": "tui", "cwd": "~", "profile_home": str(profile)}

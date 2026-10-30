@@ -24,7 +24,8 @@ from agent.memory_context import sanitize_context
 from agent.tool_dispatch_helpers import _is_multimodal_tool_result, _multimodal_text_summary
 from agent.trajectory import save_trajectory as _save_trajectory_to_file
 from agent.message_metadata import (
-    DB_ROW_SNAPSHOT, MERGED_TURN_PREFIX, REPAIR_BOOKKEEPING_FIELDS, TOOL_CALL_UID, copy_identity_fields,
+    DB_ROW_SNAPSHOT, MERGED_TURN_PREFIX, REPAIR_BOOKKEEPING_FIELDS, RESTORED_FROM_STORE,
+    SKILLS_NOTE_CARRIER, TOOL_CALL_UID, copy_identity_fields, message_uid_or_none,
     tool_call_uid_from_history)
 from agent.transcript_repair import sync_flushed_message_markers
 
@@ -141,6 +142,30 @@ def _image_marker(part: dict) -> str:
     return f"[screenshot detail={detail}]" if detail in ("low", "high", "auto") else "[screenshot]"
 
 
+def _multimodal_note_sidecar(content: Any) -> str | None:
+    """Plain-text sidecar for a multimodal user row that carries a skills note, else None.
+
+    The store keeps a part list as flat text, which would hide where an agent-attached note sits. A
+    sidecar with the parts joined by blank lines keeps the note in its recognisable shape, so a resumed
+    session projects it for a protected route like any other note (``skills_index_delivery``). Only a row an
+    agent appended the note to gets one (the caller checks ``SKILLS_NOTE_CARRIER``): a sidecar is what
+    authenticates a note, so a user's pasted look-alike must not acquire one on the way to the store.
+    """
+    if not isinstance(content, list):
+        return None
+    from agent.skills_index_delivery import _note_start
+
+    parts = [p for p in content if isinstance(p, dict) and (p.get("type") == "text" or p.get("type") in _IMAGE_PART_TYPES)]
+    pieces = [str(p.get("text", "")) if p.get("type") == "text" else _image_marker(p) for p in parts]
+    texts = [i for i, p in enumerate(parts) if isinstance(p.get("text"), str)]
+    carrier = next((i for i in texts[-2:] if _note_start(parts[i]["text"]) is not None), None)
+    if carrier is None:
+        return None
+    # The note ends the sidecar, as it does a string turn's, whatever context part followed it.
+    pieces.append(pieces.pop(carrier))
+    return "\n\n".join(pieces)
+
+
 def _persist_lock(agent):
     """Close and turn-start persistence can run on separate CLI threads: one critical section.
 
@@ -199,6 +224,16 @@ def _db_flush_seed_ids(agent) -> set:
     return seed_ids if isinstance(seed_ids, set) else set()
 
 
+def _db_flush_store_uids(agent) -> set:
+    """``message_uid``s this agent saw durable in its CURRENT session (flushed by it, or scanned as already-durable
+    history): the provenance that lets the write path skip a marker-stripped copy of one of them (#134799)."""
+    session_id = getattr(agent, "session_id", None)
+    scope = getattr(agent, "_db_store_uid_scope", None)
+    if not (isinstance(scope, tuple) and scope[0] == session_id):
+        scope = agent._db_store_uid_scope = (session_id, set())
+    return scope[1]
+
+
 def _db_flush_scan_start(agent, messages: list[dict]) -> int:
     """Skip the identity-matched, still-marked prefix of the previous flush's snapshot."""
     scan_start = 0
@@ -222,6 +257,8 @@ def _db_flush_row(agent, msg: dict, is_current_turn_user: bool) -> dict[str, Any
         timestamp = timestamp if ov_timestamp is None else ov_timestamp
     if api_content == content:
         api_content = None
+    if api_content is None and role == "user" and msg.get(SKILLS_NOTE_CARRIER):
+        api_content = _multimodal_note_sidecar(content)
     # get_messages_as_conversation replays rows through sanitize_context().strip(); capture the sent bytes
     # when they would differ (compared in wire form).
     if (
@@ -254,6 +291,47 @@ def _db_flush_row(agent, msg: dict, is_current_turn_user: bool) -> dict[str, Any
     return row
 
 
+def sync_rewritten_tool_rows(agent, batch: list[dict], contents_before: list[Any]) -> int:
+    """Carry an end-of-batch rewrite of already-flushed tool results (the turn budget's spill
+    stubs) onto their durable rows; returns the rows rewritten.
+
+    Each result was flushed as it landed, so its row holds the full body. Replay reads the
+    store, so a row left stale reloads the spilled bytes next turn: the request grows by
+    everything the budget removed and its cached prefix diverges at the first spilled row.
+    The full body survives as the archived twin ``rewrite_pruned_rows`` keeps, beside the
+    spill file. A store without the in-place writer, or a row another writer moved, keeps
+    today's row.
+    """
+    session_db, session_id = getattr(agent, "_session_db", None), getattr(agent, "session_id", None)
+    rewrite = getattr(session_db, "rewrite_pruned_rows", None)
+    if getattr(agent, "_persist_disabled", False) or not session_id or not callable(rewrite):
+        return 0
+    changed = [
+        (msg, before) for msg, before in zip(batch, contents_before)
+        if msg.get(_DB_PERSISTED_MARKER) and msg.get("role") == "tool" and msg.get("content") != before]
+    if not changed:
+        return 0
+    rows = [(_db_flush_row(agent, {**msg, "content": before}, False), _db_flush_row(agent, msg, False))
+            for msg, before in changed]
+    from hermes_state_errors import PruneRowUnresolvedError, SessionTurnLeaseLostError
+    try:
+        with _persist_lock(agent):
+            written = rewrite(
+                session_id, rows, turn_lease_holder=getattr(agent, "_active_session_turn_lease_holder", None),
+                turn_lease_ttl_seconds=getattr(agent, "_active_session_turn_lease_ttl_seconds", 300.0) or 300.0,
+            )
+    except (PruneRowUnresolvedError, SessionTurnLeaseLostError) as exc:  # another writer owns the row or turn
+        logger.info("Tool-result rewrite not persisted; the stored row keeps the full body: %s", exc)
+        return 0
+    except Exception as exc:  # health: allow BLE001 -- a store failure must not fail the turn; the row keeps its body
+        logger.warning("Tool-result rewrite not persisted: %s", exc)
+        return 0
+    for (msg, _before), (_original, replacement) in zip(changed, rows):
+        if isinstance(replacement.get(DB_ROW_SNAPSHOT), str):
+            msg[DB_ROW_SNAPSHOT] = replacement[DB_ROW_SNAPSHOT]
+    return int(written)
+
+
 def _db_flush_collect(agent, messages: list[dict], conversation_history: Optional[list[dict]],
                       replay_history: bool = False):
     """Scan for un-flushed messages; returns ``(rows, msgs)`` to write in one transaction. ``replay_history``
@@ -267,11 +345,20 @@ def _db_flush_collect(agent, messages: list[dict], conversation_history: Optiona
     batch_rows: list[dict[str, Any]] = []
     batch_msgs: list[dict] = []
     tool_uid_owners: dict = {}  # tool_call_uid_from_history memo; the scanned dicts outlive this loop
+    # Durable-uid re-insert guard: a row whose uid this agent already saw durable is marked RESTORED_FROM_STORE;
+    # resolve_and_repair_transcript_batch skips it only if that uid is still ACTIVE, inside the write
+    # transaction, and never for a snapshot-carrying dict (the CAS rewrite owns its live edit).
+    store_uids = _db_flush_store_uids(agent)
     for msg_idx in range(_db_flush_scan_start(agent, messages), len(messages)):
         msg = messages[msg_idx]
         # Append-only flush: a mid-turn persist of scaffolding would commit a synthetic turn the end-of-turn
         # drop cannot un-write. Skip regardless of position.
-        if not isinstance(msg, dict) or _is_ephemeral_scaffolding(msg) or msg.get(_DB_PERSISTED_MARKER):
+        if not isinstance(msg, dict) or _is_ephemeral_scaffolding(msg):
+            continue
+        uid = message_uid_or_none(msg)
+        if msg.get(_DB_PERSISTED_MARKER):
+            if uid is not None:
+                store_uids.add(uid)
             continue
         # Already durable (history copy or caller-seeded): stamp so future flushes skip it.
         is_history = id(msg) in history_ids
@@ -279,6 +366,8 @@ def _db_flush_collect(agent, messages: list[dict], conversation_history: Optiona
             (is_history and not replay_history) or id(msg) in seed_ids
         ) and not msg.get(_PERSIST_AFTER_ADMISSION_INTERRUPT):
             msg[_DB_PERSISTED_MARKER] = True
+            if uid is not None:
+                store_uids.add(uid)
             continue
         if getattr(agent, "_mute_notification_reply", False) and not is_history:
             # Only new rows, never the cached history prefix. Keep evidence/model
@@ -290,7 +379,10 @@ def _db_flush_collect(agent, messages: list[dict], conversation_history: Optiona
             # minted (same-batch pairing happens inside the insert).
             if (tool_uid := tool_call_uid_from_history(messages, msg_idx, tool_uid_owners)) is not None:
                 msg[TOOL_CALL_UID] = tool_uid
-        batch_rows.append(_db_flush_row(agent, msg, ov_idx == msg_idx or msg is pending_cli_message))
+        row = _db_flush_row(agent, msg, ov_idx == msg_idx or msg is pending_cli_message)
+        if uid is not None and uid in store_uids:
+            row[RESTORED_FROM_STORE] = True
+        batch_rows.append(row)
         batch_msgs.append(msg)
     return batch_rows, batch_msgs
 
@@ -306,6 +398,7 @@ def _db_flush_write(agent, batch_rows: list[dict[str, Any]], batch_msgs: list[di
         turn_lease_ttl_seconds=getattr(agent, "_active_session_turn_lease_ttl_seconds", 300.0) or 300.0,
     )
     sync_flushed_message_markers(batch_msgs, batch_rows)
+    _db_flush_store_uids(agent).update(uid for msg in batch_msgs if (uid := message_uid_or_none(msg)) is not None)
     if _newest_checkpoint_carrier(batch_msgs, "codex_reasoning_items") >= 0:
         # The insert already rewrote the older rows (SessionDB._drop_shadowed_checkpoint_rows); mirror it on
         # the live transcript so forks/compaction built from memory carry one checkpoint too. Markers stay:

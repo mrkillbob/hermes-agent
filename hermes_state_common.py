@@ -10,6 +10,8 @@ import sys
 import time
 from typing import Any
 
+from hermes_state_file_identity import FTS_REBUILD_DEFERRAL_KEY, stat_db_file_identity
+
 from hermes_cli.timefmt import EPOCH_MAX, EPOCH_MIN
 from hermes_state_keys import CRON_PRINCIPAL_ID
 from hermes_state_pidns import persistent_record_pidns_checkable, pid_namespace_id
@@ -335,16 +337,6 @@ _FTS_OLD_INDEXED_CONTENT_SQL = _fts_indexed_content_sql("old")
 MAX_FTS5_QUERY_CHARS = 2_048
 
 
-def stat_db_file_identity(path) -> tuple[int, int] | None:
-    """``(st_dev, st_ino)`` for *path*, or None.  st_ino=0 (Windows, some network FS) would false-positive
-    every replaced-file check, so it counts as unknown."""
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    return (st.st_dev, st.st_ino) if st.st_dev and st.st_ino else None
-
-
 # Row probes shared by the messages / compression mixins.
 _ENDED_ROW_SQL = "SELECT ended_at, end_reason FROM sessions WHERE id = ?"
 _COMPRESSION_LOCK_ROW_SQL = "SELECT holder, expires_at FROM compression_locks WHERE session_id = ?"
@@ -357,6 +349,22 @@ def _ended_by_compression(row) -> bool:
 def _placeholders(items) -> str:
     """``?,?,?`` for one bound parameter per element of *items* (a sequence or an int count)."""
     return ",".join("?" for _ in range(items if isinstance(items, int) else len(items)))
+
+
+# A first prompt is durable in ``session_admissions`` from admission on, while its transcript row lands
+# only at turn start; a restart in between leaves the admission ``unknown`` and the session at 0
+# messages. Only a session with neither messages nor an admission is an empty launch stub.
+_NOT_A_LAUNCH_STUB_SQL = (
+    "(s.message_count > 0 OR EXISTS (SELECT 1 FROM session_admissions a WHERE a.target_session_id = s.id))")
+
+
+def launch_stub_filter_sql(db) -> str:
+    """``sessions s`` predicate that drops empty launch stubs (the CLI crashed or a resume failed before
+    the first turn). A read-only open does not migrate, so a store from before the runtime tables may
+    lack ``session_admissions``; messages alone decide there."""
+    if db._read_all("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_admissions'"):
+        return _NOT_A_LAUNCH_STUB_SQL
+    return "s.message_count > 0"
 
 
 def _source_match_clause(sources, local_created_sources=None) -> tuple[str, list]:
@@ -729,6 +737,22 @@ CREATE TABLE IF NOT EXISTS async_delegations (
     -- ever run, breaking rebuild/replay pipelines that reconstruct state.db
     -- from the canonical schema (#94691).
     origin_session_id TEXT NOT NULL DEFAULT ''
+);
+
+-- Deliberately has no sessions(id) foreign key. A desktop or gateway root
+-- claims its Git identity before lazy session persistence creates the row.
+CREATE TABLE IF NOT EXISTS conversation_worktree_bindings (
+    root_session_id TEXT PRIMARY KEY,
+    worktree_path TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    repo_common_dir TEXT NOT NULL,
+    source_worktree TEXT,
+    state TEXT NOT NULL CHECK (state IN ('creating', 'ready', 'creation_failed', 'retained', 'removed')),
+    failure_phase TEXT,
+    failure_message TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
@@ -1121,8 +1145,6 @@ FTS_CJK_STALE_KEY = "fts_cjk_stale"
 # index before reinstalling sync triggers (rows written while they were absent leave an unknown gap).
 FTS_STALE_KEY = "fts_stale"
 
-# Durable diagnostic for stale FTS recovery blocked across process restarts.
-FTS_REBUILD_DEFERRAL_KEY = "fts_rebuild_deferral"
 
 
 # ── Legacy (v22 / inline-content) FTS DDL ──────────────────────────────

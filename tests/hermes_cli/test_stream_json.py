@@ -105,7 +105,7 @@ def _interrupted_turn(_peer):
 
 
 @pytest.mark.parametrize("turn, credentials_ok, exit_code, types", [
-    (_ok_turn, True, 0, ["system", "text", "tool_use", "tool_result", "result"]),
+    (_ok_turn, True, 0, ["system", "system", "text", "tool_use", "tool_result", "result"]),
     (_interrupted_turn, True, 130, ["system", "result"]),
     (_ok_turn, False, 1, ["system", "result"]),  # credentials fail before any session exists
 ])
@@ -118,6 +118,10 @@ def test_chat_stream_json_implies_quiet_and_closes_with_result(monkeypatch, caps
     assert events[-1]["exit_code"] == exit_code
     # A launch refused before the gateway created a session has none to report.
     assert events[-1]["session_id"] == ("session-123" if credentials_ok else "")
+    if turn is _ok_turn and credentials_ok:
+        assert events[1]["subtype"] == "admission"
+        assert events[1]["session_id"] == "session-123"
+        assert events[1]["admission_id"] == "adm-1"
 
 
 @pytest.mark.parametrize("argv, message", [

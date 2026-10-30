@@ -1,7 +1,7 @@
 """Owner-only adoption of pre-authority local transcripts.
 
-An old transcript has no authenticated subject. Only a redeemed same-profile
-native control ticket may adopt it; remote login is not evidence of ownership.
+An old transcript has no authenticated subject. Only the machine owner (a redeemed same-profile
+native control ticket, or the owner signed in to the Webapp: gateway.owner_identity) may adopt it.
 The historical ID becomes the stable logical owner without copying its messages.
 Compression and reset may later advance the physical target, never FIFO identity.
 """
@@ -17,9 +17,11 @@ from hermes_state_runtime import RuntimeStoreError
 
 
 def bind_native_transport(authority, actor, identity):
-    if (identity.get('provider') == 'local'
-            and identity.get('profile_id') == authority.profile_id
-            and identity.get('instance_id') == authority.instance_id
+    # The machine owner signed in to the Webapp is the same person native Desktop is (owner_identity).
+    from gateway.owner_identity import host_owner_subject
+    native = (identity.get('provider') == 'local' and identity.get('profile_id') == authority.profile_id
+              and identity.get('instance_id') == authority.instance_id)
+    if ((native or actor.subject == host_owner_subject())
             and actor.profile_id == authority.profile_id
             and 'session:create' in actor.capabilities):
         if not hasattr(authority, '_native_legacy_transports'):
@@ -33,12 +35,16 @@ def unbind_native_transport(authority, actor):
 
 def require_history_claim(authority, conn, actor, sid):
     """Import receipts confer ownership; merely knowing an old ID does not."""
-    from hermes_state_mutation_binding import BINDING_PREFIX
-    row = conn.execute('SELECT session_key,chat_id,origin_json FROM sessions WHERE id=?', (sid,)).fetchone()
-    if row is None or any(row):
+    from gateway.owner_identity import same_owner
+    from hermes_state_mutation_binding import BINDING_PREFIX, _owner_user
+    row = conn.execute('SELECT * FROM sessions WHERE id=?', (sid,)).fetchone()
+    if row is None or row['session_key'] or row['chat_id'] or row['origin_json']:
         return
     if conn.execute('SELECT 1 FROM state_meta WHERE key=?', (BINDING_PREFIX + sid,)).fetchone():
         return  # authorize_history checks the already committed importer identity.
+    own_profile = row['profile_name'] in (None, '', authority.db._own_profile_name() or 'default')
+    if own_profile and _owner_user(row) and same_owner(row['user_id'], actor.subject):
+        return  # Its owner (a login stamp is the machine owner's); authorize_history re-checks it.
     if getattr(authority, '_native_legacy_transports', {}).get(actor.transport_id) != actor:
         raise RuntimeStoreError('permission_denied')
 
@@ -67,7 +73,21 @@ def resolve_local_target(authority, actor, sid):
     return adopt_legacy_session(authority, actor, row)
 
 
-def legacy_launch_params(row):
+def _legacy_placeholder_route(route, params, config):
+    """An endpointless custom placeholder inherits the profile unless its model names an entry."""
+    if route.get('provider') != 'custom' or 'base_url' in route:
+        return route
+    from gateway.session_policy import _with_entry_pick
+    picked = _with_entry_pick({**params, 'provider': 'custom'}, config or {})['provider']
+    # The missing endpoint's saved wire mode cannot override the profile or a resolved entry.
+    route.pop('api_mode', None)
+    route.pop('provider')
+    if picked.startswith('custom:'):
+        route['provider'] = picked
+    return route
+
+
+def legacy_launch_params(row, config=None):
     """``(create params, api_mode)`` a legacy row resumes on.
 
     The old local surfaces persisted their effective route and runtime choices in
@@ -89,6 +109,7 @@ def legacy_launch_params(row):
         # an endpoint left without a provider is a custom route, never one to pair with the
         # profile's provider.
         route.setdefault('provider', 'custom')
+    route = _legacy_placeholder_route(route, params, config)
     if row['source'] == 'acp' and 'cwd' not in params and Path(str(saved.get('cwd') or '')).is_absolute():
         params['cwd'] = saved['cwd']
     params.update({key: route[key] for key in ('provider', 'base_url') if key in route})
@@ -246,10 +267,10 @@ def adopt_legacy_session(authority, actor, row):
 
     request_id = 'legacy:' + row['id']
     sid = row['id']
-    params, api_mode = legacy_launch_params(row)
+    config = _load_gateway_config()
+    params, api_mode = legacy_launch_params(row, config)
     params['source'] = LEGACY_CREATION_SOURCES.get(row['source'], row['source'])
     private = {}
-    config = _load_gateway_config()
     params, api_mode = legacy_bot_chat_launch(row, params, api_mode, config)
     model_cfg = config.get('model')
     if isinstance(model_cfg, dict) and ('provider' in params or 'base_url' in params):

@@ -7,7 +7,6 @@ stdout drain thread used by ``BaseEnvironment._wait_for_process``.
 
 import codecs
 import os
-import select
 import subprocess
 import threading
 import time
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import IO, Callable, Protocol
 
 from hermes_constants import get_hermes_home
+from tools.environments.fd_wait import open_fd_waiter
 from tools.tool_output_truncate import head_tail_split, truncation_notice
 from hermes_cli._subprocess_compat import windows_hide_flags
 
@@ -343,24 +343,24 @@ def _drain_stdout(proc: ProcessHandle, output: _BoundedOutputCollector, stop: th
     """Drain ``proc.stdout`` into *output* until EOF or shortly after exit.
     ``for line in proc.stdout`` would block on ``readline()`` until EOF, and a backgrounded
     grandchild (``cmd &``, ``setsid cmd & disown``) inherits the pipe's write end — so the
-    tool would hang for the grandchild's lifetime. Instead we ``select()`` with a short poll
+    tool would hang for the grandchild's lifetime. Instead we poll readiness with a short interval
     and stop ~300ms after bash exits even if the pipe has not EOF'd. Raw 4096-byte ``os.read``
     chunks can split a multibyte UTF-8 sequence, so an incremental decoder with
     ``errors="replace"`` buffers partial sequences across chunks. Streams without a real
     integer ``fileno()`` (mocks, in-memory adapters) are iterated to EOF instead — otherwise
-    the thread would die silently and lose all output. ``select()`` does not work on pipe fds
+    the thread would die silently and lose all output. POSIX readiness polling does not work on pipe fds
     on Windows, so :func:`_drain_fd_windows` polls ``PeekNamedPipe`` there instead.
     """
     stream = proc.stdout
     if stream is None:
         return
-    # Non-blocking drain via select(). The old pattern — ``for line in proc.stdout`` — blocks on
+    # Non-blocking drain via native readiness polling. The old pattern — ``for line in proc.stdout`` — blocks on
     # ``readline()`` until the pipe reaches EOF. When the user's command backgrounds a process (``cmd &``,
     # ``setsid cmd & disown``, etc.), that backgrounded grandchild inherits the write-end of our stdout pipe
     # via ``fork()``. Even after ``bash`` itself exits, the pipe stays open because the grandchild still
     # holds it — so the drain thread never returns and the tool hangs for the full lifetime of the
     # grandchild (issue #8340: users reported indefinite hangs when restarting uvicorn with ``setsid ... &
-    # disown``). The fix: select() with a short poll interval, and stop draining shortly after ``bash``
+    # disown``). Poll readiness at short intervals, and stop draining shortly after ``bash``
     # exits even if the pipe hasn't EOF'd yet. Any output the grandchild writes after that point goes to an
     # orphaned pipe (harmless — the kernel reaps it when our end closes). Decoding: we ``os.read()`` raw
     # bytes in fixed-size chunks (4096) so a single multibyte UTF-8 character can split across reads. An
@@ -395,17 +395,24 @@ def _drain_stdout(proc: ProcessHandle, output: _BoundedOutputCollector, stop: th
 
 
 def _drain_fd_select(proc, fd: int, output: _BoundedOutputCollector, decoder, stop=None) -> None:
-    """POSIX drain: select() poll, stopping ~300ms after bash exits with the pipe idle, or
-    when *stop* is set (the pipe is being handed to another reader — yield-to-background)."""
+    """POSIX drain: selector readiness (no FD_SETSIZE ceiling, #94928), stopping ~300ms after
+    bash exits with the pipe idle, or when *stop* is set (the pipe is being handed to another
+    reader — yield-to-background)."""
+    waiter = open_fd_waiter(fd)
+    if waiter is None:
+        return  # fd already closed
+    try:
+        _drain_fd_waiter(proc, fd, waiter, output, decoder, stop)
+    finally:
+        waiter.close()
+
+
+def _drain_fd_waiter(proc, fd: int, waiter, output: _BoundedOutputCollector, decoder, stop) -> None:
     idle_after_exit = 0
     while True:
         if stop is not None and stop.is_set():
             return
-        try:
-            ready, _, _ = select.select([fd], [], [], 0.1)
-        except (ValueError, OSError):
-            return  # fd already closed
-        if ready:
+        if waiter.wait(0.1):
             try:
                 chunk = os.read(fd, 4096)
             except (ValueError, OSError):

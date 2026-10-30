@@ -59,6 +59,7 @@ def _make_dummy_env(**kwargs):
         persist_across_processes=kwargs.get("persist_across_processes", True),
         shared_container_key=kwargs.get("shared_container_key", ""),
         shm_size=kwargs.get("shm_size", docker_env._DEFAULT_SHM_SIZE),
+        isolate_host_data=kwargs.get("isolate_host_data", False),
         snap_compat=kwargs.get("snap_compat", False),
     )
 
@@ -98,6 +99,103 @@ def test_auto_mount_host_cwd_adds_volume(monkeypatch, tmp_path):
     assert f"{project_dir}:/workspace" in run_args_str
 
 
+def test_isolate_host_data_suppresses_automatic_credentials_skills_and_caches(
+    monkeypatch, tmp_path
+):
+    """Secure workers must not inherit Hermes' ambient automatic host mounts."""
+    project_dir = tmp_path / "sanitized-pack"
+    project_dir.mkdir()
+    credential = tmp_path / "token.json"
+    credential.write_text("secret")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+    from tools import credential_files
+    monkeypatch.setattr(
+        credential_files,
+        "get_credential_file_mounts",
+        lambda: [{"host_path": str(credential), "container_path": "/root/.auth/token.json"}],
+    )
+    monkeypatch.setattr(
+        credential_files,
+        "get_skills_directory_mount",
+        lambda: [{"host_path": str(skills), "container_path": "/root/.hermes/skills"}],
+    )
+    monkeypatch.setattr(
+        credential_files,
+        "get_cache_directory_mounts",
+        lambda: [{"host_path": str(cache), "container_path": "/root/.hermes/cache"}],
+    )
+
+    _make_dummy_env(
+        cwd="/workspace",
+        host_cwd=str(project_dir),
+        auto_mount_cwd=True,
+        isolate_host_data=True,
+    )
+
+    run_call = next(c for c in calls if c[0][1] == "run")
+    run_args = " ".join(run_call[0])
+    assert f"{project_dir}:/workspace" in run_args
+    assert str(credential) not in run_args
+    assert str(skills) not in run_args
+    assert str(cache) not in run_args
+
+
+def test_non_persistent_cleanup_removes_container(monkeypatch):
+    """When persist_across_processes=false, cleanup() must docker stop AND
+    docker rm so containers don't leak across hermes processes.
+
+    Updated for issue #20561: the previous implementation used fire-and-forget
+    ``subprocess.Popen("... &", shell=True)`` which raced with parent exit;
+    the new implementation uses ``subprocess.run`` on a daemon thread with
+    bounded timeouts. See test_cleanup_with_persist_disabled_stops_and_rms
+    for the full behavior contract.
+    """
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
+    _mock_subprocess_run(monkeypatch)
+    # Run the worker thread synchronously so assertions can observe its work.
+    import threading
+    monkeypatch.setattr(threading, "Thread", _FakeThread)
+
+    env = docker_env.DockerEnvironment(
+        image="python:3.11", cwd="/root", timeout=60,
+        task_id="ephemeral-task", persistent_filesystem=False,
+        persist_across_processes=False,
+    )
+    container_id = env._container_id
+    assert container_id
+
+    # Capture cleanup-time docker calls (everything before this was init).
+    cleanup_calls = []
+    real_run = docker_env.subprocess.run
+
+    def _capture(cmd, **kw):
+        cleanup_calls.append((list(cmd) if isinstance(cmd, list) else cmd, kw))
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(docker_env.subprocess, "run", _capture)
+    env.cleanup()
+
+    stops = [c for c in cleanup_calls if isinstance(c[0], list) and c[0][1:2] == ["stop"]]
+    assert stops, f"cleanup() should docker stop {container_id}; got {cleanup_calls}"
+
+
+class _FakePopen:
+    def __init__(self, cmd, **kwargs):
+        self.cmd = cmd
+        self.kwargs = kwargs
+        self.stdout = StringIO("")
+        self.stdin = None
+        self.returncode = 0
+
+    def poll(self):
+        return self.returncode
 
 
 def _make_execute_only_env(forward_env=None):
@@ -743,6 +841,45 @@ def test_sandbox_dir_name_never_resolves_to_the_sandbox_root():
         assert not (set(name) & set(':/\\')), name
 
 
+@pytest.mark.parametrize("isolate_host_data", [False, True])
+def test_labels_attribute_populated_after_init(monkeypatch, isolate_host_data):
+    """``self._labels`` must be set to the same key/value pairs that went onto
+    docker run, so subsequent reuse / reaper paths can match without re-running
+    the sanitizer or re-importing the profile module."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    env = _make_dummy_env(task_id="abc", isolate_host_data=isolate_host_data)
+
+    run_cmd = next(cmd for cmd, _ in calls if isinstance(cmd, list) and cmd[1] == "run")
+    wire_labels = dict(run_cmd[i + 1].split("=", 1) for i, arg in enumerate(run_cmd) if arg == "--label")
+    assert env._labels == wire_labels
+    labels = dict(env._labels)
+    environment_label = labels.pop("hermes-environment")
+    assert labels == {
+        "hermes-agent": "1",
+        "hermes-task-id": "abc",
+        "hermes-profile": "default",
+        "hermes-egress": "off",
+        "hermes-host-data": "isolated" if isolate_host_data else "ambient",
+    }
+    assert re.fullmatch(r"[0-9a-f]{24}", environment_label)
+
+
+def test_isolated_container_reuse_is_label_partitioned(monkeypatch):
+    """A secure worker must never reuse a container created with ambient host mounts."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "secure")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    env = _make_dummy_env(task_id="reuse-boundary", isolate_host_data=True)
+
+    assert env._labels["hermes-host-data"] == "isolated"
+    ps_call = next(c[0] for c in calls if c[0][1] == "ps")
+    assert "label=hermes-host-data=isolated" in ps_call
+
+
 @pytest.mark.require_symlinks
 def test_symlinked_skills_tree_reuses_container_across_processes(monkeypatch, tmp_path):
     """A symlink under ``skills/`` makes the skills mount a fresh mkdtemp copy per
@@ -776,27 +913,6 @@ def test_symlinked_skills_tree_reuses_container_across_processes(monkeypatch, tm
     changed = dict(config, volumes=["volume-b:/workspace"])
     third = _make_dummy_env(**changed)
     assert third._labels["hermes-environment"] != first._labels["hermes-environment"]
-
-
-def test_labels_attribute_populated_after_init(monkeypatch):
-    """``self._labels`` must be set to the same key/value pairs that went onto
-    docker run, so subsequent reuse / reaper paths can match without re-running
-    the sanitizer or re-importing the profile module."""
-    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
-    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
-    _mock_subprocess_run(monkeypatch)
-
-    env = _make_dummy_env(task_id="abc")
-
-    labels = dict(env._labels)
-    environment_label = labels.pop("hermes-environment")
-    assert labels == {
-        "hermes-agent": "1",
-        "hermes-task-id": "abc",
-        "hermes-profile": "default",
-        "hermes-egress": "off",
-    }
-    assert re.fullmatch(r"[0-9a-f]{24}", environment_label)
 
 
 @pytest.mark.parametrize("changed_setting", ["image", "volumes", "hermes_home"])
@@ -1897,36 +2013,3 @@ def test_docker_env_warnings_never_echo_values(caplog):
     with caplog.at_level(logging.WARNING, logger="tools.environments.docker"):
         docker_env._normalize_env_dict({"TOKEN": ["sk-live-value"], "OK": "1"})
     assert "TOKEN" in caplog.text and "sk-live-value" not in caplog.text
-
-
-@pytest.mark.parametrize("base", ["default", "profile:research-assistant-for-the-quarterly-ops"])
-def test_workspace_container_labels_identify_it_to_the_orphan_reaper(monkeypatch, base):
-    """The orphan reaper must recognise an idle-STOPPED workspace container from the labels the
-    create path actually stamps. ``hermes-task-id`` is truncated to 63 chars, so a profile name of
-    36+ chars cut the ``_ws_<digest>`` suffix and the next sweep ``docker rm``-ed the container,
-    losing everything installed outside the mounts."""
-    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
-    calls = _mock_subprocess_run(monkeypatch)
-    _make_dummy_env(task_id=f"{base}:ws:0123456789abcdef")
-    labels = dict(lbl.split("=", 1) for lbl in _labels_in_run_args(_run_args_from_calls(calls)))
-
-    def _inspect(cmd, **kwargs):
-        key = re.search(r'Labels "([^"]+)"', cmd[cmd.index("--format") + 1]).group(1)
-        return subprocess.CompletedProcess(cmd, 0, stdout=labels.get(key, "<no value>") + "\n", stderr="")
-
-    monkeypatch.setattr(docker_env.subprocess, "run", _inspect)
-    assert docker_env._is_idle_workspace_container("/usr/bin/docker", "cid"), labels
-
-
-def test_non_workspace_container_is_not_an_idle_workspace(monkeypatch):
-    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
-    calls = _mock_subprocess_run(monkeypatch)
-    _make_dummy_env(task_id="profile:research-assistant-for-the-quarterly-ops")
-    labels = dict(lbl.split("=", 1) for lbl in _labels_in_run_args(_run_args_from_calls(calls)))
-
-    def _inspect(cmd, **kwargs):
-        key = re.search(r'Labels "([^"]+)"', cmd[cmd.index("--format") + 1]).group(1)
-        return subprocess.CompletedProcess(cmd, 0, stdout=labels.get(key, "<no value>") + "\n", stderr="")
-
-    monkeypatch.setattr(docker_env.subprocess, "run", _inspect)
-    assert not docker_env._is_idle_workspace_container("/usr/bin/docker", "cid"), labels

@@ -458,8 +458,12 @@ class Venv(StatePackage):
             from pm.plugins_state import enabled_plugins_ordered
             enabled_plugins_ordered(skip_invalid_secondary=skip_invalid_secondary)
         members = [] if repair else (enabled_member_dirs() if plugin_dirs is None else plugin_dirs)
+        from pm.lifetime_cleanup import defer_failed_output, output_identity
+
+        owned_identity = None
         try:
             generation.mkdir(parents=True)
+            owned_identity = output_identity(generation)
             (generation / ".lease-managed").touch()
             environment.create()
             prior = Facts(runtime_facts_path(project), strict=repair).get("venv") or {}
@@ -480,14 +484,15 @@ class Venv(StatePackage):
                           seed_lock=seed, frozen=repair or not members, replay=replay,
                           source=project, environment=environment)
             resolved_lock = generation / "workspace" / "uv.lock"
-            environment.check()
+            environment.check(resolved_lock)
             if repair:
                 from pm.environments import venv_command
                 from pm.recovery import validate_environment
                 validate_environment(venv_command(project, candidate, ("-I",)),
                                      env=dict(environment.env), cwd=resolved_lock.parent)
         except BaseException:
-            shutil.rmtree(generation, ignore_errors=True)
+            if owned_identity is not None and not defer_failed_output(generation, owned_identity):
+                shutil.rmtree(generation, ignore_errors=True)
             raise
         (generation / ".lease-managed").touch()
         return {"environment": candidate, "resolved_lock": resolved_lock}
@@ -963,65 +968,6 @@ class CuaDriver(BinaryPackage):
 
 
 @register
-class AgentBrowser(BinaryPackage):
-    name = "agent-browser"
-    optional = True
-    # Browser tools find agent-browser only in PM's store or on PATH (no npx
-    # fallback), and their readiness check never installs it, so an install
-    # without it silently loses every browser_* tool.
-    # Default-install it; `install.sh --skip-browser` declines it.
-    default = True
-    deps = ("chromium",)
-    # Termux owns its browser stack (`npm install -g agent-browser`; see
-    # tools/browser_tool_install.py), and PM has no bionic Chromium to drive.
-    gaps = {
-        "linux-arm64-bionic": "Termux installs agent-browser through npm",
-        **{target: "agent-browser has no musl Chromium runtime" for target in MUSL_TARGETS},
-    }
-    flatten = True
-    probe_version = False
-    url = "https://registry.npmjs.org/agent-browser/-/agent-browser-{version}.tgz"
-    # No win32-arm64 gap: agent-browser ships only win32-x64, and Windows
-    # ARM64 runs it via built-in emulation (its own postinstall falls back
-    # to x64 on arm64). chromium is likewise the x64 build on win32-arm64.
-    emulated_arch_targets = frozenset({"win32-arm64"})
-
-    def latest_versions(self, target: str, locked=None) -> list[str]:
-        latest = npm_dist_tags("agent-browser").get("latest")
-        return [latest] if latest else []
-
-    def _rel(self, target: str) -> Optional[str]:
-        ext = ".exe" if target.startswith("win32") else ""
-        # Windows ARM64 runs the x64 binary under built-in emulation:
-        # agent-browser ships no native arm64 build (its own postinstall
-        # falls back to x64 on arm64), so the staged name is win32-x64.
-        if target == "win32-arm64":
-            target = "win32-x64"
-        return f"bin/agent-browser-{target}{ext}"
-
-    def binary(self, entry: Path, target: str) -> Optional[Path]:
-        # The win32-arm64 payload carries the x64 binary (emulated), so
-        # resolve it under the win32-x64 name.
-        return super().binary(entry, "win32-x64" if target == "win32-arm64" else target)
-
-    def stage(self, store: Store, staged: Path, version: str, target: str) -> None:
-        flatten_single_dir(staged)
-        bin_dir = staged / "bin"
-        if not bin_dir.is_dir():
-            raise InstallError(self.name, "staged without a bin/ directory")
-        keep = Path(self._rel(target)).name
-        if not (bin_dir / keep).is_file():
-            raise InstallError(self.name, f"{keep} missing from the staged tarball")
-        for item in bin_dir.iterdir():
-            if item.is_file() and item.name.startswith("agent-browser-") and item.name != keep:
-                item.unlink()
-        # The npm tarball ships every native binary as 0644; agent-browser's
-        # own postinstall sets the exec bit, and pm runs no postinstall.
-        kept = bin_dir / keep
-        kept.chmod(kept.stat().st_mode | 0o111)
-
-
-@register
 class Chromium(Package):
     """Playwright resolves browsers by DIRECTORY NAME under one root:
     `<name with '-'→'_'>-<revision>`, no target suffix. The env points
@@ -1036,6 +982,10 @@ class Chromium(Package):
 
     name = "chromium"
     optional = True
+    # browser_exec's launcher drives this build, and its readiness check
+    # installs it only once per process, so default-install it like the
+    # other OS tools; `install.sh --skip-browser` declines it.
+    default = True
     on_path = False
     # Neither Chrome-for-Testing nor Playwright's mirror builds for Android.
     gaps = {
@@ -1049,7 +999,7 @@ class Chromium(Package):
     # playwright's dbazure mirror with its own platform names.
     # win32-arm64 uses the win64 (x64) build: CfT publishes no native
     # win-arm64 chromium, and Windows ARM64 runs x64 binaries via built-in
-    # emulation — the same choice agent-browser's own postinstall makes.
+    # emulation.
     _CFT = {
         "linux-x64": "linux64",
         "darwin-x64": "mac-x64",
@@ -1096,10 +1046,11 @@ class Chromium(Package):
         binary = self.binary(entry, target)
         if binary is None:
             raise InstallError(self.name, f"Chromium executable missing under {native(entry)}")
-        return {
-            "PLAYWRIGHT_BROWSERS_PATH": str(entry.parent),
-            "AGENT_BROWSER_EXECUTABLE_PATH": str(binary),
-        }
+        # Playwright launches without an executable_path (e.g. the
+        # har-derived-api-client skill's `chromium.launch(channel="chromium")`)
+        # find this build through the root; Hermes's own launcher asks
+        # hermes_cli.browser_runtime.chromium_executable() instead.
+        return {"PLAYWRIGHT_BROWSERS_PATH": str(entry.parent)}
 
 
 class LlamaCpp(BinaryPackage):

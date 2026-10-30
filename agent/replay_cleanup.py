@@ -102,7 +102,8 @@ def strip_interrupted_tool_tails(agent_history: list[dict[str, Any]]) -> list[di
                         if is_interrupted_tool_result(tool_result.get("content", "")):
                             name = call_names.get(str(tool_result.get("tool_call_id") or ""), "")
                             disposition, content = _orphan_recovery(name, _INTERRUPTED_NOTICES)
-                            tool_result = {**tool_result, "effect_disposition": disposition, "content": content}
+                            from agent.llm_egress_lineage import transfer
+                            tool_result = transfer({**tool_result, "effect_disposition": disposition, "content": content}, tool_result)
                         cleaned.append(tool_result)
                 else:
                     logger.debug("Stripping interrupted read-only assistant→tool replay block (indices %d–%d, tool_results=%d)",
@@ -237,7 +238,8 @@ def strip_stale_dangerous_confirmations(
             "Redacting stale dangerous-confirmation text in user message (age=%.1fs, expiry=%.1fs): %r",
             age, expiry_seconds, (msg.get("content") or "")[:80],
         )
-        redacted = dict(msg)
+        from agent.llm_egress_lineage import transfer
+        redacted = transfer(dict(msg), msg)
         redacted["content"] = _EXPIRED_CONFIRMATION_SENTINEL
         # The api_content sidecar carries the exact bytes sent — the confirmation itself; replaying it would undo the redaction.
         drop_stale_api_content(redacted)

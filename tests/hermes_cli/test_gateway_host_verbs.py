@@ -211,7 +211,7 @@ def test_named_profile_restart_all_with_host_down_restarts_the_default_root(monk
     assert len(spawned) == 1
     cmd, kwargs = spawned[0]
     assert cmd[-3:] == ["gateway", "run", "--replace"]
-    assert "--profile" not in cmd
+    assert cmd[-5:-3] == ["--profile", "default"] and "leinad" not in cmd
     env = kwargs["env"]
     assert Path(env["HERMES_HOME"]) == root
     assert env.get("DISCORD_BOT_TOKEN") == "root-discord"
@@ -248,7 +248,7 @@ def test_restart_all_does_not_attach_to_the_process_it_just_stopped(
     monkeypatch.setattr(gw, "kill_gateway_processes", lambda **k: 1)
     monkeypatch.setattr(gw, "_wait_for_api_server_port_free", lambda *a, **k: None)
     monkeypatch.setattr(gw, "_installed_service_kind_for", lambda *a, **k: None)
-    monkeypatch.setattr(gw, "_print_unfolded_gateway_note", lambda owner: None)
+    monkeypatch.setattr("hermes_cli.gateway_profile_lifecycle._print_unfolded_gateway_note", lambda owner: None)
 
     def _stopped(*a, **k):
         # The owner really is gone by the time the re-entry happens.
@@ -274,7 +274,7 @@ def test_named_profile_restart_all_reaches_the_all_aware_branch(monkeypatch):
     monkeypatch.setattr(gw, "_guard_named_profile_under_multiplexer",
                         lambda **k: pytest.fail("the generic guard pre-empted the --all branch"))
     called: list[bool] = []
-    monkeypatch.setattr(gw, "_restart_all", lambda system: called.append(True))
+    monkeypatch.setattr(gw, "_restart_all", lambda system, detach=False: called.append(True))
 
     gw._cmd_restart(SimpleNamespace(system=False, all=True, force=False))
 

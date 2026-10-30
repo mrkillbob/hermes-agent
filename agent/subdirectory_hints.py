@@ -11,7 +11,8 @@ import shlex
 from pathlib import Path
 from typing import Dict, Any, Optional, Set
 
-from agent.prompt_builder import _read_text_with_timeout, _scan_context_content, _truncate_content
+from agent.prompt_builder import _scan_context_content, _truncate_content
+from agent.source_context_presentation import context_display_text, read_context_bytes
 from agent.search_policy import SEARCH_PRUNE_DIR_NAMES
 
 logger = logging.getLogger(__name__)
@@ -293,7 +294,8 @@ class SubdirectoryHintTracker:
             if (target := _resolved_hint_target(hint_path, self.working_dir)) is None:
                 continue
             try:
-                content = (_read_text_with_timeout(target) or "").strip()
+                raw_bytes = read_context_bytes(target) or b""
+                content = context_display_text(raw_bytes.decode("utf-8"))
                 if not content:
                     continue
                 digest = _digest(content)
@@ -307,6 +309,10 @@ class SubdirectoryHintTracker:
                 content = _truncate_content(
                     content, filename, max_chars=_MAX_HINT_CHARS, read_path=rel_path, queue_warning=False,
                 )
+                from agent.source_context_presentation import issue_context_read
+
+                issue_context_read(hint_path, raw_bytes, content,
+                                   working_root=self.working_dir, relative_path=rel_path, read_target=target)
                 logger.debug("Loaded subdirectory hints from %s: %s", directory, [rel_path])
                 return f"[Subdirectory context discovered: {rel_path}]\n{content}"  # first match wins per directory
             except Exception as exc:
@@ -317,7 +323,7 @@ class SubdirectoryHintTracker:
         """Working-dir-relative, else ``~/``-relative (POSIX rendering so Windows
         never shows ``~/AppData\\Local\\...`` chimeras), else absolute."""
         try:
-            return str(hint_path.relative_to(self.working_dir))
+            return hint_path.relative_to(self.working_dir).as_posix()
         except (ValueError, RuntimeError):
             pass
         try:

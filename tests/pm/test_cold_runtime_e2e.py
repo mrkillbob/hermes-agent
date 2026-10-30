@@ -104,6 +104,10 @@ def test_cold_cli_builds_own_runtime_discovers_plugins_and_repairs_app(tmp_path,
     for name in ("utils.py", "hermes_constants.py", "hermes_yaml.py",
                  "hermes_bootstrap.py"):
         shutil.copy2(source / name, repo / name)
+    # Automatic post-sync cleanup consults the real stdlib-only pause protocol.
+    (repo / "agent").mkdir()
+    for name in ("__init__.py", "jiter_preload.py", "estop.py", "file_safety.py"):
+        shutil.copy2(source / "agent" / name, repo / "agent" / name)
     # No production application lock or metadata enters this source snapshot.
     recipe = tomllib.loads((repo / "pm" / "pyproject.toml").read_text())
     yaml_requirement = next(dep for dep in recipe["project"]["dependencies"]

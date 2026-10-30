@@ -40,8 +40,8 @@ def test_salvage_stubs_old_tools_and_keeps_todo_when_stubbing_suffices():
     assert any("cleared to save context space" in t for t in tools)
 
 
-def test_salvage_drops_todo_only_as_last_resort():
-    """When cheaper ops cannot get under budget, the snapshot is dropped."""
+def test_salvage_refuses_instead_of_dropping_legacy_todo_state():
+    """A size limit cannot authorize losing the only recoverable state."""
     original = [
         {"role": "user", "content": "please do the thing " + ("o" * 600)},
         {"role": "assistant", "content": "ok"},
@@ -59,13 +59,12 @@ def test_salvage_drops_todo_only_as_last_resort():
 
     out = salvage_grown_transcript(original, grown)
 
-    assert out is not None
-    assert estimate_messages_tokens_rough(out) < estimate_messages_tokens_rough(original)
-    assert not any(m.get("_todo_snapshot_synthetic") for m in out)
+    assert out is None
+    assert grown[-1]["content"].endswith("t" * 800)
 
 
-def test_salvage_last_resort_preserves_pruned_skill_reload_notice():
-    """7a16840add couples the reload notice into the snapshot — it survives."""
+def test_salvage_refuses_instead_of_replacing_state_with_reload_notice():
+    """Both the todo state and its reload reference must survive together."""
     from agent.conversation_compression import _PRUNED_SKILL_RELOAD_NOTICE_HEADER
 
     notice = (
@@ -89,12 +88,9 @@ def test_salvage_last_resort_preserves_pruned_skill_reload_notice():
 
     out = salvage_grown_transcript(original, grown)
 
-    assert out is not None
-    assert estimate_messages_tokens_rough(out) < estimate_messages_tokens_rough(original)
-    snapshot_rows = [m for m in out if m.get("_todo_snapshot_synthetic")]
-    assert len(snapshot_rows) == 1
-    assert snapshot_rows[0]["content"].startswith(_PRUNED_SKILL_RELOAD_NOTICE_HEADER)
-    assert "Current todos" not in snapshot_rows[0]["content"]
+    assert out is None
+    assert grown[-1]["content"].endswith(notice)
+    assert "t" * 4000 in grown[-1]["content"]
 
 
 def test_salvage_returns_none_when_nothing_can_shrink():

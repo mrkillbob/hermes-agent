@@ -7,6 +7,7 @@ Each function takes the parent ``AIAgent`` as ``agent`` except the stateless mes
 from __future__ import annotations
 import contextlib
 import copy
+from agent.llm_egress_lineage import transfer as _lineage_transfer
 import json
 import logging
 import re
@@ -1054,12 +1055,8 @@ def recover_with_credential_pool(
         # Pass classified semantics, not just the status: a billing 403 and an edge-throttle 403
         # need opposite cooldowns.
         if effective_reason is not None:
-            failure_reason = effective_reason.value
-            if effective_reason == FailoverReason.billing and billing_unverified:
-                # Ambiguous billing body: size the cooldown as transient, not a 1-hour bench.
-                from agent.credential_pool import FAILURE_REASON_BILLING_UNVERIFIED
-                failure_reason = FAILURE_REASON_BILLING_UNVERIFIED
-            kwargs["failure_reason"] = failure_reason
+            from agent.credential_pool_model_cooldowns import pool_failure_reason
+            kwargs["failure_reason"] = pool_failure_reason(effective_reason, error_context, billing_unverified)
         model = getattr(agent, "model", None)
         if isinstance(model, str) and model.strip():
             kwargs["model"] = model
@@ -1247,9 +1244,8 @@ def drop_thinking_only_and_merge_users(
     messages: list[dict[str, Any]], *, drop_codex_reasoning_items: bool = True,
     drop_nudge_marker: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Drop thinking-only assistant turns and merge adjacent user messages left behind, on the
-    per-call ``api_messages`` copy only (``agent.messages`` is never mutated). Drop-and-merge
-    (not stub text) keeps history honest and preserves role alternation.
+    """Drop thinking-only assistant turns and merge adjacent users on the per-call API copy.
+    Canonical history stays untouched and role alternation is preserved.
 
     ``drop_nudge_marker`` (#67321): user rows equal to the marker — the synthetic Codex
     continuation nudge — are dropped too once the turn has crossed to a non-Codex provider;
@@ -1275,7 +1271,7 @@ def drop_thinking_only_and_merge_users(
             # alternation, but is safer than raising in a hot path).
             merged.append(m)
         else:
-            merged[-1] = {**prev, "content": content}  # copy so caller dicts are never mutated
+            merged[-1] = _lineage_transfer({**prev, "content": content}, prev, m)
             merges += 1
     if dropped == 0 and merges == 0:
         return messages
@@ -1924,8 +1920,8 @@ def _provider_supplied_client(agent, client_kwargs: dict) -> Any | None:
 
 def _profile_for_base_url(base_url: str) -> Any | None:
     """Registered profile whose own base_url is a prefix of ``base_url`` (provider name did not
-    resolve). Prefix, not equality: the replaced copilot-acp branch keyed on
-    ``startswith("acp://copilot")``, so a path or user override under the same root must resolve."""
+    resolve). Prefix, not equality: an ACP profile's ``acp://<vendor>`` root must also resolve a
+    path or user override under the same root."""
     try:
         from providers import list_providers
         candidates = list_providers()
@@ -1939,21 +1935,21 @@ def _profile_for_base_url(base_url: str) -> Any | None:
     return None
 
 
-def _ensure_copilot_headers(client_kwargs: dict) -> None:
+def _ensure_route_client_headers(client_kwargs: dict, provider: str) -> None:
     """Defense-in-depth: recovery/restore rebuild from a snapshot without re-running header
-    wiring; a missing Copilot-Integration-Id causes model_not_available_for_integrator 400s.
-    Only ADD missing keys, never override."""
-    try:
-        if base_url_host_matches(str(client_kwargs.get("base_url", "")), "githubcopilot.com"):
-            from hermes_cli.models import copilot_default_headers
-            existing = dict(client_kwargs.get("default_headers") or {})
-            existing_lower = {k.lower() for k in existing}
-            for hk, hv in copilot_default_headers().items():
-                if hk.lower() not in existing_lower:
-                    existing[hk] = hv
-            client_kwargs["default_headers"] = existing
-    except Exception:
-        _ra().logger.debug("Copilot default-header guard skipped", exc_info=True)
+    wiring, and a route whose provider requires its client headers (integration ids) 400s
+    without them. Only ADD missing keys, never override."""
+    from agent.provider_route_hooks import route_answer
+    required = route_answer("client_headers", provider=provider, base_url=str(client_kwargs.get("base_url", "")),
+                            api_key=str(client_kwargs.get("api_key", "") or ""))
+    if not required:
+        return
+    existing = dict(client_kwargs.get("default_headers") or {})
+    existing_lower = {k.lower() for k in existing}
+    for hk, hv in required.items():
+        if hk.lower() not in existing_lower:
+            existing[hk] = hv
+    client_kwargs["default_headers"] = existing
 
 
 def _gemini_native_client(agent, client_kwargs: dict, httpx_verify, *, reason: str, shared: bool):
@@ -1984,8 +1980,6 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
         _validate_proxy_env_urls,
     )
     from agent.ssl_verify import resolve_httpx_verify
-    # Treat client_kwargs as read-only: callers pass agent._client_kwargs, and in-place mutation
-    # leaks into later requests (a torn-down httpx transport got reused).
     # Callers pass agent._client_kwargs (or shallow copies of it) in; any in-place mutation leaks back into
     # the stored dict and is reused on subsequent requests. #10933 hit this by injecting an httpx.Client
     # transport that was torn down after the first request, so the next request wrapped a closed transport
@@ -2078,7 +2072,7 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # (init, switch_model, recovery, restore, request-scoped); auxiliary_client builds its own clients and
     # keeps SDK retries because it is NOT wrapped by the conversation loop.
     client_kwargs.setdefault("max_retries", 0)
-    _ensure_copilot_headers(client_kwargs)
+    _ensure_route_client_headers(client_kwargs, str(getattr(agent, "provider", "") or ""))
     # All primary construction and recovery paths must identify Hermes to the official Codex
     # endpoint, including snapshots with custom header overrides.
     from agent.codex_headers import apply_required_codex_headers
@@ -2088,7 +2082,8 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     )
     # ``process_bootstrap.OpenAI`` is a lazy SDK proxy; resolved at call time so tests can patch it.
     from agent import process_bootstrap
-    client = process_bootstrap.OpenAI(**client_kwargs)
+    from agent.managed_request_budget import prepare_provider_client
+    client = prepare_provider_client(process_bootstrap.OpenAI(**client_kwargs))
     # Routing proxies name the deployment they served in a response header (#54864).
     from agent.served_model import install_served_model_capture
     install_served_model_capture(agent, client)
@@ -3131,7 +3126,7 @@ def _realign_tool_result_names(messages: list[dict[str, Any]]) -> list[dict[str,
             current = msg.get("name")
             # Only rewrite a present, disagreeing name; clean transcripts must stay byte-identical for prompt caching.
             if expected and current and current != expected:
-                msg = {**msg, "name": expected}
+                msg = _lineage_transfer({**msg, "name": expected}, msg)
                 realigned.append((current, expected))
         aligned.append(msg)
     if not realigned:
@@ -3184,12 +3179,10 @@ def looks_like_codex_intermediate_ack(
     assistant_text = agent._strip_think_blocks(assistant_content or "").strip().lower()
     if not assistant_text or len(assistant_text) > 1200:
         return False
-    # Some tool-using providers narrate the next action in terse log style
-    # rather than with a first-person lead-in: "Brief written. Creating the
-    # session now." Bare gerunds are too ambiguous ("Reading the traceback
-    # explains the failure" is a final answer), so this path also requires an
-    # explicit transition cue such as "now", "via acpx", "actual log", or
-    # "then launching". Completed reports and questions stay final.
+    # Some tool-using providers narrate the next action in terse log style: "Brief written. Creating the
+    # session now." Bare gerunds are too ambiguous ("Reading the traceback explains the failure" is a final
+    # answer), so this path also requires an explicit transition cue such as "now", "on <ACP agent> via acpx",
+    # "actual log", or "then launching". Completed reports and questions stay final.
     action_clause_pattern = re.compile(
         r"(?:^|[.!…—–]\s+|\n+\s*|,\s+then\s+)"
         r"(?:(?P<transition>then)\s+)?"
@@ -3231,13 +3224,14 @@ def looks_like_codex_intermediate_ack(
         r"\s+now\s*[—–-]\s*see\s+https?://\S+"
         r"(?:\s+for\s+progress)?\s*$"
     )
+    from providers import list_providers  # "relaunching it on <an ACP agent: its name, alias or binary>"
+    provider_names = sorted({n.lower() for p in list_providers() if p.auth_type == "external_process"
+                             for n in (p.name, *p.aliases, p.process_command) if n})
     provider_tail_pattern = re.compile(
         r"\s+(?:it|(?:the\s+)?(?:session|worker|agent|job|process))\s+"
-        r"on\s+copilot(?:\s+via\s+acpx)?\s*$"
+        rf"on\s+(?:{'|'.join(map(re.escape, provider_names)) or '(?!)'})(?:\s+via\s+acpx)?\s*$"
     )
-    actual_log_tail_pattern = re.compile(
-        r"\s+(?:the\s+)?actual\s+(?:log|output)\s*$"
-    )
+    actual_log_tail_pattern = re.compile(r"\s+(?:the\s+)?actual\s+(?:log|output)\s*$")
     health_check_tail_pattern = re.compile(
         r"\s+whether\b.*\b(?:healthy|ready|running|available|reachable|working)\s*$"
     )
@@ -3479,141 +3473,6 @@ def reapply_reasoning_echo_for_provider(agent, api_messages: list) -> int:
     return reapply_reasoning_echo(api_messages, *agent._reasoning_replay_route())
 
 
-def _iter_httpx_pools_with_owner(http_client: Any):
-    """Yield ``(pool, owner)`` pairs reachable from an httpx client, including mounted transports:
-    keepalive and proxy configs put live connections on ``client._mounts``, which a
-    ``_transport``-only walk misses.
-
-    ``owner`` is ``None`` for a pool this client owns outright, or the ``_SharedTransport`` view
-    id when the pool is process-shared with other clients
-    (``process_bootstrap.build_keepalive_http_client``). Callers must then touch only the
-    in-flight requests stamped with that owner.
-
-    Walking the default transport alone makes ``force_close_tcp_sockets`` return 0 while a stream is still
-    mid-recv — the interrupt logs success and the provider keeps burning the slot (#72975).
-    """
-    seen_pools: set[int] = set()
-    try:
-        transports = [getattr(http_client, "_transport", None)]
-        transports += list((getattr(http_client, "_mounts", None) or {}).values())
-        for transport in transports:
-            if transport is None:
-                continue
-            # Connections live under ``_pool``; a directly mounted HTTPProxy *is* a ConnectionPool,
-            # so ``_connections`` may sit on the transport itself.
-            pool = getattr(transport, "_pool", None)
-            if pool is None and getattr(transport, "_connections", None) is not None:
-                pool = transport
-            if pool is not None and id(pool) not in seen_pools:
-                seen_pools.add(id(pool))
-                owner = id(transport) if type(transport).__name__ == "_SharedTransport" else None
-                yield pool, owner
-    except Exception:
-        return
-
-
-def _iter_httpx_pool_objects(http_client: Any):
-    """Yield httpcore pool objects reachable from an httpx client."""
-    for pool, _owner in _iter_httpx_pools_with_owner(http_client):
-        yield pool
-
-
-def _connection_candidates(conn: Any):
-    """Walk nested wrappers: proxy tunnels (``_connection``) plus httpx/httpcore
-    stream envelopes (``_stream``/``_httpcore_stream``: BoundSyncStream →
-    ResponseStream → connection byte stream → HTTP11/2 connection)."""
-    seen: set[int] = set()
-    stack = [conn]
-    while stack:
-        obj = stack.pop()
-        if obj is None or id(obj) in seen:
-            continue
-        seen.add(id(obj))
-        yield obj
-        for attr in ("_connection", "_stream", "_httpcore_stream"):
-            nxt = getattr(obj, attr, None)
-            if nxt is not None:
-                stack.append(nxt)
-
-
-def _socket_from_candidate(candidate: Any):
-    """Raw socket behind a connection/stream wrapper yielded by ``_connection_candidates``."""
-    stream = getattr(candidate, "_network_stream", None) or getattr(candidate, "_stream", None)
-    sock = _socket_from_stream(stream) if stream is not None else None
-    return sock if sock is not None else _socket_from_stream(candidate)
-
-
-def _socket_from_response(response: Any):
-    """Raw socket behind an httpx response's network stream (``extensions["network_stream"]``
-    first, then ``response.stream``), or None. Callers own their error handling."""
-    exts = getattr(response, "extensions", None) or {}
-    direct = exts.get("network_stream") if isinstance(exts, dict) else None
-    for start in (direct, getattr(response, "stream", None)):
-        if start is None:
-            continue
-        for candidate in _connection_candidates(start):
-            sock = _socket_from_candidate(candidate)
-            if sock is not None:
-                return sock
-    return None
-
-
-def _socket_from_stream(stream: Any):
-    """Raw socket behind an httpcore network stream (several backends), or None."""
-    sock = getattr(stream, "_sock", None)
-    if sock is None and callable(getattr(stream, "get_extra_info", None)):
-        with contextlib.suppress(Exception):
-            sock = stream.get_extra_info("socket")
-    if sock is None:
-        sock = getattr(getattr(stream, "stream", None), "_sock", None)
-    if sock is None and callable(getattr(getattr(stream, "_stream", None), "extra", None)):
-        # anyio-backed streams expose the raw socket through SocketAttribute.raw_socket.
-        with contextlib.suppress(Exception):
-            from anyio.abc import SocketAttribute
-            sock = stream._stream.extra(SocketAttribute.raw_socket)
-    return sock
-
-
-def _iter_pool_sockets(client: Any):
-    """Yield raw sockets reachable from an OpenAI/httpx client pool. Defensive over private
-    httpcore internals (``conn._connection``, proxy tunnel wrappers) that vary by release; also
-    walks mount transports and in-flight ``PoolRequest.connection`` objects (``_connections``
-    is empty during checkout)."""
-    try:
-        # Some SDK wrappers *are* the httpx client; fall through so mount-aware discovery runs.
-        http_client = getattr(client, "_client", None)
-        pools = list(_iter_httpx_pools_with_owner(client if http_client is None else http_client))
-    except Exception:
-        return
-    if not pools:
-        return
-    from agent.process_bootstrap import HERMES_TRANSPORT_OWNER_EXT
-    seen: set[int] = set()
-    for pool, owner in pools:
-        # ``is None``, not falsiness: an empty ``_connections`` must still let us walk in-flight ``_requests``.
-        raw_conns = getattr(pool, "_connections", None)
-        if raw_conns is None:
-            raw_conns = getattr(pool, "_pool", None)
-        # A process-shared pool carries other clients' idle + in-flight connections: only this
-        # client's own in-flight requests (stamped by ``_SharedTransport.handle_request``) may be
-        # shut down.
-        connections = [] if owner is not None else list(raw_conns or [])
-        for pool_req in list(getattr(pool, "_requests", None) or []):
-            if owner is not None:
-                exts = getattr(getattr(pool_req, "request", None), "extensions", None) or {}
-                if exts.get(HERMES_TRANSPORT_OWNER_EXT) != owner:
-                    continue
-            conn = getattr(pool_req, "connection", None)
-            if conn is not None:
-                connections.append(conn)
-        for conn in connections:
-            for candidate in _connection_candidates(conn):
-                sock = _socket_from_candidate(candidate)
-                if sock is not None and id(sock) not in seen:
-                    seen.add(id(sock))
-                    yield sock
-
-
 def _set_reset_from_retry_after(context: dict[str, Any], retry_after: Any) -> None:
     if "reset_at" in context:
         return
@@ -3748,60 +3607,12 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
     )
 
 
-def _shutdown_socket(sock: Any) -> None:
-    """``shutdown(SHUT_RDWR)`` WITHOUT closing the FD. ``close()`` from a non-owner thread is
-    unsafe: the SSL BIO caches the raw FD, the kernel recycles it, and a flushed TLS record lands
-    in the wrong file (once clobbered a SQLite header). ``shutdown()`` is FD-safe from any thread.
-    Already shut down / not connected / FD invalid are all benign."""
-    import socket as _socket
-    try:
-        # Clear a blocking timeout so a hung SSL_read notices the shutdown. Still no close().
-        settimeout = getattr(sock, "settimeout", None)
-        if callable(settimeout):
-            with contextlib.suppress(OSError):
-                settimeout(0)
-        sock.shutdown(_socket.SHUT_RDWR)
-    except OSError:
-        pass
-
-
-def force_close_tcp_sockets(client: Any) -> int:
-    """Abort in-flight TCP I/O on every pool socket via ``_shutdown_socket``. Returns the count
-    (logged as ``tcp_force_closed=N``)."""
-    shutdown_count = 0
-    try:
-        for sock in _iter_pool_sockets(client):
-            _shutdown_socket(sock)
-            shutdown_count += 1
-    except Exception as exc:
-        _ra().logger.debug("Force-close TCP sockets sweep error: %s", exc)
-    return shutdown_count
-
-
 __all__ = [
-    "_iter_pool_sockets",
-    "anthropic_prompt_cache_policy",
-    "apply_pending_steer_to_tool_results",
-    "blank_cache_policy_stub",
-    "convert_to_trajectory_format",
-    "copy_reasoning_content_for_api",
-    "create_openai_client",
-    "drop_thinking_only_and_merge_users",
-    "dump_api_request_debug",
-    "extract_api_error_context",
-    "extract_reasoning",
-    "force_close_tcp_sockets",
-    "invoke_tool",
-    "looks_like_codex_intermediate_ack",
-    "plan_cache_sections_for_destination",
-    "prompt_caching_disabled_from_config",
-    "recover_with_credential_pool",
-    "repair_message_sequence",
-    "repair_tool_call",
-    "restore_primary_runtime",
-    "sanitize_api_messages",
-    "sanitize_tool_call_arguments",
-    "strip_think_blocks",
-    "switch_model",
-    "try_recover_primary_transport",
+    "anthropic_prompt_cache_policy", "apply_pending_steer_to_tool_results", "blank_cache_policy_stub",
+    "convert_to_trajectory_format", "copy_reasoning_content_for_api", "create_openai_client",
+    "drop_thinking_only_and_merge_users", "dump_api_request_debug", "extract_api_error_context", "extract_reasoning",
+    "invoke_tool", "looks_like_codex_intermediate_ack", "plan_cache_sections_for_destination",
+    "prompt_caching_disabled_from_config", "recover_with_credential_pool", "repair_message_sequence",
+    "repair_tool_call", "restore_primary_runtime", "sanitize_api_messages", "sanitize_tool_call_arguments",
+    "strip_think_blocks", "switch_model", "try_recover_primary_transport",
 ]

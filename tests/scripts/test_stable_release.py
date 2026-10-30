@@ -349,6 +349,9 @@ def https_origin(tmp_path, monkeypatch):
     base = f"https://127.0.0.1:{server.server_port}"
     server.base, server.opener = base, opener
     monkeypatch.setenv('SSL_CERT_FILE', str(cert_file))
+    # urlopen() caches its default opener, SSL context included, on first use; each
+    # origin has its own certificate, so a later test must not inherit an earlier CA.
+    monkeypatch.setattr(urllib.request, "_opener", None)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1293,6 +1296,7 @@ def test_an_intel_receipt_upgrades_only_from_a_baseline_that_built_intel(tmp_pat
 
 
 def test_missing_baseline_plans_no_upgrade_arm_but_a_missing_supplied_one_blocks(
+        # health: allow F811 -- r2_server is a pytest fixture imported from test_release_r2
         tmp_path, r2_server, https_origin, monkeypatch):
     from scripts.releases import stable
 

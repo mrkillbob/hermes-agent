@@ -3,14 +3,25 @@ import asyncio
 from contextlib import closing
 from http.server import ThreadingHTTPServer
 import json
+import logging
+from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
+import queue
 import sqlite3
 import threading
 
 import pytest
 
 from tests.gateway.fixtures.local_recovery_probe import Model, child_env, daemon, rpc, websocket
-from tests.waiting import async_wait_until
+from tests.waiting import async_wait_until, wait_until
+
+
+def _initialization_failure_snapshot(home, query):
+    # Admission commits and QueueListener file writes are independent receipts.
+    if query('SELECT status FROM session_admissions') != [('unknown',)]:
+        return None
+    errors = (home / 'logs/errors.log').read_text()
+    return errors if 'Managed worker lost: managed_worker_failed' in errors else None
 
 
 @pytest.mark.parametrize(('mode', 'invariant'), [
@@ -73,10 +84,9 @@ def test_worker_lineage_and_settlement(tmp_path, mode, invariant):
             sid = created['session_id']
             first = await call(ws, 'prompt.submit', session_id=sid, input_id='before', text='BEFORE_RESET')
             if invariant == 'initialization':
-                await async_wait_until(lambda: query('SELECT status FROM session_admissions') == [('unknown',)],
-                                       timeout=30, interval=.02, what='failed worker admission unknown')
+                errors = await async_wait_until(lambda: _initialization_failure_snapshot(home, query),
+                                                timeout=30, interval=.02, what='failed worker admission and diagnostic')
                 assert peer.requests == []
-                errors = (home / 'logs/errors.log').read_text()
                 assert 'Managed worker lost: managed_worker_failed' in errors
                 assert 'invalid_worker_frame' not in errors
                 return
@@ -125,3 +135,49 @@ def test_worker_lineage_and_settlement(tmp_path, mode, invariant):
         peer.shutdown()
         peer.server_close()
         thread.join(timeout=5)
+
+
+def test_initialization_observation_waits_for_db_and_queued_log(tmp_path):
+    home = tmp_path / 'state'
+    (home / 'logs').mkdir(parents=True)
+    (home / 'logs/errors.log').write_text('WARNING No messaging platforms enabled.\n')
+    queued, release = threading.Event(), threading.Event()
+
+    class GatedFileHandler(logging.FileHandler):
+        def emit(self, record):
+            queued.set()
+            if release.wait(timeout=10):
+                super().emit(record)
+
+    handler = GatedFileHandler(home / 'logs/errors.log')
+    records = queue.SimpleQueue()
+    listener = QueueListener(records, handler)
+    queue_handler = QueueHandler(records)
+    logger = logging.Logger('lineage-visibility', level=logging.WARNING)
+    logger.addHandler(queue_handler)
+    listener.start()
+    try:
+        with closing(sqlite3.connect(home / 'state.db')) as db:
+            db.execute('CREATE TABLE session_admissions (status TEXT)')
+            db.execute("INSERT INTO session_admissions VALUES ('unknown')")
+            db.commit()
+
+            def query(sql):
+                return db.execute(sql).fetchall()
+
+            logger.warning('Managed worker lost: managed_worker_failed')
+            assert queued.wait(timeout=10)
+            assert query('SELECT status FROM session_admissions') == [('unknown',)]
+            assert _initialization_failure_snapshot(home, query) is None
+            release.set()
+            errors = wait_until(lambda: _initialization_failure_snapshot(home, query), timeout=10)
+            assert 'Managed worker lost: managed_worker_failed' in errors
+            assert 'invalid_worker_frame' not in errors
+            db.execute("UPDATE session_admissions SET status='active'")
+            db.commit()
+            assert _initialization_failure_snapshot(home, query) is None
+    finally:
+        release.set()
+        listener.stop()
+        logger.removeHandler(queue_handler)
+        handler.close()

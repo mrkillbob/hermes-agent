@@ -209,7 +209,7 @@ def _is_provider_env_blocklisted(name: str, _registered: frozenset | None = None
 # computer-use driver binary, and user-script runners (bang ``!`` commands, quick commands, cron scripts,
 # webhook-filter scripts), so those children receive the vars too — matching the approved background/PTY
 # scope. Every other surface stays sealed — execute_code scrubbing, :func:`hermes_subprocess_env` (browser /
-# TUI host / copilot-executor spawns), docker children, and ``env_passthrough`` registration (skills/config
+# TUI host / ACP agent spawns), docker children, and ``env_passthrough`` registration (skills/config
 # still cannot register these names). The GHSA-rhgp-j443-p4rf seal is preserved because no registration path
 # is opened; this is a scrub-path exemption, not an allowlist addition. First-party matches use the merged
 # env value directly — they are the process's own env values and are never scope-resolved (a profile secret
@@ -376,9 +376,11 @@ def _plugin_terminal_env_strip_keys() -> frozenset:
 # (claude/codex/gemini). Not provider credentials — no child needs them and they are the
 # highest-value secrets to keep from a compromised dependency. Provider keys = Tier 2.
 _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
-    # GitHub auth
+    # GitHub auth. HERMES_GITHUB_BOT_TOKEN is the governed automation identity
+    # (mrkillbobbot); a spawned subprocess must never see it — see CLAUDE.md's
+    # GitHub identity boundary.
     "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH",
-    "GITHUB_APP_INSTALLATION_ID",
+    "GITHUB_APP_INSTALLATION_ID", "HERMES_GITHUB_BOT_TOKEN",
     # Gateway / messaging bot tokens and access control
     "TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN",
     "SLACK_SIGNING_SECRET", "GATEWAY_ALLOWED_USERS", "GATEWAY_ALLOW_ALL_USERS",

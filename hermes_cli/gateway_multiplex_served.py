@@ -17,17 +17,32 @@ logger = logging.getLogger(__name__)
 
 
 def live_default_gateway_pid() -> Optional[int]:
-    """PID of the default profile's gateway when a VERIFIED live process owns it, else None.
-
-    ``gateway.status.live_gateway_pid_for_home``: pid file + lock, then the runtime record the gateway
-    itself writes, each proven against the live process (start time, gateway command line, home). A
-    launch-service gateway can be live with no ``gateway.pid`` at all, and a stale record whose PID was
-    recycled by an unrelated process must not make its ``served_profiles`` authoritative. Never key this
-    off the record's ``updated_at``: an idle gateway never advances it.
-    """
+    """PID of the default gateway only when its lock, identity, and live command all validate."""
     from hermes_constants import get_default_hermes_root
-    from gateway.status import live_gateway_pid_for_home
-    return live_gateway_pid_for_home(get_default_hermes_root())
+    from gateway.status import get_running_pid
+    default_root = get_default_hermes_root()
+    try:
+        # An explicit PID path scopes identity validation to its parent home.
+        # ``get_running_pid`` derives that expected home from the path itself.
+        pid = get_running_pid(default_root / "gateway.pid", cleanup_stale=False)
+        if pid is not None:
+            return pid
+        # Pre-multiplex Hermes versions wrote only gateway.pid and had no lock file. Keep
+        # the historical probe during upgrade; current records use the strict path above.
+        from gateway.status import (
+            _live_pid_from_record, _pid_from_record, _read_pid_record,
+            _record_matches_live_gateway_pid,
+        )
+        if (default_root / "gateway.lock").exists():
+            return None
+        record = _read_pid_record(default_root / "gateway.pid")
+        pid = _pid_from_record(record) if record else None
+        if pid is None or _live_pid_from_record(record) != pid:
+            return None
+        return pid if _record_matches_live_gateway_pid(record, pid, expected_home=default_root) else None
+    except Exception:
+        logger.debug("default gateway identity probe failed", exc_info=True)
+        return None
 
 
 def recorded_served_profiles(default_root: Optional[Path] = None) -> Optional[list[str]]:

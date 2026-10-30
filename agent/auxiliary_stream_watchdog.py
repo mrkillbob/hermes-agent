@@ -20,7 +20,7 @@ from agent.sleep_clock import awake_seconds
 
 def _stream_socket(stream: Any) -> Any:
     """The raw socket under an SDK chunk stream (``stream.response`` is the ``httpx.Response``)."""
-    from agent.agent_runtime_helpers import _socket_from_response
+    from agent.agent_runtime_helpers_connections import _socket_from_response
     response = getattr(stream, "response", None)
     return _socket_from_response(response) if response is not None else None
 
@@ -111,7 +111,7 @@ class ChatStreamWatchdog:
                 return
             self.fired = True
             if self._sock is not None:
-                from agent.agent_runtime_helpers import _shutdown_socket
+                from agent.agent_runtime_helpers_connections import _shutdown_socket
                 _shutdown_socket(self._sock)
 
     def finish(self) -> None:

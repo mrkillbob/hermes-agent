@@ -22,7 +22,13 @@ class ArchiveEngine(LlamaCppCpu):
 
 @pytest.mark.parametrize("endpoint", ["runtime/install", "quickstart"])
 def test_component_job_pause_retains_pin_and_stops_sequence(client, monkeypatch, tmp_path, dl_server, endpoint):
+    from hermes_cli.local_runtime import ownership
     from hermes_cli.web_routers import local_models as lm
+    from hermes_constants import get_hermes_home
+
+    # Exercise transfers as the durable root owner; ownerless quickstart must refuse
+    # before reaching the archive pause/resume contract under test.
+    monkeypatch.setattr(ownership, "_OWNER", ownership.RuntimeOwner(get_hermes_home()))
 
     package = ArchiveEngine()
     monkeypatch.setitem(registry._packages, package.name, package)

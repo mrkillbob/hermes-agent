@@ -1,3 +1,5 @@
+import type { SourceProbeControl } from './source-backend'
+
 /**
  * HERMES_DESKTOP_IGNORE_EXISTING=1 (`hermes desktop --ignore-existing`) keeps
  * Desktop off installed runtimes (ACTIVE_HERMES_ROOT, or the install a
@@ -27,10 +29,13 @@ export function createInstalledRuntimeGate(env: NodeJS.ProcessEnv, log: (message
     },
 
     /** Re-resolve after a successful bootstrap; the new runtime is exempt from the flag. */
-    afterInstall<T>(resolveBackend: () => Promise<T>): Promise<T> {
+    afterInstall<T>(
+      resolveBackend: (control: SourceProbeControl) => Promise<T>,
+      control: SourceProbeControl
+    ): Promise<T> {
       installedThisLaunch = true
 
-      return resolveBackend()
+      return resolveBackend(control)
     }
   }
 }

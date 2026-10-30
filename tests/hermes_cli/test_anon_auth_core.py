@@ -16,7 +16,7 @@ import pytest
 
 from hermes_cli import anon_auth
 from hermes_cli.auth import _load_auth_store, resolve_provider
-from tests.hermes_cli.anon_portal import PORTAL, WELCOME, claimed_trial, install_portal, make_jwt as _jwt
+from tests.hermes_cli.anon_portal import PORTAL, WELCOME, claimed_trial, install_portal, make_jwt as _jwt, off_local_desktop
 
 
 @pytest.fixture
@@ -88,13 +88,11 @@ class TestIdentityLifecycle:
         with pytest.raises(anon_auth.AuthError):
             resolve_provider("auto")
 
-    def test_a_claimed_trial_carries_inference_only_on_the_local_desktop_backend(self, portal, monkeypatch):
+    def test_a_claimed_trial_carries_inference_on_every_surface(self, portal, monkeypatch):
         claimed_trial(monkeypatch)
+        off_local_desktop(monkeypatch)     # a CLI shell beside the desktop
+        assert anon_auth.free_inference_active() is True
         assert resolve_provider("auto") == "nous"
-        monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN")     # a CLI shell beside the desktop
-        assert anon_auth.free_inference_active() is False
-        with pytest.raises(anon_auth.AuthError):
-            resolve_provider("auto")
 
 
 class TestExplicitProvision:
@@ -125,24 +123,69 @@ class TestExplicitProvision:
         assert anon_auth.ensure_portal_identity(explicit=True) is None
         assert portal.minted == 0
 
-    @pytest.mark.parametrize("raw, body", [
-        ("true", {"preview_full_connectors": True}),
-        ("1", {"preview_full_connectors": True}),
-        ("false", {"preview_full_connectors": False}),
-        ("0", {"preview_full_connectors": False}),
+    @pytest.mark.parametrize("preference, body", [
+        (True, {"preview_full_connectors": True}),
+        (False, {"preview_full_connectors": False}),
         (None, {}),
-        ("yes", {}),
+        ("true", {}),
+        (1, {}),
+        (0, {}),
     ])
-    def test_preview_full_connectors_rides_the_create_call(self, portal, monkeypatch, raw, body):
-        """The cohort reaches the account service on the one call that creates the account, as a
-        real boolean. "1" and "true" turn it on, "0" and "false" off; an unrecognised value leaves the
-        body empty (the service default)."""
-        if raw is None:
-            monkeypatch.delenv(anon_auth.PREVIEW_FULL_CONNECTORS_ENV, raising=False)
-        else:
-            monkeypatch.setenv(anon_auth.PREVIEW_FULL_CONNECTORS_ENV, raw)
+    @pytest.mark.parametrize("retired_value", ["true", "false"])
+    def test_preview_full_connectors_rides_the_create_call(self, portal, monkeypatch, preference, body, retired_value):
+        """Profile config reaches the account service once; the retired environment flag is ignored."""
+        monkeypatch.setenv("HERMES_PREVIEW_FULL_CONNECTORS", retired_value)
+        home = Path(os.environ["HERMES_HOME"])
+        (home / "config.yaml").write_text(json.dumps({"nous": {"preview_full_connectors": preference}}))
         anon_auth.ensure_portal_identity(explicit=True)
         assert portal.create_requests == [body]
+        (home / "config.yaml").write_text(json.dumps({"nous": {"preview_full_connectors": False}}))
+        anon_auth.ensure_portal_identity(explicit=True)
+        assert portal.create_requests == [body]  # Changing the preference never replaces an identity.
+
+    def test_connector_preference_post_follows_interleaved_profile_scopes(self, portal, tmp_path, monkeypatch):
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        homes = []
+        for name, preference in (("on", True), ("off", False), ("unset", None)):
+            home = tmp_path / ".hermes" / "profiles" / name
+            home.mkdir(parents=True)
+            home.joinpath("config.yaml").write_text(
+                json.dumps({"nous": {"preview_full_connectors": preference}} if preference is not None else {}))
+            homes.append(home)
+        with anon_auth.httpx.Client() as client:
+            for index in (0, 1, 0, 2):
+                token = set_hermes_home_override(homes[index])
+                try:
+                    anon_auth.mint_guest(client, PORTAL)
+                finally:
+                    reset_hermes_home_override(token)
+        assert portal.create_requests == [
+            {"preview_full_connectors": True}, {"preview_full_connectors": False},
+            {"preview_full_connectors": True}, {},
+        ]
+
+    def test_unreadable_connector_config_omits_stale_preference(self, portal):
+        home = Path(os.environ["HERMES_HOME"])
+        home.joinpath("config.yaml").write_text("nous:\n  preview_full_connectors: true\n")
+        with anon_auth.httpx.Client() as client:
+            anon_auth.mint_guest(client, PORTAL)
+            home.joinpath("config.yaml").write_text("nous: [broken\n")
+            anon_auth.mint_guest(client, PORTAL)
+        assert portal.create_requests == [{"preview_full_connectors": True}, {}]
+
+    def test_connector_config_read_error_keeps_guest_gate_closed(self, portal, monkeypatch):
+        from hermes_cli import config
+
+        def unreadable():
+            raise PermissionError("fixture configuration unavailable")
+
+        monkeypatch.setattr(config, "load_config_readonly", unreadable)
+        assert anon_auth.mint_request_body() == {}
+        assert anon_auth.guest_allowed() is False
+        assert anon_auth.ensure_portal_identity(explicit=True) is None
+        assert portal.create_requests == []
 
 
 class TestResolverIsUnchanged:
@@ -376,7 +419,7 @@ class TestIdentityOfRecordIsTheSharedStore:
         from hermes_cli.auth_nous import _write_shared_nous_state
         _write_shared_nous_state({"access_token": _jwt(client_id="hermes-cli", account_tier="free"),
                                   "refresh_token": "rt-sibling", "expires_at": "2030-01-01T00:00:00+00:00",
-                                  "auth_method": "oauth_device_code"})
+                                  "auth_method": "oauth_device_code"}, renewal=False)
         state = anon_auth.ensure_portal_identity(explicit=True)
         assert not anon_auth.is_guest_state(state)
         assert state["refresh_token"] == "rt-sibling"
@@ -397,7 +440,8 @@ class TestIdentityOfRecordIsTheSharedStore:
         anon_auth.ensure_portal_identity(explicit=True)
         from hermes_cli.auth_nous import _write_shared_nous_state
         _write_shared_nous_state({"access_token": _jwt(client_id="hermes-cli"), "refresh_token": "rt-sibling",
-                                  "expires_at": "2030-01-01T00:00:00+00:00", "auth_method": "oauth_device_code"})
+                                  "expires_at": "2030-01-01T00:00:00+00:00", "auth_method": "oauth_device_code"},
+                                 renewal=False)
         anon_auth.clear_dead_guest("test")
         assert "nous" not in _load_auth_store().get("providers", {})
         assert _shared_store(tmp_path)["refresh_token"] == "rt-sibling"

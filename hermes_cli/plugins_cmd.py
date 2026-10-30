@@ -17,7 +17,7 @@ from typing import Any, NoReturn, Optional
 
 from hermes_constants import get_hermes_home, hermes_home_key
 from hermes_cli.config import cfg_get
-from hermes_cli.plugin_capabilities import _child_dict
+from hermes_cli.plugin_capabilities import _child_dict, _write_raw_config_value
 # Tests patch these two on the facade; the install/remove siblings read them through it.
 from hermes_cli.secret_prompt import masked_secret_prompt
 from utils import rmtree_readonly
@@ -173,11 +173,7 @@ def _config_str(*keys: str, default: str) -> str:
 
 
 def _write_config_value(section: str, key: str, value: Any) -> None:
-    """Persist ``config[section][key] = value`` to config.yaml (creating the section)."""
-    from hermes_cli.config import load_config, save_config
-    config = load_config()
-    config.setdefault(section, {})[key] = value
-    save_config(config)
+    _write_raw_config_value((section, key), value)
 
 
 def _scan_on_install_enabled() -> bool:
@@ -263,7 +259,7 @@ def _sanitize_plugin_name(name: str, plugins_dir: Path, *, allow_subdir: bool = 
     """Validate a plugin name and return the safe target path inside *plugins_dir*.
 
     Raises ``ValueError`` on traversal or a target outside the plugins directory. ``allow_subdir``
-    permits forward slashes so category keys like ``web/firecrawl`` can be looked up
+    permits forward slashes so category keys like ``observability/langfuse`` can be looked up
     (``..`` and backslashes stay rejected); install paths keep ``False`` — a clone lands top-level.
     """
     if allow_subdir and name:
@@ -463,9 +459,6 @@ def _unknown_plugin_message(name: str, *, downloaded_only: bool = False) -> str:
     """``No plugin named ...`` with the exact-name rule and the two commands that resolve it."""
     scope = (" This command only works on downloaded plugins; bundled ones can only be enabled or disabled."
              if downloaded_only else " Bundled plugins can only be enabled or disabled.")
-    from hermes_cli.left_core_migration import moved_plugin_hint
-    if moved := moved_plugin_hint(name):
-        return f"[red]No plugin named '{name}'.[/red] {moved}"
     return (f"[red]No plugin named '{name}'.[/red] Run `hermes plugins list` to see the exact names "
             f"(nested plugins use their full key, e.g. web/firecrawl).{scope} "
             "To add one: `hermes plugins install <owner/repo>`.")
@@ -490,7 +483,7 @@ def _plugin_selection_version() -> str:
 
 def _admit_and_save_plugin_sets(
     enabled: set, disabled: set, *, extra_dirs=(), console=None, action: str = "enable", expected_config=None,
-    plugin: Optional[str] = None,
+    plugin: Optional[str] = None, settled=(),
 ) -> None:
     """ONE admission authority for proposed enabled/disabled sets (C13):
     the candidate union is resolved against the ACTIVE environment and
@@ -506,7 +499,7 @@ def _admit_and_save_plugin_sets(
     try:
         admit_plugin_set_change(
             enabled, disabled, active_plugins_dir=_plugins_dir(), extra_dirs=extra_dirs, expected_config=expected_config,
-            plugin=plugin,
+            plugin=plugin, settled=settled,
         )
     except DependencyConflict as exc:
         # `hermes pm install` cannot fix a conflict, so the retry hint below would mislead here.
@@ -544,7 +537,7 @@ def ensure_basic_auth_plugin_enabled_in_config(cfg: dict) -> bool:
 
 
 def _discard_key_and_leaf(names: set, key: str) -> None:
-    """Drop *key* and its bare leaf (``web/exa`` -> ``exa``) from *names*, so a
+    """Drop *key* and its bare leaf (``observability/langfuse`` -> ``langfuse``) from *names*, so a
     stale legacy bare-name entry can't keep vetoing the canonical key."""
     names.discard(key)
     names.discard(key.split("/")[-1])
@@ -570,10 +563,20 @@ def _activate_key(key: str, *, enable: bool, console=None) -> bool:
     enabled, disabled = _get_enabled_set(), _get_disabled_set()
     aliases = _plugin_aliases(key)
     target, other = (enabled, disabled) if enable else (disabled, enabled)
-    if key in target and not (aliases & other):
+    # A plugin an update disabled is retried by later updates; disabling it yourself stops that.
+    if key in target and not (aliases & other) and not (not enable and _disabled_by_update(key, aliases)):
         return False
     _set_plugin_enabled(key, enable=enable, aliases=aliases, console=console)
     return True
+
+
+def _disabled_by_update(key: str, aliases) -> bool:
+    """Whether an update disabled this plugin and will retry it (``pm.plugin_eviction`` records it)."""
+    from pm.plugins_state import RECORD
+    from pm.plugins_state import read_home_selection
+
+    record = ((read_home_selection(get_hermes_home()) or {}).get("plugins") or {}).get(RECORD)
+    return isinstance(record, dict) and bool({key, *aliases} & set(record))
 
 
 def _forget_plugin_config(aliases: set) -> dict[str, Any]:
@@ -633,7 +636,8 @@ def _set_plugin_enabled(name: str, *, enable: bool, aliases=(), console=None) ->
         _apply_activation(enabled, disabled, name, aliases, enable=enable)
         _admit_and_save_plugin_sets(enabled, disabled, console=console,
                                    action=f"{'Enable' if enable else 'Disable'} '{name}'",
-                                   expected_config=expected_config, plugin=name if enable else None)
+                                   expected_config=expected_config, plugin=name if enable else None,
+                                   settled=(name, *aliases))
 
 
 def _apply_activation(enabled: set, disabled: set, key: str, aliases, *, enable: bool) -> None:
@@ -669,8 +673,8 @@ def _catalog_installed_dir(name: str) -> Optional[Path]:
 def _find_plugin_entry(name: str) -> Optional[tuple]:
     """THE plugin name resolver for every verb (enable/disable/show/capabilities/remove/update, the
     dashboard and the Desktop hub): the discovered ``(name, version, description, source, dir_path, key)``
-    entry for a canonical key or manifest name; else a bare leaf (``exa`` ->
-    ``web/exa``) only when unique; else the catalog name the plugin was installed under.
+    entry for a canonical key or manifest name; else a bare leaf (``langfuse`` ->
+    ``observability/langfuse``) only when unique; else the catalog name the plugin was installed under.
     Never guesses between two candidates."""
     entries = _discover_all_plugins()
     from hermes_cli.left_core_migration import legacy_plugin_alias
@@ -725,9 +729,9 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
 
     changed = _activate_key(key, enable=True, console=console)
     if changed:
-        from hermes_cli.plugins_activation import activate_plugin_now, activation_hint
+        from hermes_cli.plugins_activation import report_activation
         console.print(f"[green]✓[/green] Plugin [bold]{key}[/bold] enabled.")  # the hint says when it applies
-        console.print(f"[dim]{activation_hint(activate_plugin_now(key, in_process=False))}[/dim]")
+        report_activation(console, key)
     else:
         console.print(f"[dim]Plugin '{key}' is already enabled.[/dim]")
     if source != "bundled":
@@ -832,6 +836,7 @@ def _default_on(dir_path, source: str) -> bool:
     try:
         kind = str(_load_yaml_manifest(manifest_file).get("kind", "standalone")).strip().lower()
     except Exception:
+        logger.debug("Plugin default-on manifest unreadable at %s", manifest_file, exc_info=True)
         return False
     return kind == "model-provider" or (source == "bundled" and kind in _BUNDLED_DEFAULT_ON_KINDS)
 
@@ -871,11 +876,11 @@ def _discover_all_plugins() -> list:
     in ``PluginManager.discover_and_load`` order: bundled, user, then entry points — which never
     displace a directory plugin of the same key (see ``PluginManager._discover_and_load_inner``)."""
     seen: dict = {}
-    # memory/, context_engine/, computer_use/ and model-providers/ load through dedicated registries, not the
-    # PluginManager opt-in surface, so listing them as toggleable plugins would mislead.
+    # memory/, context_engine/, computer_use/, model-providers/ and config_backends/ load through dedicated
+    # paths, not the PluginManager opt-in surface, so listing them as toggleable plugins would mislead.
     from hermes_cli.plugins import discover_entrypoint_manifests, get_bundled_plugins_dir
     for base, source, skip in (
-        (get_bundled_plugins_dir(), "bundled", {"memory", "context_engine", "computer_use", "model-providers"}),
+        (get_bundled_plugins_dir(), "bundled", {"memory", "context_engine", "computer_use", "model-providers", "config_backends"}),
         (_plugins_dir(), "user", set()),
     ):
         _scan_level(base, source, skip, "", 0, seen)
@@ -973,11 +978,11 @@ def _toggle_plugin_toolset(name: str, *, enable: bool, toolset_key: Optional[str
     toolset_key = toolset_key or _saved_list_toolset_key(name)
     if not toolset_key:
         return
-    from hermes_cli.config import load_config, save_config
+    from hermes_cli.config import load_config
     from hermes_cli.toolset_validation import parse_platform_toolsets_value
     config = load_config()
     platform_toolsets = _child_dict(config, "platform_toolsets")
-    changed = False
+    changed_toolsets = {}
     for platform, raw in list(platform_toolsets.items()):
         # A list-literal string (older `hermes config set`) is the user's real selection; toggling
         # it re-saves the entry as a proper list so the string never persists.
@@ -985,9 +990,28 @@ def _toggle_plugin_toolset(name: str, *, enable: bool, toolset_key: Optional[str
         if ts_list is not None and enable != (toolset_key in ts_list):
             (ts_list.append if enable else ts_list.remove)(toolset_key)
             platform_toolsets[platform] = ts_list
-            changed = True
-    if changed:
-        save_config(config)
+            changed_toolsets[platform] = ts_list
+    for platform, toolsets in changed_toolsets.items():
+        _write_raw_config_value(("platform_toolsets", platform), toolsets)
+
+
+def _managed_plugin_toggle_keys(name: str, *, enable: bool) -> list[str]:
+    """Return administrator-managed config keys this toggle would write."""
+    from hermes_cli import managed_scope
+    from hermes_cli.config import load_config
+
+    keys = ["plugins.enabled", "plugins.disabled"]
+    toolset_key = _get_plugin_toolset_key(name)
+    if toolset_key:
+        platform_toolsets = load_config().get("platform_toolsets")
+        if not isinstance(platform_toolsets, dict):
+            platform_toolsets = {}
+        changed_platforms = [
+            platform for platform, toolsets in platform_toolsets.items()
+            if isinstance(toolsets, list) and enable != (toolset_key in toolsets)
+        ]
+        keys.extend(f"platform_toolsets.{platform}" for platform in changed_platforms)
+    return [key for key in keys if managed_scope.is_key_managed(key)]
 
 
 def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str, Any]:
@@ -998,6 +1022,15 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
     key = _resolve_plugin_key(name)
     if key is None:
         return {"ok": False, "error": f"Plugin '{name}' is not installed or bundled."}
+    managed_keys = _managed_plugin_toggle_keys(key, enable=enabled)
+    if managed_keys:
+        return {
+            "ok": False,
+            "error": f"Cannot change plugin enablement: {', '.join(managed_keys)} is managed by your administrator.",
+            "name": key,
+            "unchanged": True,
+            "restart_required": False,
+        }
     from hermes_cli.plugins_admission import AdmissionRefused
 
     toolset_key = None if enabled else _saved_list_toolset_key(key)
@@ -1067,8 +1100,10 @@ def _action_update(args):
     if args.name:
         if getattr(args, "yes", False):
             _fail(_console(), "[red]Error:[/red] --yes only applies to `hermes plugins update` with no name.")
-        cmd_update(args.name)
+        cmd_update(args.name, force=getattr(args, "force", False))
         return
+    if getattr(args, "force", False):
+        _fail(_console(), "[red]Error:[/red] --force applies to one named plugin: `hermes plugins update <name> --force`.")
     from hermes_cli.plugins_cmd_update_all import cmd_update_all
     cmd_update_all(yes=getattr(args, "yes", False))
 

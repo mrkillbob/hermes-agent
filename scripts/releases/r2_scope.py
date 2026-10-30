@@ -4,6 +4,41 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import re
+import sys
+
+OFFICIAL_REPOSITORY = "NousResearch/hermes-agent"
+DEFAULT_PUBLIC_URL = "https://hermes-assets.nousresearch.com"
+ARCHIVE_REQUIRED_ENV = (
+    "CLOUDFLARE_R2_ACCOUNT_ID", "CLOUDFLARE_R2_ACCESS_KEY_ID",
+    "CLOUDFLARE_R2_SECRET_ACCESS_KEY", "CLOUDFLARE_R2_BUCKET",
+)
+
+
+def configured_public_root(explicit: str | None = None, *, repository: str | None = None) -> str:
+    from hermes_cli.release_channels import public_base, validate_repository
+    selected = repository or os.environ.get("GITHUB_REPOSITORY", "")
+    if selected:
+        validate_repository(selected)
+    configured = explicit if explicit is not None else os.environ.get("CLOUDFLARE_R2_PUBLIC_URL", "")
+    if not configured:
+        if selected and selected.casefold() != OFFICIAL_REPOSITORY.casefold():
+            raise ValueError("Fork releases require CLOUDFLARE_R2_PUBLIC_URL")
+        configured = DEFAULT_PUBLIC_URL
+    return public_base(configured)
+
+
+def validate_archive_environment(*, public: bool = True) -> None:
+    """Admission diagnostics contain field names, never their values."""
+    missing = [name for name in ARCHIVE_REQUIRED_ENV if not os.environ.get(name, "").strip()]
+    selected = os.environ.get("GITHUB_REPOSITORY", "")
+    if public and selected.casefold() != OFFICIAL_REPOSITORY.casefold() and not os.environ.get("CLOUDFLARE_R2_PUBLIC_URL", "").strip():
+        missing.append("CLOUDFLARE_R2_PUBLIC_URL")
+    if missing:
+        print("::error::Unavailable release archive inputs: " + ", ".join(missing), file=sys.stderr)
+        raise SystemExit(2)
+    if public:
+        configured_public_root()
+    R2Scope.configured()
 
 # A lease is the workflow run id alone: "re-run failed jobs" must re-enter the
 # SAME namespace because succeeded jobs are skipped and their outputs persist.
@@ -78,7 +113,7 @@ class R2Scope:
         return root
 
 
-def channel_public_base(explicit: str | None = None) -> str:
+def channel_public_base(explicit: str | None = None, *, repository: str | None = None) -> str:
     scope = R2Scope.configured()
     configured = os.environ.get("CLOUDFLARE_R2_PUBLIC_URL", "")
     if scope.prefix:
@@ -88,13 +123,4 @@ def channel_public_base(explicit: str | None = None) -> str:
         if explicit is not None and explicit.rstrip("/") != expected:
             raise ValueError("Disposable channel archive authority mismatch")
         return expected
-    from hermes_cli.release_channels import public_base
-    if explicit is not None:
-        return public_base(explicit)
-    if not configured:
-        # The documented production origin is the default, exactly as the
-        # commit-build path (r2.public_base_url) does, so a local command can
-        # name the page it is about to publish without hand-setting the URL.
-        from scripts.releases.r2 import DEFAULT_PUBLIC_URL
-        configured = DEFAULT_PUBLIC_URL
-    return public_base(configured)
+    return configured_public_root(explicit, repository=repository)

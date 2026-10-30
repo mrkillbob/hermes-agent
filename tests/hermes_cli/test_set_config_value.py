@@ -131,6 +131,13 @@ class TestConfigYamlRouting:
 
 
 
+    def test_agent_reasoning_effort_is_recognized(self, _isolated_hermes_home, capsys):
+        """The canonical per-profile reasoning knob must not be flagged as inert."""
+        set_config_value("agent.reasoning_effort", "low")
+
+        assert "not a recognized config key" not in capsys.readouterr().out
+        assert "reasoning_effort: low" in _read_config(_isolated_hermes_home)
+
     def test_tool_search_defer_is_recognized(self, _isolated_hermes_home, capsys):
         """tools.tool_search.defer is read by ToolSearchConfig.from_raw, so it must be a
         registered config key (not flagged as unrecognized) and coerce to a real list."""
@@ -252,7 +259,7 @@ class TestConfigGetPhantomKeyNotice:
         self, _isolated_hermes_home, capsys
     ):
         # The check is a DEFAULT_CONFIG walk; ``browser.cloud_provider`` is deliberately unseeded
-        # yet read by tools/browser_tool_cloud.py, so the notice must not claim it is never read.
+        # yet read by tools/browser_session_cloud.py, so the notice must not claim it is never read.
         (_isolated_hermes_home / "config.yaml").write_text("browser:\n  cloud_provider: local\n")
 
         config_command(argparse.Namespace(config_command="get", key="browser.cloud_provider", json=False))

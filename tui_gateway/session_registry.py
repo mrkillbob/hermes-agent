@@ -281,7 +281,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # MCP fleet, and live-transport sessions are never reaped, so fleets would accumulate.
             notify_registered = _wire_session_agent(sid, key, agent)
             _announce_built_agent(sid, key, current, agent)
-        except Exception as e:
+        except (Exception, ConfigBackendUnavailable) as e:  # health: allow BLE001 -- reported as agent_error + error event
             from agent.auxiliary_unavailable import ProviderNotConfiguredError
             current["agent_error"] = str(e)
             # A client can route "no provider is set up" to its setup flow instead of a dead-end
@@ -337,10 +337,14 @@ def _sess_building(params, rid):
 def _init_session(
     sid: str, key: str, agent, history: list, cols: int = 80, cwd: str | None = None,
     session_db=None, source: str | None = None, profile_home: str | None = None,
-    explicit_cwd: bool = False):
+    explicit_cwd: bool = False, conversation_worktree=None, conversation_root_lease=None,
+    conversation_worktree_historical: bool = False):
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
+            "conversation_worktree": conversation_worktree or {},
+            "conversation_worktree_historical": bool(conversation_worktree_historical),
+            "conversation_root_lease": conversation_root_lease,
             "agent": agent, "session_key": key, "history": history, "history_lock": threading.Lock(),
             "history_version": 0, "inflight_turn": None, "created_at": now, "last_active": now,
             "running": False, "attached_images": [], "image_counter": 0, "cwd": cwd or _completion_cwd(),
@@ -465,7 +469,8 @@ def _deferred_session_record(
         "close_on_disconnect": close_on_disconnect, "active_session_lease": lease, "cols": cols,
         "created_at": now, "cwd": cwd, "display_history_prefix": display_history_prefix or [],
         "edit_snapshots": {}, "explicit_cwd": bool(explicit_cwd), "history": history,
-        "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
+        "history_lock": threading.Lock(), "prompt_submit_lock": threading.Lock(),
+        "history_version": 0, "image_counter": 0,
         "inflight_turn": None, "last_active": now, "lazy": lazy, "model_override": model_override,
         "pending_title": None,
         "profile_home": str(profile_home) if profile_home is not None else None,
@@ -509,14 +514,17 @@ def _claim_or_reuse_live(sid: str, session_key: str, record: dict, lease) -> tup
         # A PRIOR runtime for this stored id may still be sentinel-parked with a reap Timer armed; cancel +
         # finalize it quietly so the reap doesn't broadcast session.reclaimed (storm).
         _cancel_ws_orphan_reap(sid)
-        stale = _claim_parked_runtimes(session_key, keep_sid=sid, profile_home=profile_home)
+    # The parked-runtime claim is itself teardown. It must acquire prompt admission before the resume lock,
+    # so do it after releasing the resume lock rather than inverting prompt.submit's lock order.
+    stale = _claim_parked_runtimes(session_key, keep_sid=sid, profile_home=profile_home)
     _finalize_superseded_runtimes(stale)  # slow finalization stays OUTSIDE _session_resume_lock
     return None
 
 
 def _claim_parked_runtimes(session_key: str, *, keep_sid: str, profile_home=_ANY_PROFILE) -> list[tuple[str, dict]]:
     """Claim sentinel-parked stale runtimes of ``session_key`` for supersession: cancel their orphan-reap
-    Timer and pop them here (under the caller's _session_resume_lock); the caller finalizes after release."""
+    Timer and pop them here; prompt admission and resume both remain serialized while each stale runtime is claimed.
+    The caller finalizes after release."""
     stale: list[tuple[str, dict]] = []
     with _sessions_lock:
         candidates = [
@@ -524,10 +532,17 @@ def _claim_parked_runtimes(session_key: str, *, keep_sid: str, profile_home=_ANY
             if old_sid != keep_sid and not old.get("_finalized")
             and _session_lookup_key(old, fallback=old_sid) == session_key
             and _live_profile_matches(old, profile_home) and old.get("transport") is _detached_ws_transport]
-    for old_sid, _old in candidates:
-        _cancel_ws_orphan_reap(old_sid)
-        if (popped := _pop_session_by_id(old_sid)) is not None:
-            stale.append((old_sid, popped))
+    for old_sid, old in candidates:
+        with _session_prompt_submit_lock(old), _session_resume_lock, _sessions_lock:
+            current = _sessions.get(old_sid)
+            if (current is not old or current.get("_finalized")
+                    or _session_lookup_key(current, fallback=old_sid) != session_key
+                    or not _live_profile_matches(current, profile_home)
+                    or current.get("transport") is not _detached_ws_transport):
+                continue
+            _cancel_ws_orphan_reap(old_sid)
+            if (popped := _pop_session_by_id(old_sid)) is not None:
+                stale.append((old_sid, popped))
     return stale
 
 
@@ -541,8 +556,33 @@ def _finalize_superseded_runtimes(stale: list[tuple[str, dict]]) -> None:
             logger.exception("superseded runtime teardown failed sid=%s", old_sid)
 
 
+def _conversation_worktree_prewarm_pending(session: dict) -> bool:
+    """Whether an isolated desktop/TUI draft must bind its worktree before agent construction."""
+    if (session.get("source") not in {"desktop", "tui"}
+            or session.get("conversation_worktree")):
+        return False
+    home_token = None
+    try:
+        if profile_home := session.get("profile_home"):
+            home_token = set_hermes_home_override(str(profile_home))
+        from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+        return bool(resolve_conversation_worktree_policy(_load_cfg()).enabled)
+    except Exception:
+        # Do not prewarm an agent when policy resolution itself failed: construction
+        # would otherwise run outside the submit error surface and strand the draft.
+        logger.warning("conversation worktree prewarm policy check failed", exc_info=True)
+        return True
+    finally:
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
+
+
 def _schedule_agent_build(sid: str, delay: float = 0.05) -> None:
     """Pre-warm a deferred session's agent off the response path (session.create + cold resume; _sess() also builds on demand)."""
+    session = _sessions.get(sid)
+    if session is not None and _conversation_worktree_prewarm_pending(session):
+        logger.debug("deferring agent prewarm for isolated session %s until worktree binding", sid)
+        return
 
     def _run():
         if (session := _sessions.get(sid)) is not None:
@@ -617,7 +657,7 @@ def _schedule_resume_hydration(sid: str, stored_id: str, db, *, close_db: bool =
                   {"message_count": session["resume_message_count"], "phase": "history", "status": "complete"})
             _maybe_schedule_auto_continue(sid, session, stored_id)
             _start_agent_build(sid, session)
-        except Exception as exc:
+        except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- reported as the resume failure
             if _sessions.get(sid) is not session:
                 return
             message = resume_failed_message(exc)
@@ -626,10 +666,7 @@ def _schedule_resume_hydration(sid: str, stored_id: str, db, *, close_db: bool =
             session["agent_ready"].set()
             _emit("session.resume_progress", sid, {"message": message, "phase": "history", "status": "failed"})
             _emit("error", sid, {"message": message})
-            with _sessions_lock:
-                discarded = _sessions.pop(sid, None) if _sessions.get(sid) is session else None
-            if (lease := (discarded or {}).get("active_session_lease")) is not None:
-                lease.release()
+            _close_session_by_id(sid, end_reason="resume_failed")
         finally:
             if close_db and hasattr(db, "close"):
                 try:
@@ -844,7 +881,5 @@ def _main_runtime_from_agent(agent) -> dict | None:
         elif field == "api_key" and callable(value):
             runtime[field] = value
     return runtime or None
-
-
 def register(server):
     bind_module(globals(), server)

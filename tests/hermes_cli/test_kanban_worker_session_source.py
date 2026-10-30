@@ -34,7 +34,7 @@ def test_worker_spawn_tags_session_source_kanban(monkeypatch, tmp_path):
         captured["env"] = kwargs["env"]
         return _Proc()
 
-    monkeypatch.setattr("subprocess.Popen", _fake_popen)
+    monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", _fake_popen)
     monkeypatch.setattr(kbd, "_retag_legacy_worker_sessions", lambda _root: None)
     monkeypatch.setattr(kb, "worker_logs_dir", lambda board=None: tmp_path / "logs")
 

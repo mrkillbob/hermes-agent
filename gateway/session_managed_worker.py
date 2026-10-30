@@ -15,7 +15,7 @@ import sys
 import time
 
 from agent.managed_worker import accept_result, encode_frame, read_frame
-from gateway.session_worker_reservation import reserve_admission_worker
+from gateway.session_worker_reservation import owner_worker_subject, reserve_admission_worker
 from hermes_state_runtime import RuntimeStoreError
 
 # The interpreter only imports psutil before it introduces itself; a child silent this long
@@ -215,13 +215,13 @@ class ManagedWorker:
             self._arrived.clear()
         return item
 
-    def drain_stderr(self, path):
+    def drain_stderr(self, path, consume_bytes=None):
         """Route the child's stderr (its tracebacks and redirected prints) into the profile's
         bounded, redacted, private log instead of discarding it."""
         from agent.memory_provider import spawn_context_thread
         from gateway.session_managed_worker_log import drain_worker_stderr
         self.stderr_drain = spawn_context_thread(drain_worker_stderr, name='managed-stderr-drain',
-                                                 args=(self.process.stderr, path, self.process.pid, lambda: self.secrets))
+                                                 args=(self.process.stderr, path, self.process.pid, lambda: self.secrets, consume_bytes))
         self.stderr_drain.start()
 
     def control(self, frame):
@@ -293,8 +293,8 @@ class ManagedWorker:
             return
         try:
             proc = psutil.Process(self.worker[0])
-            from hermes_cli.process_identity import process_birth
-            if process_birth(proc) == self.worker[1]:
+            from hermes_cli.process_identity import worker_birth
+            if worker_birth(proc) == self.worker[1]:
                 (proc.kill if kill else proc.terminate)()
         except psutil.Error:
             pass
@@ -545,20 +545,20 @@ def _stopped_before_spawn(authority, ref, row):
     return True
 
 
-async def _spawn_registered_worker(authority, ref, row):
-    """Spawn the turn's child and register it for Stops: ``(worker, process)``, or None when the spawn was cancelled (the
+async def _spawn_registered_worker(authority, ref, row, budget):
+    """Spawn the turn's child and register it for Stops: ``(worker, process, acquisition_error)``, or None when the spawn was cancelled (the
     interrupted result is already recorded). The generation stays marked spawning until registration."""
     spawning = _mark_spawning(authority, ref, row)
     generation = row.get('generation')
     try:
-        env = await asyncio.to_thread(_worker_env, authority)
-        cwd = (await asyncio.to_thread(Path(__file__).resolve)).parents[1]
+        env = await budget.wait(asyncio.to_thread(_worker_env, authority))
+        cwd = (await budget.wait(asyncio.to_thread(Path(__file__).resolve))).parents[1]
         from gateway.session_worker_spawn import acquire_process
         from gateway.session_managed_worker_log import worker_log_path
         log_path = worker_log_path(authority.profile_id)
-        process = await acquire_process(subprocess.Popen, [sys.executable, '-m', 'agent.managed_worker'],
-            cwd=cwd, stdin=subprocess.PIPE, env=env, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL if log_path is None else subprocess.PIPE, **WORKER_POPEN)
+        process, acquisition_error = await acquire_process(subprocess.Popen, [sys.executable, '-m', 'agent.managed_worker'],
+            budget=budget, cwd=cwd, stdin=subprocess.PIPE, env=env, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE if log_path is not None or budget.value is not None else subprocess.DEVNULL, **WORKER_POPEN)
     except asyncio.CancelledError:
         # acquire_process owns late-child cleanup; no bootstrap or reservation was sent.
         spawning.pop(ref.session_id, None)
@@ -568,15 +568,27 @@ async def _spawn_registered_worker(authority, ref, row):
         spawning.pop(ref.session_id, None)
         raise
     worker = ManagedWorker(process)
-    if log_path is not None:
-        worker.drain_stderr(log_path)
+    if log_path is not None or budget.value is not None:
+        worker.drain_stderr(log_path, budget.consume)
     workers = getattr(authority, '_managed_workers', None)
     if workers is None:
         workers = authority._managed_workers = {}
     workers[ref.session_id] = worker
     spawning.pop(ref.session_id, None)
     worker.stop_cause = _latched_stop_cause(authority, ref.session_id, generation)
-    return worker, process
+    return worker, process, acquisition_error
+
+
+async def admit_managed(authority, ref, row, policy):
+    """The ingress route into a managed worker. A removed folder is refused before a worker exists,
+    like the in-process runner: a worker failing in its policy scope reads as a LOST execution
+    (``unknown``) and parks every follower behind it."""
+    from gateway.session_policy import workspace_ready, workspace_unavailable_result
+    if not workspace_ready(policy):
+        result = workspace_unavailable_result(policy)
+        authority.pending_results[row['admission_id']] = {'result': result, 'usage': {}}
+        return result['final_response']
+    return await execute_managed(authority, ref, row, policy)
 
 
 async def execute_managed(authority, ref, row, policy):
@@ -595,10 +607,12 @@ async def execute_managed(authority, ref, row, policy):
         return refusal
     if _stopped_before_spawn(authority, ref, row):
         return ''
-    spawned = await _spawn_registered_worker(authority, ref, row)
+    from gateway.session_execution_budget import ExecutionBudget
+    budget = ExecutionBudget(json.loads(getattr(policy, 'kanban_json', None) or '{}').get('execution_budget'))
+    spawned = await _spawn_registered_worker(authority, ref, row, budget)
     if spawned is None:
         return ''
-    worker, process = spawned
+    worker, process, acquisition_error = spawned
     workers = authority._managed_workers
     # A Stop acknowledged during the env/spawn awaits found no worker and was latched for this
     # generation; consume it in the same step that makes the worker reachable to interrupt_managed.
@@ -606,24 +620,30 @@ async def execute_managed(authority, ref, row, policy):
     accepted = usage = None
     scope = None
     try:
+        budget.check(acquisition_error)
         # The interpreter behind the handle introduces itself first; the owner verifies that
         # identity (alive, same birth, descends from the handle) before reserving for it.
-        hello = await worker.next_frame(HELLO_SECONDS, ack=0)
+        hello = await budget.wait(worker.next_frame(HELLO_SECONDS, ack=0))
+        budget.frame(hello)
         if worker.stop.is_set():
             # Stopped before the child could receive controls: hello raced the latch; never bootstrap.
             raise RuntimeStoreError('managed_worker_stopped')
         # psutil + BEGIN IMMEDIATE: off-loop and retirement-tracked, like admission and claim.
         from gateway.session_runtime_workers import tracked_write
-        scope = await tracked_write(authority, partial(reserve_admission_worker, authority,
-                    admission_id=row['admission_id'], process=process, principal_id=row['principal_id'], hello=hello))
+        scope, reservation_error = await budget.reserve(worker, tracked_write(authority,
+            partial(reserve_admission_worker, authority, admission_id=row['admission_id'],
+                    process=process, principal_id=row['principal_id'], hello=hello,
+                    worker_subject=owner_worker_subject())))
+        budget.check(reservation_error)
         worker.worker = (scope['pid'], scope['birth'])
         # The child reads nothing else until the exact reservation has committed.
-        frame = await asyncio.to_thread(_bootstrap, authority, ref, row, policy, scope, text)
+        frame = await budget.wait(asyncio.to_thread(_bootstrap, authority, ref, row, policy, scope, text))
         worker.secrets.extend(v for v in (frame['api_key'], scope['secret']) if isinstance(v, str) and v)
-        await asyncio.to_thread(worker.send, frame)
+        await budget.wait(asyncio.to_thread(worker.send, frame))
         worker.writer.start()
         while True:
-            frame = await worker.next_frame(None, ack=STOP_ACK_SECONDS)
+            frame = await budget.wait(worker.next_frame(None, ack=STOP_ACK_SECONDS))
+            budget.frame(frame)
             # The claim's execution stamp, not a ledger read per frame (publish_execution fences the same way).
             if authority.executing.get(ref.session_id) != row['generation']:
                 raise RuntimeStoreError('stale_generation')
@@ -646,14 +666,17 @@ async def execute_managed(authority, ref, row, policy):
                 except ValueError as exc:
                     raise RuntimeStoreError('invalid_worker_result') from exc
                 authority.sessions[ref.session_id].controls.snapshot(ref.session_id, None)
-                await asyncio.to_thread(worker.send, {'type': 'finish'})
+                await budget.wait(asyncio.to_thread(worker.send, {'type': 'finish'}))
                 continue
             if frame == {'type': 'finished'} and accepted is not None:
                 # 'finished' follows the worker's durable execution.finish: the turn is complete.
                 # A slow or non-zero interpreter exit after it is close()'s cleanup, not a loss.
+                await budget.finish(worker)
                 with suppress(subprocess.TimeoutExpired):
                     await asyncio.to_thread(process.wait, 10)
                 accepted = _with_stop_cause(accepted, worker)
+                from gateway.session_kanban_text_result import settle_text_result
+                accepted = await tracked_write(authority, partial(settle_text_result, policy, scope, accepted))
                 # Like in-process execution, settlement belongs to the drain's stream lock.
                 authority.pending_results[row['admission_id']] = {
                     'result': {**accepted, 'local_viewer': True}, 'usage': usage,
@@ -661,6 +684,7 @@ async def execute_managed(authority, ref, row, policy):
                 return accepted['final_response']
             raise RuntimeStoreError('invalid_worker_frame')
     except (Exception, asyncio.CancelledError) as exc:
+        await budget.close_exhausted(worker, exc)
         import logging
         logging.getLogger(__name__).warning('Managed worker lost: %s',
             exc.reason if isinstance(exc, RuntimeStoreError) else type(exc).__name__)

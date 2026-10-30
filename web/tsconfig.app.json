@@ -32,5 +32,9 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src", "../apps/shared/src"]
+  "include": ["src", "../apps/shared/src"],
+  "exclude": [
+    "../apps/shared/src/**/*.test.*",
+    "../apps/shared/src/**/*.spec.*"
+  ]
 }

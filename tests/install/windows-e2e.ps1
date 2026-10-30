@@ -161,6 +161,7 @@ $env:HERMES_DESKTOP_USER_DATA_DIR = Join-Path $WorkRoot 'electron-user-data'
 $script:ChatMock = $null
 $script:ChatFailure = $false
 . (Join-Path $AssetsDir 'desktop-smoke-windows.ps1')
+. (Join-Path $AssetsDir 'out-of-job.ps1')
 
 function Start-JourneyChat {
     if (-not $script:ChatMock) {
@@ -171,14 +172,27 @@ function Start-JourneyChat {
 }
 
 function Invoke-DesktopCheckpoint([string]$ChatPhase, [string]$Commit, [string]$Method) {
+    Start-JourneyChat
     $script:ChatFailure = $true
     $prevEap = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & $DriverNode (Join-Path $AssetsDir 'source-desktop-smoke.mjs') `
-            --root $InstallDir --home $HermesHome --user-data $env:HERMES_DESKTOP_USER_DATA_DIR `
-            --out $ProofRoot --phase $ChatPhase --expect-commit $Commit --desktop $script:ExpectedDesktop --method $Method
-        $chatExit = $LASTEXITCODE
+        $smokeArgs = @((Join-Path $AssetsDir 'source-desktop-smoke.mjs'),
+            '--root', $InstallDir, '--home', $HermesHome, '--user-data', $env:HERMES_DESKTOP_USER_DATA_DIR,
+            '--out', $ProofRoot, '--phase', $ChatPhase, '--expect-commit', $Commit,
+            '--desktop', $script:ExpectedDesktop, '--method', $Method)
+        $chatExit = $null
+        if ($ChatPhase -eq 'new' -and (Test-OutOfJobLaunchWanted)) {
+            # The updated app has to start its own gateway, which the runner step's job forbids
+            # (issue 301, e2e-assets/out-of-job.ps1). $null: the task could not start; run in-process.
+            $chatExit = Invoke-OutsideRunnerJob -FilePath $DriverNode -ArgumentList $smokeArgs `
+                -WorkingDirectory (Get-Location).Path -StageDir (Join-Path $WorkRoot 'out-of-job-new') |
+                Select-Object -Last 1
+        }
+        if ($null -eq $chatExit) {
+            & $DriverNode @smokeArgs
+            $chatExit = $LASTEXITCODE
+        }
     } finally { $ErrorActionPreference = $prevEap }
     if ($chatExit -ne 0) { throw "Mandatory desktop chat $ChatPhase failed (exit $chatExit)" }
     $script:ChatFailure = $false
@@ -528,6 +542,11 @@ function Invoke-HermesUpdate {
         throw "Installed update --help failed: $helpText"
     }
     if ($helpText -match '--yes') { $updateArgs += "--yes" }
+    # This fixture advances serve.git/main to an unpublished HEAD (or NEXT). An official-origin
+    # checkout otherwise follows the stable release channel and waits for a newer release;
+    # older updaters do not accept --branch, so ask the installed binary first (as
+    # e2e-assets/source-update-command.sh does for the POSIX legs).
+    if ($helpText -match '(^|[\s\[])--branch([=\s]|$)') { $updateArgs += @("--branch", "main") }
     New-Item -ItemType Directory -Path (Join-Path $WorkRoot "logs") -Force | Out-Null
     $log = Join-Path $WorkRoot "logs\update.log"
     $hangLog = Join-Path $WorkRoot "logs\update-hang-processes.txt"
@@ -631,6 +650,8 @@ function Clear-HistoricalInstallerChurn {
     # identical index/HEAD blobs. Undo only that installer-generated state in
     # this disposable clone; any other change still fails, listed.
     # porcelain=v2: Invoke-Git trims output, which would eat v1's leading " M".
+    & $DriverNode (Join-Path $AssetsDir "source-churn.mjs") $InstallDir $script:RealGitExe
+    Assert-True ($LASTEXITCODE -eq 0) "verified only installer-generated contributor and launcher churn"
     $lines = @((Invoke-Git @("-C", $InstallDir, "-c", "core.quotepath=false", "status", "--porcelain=v2", "--untracked-files=all")) -split "\r?\n" |
         Where-Object { $_ })
     if ($lines.Count -eq 0) { return }
@@ -862,33 +883,7 @@ function Stop-HermesAppProcesses([string]$Label) {
 # ----------------------------------------------------------------------------
 # Phase: stage -- serve.git with `main` at OLD (advanced to HEAD by update-gui)
 # ----------------------------------------------------------------------------
-# Mirror of resolve_update_ref's NEXT arm in e2e-assets/installer-common.sh:
-# a synthetic child of $Parent whose tree adds one marker file (a real diff,
-# not an empty fast-forward), written to the object store only -- no ref, no
-# worktree change. A local `clone --bare` copies objects/ wholesale, which is
-# how it reaches serve.git. A throwaway index stands in for mktree so no
-# NUL-delimited stdin has to cross PowerShell's native pipe.
-function New-NextCommit([string]$Repo, [string]$Parent) {
-    $marker = Join-Path $WorkRoot "next-marker.txt"
-    Set-Content -LiteralPath $marker -Encoding ASCII -Value "synthetic next commit for the HEAD -> NEXT install E2E leg"
-    $blob = Invoke-Git @("-C", $Repo, "hash-object", "-w", "--no-filters", $marker)
-    $saved = @{}
-    $vars = @{
-        GIT_INDEX_FILE = (Join-Path $WorkRoot "next.index")
-        GIT_AUTHOR_NAME = "Hermes E2E"; GIT_AUTHOR_EMAIL = "e2e@hermes.invalid"
-        GIT_COMMITTER_NAME = "Hermes E2E"; GIT_COMMITTER_EMAIL = "e2e@hermes.invalid"
-    }
-    foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
-    try {
-        Invoke-Git @("-C", $Repo, "read-tree", $Parent) | Out-Null
-        Invoke-Git @("-C", $Repo, "update-index", "--add", "--cacheinfo", "100644,$blob,.hermes-e2e-next") | Out-Null
-        $tree = Invoke-Git @("-C", $Repo, "write-tree")
-        return Invoke-Git @("-C", $Repo, "commit-tree", $tree, "-p", $Parent, "-m", "e2e: synthetic next commit")
-    } finally {
-        foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
-        Remove-Item -LiteralPath $vars.GIT_INDEX_FILE -Force -ErrorAction SilentlyContinue
-    }
-}
+. (Join-Path $AssetsDir "next-commit.ps1")
 
 function Invoke-PhaseStage {
     Write-Step "STAGE: bare serve repo, main -> OLD (install base)"
@@ -1005,7 +1000,23 @@ function Invoke-PhaseInstallGui {
 
     # AHK script + button templates side by side (ImageSearch resolves
     # relative to the script dir).
-    Copy-Item -Path (Join-Path $AssetsDir "install-and-launch.ahk"), (Join-Path $AssetsDir "install-button.png"), (Join-Path $AssetsDir "launch-button.png") -Destination $AhkDir -Force
+    Copy-Item -Path (Join-Path $AssetsDir "install-and-launch.ahk"), (Join-Path $AssetsDir "bootstrap-log-state.ahk"), (Join-Path $AssetsDir "bootstrap-log-state.test.ahk"), (Join-Path $AssetsDir "install-button.png"), (Join-Path $AssetsDir "launch-button.png") -Destination $AhkDir -Force
+    # Exercise the same fail-fast reader before the real headed installation.
+    $logStateScript = Join-Path $AhkDir "bootstrap-log-state.test.ahk"
+    $logStateFixture = Join-Path $proof "log-state-fixture"
+    $logStateArguments = '/ErrorStdOut "{0}" "{1}"' -f $logStateScript, $logStateFixture
+    $logStateTest = Start-Process -FilePath $ahkExe -ArgumentList $logStateArguments `
+        -RedirectStandardOutput (Join-Path $proof "log-state-stdout.log") `
+        -RedirectStandardError (Join-Path $proof "log-state-stderr.log") -PassThru
+    # Cache the native handle before waiting: redirected Start-Process in Windows
+    # PowerShell can otherwise lose ExitCode (PowerShell/PowerShell#5421).
+    $null = $logStateTest.Handle
+    if (-not $logStateTest.WaitForExit(30000)) {
+        Stop-Process -Id $logStateTest.Id -Force -ErrorAction SilentlyContinue
+        throw "bootstrap log state regression did not finish within 30 seconds"
+    }
+    $logStateExitCode = $logStateTest.ExitCode
+    Assert-True ($null -ne $logStateExitCode -and $logStateExitCode -eq 0) "bootstrap log state regression passed (exit code: $logStateExitCode)"
 
     $env:HERMES_HOME = $HermesHome
     New-Item -ItemType Directory -Path $HermesHome -Force | Out-Null
@@ -1021,6 +1032,13 @@ function Invoke-PhaseInstallGui {
     $ahkLog = Join-Path $proof "ahk.log"
     try {
         Save-DesktopScreenshot (Join-Path $proof "00-before-installer.png")
+
+        # This home belongs to this E2E arm. Preserve prior evidence before
+        # launch: neither an earlier complete nor FAILED line decides this attempt.
+        $bootLog = Join-Path $HermesHome "logs\bootstrap-installer.log"
+        if (Test-Path -LiteralPath $bootLog) {
+            Move-Item -LiteralPath $bootLog -Destination (Join-Path $proof "bootstrap-prior-attempt.log") -Force
+        }
 
         # Launch the real headed installer. Scope the paired script source to
         # this process only so later product launches cannot inherit it.
@@ -1118,6 +1136,9 @@ function Invoke-PhaseInstallGui {
 # Phase: update-gui -- OLD -> HEAD through the selected route
 # ----------------------------------------------------------------------------
 function Invoke-GuiUpdateDesktopRoute([string]$TargetSha) {
+    # The OS-open route does not pass through hermes desktop launch capture,
+    # where the sibling GUI route already verifies historical installer churn.
+    Clear-HistoricalInstallerChurn
     Write-Step "UPDATE (GUI, route=desktop): advance served main -> $TargetSha, click Update now"
     $proof = Join-Path $ProofRoot "update-gui"
     New-Item -ItemType Directory -Path $proof -Force | Out-Null
@@ -1287,6 +1308,13 @@ function Seed-PreservationFixtures {
     $external = Join-Path $WorkRoot "external-mnemosyne-runtime"
     & $DriverPython (Join-Path $AssetsDir "verify-plugin-preservation.py") seed --home $HermesHome --external $external
     if ($LASTEXITCODE -ne 0) { throw "could not seed fresh preservation fixtures (exit $LASTEXITCODE)" }
+    # Profiles are configuration/credential islands. The Desktop keeps this
+    # newly owned fixture profile active, so configure its mock before either
+    # preservation snapshot; the root home's mock does not configure it.
+    $profileHome = Join-Path $HermesHome 'profiles\e2e-preserve'
+    $configWriter = [IO.Path]::GetFullPath((Join-Path $AssetsDir '..\..\..\tests-js\scripts\mock-provider-config.ts'))
+    & $DriverNode $configWriter $profileHome $env:HERMES_E2E_MOCK_URL
+    if ($LASTEXITCODE -ne 0) { throw 'preservation profile mock configuration failed' }
 }
 
 function Invoke-PreserveSnapshot {
@@ -1579,9 +1607,7 @@ function Invoke-PhaseUpdate {
     # helper used to own this step.
     # The mock provider is journey setup, not an upgrade mutation. Configure it
     # before preservation snapshots so its stable endpoint is part of baseline state.
-    if ($Route -in @('open-app-update', 'hermes-desktop-app-update', 'desktop-installer@latest')) {
-        Start-JourneyChat
-    }
+    Start-JourneyChat
     Set-SourceMainChannel $InstallDir
     # Snapshot every plugin tree BEFORE the upgrade moves anything.
     Invoke-PreserveSnapshot
@@ -1679,12 +1705,21 @@ function Invoke-PhaseVerifyStamp {
     Assert-True ($head -match '^[0-9a-f]{40}$') "installed HEAD readable: '$head'"
     Write-Host "  install HEAD: $($head.Substring(0, 12))"
     $stampPath = Join-Path $InstallDir '.hermes-bootstrap-complete'
+    # Pre-receipt script installers (e.g. e71a2bd / v2026.5.29) never wrote a
+    # bootstrap receipt. hermes update intentionally refreshes existing ones
+    # only. The verifier checks that immutable ancestor's actual capability,
+    # and still requires current HEAD + source identity. An installer rerun
+    # or GUI route must produce its own receipt and gets no legacy allowance.
+    $legacyArgs = @()
+    if ($InstallMethod -eq 'installer-script' -and $Route -eq 'hermes-update') {
+        $legacyArgs = @('--initial-windows-installer', $state.old)
+    }
     # FAIL lines go to stderr; under "Stop", PowerShell 5.1 would throw on the first one.
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
         $verdict = @(& $DriverPython -B (Join-Path $RepoRoot 'scripts\verify-bootstrap-version-stamp.py') `
-            --stamp $stampPath --repo $InstallDir --expect-commit $state.current 2>&1 | ForEach-Object { "$_" })
+            --stamp $stampPath --repo $InstallDir --expect-commit $state.current @legacyArgs 2>&1 | ForEach-Object { "$_" })
         $verifyExit = $LASTEXITCODE
     } finally { $ErrorActionPreference = $prevEap }
     $verdict | ForEach-Object { Write-Host $_ }

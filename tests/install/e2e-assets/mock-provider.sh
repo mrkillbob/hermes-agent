@@ -41,22 +41,28 @@ mock_start() {
     return 0
   fi
 
+  # A mock that died between steps (a step's background processes are not guaranteed to outlive it)
+  # comes back on its old port, or the run fails: the install and any chat it persisted still name that URL.
+  local previous_port=""
+  if [ -s "$MOCK_URLFILE" ]; then
+    previous_port="$(sed -n 's#^http://127\.0\.0\.1:\([0-9][0-9]*\)$#\1#p' "$MOCK_URLFILE")"
+  fi
   rm -f "$MOCK_PIDFILE" "$MOCK_URLFILE"
 
   # Bare `node file.ts` type-stripping works on node >=22.18 (the images
   # ship 22.22+; the installed managed node is >=26) - same contract as
   # the repo's own `dev:mock` script.
-  node "$ASSETS/mock-provider.mjs" "$MOCK_URLFILE" > "$LOG_DIR/mock.log" 2>&1 &
-  echo $! > "$MOCK_PIDFILE"
-
   local _i
+  node "$ASSETS/mock-provider.mjs" "$MOCK_URLFILE" ${previous_port:+"$previous_port"} > "$LOG_DIR/mock.log" 2>&1 &
+  echo $! > "$MOCK_PIDFILE"
   for _i in 1 2 3 4 5 6 7 8 9 10; do
     [ -s "$MOCK_URLFILE" ] && break
     sleep 0.2
   done
   if [ ! -s "$MOCK_URLFILE" ]; then
     log_group "mock server transcript" "$LOG_DIR/mock.log"
-    fail "mock inference server did not come up; transcript above"
+    # A different port would strand every chat already persisted against the old URL.
+    fail "mock inference server did not come up${previous_port:+ on its previous port $previous_port}; transcript above"
   fi
   local url
   url="$(cat "$MOCK_URLFILE")"

@@ -52,8 +52,12 @@ def test_bootstrap_repairs_before_dependency_activation(tmp_path, monkeypatch, m
     # Include the real preimport protocol, including its ownership check. Do
     # not stub prepare_launch: the same files are also saved in PM's workspace.
     for name in ("__init__.py", "runtime_state.py", "_early_recovery.py",
-                 "_parser.py", "venv_sync.py", "steward.py"):
+                 "_parser.py", "startup_hold.py", "venv_sync.py", "steward.py"):
         shutil.copy2(repo / "hermes_cli" / name, cli / name)
+    # Automatic post-sync cleanup consults the real stdlib-only pause protocol.
+    (core / "agent").mkdir()
+    for name in ("__init__.py", "jiter_preload.py", "estop.py", "file_safety.py"):
+        shutil.copy2(repo / "agent" / name, core / "agent" / name)
     wheels = tmp_path / "wheels"
     wheels.mkdir()
     _wheel(wheels, "startup_dep", "1.0")

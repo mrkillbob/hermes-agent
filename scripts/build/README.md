@@ -68,7 +68,14 @@ node scripts/build/node-deps.mjs --source /work/source \
 locked path or package name. The provider deduplicates the selection and runs
 one root `npm ci` operation. It includes root dependencies, development
 dependencies, and optional dependencies. It checks Node/npm against the root
-`engines` declarations. npm lifecycle scripts remain enabled.
+`engines` declarations. npm lifecycle scripts remain enabled. When Desktop is
+selected, the provider loads a tracked get-windows compiler selector only inside
+the npm installation subprocess, preserving effective Node options and unrelated
+package compilers. The selector and options are part of the preparation receipt.
+Required Windows x64 bindings must contain PE bytes and load with the expected
+native exports before fresh or reused preparation is accepted. Unsupported optional
+targets keep their existing behavior. Bare npm install/ci is outside this Desktop
+compiler guarantee; use `npm run install:desktop` or this provider.
 
 The prepared source needs these inputs:
 
@@ -290,8 +297,8 @@ cache. `scripts.bundles.stage --cache PATH` (or `hermes pm bundle --cache PATH`)
 selects the persistent cache explicitly. Direct staging also accepts the
 provider's `UV_CACHE_DIR`; otherwise it uses the output parent's `.uv-cache`.
 The PM runtime and application dependency builds receive this same cache.
-General PM staging uses `setup-pm` and `save-pm-cache` to restore and save it
-after the build, including failures, under its v2 namespace. Desktop composition
+General PM staging uses `setup-pm`, which restores and saves it automatically on
+success. Desktop composition
 instead prepares the full dependency set before its single dependency snapshot
 save. The packaged `uv-cache/` is a copy, not the writable build cache.
 

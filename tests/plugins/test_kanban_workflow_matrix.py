@@ -1,13 +1,15 @@
 """Manual move matrix: ``DEFAULT_WORKFLOW.manual`` vs. the live ``PATCH /tasks/{id}``.
 
 Every ``src -> dst`` pair is requested through the dashboard API on a parentless task.
-The workflow allow-list must agree with what the server accepts, in both directions.
+The workflow allow-list agrees with acceptance when the verb's gates are satisfied.
+Running tasks without a verified worker exit remain subject to the archive guard.
 Also covers ``GET /workflow``.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -80,6 +82,23 @@ def test_manual_moves_match_server(client, src):
         r = client.patch(f"/k/tasks/{tid}", json=body)
         with kbc.connect_closing() as conn:
             landed = kb.get_task(conn, tid).status
+            if (src, dst) == ("running", kw.ARCHIVED):
+                # This fixture claims without installing a worker PID. Eligibility
+                # does not bypass the requirement to verify worker termination.
+                assert W.can_move(src, dst)
+                assert r.status_code == 409
+                task = kb.get_task(conn, tid)
+                assert task.status == "running"
+                assert task.worker_pid is None
+                assert task.claim_lock is not None
+                event = conn.execute(
+                    "SELECT payload FROM task_events WHERE task_id = ? "
+                    "AND kind = 'reclaim_deferred' ORDER BY id DESC LIMIT 1",
+                    (tid,),
+                ).fetchone()
+                assert event is not None
+                assert json.loads(event["payload"])["reason"] == "archive_termination_unverified"
+                continue
         # A refusal must be a domain rejection (400 bad verb / 409 refused transition);
         # anything else (5xx, 422) is a bug, never an acceptable "not allowed".
         if r.status_code not in (200, 400, 409):
@@ -91,6 +110,46 @@ def test_manual_moves_match_server(client, src):
         elif accepted and landed != _KNOWN_REDIRECTS.get((src, dst), dst):
             mismatches.append(f"{src}->{dst}: landed in {landed}")
     assert not mismatches, "\n".join(mismatches)
+
+
+def test_running_archive_after_verified_termination(client, monkeypatch):
+    """Exercise HTTP/SQLite integration with a controlled termination result, not an OS kill."""
+    tid = _task_in(client, "running")
+    with kbc.connect_closing() as conn:
+        conn.execute("UPDATE tasks SET worker_pid = ? WHERE id = ?", (4242, tid))
+        claim_lock = kb.get_task(conn, tid).claim_lock
+    calls = []
+
+    def terminate(pid, lock, *, task_id):
+        calls.append((pid, lock, task_id))
+        return {"prev_pid": pid, "terminated": True}
+
+    monkeypatch.setattr(kb, "_terminate_reclaimed_worker", terminate)
+    response = client.patch(f"/k/tasks/{tid}", json={"status": kw.ARCHIVED})
+    assert W.can_move("running", kw.ARCHIVED)
+    assert response.status_code == 200
+    assert calls == [(4242, claim_lock, tid)]
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == kw.ARCHIVED
+        assert task.claim_lock is None
+        assert task.worker_pid is None
+        run = conn.execute(
+            "SELECT status FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        assert run["status"] == "reclaimed"
+
+
+@pytest.mark.parametrize("summary", [None, "", "   "])
+def test_triage_completion_still_requires_evidence(client, summary):
+    tid = _task_in(client, "triage")
+    response = client.patch(f"/k/tasks/{tid}", json={"status": "done", "summary": summary})
+    assert W.can_move("triage", "done")
+    assert response.status_code == 400
+    assert "no result or summary evidence" in response.json()["detail"]
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "triage"
 
 
 def test_get_workflow(client):

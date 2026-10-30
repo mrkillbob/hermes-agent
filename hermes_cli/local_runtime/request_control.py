@@ -1,17 +1,12 @@
-"""Request-scoped cancellation of one managed llama.cpp chat request, with verified completion.
+"""Attempt socket-scoped cancellation without inventing a native acknowledgement.
 
-The router ends a generation when the client connection that carries it closes; there is no
-request-ID cancel endpoint. So the only cancel primitive here is closing OUR socket, and the only
-evidence that the work stopped is the server's own telemetry (``/slots``, ``/metrics``, ``/models``)
-read afterwards. A client exit, a timeout, or a closed socket is never reported as a cancellation:
-``CancelResult.cancelled`` is True only after the server shows no processing slot, no processing or
-deferred request, our bound task gone, and the model child still resident, on consecutive reads.
-
-Scope: one request at a time against an otherwise idle child (``start`` refuses a busy child), so
-"nothing is processing" is a statement about this request. If a foreign request appears while ours
-runs, binding is ``ambiguous`` and verification will not claim a cancel while anything is busy.
-The residual race (a task queued after the last idle read) is bounded by ``settle_reads`` x
-``interval_s`` and documented on ``cancel``.
+Idle child telemetry after closing a request is useful observation, not proof that
+router forwarding has drained or a native task was cancelled. This source-only
+helper reports IDLE_AFTER_CLOSE (cancelled=False). Supervisor readiness supplies
+its verified incarnation and rechecks it before dispatch; generic callers supply
+no owner authority. Exclusion covers cooperating helpers in this process only;
+router/native cancellation proof remains unavailable.
+Eviction is deliberately unavailable through this unbound helper.
 """
 
 from __future__ import annotations
@@ -20,37 +15,52 @@ from dataclasses import dataclass
 from enum import Enum
 import http.client
 import json
-import socket
+import math
 import threading
 import time
+from typing import Callable
 from urllib.parse import urlsplit
 
 from agent.memory_provider import spawn_context_thread
 from hermes_cli.local_runtime.endpoint import child_query
+from hermes_cli.local_runtime.request_io import DeadlineConnection, read_response
 
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
 _RESIDENT = ("loaded", "ready")
+_LEASE_LOCK = threading.Lock()
+_LEASES: set[tuple] = set()
+
+
+def _seconds(value: float, *, zero: bool = True) -> float:
+    if not math.isfinite(value) or value < 0 or (not zero and value == 0):
+        raise ValueError("timeout/interval must be finite and nonnegative")
+    return value
 
 
 class CancelOutcome(str, Enum):
-    CONFIRMED_CANCELLED = "confirmed_cancelled"      # closed early; server idle, task gone
-    COMPLETED_BEFORE_CANCEL = "completed_before_cancel"  # full response arrived; nothing to cancel
-    NOT_CONFIRMED = "not_confirmed"                  # server still busy at the deadline
-    UNVERIFIABLE = "unverifiable"                    # telemetry unreadable; nothing is claimed
-    MODEL_NOT_RESIDENT = "model_not_resident"        # child gone: idle is vacuous, not an ack
-    EVICTED = "evicted"                              # explicit evict(): child unloaded and confirmed
+    CONFIRMED_CANCELLED = (
+        "confirmed_cancelled"  # reserved for a future native acknowledgement
+    )
+    IDLE_AFTER_CLOSE = (
+        "idle_after_close"  # observation, never native cancellation proof
+    )
+    COMPLETED_BEFORE_CANCEL = "completed_before_cancel"
+    NOT_CONFIRMED = "not_confirmed"
+    UNVERIFIABLE = "unverifiable"
+    MODEL_NOT_RESIDENT = "model_not_resident"
+    EVICTED = "evicted"  # distinct from request cancellation; this helper cannot evict
 
 
 class RequestRefused(RuntimeError):
-    """The request was not sent: the child is busy, not resident, or telemetry is unreadable."""
+    """No new request may be dispatched through this object."""
 
 
 class ProbeError(RuntimeError):
-    """A telemetry read failed or returned something unparseable."""
+    """Telemetry is unavailable, malformed or past its absolute deadline."""
 
 
 class ModelNotResident(ProbeError):
-    """The router answered 400 for a status read: the child is not loaded."""
+    """A child telemetry route refused a nonresident model."""
 
 
 @dataclass(frozen=True)
@@ -64,7 +74,7 @@ class CancelResult:
 
     @property
     def cancelled(self) -> bool:
-        return self.outcome in (CancelOutcome.CONFIRMED_CANCELLED, CancelOutcome.EVICTED)
+        return self.outcome is CancelOutcome.CONFIRMED_CANCELLED
 
     @property
     def completed(self) -> bool:
@@ -74,180 +84,325 @@ class CancelResult:
 @dataclass(frozen=True)
 class ChildState:
     resident: bool
-    busy_slots: tuple[tuple[int, int | None], ...]  # (slot id, id_task) of processing slots
+    busy_slots: tuple[tuple[int, int | None], ...]
     requests_processing: float
     requests_deferred: float
 
     @property
     def idle(self) -> bool:
-        return (self.resident and not self.busy_slots
-                and self.requests_processing == 0 and self.requests_deferred == 0)
+        return (
+            self.resident
+            and not self.busy_slots
+            and self.requests_processing == 0
+            and self.requests_deferred == 0
+        )
 
 
 class ManagedChildProbe:
-    """Read-only telemetry for one router child. Fails closed: any gap raises ``ProbeError``."""
+    """Loopback telemetry only; the name does not establish durable-owner authority."""
 
-    def __init__(self, base: str, api_key: str, model_id: str, *, timeout_s: float = 5.0):
+    def __init__(
+        self, base: str, api_key: str, model_id: str, *, timeout_s: float = 5.0
+    ):
         parts = urlsplit(base)
-        if parts.scheme != "http" or (parts.hostname or "") not in _LOOPBACK or not parts.port:
-            raise ValueError(f"managed endpoint must be http loopback with a port: {base!r}")
-        self.host, self.port = parts.hostname, parts.port
-        self.api_key, self.model_id, self.timeout_s = api_key, model_id, timeout_s
+        if (
+            parts.scheme != "http"
+            or parts.hostname not in _LOOPBACK
+            or not parts.port
+            or parts.username
+            or parts.password
+            or parts.path not in ("", "/")
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError(
+                "endpoint must be a plain loopback HTTP origin with a port"
+            )
+        if (
+            not isinstance(model_id, str)
+            or not model_id
+            or model_id != model_id.strip()
+        ):
+            raise ValueError("model must be an exact nonempty identifier")
+        self.host = "127.0.0.1" if parts.hostname == "localhost" else parts.hostname
+        self.port = parts.port
+        self.api_key, self.model_id = api_key, model_id
+        self.timeout_s = _seconds(timeout_s, zero=False)
 
-    def _get(self, route: str) -> tuple[int, bytes]:
-        conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout_s)
+    def _deadline(self, deadline: float | None) -> float:
+        return (
+            min(time.monotonic() + self.timeout_s, deadline)
+            if deadline is not None
+            else time.monotonic() + self.timeout_s
+        )
+
+    def _get(self, route: str, *, deadline: float | None = None) -> tuple[int, bytes]:
+        conn = None
         try:
-            conn.request("GET", route, headers={"Authorization": f"Bearer {self.api_key}"})
-            resp = conn.getresponse()
-            return resp.status, resp.read()
-        except (OSError, http.client.HTTPException) as exc:
-            raise ProbeError(f"GET {route.split('?')[0]} failed: {exc}") from exc
+            conn = DeadlineConnection(self.host, self.port, self._deadline(deadline))
+            conn.request(
+                "GET", route, headers={"Authorization": f"Bearer {self.api_key}"}
+            )
+            return read_response(conn, limit=1 << 20)
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            raise ProbeError(f"GET {route.split('?')[0]} failed") from exc
         finally:
-            conn.close()
+            if conn is not None:
+                conn.finish()
 
-    def _json(self, route: str) -> object:
-        status, body = self._get(route)
+    def _json(self, route: str, *, deadline: float | None = None) -> object:
+        status, body = self._get(route, deadline=deadline)
         if status == 400:
-            raise ModelNotResident(f"{route.split('?')[0]} -> 400")
+            raise ModelNotResident("model is not resident")
         if status != 200:
-            raise ProbeError(f"{route.split('?')[0]} -> HTTP {status}")
+            raise ProbeError(f"telemetry HTTP {status}")
         try:
             return json.loads(body)
         except ValueError as exc:
-            raise ProbeError(f"{route.split('?')[0]} returned non-JSON") from exc
+            raise ProbeError("non-JSON telemetry") from exc
 
-    def model_status(self) -> str | None:
-        data = self._json("/models")
+    def model_status(self, *, deadline: float | None = None) -> str | None:
+        data = self._json("/models", deadline=deadline)
         rows = data.get("data") if isinstance(data, dict) else None
         if not isinstance(rows, list):
             raise ProbeError("/models returned no data list")
-        for row in rows:
-            if isinstance(row, dict) and row.get("id") == self.model_id:
-                status = row.get("status")
-                return status.get("value") if isinstance(status, dict) else None
-        return None
+        matches = [
+            r for r in rows if isinstance(r, dict) and r.get("id") == self.model_id
+        ]
+        if len(matches) > 1:
+            raise ProbeError("ambiguous model telemetry")
+        if not matches:
+            return None
+        status = matches[0].get("status")
+        if not isinstance(status, dict) or not isinstance(status.get("value"), str):
+            raise ProbeError("model status is malformed")
+        return status["value"]
 
-    def read(self) -> ChildState:
-        status = self.model_status()
-        if status not in _RESIDENT:
+    def read(self, *, deadline: float | None = None) -> ChildState:
+        deadline = self._deadline(deadline)
+        if time.monotonic() >= deadline:
+            raise ProbeError("telemetry deadline expired")
+        if self.model_status(deadline=deadline) not in _RESIDENT:
             return ChildState(False, (), 0.0, 0.0)
         query = child_query(self.model_id)
         try:
-            slots = self._json(f"/slots?{query}")
-            code, raw = self._get(f"/metrics?{query}")
+            slots = self._json(f"/slots?{query}", deadline=deadline)
+            code, raw = self._get(f"/metrics?{query}", deadline=deadline)
         except ModelNotResident:
             return ChildState(False, (), 0.0, 0.0)
-        if not isinstance(slots, list):
-            raise ProbeError("/slots returned no list")
         if code == 400:
             return ChildState(False, (), 0.0, 0.0)
-        if code != 200:
-            raise ProbeError(f"/metrics -> HTTP {code}")
-        busy = []
+        if code != 200 or not isinstance(slots, list) or not slots:
+            raise ProbeError("missing slot/metric telemetry")
+        busy, ids = [], set()
         for slot in slots:
-            if not isinstance(slot, dict) or "is_processing" not in slot or "id" not in slot:
-                raise ProbeError("/slots row lacks id/is_processing")
+            if (
+                not isinstance(slot, dict)
+                or type(slot.get("is_processing")) is not bool
+                or type(slot.get("id")) is not int
+                or slot["id"] < 0
+                or slot["id"] in ids
+            ):
+                raise ProbeError("invalid slot identity/processing state")
+            ids.add(slot["id"])
             if slot["is_processing"]:
                 task = slot.get("id_task")
-                busy.append((int(slot["id"]), int(task) if isinstance(task, int) else None))
+                if type(task) is not int or task < 0:
+                    raise ProbeError("busy slot lacks task identity")
+                busy.append((slot["id"], task))
         values = {}
         for line in raw.decode("utf-8", "replace").splitlines():
-            for key in ("requests_processing", "requests_deferred"):
-                if line.startswith(f"llamacpp:{key}"):
-                    try:
-                        values[key] = float(line.split()[-1])
-                    except ValueError as exc:
-                        raise ProbeError(f"unparseable metric {key}") from exc
-        if len(values) != 2:
-            # The existing idle sweeper treats a missing line as idle; a cancel proof must not.
-            raise ProbeError("/metrics lacks requests_processing/requests_deferred")
-        return ChildState(True, tuple(busy), values["requests_processing"],
-                          values["requests_deferred"])
-
-    def unload(self) -> None:
-        conn = http.client.HTTPConnection(self.host, self.port, timeout=120)
-        try:
-            conn.request("POST", "/models/unload", body=json.dumps({"model": self.model_id}),
-                         headers={"Authorization": f"Bearer {self.api_key}",
-                                  "Content-Type": "application/json"})
-            resp = conn.getresponse()
-            resp.read()
-            if resp.status != 200:
-                raise ProbeError(f"/models/unload -> HTTP {resp.status}")
-        except (OSError, http.client.HTTPException) as exc:
-            raise ProbeError(f"/models/unload failed: {exc}") from exc
-        finally:
-            conn.close()
+            fields = line.split()
+            if not fields or fields[0] not in (
+                "llamacpp:requests_processing",
+                "llamacpp:requests_deferred",
+            ):
+                continue
+            try:
+                value = float(fields[1]) if len(fields) == 2 else float("nan")
+            except ValueError as exc:
+                raise ProbeError("invalid request metric") from exc
+            if (
+                fields[0] in values
+                or not math.isfinite(value)
+                or value < 0
+                or not value.is_integer()
+            ):
+                raise ProbeError("invalid/duplicate request metric")
+            values[fields[0]] = value
+        if len(values) != 2 or time.monotonic() >= deadline:
+            raise ProbeError("missing metrics or expired telemetry")
+        return ChildState(
+            True,
+            tuple(busy),
+            values["llamacpp:requests_processing"],
+            values["llamacpp:requests_deferred"],
+        )
 
 
 class ScopedRequest:
-    """One chat-completions request that this object alone may cancel."""
+    """Single-use request; lifecycle facts and idle observations never confer owner authority."""
 
-    def __init__(self, probe: ManagedChildProbe, body: dict, *, request_timeout_s: float = 600.0):
-        self._probe = probe
-        self._payload = json.dumps(body).encode()
-        self._request_timeout_s = request_timeout_s
-        self._lock = threading.Lock()
-        self._finished = threading.Event()
-        self._conn: http.client.HTTPConnection | None = None
-        self._response: tuple[int, bytes] | None = None  # set only by a fully read response
-        self._error: BaseException | None = None
-        self._result: CancelResult | None = None
-        self._worker: threading.Thread | None = None
-        self.bound_slot: int | None = None
-        self.bound_task: int | None = None
-        self.binding = "unbound"  # bound | ambiguous | completed_before_bind | unbound
+    def __init__(
+        self, probe: ManagedChildProbe, body: dict, *, request_timeout_s: float = 600.0,
+        lease_identity: tuple | None = None, owner_check: Callable[[], bool] | None = None,
+        absolute_deadline: float | None = None,
+    ):
+        if body.get("model") != probe.model_id:
+            raise ValueError("request model must match the telemetry model exactly")
+        self._probe, self._payload = probe, json.dumps(body).encode()
+        if (lease_identity is None) != (owner_check is None):
+            raise ValueError('owner check and lease identity must be supplied together')
+        if lease_identity is not None and (type(lease_identity) is not tuple or not callable(owner_check)):
+            raise ValueError('owner lease requires an immutable identity and check')
+        self._owner_check = owner_check
+        self._request_timeout_s = _seconds(request_timeout_s, zero=False)
+        self._absolute_deadline = _seconds(absolute_deadline) if absolute_deadline is not None else None
+        self._lock, self._cancel_lock = threading.RLock(), threading.Lock()
+        self._finished, self._cancel_intent = threading.Event(), threading.Event()
+        self._conn = self._response = self._error = self._result = self._worker = None
+        self._state = "new"
+        self._lease = False
+        self._lease_key = (
+            getattr(probe, "host", id(probe)),
+            getattr(probe, "port", None),
+            probe.model_id,
+            lease_identity,
+        )
+        self.bound_slot = self.bound_task = None
+        self.binding = "unbound"
 
-    # ── lifecycle ────────────────────────────────────────
+    def _check_owner(self) -> None:
+        if self._owner_check is not None and not self._owner_check():
+            raise RequestRefused('readiness owner incarnation changed')
+
+    def _check_deadline(self) -> None:
+        if time.monotonic() >= self._request_deadline:
+            raise RequestRefused('request deadline expired before dispatch')
+
+    def _release_lease(self) -> None:
+        with _LEASE_LOCK:
+            if self._lease:
+                _LEASES.discard(self._lease_key)
+                self._lease = False
 
     def start(self, bind_timeout_s: float = 5.0, interval_s: float = 0.05) -> str:
-        """Send the request and bind to the server task that runs it. Returns the binding state."""
+        _seconds(bind_timeout_s, zero=False)
+        _seconds(interval_s, zero=False)
+        with self._lock:
+            if self._state != "new" or self._cancel_intent.is_set():
+                raise RequestRefused("request is single-use or already cancelled")
+            self._request_deadline = time.monotonic() + self._request_timeout_s
+            if self._absolute_deadline is not None:
+                self._request_deadline = min(self._request_deadline, self._absolute_deadline)
+            self._check_deadline()
+            self._state = "starting"
+            with _LEASE_LOCK:
+                if self._lease_key in _LEASES:
+                    self._state = "refused"
+                    raise RequestRefused(
+                        "cooperative request lease is busy or quarantined"
+                    )
+                _LEASES.add(self._lease_key)
+                self._lease = True
+        deadline = min(self._request_deadline, time.monotonic() + bind_timeout_s)
         try:
-            state = self._probe.read()
-        except ProbeError as exc:
-            raise RequestRefused(f"cannot verify an idle child before sending: {exc}") from exc
-        if not state.idle:
-            raise RequestRefused("child is not resident and idle; request-scoped cancel needs a "
-                                 "single-flight child")
-        self._worker = spawn_context_thread(self._run, name="scoped-llamacpp-request")
-        self._worker.start()
-        deadline = time.monotonic() + bind_timeout_s
-        while time.monotonic() < deadline and not self._finished.is_set():
+            self._check_owner()
+            if not self._probe.read(deadline=deadline).idle:
+                raise RequestRefused("child is not resident and idle")
+            with self._lock:
+                if self._cancel_intent.is_set():
+                    raise RequestRefused("cancelled before dispatch")
+                self._check_owner()
+                self._state = "active"
+                try:
+                    self._worker = spawn_context_thread(
+                        self._run, name="scoped-llamacpp-request"
+                    )
+                    self._worker.start()
+                except RuntimeError as exc:
+                    # No worker owns cleanup when thread creation/start fails before dispatch.
+                    self._worker = None
+                    raise RequestRefused("request worker unavailable") from exc
+        except (ProbeError, RequestRefused):
+            self._release_lease()
+            with self._lock:
+                self._state = "refused"
+            raise RequestRefused("request refused before dispatch") from None
+        while (
+            time.monotonic() < deadline
+            and not self._finished.is_set()
+            and not self._cancel_intent.is_set()
+        ):
             try:
-                busy = self._probe.read().busy_slots
+                busy = self._probe.read(deadline=deadline).busy_slots
             except ProbeError:
-                busy = ()
+                break
             if len(busy) == 1:
                 self.bound_slot, self.bound_task = busy[0]
-                self.binding = "bound"
+                self.binding = "observed"  # not proven to be this request's task
                 return self.binding
             if len(busy) > 1:
                 self.binding = "ambiguous"
                 return self.binding
-            self._finished.wait(interval_s)
-        if self._finished.is_set() and self._response is not None:
+            self._finished.wait(min(interval_s, max(0.0, deadline - time.monotonic())))
+        if self._response is not None:
             self.binding = "completed_before_bind"
         return self.binding
 
     def _run(self) -> None:
-        conn = http.client.HTTPConnection(self._probe.host, self._probe.port,
-                                          timeout=self._request_timeout_s)
-        with self._lock:
-            self._conn = conn
+        conn = None
+        send_attempted = False
         try:
-            conn.request("POST", "/v1/chat/completions", body=self._payload, headers={
-                "Authorization": f"Bearer {self._probe.api_key}",
-                "Content-Type": "application/json"})
-            resp = conn.getresponse()
-            body = resp.read()  # IncompleteRead on a truncated body: never a "completed" response
-            self._response = (resp.status, body)
-        except (OSError, http.client.HTTPException) as exc:
+            if self._cancel_intent.is_set():
+                return
+            self._check_deadline()
+            conn = DeadlineConnection(
+                self._probe.host, self._probe.port, self._request_deadline
+            )
+            with self._lock:
+                self._conn = conn
+                if self._cancel_intent.is_set():
+                    return
+            conn.connect()
+            with self._lock:
+                if self._cancel_intent.is_set():
+                    return
+                self._check_owner()
+                self._check_deadline()
+                # Once sending begins, a failure cannot establish that no bytes reached the router.
+                send_attempted = True
+                conn.request(
+                    "POST",
+                    "/v1/chat/completions",
+                    body=self._payload,
+                    headers={
+                        "Authorization": f"Bearer {self._probe.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                )
+            response = read_response(conn, limit=8 << 20)
+            with self._lock:
+                self._response = response
+        except (OSError, ValueError, http.client.HTTPException, RequestRefused) as exc:
             self._error = exc
         finally:
-            self._finished.set()
+            try:
+                if conn is not None:
+                    conn.finish()
+            except (OSError, http.client.HTTPException) as exc:
+                if self._error is None:
+                    self._error = exc
+            finally:
+                if self._response is not None or not send_attempted:
+                    self._release_lease()
+                # Publish completion only after cleanup and lease disposition are settled.
+                with self._lock:
+                    self._state = "finished"
+                    self._finished.set()
+            # An interrupted POST stays quarantined: idle child telemetry cannot drain router work.
 
     def wait(self, timeout_s: float | None = None) -> tuple[int, bytes] | None:
-        """The full response, or None if cancelled/failed/timed out (see ``error``)."""
         self._finished.wait(timeout_s)
         return self._response
 
@@ -255,101 +410,134 @@ class ScopedRequest:
     def error(self) -> BaseException | None:
         return self._error
 
-    # ── cancellation ─────────────────────────────────────
+    def _outcome(
+        self, outcome: CancelOutcome, detail: str, started: float, reads: int = 0
+    ) -> CancelResult:
+        return CancelResult(
+            outcome,
+            detail,
+            self.bound_slot,
+            self.bound_task,
+            reads,
+            time.monotonic() - started,
+        )
 
-    def cancel(self, timeout_s: float = 30.0, *, settle_reads: int = 2,
-               interval_s: float = 0.25) -> CancelResult:
-        """Close the request's connection, then prove the server stopped. Idempotent.
-
-        ``cancelled`` is True only after ``settle_reads`` consecutive clean idle reads. A task the
-        server queues after the final clean read and before it notices the closed socket is the
-        one race this cannot exclude; ``settle_reads * interval_s`` is how long the server had to
-        show it. A response that fully arrived before the close reports COMPLETED_BEFORE_CANCEL.
-        """
-        with self._lock:
+    def cancel(
+        self,
+        timeout_s: float = 30.0,
+        *,
+        settle_reads: int = 2,
+        interval_s: float = 0.25,
+    ) -> CancelResult:
+        _seconds(timeout_s)
+        _seconds(interval_s)
+        if type(settle_reads) is not int or settle_reads < 1:
+            raise ValueError("settle_reads must be a positive integer")
+        started = time.monotonic()
+        deadline = started + timeout_s
+        self._cancel_intent.set()  # survives connection construction/publication races
+        conn = self._conn
+        if conn is not None:
+            conn.abort()
+        if not self._cancel_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return self._outcome(
+                CancelOutcome.UNVERIFIABLE, "cancellation result still pending", started
+            )
+        try:
             if self._result is not None:
                 return self._result
-            conn = self._conn
-        started = time.monotonic()
-        if conn is not None and conn.sock is not None:
-            try:
-                conn.sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            conn.close()
-        self._finished.wait(min(timeout_s, 5.0))
-        if self._response is not None:
-            return self._remember(CancelResult(
-                CancelOutcome.COMPLETED_BEFORE_CANCEL,
-                "full response was received before the connection closed", self.bound_slot,
-                self.bound_task, 0, time.monotonic() - started))
-        result = self._verify(timeout_s - (time.monotonic() - started), settle_reads, interval_s,
-                              started)
-        return self._remember(result)
+            # Do not wait for the lifecycle lock: a send may be blocked, but abort has already fired.
+            if self._worker is None:
+                self._result = self._outcome(
+                    CancelOutcome.UNVERIFIABLE, "no dispatched request", started
+                )
+                return self._result
+            self._finished.wait(min(0.05, max(0.0, deadline - time.monotonic())))
+            self._result = self._verify(
+                max(0.0, deadline - time.monotonic()), settle_reads, interval_s, started
+            )
+            return self._result
+        finally:
+            self._cancel_lock.release()
 
-    def _remember(self, result: CancelResult) -> CancelResult:
-        with self._lock:
-            self._result = result
-        return result
-
-    def _verify(self, budget_s: float, settle_reads: int, interval_s: float,
-                started: float) -> CancelResult:
+    def _verify(
+        self, budget_s: float, settle_reads: int, interval_s: float, started: float
+    ) -> CancelResult:
         deadline = time.monotonic() + max(0.0, budget_s)
-        clean = 0
-        last_problem = "no read completed"
-        problem_kind = CancelOutcome.UNVERIFIABLE
-        while True:
+        clean, problem, outcome = (
+            0,
+            "verification deadline expired",
+            CancelOutcome.UNVERIFIABLE,
+        )
+        while time.monotonic() < deadline:
+            if self._response is not None:
+                return self._outcome(
+                    CancelOutcome.COMPLETED_BEFORE_CANCEL,
+                    "full response received",
+                    started,
+                )
             try:
-                state = self._probe.read()
+                state = self._probe.read(deadline=deadline)
+                if time.monotonic() >= deadline:
+                    break
                 if not state.resident:
-                    clean, last_problem = 0, "model child is not resident"
-                    problem_kind = CancelOutcome.MODEL_NOT_RESIDENT
-                elif state.idle and not any(task == self.bound_task and self.bound_task is not None
-                                            for _, task in state.busy_slots):
+                    clean, problem, outcome = (
+                        0,
+                        "child is not resident",
+                        CancelOutcome.MODEL_NOT_RESIDENT,
+                    )
+                elif state.idle:
                     clean += 1
                     if clean >= settle_reads:
-                        return CancelResult(CancelOutcome.CONFIRMED_CANCELLED,
-                                            "connection closed; slots, metrics and queue idle",
-                                            self.bound_slot, self.bound_task, clean,
-                                            time.monotonic() - started)
+                        # Finished is published after the response and all transport cleanup.
+                        # Never take a send-held lock here: cancellation has an absolute deadline.
+                        if not self._finished.is_set():
+                            return self._outcome(
+                                CancelOutcome.UNVERIFIABLE,
+                                "request transport still pending",
+                                started,
+                                clean,
+                            )
+                        if self._response is not None:
+                            return self._outcome(
+                                CancelOutcome.COMPLETED_BEFORE_CANCEL,
+                                "full response received",
+                                started,
+                            )
+                        return self._outcome(
+                            CancelOutcome.IDLE_AFTER_CLOSE,
+                            "transport ended; child observed idle; native/router cancellation unproven",
+                            started,
+                            clean,
+                        )
                 else:
-                    clean = 0
-                    last_problem = (f"still busy: slots={list(state.busy_slots)} "
-                                    f"processing={state.requests_processing} "
-                                    f"deferred={state.requests_deferred}")
-                    problem_kind = CancelOutcome.NOT_CONFIRMED
-            except ProbeError as exc:
-                clean, last_problem = 0, f"telemetry unreadable: {exc}"
-                problem_kind = CancelOutcome.UNVERIFIABLE
-            if time.monotonic() >= deadline:
-                # A response that completed while we were verifying is a completion, not a cancel.
-                if self._response is not None:
-                    return CancelResult(CancelOutcome.COMPLETED_BEFORE_CANCEL,
-                                        "full response arrived during verification",
-                                        self.bound_slot, self.bound_task, clean,
-                                        time.monotonic() - started)
-                return CancelResult(problem_kind, last_problem, self.bound_slot, self.bound_task,
-                                    clean, time.monotonic() - started)
-            time.sleep(interval_s)
+                    clean, problem, outcome = (
+                        0,
+                        "still busy",
+                        CancelOutcome.NOT_CONFIRMED,
+                    )
+            except ProbeError:
+                if time.monotonic() >= deadline:
+                    break
+                clean, problem, outcome = (
+                    0,
+                    "telemetry unreadable",
+                    CancelOutcome.UNVERIFIABLE,
+                )
+            if interval_s:
+                time.sleep(min(interval_s, max(0.0, deadline - time.monotonic())))
+        if self._response is not None:
+            return self._outcome(
+                CancelOutcome.COMPLETED_BEFORE_CANCEL, "full response received", started
+            )
+        return self._outcome(outcome, problem, started, clean)
 
     def evict(self, timeout_s: float = 60.0, interval_s: float = 0.25) -> CancelResult:
-        """Last resort after NOT_CONFIRMED: unload the child (frees its memory, loses residency)
-        and confirm via /models that it left. Reported as EVICTED, never as a clean cancel."""
-        started = time.monotonic()
-        try:
-            self._probe.unload()
-        except ProbeError as exc:
-            return CancelResult(CancelOutcome.UNVERIFIABLE, f"unload not accepted: {exc}",
-                                self.bound_slot, self.bound_task, 0, time.monotonic() - started)
-        deadline = started + timeout_s
-        while time.monotonic() < deadline:
-            try:
-                if self._probe.model_status() not in (*_RESIDENT, "unloading"):
-                    return CancelResult(CancelOutcome.EVICTED, "model child unloaded",
-                                        self.bound_slot, self.bound_task, 0,
-                                        time.monotonic() - started)
-            except ProbeError:
-                pass
-            time.sleep(interval_s)
-        return CancelResult(CancelOutcome.NOT_CONFIRMED, "child still resident after unload",
-                            self.bound_slot, self.bound_task, 0, time.monotonic() - started)
+        """Unavailable: generic request objects have no durable-owner eviction capability."""
+        _seconds(timeout_s)
+        _seconds(interval_s)
+        return self._outcome(
+            CancelOutcome.UNVERIFIABLE,
+            "eviction requires a separate durable-owner-authorized operation",
+            time.monotonic(),
+        )

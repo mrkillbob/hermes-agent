@@ -40,6 +40,41 @@ description: Description for {name}.
 class TestScanSkillCommands:
 
 
+
+
+
+
+
+    def test_scan_uses_live_profile_skills_dir_after_module_import(self, tmp_path):
+        """A profile switch must not leave slash-command discovery on the old root."""
+        import agent.skill_commands as sc_mod
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        profiles = [tmp_path / "profile-a", tmp_path / "profile-b"]
+        for profile, name in zip(profiles, ["profile-a-only", "profile-b-only"]):
+            profile.mkdir()
+            _make_skill(profile / "skills", name)
+
+        with (
+            patch.object(sc_mod, "_skill_commands_by_key", {}),
+            patch.object(skills_tool_module, "_get_disabled_skill_names", return_value=set()),
+            patch("agent.skill_utils.get_external_skills_dirs", return_value=[]),
+            patch("agent.skill_utils.get_project_skills_dirs", return_value=[]),
+        ):
+            for profile, expected, absent in [
+                (profiles[0], "/profile-a-only", "/profile-b-only"),
+                (profiles[1], "/profile-b-only", "/profile-a-only"),
+                (profiles[0], "/profile-a-only", "/profile-b-only"),
+            ]:
+                token = set_hermes_home_override(profile)
+                try:
+                    commands = sc_mod.get_skill_commands()
+                finally:
+                    reset_hermes_home_override(token)
+                assert expected in commands
+                assert absent not in commands
+
+
     def test_loads_skill_invocation_from_symlinked_skill_dir(self, tmp_path):
         """Slash commands should load skills symlinked under the local skills dir."""
         external_root = tmp_path / "external"
@@ -575,7 +610,7 @@ class TestDuplicateNamesAgreeAcrossSurfaces:
 
         ambiguous = "Ambiguous skill name dup-demo: use one of a/one, b/two"
         assert sorted(s["name"] for s in json.loads(skills_list())["skills"]) == ["a/one", "b/two", "xdup"]
-        index = [ln.strip() for ln in pb.build_skills_system_prompt().splitlines() if ln.startswith("    - ")]
+        index = [ln.strip() for ln in pb.build_skills_system_prompt().splitlines() if ln.lstrip().startswith("- ")]
         assert index == ["- a/one: Description for dup-demo.", "- b/two: Description for dup-demo.",
                          "- xdup: Description for xdup."]
         assert sorted(scan_skill_commands()) == ["/xdup"]
@@ -603,7 +638,7 @@ class TestDuplicateNamesAgreeAcrossSurfaces:
         monkeypatch.setattr(skills_tool_module, "_SKILLS_CACHE", {})
         pb.clear_skills_system_prompt_cache()
         assert sorted(s["name"] for s in json.loads(skills_list())["skills"]) == ["b/two", "other", "xdup"]
-        index = [ln.strip() for ln in pb.build_skills_system_prompt().splitlines() if ln.startswith("    - ")]
+        index = [ln.strip() for ln in pb.build_skills_system_prompt().splitlines() if ln.lstrip().startswith("- ")]
         assert index == ["- other: Description for other.", "- b/two: Description for dup-demo.",
                          "- xdup: Description for xdup."]
         for ident in ("a/one", "one"):  # refused by any alias, as list/index hide it

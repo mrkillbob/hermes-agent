@@ -72,8 +72,7 @@ export function createQuickEntrySubmitRelay(options: {
 
       clearTimeout(request.timer)
       pending.delete(correlationId)
-      request.resolve(result)
-
+      request.resolve({ ...result, correlationId })
       if (result.ok === true) {
         options.onSuccess()
       }
@@ -88,6 +87,7 @@ export function createQuickEntrySubmitRelay(options: {
           // must never invite a retry. Keep the correlation for late acks.
           reconcilable.add(correlationId)
           resolve({
+            correlationId,
             code: 'timeout',
             message: 'Hermes has not confirmed the prompt yet — it may still be delivered.',
             ok: false,

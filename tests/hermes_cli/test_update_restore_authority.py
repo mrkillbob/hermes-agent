@@ -107,7 +107,7 @@ def test_corrupt_epoch_refuses_profile_sweep_with_separate_recovery(tmp_path, mo
         (home / 'state.db').write_bytes(b'unreadable canonical runtime epoch')
         originals[home] = (home / 'state.db').read_bytes(), snapshots[home].read_bytes()
     monkeypatch.setattr(update_cmd, 'get_hermes_home', lambda: homes[0])
-    monkeypatch.setattr(backup, '_sibling_profile_homes', lambda home: [('work', homes[1])])
+    monkeypatch.setattr(backup, '_sibling_profile_homes', lambda home, **_kw: [('work', homes[1])])
     update_cmd._verify_and_restore_state_dbs_post_update()
     output = capsys.readouterr().out
     for home in homes:

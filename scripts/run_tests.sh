@@ -50,9 +50,57 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # the Nix devShell's editable venv and CI's minimal installer lanes provide
 # one on purpose. The import check matters: a wrapped `hermes` binary exports
 # HERMES_PYTHON pointing at a release venv without pytest.
-_has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import pytest' 2>/dev/null; }
+_has_pytest() { [ -n "$1" ] && [ -x "$1" ] && "$BASH" "$SCRIPT_DIR/protected-python" "$1" -c 'import pytest' 2>/dev/null; }
 # shellcheck source=scripts/_activation.sh
 . "$SCRIPT_DIR/_activation.sh"
+
+# A test run under a faked HOME (worktree lanes, probe homes) provisions its
+# test environment from the OS account's tool store instead of downloading
+# ~1 GB of tools into every temporary home, but only while that store already
+# records this checkout's pins (_store_has_pins). The check runs unlocked
+# before `pm install` takes the store's install lock, so it keeps runs that
+# START on different pins apart; it does not cover the window in between, where
+# the account's own `hermes update` (or a run on other pins) can re-point
+# facts.json and this run's `pm install` then re-stages its pins over them.
+# Only this runner's own provisioning gets HERMES_RUNTIME_DIR: the pytest
+# children below start from `env -i` without it, so tests that exercise setup,
+# install or update resolve their own stores. Their PATH still holds the
+# account store's tool dirs, so a test writing through a PATH tool
+# (`pip install`, `npm -g`) would write into the account store. An explicit
+# HERMES_RUNTIME_DIR, a custom HERMES_HOME, a home that already holds a store,
+# or an account without a usable store keep today's per-home layout.
+# Prints the account home, then the pinned Python minor.
+_account_tool_store() {
+  local account py_minor
+  [ -z "${HERMES_RUNTIME_DIR:-}" ] || return 1
+  case "${HERMES_HOME:-}" in "" | "$HOME/.hermes" | "$HOME/.hermes/"*) ;; *) return 1 ;; esac
+  [ ! -f "$HOME/.hermes/tools/facts.json" ] || return 1
+  account="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+  [ -n "$account" ] || account="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: *//p')"
+  [ -n "$account" ] && [ -d "$account" ] && [ ! "$account" -ef "$HOME" ] || return 1
+  [ -f "$account/.hermes/tools/facts.json" ] && [ -w "$account/.hermes/tools" ] || return 1
+  py_minor="$(_store_has_pins "$account/.hermes/tools")" || return 1
+  printf '%s\n%s\n' "$account" "$py_minor"
+}
+# Read-only check that the store already records this checkout's pins
+# (scripts/tool_store_pins.py says why and what counts); prints the Python minor.
+_store_has_pins() {
+  local python
+  python="$(HERMES_RUNTIME_DIR="$1" hermes_bootstrap_python "$REPO_ROOT")" || return 1
+  PYTHONHOME= "$python" -I -B "$REPO_ROOT/scripts/tool_store_pins.py" "$REPO_ROOT" "$1" 2>/dev/null
+}
+if _shared="$(_account_tool_store)"; then
+  _account="${_shared%%$'\n'*}"
+  export HERMES_RUNTIME_DIR="$_account/.hermes/tools"
+  # setup-hermes.sh's uv-managed bootstrap interpreter is the same kind of
+  # cache, but only reused: a missing pinned minor would download into it.
+  if [ -z "${UV_PYTHON_INSTALL_DIR:-}" ] && [ -w "$_account/.local/share/uv/python" ] \
+      && compgen -G "$_account/.local/share/uv/python/cpython-${_shared#*$'\n'}[.-]*" >/dev/null; then
+    export UV_PYTHON_INSTALL_DIR="$_account/.local/share/uv/python"
+  fi
+  echo "▶ faked HOME: using the account's tool store $HERMES_RUNTIME_DIR"
+fi
+unset _account _shared
 if [ -z "${__HERMES_ACTIVATED:-}" ] && _has_pytest "${HERMES_PYTHON:-}"; then
   PYTHON="$HERMES_PYTHON"
   echo "▶ not activated — using HERMES_PYTHON: $PYTHON"
@@ -72,6 +120,10 @@ else
     exit 1
   fi
 fi
+VENV_BIN="$(dirname "$PYTHON")"
+# Resolve while caller-owned tool locations are still available; the final
+# hermetic child receives this validated path through argv, never config/env.
+PROTECTION_BOOTSTRAP="$("$BASH" "$SCRIPT_DIR/protected-python" --print-bootstrap "$PYTHON")"
 
 
 # ── Live-gateway plugin (computed before we drop env) ───────────────────────
@@ -94,7 +146,7 @@ fi
 # credentials, so forwarding them keeps the isolation intent intact. Each is
 # only forwarded when actually set, so POSIX runs are byte-for-byte unchanged.
 WIN_ENV=()
-for _win_var in USERPROFILE HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMROOT TEMP TMP \
+for _win_var in USERNAME USERPROFILE HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMROOT TEMP TMP \
     ComSpec PATHEXT PROGRAMFILES ProgramFiles PROGRAMDATA ProgramData; do
   if [ -n "${!_win_var:-}" ]; then
     WIN_ENV+=("$_win_var=${!_win_var}")
@@ -136,6 +188,8 @@ _pf86="$(env | sed -n 's/^ProgramFiles(x86)=//p' | head -n1)"
 #     HERMES_GIT_SHA build-arg the workflow bakes in).
 #   * HERMES_E2E_REQUIRE_TUI turns a missing Ink TUI build into a failure in
 #     tests/e2e/core/terminal instead of a skip (set by the e2e CI job).
+#   * The upgrade E2E lane shares its preinstalled Node workspace and npm cache
+#     across isolated updater legs; these variables gate only that optimization.
 #   * CI / GITHUB_ACTIONS tell suites they run on a disposable runner (e.g.
 #     tests/e2e/core/upgrade runs the real updater unsandboxed only there).
 #   * HERMES_E2E_WINDOWS_INSTALL opts tests/e2e/core/windows_update into running
@@ -153,13 +207,21 @@ _pf86="$(env | sed -n 's/^ProgramFiles(x86)=//p' | head -n1)"
 # These are test-infrastructure knobs, not credentials — same class as the
 # HERMES_RUN_SLOW_PET_TESTS / HERMES_E2E_BROWSER / HERMES_RUN_E2E opt-ins
 # forwarded below.
+# HERMES_TEST_SCRATCH_ROOT selects a caller-owned per-file allocation/cleanup root.
+# TMPDIR/TMP/TEMP and Python bytecode controls keep the runner and interpreter
+# outputs in the caller's reserved storage; these are paths/flags, not credentials.
 # SSL_CERT_FILE/DIR are trust-store locations: the pinned interpreter's
 # OpenSSL has no compiled-in bundle path on NixOS, so network tests (PM
 # downloads, channel reads) need the host's pointer to verify TLS.
 # Keep this an explicit allowlist (no HERMES_TEST_* glob) so the "no
 # credential can leak" property stays auditable at a glance.
 TEST_ENV=()
-for _test_var in HERMES_TEST_IMAGE HERMES_TEST_WORKERS HERMES_TEST_PATHS \
+if [ "${HERMES_TEST_SCRATCH_ROOT+x}" = x ]; then
+  TEST_ENV+=("HERMES_TEST_SCRATCH_ROOT=$HERMES_TEST_SCRATCH_ROOT")
+fi
+for _test_var in TMPDIR TMP TEMP \
+  PYTHONPYCACHEPREFIX PYTHONDONTWRITEBYTECODE \
+  HERMES_TEST_IMAGE HERMES_TEST_WORKERS HERMES_TEST_PATHS \
   HERMES_TEST_FILE_TIMEOUT HERMES_TEST_FILE_RETRIES HERMES_TEST_SLICE \
   SSL_CERT_FILE SSL_CERT_DIR HERMES_GATEWAY_LOCK_DIR HERMES_E2E_REQUIRE_TUI CI GITHUB_ACTIONS \
   HERMES_E2E_WINDOWS_INSTALL HERMES_E2E_MACHINE_ROOT HERMES_E2E_PROFILES_ROOT HERMES_E2E_ARTIFACTS \
@@ -173,6 +235,8 @@ done
 # ── Run in hermetic env ──────────────────────────────────────────────────────
 # env -i: start with empty environment, opt-in only what we need.
 # No credential var can leak — you'd have to explicitly add it here.
+# Never forward HERMES_RUNTIME_DIR or UV_PYTHON_INSTALL_DIR: under a faked HOME
+# they point at the account's shared stores (see _account_tool_store).
 echo "▶ running per-file parallel test suite via run_tests_parallel.py"
 echo "  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)"
 
@@ -184,11 +248,11 @@ cd "$REPO_ROOT"
 # compiling on first import) avoids redundant work across ~2000 processes.
 # Uses git to list tracked .py files (skips venv, node_modules, etc).
 echo "▶ pre-compiling bytecode cache"
-"$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+"$BASH" "$SCRIPT_DIR/protected-python" "$PYTHON" -m compileall -q -j 1 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
 
 echo "▶ launching test runner"
-exec env -i \
-  PATH="$PATH" \
+env -i \
+  PATH="$VENV_BIN:$PATH" \
   HOME="$HOME" \
   ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
   ${TEST_ENV[@]+"${TEST_ENV[@]}"} \
@@ -202,4 +266,4 @@ exec env -i \
   ${HERMES_RUN_E2E:+HERMES_RUN_E2E="$HERMES_RUN_E2E"} \
   ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
   ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \
-  "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"
+  "$BASH" "$SCRIPT_DIR/protected-python" --bootstrap "$PROTECTION_BOOTSTRAP" --managed "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"

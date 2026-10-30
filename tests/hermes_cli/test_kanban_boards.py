@@ -85,6 +85,22 @@ class TestSlugValidation:
         assert kb._normalize_board_slug("   ") is None
 
 
+class TestBoardAllowlist:
+    def test_configured_allowlist_rejects_unapproved_creation(self, fresh_home, monkeypatch):
+        from hermes_cli import config
+
+        monkeypatch.setattr(
+            config,
+            "load_config",
+            lambda: {"kanban": {"allowed_boards": ["hermes-agent", "lunabot"]}},
+        )
+
+        kb.create_board("hermes-agent")
+        kb.create_board("lunabot")
+        with pytest.raises(ValueError, match="not allowed"):
+            kb.create_board("research-lab")
+
+
 # ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
@@ -292,7 +308,7 @@ class TestWorkerSpawnEnv:
             captured["env"] = kwargs.get("env", {})
             return FakeProc()
 
-        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        monkeypatch.setattr("hermes_cli.kanban_worker_spawn.spawn_worker", fake_popen)
         kb.create_board("spawntest")
 
         task = kb.Task(

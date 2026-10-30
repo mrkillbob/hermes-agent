@@ -19,7 +19,7 @@ describe('JsonRpcRequestChannel', () => {
 
     const ok = channel.request<{ ok: boolean }>('session.create', { cols: 80 })
     const okId = last().id
-    const failing = channel.request('projects.create')
+    const failing = channel.request('prompt.submit')
     const failId = last().id
 
     expect(okId).toBe('x1')
@@ -42,6 +42,7 @@ describe('JsonRpcRequestChannel', () => {
     expect(error).toBeInstanceOf(JsonRpcGatewayError)
     expect(error.code).toBe(-32601)
     expect(error.data).toEqual({ method: 'projects.create' })
+    expect(error.method).toBe('prompt.submit')
     expect(events).toEqual(['session.info'])
   })
 
@@ -191,6 +192,22 @@ describe('JsonRpcRequestChannel', () => {
     // An older backend answers -32601: nothing rejects out of the channel.
     channel.handleFrame(JSON.stringify({ error: { code: -32601, message: 'unknown method' }, id: last().id, jsonrpc: '2.0' }))
     expect(sent).toHaveLength(1)
+  })
+
+  it('says it is the local Desktop first on the socket, in a call of its own', () => {
+    let local = true
+    const channel = new JsonRpcRequestChannel({ desktopLocal: () => local, requestIdPrefix: 'c' })
+    const { sent, transport } = spyTransport()
+    const params = () => sent.map(frame => JSON.parse(frame).params)
+
+    channel.attach(transport)
+    void channel.request('onboarding.state', { assume_fresh: true }).catch(() => undefined)
+    channel.handleFrame(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } }))
+    expect(params()).toEqual([{ desktop_local: true }, { assume_fresh: true }, { server_requests: true }])
+
+    local = false
+    channel.attach(spyTransport().transport)
+    expect(params()).toHaveLength(3)
   })
 
   it('sends a not-shown decline only to a backend that advertised counting it', async () => {

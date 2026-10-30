@@ -12,29 +12,26 @@ from hermes_cli.config import cfg_get, read_raw_config
 
 logger = logging.getLogger(__name__)
 
-# Process-wide set of env var names registered by skills for sandbox
-# passthrough. Deliberately NOT a ContextVar: tool dispatch fans each tool
-# call onto a worker whose context is a copy_context() snapshot taken at
-# submit time (tools.thread_context.propagate_context_to_thread), so a
-# registration made inside one tool's worker (skill_view calling
-# register_env_passthrough) never reaches the submitting thread's context —
-# every subsequent tool (execute_code, terminal) re-snapshots the original
-# context and sees an empty allowlist, and the skill's declared env vars
-# never pass through (#90004). The config-based allowlist below is already
-# a module-level global with exactly the process-wide visibility the skill
-# path needs to match.
-#
-# Cross-session exposure is limited to the NAMES: the values still resolve
-# per profile through resolve_passthrough_value's secret_scope, so a name
-# registered by one session cannot read another profile's secret. The
-# previous ContextVar also never actually isolated anything within one
-# process running a single profile (the common deployment).
-_allowed_env_vars: set[str] = set()
+# Skill-registered env var names, keyed by conversation session id. Deliberately NOT a
+# ContextVar: tool dispatch fans each tool call onto a worker whose context is a copy_context()
+# snapshot taken at submit time (tools.thread_context.propagate_context_to_thread), so a
+# registration made inside one tool's worker (skill_view calling register_env_passthrough) never
+# reaches the submitting thread's context (#90004). The session id survives that copy as a plain
+# string, so keying by it keeps the registration visible to every later tool of the SAME
+# conversation while a sibling conversation in the same process never sees it — otherwise
+# viewing a skill in one chat would authorize its secret names for all of them. Sessionless
+# callers (CLI, tests) share the "" slot.
+_allowed_env_vars: dict[str, set[str]] = {}
+
+
+def _session_key() -> str:
+    from gateway.session_context import get_session_env
+    return get_session_env("HERMES_SESSION_ID", "") or ""
 
 
 def _get_allowed() -> set[str]:
-    """Get the process-wide skill passthrough allowlist."""
-    return _allowed_env_vars
+    """Get the current conversation's skill passthrough allowlist."""
+    return _allowed_env_vars.get(_session_key(), set())
 
 
 # Config-based allowlist, keyed by Hermes home: under gateway.multiplex_profiles one process serves
@@ -76,7 +73,7 @@ def register_env_passthrough(var_names: Iterable[str]) -> None:
         "Skills must not override the execute_code sandbox's "
         "credential scrubbing; see GHSA-rhgp-j443-p4rf."
     )):
-        _get_allowed().add(name)
+        _allowed_env_vars.setdefault(_session_key(), set()).add(name)
         logger.debug("env passthrough: registered %s", name)
 
 
@@ -183,8 +180,7 @@ def scoped_passthrough_additions(present: Iterable[str]) -> dict[str, str]:
 
 
 def clear_env_passthrough() -> None:
-    """Reset the skill-registered allowlist (e.g. on session reset).
+    """Reset the current conversation's skill-registered allowlist (e.g. on session reset).
 
-    Clears the process-wide set; a later ``skill_view`` re-registers its
-    vars on demand, so recovery is a single skill load."""
-    _get_allowed().clear()
+    A later ``skill_view`` re-registers its vars on demand, so recovery is a single skill load."""
+    _allowed_env_vars.pop(_session_key(), None)

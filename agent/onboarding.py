@@ -95,7 +95,8 @@ def openclaw_residue_hint_cli() -> str:
     """Banner shown the first time Hermes finds ``~/.openclaw/``: migrate first, cleanup (which breaks OpenClaw) after."""
     return (
         "A legacy OpenClaw directory was detected at ~/.openclaw/.\n"
-        "To port your config, memory, and skills over to Hermes, run `hermes claw migrate`.\n"
+        "To port your config, memory, and skills over to Hermes, run `hermes import-agent openclaw` "
+        "(from the agent-importers plugin: `hermes plugins install agent-importers`).\n"
         "If you've already migrated and want to archive the old directory, run `hermes claw cleanup` "
         "(renames it to ~/.openclaw.pre-migration — OpenClaw will stop working after this).\n"
         "This tip only shows once."
@@ -128,7 +129,7 @@ def profile_build_mode(config: Mapping[str, Any]) -> str:
 # Shared by both first-contact notes so a real first-message task is never
 # replaced by the intro (plain or profile-build offer).
 TASK_FIRST_CLAUSE = (
-    "If this message is itself a real request or task, DO THE TASK FIRST -- call "
+    "If this message is itself a real request or task, HANDLE THE REQUEST FIRST -- call "
     "whatever tools it needs -- and only then, in the closing sentences of that same "
     "reply, do what this note asks. Never let this note replace or skip work the user "
     "actually asked for. "

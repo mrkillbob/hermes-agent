@@ -171,23 +171,23 @@ def test_finite_batch_returns_parent_interruption(harness, monkeypatch):
     children.extend([_Child(), _Child("slow")])
     slow = children[1]
     stop_errors = []
-    # The child's own close() runs inside its worker before the future resolves, so stopping the
-    # parent then can catch the sibling still pending and report it interrupted. Wait until the
-    # parent has collected the completed sibling instead.
-    from tools import delegate_tool_dispatch as dispatch_mod
-    collected = threading.Event()
-    report = dispatch_mod._report_child_done
+    completed_reported = threading.Event()
+    from tools import delegate_tool_dispatch as dispatch_impl
+    report_done = dispatch_impl._report_child_done
 
-    def report_and_signal(*args, **kwargs):
-        report(*args, **kwargs)
-        collected.set()
+    def report_completed(*args, **kwargs):
+        report_done(*args, **kwargs)
+        if args[2]["task_index"] == 0:
+            completed_reported.set()
 
-    monkeypatch.setattr(dispatch_mod, "_report_child_done", report_and_signal)
+    monkeypatch.setattr(dispatch_impl, "_report_child_done", report_completed)
 
     def stop_parent():
         try:
             assert slow.started.wait(3)
-            assert collected.wait(3)
+            # close() precedes Future completion; interrupt only after the
+            # dispatcher has collected the completed sibling result.
+            assert completed_reported.wait(5)
             parent.hard_interrupt("test parent stop")
         except Exception as exc:
             stop_errors.append(exc)
@@ -262,3 +262,20 @@ def test_owner_finite_scope_overrides_history_without_leaking(harness, monkeypat
     assert dict(os.environ) == before
     assert finite_turn_required() is None
     assert _resolve_async_wake_sid("history", True) is None
+
+
+def test_oneshot_started_session_joins_children_on_an_interactive_turn(harness, monkeypatch):
+    """A ``chat -q`` session resumed interactively keeps its pinned one-shot ``delegate_task`` schema ("joined in
+    this call", no list/steer/stop), so an interactive (finite=False) turn must still join, never detach."""
+    from agent.oneshot_footprint import agent_is_oneshot
+    from gateway.session_finite import finite_turn_scope
+    from gateway.session_policy import build_policy, policy_scope
+
+    parent, _children, dispatch = harness
+    monkeypatch.delenv("HERMES_SINGLE_QUERY_SESSION")
+    with policy_scope(build_policy({"source": "oneshot", "cwd": str(os.getcwd()), "model": "m"}, {})):
+        assert agent_is_oneshot(parent)  # the pin the tool build froze for this session
+    sc.set_session_vars(async_delivery=True)
+    with finite_turn_scope(False):
+        result = dispatch("completed", "error")
+    _joined(result, ["completed", "error"])

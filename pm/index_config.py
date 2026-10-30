@@ -1,10 +1,11 @@
-"""Forward the user's package-index and transport configuration into uv.
+"""Forward package-index, transport and install concurrency controls into uv.
 
-PM strips ambient ``UV_*`` so a caller's uv settings cannot steer which
+PM strips other ambient ``UV_*`` so a caller's uv settings cannot steer which
 project, interpreter or cache an operation uses (pm.environment). Index and
 transport knobs are different: on mirrored or air-gapped networks they are the
 only way any dependency resolves at all (#88453, #94613, #95608). Only those
-cross the boundary; the lockfile stays authoritative for what gets installed.
+cross the boundary, along with install concurrency to bound bytecode workers.
+The lockfile stays authoritative for what gets installed.
 
 uv never reads pip's configuration, so a pip-only mirror (``PIP_INDEX_URL`` or
 ``index-url`` in pip.conf) is bridged to ``UV_INDEX_URL`` unless uv already has
@@ -19,12 +20,13 @@ import os
 from pathlib import Path
 import sys
 
-# Explicit uv index / transport settings that survive into uv. UV_INDEX_<NAME>_
+# Explicit uv index / transport / install concurrency settings that survive into uv. UV_INDEX_<NAME>_
 # {USERNAME,PASSWORD} credentials match by prefix in is_forwarded().
 FORWARDED_UV_SETTINGS = frozenset({
     "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX", "UV_NO_INDEX",
     "UV_FIND_LINKS", "UV_INDEX_STRATEGY", "UV_KEYRING_PROVIDER",
     "UV_NATIVE_TLS", "UV_INSECURE_HOST", "UV_HTTP_TIMEOUT",
+    "UV_CONCURRENT_INSTALLS",
 })
 
 _UV_INDEX_KNOBS = ("UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX")

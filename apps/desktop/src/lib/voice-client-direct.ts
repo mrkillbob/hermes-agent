@@ -1,4 +1,4 @@
-import { hermesApiAs, type OwnerScope, ownerScoped, type ResolvedOwner } from '@/api/client'
+import { type OwnerScope, ownerScoped, type ResolvedOwner } from '@/api/client'
 import { getApiRequestConnection, getApiRequestProfile, hermesApi } from '@/hermes'
 
 /**
@@ -60,6 +60,16 @@ export interface VoiceClientConfig {
   tts: DirectTtsConfig | RelayConfig
 }
 
+/**
+ * An immutable backend identity for voice configuration and provider-direct
+ * requests. Voice captures owned by a session must never follow the ambient
+ * Desktop selection after the microphone has opened.
+ */
+export interface VoiceClientScope {
+  connectionId: string
+  profile: string
+}
+
 // ---------------------------------------------------------------------------
 // Config fetch + cache. Keyed by (connection, profile) so a profile/backend
 // switch never reuses another scope's credentials; TTL'd so a config change
@@ -67,17 +77,29 @@ export interface VoiceClientConfig {
 // ---------------------------------------------------------------------------
 
 const CONFIG_TTL_MS = 60_000
-// Per-request cap on a direct STT upload; the gateway's stt timeout is not part of the
-// client config, so this mirrors its 60s default rather than hanging dictation forever.
-const STT_REQUEST_TIMEOUT_MS = 60_000
 
 let cached: { key: string; at: number; config: VoiceClientConfig } | null = null
-let inflight: { key: string; promise: Promise<null | VoiceClientConfig> } | null = null
+let inflight: { key: string; promise: Promise<null | VoiceClientConfig>; token: symbol } | null = null
 
-// `owner` is the speaking session's (connection, profile) — a Bot chat runs
-// on its own profile, on its own gateway; missing halves → the active scope.
-function scopeKey(owner?: OwnerScope): string {
-  return `${owner?.connectionId || getApiRequestConnection() || 'local'}::${owner?.profile || getApiRequestProfile() || 'default'}`
+function canonicalScope(scope: VoiceClientScope): VoiceClientScope {
+  const connectionId = scope.connectionId.trim()
+  const profile = scope.profile.trim()
+
+  if (!connectionId || !profile) {
+    throw new Error('Voice client scope requires an exact connectionId and profile')
+  }
+
+  return { connectionId, profile }
+}
+
+function scopeKey(scope?: VoiceClientScope): string {
+  if (scope) {
+    const owner = canonicalScope(scope)
+
+    return `${owner.connectionId}::${owner.profile}`
+  }
+
+  return `${getApiRequestConnection() ?? 'local'}::${getApiRequestProfile() ?? 'default'}`
 }
 
 /** Drop cached credentials (used by tests; scope changes rotate the key). */
@@ -86,20 +108,26 @@ export function clearVoiceClientConfigCache(): void {
   inflight = null
 }
 
-export async function fetchVoiceClientConfig(owner?: OwnerScope): Promise<null | VoiceClientConfig> {
-  // hermesApi carries connectionScoped(); profileScoped() adds the profile —
-  // the same routing every relay audio call uses, so the config comes from
-  // the backend the user is actually talking to.
-  return loadVoiceClientConfig(scopeKey(owner), () =>
-    hermesApi<VoiceConfigResponse>({ ...ownerScoped(owner), path: '/api/audio/voice-config' })
-  )
+export async function fetchVoiceClientConfig(scope?: VoiceClientScope): Promise<null | VoiceClientConfig> {
+  const owner = scope ? canonicalScope(scope) : undefined
+
+  return owner
+    ? fetchVoiceClientConfigFor(owner)
+    : loadVoiceClientConfig(scopeKey(), () =>
+        hermesApi<VoiceConfigResponse>({ ...ownerScoped(undefined), path: '/api/audio/voice-config' })
+      )
 }
 
 /** The config for an owner resolved once for a whole voice operation: the
  *  lookup cannot drift to whatever scope is ambient by the time it runs. */
 export async function fetchVoiceClientConfigFor(owner: ResolvedOwner): Promise<null | VoiceClientConfig> {
   return loadVoiceClientConfig(`${owner.connectionId || 'local'}::${owner.profile || 'default'}`, () =>
-    hermesApiAs<VoiceConfigResponse>(owner, { path: '/api/audio/voice-config' })
+    // Config warm-up stays off the foreground dial slot, even for a pinned owner.
+    window.hermesDesktop.api<VoiceConfigResponse>({
+      ...(owner.connectionId ? { connectionId: owner.connectionId } : {}),
+      ...(owner.profile ? { profile: owner.profile } : {}),
+      path: '/api/audio/voice-config'
+    })
   )
 }
 
@@ -117,6 +145,8 @@ async function loadVoiceClientConfig(
     return inflight.promise
   }
 
+  const token = Symbol('voice-client-config')
+
   const promise = (async () => {
     try {
       const response = await fetchConfig()
@@ -133,11 +163,13 @@ async function loadVoiceClientConfig(
       // Older backend without the endpoint / transient failure → relay.
       return null
     } finally {
-      inflight = null
+      if (inflight?.token === token) {
+        inflight = null
+      }
     }
   })()
 
-  inflight = { key, promise }
+  inflight = { key, promise, token }
 
   return promise
 }
@@ -253,11 +285,12 @@ async function sttFetch(stt: DirectSttConfig, url: string, init: RequestInit): P
   const seconds = sttTimeoutSeconds(stt)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), seconds * 1000)
+  const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
 
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    return await fetch(url, { ...init, signal })
   } catch (error) {
-    if (controller.signal.aborted) {
+    if (controller.signal.aborted && signal.reason === controller.signal.reason) {
       throw new Error(`Transcription timed out after ${seconds}s (${stt.provider} did not answer)`)
     }
 
@@ -293,8 +326,19 @@ function xaiSttForm(audio: Blob, stt: DirectSttConfig): FormData {
  * slower and hide the real error. `owner` pins the provider config to the
  * recording's owner (resolved when the mic opened); omitted → the active scope.
  */
-export async function transcribeAudioClientDirect(audio: Blob, owner?: ResolvedOwner): Promise<null | string> {
+function throwIfVoiceRequestAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new Error('Voice transcription was aborted')
+  }
+}
+
+export async function transcribeAudioClientDirect(
+  audio: Blob,
+  owner?: ResolvedOwner,
+  signal?: AbortSignal
+): Promise<null | string> {
   const config = await (owner ? fetchVoiceClientConfigFor(owner) : fetchVoiceClientConfig())
+  throwIfVoiceRequestAborted(signal)
   const stt = config?.stt
 
   if (!stt || stt.mode !== 'direct') {
@@ -319,7 +363,7 @@ export async function transcribeAudioClientDirect(audio: Blob, owner?: ResolvedO
       method: 'POST',
       headers: { Authorization: `Bearer ${stt.api_key}` },
       body: form,
-      signal: AbortSignal.timeout(STT_REQUEST_TIMEOUT_MS)
+      signal
     })
 
     if (!response.ok) {
@@ -338,7 +382,7 @@ export async function transcribeAudioClientDirect(audio: Blob, owner?: ResolvedO
       method: 'POST',
       headers: { Authorization: `Bearer ${stt.api_key}` },
       body: xaiSttForm(audio, stt),
-      signal: AbortSignal.timeout(STT_REQUEST_TIMEOUT_MS)
+      signal
     })
 
     if (!response.ok) {
@@ -368,7 +412,7 @@ export async function transcribeAudioClientDirect(audio: Blob, owner?: ResolvedO
       method: 'POST',
       headers: { 'xi-api-key': stt.api_key },
       body: form,
-      signal: AbortSignal.timeout(STT_REQUEST_TIMEOUT_MS)
+      signal
     })
 
     if (!response.ok) {
@@ -392,7 +436,11 @@ export async function transcribeAudioClientDirect(audio: Blob, owner?: ResolvedO
 
 /** Resolve the profile's TTS config when it is client-callable, else null. */
 export async function directTtsConfig(owner?: OwnerScope): Promise<DirectTtsConfig | null> {
-  const config = await fetchVoiceClientConfig(owner)
+  const scope: VoiceClientScope | undefined =
+    owner?.connectionId && owner?.profile
+      ? { connectionId: owner.connectionId, profile: owner.profile }
+      : undefined
+  const config = await fetchVoiceClientConfig(scope)
 
   return config?.tts && config.tts.mode === 'direct' ? config.tts : null
 }

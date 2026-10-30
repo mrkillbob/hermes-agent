@@ -93,17 +93,13 @@ class FakeTerminal {
   write() {}
 }
 
+const uploadChatImage = vi.hoisted(() => vi.fn<
+  (blob: Blob, profile?: string) => Promise<import("@/lib/chatImagePaste").ChatImageUploadResult>
+>());
+
 const maybeReloadForLoopbackWsAuthFailure = vi.fn(() => false);
 const apiMocks = vi.hoisted(() => ({
   buildWsUrl: vi.fn(async () => "ws://localhost/api/pty?channel=chat-1"),
-}));
-const uploadChatImage = vi.hoisted(() =>
-  vi.fn(async () => ({ path: "/tmp/pasted.png" })),
-);
-
-vi.mock("@/lib/chatImagePaste", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/chatImagePaste")>()),
-  uploadChatImage,
 }));
 
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: FakeFitAddon }));
@@ -140,6 +136,10 @@ vi.mock("@/i18n", () => ({
       },
     },
   }),
+}));
+vi.mock("@/lib/chatImagePaste", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/chatImagePaste")>()),
+  uploadChatImage,
 }));
 vi.mock("@/lib/dashboard-auth-reload", () => ({
   maybeReloadForLoopbackWsAuthFailure,
@@ -215,6 +215,13 @@ async function render(ui: ReactNode) {
 beforeEach(() => {
   FakeWebSocket.instances = [];
   webglInstances.length = 0;
+  uploadChatImage.mockReset();
+  uploadChatImage.mockResolvedValue({
+    bytes: 3,
+    mime_type: "image/png",
+    name: "shot.png",
+    path: "/tmp/shot.png",
+  });
   maybeReloadForLoopbackWsAuthFailure.mockClear();
   apiMocks.buildWsUrl.mockReset();
   apiMocks.buildWsUrl.mockResolvedValue("ws://localhost/api/pty?channel=chat-1");
@@ -682,6 +689,46 @@ describe("ChatPage side panel collapse", () => {
     expect(
       container.querySelector('[aria-label="Collapse chat side panel"]'),
     ).not.toBeNull();
+  });
+});
+
+describe("ChatPage bundled font swap-in", () => {
+  it("redraws the terminal with the bundled font once it finishes loading", async () => {
+    let releaseFont!: () => void;
+    const fontGate = new Promise<void>((resolve) => {
+      releaseFont = resolve;
+    });
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: {
+        check: () => false,
+        load: async () => {
+          await fontGate;
+          return [{}];
+        },
+      },
+    });
+    const clearAtlas = vi.spyOn(FakeTerminal.prototype, "clearTextureAtlas");
+    try {
+      const { default: ChatPage } = await import("./ChatPage");
+      await render(
+        <MemoryRouter initialEntries={["/chat"]}>
+          <ChatPage isActive />
+        </MemoryRouter>,
+      );
+      expect(clearAtlas).not.toHaveBeenCalled();
+
+      await act(async () => {
+        releaseFont();
+        await fontGate;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(clearAtlas).toHaveBeenCalledTimes(1);
+    } finally {
+      clearAtlas.mockRestore();
+      delete (document as { fonts?: unknown }).fonts;
+    }
   });
 });
 

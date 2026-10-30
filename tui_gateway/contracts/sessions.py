@@ -506,6 +506,7 @@ class SessionUsageParams(SessionParams):
 
 class SessionUsageResult(Usage):
     credits_lines: list[str] | None = None
+    credits_usage_window: bool | None = None
 
 
 method("session.usage", params=SessionUsageParams, result=SessionUsageResult,
@@ -783,3 +784,32 @@ class LlmOneshotResult(Result):
 method("llm.oneshot", params=LlmOneshotParams, result=LlmOneshotResult,
        doc="Stateless one-shot LLM completion (titles, ideas) on the session's or the task backend.")
 
+
+
+# ── conversation worktrees ────────────────────────────────────────────────────────────────────
+
+
+class SessionWorktreeCleanupParams(Params):
+    session_id: str
+    action: str = "inspect"  # inspect | quarantine | restore | reconcile; remove refuses
+    profile: str | None = None
+
+
+class SessionWorktreeCleanupResult(Result):
+    outcome: str = "inspected"
+    retained_path: str | None = None
+    recovery_required: bool = False
+    allowed: bool
+    reasons: list[str]
+    removed: bool
+    root_session_id: str
+    path: str
+    branch: str
+    base_commit: str
+    state: str
+    failure_phase: str | None = None
+    failure_message: str | None = None
+
+
+method("session.worktree_cleanup", params=SessionWorktreeCleanupParams, result=SessionWorktreeCleanupResult,
+       doc="Inspect, explicitly retain or restore one managed conversation worktree; removal is disabled.")

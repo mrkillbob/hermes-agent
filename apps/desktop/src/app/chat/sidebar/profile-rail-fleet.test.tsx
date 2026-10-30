@@ -236,8 +236,12 @@ beforeEach(() => {
   ;(window as { hermesDesktop?: unknown }).hermesDesktop = { getAgentRoster, openWindow, probeLocalBackend }
 })
 
-afterEach(() => {
+afterEach(async () => {
   cleanup()
+  // Radix queues unmount autofocus; drain it while this JSDOM realm still owns its events.
+  await act(async () => {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  })
   $profileOrder.set([])
   vi.clearAllMocks()
   vi.restoreAllMocks()

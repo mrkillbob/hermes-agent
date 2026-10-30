@@ -187,8 +187,10 @@ def test_gui_releases_lock_after_build_failure(tmp_path, monkeypatch, capsys):
     def failing_build(*_args, **_kwargs):
         raise RuntimeError("tsc missing: ENOTEMPTY node_modules race")
 
-    with patch("hermes_cli.main_desktop._desktop_launch_env", return_value=({}, [])), \
+    with patch("hermes_cli.main_desktop._desktop_launch_env", return_value=({"PATH": "/usr/bin"}, [])), \
          patch("hermes_cli.main_desktop._desktop_build_needed", return_value=True), \
+         patch("hermes_cli.source_build.source_build_env", return_value={"PATH": "/usr/bin"}), \
+         patch("hermes_cli.source_build.prepare_source_dependencies", return_value=None), \
          patch("hermes_cli.main_desktop.build_prepared_desktop", side_effect=failing_build), \
          pytest.raises(SystemExit) as exc:
         cli_desktop.cmd_gui(_args(build_only=True))

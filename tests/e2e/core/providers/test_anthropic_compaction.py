@@ -10,6 +10,7 @@ byte-exact, and the body validates against the SDK schema.
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import threading
@@ -25,7 +26,7 @@ from tests.e2e.core.providers._anthropic_helpers import (
     thinking_of,
     tool_pairing_problems,
 )
-from tests.fakes.providers.anthropic_messages import Reply, Text, Thinking, ToolUse
+from tests.fakes.providers.anthropic_messages import MODEL_ID, Reply, Text, Thinking, ToolUse
 
 pytestmark = [pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process-tree cleanup uses /proc"),
               pytest.mark.live_system_guard_bypass]
@@ -35,7 +36,9 @@ SUMMARY_TOKEN = "E2E-ANTHROPIC-SUMMARY-7f3a"
 
 
 def _sig(i: int) -> str:
-    return f"EqRound{i:02d}+/sigBytes{'x' * i}=="
+    # Anthropic signatures are canonical Base64 and are validated as opaque
+    # thinking replay tokens by the egress firewall.
+    return base64.b64encode(f"EqRound{i:02d}-signature-{i}".encode("ascii")).decode("ascii")
 
 
 def _think(i: int) -> str:
@@ -63,7 +66,7 @@ def rig(tmp_path: Path):
                 return Reply([Thinking(f"Answer {n}.", _sig(50 + n)), Text(f"TURN-{n}-DONE")], input_tokens=tokens)
             state["calls"] += 1
             i = state["calls"]
-        return Reply([Thinking(_think(i), _sig(i)), ToolUse("read_file", {"path": str(files[i - 1])})],
+        return Reply([Thinking(_think(i), _sig(i)), ToolUse("read_file", {"path": files[i - 1].name})],
                      input_tokens=tokens)
 
     def aux(record):
@@ -73,6 +76,10 @@ def rig(tmp_path: Path):
     r = start_rig(tmp_path / "r", respond, aux=aux, config={
         "model": {"context_length": 64000},
         "compression": {"threshold_tokens": 20000, "protect_last_n": 4},
+        # `aux=` scripts summarisation responses, but the runtime still needs an
+        # explicit route to the fake Anthropic endpoint. Without it compression
+        # aborts with `aux_model=""`, leaving the test's precondition unfulfilled.
+        "auxiliary": {"compression": {"provider": "anthropic", "model": MODEL_ID}},
     })
     for i in range(1, TURNS + 1):
         path = r.project / f"chunk{i}.txt"
@@ -89,7 +96,10 @@ def _drive_turns(rig) -> None:
     (session_id,) = rig.session_ids()
     for n in range(2, TURNS + 1):
         proc = rig.run("chat", "--resume", session_id, "-q", f"Read chunk {n}.", "-Q")
-        assert proc.returncode == 0 and f"TURN-{n}-DONE" in proc.stdout, (n, proc.stderr[-2000:])
+        assert proc.returncode == 0 and f"TURN-{n}-DONE" in proc.stdout, (
+            f"turn {n} failed\nstdout/stderr tail:\n{(proc.stdout + proc.stderr)[-4000:]}\n"
+            f"egress log tail:\n{rig.log_tail(pattern='egress', chars=4000)}"
+        )
 
 
 def test_compaction_keeps_pairing_and_signatures(rig) -> None:
@@ -102,7 +112,9 @@ def test_compaction_keeps_pairing_and_signatures(rig) -> None:
     summarised = [i for i, b in enumerate(mains) if SUMMARY_TOKEN in json.dumps(b.get("messages"))]
     assert summarised, (
         f"precondition: the trigger never fired, nothing was compacted (last request "
-        f"{len(json.dumps(mains[-1])) // 4} est. tokens)\n{rig.log_tail(pattern='compress', chars=6000)}")
+        f"{len(json.dumps(mains[-1])) // 4} est. tokens)\n"
+        f"{rig.log_tail(pattern='compress', chars=6000)}\n"
+        f"egress diagnostics:\n{rig.log_tail(pattern='egress', chars=3000)}")
     assert not rig.srv.schema_errors(), rig.srv.schema_errors()
 
     checked = 0

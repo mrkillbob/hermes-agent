@@ -15,7 +15,7 @@ import httpx
 import pytest
 
 from agent import process_bootstrap
-from agent.agent_runtime_helpers import _iter_pool_sockets, force_close_tcp_sockets
+from agent.agent_runtime_helpers_connections import _iter_pool_sockets, force_close_tcp_sockets
 from agent.process_bootstrap import build_keepalive_http_client
 
 

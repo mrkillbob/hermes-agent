@@ -9,7 +9,7 @@ from typing import NamedTuple, Optional
 
 from agent.conversation_compression_archive import ABSORBED_ROW_IDS
 from agent.message_metadata import (
-    CANONICAL_ROW, DB_ROW_SNAPSHOT, MESSAGE_UID, PERSISTENCE_ONLY_MESSAGE_FIELDS, TOOL_CALL_UID, TOOL_CALL_UIDS,
+    CANONICAL_ROW, DATA_USE, DB_ROW_SNAPSHOT, MESSAGE_UID, PERSISTENCE_ONLY_MESSAGE_FIELDS, TOOL_CALL_UID, TOOL_CALL_UIDS,
 )
 from hermes_state_keys import admission_fingerprint
 
@@ -30,6 +30,12 @@ class RuntimeStoreError(ValueError):
         self.field = _one_line(field, 80)
         self.detail = _one_line(detail, 160)
         super().__init__(reason)
+
+
+#: The one ``admission_conflict`` that proves the request was already admitted: this principal's
+#: request id on this target holds an admission with another payload. Every other conflict (route,
+#: binding, lineage) carries no such proof, so a client tells them apart by this field.
+ADMITTED_REQUEST_CONFLICT = {'field': 'request_id', 'detail': 'this request id was already admitted with another payload'}
 
 
 def _one_line(value, limit):
@@ -150,7 +156,7 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
             WHERE principal_id=? AND target_session_id=? AND request_id=?''', (principal_id, session_id, request_id)).fetchone()
         if old is not None:
             if old['payload_digest'] != digest:
-                raise RuntimeStoreError('admission_conflict')
+                raise RuntimeStoreError('admission_conflict', **ADMITTED_REQUEST_CONFLICT)
             if _replay_guard is not None:
                 _replay_guard(conn)
             return _row(old)
@@ -162,6 +168,8 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
             raise RuntimeStoreError('queue_full')
         if _authorize_write is not None:
             _authorize_write(conn)
+        from hermes_state_worktree_cleanup import require_available
+        require_available(db, conn, session_id)
         admission_id = uuid.uuid4().hex
         conn.execute('''INSERT INTO session_admissions(admission_id,request_id,principal_id,
             target_session_id,lineage_json,payload_json,payload_digest,intent,status,owner_epoch)
@@ -394,6 +402,9 @@ def rehome_queued_inputs(db, *, epoch: int, old_session_id: str, new_session_id:
         rows = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' "
                             "AND substr(principal_id,1,?)=? ORDER BY seq",
                             (old_session_id, len(principal_prefix), principal_prefix)).fetchall()
+        if rows:
+            from hermes_state_worktree_cleanup import require_available
+            require_available(db, conn, new_session_id)
         for row in rows:
             digest = admission_fingerprint(canonical_target=new_session_id, payload={
                 'input': json.loads(row['payload_json']), 'intent': row['intent']})
@@ -448,6 +459,8 @@ def recover_session_inputs(db, *, epoch: int) -> int:
     """Never replay started work. Live worker adoption is a separate explicit operation."""
     def write(conn):
         _epoch(conn, epoch)
+        from hermes_state_runtime_workers import retire_stale_children
+        retire_stale_children(conn, epoch)
         conn.execute("UPDATE worker_executions SET status='unknown' WHERE status IN ('registered','running') AND owner_epoch!=?", (epoch,))
         # A steer handed to a lost claim may or may not have reached its agent: never replayed.
         conn.execute("UPDATE session_admissions SET outcome='interrupted' WHERE status='terminal' AND outcome=? "
@@ -571,7 +584,7 @@ def _canonical_chain(conn, session_id):
     raise RuntimeStoreError('admission_conflict')
 
 
-def _import_legacy_row(conn, row, epoch, principal_id):
+def _import_legacy_row(db, conn, row, epoch, principal_id):
     for field in ('admission_id', 'target_session_id', 'root'):
         _text(row[field])
     lineage = json.loads(row['lineage'])
@@ -586,6 +599,9 @@ def _import_legacy_row(conn, row, epoch, principal_id):
     chain = _canonical_chain(conn, row['target_session_id'])
     target = chain[-1]
     status = 'unknown' if row['status'] == 'started' else row['status']
+    if status != 'terminal':
+        from hermes_state_worktree_cleanup import require_available
+        require_available(db, conn, target)
     generation = row['generation']
     if generation is None and status == 'unknown':
         generation = _session(conn, target)['runtime_generation'] + 1
@@ -640,7 +656,7 @@ def import_legacy_session_admissions(db, *, epoch: int, source_path, principal_i
                 target = _canonical_chain(conn, _text(execution['root']))[-1]
                 conn.execute('UPDATE sessions SET runtime_generation=MAX(runtime_generation,?) WHERE id=?', (generation, target))
             for row in rows:
-                _import_legacy_row(conn, row, epoch, principal_id)
+                _import_legacy_row(db, conn, row, epoch, principal_id)
             conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)', (_IMPORT_KEY, marker))
             return len(rows)
         return db._execute_write(write)
@@ -739,6 +755,13 @@ def register_worker_execution(db, *, epoch: int, execution_id: str, session_id: 
         if old is not None:
             if (old['session_id'], old['generation'], old['kind'], old['owner_epoch'], old['adoption_digest']) != (session_id, generation, kind, epoch, digest):
                 raise RuntimeStoreError('admission_conflict')
+            if old['status'] == 'terminal':
+                # Exact terminal registration replay only returns its receipt;
+                # it cannot admit, adopt or restart work in a retired root.
+                return _worker_public(old)
+        from hermes_state_worktree_cleanup import require_available
+        require_available(db, conn, session_id)
+        if old is not None:
             return _worker_public(old)
         from hermes_state_runtime_workers import runtime_lineage, worker_states
         targets = runtime_lineage(conn, session_id)
@@ -762,6 +785,8 @@ def adopt_worker_execution(db, *, epoch: int, execution_id: str, session_id: str
     def write(conn):
         _epoch(conn, epoch)
         row = _worker_assignment(conn, execution_id, session_id, generation)
+        from hermes_state_worktree_cleanup import require_available
+        require_available(db, conn, session_id)
         if row['status'] == 'terminal':
             raise RuntimeStoreError('stale_generation')
         if not hmac.compare_digest(row['adoption_digest'], digest):
@@ -795,7 +820,7 @@ _MESSAGE_FIELDS = frozenset({
     'finish_reason', 'reasoning', 'reasoning_content', 'reasoning_details',
     'codex_reasoning_items', 'codex_message_items', 'platform_message_id', 'message_id',
     'observed', 'effect_disposition', '_compressed_summary', 'timestamp', 'api_content',
-    'display_kind', 'display_metadata', '_row_id', '_canonical_content', DB_ROW_SNAPSHOT, CANONICAL_ROW,
+    'display_kind', 'display_metadata', '_row_id', '_canonical_content', DB_ROW_SNAPSHOT, CANONICAL_ROW, DATA_USE,
     # Main's durable message identity (message_uid / merge witness / tool-call uids) and the alternation
     # repair's row counts ride every persisted dict; the owner's insert and coverage read them.
 }) | PERSISTENCE_ONLY_MESSAGE_FIELDS | {ABSORBED_ROW_IDS}
@@ -864,9 +889,15 @@ def _worker_turn(db, conn, session_id, payload, operation):
 
 def _worker_usage(db, conn, session_id, payload, *, auxiliary=False):
     from hermes_state_usage import _MODEL_USAGE_FIELDS, _TOKEN_COUNTERS
+    source = None
     if not auxiliary:
-        # ``source`` feeds the legacy path's row-existence guard (#111999); an authority-owned
-        # session row was minted with its real surface at admission, so nothing to repair here.
+        # ``source`` is the worker platform (turn_usage._agent_session_source). A Desktop
+        # managed worker passes ``gui``; created_surface maps that to ``desktop``. The row
+        # is usually stamped at admission. A compression child can still be NULL (or an
+        # auxiliary-usage ``unknown``), and this worker never create_session's it, so fill
+        # only an unset column, as the creator upsert does.
+        raw = payload.get('source')
+        source = raw if isinstance(raw, str) else None
         payload = {k: v for k, v in payload.items() if k != 'source'}
     allowed = (_MODEL_USAGE_FIELDS - {'billing_mode', 'actual_cost_usd', 'cost_status', 'cost_source'} | {'task'}) if auxiliary else (_MODEL_USAGE_FIELDS | {'pricing_version', 'absolute', 'task'})
     if set(payload) - allowed:
@@ -888,6 +919,17 @@ def _worker_usage(db, conn, session_id, payload, *, auxiliary=False):
         db._record_model_usage(conn, session_id, **({'api_call_count': 1} | payload))
     else:
         db._update_token_counts_in_transaction(conn, session_id, **payload)
+        # The managed worker's platform is the policy label (gui), not the in-process
+        # agent surface (desktop). Stamp the same created_surface the insert uses.
+        from gateway.session_policy import created_surface
+        from hermes_state_compression import _UNSET_CREATED_SQL, stamp_compression_ancestors
+        surfaced = created_surface(source)
+        if surfaced:
+            conn.execute(
+                "UPDATE sessions SET created_source=? WHERE id=? AND "
+                + _UNSET_CREATED_SQL.format(col="created_source"),
+                (surfaced, session_id))
+            stamp_compression_ancestors(conn, session_id)
     return {'value': None}
 
 

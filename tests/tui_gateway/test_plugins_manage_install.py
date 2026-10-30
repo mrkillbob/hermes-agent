@@ -123,4 +123,3 @@ def test_plugins_manage_list_resolves_the_live_catalog_once_per_listing(tmp_path
     assert len(resp["result"]["plugins"]) == 3
     # ONE resolution for the whole listing (the pre-hoist code paid one per installed plugin).
     assert len(resolver_calls) == 1
-

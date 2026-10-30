@@ -88,4 +88,3 @@ def test_unset_effort_default_keeps_the_field_off_where_it_would_be_wrong():
         # Not a chat-completions wire: the Anthropic adapter's "unset = no thinking kwargs" stands.
         from agent.reasoning_params import unset_reasoning_default
         assert unset_reasoning_default(_Agent(None, api_mode="anthropic_messages")) is None
-

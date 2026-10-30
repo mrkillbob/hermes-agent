@@ -235,6 +235,36 @@ test('the Windows command line: powershell -File windows.ps1 -MarkerOp ... (hidd
 // helper only when the script would answer "not held" for a missing checkout
 // lock, so the TS path must be the script's own.
 describe.skipIf(process.platform === 'win32')('checkout lock path mirrors marker.sh', () => {
+  test('sealed source aliases use an external stable gate and the authoritative free/uncertain probe', () => {
+    const temp = scratchRoot('sealed-lock')
+    const app = path.join(temp, 'Hermes.app')
+    const payload = path.join(app, 'Contents', 'Resources', 'agent-payload')
+    const root = path.join(payload, 'hermes-agent')
+    fs.mkdirSync(root, { recursive: true })
+    const runtime = { repoDir: 'hermes-agent', toolsDir: 'tools', storePython: 'tools/python/bin/python3',
+      sitePackages: 'venv/site-packages', commands: { hermes: 'bin/hermes' } }
+    fs.writeFileSync(path.join(payload, 'manifest.json'), JSON.stringify({ schema: 1, target: 'darwin-arm64',
+      repo: 'hermes-agent', venv: 'venv', store: 'tools', ref: 'a'.repeat(40), runtime }))
+    fs.writeFileSync(path.join(root, 'install-stamp.json'), JSON.stringify({ schemaVersion: 1,
+      commit: 'a'.repeat(40), dirty: false, payload: 'bundled', distribution: 'desktop-app',
+      updateMechanism: 'external', runtime }))
+    const alias = path.join(temp, 'alias')
+    fs.symlinkSync(root, alias, 'dir')
+    const expected = path.join(fs.realpathSync(temp), '.Hermes.app.hermes-update.lock')
+    assert.equal(checkoutLockPath(alias, false), expected)
+    assert.equal(path.resolve(scriptPath(alias)), path.resolve(expected))
+    assert.equal(checkoutLockMayBeHeld(alias, false), true, 'ask the authoritative reader')
+    const probe = () => execFileSync('bash', ['-c',
+      'source "$0"; if checkout_lock_held; then echo held; else echo free; fi', markerSh], {
+      env: { ...process.env, INSTALL_ROOT: alias }, encoding: 'utf8'
+    }).trim()
+    assert.equal(probe(), 'free', 'a valid unused sealed install is free, not permanently held')
+    fs.writeFileSync(path.join(payload, 'manifest.json'), '{}')
+    assert.equal(probe(), 'held', 'missing identity never falls back to the embedded path')
+    assert.equal(fs.existsSync(path.join(root, '.hermes-update.lock')), false)
+  })
+
+
   const markerSh = path.resolve(__dirname, '../../../../scripts/desktop-update/marker.sh')
 
   const scriptPath = (root: string) =>

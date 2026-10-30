@@ -11,7 +11,6 @@ import contextlib
 import os
 import urllib.parse
 
-from hermes_cli.cli_output import line_input
 from hermes_cli.providers import custom_provider_slug
 from hermes_cli.model_setup_flows_common import (
     _HTTP, _ask, _commit_model_config, _load_config_model_section,
@@ -76,6 +75,8 @@ def _probe_custom_endpoint(effective_key: str, effective_url: str) -> tuple[dict
 def _pick_detected_model(detected_models: list) -> str:
     """Model-name step of the custom flow: confirm a single detection, number-pick from
     several, or type one. Raises KeyboardInterrupt/EOFError like the prompts it wraps."""
+    from hermes_cli.cli_output import line_input
+
     manual = "Model name (e.g. gpt-4, llama-3-70b): "
     if len(detected_models) == 1:
         print(f"  Detected model: {detected_models[0]}")
@@ -96,6 +97,7 @@ def _pick_detected_model(detected_models: list) -> str:
 def _model_flow_custom(config):
     """Custom endpoint: collect URL, API key, and model name; also saved to ``custom_providers`` so
     it appears in the provider menu on subsequent runs."""
+    from hermes_cli.cli_output import line_input
     from hermes_cli.main_provider_setup import _auto_provider_name, _prompt_custom_api_mode_selection, _save_custom_provider
     from hermes_cli.auth import _save_model_choice, deactivate_provider
     from hermes_cli.config import custom_endpoint_key_env, get_env_value, save_env_value

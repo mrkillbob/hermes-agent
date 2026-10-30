@@ -140,3 +140,15 @@ describe('resolved window routes share one dial claim (#90812)', () => {
     }
   )
 })
+
+describe('backend scope keys (#90812)', () => {
+  it('keeps local scopes profile-only and disambiguates each remote connection', () => {
+    expect(backendScopeKey(null, 'work')).toBe('work')
+    expect(backendScopeKey('local', 'work')).toBe('work')
+    expect(backendScopeKey('office-ssh', 'work')).toBe('conn:office-ssh::work')
+    expect(parseBackendScopeKey(backendScopeKey('office-ssh', 'work'))).toEqual({
+      connectionId: 'office-ssh',
+      profile: 'work'
+    })
+  })
+})

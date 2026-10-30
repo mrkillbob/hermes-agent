@@ -22,6 +22,7 @@ class _SafeWorkerPolicy:
     safe_mode: bool
     ignore_user_config: bool
     config_json: str
+    local_text_only: bool = False
 
 
 _policy: _SafeWorkerPolicy | None = None
@@ -33,13 +34,15 @@ _RUNTIME_IMPORTS = frozenset({
 
 
 def _bind_safe_worker_policy(*, safe_mode: bool, ignore_user_config: bool,
-                             config: dict) -> _SafeWorkerPolicy:
+                             config: dict, local_text_only: bool = False) -> _SafeWorkerPolicy:
     """Called by the private worker bootstrap, never by the owner or public CLI."""
     if type(safe_mode) is not bool or type(ignore_user_config) is not bool:
         raise TypeError("worker bypass policy fields must be booleans")
     if not (safe_mode or ignore_user_config):
         raise ValueError("ordinary execution binds its config with _bind_worker_config")
-    return _bind(safe_mode, True, config)
+    if type(local_text_only) is not bool or (local_text_only and not safe_mode):
+        raise ValueError('invalid_local_text_worker_policy')
+    return _bind(safe_mode, True, config, local_text_only)
 
 
 def _bind_worker_config(config: dict) -> _SafeWorkerPolicy:
@@ -49,7 +52,7 @@ def _bind_worker_config(config: dict) -> _SafeWorkerPolicy:
     return _bind(False, False, config)
 
 
-def _bind(safe_mode: bool, ignore_user_config: bool, config: dict) -> _SafeWorkerPolicy:
+def _bind(safe_mode: bool, ignore_user_config: bool, config: dict, local_text_only=False) -> _SafeWorkerPolicy:
     global _policy
     if type(config) is not dict:
         raise TypeError("worker config must be a JSON object")
@@ -59,7 +62,7 @@ def _bind(safe_mode: bool, ignore_user_config: bool, config: dict) -> _SafeWorke
             raise RuntimeError("worker policy is already bound")
         if _RUNTIME_IMPORTS.intersection(sys.modules):
             raise RuntimeError("worker policy must bind before runtime imports")
-        _policy = _SafeWorkerPolicy(os.getpid(), safe_mode, ignore_user_config, serialized)
+        _policy = _SafeWorkerPolicy(os.getpid(), safe_mode, ignore_user_config, serialized, local_text_only)
         return _policy
 
 
@@ -72,6 +75,11 @@ def _current_policy() -> _SafeWorkerPolicy | None:
 def safe_worker_enabled() -> bool:
     policy = _current_policy()
     return policy is not None and policy.safe_mode
+
+
+def local_text_worker_enabled() -> bool:
+    policy = _current_policy()
+    return policy is not None and policy.local_text_only
 
 
 def worker_config_snapshot() -> dict | None:

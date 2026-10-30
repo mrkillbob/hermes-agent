@@ -119,7 +119,7 @@ A worker that is blocked on `t_parent` and creates a support card for the missin
 
 **Use Kanban when** work crosses agent boundaries, needs to survive restarts, might need human input, might be picked up by a different role, or needs to be discoverable after the fact.
 
-They coexist, but not inside one run: a kanban task executes in an isolated managed worker under the profile's gateway, and that worker is not offered `delegate_task` (a delegated child would need its own owner-registered execution, which the single-turn worker cannot reserve). Split work that needs fan-out into child cards instead (`kanban_create` with `parents`).
+They also coexist inside one run. A kanban task executes in an isolated managed worker under the profile's gateway, and its `delegate_task` children are reserved by that gateway under the worker's execution: each child gets its own session (listed as a subagent of the card's session), counts against `delegation.max_concurrent_children` and `delegation.max_spawn_depth`, returns its result inside the card's turn, and ends with the worker. If the gateway goes down mid-child, the child is retired, never resumed. Work that must outlive the gateway, or needs its own reviewer, still belongs in child cards (`kanban_create` with `parents`).
 
 ## Core concepts
 
@@ -310,6 +310,60 @@ hermes kanban stats
 ```
 
 When the dispatcher picks up `t_abcd` and spawns the `researcher` profile, the very first thing that worker's model does is call `kanban_show()` to read its task. It doesn't run `hermes kanban show t_abcd`.
+
+### Dispatch a finite set of cards
+
+Use repeated `--task-id` flags for a one-pass exact selection on the current
+board (or select the board explicitly):
+
+```bash
+hermes kanban --board engineering dispatch --task-id t_abcd1234 --task-id t_efab5678
+```
+
+Only those exact IDs already in `ready` or `review` can be dispatched. Duplicates
+are ignored, and normal board priority order applies. Unknown IDs do not match
+other cards. Empty IDs, whitespace and wildcard patterns are rejected; omitting
+`--task-id` retains the normal board-wide tick.
+
+An exact-card pass skips watchdog, reclamation, orphan reconciliation and
+promotion entirely, including for the selected cards. It leaves running claims,
+blocked holds, triage and staged `todo` work to their existing maintenance owner.
+Routing and assignment run only after selection. Newly created cards and children
+are excluded unless their exact IDs are explicitly selected in a later pass.
+This selection restricts which cards the dispatcher may consider; it does not
+restrict the actions an admitted worker may perform.
+
+For one exact native-owner attempt, opt into all three execution ceilings together:
+
+```bash
+hermes kanban dispatch --task-id t_abcd1234 --max 1 \
+  --wall-seconds 120 --output-bytes 65536 --requests 4
+```
+
+Each limit must be a positive integer no greater than the value shown. The output
+ceiling counts combined worker protocol frames and stderr. Provider requests share
+one counter across the worker's turns, recovery, retries and auxiliary calls;
+unsupported transports fail closed. External executor lanes cannot use this mode.
+The claim freezes these limits, and a retry cannot omit or change them.
+
+A bounded attempt requires an existing ready owner and never starts a gateway.
+Prepare that owner and stop automatic dispatch, cron and other work sources before
+resuming a globally paused installation for an exclusively owned one-card window.
+The command still honors ESTOP and all existing safety and routing gates.
+
+On wall or output exhaustion, the owner closes its worker through the existing
+managed lifecycle and retains an unknown outcome behind the execution fence.
+Ledger settlement may take longer than the execution deadline. Local process
+cleanup cannot prove that an already submitted remote request stopped. Inspect the
+final owner receipt before resolving uncertainty; the worker client treats a late
+owner failure as non-success even if an earlier board event reported success.
+
+Normal ownership, dependency, profile, respawn, workspace, model, host capacity
+and memory-pressure controls still apply. Unselected running work still counts
+against capacity. `--max` remains the live board concurrency cap and does not
+grant capacity beyond those controls. The selector does not enable the gateway
+dispatcher or grant task execution or data-route authority. `--dry-run` suppresses
+worker spawning; it is not a promise of a read-only operation.
 
 ### Gateway-embedded dispatcher (default)
 
@@ -516,7 +570,7 @@ The "(Orchestrators)" tools — `kanban_list`, `kanban_create`, `kanban_link`, `
 
 Three reasons:
 
-1. **Backend portability.** Workers whose terminal tool points at a remote backend (Docker / Modal / Singularity / SSH) would run `hermes kanban complete` *inside* the container, where `hermes` isn't installed and `~/.hermes/kanban.db` isn't mounted. The kanban tools run in the agent's own Python process and always reach `~/.hermes/kanban.db` regardless of terminal backend.
+1. **Backend portability.** Workers whose terminal tool points at a remote backend (Docker / Modal / SSH / a plugin sandbox) would run `hermes kanban complete` *inside* the container, where `hermes` isn't installed and `~/.hermes/kanban.db` isn't mounted. The kanban tools run in the agent's own Python process and always reach `~/.hermes/kanban.db` regardless of terminal backend.
 2. **No shell-quoting fragility.** Passing `--metadata '{"files": [...]}'` through shlex + argparse is a latent footgun. Structured tool args skip it entirely.
 3. **Better errors.** Tool results are structured JSON the model can reason about, not stderr strings it has to parse.
 
@@ -926,7 +980,7 @@ Tasks in `~/.hermes/kanban.db` are profile-agnostic on purpose (that's the coord
 
 ### Extending it
 
-The plugin uses the standard Hermes dashboard plugin contract — see [Extending the Dashboard](./extending-the-dashboard) for the full manifest reference, shell slots, page-scoped slots, and the Plugin SDK. Extra columns, custom card chrome, tenant-filtered layouts, or full `tab.override` replacements are all expressible without forking this plugin.
+The plugin uses the standard Hermes dashboard plugin contract — see [Extending the Dashboard](./extending-the-dashboard) for the full manifest reference, shell slots, page-scoped slots, and the Plugin SDK. Extra columns, tenant-filtered layouts, or full `tab.override` replacements are all expressible without forking this plugin. The dashboard has no per-card slot; on the desktop board, plugins add per-card labels through the `KANBAN_CARD_AREAS.badges` contribution area (see [Desktop Plugin SDK](../../developer-guide/desktop-plugin-sdk.md#kanban-card-badges)).
 
 To disable without removing: add `dashboard.plugins.kanban.enabled: false` to `config.yaml` (or delete `plugins/kanban/dashboard/manifest.json`).
 
@@ -1010,7 +1064,7 @@ All commands are also available as a slash command in the interactive CLI and in
 
 | Config key | Default | What it does |
 |------------|---------|--------------|
-| `kanban.max_in_progress` | unset (unlimited) | Caps the number of simultaneously running tasks. When the board already has N running, the dispatcher skips spawning more — useful for slow workers (local LLMs, resource-constrained hosts) so they finish what they have before more pile up and time out. Invalid or below-1 values log a warning and behave as unlimited. |
+| `kanban.max_in_progress` | unset (memory-derived) | Caps the number of simultaneously running tasks across all boards. When unset, Hermes derives a conservative cap from system memory where available. Invalid or below-1 values fall through to that derived default. Cloud workers use this host-wide budget even when the priority runtime guard is active. |
 | `kanban.max_in_progress_per_profile` | unset (unlimited) | Per-profile variant of `max_in_progress` — caps how many tasks any single assignee profile may run concurrently. Useful when one profile is slow or rate-limited but others should keep flowing. Applies alongside the board-wide `max_in_progress`; both must allow a spawn for it to proceed. |
 | `kanban.dispatch_profiles` | unset (any existing profile) | Per-home claim allowlist for boards shared across Hermes homes. When the key is present, this home's dispatcher only claims cards whose assignee is listed — fail-closed: an empty list, `null` or a bare `dispatch_profiles:` claims nothing, and a config read that fails logs a warning and claims nothing; other assignees land in `skipped_nonspawnable`. Only omitting the key means "any existing profile". `hermes kanban diagnostics` prints the resolved value for this home (`any`, the listed names, or `none (fail-closed: …)`). See [Shared boards across homes](#shared-boards-across-homes). |
 | `kanban.auto_promote_children` | `true` | After `decompose_triage_task()` produces children with no parent-blocker dependencies, they're automatically promoted to `ready` so the dispatcher can pick them up. Set to `false` to require manual review — children stay in `todo` until you promote them. |
@@ -1018,10 +1072,29 @@ All commands are also available as a slash command in the interactive CLI and in
 
 ```yaml
 kanban:
-  max_in_progress: 2
+  # Normal performance lane.
+  max_in_progress: 8
+  # Bound only profiles that use a host-heavy local model.
+  max_in_progress_by_profile:
+    local-builder: 1
+  # Reserve resources for local-model workers while an exact private runtime
+  # entrypoint is active. Cloud workers keep the normal global budget above.
+  priority_runtime_guard:
+    enabled: true
+    project_roots:
+      - ~/work/private-runtime
+    entrypoints:
+      - main.py
+    normal_max_in_progress: 8
+    max_in_progress: 2
   auto_promote_children: false
   default_workdir: ~/work/active-project
 ```
+
+The runtime match is path-exact: `python main.py` matches only when the
+process working directory is the configured root, and an absolute script path
+must resolve to the configured root plus entrypoint. An unrelated project with
+its own `main.py`, or text that merely mentions `main.py`, does not match.
 
 ### Scheduled task starts (`scheduled_at`)
 
@@ -1459,6 +1532,7 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `respawn_guarded` | `{reason}` | Dispatcher refused to re-spawn this ready task this tick. Reasons: `infrastructure_cooldown` (the host refused the last spawn — no restart-safe systemd scope — and the cooldown has not elapsed; never counted against the card), `rate_limit_cooldown` (the last run hit a quota wall; same cooldown, never counted), `blocker_auth` (last failure was a quota/auth/429 error — wait for the rate window to reset), `recent_success` (a completed run happened in the last hour — wait for review before re-running), `active_pr` (a GitHub PR URL appears in a recent comment — a prior worker already opened a PR). The task stays in `ready`; the next tick gets another chance to spawn. If the underlying condition persists, the normal `consecutive_failures` circuit breaker will auto-block via `gave_up` after `failure_limit` failures. |
 | `spawn_failed` | `{error, failures}` | One spawn attempt failed (missing PATH, workspace unmountable, …). Counter increments; task returns to `ready` for retry. |
 | `skipped_nonspawnable` | `{assignee}` | Dispatcher refused to spawn because the assignee profile does not exist in this home (or is not in `kanban.dispatch_profiles`). Written once per card — repeated only when another event landed in between — so `show`/`tail` name the missing profile without a row per tick. The card stays in `ready`; reassign it or install the profile. |
+| `routing_refused` | `{assignee, reason}` | The orchestrator lane could not hand this ready card to its repair profile because PR write authority for `assignee` is unverified or read-only (`execution_authority` in that profile's `profile.yaml`). The card stays in `ready`, is reported in the tick's `routing_refused` bucket (also named by the stuck-dispatcher warning), and the event is written once per change. Set the profile's authority or reassign the card. |
 | `protocol_violation` | `{pid, claimer, exit_code, protocol_violation, worker_output?}` | Worker exited successfully while the task was still `running`, usually because it answered without a terminal board call (`kanban_complete`, `kanban_request_review` or `kanban_block`). Emitted on every violation (the payload's `protocol_violation: true` marker is copied into the run metadata and feeds the violation-only retry budget). Below the budget — up to `_PROTOCOL_VIOLATION_FAILURE_LIMIT` (default 3) *consecutive* violations, per-task `max_retries` overriding — the task simply returns to `ready` for another attempt; when the streak reaches the bound the dispatcher also emits `gave_up` and auto-blocks. `worker_output` carries the worker's own last printed text (usually its explanation of why it stopped), also folded into `last_failure_error` and shown to the retry worker as the prior-attempt error. |
 | `gave_up` | `{failures, effective_limit, limit_source, error, terminal_provider?}` | Circuit breaker fired after N consecutive non-successful attempts. Task auto-blocks with the last error. The effective limit resolves as task `max_retries`, then dispatcher `failure_limit` / `kanban.failure_limit`, then the built-in default. `terminal_provider: true` means the worker exited `78` on a provider error a retry cannot fix (credential revoked, model gone) — including a startup credential failure that explicitly requires re-login (`hermes auth` / `setup`), which exits `78` before the first turn; other startup failures exit `1` — and the breaker fired on that first attempt, sticky, regardless of the limit. |
 
@@ -1467,3 +1541,17 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 ## Out of scope
 
 Kanban is deliberately single-host. `~/.hermes/kanban.db` is a local SQLite file and the dispatcher spawns workers on the same machine. Running a shared board across two hosts is not supported — there's no coordination primitive for "worker X on host A, worker Y on host B," and the crash-detection path assumes PIDs are host-local. If you need multi-host, run an independent board per host and use `delegate_task` / a message queue to bridge them.
+
+### Shared project worktree policy
+
+The control home's `kanban.worktree_roots` mapping selects an absolute worktree
+directory for each absolute repository path. Worker profiles use this shared
+mapping, so project tasks keep the same location across profile boundaries.
+Existing materialized worktrees are preserved; unmaterialized legacy task paths
+use the configured root at dispatch. Without a mapping, `.worktrees` remains the
+default.
+
+`kanban.worktree_base_refs` can pin a project's source branch. When it names a
+configured remote branch (for example `origin/stable`), admission fetches that
+exact branch before resolving its commit. Fetch failure stops admission instead
+of silently using a stale or unrelated base.

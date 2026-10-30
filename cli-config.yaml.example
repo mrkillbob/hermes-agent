@@ -7,7 +7,7 @@
 # Schema version of this file. The installers copy it to seed config.yaml, and
 # `hermes update` uses it to know which one-time migrations the file already
 # has. Hermes manages it: do not copy it into another config.
-_config_version: 51
+_config_version: 52
 
 # =============================================================================
 # Database Configuration
@@ -69,10 +69,13 @@ plugins:
 # =============================================================================
 # Model Configuration
 # =============================================================================
+# The GPT-5.4 family was removed from active routing ahead of retirement. Do not
+# silently follow mutable model aliases: evaluate any replacement mini or newly
+# released model with representative per-profile benchmarks before adoption.
 model:
   # Default model to use (can be overridden with --model flag)
   # Both "default" and "model" work as the key name here.
-  default: "anthropic/claude-opus-4.6"
+  default: "openai-codex/gpt-5.5"
   
   # Inference provider selection:
   #   "auto"         - Auto-detect from credentials (default)
@@ -81,7 +84,6 @@ model:
   #   "nous-api"     - Nous Portal API key (requires: NOUS_API_KEY)
   #   "anthropic"    - Direct Anthropic API (requires: ANTHROPIC_API_KEY)
   #   "openai-codex" - OpenAI Codex (requires: hermes auth)
-  #   "copilot"      - GitHub Copilot / GitHub Models (requires: GITHUB_TOKEN)
   #   "gemini"      - Use Google AI Studio direct (requires: GOOGLE_API_KEY or GEMINI_API_KEY)
   #   "zai"         - Use z.ai / ZhipuAI GLM models (requires: GLM_API_KEY)
   #   "kimi-coding"  - Kimi / Moonshot AI (requires: KIMI_API_KEY)
@@ -303,7 +305,7 @@ model:
 #         timeout_seconds: 600       # Longer timeout for extended-thinking Opus calls
 #   openai-codex:
 #     models:
-#       gpt-5.4:
+#       gpt-5.6-luna:
 #         stale_timeout_seconds: 1800  # Longer non-stream stale timeout for slow large-context turns
 
 # =============================================================================
@@ -375,9 +377,31 @@ model:
 # =============================================================================
 # Git Worktree Isolation
 # =============================================================================
-# When enabled, each CLI session creates an isolated git worktree so multiple
-# agents can work on the same repo concurrently without file collisions.
-# Equivalent to always passing --worktree / -w on the command line.
+# Durable per-conversation isolation shared by interactive CLI, Desktop/TUI,
+# and messaging gateways. New root conversations branch from the exact local
+# HEAD of source_worktree; resume/continue reuses the persisted binding, and
+# /new gets a new binding. Worktrees are retained when the process exits and
+# can be removed only by the guarded explicit-cleanup flow after Hermes proves
+# they are inactive, clean, pushed, and integrated.
+#
+# conversation_worktree:
+#   enabled: false
+#   source_worktree: "/absolute/path/to/stable-checkout"
+#   worktree_root: "/absolute/path/to/conversation-worktrees"
+#   branch_prefix: "hermes/session"
+#   bootstrap: false
+#   bootstrap_command: []       # argv list; required and non-empty when bootstrap is true
+#   bootstrap_timeout: 300      # finite positive seconds
+#   create_timeout: 60          # finite positive seconds
+#   retain_until_explicit_cleanup: true  # required when enabled
+#
+# Invalid or unavailable managed policy fails closed: Hermes does not silently
+# continue in source_worktree. Kanban, cron, subagent, and explicit/manual
+# worktrees keep their existing task-owned lifecycle and are not rebound.
+#
+# Legacy CLI-only isolation remains available independently. When enabled,
+# each CLI invocation creates the historical temporary worktree; this is
+# equivalent to always passing --worktree / -w on the command line.
 #
 # worktree: true    # Always create a worktree when in a git repo
 # worktree: false   # Default — only create when -w flag is passed
@@ -439,6 +463,7 @@ terminal:
   #   profile - force HERMES_HOME/home for strict per-profile CLI config isolation
   home_mode: "auto"
   docker_mount_cwd_to_workspace: false  # SECURITY: off by default. Opt in to mount the launch cwd into Docker /workspace.
+  docker_isolate_host_data: false  # Suppress automatic credential, skill, cache, and egress-proxy mounts.
   lifetime_seconds: 300
   # Two process_manage wait/poll calls in a row with no new output on a running background process
   # turn on notify_on_complete for it and tell the agent to stop checking; false = poll as before.
@@ -503,9 +528,10 @@ terminal:
 #   #   - "SETUID"
 
 # -----------------------------------------------------------------------------
-# OPTION 4: Singularity/Apptainer container
+# OPTION 4: Singularity/Apptainer container (the official `singularity` plugin)
 # Commands run in a Singularity container (common in HPC environments)
 # Great for: HPC clusters, shared compute environments
+# Install it first: hermes plugins install singularity
 # -----------------------------------------------------------------------------
 # terminal:
 #   backend: "singularity"
@@ -541,7 +567,7 @@ terminal:
 #   container_disk: 10240          # Daytona max is 10GB per sandbox
 
 #
-# --- Container resource limits (docker, singularity, modal, daytona -- ignored for local/ssh) ---
+# --- Container resource limits (docker, modal, daytona, container plugin backends -- ignored for local/ssh) ---
 # These settings apply to all container backends. They control the resources
 # allocated to the sandbox and whether its filesystem persists across sessions.
   container_cpu: 1              # CPU cores
@@ -613,25 +639,14 @@ browser:
   # Inactivity timeout in seconds - browser sessions are automatically closed
   # after this period of no activity between agent loops (default: 120 = 2 minutes)
   inactivity_timeout: 120
-  # Let an authenticated browser extension register as the controller for an
-  # existing Hermes session. Disabled by default. Local API registration also
-  # requires the API server bearer key to be configured.
-  extension_control:
-    enabled: false
 
-  # Maximum characters of snapshot content before truncate-and-store.
-  # Increase for long pages (for example, documentation or financial reports),
-  # or decrease to reduce context usage. Minimum: 1000; default: 15000
-  # (same per-page budget as web_extract).
-  # snapshot_threshold: 15000
-
-  # JavaScript evaluation guardrails (both default false). restrict_evaluate
-  # opts into a denylist that blocks sensitive primitives (cookies, storage,
-  # clipboard, network, form values) in browser_console(expression=...) — use
-  # it when the agent drives a logged-in profile. allow_unsafe_evaluate is the
-  # legacy override that switches the denylist back off even when restrict is on.
-  # restrict_evaluate: false
-  # allow_unsafe_evaluate: false
+  # Local Chromium for browser_exec. Empty executable_path = pm's chromium
+  # (`hermes pm install chromium`), the Docker image's build, or a system
+  # chromium where pm builds none (Termux). user_data_dir keeps one persistent
+  # profile for every local session (empty = a throwaway profile per session).
+  # executable_path: ""
+  # user_data_dir: ""
+  # chromium_args: ["--lang=de"]
 
 # =============================================================================
 # Tool Loop Guardrails
@@ -945,6 +960,16 @@ prompt_caching:
 #     model: ""
 #     reasoning_effort: "low"
 #
+#   # Guarded compression fast lane. The output cap is honored only when both
+#   # provider and model are explicit and reasoning_effort is exactly "none".
+#   # If the effective route drifts, Hermes drops the cap and reasoning
+#   # override instead of applying them to an uncertified model.
+#   compression:
+#     provider: "main"
+#     model: "qwen3:8b"
+#     reasoning_effort: "none"
+#     max_output_tokens: 1400  # positive integer; 0 = historic uncapped behavior
+#
 #   # Gemini 3.1 TTS hidden audio-tag insertion
 #   tts_audio_tags:
 #     provider: "auto"       # empty model = your main chat model
@@ -1059,6 +1084,22 @@ max_concurrent_sessions: null
 group_sessions_per_user: true
 
 # =============================================================================
+# Native Hosted-Room Discussion Limits
+# =============================================================================
+# Shared ceilings per discussion across all members, applied to all native hosted
+# rooms (not Desktop renderer/mirrored rooms). Positive integers only: no 0,
+# unlimited, null, booleans, strings, or floats; an invalid value is logged and
+# the defaults apply. Omitted keys keep these defaults.
+# Set in the root owner's config.yaml beside shared-state.db, not a member's
+# profile config. Read once at startup; refresh every server process sharing the
+# room database to apply (not just the service the client connects to).
+# For a larger discussion budget, use max_rounds: 6 and max_messages: 30.
+hosted_rooms:
+  discussion:
+    max_rounds: 3
+    max_messages: 10  # Total visible bot replies, not per member
+
+# =============================================================================
 # Session Storage Retention (state.db)
 # =============================================================================
 # ~/.hermes/state.db keeps every session, message, and tool call, plus the
@@ -1076,6 +1117,14 @@ group_sessions_per_user: true
 # of the file's pages are reclaimable — a dense database never pays for a full
 # rewrite to reclaim a few MB.
 #
+# A CLI/TUI/Desktop session left with no viewer (a killed terminal, a dropped
+# connection, a gateway restart) is ended by the gateway orphan_end_grace_s
+# seconds later, once its running turn settles. It stays resumable, and a viewer
+# that comes back within the grace keeps it open. 0 never ends it. After a
+# restart it also waits out the rest of 6h since the session's last activity.
+# It replaces dashboard.ws_orphan_reap_grace_s / startup_orphan_sweep for these
+# sessions; while it is unset, their opt-outs (0 / false) still turn it off.
+#
 # Uncomment to change the defaults shown; auto_prune: true bounds the file,
 # auto_prune: false keeps every ended session and silences the low-disk prompt.
 # sessions:
@@ -1084,6 +1133,7 @@ group_sessions_per_user: true
 #   vacuum_after_prune: true
 #   min_vacuum_interval_days: 30
 #   min_interval_hours: 24
+#   orphan_end_grace_s: 300
 
 # Optional direct endpoint for autonomous Bot Mode rooms spanning gateways.
 # Leave unset for the safe default: Desktop coordinates cross-gateway rooms and
@@ -1497,6 +1547,9 @@ platform_toolsets:
 #       # Route scripts default to a 30 second timeout. Scripts must live under
 #       # the active profile's scripts directory and receive webhook JSON on stdin.
 #       script_timeout_seconds: 30
+#       # Public HTTPS origin in front of this listener; MCP servers with
+#       # `events: true` POST event deliveries to <public_url>/webhooks/<route>.
+#       public_url: "https://hermes.example.com"
 #
 # Discord-specific settings (config.yaml top-level, not under platforms:):
 #
@@ -1522,9 +1575,8 @@ platform_toolsets:
 #   search       - web_search only (no scraping)
 #   terminal     - terminal, process
 #   file         - read_file, write_file, patch, search
-#   browser      - browser_navigate, browser_snapshot, browser_click, browser_type,
-#                  browser_scroll, browser_back, browser_press,
-#                  browser_get_images, browser_vision  (requires BROWSERBASE_API_KEY)
+#   browser      - browser_exec, browser_cdp, browser_dialog, browser_vault
+#                  (local Chromium, or a cloud browser with its API key)
 #   vision       - vision_analyze  (requires OPENROUTER_API_KEY)
 #   image_gen    - image_generate  (requires FAL_KEY)
 #   skills       - skills_list, skill_view
@@ -1550,7 +1602,7 @@ platform_toolsets:
 #   search       - Web search only, no scraping (web_search)
 #   terminal     - Command execution and process management (terminal, process)
 #   file         - File operations: read, write, patch, search
-#   browser      - Full browser automation (navigate, click, type, screenshot, etc.)
+#   browser      - Browser automation over CDP (browser_exec drives a real Chromium)
 #   vision       - Image analysis (vision_analyze)
 #   image_gen    - Image generation with FLUX (image_generate)
 #   skills       - Load skill documents (skills_list, skill_view)
@@ -1632,6 +1684,13 @@ platform_toolsets:
 #       max_tool_rounds: 5      # tool loop limit (0 = disable)
 #       expose_client_tools: false # advertise extended sampling.tools capability
 #       log_level: "info"       # audit verbosity
+#
+# MCP events (experimental, webhook delivery) — opt-in per server. Adds the
+# list_event_types / subscribe_event / unsubscribe_event tools; needs
+# platforms.webhook.extra.public_url and a running gateway:
+#   feeds:
+#     url: https://feeds.example.com/mcp
+#     events: true
 
 # =============================================================================
 # Text-to-Speech
@@ -1815,14 +1874,12 @@ stt:
 # Intermediate tool results stay out of the LLM's context window.
 code_execution:
   timeout: 300         # Max seconds per script before kill (default: 300 = 5 min)
-  max_tool_calls: 50   # Max RPC tool calls per execution (default: 50)
-  # Local execution uses a persistent session kernel: variables, imports, and
-  # loaded data survive across execute_code calls in one conversation, so
-  # multi-step data work stops re-loading its inputs every call. Pass
-  # reset=true on a call to discard state; a timed-out/interrupted cell kills
-  # the kernel (next call starts fresh). Remote terminal backends currently
-  # run per-call (remote kernel host is tracked follow-up work). Security
-  # scrubbing, tool whitelist, and output redaction are identical either way.
+  max_tool_calls: 50   # Max RPC tool calls per execution (default: 50; 0 = unlimited; negatives rejected)
+  # Session kernels are always on: one persistent kernel per (task, mode,
+  # interpreter, cwd, tool-set), so variables, imports, and loaded data survive
+  # across execute_code calls and multi-step data work stops re-loading its
+  # inputs. A timed-out/interrupted cell kills the kernel; pass reset=true to
+  # discard state deliberately.
   # kernel_idle_timeout: 1800   # Reap kernels idle longer than this (seconds)
   # max_session_kernels: 4      # Process-wide LRU cap on live kernels
 
@@ -1832,6 +1889,30 @@ code_execution:
 # The delegate_task tool spawns child agents with isolated context.
 # Supports single tasks and batch mode (default 3 parallel, configurable).
 delegation:
+  # backend: "default"                        # Strategy routing each delegate_task task: "default" = the keys below,
+                                              # else the parent's route. model_map / profile_routes come from the
+                                              # advanced-delegation plugin; a backend that is missing, disabled or
+                                              # unavailable fails closed (tool error naming it; /delegation default or
+                                              # `hermes config set delegation.backend default` restores the default).
+  # backends:                                 # Each plugin backend's own settings, keyed by its backend name.
+  #   model_map:                              # backend: model_map (advanced-delegation)
+  #     options:
+  #       - name: fast
+  #         description: "Cheap and quick; lookups, summaries, simple edits."
+  #         provider: "openrouter"
+  #         model: "google/gemini-3-flash-preview"
+  #       - name: deep
+  #         description: "Slow and careful; hard debugging and design work."
+  #         provider: "anthropic"
+  #         model: "claude-opus-5"
+  #         reasoning_effort: "high"
+  #         service_tier: "fast"              # optional: that task is refused when the route has no such tier
+  #         # fallback_providers: [...]         # optional; absent = delegation.fallback_providers, [] = none
+  #     default: fast                         # optional: option for tasks that set none
+  #   profile_routes:                         # backend: profile_routes (advanced-delegation). A listed
+  #     profiles:                             # profile's subagents use ITS credentials, pool, SOUL.md and terminal policy.
+  #       - name: coder
+  #         description: "Writes and refactors code; runs tests."
   max_iterations: 250                         # Max tool-calling turns per child (default: 250)
   # max_concurrent_children: 10               # Max parallel child agents per batch (default: 10, floor: 1, no ceiling).
                                               # WARNING: values above 10 multiply API cost linearly.
@@ -2195,6 +2276,11 @@ updates:
   # Disable passive CLI/banner update checks with `hermes config set updates.check false`.
   # Explicit `hermes update --check` and `hermes update` remain available.
   check: true
+  # Per-home maintenance controls; auto preserves existing update behavior.
+  # defer keeps required scope conversion but postpones catalog/install work.
+  left_core_migration: auto
+  # check-only verifies the complete database without snapshot recovery.
+  state_db_recovery: auto
   # Create a full HERMES_HOME zip before every `hermes update`.
   # Backups land in ~/.hermes/backups/ and can be restored with `hermes import`.
   # Off by default because large homes can add minutes to every update.

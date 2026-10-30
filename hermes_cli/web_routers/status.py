@@ -449,6 +449,20 @@ async def _component_health(gateway: dict[str, Any]) -> dict[str, Any]:
     return components
 
 
+def _read_fts_rebuild_status(home: Path):
+    """Keep SQLite open/read/close (including its shared lock) off the event loop."""
+    from hermes_state import SessionDB
+
+    path = home / "state.db"
+    if not path.exists():
+        return None
+    database = SessionDB(db_path=path, read_only=True)
+    try:
+        return database.fts_rebuild_status()
+    finally:
+        database.close()
+
+
 async def _advisory_pressure(status: dict[str, Any], home: Path) -> None:
     """Memory / disk pressure rollups + deferred FTS rebuild progress (coarse numbers/enums
     only; public payload). Deliberately NOT folded into components/overall: pressure is
@@ -464,19 +478,36 @@ async def _advisory_pressure(status: dict[str, Any], home: Path) -> None:
             status[key] = {"pressure": "unknown"}
 
     try:
-        from hermes_state import SessionDB as _SDB
-        from hermes_constants import get_hermes_home as _ghh
-        _db_path = _ghh() / "state.db"
-        if _db_path.exists():
-            _sdb = _SDB(db_path=_db_path, read_only=True)
-            try:
-                _rebuild = _sdb.fts_rebuild_status()
-            finally:
-                _sdb.close()
-            if _rebuild is not None:
-                status["fts_rebuild"] = _rebuild
+        rebuild = await run_in_threadpool(_read_fts_rebuild_status, home)
+        if rebuild is not None:
+            status["fts_rebuild"] = rebuild
     except Exception:
         pass
+
+
+def _status_local_reads() -> dict[str, Any]:
+    """The probe's synchronous local reads: the raw config.yaml stamp, the install method, the
+    auth store and (first call only) git provenance. Run on a worker thread: on the event loop that
+    also serves the session WebSocket they stalled every Desktop request behind the disk (#143561)."""
+    current_ver, latest_ver = check_config_version()
+    return {"version": get_version_info().base_version, "config_version": current_ver,
+            "latest_config_version": latest_ver,
+            "can_update_hermes": not _dashboard_local_update_managed_externally(),
+            "nous_session_valid": _nous_session_validity()}
+
+
+def _fts_rebuild_status() -> Optional[dict[str, Any]]:
+    """Deferred FTS rebuild progress of this home's state.db (read-only open), or None."""
+    from hermes_state import SessionDB as _SDB
+    from hermes_constants import get_hermes_home as _ghh
+    _db_path = _ghh() / "state.db"
+    if not _db_path.exists():
+        return None
+    _sdb = _SDB(db_path=_db_path, read_only=True)
+    try:
+        return _sdb.fts_rebuild_status()
+    finally:
+        _sdb.close()
 
 
 @router.get("/api/status")
@@ -498,7 +529,7 @@ async def get_status(profile: Optional[str] = None):
         status_scope.__enter__()
 
     try:
-        current_ver, latest_ver = check_config_version()
+        local = await run_in_threadpool(_status_local_reads)
         gateway = await _resolve_gateway_status(profile_dir, _GATEWAY_HEALTH_URL)
         gateway_running, gateway_state = gateway["gateway_running"], gateway["gateway_state"]
 
@@ -522,9 +553,9 @@ async def get_status(profile: Optional[str] = None):
         auth = _auth_gate_status()
 
         status = {
-            "version": get_version_info().base_version, "release_date": __release_date__,
-            "config_version": current_ver, "latest_config_version": latest_ver,
-            "can_update_hermes": not _dashboard_local_update_managed_externally(),
+            "version": local["version"], "release_date": __release_date__,
+            "config_version": local["config_version"], "latest_config_version": local["latest_config_version"],
+            "can_update_hermes": local["can_update_hermes"],
             "gateway_running": gateway_running, "gateway_state": gateway_state,
             "gateway_platforms": gateway["gateway_platforms"],
             "gateway_exit_reason": gateway["gateway_exit_reason"],
@@ -541,7 +572,7 @@ async def get_status(profile: Optional[str] = None):
             "gateway_drainable": derive_gateway_drainable(
                 gateway_running=gateway_running, gateway_state=gateway_state),
             "restart_drain_timeout": restart_drain_timeout, "active_sessions": active_sessions,
-            **auth, "nous_session_valid": _nous_session_validity()}
+            **auth, "nous_session_valid": local["nous_session_valid"]}
 
         # Stable per-install identity (first call may touch disk). Omitted (not null) when
         # unpersistable so older-client behavior and the no-identity fallback stay identical.
@@ -583,7 +614,7 @@ async def get_status(profile: Optional[str] = None):
 
 
 @router.get("/api/system/stats")
-async def get_system_stats():
+def get_system_stats():  # sync: FastAPI runs it on a worker (psutil.cpu_percent blocks 100 ms)
     """Host + process system stats for the System page (stdlib identity; psutil CPU/memory/
     disk/uptime when available). Non-sensitive: no env values, no paths beyond hermes home."""
     import platform as _platform

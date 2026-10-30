@@ -83,7 +83,7 @@ CONFIGURABLE_TOOLSETS = [
     ("memory",          "💾 Memory",                    "persistent memory across sessions"),
     ("context_engine",  "🧩 Context Engine",            "runtime tools from the active context engine"),
     ("session_search",  "🔎 Session Search",            "search past conversations"),
-    ("connections",     "🔌 Connections",               "remote connector tools and account authorization"),
+    ("inter_agent",     "🤝 Inter-Agent Messaging",    "persistent messaging between Hermes agents"),
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
@@ -236,6 +236,8 @@ _NOUS = {"requires_nous_auth": True}
 _OPENAI_VOICE_KEY = _key("VOICE_TOOLS_OPENAI_KEY", "OpenAI API key", "https://platform.openai.com/api-keys")
 _ELEVENLABS_KEY = _key("ELEVENLABS_API_KEY", "ElevenLabs API key", "https://elevenlabs.io/app/settings/api-keys")
 _DEEPINFRA_KEY = _key("DEEPINFRA_API_KEY", "DeepInfra API key", "https://deepinfra.com/dash/api_keys")
+_LANGFUSE_PUBLIC = ("HERMES_LANGFUSE_PUBLIC_KEY", "Langfuse public key (pk-lf-...)")
+_LANGFUSE_SECRET = ("HERMES_LANGFUSE_SECRET_KEY", "Langfuse secret key (sk-lf-...)")
 
 TOOL_CATEGORIES = {
     "tts": {
@@ -302,7 +304,7 @@ TOOL_CATEGORIES = {
         # picks the gateway at run time (tools/image_generation_managed.py).
         "providers": [
             _row("Nous Subscription", "subscription",
-                 "Managed image generation (FAL, Krea 2, Nous Portal models) billed to your subscription", **_NOUS,
+                 "Managed image generation (FAL, Krea 3 and Krea 2, Nous Portal models) billed to your subscription", **_NOUS,
                  managed_nous_feature="image_gen", override_env_vars=["FAL_KEY"], imagegen_backend="nous"),
         ],
     },
@@ -337,25 +339,18 @@ TOOL_CATEGORIES = {
         # Cloud provider rows (Browserbase, Browser Use, Firecrawl) come from plugins.browser.<vendor> via
         # _plugin_browser_providers(); only non-provider setup-flow rows live here. "Local Browser" MUST stay
         # first so a fresh install's Enter lands on the free local backend (index 0), never on the paid Nous row.
-        # Lightpanda is local too (cloud_provider: local, browser.engine: lightpanda — Browser Use mode spawns
-        # ``lightpanda serve``, built-in tools use ``agent-browser --engine lightpanda``; no Chromium).
-        # Camofox short-circuits the cloud dispatch via _is_camofox_mode().
+        # Lightpanda is local too (cloud_provider: local, browser.engine: lightpanda — browser_exec spawns
+        # ``lightpanda serve``; no Chromium).
         "providers": [
             _row("Local Browser", "★ recommended · free", "Headless Chromium, no API key needed", browser_provider="local",
-                 browser_engine="auto", post_setup="agent_browser"),
+                 browser_engine="auto", post_setup="chromium"),
             _row("Lightpanda", "free · local · no Chromium", "Zig headless browser spawned by Hermes, text-only (no screenshots)",
                  browser_provider="local", browser_engine="lightpanda", post_setup="lightpanda"),
-            # Cloud hook installs only the agent-browser CLI: Browser Use hosts its own Chromium, so the
-            # local-Chromium install and readiness gate must not apply (with "agent_browser" this row read
-            # "needs setup" forever on machines without a local Chromium build).
+            # Browser Use hosts its own Chromium, so the local-Chromium install and readiness gate must not
+            # apply (with "chromium" this row read "needs setup" forever on machines without a local build).
             _row("Nous Subscription (Browser Use cloud)", "subscription", "Managed Browser Use billed to your subscription",
                  browser_provider="browser-use", **_NOUS, managed_nous_feature="browser",
                  override_env_vars=["BROWSER_USE_API_KEY"], post_setup="browserbase"),
-            _row("Camofox", "free · local", "Anti-detection browser (Firefox/Camoufox)",
-                 [_key("CAMOFOX_URL", "Camofox server URL", "https://github.com/jo-inc/camofox-browser", default="http://localhost:9377")],
-                 browser_provider="camofox", post_setup="camofox"),
-            _row("Browser Use", "free · local · cloud", "New SOTA web harness (CLI 3.0)", browser_backend="browser-use",
-                 post_setup="browser_use_cli"),
         ],
     },
     "computer_use": {
@@ -368,6 +363,16 @@ TOOL_CATEGORIES = {
             _row("cua-driver (background)", "★ recommended · free · local",
                  "Background computer-use via cua-driver — does NOT steal your cursor or focus. Works with any model.",
                  computer_use_backend="cua", post_setup="cua_driver"),
+        ],
+    },
+    "langfuse": {
+        "name": "Langfuse Observability", "icon": "📊",
+        "providers": [
+            _row("Langfuse Cloud", tag="Hosted Langfuse (cloud.langfuse.com)", post_setup="langfuse",
+                 env_vars=[_key(*_LANGFUSE_PUBLIC, "https://cloud.langfuse.com"), _key(*_LANGFUSE_SECRET, "https://cloud.langfuse.com")]),
+            _row("Langfuse Self-Hosted", tag="Self-hosted Langfuse instance", post_setup="langfuse",
+                 env_vars=[_key(*_LANGFUSE_PUBLIC), _key(*_LANGFUSE_SECRET),
+                           _key("HERMES_LANGFUSE_BASE_URL", "Langfuse server URL (e.g. http://localhost:3000)", default="http://localhost:3000")]),
         ],
     },
 }
@@ -622,7 +627,11 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
     else:
         enabled_toolsets = _composite_toolsets(toolset_names, platform, explicitly_configured)
 
-    _recover_platform_native_toolsets(enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys)
+    # A saved platform list is an explicit allowlist. Native recovery belongs only
+    # to implicit composite resolution; otherwise [] or [file] gains capabilities
+    # the user did not select.
+    if not explicitly_configured:
+        _recover_platform_native_toolsets(enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys)
     if plugin_ts_keys:
         enabled_toolsets |= _enabled_plugin_toolsets(config, platform, toolset_names, plugin_ts_keys)
 
@@ -632,7 +641,14 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
         enabled_toolsets.add("context_engine")
 
     # Explicit non-configurable entries (custom toolsets, MCP server names) pass through.
-    explicit_passthrough = {ts for ts in toolset_names if ts not in explicit_known_keys and ts not in platform_default_keys}
+    # ``all``/``*`` are composite expansion sentinels, never toolset names to
+    # forward after the composite has already been expanded above.
+    explicit_passthrough = {
+        ts for ts in toolset_names
+        if ts not in explicit_known_keys
+        and ts not in platform_default_keys
+        and ts not in {"all", "*"}
+    }
     enabled_toolsets |= _merge_mcp_servers(config, toolset_names, explicit_passthrough, include_default_mcp_servers)
 
     # Legacy profile opt-in is a fallback only. A saved platform list (even
@@ -670,6 +686,47 @@ def _prune_toolsets_stripped_by_disabled(enabled_toolsets: set[str], disabled_na
     surviving: set[str] = set().union(*resolved.values())
     _apply_toolset_selection(surviving, disabled_names, quiet_mode=True, disable=True)
     return {name for name, tools in resolved.items() if not tools or tools & surviving}
+
+
+def _disabled_entry_tools(name: str) -> set[str]:
+    """Tools one ``agent.disabled_toolsets`` entry removes at runtime: legacy names (``terminal_tools``)
+    and the bundle/posture non-core delta included, which ``resolve_toolset`` alone gets wrong."""
+    from model_tools import _LEGACY_TOOLSET_MAP, _apply_toolset_selection
+    from toolsets import resolve_toolset
+
+    universe = set(resolve_toolset(name)) | set(_LEGACY_TOOLSET_MAP.get(name, ()))
+    kept = set(universe)
+    _apply_toolset_selection(kept, [name], quiet_mode=True, disable=True)
+    return universe - kept
+
+
+def toolsets_partially_stripped(config: dict, enabled_toolsets: set[str]) -> dict[str, tuple[list[str], list[str], str]]:
+    """``{toolset: (stripped tools, disabled entries stripping them, repair hint)}`` for enabled toolsets
+    that ``agent.disabled_toolsets`` cuts down without removing (``web`` minus ``web_search`` via ``search``,
+    #134593). ``_prune_toolsets_stripped_by_disabled`` keeps such a toolset "enabled" because some of its
+    tools survive, so inspection surfaces need this to say which ones did not. The hint offers
+    ``hermes tools enable`` only when that save clears every entry (``_save_platform_tools`` coverage)."""
+    from agent.skill_utils import parse_config_string_list
+    from model_tools import _apply_toolset_selection
+    from toolsets import resolve_toolset, validate_toolset
+
+    disabled = [n.strip() for n in parse_config_string_list((config.get("agent") or {}).get("disabled_toolsets")) if n.strip()]
+    report: dict[str, tuple[list[str], list[str]]] = {}
+    for name in sorted(enabled_toolsets):
+        tools = set(resolve_toolset(name)) if validate_toolset(name) else set()
+        by: dict[str, set[str]] = {}
+        for entry in disabled:
+            kept = set(tools)
+            _apply_toolset_selection(kept, [entry], quiet_mode=True, disable=True)
+            if tools - kept:
+                by[entry] = tools - kept
+        if by:
+            entries = sorted(by)
+            clears = all(_disabled_entry_tools(e) <= tools for e in entries)
+            hint = (f"run `hermes tools enable {name}` to restore" if clears
+                    else f"remove {', '.join(entries)} from agent.disabled_toolsets to restore")
+            report[name] = (sorted(set().union(*by.values())), entries, hint)
+    return report
 
 
 def _recover_platform_native_toolsets(enabled_toolsets: set[str], platform: str, *, skip: set[str]) -> None:
@@ -769,7 +826,19 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: set[
     if isinstance(agent_cfg, dict) and agent_cfg.get("disabled_toolsets") and newly_enabled:
         from agent.skill_utils import parse_config_string_list
         parsed_disabled = parse_config_string_list(agent_cfg["disabled_toolsets"])
-        remaining = [ts for ts in parsed_disabled if ts not in newly_enabled]
+        # Also clear entries whose tools are entirely covered by a newly enabled toolset: Blank Slate writes
+        # subset toolsets like `search` (only web_search), which have no checklist row, so enabling `web`
+        # left web_search stripped with no supported way to undo it (#134593).
+        from toolsets import resolve_toolset
+        covered: set[str] = set()
+        for ts in newly_enabled:
+            covered.update(resolve_toolset(ts))  # [] for unknown names; never raises
+
+        def _covered(ts: str) -> bool:
+            tools = _disabled_entry_tools(ts)
+            return bool(tools) and tools <= covered
+
+        remaining = [ts for ts in parsed_disabled if ts not in newly_enabled and not _covered(ts)]
         if remaining != parsed_disabled:
             agent_cfg["disabled_toolsets"] = remaining
     save_config(config)
@@ -931,9 +1000,10 @@ def _shared_metrics_state(config: dict) -> tuple[bool, bool]:
 
 
 def _shared_metrics_menu_label(config: dict) -> str:
-    """Menu row for shared metrics, showing both consent states."""
+    """Menu row for shared metrics. Collect-only is an answer the offer no longer has; a profile
+    that chose it earlier keeps it, and the row names it rather than reading "off" while it collects."""
     enabled, send = _shared_metrics_state(config)
-    state = "off" if not enabled else ("collecting + sending to Nous" if send else "collecting locally")
+    state = "off" if not enabled else ("sending to Nous" if send else "collecting locally")
     return f"Configure shared metrics  ({state})"
 
 
@@ -978,7 +1048,7 @@ def _platform_menu_label(config: dict, pkey: str) -> str:
 def _print_tools_summary(config: dict, enabled_platforms: list[str]) -> None:
     """``hermes tools --summary``: enabled toolsets per platform, non-interactive."""
     total = len(_get_effective_configurable_toolsets())
-    print(color("☤ Tool Summary", Colors.CYAN, Colors.BOLD))
+    print(color("⚕ Tool Summary", Colors.CYAN, Colors.BOLD))
     print()
     for pkey, enabled in _platform_toolset_summary(config, enabled_platforms).items():
         print(color(f"  {PLATFORMS[pkey]['label']}", Colors.BOLD) + color(f"  ({len(enabled)}/{total})", Colors.DIM))
@@ -1085,7 +1155,7 @@ def tools_command(args=None, first_install: bool = False, config: dict | None = 
     if getattr(args, "summary", False):
         _print_tools_summary(config, enabled_platforms)
         return
-    print(color("☤ Hermes Tool Configuration", Colors.CYAN, Colors.BOLD))
+    print(color("⚕ Hermes Tool Configuration", Colors.CYAN, Colors.BOLD))
     print(color("  Enable or disable tools per platform.", Colors.DIM))
     print(color("  Tools that need API keys will be configured when enabled.", Colors.DIM))
     print(color("  Guide: https://hermes-agent.nousresearch.com/docs/user-guide/features/tools", Colors.DIM))

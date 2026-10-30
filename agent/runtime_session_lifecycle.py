@@ -68,14 +68,23 @@ class RuntimeSessionLifecycleMixin:
 
     # The turn prologue's row-addressed backfills (agent/turn_context.py) for a user row another
     # writer materialized first (in-place preflight compaction, an early flush, a submit-time row).
-    def set_message_api_content(self, session_id, row_id, content, api_content):
+    def set_message_api_content(self, session_id, row_id, content, api_content, display_metadata=None):
         self._session(session_id)
-        return self._apply('session.message_api_content',
-                           {'row_id': row_id, 'content': content, 'api_content': api_content})['value']
+        payload = {'row_id': row_id, 'content': content, 'api_content': api_content}
+        if display_metadata is not None:
+            payload['display_metadata'] = display_metadata
+        return self._apply('session.message_api_content', payload)['value']
 
     def set_user_message_content(self, session_id, row_id, content):
         self._session(session_id)
         return self._apply('session.user_content', {'row_id': row_id, 'content': content})['value']
+
+    def compare_and_set_user_message_projection(self, session_id, row_id, *, expected_content,
+                                                expected_api_content, content, api_content):
+        self._session(session_id)
+        return self._apply('session.user_projection', {
+            'row_id': row_id, 'expected_content': expected_content, 'expected_api_content': expected_api_content,
+            'content': content, 'api_content': api_content})['value']
 
     def end_session(self, session_id, end_reason):
         self._session(session_id)

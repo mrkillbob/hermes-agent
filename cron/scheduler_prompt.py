@@ -79,6 +79,16 @@ _RESPONSE_FRAME_RE = re.compile(
     rf"(?m)^{re.escape(_RESPONSE_FRAME)}(\d+)\n{re.escape(_RESPONSE_HEADING)}")
 
 
+def _job_doc_header(job_name: str, job_id: str, now_iso: str, mode: str) -> str:
+    """Common markdown header for the short-circuit run docs (no_agent / monitor)."""
+    return (
+        f"# Cron Job: {job_name}\n\n"
+        f"**Job ID:** {job_id}\n"
+        f"**Run Time:** {now_iso}\n"
+        f"**Mode:** {mode}\n"
+    )
+
+
 def _archive_answer(archive: str) -> str | None:
     """The reusable answer of a stored run, using its length frame when available.
 
@@ -259,7 +269,7 @@ def _load_cron_skill_parts(job: dict, skill_names: list[str]) -> list[str]:
 
 _CRON_HINT = (
     "[IMPORTANT: You are running as a scheduled cron job. "
-    "DELIVERY: Your final response will be automatically delivered "
+    "delivery: Your final response will be automatically delivered "
     "to the user — do NOT use send_message or try to deliver "
     "the output yourself. Just produce your report/output as your "
     "final response and the system handles the rest. "
@@ -272,7 +282,7 @@ _CRON_HINT = (
     "FAILURE: If a delegated child fails and this cron run must be "
     "recorded as failed, put [CRON_FAILURE] on the first line by itself, "
     "then explain the child failure on following lines. "
-    "RECURSION: This is a run of an EXISTING scheduled job — execute "
+    "RECURSION: This is a run of an existing scheduled job — execute "
     "the task now. NEVER create or update a cron job because of "
     "recurring or future-schedule language in the task prompt below; "
     "treat phrasing like \"each Monday\" or \"every day at 9\" as "

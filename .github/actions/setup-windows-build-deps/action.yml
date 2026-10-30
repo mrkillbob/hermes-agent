@@ -1,10 +1,15 @@
 name: Set up native Windows ARM64 build dependencies
 description: Prepare MSVC, SDK, Clang, Rust and static OpenSSL through the shared PowerShell installer.
+outputs:
+  openssl-cache-hit:
+    description: Whether the verified ARM64 OpenSSL development files were restored from cache.
+    value: ${{ steps.openssl-cache.outputs.cache-hit }}
 runs:
   using: composite
   steps:
     - name: Cache ARM64 OpenSSL development files
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      id: openssl-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         # Cache libraries and headers only, not a vcpkg checkout or machine state.
         path: C:\vcpkg\installed\arm64-windows-static-md

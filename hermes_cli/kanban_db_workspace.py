@@ -7,23 +7,28 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
+import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import time
 import unicodedata
 from pathlib import Path
-from typing import Optional
-from typing import TYPE_CHECKING
-import contextlib
+from typing import TYPE_CHECKING, Optional
 
 from hermes_cli.worktree_ops import release_lsp_clients
+from hermes_cli.kanban_workspace_deferred import _defer_shared_workspace_cleanup, resume_shared_cleanup
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
 _REMOVABLE_KINDS = ("scratch", "worktree")
+_ARCHIVED_BOARD_MARKER_READ_CHUNK = 8 * 1024
 
 
 def _path_key(path: Path | str | None) -> str:
@@ -86,17 +91,20 @@ def _is_terminal_task(conn: sqlite3.Connection, task_id: str) -> bool:
     return conn.execute(_TERMINAL_TASK_SQL, (task_id,)).fetchone() is not None
 
 
-_OTHER_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
-    "WHERE id != ? AND workspace_path IS NOT NULL "
-    f"AND status NOT IN {_TERMINAL_STATUSES_SQL}"
+# A terminal borrower still owns handoff storage while a direct child is live.
+_WORKSPACE_CONSUMER_SQL = (
+    f"(t.status NOT IN {_TERMINAL_STATUSES_SQL} OR EXISTS ("
+    "SELECT 1 FROM task_links l JOIN tasks child ON child.id=l.child_id "
+    f"WHERE l.parent_id=t.id AND child.status NOT IN {_TERMINAL_STATUSES_SQL}))"
 )
-# Sibling boards mint their own ids, so the id being cleaned up here can
-# name a different live task there. Do not exclude it.
+_OTHER_LIVE_PATHS_SQL = (
+    "SELECT t.workspace_path FROM tasks t "
+    "WHERE t.id != ? AND t.workspace_path IS NOT NULL AND " + _WORKSPACE_CONSUMER_SQL
+)
+# Sibling boards mint their own ids; do not exclude an unrelated task there.
 _ANY_LIVE_PATHS_SQL = (
-    "SELECT workspace_path FROM tasks "
-    "WHERE workspace_path IS NOT NULL "
-    f"AND status NOT IN {_TERMINAL_STATUSES_SQL}"
+    "SELECT t.workspace_path FROM tasks t "
+    "WHERE t.workspace_path IS NOT NULL AND " + _WORKSPACE_CONSUMER_SQL
 )
 
 
@@ -136,7 +144,9 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
     root = _kb.boards_root()
     if root.is_dir():
         for child in root.iterdir():
-            if child.is_dir():
+            if child.name == "_archived":
+                candidates.extend(_archived_board_db_files(child))
+            elif child.is_dir():
                 candidates.append(child / "kanban.db")
     found: list[Path] = []
     seen: set[Path] = set()
@@ -151,6 +161,84 @@ def _sibling_board_db_files(conn: sqlite3.Connection) -> list[Path]:
         seen.add(resolved)
         found.append(resolved)
     return found
+
+
+def _archived_board_db_files(archive_root: Path) -> list[Path]:
+    """Return concrete archived board DBs; the container itself is not a board.
+
+    Archiving moves a complete board directory beneath ``_archived``. Require
+    its durable board marker and database rather than silently dropping legacy
+    or malformed history from the workspace-ownership scan.
+    """
+    if not archive_root.is_dir():
+        raise OSError("archived boards container is not a directory")
+    container_db = archive_root / "kanban.db"
+    if container_db.exists() and container_db.stat().st_size:
+        raise OSError("unexpected database at archived boards container root")
+
+    archived: list[Path] = []
+    for directory in archive_root.iterdir():
+        if not directory.is_dir():
+            continue
+        marker = directory / "board.json"
+        database = directory / "kanban.db"
+        if not marker.is_file() or not database.is_file():
+            from hermes_cli.kanban_archive_quarantine import admits_opaque_store
+
+            if admits_opaque_store(directory):
+                archived.append(database)
+                continue
+            raise OSError("archived board entry is missing its marker or database")
+        try:
+            slug = _kb._require_slug(_read_archived_board_marker(marker))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
+            raise OSError("archived board marker is invalid") from None
+        if not slug or not re.fullmatch(rf"{re.escape(slug)}-\d{{10}}(?:-[1-9]\d*)?", directory.name):
+            raise OSError("archived board marker does not match its directory")
+        archived.append(database)
+    return archived
+
+
+def _read_archived_board_marker(path: Path) -> object:
+    """Read only the board identity while streaming and checking marker stability."""
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("archived board marker is not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+    except OSError:
+        raise OSError("archived board marker cannot be safely opened") from None
+    try:
+        opened = os.fstat(fd)
+        if not _same_archive_marker_file(before, opened):
+            raise OSError("archived board marker changed while opening")
+        raw_file = os.fdopen(fd, "rb", closefd=False)
+        text_file = io.TextIOWrapper(raw_file, encoding="utf-8-sig")
+        try:
+            from hermes_cli.kanban_archive_marker import read_board_slug
+
+            slug = read_board_slug(text_file, chunk_size=_ARCHIVED_BOARD_MARKER_READ_CHUNK)
+        finally:
+            text_file.detach()
+            raw_file.close()
+        after = os.fstat(fd)
+        path_after = path.lstat()
+        if (not _same_archive_marker_file(opened, after)
+                or not _same_archive_marker_file(opened, path_after)):
+            raise OSError("archived board marker changed while reading")
+        return slug
+    finally:
+        os.close(fd)
+
+
+def _same_archive_marker_file(left, right) -> bool:
+    return (
+        stat.S_ISREG(left.st_mode)
+        and stat.S_ISREG(right.st_mode)
+        and (left.st_dev, left.st_ino, left.st_size, left.st_mtime_ns, left.st_ctime_ns)
+        == (right.st_dev, right.st_ino, right.st_size, right.st_mtime_ns, right.st_ctime_ns)
+    )
 
 
 def _other_board_uses_path(db_file: Path, task_id: str, key: str) -> bool:
@@ -205,35 +293,6 @@ def _workspace_in_use_by_other(
             )
             return "unknown"
     return None
-
-
-def _defer_shared_workspace_cleanup(
-    conn: sqlite3.Connection, task_id: str, path: Path | str
-) -> bool:
-    """Skip removal and record why, when *path* may still be used by a live task."""
-    reason = _workspace_in_use_by_other(conn, task_id, path)
-    if reason is None:
-        return False
-    if reason == "shared":
-        _kb._log.warning(
-            "Deferring workspace cleanup for task %s: %s is still used by "
-            "another non-terminal task",
-            task_id, path,
-        )
-    else:
-        _kb._log.warning(
-            "Deferring workspace cleanup for task %s: cannot tell whether "
-            "another task still uses %s",
-            task_id, path,
-        )
-    try:
-        _kb._append_event(
-            conn, task_id, "workspace_cleanup_deferred_shared",
-            {"path": str(path), "reason": reason},
-        )
-    except sqlite3.Error:
-        pass
-    return True
 
 
 def _defer_shared_worktree_cleanup(
@@ -421,10 +480,12 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         _try_cleanup_parent_workspaces(conn, task_id)
     except Exception:
         pass  # best-effort — never block completion
+    finally:
+        resume_shared_cleanup(conn, task_id)
 
 
 def _cleanup_worktree_workspace(
-    task_id: str, path: str, branch_name: Optional[str] = None
+    task_id: str, path: str, branch_name: Optional[str] = None, *, identity_check=None
 ) -> None:
     """Remove a finished task's linked git worktree when it holds no work.
     Mirrors the CLI startup pruner (``cli._prune_stale_worktrees``): removal
@@ -476,11 +537,15 @@ def _cleanup_worktree_workspace(
         # No --force: git's own dirty guard re-verifies at removal time, so if
         # the tree became dirty since our check (TOCTOU) removal fails safe.
         release_lsp_clients(str(worktree_path))
+        if identity_check is not None and not identity_check():
+            return
         result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
         if result.returncode != 0:
             # Windows can retain a directory handle briefly after cwd changes.
             # Retry once without --force; Git still enforces its dirty guard.
             time.sleep(0.1)
+            if identity_check is not None and not identity_check():
+                return
             result = _git(repo_root, "worktree", "remove", str(wp), timeout=60)
         if result.returncode != 0:
             _kb._log.warning(
@@ -686,28 +751,112 @@ def _repo_root_for_worktree_target(path: Path) -> Optional[Path]:
         current = current.parent
 
 
+def _require_worktree_root(path: Path) -> None:
+    root = _git_toplevel(path)
+    if root is None or _path_key(root) != _path_key(path.resolve(strict=False)):
+        raise ValueError(f"worktree path must be a checkout root: {path}")
+
+
 def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> None:
     """Materialize ``target`` as a linked git worktree under ``repo_root``."""
+    from hermes_cli.worktree_base import resolve_worktree_base
+    from hermes_cli.worktree_environment import bootstrap_worktree_environments
+
+    def _assigned_base_is_recorded() -> bool:
+        ref_key = f"branch.{branch_name}.hermes-kanban-base-ref"
+        sha_key = f"branch.{branch_name}.hermes-kanban-base-sha"
+        existing_ref = _git(repo_root, "config", "--get", ref_key, timeout=20)
+        existing_sha = _git(repo_root, "config", "--get", sha_key, timeout=20)
+        return existing_ref.returncode == 0 and existing_sha.returncode == 0
+
+    def _record_assigned_base(base_ref: str) -> None:
+        ref_key = f"branch.{branch_name}.hermes-kanban-base-ref"
+        sha_key = f"branch.{branch_name}.hermes-kanban-base-sha"
+        resolved = _git(
+            repo_root, "rev-parse", "--verify", "--end-of-options",
+            base_ref + "^{commit}", timeout=20,
+        )
+        if resolved.returncode != 0:
+            raise RuntimeError(f"assigned Kanban worktree base does not resolve: {base_ref}")
+        base_sha = resolved.stdout.strip()
+        for key, value in ((ref_key, base_ref), (sha_key, base_sha)):
+            configured = _git(repo_root, "config", key, value, timeout=20)
+            if configured.returncode != 0:
+                raise RuntimeError(
+                    f"could not record assigned Kanban worktree base for {branch_name}"
+                )
+
+    def _assignment_base() -> str:
+        base_ref = _configured_worktree_base(repo_root)
+        if base_ref is None:
+            base_ref, _ = resolve_worktree_base(
+                str(repo_root), prefer_current_upstream=False,
+            )
+        return base_ref
+
     target = target.expanduser()
     repo_common = _git_common_dir(repo_root)
-    if target.exists() and repo_common is not None and _path_key(_git_common_dir(target)) == _path_key(repo_common):
+    if (target.exists() and repo_common is not None
+            and _path_key(_git_common_dir(target)) == _path_key(repo_common)):
+        _require_worktree_root(target)
+        if not _is_linked_worktree_checkout(target) or _git_current_branch(target) != branch_name:
+            raise ValueError(
+                f"worktree target is occupied by another assignment: {target} "
+                f"(expected branch {branch_name})"
+            )
+        if not _assigned_base_is_recorded():
+            _record_assigned_base(_assignment_base())
+        bootstrap_worktree_environments(
+            repo_root, target, require_python=False, allow_venv_fallback=False,
+        )
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     if _git_branch_exists(repo_root, branch_name):
         args = ["worktree", "add", str(target), branch_name]
+        base_ref = None if _assigned_base_is_recorded() else _assignment_base()
     else:
-        args = ["worktree", "add", "-b", branch_name, str(target), "HEAD"]
+        base_ref = _assignment_base()
+        args = ["worktree", "add", "--no-track", "-b", branch_name, str(target), base_ref]
     result = _git(repo_root, *args, timeout=60)
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(
             f"git worktree add failed for {target} on branch {branch_name}: {stderr}"
         )
+    if base_ref is not None:
+        _record_assigned_base(base_ref)
+    bootstrap_worktree_environments(repo_root, target)
+
+
+def _configured_worktree_base(repo_root: Path) -> Optional[str]:
+    """A shared-board source choice must survive the worker's profile boundary."""
+    from hermes_cli.config import read_user_config_raw
+
+    config_path = _kb.kanban_home() / "config.yaml"
+    from hermes_cli.config_backend import config_exists
+    if not config_exists(config_path):
+        return None
+    config = read_user_config_raw(config_path) or {}
+    refs = (config.get("kanban") or {}).get("worktree_base_refs", {})
+    if not isinstance(refs, dict):
+        raise ValueError("kanban.worktree_base_refs must map repository paths to Git refs")
+    ref = refs.get(str(repo_root.resolve()))
+    if ref is None:
+        return None
+    if not isinstance(ref, str) or not ref.strip() or ref.startswith("-"):
+        raise ValueError("configured Kanban worktree base must be a Git ref")
+    from hermes_cli.kanban_worktree_policy import refresh_configured_remote_base
+    refresh_configured_remote_base(repo_root, ref, _git)
+    result = _git(repo_root, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}", timeout=20)
+    if result.returncode:
+        raise ValueError(f"configured Kanban worktree base does not resolve: {ref}")
+    return result.stdout.strip()
 
 
 def _anchored_worktree(repo_root: Path, task_id: str, branch_name: str) -> tuple[Path, str]:
     """Materialize the canonical ``<repo>/.worktrees/<task-id>`` worktree."""
-    target = repo_root / ".worktrees" / task_id
+    from hermes_cli.kanban_worktree_policy import project_worktree_path
+    target = project_worktree_path(repo_root, task_id)
     _ensure_git_worktree(repo_root, target, branch_name)
     return target, branch_name
 
@@ -752,23 +901,38 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     requested_resolved = requested.resolve(strict=False)
 
     if requested.exists() and _is_linked_worktree_checkout(requested):
+        _require_worktree_root(requested)
         actual_branch = _git_current_branch(requested)
         if actual_branch == branch_name:
+            from hermes_cli.worktree_environment import bootstrap_worktree_environments
+
+            bootstrap_root = _repo_root_for_worktree_target(requested.parent)
+            common = _git_common_dir(requested)
+            if bootstrap_root is not None and common is not None and _git_common_dir(bootstrap_root) == common:
+                bootstrap_worktree_environments(
+                    bootstrap_root, requested, require_python=False, allow_venv_fallback=False,
+                )
             return requested_resolved, actual_branch
         # The requested path is an existing checkout of a DIFFERENT task's
         # branch (decompose children inherit the root's workspace_path
         # verbatim, so siblings all point here). Reusing it would run this task
         # on the other task's branch — silent cross-task provenance corruption,
         # unsafe under concurrency — so fall back to our own worktree.
-        fallback_root = _repo_root_for_worktree_target(requested.parent)
+        common = _git_common_dir(requested)
+        fallback_root = (
+            common.parent if common is not None and common.name == ".git"
+            else _repo_root_for_worktree_target(requested.parent)
+        )
         if fallback_root is not None:
-            fallback = fallback_root / ".worktrees" / task.id
+            from hermes_cli.kanban_worktree_policy import project_worktree_path
+
+            fallback = project_worktree_path(fallback_root, task.id)
             if _path_key(fallback.resolve(strict=False)) != _path_key(requested_resolved):
                 _ensure_git_worktree(fallback_root, fallback, branch_name)
                 return fallback.resolve(strict=False), branch_name
-        # No repo to anchor a fallback on (or the occupied path IS this task's
-        # own canonical worktree): keep the legacy reuse rather than fail dispatch.
-        return requested_resolved, actual_branch or branch_name
+        # No distinct target can be established. Preserve the occupied checkout
+        # rather than dispatch this assignment on another task's branch.
+        raise ValueError(f"worktree target is occupied by another assignment: {requested}")
 
     repo_root = _git_toplevel(requested)
     if repo_root is not None and _path_key(requested_resolved) == _path_key(repo_root):
@@ -780,8 +944,73 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
             f"task {task.id} worktree path {task.workspace_path!r} is not inside a git repo "
             "and does not point at a git repo root"
         )
+    if not requested.exists() and requested.parent.name == ".worktrees" and requested.name == task.id:
+        from hermes_cli.kanban_worktree_policy import project_worktree_path
+        requested = project_worktree_path(repo_root, task.id)
     _ensure_git_worktree(repo_root, requested, branch_name)
     return requested, branch_name
+
+
+def resolve_dispatch_workspace(task: Task, *, board: Optional[str] = None) -> tuple[Path, Optional[str]]:
+    """Resolve a worker workspace together with its actual assignment branch."""
+    if task.workspace_kind == "worktree":
+        return _resolve_worktree_workspace(task, board=board)
+    return resolve_workspace(task, board=board), None
+
+
+class DispatchWorkspaceOwnershipChanged(RuntimeError):
+    """The prepared attempt no longer owns the task; dispatch must stop."""
+
+
+def persist_dispatch_workspace(
+    conn: sqlite3.Connection, task: Task, workspace: Path, resolved_branch_name: Optional[str],
+) -> None:
+    """Persist one assignment atomically only while the captured attempt owns it."""
+    branch = resolved_branch_name or (task.branch_name or "").strip() or f"wt/{task.id}"
+    prior_base = ((task.workspace_base_ref or "").strip(),
+                  (task.workspace_base_sha or "").strip().lower()) if task.workspace_kind == "worktree" else None
+    evidence = _read_worktree_base(workspace, branch, prior_base=prior_base) if prior_base is not None else None
+    with _kb.write_txn(conn):
+        row = conn.execute(
+            "SELECT workspace_base_ref, workspace_base_sha FROM tasks WHERE id=? "
+            "AND status='running' AND current_run_id=? AND claim_lock=?",
+            (task.id, task.current_run_id, task.claim_lock),
+        ).fetchone()
+        if row is None:
+            raise DispatchWorkspaceOwnershipChanged("prepared Kanban attempt no longer owns the task")
+        if prior_base is not None and any(prior_base):
+            current_base = ((row["workspace_base_ref"] or "").strip(),
+                            (row["workspace_base_sha"] or "").strip().lower())
+            if current_base != prior_base:
+                raise DispatchWorkspaceOwnershipChanged("assignment base changed during preparation")
+        values = {"workspace_path": str(workspace)}
+        if evidence is not None:
+            ref, sha, valid = evidence
+            assigned = _validate_worktree_base(task.id, row, ref, sha, valid)
+            values["branch_name"] = branch
+            if not assigned:
+                values.update(workspace_base_ref=ref, workspace_base_sha=sha)
+        conn.execute(
+            "UPDATE tasks SET " + ", ".join(f"{key}=?" for key in values) + " WHERE id=?",
+            (*values.values(), task.id),
+        )
+
+
+def defer_dispatch_workspace(conn, task, owner_id: str, workspace: str) -> bool:
+    """Record collision deferral without releasing replacement ownership."""
+    with _kb.write_txn(conn):
+        retry_status = _kb._retry_status_for_run(conn, task.id, task.current_run_id)
+        updated = conn.execute(
+            "UPDATE tasks SET status=?, claim_lock=NULL, claim_expires=NULL, worker_pid=NULL "
+            "WHERE id=? AND status='running' AND current_run_id=? AND claim_lock=?",
+            (retry_status, task.id, task.current_run_id, task.claim_lock),
+        )
+        if updated.rowcount != 1:
+            return False
+        payload = {"owner": owner_id, "workspace": workspace}
+        run_id = _kb._end_run(conn, task.id, outcome="workspace_deferred", metadata=payload)
+        _kb._append_event(conn, task.id, "workspace_deferred", payload, run_id=run_id)
+    return True
 
 
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
@@ -836,6 +1065,84 @@ def set_workspace_path(conn: sqlite3.Connection, task_id: str, path: Path | str)
 
 def set_branch_name(conn: sqlite3.Connection, task_id: str, branch_name: str) -> None:
     _set_task_column(conn, task_id, "branch_name", str(branch_name))
+
+
+def _retained_worktree_base(workspace, branch_name, prior_base, base_ref, base_sha):
+    """Bridge absent Git keys only with the task's previously recorded assignment pair."""
+    ref, sha = prior_base or (None, None)
+    ref, sha = (ref or "").strip(), (sha or "").strip().lower()
+    if not ref or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise RuntimeError("prior Kanban assignment base is unavailable")
+    if any(result.returncode not in (0, 1)
+           or (result.returncode == 1 and (result.stdout.strip() or result.stderr.strip()))
+           for result in (base_ref, base_sha)):
+        raise RuntimeError("Git base evidence is unavailable")
+    if ((base_ref.returncode == 0 and base_ref.stdout.strip() != ref)
+            or (base_sha.returncode == 0 and base_sha.stdout.strip().lower() != sha)):
+        raise RuntimeError("Git base evidence conflicts with the retained assignment")
+    _require_worktree_root(workspace)
+    if not _is_linked_worktree_checkout(workspace) or _git_current_branch(workspace) != branch_name:
+        raise RuntimeError("retained assignment requires its matching linked worktree")
+    return ref, sha
+
+
+def _read_worktree_base(
+    workspace: Path, branch_name: str, *, prior_base=None,
+) -> tuple[str, str, bool]:
+    prefix = f"branch.{branch_name}.hermes-kanban-base"
+    base_ref = _git(workspace, "config", "--get", prefix + "-ref", timeout=20)
+    base_sha = _git(workspace, "config", "--get", prefix + "-sha", timeout=20)
+    retained = base_ref.returncode != 0 or base_sha.returncode != 0
+    if retained:
+        ref, sha = _retained_worktree_base(workspace, branch_name, prior_base, base_ref, base_sha)
+    else:
+        ref, sha = base_ref.stdout.strip(), base_sha.stdout.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise RuntimeError(f"assigned Kanban worktree base is unavailable for {branch_name}")
+    resolved = _git(
+        workspace, "rev-parse", "--verify", "--end-of-options", sha + "^{commit}", timeout=20,
+    )
+    valid = resolved.returncode == 0 and resolved.stdout.strip().lower() == sha
+    if retained:
+        if not valid:
+            raise RuntimeError("retained assignment commit is unavailable")
+        # Verify the known prior SHA; never derive an assignment base from history.
+        ancestry = _git(workspace, "merge-base", "--is-ancestor", sha, "HEAD", timeout=20)
+        if ancestry.returncode != 0:
+            raise RuntimeError("worktree history does not retain the recorded assignment base")
+    return ref, sha, valid
+
+
+def _validate_worktree_base(task_id, row, ref, sha, valid) -> bool:
+    assigned_ref = (row["workspace_base_ref"] or "").strip()
+    assigned_sha = (row["workspace_base_sha"] or "").strip().lower()
+    if assigned_ref or assigned_sha:
+        if assigned_ref == ref and assigned_sha == sha:
+            return True
+        raise RuntimeError(f"assigned Kanban worktree base cannot change for task {task_id}")
+    if not ref or not valid:
+        raise RuntimeError("assigned Kanban worktree base is not a commit")
+    return False
+
+
+def set_worktree_base(
+    conn: sqlite3.Connection, task_id: str, workspace: Path, branch_name: str,
+) -> None:
+    """Copy allocator-owned base evidence into the control-plane task row."""
+    ref, sha, valid = _read_worktree_base(workspace, branch_name)
+    with _kb.write_txn(conn):
+        row = conn.execute(
+            "SELECT workspace_base_ref, workspace_base_sha FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Kanban task {task_id} does not exist")
+        if _validate_worktree_base(task_id, row, ref, sha, valid):
+            return
+        conn.execute(
+            "UPDATE tasks SET workspace_base_ref = ?, workspace_base_sha = ? WHERE id = ?",
+            (ref, sha, task_id),
+        )
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this

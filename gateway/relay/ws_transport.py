@@ -296,7 +296,7 @@ async def _await_bounded(aw: Awaitable[Any]) -> None:
     try:
         await asyncio.wait_for(aw, timeout=_TEARDOWN_AWAIT_TIMEOUT_S)
     except (TimeoutError, asyncio.CancelledError, Exception):
-        pass
+        logger.debug("teardown await ended early", exc_info=True)
 
 
 # Ceiling on the brokered-suspend redial hold. Must outlast the client's own

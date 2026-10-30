@@ -68,6 +68,7 @@ def run_completion(request: dict) -> dict:
     # tree's pre-install as its own process (this parent stays stdlib-only); a
     # tree without it, or any failure, just leaves the in-lock repair to report.
     if sys.platform.startswith("linux"):
+        # health: allow HX006 -- interactive pre-lock host-package repair must not kill sudo/dpkg mid-install; pm.libatomic intentionally waits for its own host installer
         subprocess.run([sys.executable, "-I", "-S", "-B", "-c",
                         "import sys; sys.path.insert(0, sys.argv[1]); "
                         "from pm.libatomic import install_before_lock; install_before_lock()", str(root)],
@@ -351,7 +352,10 @@ def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
             ensure_tools_for_sync()
             # An update never fails because of a plugin: misfits are disabled and reported.
             pm.sync_venv(explicit=True, project_root=root, evict_incompatible_plugins=True)
-            collect_superseded_generations(root)
+            # First-hop adapters can carry an explicit cleanup hold across interpreters.
+            # Keep normal unpaused cleanup unless the durable request says exactly True.
+            if request.get("defer_collection") is not True:
+                collect_superseded_generations(root)
         finally:
             request["pm_receipt"] = receipt.last_for_update(update_id)
             _write_json(request_path, request)
@@ -531,6 +535,8 @@ def _finish(request: dict, result_path: Path) -> int:
                                         f"Windows gateway recovery failed: {exc}")
         update_receipt.finalize_pending_update_receipt(code, reason)
         terminal_receipt = _read_terminal_receipt(request)
+        if terminal_receipt and terminal_receipt.get("outcome") == "partial":
+            code = code or 1  # config migration closed the run without completing delivery
         if terminal_receipt and terminal_receipt.get("outcome") == "success":
             code = 0  # an interrupt that landed after verification closed the run (review regression 3)
         if code and request["gateway_mode"]:

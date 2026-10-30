@@ -158,8 +158,9 @@ _DEFAULT_WEBHOOK_PATH = "/feishu/webhook"
 _FEISHU_DEDUP_TTL_SECONDS = 24 * 60 * 60          # 24 hours — matches openclaw
 _FEISHU_SENDER_NAME_TTL_SECONDS = 10 * 60          # 10 minutes sender-name cache
 _FEISHU_WEBHOOK_MAX_BODY_BYTES = 1 * 1024 * 1024   # 1 MB body limit
-_FEISHU_WEBHOOK_RATE_WINDOW_SECONDS = 60            # sliding window for rate limiter
-_FEISHU_WEBHOOK_RATE_LIMIT_MAX = 120               # max requests per window per IP — matches openclaw
+_FEISHU_WEBHOOK_RATE_WINDOW_SECONDS = 60            # fixed window for rate limiters
+_FEISHU_WEBHOOK_RATE_LIMIT_MAX = 120               # max authenticated event deliveries per window per IP
+_FEISHU_WEBHOOK_INGRESS_RATE_LIMIT_MAX = 120        # max rejected requests per window per IP
 _FEISHU_WEBHOOK_RATE_MAX_KEYS = 4096               # max tracked keys (prevents unbounded growth)
 _FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS = 30          # max seconds to read request body
 _FEISHU_WEBHOOK_ANOMALY_THRESHOLD = 25             # consecutive error responses before WARNING log
@@ -1321,6 +1322,8 @@ class FeishuAdapter(BasePlatformAdapter):
         self._dedup_persist_lock = asyncio.Lock()
         self._sender_name_cache: dict[str, tuple[str, float]] = {}  # sender_id → (name, expire_at)
         self._webhook_rate_counts: dict[str, tuple[int, float]] = {}  # rate_key → (count, window_start)
+        self._webhook_ingress_rate_counts: dict[str, tuple[int, float]] = {}
+        self._webhook_active_reads: dict[str, int] = {}
         self._webhook_anomaly_counts: dict[str, tuple[int, str, float]] = {}  # ip → (count, last_status, first_seen)
         self._card_action_tokens: dict[str, float] = {}  # token → first_seen_time
         # Inbound events that arrived before the loop was ready; one drainer thread replays them.
@@ -1865,10 +1868,15 @@ class FeishuAdapter(BasePlatformAdapter):
 
     async def send_voice(
         self, chat_id: str, audio_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None, **kwargs,
+        metadata: Optional[dict[str, Any]] = None, is_voice: Optional[bool] = None, **kwargs,
     ) -> SendResult:
         """Native voice message (Feishu only accepts Opus): non-opus audio is transcoded via ffmpeg
-        first; without ffmpeg the original file goes out as a file attachment."""
+        first; without ffmpeg the original file goes out as a file attachment. ``is_voice=False``
+        (an audio MEDIA file without [[audio_as_voice]]: music, a sound effect) is a file
+        attachment under its real name, never transcoded into a voice note."""
+        if is_voice is False:
+            return await self.send_document(
+                chat_id, audio_path, caption=caption, reply_to=reply_to, metadata=metadata)
         transcoded_path: Optional[str] = None
         ext = Path(audio_path).suffix.lower()
         if ext not in _FEISHU_OPUS_UPLOAD_EXTENSIONS:
@@ -2226,15 +2234,33 @@ class FeishuAdapter(BasePlatformAdapter):
         future.add_done_callback(self._log_background_failure)
         return True
 
-    def _is_interactive_operator_authorized(self, open_id: str) -> bool:
-        """Return whether this card-action operator may answer gated prompts."""
+    def _is_interactive_operator_authorized(
+        self, open_id: str, *, session_key: str = "", user_id: str = "", union_id: str = "", chat_id: str = "",
+    ) -> bool:
+        """Authorize card actions within the fork group policy and inbound DM gate."""
         normalized = str(open_id or "").strip()
         if not normalized:
             return False
         allowed_ids = set(self._admins) | set(self._allowed_group_users)
-        if not allowed_ids:
+        operator_ids = {normalized, str(user_id or "").strip(), str(union_id or "").strip()} - {""}
+        if "*" in allowed_ids or bool(operator_ids & allowed_ids):
             return True
-        return "*" in allowed_ids or normalized in allowed_ids
+        if allowed_ids:
+            return False
+        parts = str(session_key or "").split(":", 4)
+        is_feishu_session = len(parts) >= 4 and parts[0] == "agent" and parts[2] == "feishu"
+        chat_type = parts[3] if is_feishu_session else ""
+        if chat_type in {"group", "thread", "forum"}:
+            rule = self._group_rules.get(str(chat_id or ""))
+            return bool(rule and rule.policy == "allowlist" and
+                        ("*" in rule.allowlist or bool(operator_ids & set(rule.allowlist))))
+        if chat_type != "dm":
+            return False
+        principal = str(user_id or "").strip() or normalized
+        verdict = self._is_sender_authorized(principal, "dm", str(chat_id or "") or None)
+        # A card click changes approval state; an absent or failed gateway check is unknown,
+        # not an authorization for that side effect.
+        return verdict is True
 
     @staticmethod
     def _card_response(card_data: Optional[dict[str, Any]] = None) -> Any:
@@ -2251,25 +2277,30 @@ class FeishuAdapter(BasePlatformAdapter):
 
     def _validate_card_action(
         self, *, event: Any, state: dict[str, str], label: str, ident: Any,
-    ) -> Optional[tuple[str, str, str]]:
+    ) -> Optional[tuple[str, str, str, str, str]]:
         """Shared operator/chat checks for approval + update-prompt clicks.
 
-        Returns ``(open_id, callback_chat_id, user_name)`` or None (already logged).
+        Returns ``(open_id, callback_chat_id, user_name, user_id, union_id)`` or None (already logged).
         """
         operator = getattr(event, "operator", None)
         open_id = str(getattr(operator, "open_id", "") or "")
-        if not self._is_interactive_operator_authorized(open_id):
-            logger.warning("[Feishu] Unauthorized %s click by %s", label, open_id or "<unknown>")
-            return None
+        user_id = str(getattr(operator, "user_id", "") or "")
+        union_id = str(getattr(operator, "union_id", "") or "")
         callback_chat_id = str(getattr(getattr(event, "context", None), "open_chat_id", "") or "")
         expected_chat_id = str(state.get("chat_id", "") or "")
+        if not self._is_interactive_operator_authorized(
+            open_id, session_key=state.get("session_key", ""), user_id=user_id, union_id=union_id,
+            chat_id=expected_chat_id or callback_chat_id,
+        ):
+            logger.warning("[Feishu] Unauthorized %s click by %s", label, open_id or "<unknown>")
+            return None
         if callback_chat_id and expected_chat_id and callback_chat_id != expected_chat_id:
             logger.warning(
                 "[Feishu] %s callback chat mismatch for %s (expected=%s, got=%s)",
                 label.capitalize(), ident, expected_chat_id, callback_chat_id,
             )
             return None
-        return open_id, callback_chat_id, self._get_cached_sender_name(open_id) or open_id
+        return open_id, callback_chat_id, self._get_cached_sender_name(open_id) or open_id, user_id, union_id
 
     def _handle_approval_card_action(self, *, event: Any, action_value: dict[str, Any], loop: Any) -> Any:
         """Schedule approval resolution and build the synchronous callback response."""
@@ -2285,9 +2316,10 @@ class FeishuAdapter(BasePlatformAdapter):
         checked = self._validate_card_action(event=event, state=state, label="approval", ident=approval_id)
         if checked is None:
             return self._card_response()
-        open_id, chat_id, user_name = checked
+        open_id, chat_id, user_name, user_id, union_id = checked
         coro = self._resolve_approval(
             approval_id=approval_id, choice=choice, user_name=user_name, open_id=open_id, chat_id=chat_id,
+            user_id=user_id, union_id=union_id,
         )
         if not self._submit_on_loop(loop, coro):
             return self._card_response()
@@ -2310,25 +2342,30 @@ class FeishuAdapter(BasePlatformAdapter):
         checked = self._validate_card_action(event=event, state=state, label="update prompt", ident=prompt_id)
         if checked is None:
             return self._card_response()
-        open_id, chat_id, user_name = checked
-        coro = self._resolve_update_prompt(prompt_id, answer, user_name, open_id=open_id, chat_id=chat_id)
+        open_id, chat_id, user_name, user_id, union_id = checked
+        coro = self._resolve_update_prompt(
+            prompt_id, answer, user_name, open_id=open_id, chat_id=chat_id, user_id=user_id, union_id=union_id,
+        )
         if not self._submit_on_loop(loop, coro):
             return self._card_response()
         return self._card_response(self._build_resolved_update_prompt_card(answer=answer, user_name=user_name))
 
     def _pop_validated_prompt_state(
         self, *, states: dict[int, dict[str, str]], ident: Any, label: str, open_id: str, chat_id: str,
-        unauthorized_fmt: str, operator_repr: str,
+        unauthorized_fmt: str, operator_repr: str, user_id: str = "", union_id: str = "",
     ) -> Optional[dict[str, str]]:
         """Re-validate on the loop thread (state may have changed since the callback) and pop."""
         state = states.get(ident)
         if not state:
             logger.debug("[Feishu] %s %s already resolved or unknown", label, ident)
             return None
-        if not self._is_interactive_operator_authorized(open_id):
+        expected_chat_id = str(state.get("chat_id", "") or "")
+        if not self._is_interactive_operator_authorized(
+            open_id, session_key=state.get("session_key", ""), user_id=user_id, union_id=union_id,
+            chat_id=expected_chat_id or chat_id,
+        ):
             logger.warning(unauthorized_fmt, operator_repr, ident)
             return None
-        expected_chat_id = str(state.get("chat_id", "") or "")
         if expected_chat_id and chat_id and expected_chat_id != chat_id:
             logger.warning("[Feishu] %s %s chat mismatch (expected=%s, got=%s)", label, ident, expected_chat_id, chat_id)
             return None
@@ -2339,12 +2376,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
     async def _resolve_approval(
         self, approval_id: Any, choice: str, user_name: str, *, open_id: str = "", chat_id: str = "",
+        user_id: str = "", union_id: str = "",
     ) -> None:
         """Pop approval state and unblock the waiting agent thread."""
         state = self._pop_validated_prompt_state(
             states=self._approval_state, ident=approval_id, label="Approval", open_id=open_id, chat_id=chat_id,
             unauthorized_fmt="[Feishu] Unauthorized approval click by %s for approval %s",
-            operator_repr=open_id or "<unknown>",
+            operator_repr=open_id or "<unknown>", user_id=user_id, union_id=union_id,
         )
         if not state:
             return
@@ -2373,12 +2411,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
     async def _resolve_update_prompt(
         self, prompt_id: Any, answer: str, user_name: str, *, open_id: str = "", chat_id: str = "",
+        user_id: str = "", union_id: str = "",
     ) -> None:
         """Persist an update prompt answer for the detached update process."""
         state = self._pop_validated_prompt_state(
             states=self._update_prompt_state, ident=prompt_id, label="Update prompt", open_id=open_id,
             chat_id=chat_id, unauthorized_fmt="[Feishu] Unauthorized update prompt click by %s for prompt %s",
-            operator_repr=open_id,
+            operator_repr=open_id, user_id=user_id, union_id=union_id,
         )
         if not state:
             return
@@ -2588,18 +2627,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
     # --- Webhook server and security ---
     def _record_webhook_anomaly(self, remote_ip: str, status: str) -> None:
-        """Count consecutive error responses per IP (openclaw createWebhookAnomalyTracker); WARN every threshold."""
-        now = time.time()
-        count, _last_status, first_seen = self._webhook_anomaly_counts.get(remote_ip) or (0, "", now)
-        if count and now - first_seen >= _FEISHU_WEBHOOK_ANOMALY_TTL_SECONDS:
-            count, first_seen = 0, now  # TTL expired — start fresh
-        count += 1
-        if count % _FEISHU_WEBHOOK_ANOMALY_THRESHOLD == 0:
-            logger.warning(
-                "[Feishu] Webhook anomaly: %d consecutive error responses (%s) from %s over the last %.0fs",
-                count, status, remote_ip, now - first_seen,
-            )
-        self._webhook_anomaly_counts[remote_ip] = (count, status, first_seen)
+        from .webhook_limits import record_webhook_anomaly
+
+        record_webhook_anomaly(
+            self._webhook_anomaly_counts, remote_ip, status, now=time.time(),
+            ttl_seconds=_FEISHU_WEBHOOK_ANOMALY_TTL_SECONDS, threshold=_FEISHU_WEBHOOK_ANOMALY_THRESHOLD,
+            max_keys=_FEISHU_WEBHOOK_RATE_MAX_KEYS, log=logger,
+        )
 
     def _clear_webhook_anomaly(self, remote_ip: str) -> None:
         """Reset the anomaly counter for remote_ip after a successful request."""
@@ -2793,88 +2827,22 @@ class FeishuAdapter(BasePlatformAdapter):
     def _webhook_reject(self, remote_ip: str, anomaly: str, status: int, text: Optional[str] = None,
                         json_msg: Optional[str] = None) -> Any:
         """Record an anomaly for ``remote_ip`` and build the matching aiohttp error response."""
+        # Count only rejected work; an exhausted failure table must never deny
+        # an authenticated callback before it reaches its own delivery quota.
+        rate_key = f"{self._app_id}:{self._webhook_path}:{remote_ip}"
+        if status != 429 and not self._check_webhook_rate_limit(rate_key, pre_auth=True):
+            anomaly, status, text, json_msg = "429-rejected", 429, "Too Many Requests", None
+        if status in {401, 408, 413, 415, 429} or anomaly == "400-encrypted":
+            logger.warning("[Feishu] Webhook rejected: %s from %s", anomaly, remote_ip)
         self._record_webhook_anomaly(remote_ip, anomaly)
         if json_msg is not None:
             return web.json_response({"code": status, "msg": json_msg}, status=status)
         return web.Response(status=status, text=text)
 
     async def _handle_webhook_request(self, request: Any) -> Any:
-        remote_ip = (getattr(request, "remote", None) or "unknown")
+        from .webhook_ingress import handle_webhook_request
 
-        # Rate-limit key is app_id:path:remote_ip (matches openclaw key structure).
-        if not self._check_webhook_rate_limit(f"{self._app_id}:{self._webhook_path}:{remote_ip}"):
-            logger.warning("[Feishu] Webhook rate limit exceeded for %s", remote_ip)
-            return self._webhook_reject(remote_ip, "429", 429, "Too Many Requests")
-
-        headers = getattr(request, "headers", {}) or {}
-        content_type = str(headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
-        if content_type and content_type != "application/json":  # Feishu always sends JSON
-            logger.warning("[Feishu] Webhook rejected: unexpected Content-Type %r from %s", content_type, remote_ip)
-            return self._webhook_reject(remote_ip, "415", 415, "Unsupported Media Type")
-
-        content_length = getattr(request, "content_length", None)
-        if content_length is not None and content_length > _FEISHU_WEBHOOK_MAX_BODY_BYTES:
-            logger.warning("[Feishu] Webhook body too large (%d bytes) from %s", content_length, remote_ip)
-            return self._webhook_reject(remote_ip, "413", 413, "Request body too large")
-
-        try:
-            body_bytes: bytes = await asyncio.wait_for(
-                _read_limited_feishu_webhook_body(request, _FEISHU_WEBHOOK_MAX_BODY_BYTES),
-                timeout=_FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS,
-            )
-        except ValueError:
-            logger.warning("[Feishu] Webhook body exceeds limit from %s", remote_ip)
-            return self._webhook_reject(remote_ip, "413", 413, "Request body too large")
-        except TimeoutError:
-            logger.warning("[Feishu] Webhook body read timed out after %ds from %s", _FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS, remote_ip)
-            return self._webhook_reject(remote_ip, "408", 408, "Request Timeout")
-        except Exception:
-            return self._webhook_reject(remote_ip, "400", 400, json_msg="failed to read body")
-
-        try:
-            payload = json.loads(body_bytes.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return self._webhook_reject(remote_ip, "400", 400, json_msg="invalid json")
-
-        # Verification token: second defence layer beyond the signature (matches openclaw).
-        if self._verification_token:
-            header = payload.get("header") or {}
-            incoming_token = str(header.get("token") or payload.get("token") or "")
-            # compare_digest as bytes — it raises TypeError on non-ASCII str, and the token is remote input.
-            if not incoming_token or not hmac.compare_digest(
-                incoming_token.encode(), self._verification_token.encode()
-            ):
-                logger.warning("[Feishu] Webhook rejected: invalid verification token from %s", remote_ip)
-                return self._webhook_reject(remote_ip, "401-token", 401, "Invalid verification token")
-
-        # Token is validated above BEFORE reflecting the challenge, so an unauthenticated
-        # remote can't prove endpoint control by getting its own challenge echoed back.
-        if payload.get("type") == "url_verification":
-            return web.json_response({"challenge": payload.get("challenge", "")})
-
-        if self._encrypt_key and not self._is_webhook_signature_valid(request.headers, body_bytes):
-            logger.warning("[Feishu] Webhook rejected: invalid signature from %s", remote_ip)
-            return self._webhook_reject(remote_ip, "401-sig", 401, "Invalid signature")
-
-        if payload.get("encrypt"):
-            logger.error("[Feishu] Encrypted webhook payloads are not supported by Hermes webhook mode")
-            return self._webhook_reject(
-                remote_ip, "400-encrypted", 400, json_msg="encrypted webhook payloads are not supported",
-            )
-
-        self._clear_webhook_anomaly(remote_ip)
-
-        event_type = str((payload.get("header") or {}).get("event_type") or "")
-        data = self._namespace_from_mapping(payload)
-        if event_type in {"im.message.reaction.created_v1", "im.message.reaction.deleted_v1"}:
-            self._on_reaction_event(event_type, data)
-        else:
-            handler = self._WEBHOOK_EVENT_HANDLERS.get(event_type)
-            if handler is None:
-                logger.debug("[Feishu] Ignoring webhook event type: %s", event_type or "unknown")
-            else:
-                getattr(self, handler)(data)
-        return web.json_response({"code": 0, "msg": "ok"})
+        return await handle_webhook_request(self, request)
 
     # Webhook event_type -> handler method name (reaction events are routed separately).
     _WEBHOOK_EVENT_HANDLERS = {
@@ -2904,31 +2872,16 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Signature verification raised an exception", exc_info=True)
             return False
 
-    def _check_webhook_rate_limit(self, rate_key: str) -> bool:
-        """Sliding-window limiter keyed by "{app_id}:{path}:{remote_ip}" (openclaw); table capped, fail-closed."""
-        now = time.time()
-        entry = self._webhook_rate_counts.get(rate_key)
-        if entry is not None:
-            count, window_start = entry
-            if now - window_start < _FEISHU_WEBHOOK_RATE_WINDOW_SECONDS:
-                if count >= _FEISHU_WEBHOOK_RATE_LIMIT_MAX:
-                    return False
-                self._webhook_rate_counts[rate_key] = (count + 1, window_start)
-                return True
-        # New window or new key — prune stale entries when at capacity.
-        if len(self._webhook_rate_counts) >= _FEISHU_WEBHOOK_RATE_MAX_KEYS:
-            for k in [k for k, (_, ws) in self._webhook_rate_counts.items() if now - ws >= _FEISHU_WEBHOOK_RATE_WINDOW_SECONDS]:
-                del self._webhook_rate_counts[k]
-            # Still full → deny untracked keys (fail closed): the table only fills this far under
-            # abuse, and letting untracked requests through would bypass the limiter entirely.
-            if rate_key not in self._webhook_rate_counts and len(self._webhook_rate_counts) >= _FEISHU_WEBHOOK_RATE_MAX_KEYS:
-                logger.warning(
-                    "[Feishu] Webhook rate-limit table at capacity (%d keys) — denying untracked key",
-                    _FEISHU_WEBHOOK_RATE_MAX_KEYS,
-                )
-                return False
-        self._webhook_rate_counts[rate_key] = (1, now)
-        return True
+    def _check_webhook_rate_limit(self, rate_key: str, *, pre_auth: bool = False) -> bool:
+        """Independent rejected-request/delivery tables with bounded fixed-window semantics."""
+        from .webhook_limits import admit_webhook_request
+
+        counts = self._webhook_ingress_rate_counts if pre_auth else self._webhook_rate_counts
+        limit = _FEISHU_WEBHOOK_INGRESS_RATE_LIMIT_MAX if pre_auth else _FEISHU_WEBHOOK_RATE_LIMIT_MAX
+        return admit_webhook_request(
+            counts, rate_key, now=time.time(), window_seconds=_FEISHU_WEBHOOK_RATE_WINDOW_SECONDS,
+            max_requests=limit, max_keys=_FEISHU_WEBHOOK_RATE_MAX_KEYS, log=logger,
+        )
 
     # --- Text batching ---
     @staticmethod
@@ -4057,9 +4010,10 @@ class FeishuAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _resolve_outbound_file_routing(*, file_path: str, requested_message_type: str) -> tuple[str, str]:
-        # requested_message_type is accepted for call-site symmetry; routing is by extension only.
+        # Opus only becomes an ``audio`` message (Lark's in-app voice recording) when the caller asked
+        # for one (send_voice with voice intent); a document/plain-audio send of an .ogg stays a file.
         ext = Path(file_path).suffix.lower()
-        if ext in _FEISHU_OPUS_UPLOAD_EXTENSIONS:
+        if ext in _FEISHU_OPUS_UPLOAD_EXTENSIONS and requested_message_type == "audio":
             return "opus", "audio"
         if ext in _FEISHU_MEDIA_UPLOAD_EXTENSIONS:
             return "mp4", "media"

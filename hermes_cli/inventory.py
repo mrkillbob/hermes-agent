@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from threading import Lock, Thread, current_thread
 from typing import Any, Optional
 from datetime import UTC
+
+logger = logging.getLogger(__name__)
 
 _pricing_prewarm_lock = Lock()
 _pricing_prewarm_threads: dict[tuple[str, tuple[tuple[str, str], ...]], Thread] = {}
@@ -271,7 +275,9 @@ def _apply_limits(rows: list[dict]) -> None:
     pooled = {slug for slug, entries in read_credential_pool().items() if entries}
     for row in rows:
         slug = str(row.get("slug") or "")
-        if slug not in pooled or row.get("is_user_defined"):
+        # Window plans say their limits in plan_usage (gauges + limit line); a credential cooldown chip
+        # beside them would show a second, unrelated reset time.
+        if slug not in pooled or row.get("is_user_defined") or row.get("plan_usage"):
             continue
         try:
             state = load_pool(slug).limit_state(row.get("models") or [])
@@ -346,8 +352,8 @@ def _apply_usage(rows: list[dict]) -> None:
             if windows and not snapshot_is_stale(snapshot):
                 row["usage"] = {"windows": windows}
             continue
-        if supports_usage:
-            wanted.append(slug)
+        # Pooled rows refresh only through explicit read-only account requests. The legacy
+        # provider resolver may select or rotate a credential this picker does not own.
         accounts = _pool_usage_accounts(slug, _wire_windows, _account_resets_at, entry_requests)
         if accounts is not None:
             row["usage"] = {"accounts": accounts}
@@ -401,7 +407,8 @@ def _pool_usage_accounts(slug: str, wire_windows, account_resets_at,
         host = _pool_entry_host(slug, entry)
         dedupe_key = (slug, host, identity_id)
         is_dead = entry.last_status == STATUS_DEAD
-        snapshot = (cached_account_usage(slug, identity_id=identity_id)
+        route_base_url = _pool_entry_route_base_url(slug, entry)
+        snapshot = (cached_account_usage(slug, identity_id=identity_id, base_url=route_base_url)
                     if supports_usage and not is_dead else None)
         stale = snapshot_is_stale(snapshot)
         windows = wire_windows(snapshot) if not stale else []
@@ -426,6 +433,13 @@ def _pool_usage_accounts(slug: str, wire_windows, account_resets_at,
             "id": identity_id, "label": str(entry.label or ""), "windows": windows,
             "state": state, "resets_at": account_resets_at(snapshot, live_cooldown),
         }
+        # Display dedupe must not skip a live credential after a dead sibling. The
+        # refresh worker separately throttles these requests by account identity.
+        if supports_usage and not is_dead:
+            entry_requests.append({
+                "provider": slug, "identity_id": identity_id,
+                "base_url": route_base_url, "api_key": entry.runtime_api_key,
+            })
         if dedupe_key in seen:
             # Same account under a second credential: keep the row that says more (state rank
             # limited > ready > unknown > unavailable), but never duplicate the account.
@@ -437,11 +451,6 @@ def _pool_usage_accounts(slug: str, wire_windows, account_resets_at,
             continue
         seen[dedupe_key] = account_row
         accounts.append(account_row)
-        if supports_usage and not is_dead:
-            entry_requests.append({
-                "provider": slug, "identity_id": identity_id,
-                "base_url": _pool_entry_route_base_url(slug, entry), "api_key": entry.runtime_api_key,
-            })
     return accounts or None
 
 
@@ -601,6 +610,7 @@ def _apply_featured(rows: list[dict], *, metadata_config: dict | None = None) ->
     try:
         from agent.models_dev import get_model_info
     except Exception:
+        logger.debug("Featured model metadata unavailable", exc_info=True)
         get_model_info = None  # type: ignore[assignment]
 
     # "Is this row an aggregator?" is answered canonically by is_routing_aggregator() — the same
@@ -610,6 +620,7 @@ def _apply_featured(rows: list[dict], *, metadata_config: dict | None = None) ->
     try:
         from hermes_cli.providers import is_routing_aggregator
     except Exception:
+        logger.debug("Featured model routing predicate unavailable", exc_info=True)
         is_routing_aggregator = None  # type: ignore[assignment]
 
     for row in rows:
@@ -769,7 +780,7 @@ def _anthropic_oauth_credentials_present() -> bool:
 
 def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list[dict]:
     """Keep only rows backed by explicit user configuration — ``list_authenticated_providers`` also
-    discovers ambient credentials (e.g. GitHub CLI -> Copilot) Desktop chat pickers must not show."""
+    discovers ambient credentials (e.g. another CLI's login token) Desktop chat pickers must not show."""
     from hermes_cli.auth import is_provider_explicitly_configured
 
     current_slug = str(ctx.current_provider or "").strip().lower()
@@ -786,7 +797,7 @@ def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list
             # wrote an enabled preset into RAW config (the DEFAULT_CONFIG preset must not show MoA).
             return _raw_config_has_enabled_moa_preset()
         return (
-            # Anthropic OAuth (device flow / Claude Code) and external-process CLIs (copilot-acp) are
+            # Anthropic OAuth (device flow / Claude Code) and external-process CLIs (ACP agents) are
             # deliberate sign-ins that leave no trace in config/env; keep the rows discovery accepted.
             (slug == "anthropic" and _anthropic_oauth_credentials_present())
             or _external_process_signed_in(slug)
@@ -862,6 +873,43 @@ def _reorder_canonical(rows: list[dict]) -> list[dict]:
     return canon + extras
 
 
+def _attach_nous_plan_usage(row: dict, *, warm: bool):
+    """Stamp ``plan_usage`` from the portal snapshot (window plans only) and return the PickerUsage (or
+    None). A cache-only open reads the last snapshot at any age: the 60s account cache has usually lapsed
+    by the time someone opens the composer menu. Accounts without a window plan get nothing."""
+    try:
+        from hermes_cli.model_picker_usage import nous_picker_usage
+        usage = nous_picker_usage(warm=warm, any_age=not warm)
+    except Exception:
+        logging.getLogger(__name__).debug("Nous plan usage unavailable", exc_info=True)
+        return None
+    if usage is not None:
+        row["plan_usage"] = usage.to_payload()
+        # Main's subscription-usage chip (`usage.windows`): the same gauge for a window
+        # plan, so it warns near a limit in the existing slot. Once an allowance is full the picker's limit
+        # line says it (with what happens next), so the chip would only repeat it; paused plans say so in
+        # the plan line.
+        if not usage.paused_reason and not row.get("usage") and not any(g.left_fraction <= 0.0 for g in usage.gauges):
+            windows = [_plan_usage_window(g) for g in usage.gauges if g.resets_at_ms]
+            if windows:
+                row["usage"] = {"windows": windows}
+    return usage
+
+
+def _plan_usage_window(g) -> dict:
+    """One window-plan allowance in main's ``ProviderUsageWindow`` shape. The label is Hermes's row title
+    (``Today``), like the other providers' English window labels."""
+    from datetime import datetime
+    from agent.usage_gauges import WindowGauge, gauge_title
+    return {
+        "label": gauge_title(WindowGauge(g.label, g.scope, g.title or g.label, 0)),
+        "used_percent": round(g.used_fraction * 100.0, 2),
+        "resets_at": datetime.fromtimestamp(g.resets_at_ms / 1000, UTC).isoformat(),
+        "scope": "account" if g.scope == "all" else "model",
+    }
+
+
+# health: allow CC -- usage-window plans: one branch attaches plan usage to the Nous row (built in _attach_nous_plan_usage); over target on main
 def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cached_only: bool = False) -> None:
     """Set ``row["pricing"] = {model_id: {input, output, cache | None, free}}``; for Nous also
     ``free_tier`` (account is free-tier) and ``unavailable_models`` (paid models a free user can't pick).
@@ -897,6 +945,7 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
         except Exception:
             raw_pricing = {}
         cached_nous_tier: Optional[bool] = None
+        plan_usage = _attach_nous_plan_usage(row, warm=not cached_only) if slug == "nous" else None
         if slug == "nous" and cached_only:
             cached_nous_tier = get_cached_nous_free_tier()
             if cached_nous_tier is None:
@@ -956,6 +1005,14 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
             except Exception:  # tier detection failed — fail open (no gating)
                 row["free_tier"] = False
                 row["unavailable_models"] = []
+            if plan_usage is not None:
+                from hermes_cli.model_picker_usage import usage_levels
+                # The gateway's per-plan word per model (free / low / medium / top_tier).
+                row["usage_levels"] = usage_levels(list(models), raw_pricing)
+                # Top-tier marks from the gateway (it decides, not the client).
+                row["plan_usage"] = plan_usage.with_pricing({m: raw_pricing.get(m) for m in models}).to_payload()
+                # Window plans: the picker shows the usage word, not per-token prices.
+                row.pop("pricing", None)
 
 
 def _local_runtime_row(ctx: ConfigContext) -> dict | None:

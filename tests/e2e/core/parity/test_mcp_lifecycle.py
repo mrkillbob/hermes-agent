@@ -21,6 +21,7 @@ entrypoint; this file covers the two failure transitions.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import sys
@@ -130,11 +131,30 @@ def test_mcp_server_death_mid_call_fails_fast_and_the_turn_completes(tmp_path: P
 
 
 def test_host_crash_still_reaps_the_mcp_server_and_its_grandchild(tmp_path: Path) -> None:
-    with tui_host(tmp_path) as (ph, _srv, proc, _cap, rpc):
+    with tui_host(tmp_path) as (ph, srv, proc, cap, rpc):
         text = _turn(rpc, timeout=READY_TIMEOUT)
+        obs = collect_observation("tui_gateway", ph, srv, text)
+        diagnostic = {
+            "pid_log_exists": ph.pid_log.exists(),
+            "pid_log": ph.pid_log.read_text() if ph.pid_log.exists() else "",
+            "tool_names": sorted(obs.tool_names),
+            "tool_results": obs.tool_results,
+            "main_requests": obs.main_requests,
+            "host_stderr": cap.stderr,
+            "mcp_stderr": (ph.hermes_home / "logs" / "mcp-stderr.log").read_text()
+                if (ph.hermes_home / "logs" / "mcp-stderr.log").exists() else "",
+            "events": rpc.events,
+            "cached_status": rpc.call("mcp.servers.status", {}, timeout=10),
+        }
+        output = os.environ.get("HERMES_E2E_ARTIFACTS")
+        if output:
+            target = Path(output)
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "host-crash-precondition.json").write_text(json.dumps(diagnostic, indent=2))
         assert FINAL_ANSWER in text, text[-300:]
+        assert any(ph.canaries["mcp"] in result for result in obs.tool_results), json.dumps(diagnostic)
         pids = mcp_pids(ph)
-        assert pids.get("server") and pids.get("grandchild"), f"MCP tree never spawned: {pids}"
+        assert pids.get("server") and pids.get("grandchild"), json.dumps(diagnostic)
 
         os.kill(proc.pid, signal.SIGKILL)  # no atexit, no shutdown hook, no finally
         proc.wait(timeout=30)

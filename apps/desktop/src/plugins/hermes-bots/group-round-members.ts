@@ -217,19 +217,7 @@ export async function runGroupRoundMember(
       return null
     }
 
-    const reason = groupFailureReason(error)
-    recordGroupActivity(context.group, {
-      kind: 'failed',
-      member: groupMemberKey(member),
-      thread,
-      ...(reason
-        ? {
-            reason
-          }
-        : {})
-    })
-    noteBotAttention(groupMemberKey(member), reason || error?.message || error)
-    context.failedMembers?.add(groupMemberKey(member))
+    recordGroupMemberFailure(context, member, thread, error)
     reply = null // a failed turn is a pass, never a room error
   }
 
@@ -300,6 +288,38 @@ export async function runGroupRoundMember(
     })
   }
 
+  return publishGroupMemberReply(context, member, memberKey, thread, reply, markKey)
+}
+
+function recordGroupMemberFailure(
+  context: GroupRoundMemberContext,
+  member: GroupMember,
+  thread: string,
+  error: any
+) {
+  const reason = groupFailureReason(error)
+  recordGroupActivity(context.group, {
+    kind: 'failed',
+    member: groupMemberKey(member),
+    thread,
+    ...(reason
+      ? {
+          reason
+        }
+      : {})
+  })
+  noteBotAttention(groupMemberKey(member), reason || error?.message || error)
+  context.failedMembers?.add(groupMemberKey(member))
+}
+
+function publishGroupMemberReply(
+  context: GroupRoundMemberContext,
+  member: GroupMember,
+  memberKey: string,
+  thread: string,
+  reply: null | string,
+  markKey: string
+): boolean {
   const spoke = reply !== null && !isGroupPassText(reply)
 
   if (reply !== null && spoke) {

@@ -1,9 +1,18 @@
 import { isStableOpen, reconnectBackoffDelayMs } from '@hermes/shared'
 
 import type { HermesConnection } from '@/global'
+import { hostHas } from '@/lib/host-capabilities'
+import { isBrowserHostedDesktop } from '@/lib/platform'
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 
-import { $apiRequestScope, getApiRequestConnection, getApiRequestProfile, hermesApi, profileScoped } from './client'
+import {
+  $apiRequestScope,
+  capabilityScoped,
+  getApiRequestConnection,
+  getApiRequestProfile,
+  hermesApi,
+  profileScoped
+} from './client'
 
 /** Resolve the ACTIVE backend's connection descriptor, (connectionId,
  *  profile)-scoped — mirroring how store/profile resolves $connection: a
@@ -39,6 +48,28 @@ export async function activeConnection(): Promise<HermesConnection> {
   )
 }
 
+/** A stable owner for a plugin capability. Profile names are only unique
+ * within a registered connection, so both fields are required. */
+export interface PluginSourceScope {
+  readonly connectionId: string
+  readonly profile: string
+}
+
+function normalizePluginSourceScope(scope: PluginSourceScope, caller: string): Readonly<PluginSourceScope> {
+  const connectionId = scope?.connectionId?.trim()
+  const profile = scope?.profile?.trim()
+
+  if (!connectionId) {
+    throw new Error(`${caller}: scope.connectionId must not be empty`)
+  }
+
+  if (!profile) {
+    throw new Error(`${caller}: scope.profile must not be empty`)
+  }
+
+  return Object.freeze({ connectionId, profile })
+}
+
 /** Options for a plugin REST call — mirrors the app's own `hermesDesktop.api`
  *  shape, minus the path (which is namespace-derived). */
 export interface PluginRestOptions {
@@ -47,6 +78,15 @@ export interface PluginRestOptions {
   /** Single-file multipart upload (see HermesApiRequest.upload). */
   upload?: { filename: string; contentType?: string; bytes: ArrayBuffer }
   timeoutMs?: number
+  /** Pin this request to one registered Hermes backend. */
+  scope?: PluginSourceScope
+}
+
+export interface PluginSocketOptions {
+  /** Called only after an already-open socket reconnects. */
+  onReconnect?: () => void
+  /** Pin this socket, including every reconnect, to one registered backend. */
+  scope?: PluginSourceScope
 }
 
 // Normalize `path` to a leading-slash suffix relative to `/api/plugins/<id>`.
@@ -75,6 +115,7 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
   }
 
   const suffix = pluginPathSuffix('pluginRest', path)
+  const scope = opts.scope === undefined ? undefined : normalizePluginSourceScope(opts.scope, 'pluginRest')
 
   return hermesApi<T>({
     path: `/api/plugins/${pluginId}${suffix}`,
@@ -82,8 +123,32 @@ export async function pluginRest<T>(pluginId: string, path: string, opts: Plugin
     body: opts.body,
     upload: opts.upload,
     timeoutMs: opts.timeoutMs,
-    ...profileScoped()
+    ...(scope ? capabilityScoped(scope) : profileScoped())
   })
+}
+
+async function explicitPluginConnection(scope: Readonly<PluginSourceScope>): Promise<HermesConnection | null> {
+  const getConnectionFor = window.hermesDesktop?.getConnectionFor
+
+  if (!getConnectionFor) {
+    return null
+  }
+
+  const connection = await withTimeout(
+    getConnectionFor({ connectionId: scope.connectionId, profile: scope.profile }),
+    RECONNECT_ATTEMPT_TIMEOUT_MS,
+    `Timed out connecting to connection "${scope.connectionId}" profile "${scope.profile}"`
+  )
+
+  if (
+    connection.registryScoped !== true ||
+    connection.connectionId !== scope.connectionId ||
+    connection.profile !== scope.profile
+  ) {
+    return null
+  }
+
+  return connection
 }
 
 /** Refusals in a row that do not clear by themselves before the socket stops for its current
@@ -96,14 +161,24 @@ type PluginSocketTarget = null | string | { refused: 'permission' }
 /** The URL a plugin socket dials, or null to stay on polling. A local gateway
  *  (`authMode: 'native'`, no static token) gets a fresh one-use URL from main:
  *  its native grant rides a request header main attaches to that one dial. */
-async function pluginSocketUrl(connection: HermesConnection, pluginId: string, suffix: string): Promise<PluginSocketTarget> {
+async function pluginSocketUrl(
+  connection: HermesConnection,
+  pluginId: string,
+  suffix: string,
+  scope: Readonly<PluginSourceScope> | undefined
+): Promise<PluginSocketTarget> {
   if (connection.authMode === 'native') {
     const mint = window.hermesDesktop.getPluginWsUrl
 
     // An IPC round-trip with no deadline of its own, bounded like activeConnection().
     return mint
       ? withTimeout(
-          mint({ connectionId: getApiRequestConnection(), path: suffix, pluginId, profile: getApiRequestProfile() }),
+          mint({
+            connectionId: scope ? scope.connectionId : getApiRequestConnection(),
+            path: suffix,
+            pluginId,
+            profile: scope ? scope.profile : getApiRequestProfile()
+          }),
           RECONNECT_ATTEMPT_TIMEOUT_MS,
           `Timed out preparing plugin socket "${pluginId}"`
         )
@@ -131,16 +206,26 @@ const requestScopeKey = () => `${getApiRequestConnection() ?? ''}\n${getApiReque
  *  restarting, draining or being re-ensured. It stops after
  *  MAX_REFUSED_PLUGIN_DIALS refusals in a row that do not clear by themselves:
  *  main refusing the grant mint for a permission reason, or a server that
- *  accepts and closes at once. A connection or profile change drops a dial
- *  still resolving for the old scope, closes a socket bound to it, resets the
- *  count and dials for the new scope. */
-export function pluginSocket(pluginId: string, path: string, onMessage: (data: unknown) => void): () => void {
+ *  accepts and closes at once. Unpinned, a connection or profile change drops a
+ *  dial still resolving for the old scope, closes a socket bound to it, resets
+ *  the count and dials for the new scope; `opts.scope` pins the socket (and
+ *  every reconnect) to one registered backend instead, so those changes never
+ *  touch it. */
+export function pluginSocket(
+  pluginId: string,
+  path: string,
+  onMessage: (data: unknown) => void,
+  opts: PluginSocketOptions = {}
+): () => void {
   const suffix = pluginPathSuffix('pluginSocket', path)
+  const pinned = opts.scope === undefined ? undefined : normalizePluginSourceScope(opts.scope, 'pluginSocket')
 
   let socket: null | WebSocket = null
   let disposed = false
   let attempt = 0
   let refused = 0
+  let openedOnce = false
+  let retryTimer: number | null = null
   let scope = requestScopeKey()
   // Bumped on every connection or profile change. A lookup, backoff timer or socket started under an
   // older generation belongs to another scope: its result is dropped and never counts as a refusal.
@@ -161,7 +246,9 @@ export function pluginSocket(pluginId: string, path: string, onMessage: (data: u
     // socket reconnect loops — an immediate-retry loop across many
     // desktop clients floods the gateway with connection attempts
     // during a restart.
-    window.setTimeout(() => {
+    retryTimer = window.setTimeout(() => {
+      retryTimer = null
+
       if (dial === generation) {
         void connect()
       }
@@ -174,30 +261,30 @@ export function pluginSocket(pluginId: string, path: string, onMessage: (data: u
     const stale = () => disposed || dial !== generation
 
     // No bridge: stay on the polling fallback.
-    if (!window.hermesDesktop?.getConnection) {
+    if (!pinned && !window.hermesDesktop?.getConnection) {
       return
     }
 
-    let connection: HermesConnection
+    let connection: HermesConnection | null
 
     try {
-      connection = await activeConnection()
+      connection = await (pinned ? explicitPluginConnection(pinned) : activeConnection())
     } catch {
       // The descriptor can't be resolved yet or the lookup timed out (gateway starting, draining,
       // or re-ensured after a stale ticket): a connection failure, like a dial that never opened.
       return retry(dial, false)
     }
 
-    // OAuth cookie auth (WS tickets are single-use, core-managed): stay on the
-    // polling fallback rather than half-working.
-    if (stale() || connection.authMode === 'oauth') {
+    // A missing descriptor, cookie auth, or a host without URL-token auth uses polling.
+    if (stale() || !connection || connection.authMode === 'oauth' ||
+        isBrowserHostedDesktop() || !hostHas('urlTokenAuth')) {
       return
     }
 
     let url: PluginSocketTarget
 
     try {
-      url = await pluginSocketUrl(connection, pluginId, suffix)
+      url = await pluginSocketUrl(connection, pluginId, suffix, pinned)
     } catch {
       // The local mint failed or timed out (owner away, re-ensuring): a connection failure.
       return retry(dial, false)
@@ -216,7 +303,17 @@ export function pluginSocket(pluginId: string, path: string, onMessage: (data: u
     let openedAt: null | number = null
 
     current.onopen = () => {
+      if (stale()) {
+        return
+      }
+
       openedAt = Date.now()
+
+      if (openedOnce) {
+        opts.onReconnect?.()
+      } else {
+        openedOnce = true
+      }
     }
 
     current.onmessage = event => {
@@ -255,29 +352,43 @@ export function pluginSocket(pluginId: string, path: string, onMessage: (data: u
 
   // Another connection or profile is another gateway or another consent. A socket bound to the
   // old scope would show that profile's stream in this view: close it, and dial for the new scope
-  // with a fresh count.
-  const unlisten = $apiRequestScope.listen(() => {
-    const next = requestScopeKey()
+  // with a fresh count. A pinned socket follows no ambient scope.
+  const unlisten = pinned
+    ? () => {}
+    : $apiRequestScope.listen(() => {
+        const next = requestScopeKey()
 
-    if (next === scope || disposed) {
-      return
-    }
+        if (next === scope || disposed) {
+          return
+        }
 
-    scope = next
-    generation += 1
-    attempt = 0
-    refused = 0
-    const old = socket
-    socket = null
-    old?.close()
-    void connect()
-  })
+        scope = next
+        generation += 1
+        attempt = 0
+        refused = 0
+
+        if (retryTimer !== null) {
+          window.clearTimeout(retryTimer)
+          retryTimer = null
+        }
+
+        const old = socket
+        socket = null
+        old?.close()
+        void connect()
+      })
 
   void connect()
 
   return () => {
     disposed = true
     unlisten()
+
+    if (retryTimer !== null) {
+      window.clearTimeout(retryTimer)
+      retryTimer = null
+    }
+
     socket?.close()
   }
 }

@@ -116,6 +116,7 @@ def _inspect(pid: int) -> dict:
 
 
 def test_gateway_does_not_load_stale_in_tree_venv(journey: Journey) -> None:
+    journey.require_steps("install", "install_ok", "update", "update_ok", "spawn", "state")
     m, info = journey.machine, journey["gateway_proc"]
     stale = str(m.install_dir / "venv")
     published = [k for k in ("VIRTUAL_ENV", "PYTHONPATH")
@@ -132,6 +133,7 @@ def test_gateway_does_not_load_stale_in_tree_venv(journey: Journey) -> None:
 
 
 def test_cli_turn_ignores_stale_venv_and_path_python(journey: Journey) -> None:
+    journey.require_steps("install", "install_ok", "update", "update_ok")
     m, turn, markers = journey.machine, journey["turn"], journey.results["markers"]
     others = sorted(_loaded_by(markers) - set(journey.results.get("loaded_by_gateway", ())))
     assert turn.ok, fail_with(

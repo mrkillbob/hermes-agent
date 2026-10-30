@@ -279,11 +279,19 @@ at `releases/tag/<attempt ref>/index.html` is not an update feed, and an
 attempt installed from it is not upgrade-safe: every attempt of a version has
 the same package version, so the published build never replaces it. The Docker
 image is pushed early under the attempt ref; the `stable` and `latest` aliases
-move with the feed in the publication pass. The Store submission is held: the
-green run submits with auto-publish off. The submission API cannot release a
-held submission, so the publication pass only checks it and prints a GitHub
-warning; once certification passes, click Publish now for that submission in
-Partner Center. A failed submission leaves the publication run red. Stable channel
+move with the feed in the publication pass. The Store build follows the same
+rule: the green run commits it held (auto-publish off), so certification runs
+before the gate, and the publication pass switches that submission to
+auto-publish. If the submission API refuses the switch, the pass warns: select
+Publish now in Partner Center once the build is certified. A submission that
+does not carry the release's Store bundle is left alone while the pass checks
+older published releases for its owner. Store reconciliation runs even when
+the feeds and aliases are already current, so interrupted publication can be
+retried without rewinding them. A held submission records its claim in the
+certification notes: a successor can replace it only after that claim has a
+matching remote abandon marker. Legacy submissions without an owner record
+need manual cleanup in Partner Center. A failed submission becomes a warning;
+the release still publishes. Stable channel
 records carry an optional `archiveRef` naming the attempt ref; `releaseTag`
 stays `vX.Y.Z` and the protected prefix falls back to it when `archiveRef` is
 absent.
@@ -528,3 +536,33 @@ rebuilding it. Native acceptance uses the same Python serializer, including its
 Signing and publication credentials stay in their protected job environments.
 The source CI call does not inherit deployment secrets. Configure the existing
 release-signing and container-publish environments before running this pipeline.
+
+## Fork archive authority
+
+A selected fork must provide `CLOUDFLARE_R2_PUBLIC_URL` (repository/environment
+variable) for release, channel and commit-build commands. The official Nous
+archive default applies to the official repository. The builder checks every
+required R2 input before archiving and reports unavailable field names together;
+a missing injected value does not distinguish an absent credential from an
+inaccessible environment. Credential values are never printed by that check.
+
+Source installations subscribe through the owning profile's `config.yaml`:
+
+```yaml
+updates:
+  source_feed_base_url: https://your-fork-archive.example
+```
+
+Configure the same public archive root the fork producer publishes. HTTPS is
+required except for loopback test servers. A selected fork without this setting
+refuses channel resolution; an explicit archive still must publish records for
+that exact repository and valid manifest digests. Only 404 from a configured
+archive permits the existing unpublished `main` branch fallback. Other failures
+never fall back to another host or repository. Each profile owns its setting;
+Electron checkout probes carry its `HERMES_HOME` to this same resolver. Signed
+bundled apps keep the `publicBase` embedded in their release request and retain
+existing signature and adoption checks.
+
+These source changes do not provision R2/signing inputs, publish a release or
+establish installed adoption. Validate those separately on exact CI, release and
+installed receipts after the source changes have passed locked CI and review.

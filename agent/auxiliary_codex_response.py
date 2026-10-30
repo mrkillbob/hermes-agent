@@ -52,4 +52,3 @@ def _parse_codex_final_response(
             prompt_tokens=_u("input_tokens"), completion_tokens=_u("output_tokens"),
             total_tokens=_u("total_tokens"))
     return text_parts, tool_calls_raw, usage, finish_reason
-

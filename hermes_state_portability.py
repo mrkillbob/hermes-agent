@@ -22,7 +22,7 @@ from hermes_state_keys import (
 )
 from hermes_state_local import POLICY_PREFIX
 from hermes_state_common import SCHEMA_SQL, _shape_preview, _sql_preview_raw, _sql_session_last_active
-from hermes_state_messages import _parse_tool_calls, _tool_calls_count
+from hermes_state_tool_calls import _parse_tool_calls, _tool_calls_count
 import itertools
 
 # Pre-split logger identity so log filtering/capture is unchanged.
@@ -743,6 +743,8 @@ class SessionPortabilityMixin:
             conn.executemany("UPDATE messages SET active = 0, compacted = ? WHERE id = ?",
                              [(1 if self._coerce_or(msg.get("compacted"), int, 0) else 0, msg["_row_id"])
                               for msg in archived])
+            # Insert triggers saw every copy live; restored flags now identify the retained display payload.
+            self._reconcile_display_orders(conn, session_id)
         # Pruning keys on live rows, so it runs only now: while every row was still live, an archived row's
         # newer checkpoint would strip the newest live one, and archived rows keep theirs as in the donor.
         self._prune_shadowed_checkpoints(conn, session_id, live)

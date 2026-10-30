@@ -143,8 +143,45 @@ class TestRefusalOutsideScope:
 
 
 class TestSkips:
+    @pytest.mark.parametrize("next_opener_recreates", [False, True], ids=["vanished", "recreated"])
+    def test_sidecars_unlinked_by_sibling_close_mid_preflight_are_not_readonly(
+        self, hermes_home, tmp_path, monkeypatch, next_opener_recreates
+    ):
+        """A sibling connection's last close() unlinks -wal/-shm after the preflight
+        listed them (and the next opener may recreate them before the re-check); a
+        vanished sidecar is not read-only (CI flake in
+        test_concurrent_openers_zero_byte_startup_serialization). Outside the home
+        tree, so the chmod repair cannot mask a false verdict."""
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        db = outside / "state.db"
+        sibling = sqlite3.connect(str(db))
+        sibling.execute("PRAGMA journal_mode=WAL")
+        sibling.execute("CREATE TABLE t (x)")
+        sibling.commit()
+        wal = db.with_name(db.name + "-wal")
+        assert wal.is_file(), "fixture precondition: the live sibling holds a -wal"
+        real_access = os.access
+        open_sibling, next_opener = [sibling], []
 
+        def access_racing_sibling_close(path, mode, *args, **kwargs):
+            if Path(path) != wal or not open_sibling:
+                return real_access(path, mode, *args, **kwargs)
+            open_sibling.pop().close()  # last connection: SQLite unlinks -wal/-shm
+            verdict = real_access(path, mode, *args, **kwargs)
+            if next_opener_recreates:
+                next_opener.append(conn := sqlite3.connect(str(db)))
+                conn.execute("INSERT INTO t VALUES (1)")
+                conn.commit()  # a fresh -wal generation appears before the re-check
+            return verdict
 
+        monkeypatch.setattr(os, "access", access_racing_sibling_close)
+        try:
+            preflight_db_writability(db, db_label="state.db")
+        finally:
+            for conn in next_opener:
+                conn.close()
+        assert not open_sibling and len(next_opener) == int(next_opener_recreates)
 
     def test_healthy_db_untouched(self, hermes_home):
         db = hermes_home / "state.db"
@@ -199,3 +236,64 @@ class TestSessionDBIntegration:
         finally:
             os.chmod(db_path, 0o644)
             hermes_state._set_last_init_error(None)
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+@pytest.mark.parametrize("inside_home", [True, False])
+def test_checkpoint_removing_sidecar_is_not_readonly(
+    hermes_home, tmp_path, monkeypatch, suffix, inside_home
+):
+    db = (hermes_home if inside_home else tmp_path) / "concurrent.db"
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    conn.execute("CREATE TABLE t (x)")
+    conn.execute("INSERT INTO t VALUES (42)")
+    conn.commit()
+    committed = conn.execute("SELECT x FROM t").fetchall()
+    sidecar = db.with_name(db.name + suffix)
+    assert sidecar.is_file()
+    real_access = os.access
+    checkpointed = False
+
+    def checkpoint_on_access(path, mode):
+        nonlocal checkpointed
+        if Path(path) == sidecar and not checkpointed:
+            # The last SQLite connection checkpoints and removes its sidecars
+            # after preflight has enumerated them, before its access check.
+            conn.close()
+            checkpointed = True
+            assert not sidecar.exists()
+        return real_access(path, mode)
+
+    monkeypatch.setattr("hermes_state_repair.os.access", checkpoint_on_access)
+    try:
+        preflight_db_writability(db)
+    finally:
+        conn.close()
+    assert checkpointed
+    reopened = sqlite3.connect(str(db))
+    try:
+        assert reopened.execute("SELECT x FROM t").fetchall() == committed
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("inside_home", [True, False])
+def test_database_quarantined_by_another_opener_is_not_readonly(hermes_home, tmp_path, monkeypatch, inside_home):
+    """A concurrent opener can move a zeroed state.db aside after preflight enumerated it and before its
+    access check; the vanished file is a lost race, not a permission problem."""
+    db = (hermes_home if inside_home else tmp_path) / "quarantined.db"
+    db.write_bytes(b"\0" * 4096)
+    real_access = os.access
+    quarantined = False
+
+    def quarantine_on_access(path, mode):
+        nonlocal quarantined
+        if Path(path) == db and not quarantined:
+            db.rename(db.with_name(db.name + ".corrupt"))
+            quarantined = True
+        return real_access(path, mode)
+
+    monkeypatch.setattr("hermes_state_repair.os.access", quarantine_on_access)
+    preflight_db_writability(db)
+    assert quarantined

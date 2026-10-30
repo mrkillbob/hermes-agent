@@ -1,12 +1,16 @@
 """One detached-process primitive; callers must first prove owner/service absence."""
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
+import uuid
 
 from hermes_cli._subprocess_compat import windows_detach_popen_kwargs, _WINDOWS_GATEWAY_BREAKAWAY_ENV
+from hermes_cli.gateway_launchd_runtime import GatewayJob, start_gateway_job
 from hermes_cli.gateway_runtime_service import RuntimeStartError, remaining
 
 
@@ -26,16 +30,22 @@ DAEMON_STRIPPED_ENV = (
     "HERMES_INTERACTIVE", "HERMES_GATEWAY_SESSION", "HERMES_SINGLE_QUERY_SESSION",
     "HERMES_EPHEMERAL_SYSTEM_PROMPT", "HERMES_PREFILL_MESSAGES_FILE", "HERMES_INFERENCE_PROVIDER",
     "HERMES_ENABLE_PROJECT_PLUGINS", "HERMES_TUI_CLIENT_ENV",
+    # A terminal's shell under a systemd service (gnome-terminal-server, a user unit) carries these; the
+    # unmanaged daemon would then identify as "systemd" and maintenance would refuse it as supervised.
+    "INVOCATION_ID", "JOURNAL_STREAM",
 )
 
 
-def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: bool = False) -> subprocess.Popen:
+def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: bool = False,
+                            force: bool = False) -> subprocess.Popen | GatewayJob:
     """Request a daemon, not readiness. Refuse Windows no-breakaway fallback.
 
     No --replace, persistence, login changes, elevation, shell, or inherited stdio.
     The gateway runtime's own exclusive ownership fence arbitrates racing starts.
     ``idle_exit``: the daemon ends itself once idle (a chat/TUI/cron client's own start; never
     Desktop's ``gateway ensure``, which keeps its attached gateway for the app's lifetime).
+    ``force``: a ``gateway restart --force --detach`` replacement keeps the ``--force`` its old owner
+    needed (a named profile under a multiplexer), or it exits on the run-side guard.
     """
     home = profile_home.resolve()
     root = Path(__file__).resolve().parent.parent
@@ -44,7 +54,7 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
     # profile's daemon. A <root>/profiles/<name> home is already trusted as-is.
     selector = [] if home.parent.name == "profiles" else ["--profile", "default"]
     command = [sys.executable, "-m", "hermes_cli.main", *selector, "gateway", "run", "--quiet",
-               *(["--idle-exit"] if idle_exit else [])]
+               *(["--idle-exit"] if idle_exit else []), *(["--force"] if force else [])]
     # The target profile's own secrets, never the launching client's: a `hermes -p work` client's
     # dotenv would otherwise become the default daemon's frozen launch env (host_gateway_child_env).
     from tools.environments.local import served_profile_child_env
@@ -64,17 +74,73 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
     for key in (*DAEMON_STRIPPED_ENV, *_VAR_MAP):
         env.pop(key, None)
     remaining(deadline)
+    launch_options = windows_detach_popen_kwargs()
     logs = home / "logs"
     logs.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":  # LAN access must outlive the app that asked for the gateway
+        if job := start_gateway_job(command, env=env, cwd=root, log_path=logs / "gateway-stdio.log",
+                                    deadline=deadline):
+            return job
     try:
         with (logs / "gateway-stdio.log").open("ab", buffering=0) as output:
             remaining(deadline)
-            return subprocess.Popen(command, cwd=root, env=env, close_fds=True,
-                                    stdin=subprocess.DEVNULL, stdout=output, stderr=output,
-                                    **windows_detach_popen_kwargs())
+            try:
+                return subprocess.Popen(command, cwd=root, env=env, close_fds=True,
+                                        stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                        **launch_options)
+            except OSError as exc:
+                # A Windows refusal is not necessarily a job-policy denial. Keep
+                # its native code without recording argv, environment or private
+                # paths from the exception; no weaker detach fallback is safe.
+                report: dict[str, object] = {"event": "gateway_spawn_failed", "errno": exc.errno,
+                                             "winerror": getattr(exc, "winerror", None)}
+                launch: dict[str, object] = {
+                    "failure_id": uuid.uuid4().hex, "timestamp_ns": time.time_ns(),
+                    "stage": "gateway_popen", "creationflags": launch_options.get("creationflags", 0),
+                }
+                try:
+                    from hermes_platform.host.process_diagnostics import process_launch_context
+                    launch["context"] = process_launch_context(command[0], root)
+                except Exception:  # health: allow BLE001 -- A diagnostic query must not replace the spawn refusal or disclose exception text.
+                    launch["context"] = {"unavailable": True}
+                try:
+                    from hermes_platform.host.job_ancestry import process_job_ancestry
+                    ancestry = process_job_ancestry(root)
+                    if ancestry is not None:
+                        launch["job_ancestry"] = ancestry
+                except Exception:  # health: allow BLE001 -- A diagnostic query must not replace the spawn refusal or disclose exception text.
+                    launch["job_ancestry"] = {"unavailable": True}
+                report["launch"] = launch
+                try:
+                    from hermes_platform.host.windows_job import current_process_job_limits
+                    job = current_process_job_limits()
+                except Exception:  # health: allow BLE001 -- Diagnostics must preserve the original spawn refusal and disclose no exception text.
+                    job = {"scope": "immediate_job", "probe_unavailable": True}
+                if job is not None:
+                    report["windows_job"] = job
+                try:
+                    output.write((json.dumps(report) + "\n").encode("utf-8"))
+                except OSError:
+                    # A full or failed sidecar must not replace the actual spawn refusal.
+                    pass
+                raise
     except OSError as exc:
         reason = "windows_breakaway_unavailable" if sys.platform == "win32" else "spawn_failed"
         raise RuntimeStartError(reason) from exc
+
+
+def start_detached_replacement(profile_home: Path, *, force: bool = False) -> int:
+    """``gateway restart --detach`` with no service: start the stopped owner's replacement the way
+    ``gateway ensure`` starts an absent one. In the foreground, the restarting client (Desktop's
+    bounded, piped call) would itself become the long-lived gateway it only meant to restart."""
+    import time
+    try:
+        spawn_unmanaged_gateway(profile_home, deadline=time.monotonic() + 30, force=force)
+    except RuntimeStartError as exc:
+        print(f"✗ Could not start the gateway in the background: {exc}", file=sys.stderr)
+        return 1
+    print("✓ Started the gateway in the background")
+    return 0
 
 
 def stdio_log_path(profile_home: Path) -> Path:

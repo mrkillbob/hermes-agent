@@ -34,6 +34,16 @@ _IS_WINDOWS = platform.system() == "Windows"
 
 logger = logging.getLogger(__name__)
 
+# The foreground terminal is the operator's trusted shell. Preserve the
+# operator's Git/GitHub configuration and auth there so ordinary authenticated
+# workflows keep working; non-terminal and delegated child paths continue to
+# use the shared scrubber below.
+_LOCAL_TERMINAL_GIT_AUTH_ENV = frozenset({
+    "GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_TERMINAL_PROMPT",
+    "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_AUTH_SOCK",
+})
+
 # --- Terminal temp-cache pruning ---
 # get_temp_dir() defaults to HERMES_HOME/cache/terminal (real storage, not tmpfs), so
 # stale artifacts don't vanish on reboot: the gateway housekeeping loop prunes hourly
@@ -281,9 +291,10 @@ def _filter_secret_env(
             if not _is_hermes_internal_secret(key):
                 out[key] = value
             continue
-        if _is_hermes_internal_secret(key) or key.upper() in plugin_strip_folded:
-            continue
         first_party = _is_terminal_first_party_env(key)
+        if ((key in _ALWAYS_STRIP_KEYS and not first_party) or _is_hermes_internal_secret(key)
+                or key in plugin_strip or key.upper() in plugin_strip_folded):
+            continue
         passthrough = is_env_passthrough(key)
         if _is_provider_env_blocklisted(key, registered) and not (passthrough or first_party):
             continue
@@ -291,6 +302,26 @@ def _filter_secret_env(
             value = resolve_passthrough_value(key, value)
         if value is not None:
             out[key] = value
+
+
+def _neutralize_github_credential_paths(env: dict) -> None:
+    """Route GitHub identity through the bot account when present; never fall back to the
+    operator's default credential location.
+
+    HERMES_GITHUB_BOT_LOGIN marks a Bot-governed session. In that case we let ``gh`` use
+    its default config dir (~/.config/gh), which holds the Bot account's login used by
+    the PR-feedback plugin and ``gh stack``. Without the marker, the original /dev/null
+    behavior is preserved so a spawned child never inherits the operator's real GitHub
+    credentials."""
+    bot_login = env.get("HERMES_GITHUB_BOT_LOGIN")
+    if bot_login:
+        env.pop("GH_CONFIG_DIR", None)
+        env.pop("GIT_CONFIG_GLOBAL", None)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        return
+    env["GH_CONFIG_DIR"] = os.devnull
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_TERMINAL_PROMPT"] = "0"
 
 
 def _finalize_child_env(env: dict) -> dict:
@@ -301,6 +332,7 @@ def _finalize_child_env(env: dict) -> dict:
     _inject_session_context_env(env)
     _strip_hermes_owned_pythonpath_and_runtime_markers(env)
     _apply_windows_msys_bash_env_defaults(env)
+    _neutralize_github_credential_paths(env)
     from agent.delegation_context import delegated_child_subprocess_env
     return delegated_child_subprocess_env(env)
 
@@ -511,9 +543,12 @@ def strip_launch_profile_env(env: dict, target_home: str | Path | None = None) -
     # LAUNCH profile's source supplied is not the target profile's to see; the caller's scope
     # overlay puts back exactly the ones the target's own sources supply. The administrator-managed
     # .env is NOT residue: its values are policy for every profile (``_apply_managed_env`` applies
-    # it last, with override, so it beats the user's own .env) — leave them in place.
+    # it last, with override, so it beats the user's own .env) — leave them in place. Neither is
+    # the config backend's deployment (which backend, which plane, which instance): it is the
+    # instance's, and a child without it reads the target profile's config from another backend.
+    from hermes_cli.config_backend import deployment_env_names
     from hermes_cli.env_loader import launch_dotenv_keys, managed_dotenv_keys, source_supplied_names
-    managed_names = {key.upper() for key in managed_dotenv_keys()}
+    managed_names = {key.upper() for key in managed_dotenv_keys()} | set(deployment_env_names())
     residue_names = {
         key.upper() for key in
         set(load_env_file(launch_home / ".env")) | set(launch_dotenv_keys())
@@ -689,9 +724,8 @@ def _managed_runtime_path_entries() -> list[str]:
     itself, so on a machine where Hermes provisioned its own toolchain a
     command the agent runs resolves a system copy instead — or nothing at all:
 
-    - the pm store's node/npm entries — installed to satisfy the desktop and
-      browser toolchain. ``tools/browser_tool.py`` already does this for its own
-      subprocesses; the agent's shell deserves the same.
+    - the pm store's node/npm entries — installed to satisfy the desktop
+      toolchain; the agent's shell deserves the same.
     - ``$HERMES_HOME/bin`` — the managed ``uv``. ``install.sh`` writes it there
       and nothing has ever put that directory on PATH, so an install whose only
       uv is the managed one looks uv-less to both the agent and the model.
@@ -766,6 +800,35 @@ def _path_env_key(run_env: dict) -> str | None:
     return next((k for k in run_env if k.upper() == "PATH"), None) if _IS_WINDOWS else "PATH"
 
 
+def _trusted_local_terminal_session() -> bool:
+    """Return whether this LocalEnvironment call is a human-attended CLI terminal.
+
+    ``LocalEnvironment`` is also used by gateways, cron, API sessions, and
+    delegated agents. Their absence of a Kanban marker is not proof that the
+    operator intended to expose the host's Git credentials.
+    """
+    try:
+        from agent.delegation_context import is_delegated_child_process_context
+        from tools.approval_context import (
+            _is_cron_approval_context,
+            _is_gateway_approval_context,
+            _is_interactive_cli,
+            _is_single_query_approval_context,
+            _is_unattended_platform_approval_context,
+        )
+        return (
+            _is_interactive_cli()
+            and not os.environ.get("HERMES_KANBAN_TASK")
+            and not _is_gateway_approval_context()
+            and not _is_cron_approval_context()
+            and not _is_single_query_approval_context()
+            and not _is_unattended_platform_approval_context()
+            and not is_delegated_child_process_context()
+        )
+    except Exception:
+        return False
+
+
 def _make_run_env(env: dict) -> dict:
     """Build a run environment with a sane PATH and provider-var stripping. The process env is
     the LAUNCH profile's; under a routed home override its ``.env`` residue is dropped first
@@ -774,11 +837,23 @@ def _make_run_env(env: dict) -> dict:
     client toolchain (PATH, venv, nvm/pyenv/conda: ``agent.session_client_env``) replaces the daemon's
     beneath the backend's own ``env``."""
     from agent.session_client_env import toolchain_environ
-    run_env = _scrubbed_env(
-        [(dict(toolchain_environ(strip_launch_profile_env(os.environ.copy())) | env), True)],
-        frozenset(),
+    source = dict(toolchain_environ(strip_launch_profile_env(os.environ.copy())) | env)
+    result = _scrubbed_env(
+        [(source, True)], frozenset(),
         lambda p: _user_tools_first(_append_missing_sane_path_entries(p)),
     )
+    # _scrubbed_env protects background/untrusted children by neutralizing the
+    # host Git config and credentials. Only a human-attended CLI terminal gets
+    # the explicit operator-authenticated exception; gateway, cron, single-query,
+    # and delegated sessions must remain fenced even when TASK is absent.
+    if _trusted_local_terminal_session():
+        for key in _LOCAL_TERMINAL_GIT_AUTH_ENV:
+            if source.get(key) is not None:
+                result[key] = source[key]
+            elif key in {"GH_CONFIG_DIR", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT"}:
+                # Let gh/git use their normal HOME-scoped defaults in the trusted
+                # terminal. The scrubber's /dev/null values must not leak into it.
+                result.pop(key, None)
     # While this profile's Bot Desktop is running, its DISPLAY/XAUTHORITY/DBUS ride along so GUI
     # apps the agent launches from the terminal open on the Bot Screen the user is watching, not
     # on the user's own seat (#125830). published_env() is the pure read (no activity stamp — a
@@ -792,9 +867,9 @@ def _make_run_env(env: dict) -> dict:
     except Exception:
         published = {}
     if published:
-        run_env.update(published)
-        run_env.pop("WAYLAND_DISPLAY", None)  # X11 desktop; a leaked Wayland socket flips GTK/Chromium backends
-    return run_env
+        result.update(published)
+        result.pop("WAYLAND_DISPLAY", None)  # X11 desktop; a leaked Wayland socket flips GTK/Chromium backends
+    return result
 
 
 # --- Hermes venv / repo-root detection (module-level, computed once) ---
@@ -1009,11 +1084,13 @@ class LocalEnvironment(BaseEnvironment):
     the session snapshot preserves exported env vars across calls (unless
     ``persistent=False``); CWD persists via the stdout marker."""
 
-    _sudo_nopasswd_probe_supported = True
+    _passwordless_sudo_probe_supported = True
     _profile_scoped_passthrough = True
     # Commands run on the Hermes host itself — controller-side platform behavior
     # (macOS TCC pruning, etc.) legitimately applies here.
     is_local = True
+    # A subclass that confines its commands (a sandbox) sets this False: see BaseEnvironment.
+    uses_host_filesystem = True
 
     def _additional_profile_scoped_passthrough_names(self) -> tuple[str, ...]:
         """First-party ``BUZZ_*`` names present in the env, excluded from the shared

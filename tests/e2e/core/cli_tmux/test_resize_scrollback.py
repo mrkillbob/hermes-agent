@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -53,19 +52,13 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
     llm = FakeLLMServer(script, aux=lambda _r: Text("Scripted session title"))
 
     def diagnostics() -> str:
-        # What a red needs to be actionable: did the turn reach the provider, what did the CLI log,
-        # and where is every thread of the CLI parked (faulthandler dump on SIGABRT, into the pane).
+        # Keep the original timeout actionable even if the pane process has already exited.
         kinds = Counter(r["kind"] for r in llm.requests)
         out = [f"fake provider requests: main={kinds['main']} aux={kinds['aux']}"]
         for name in ("agent.log", "errors.log"):
             log = home / ".hermes" / "logs" / name
             tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-40:] if log.exists() else ["<missing>"]
             out += [f"--- {name} (tail) ---", *tail]
-        pid = tmux("display-message", "-p", "-t", "p", "#{pane_pid}").strip()
-        if pid.isdigit():
-            os.kill(int(pid), signal.SIGABRT)
-            time.sleep(2.0)
-            out += ["--- CLI thread dump ---", transcript()[-6000:]]
         return "\n".join(out)
 
     def wait_for(needle: str, timeout: float = 60.0) -> None:
@@ -97,7 +90,8 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
         time.sleep(2.0)
 
     with llm:
-        write_hermes_home(home / ".hermes", llm.base_url)
+        write_hermes_home(home / ".hermes", llm.base_url,
+                          extra_config="display:\n  cli_layout: classic\n")
         env = {k: v for k, v in os.environ.items() if not k.startswith(("HERMES_", "TMUX"))}
         env.update(HOME=str(home), HERMES_HOME=str(home / ".hermes"), PYTHONPATH=str(REPO_ROOT),
                    TERM="xterm-256color", HERMES_STATE_DB_GUARD_BYPASS="1", PYTHONFAULTHANDLER="1")
@@ -111,8 +105,9 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
             # The welcome line is printed before the input loop exists. Keys typed then land in the
             # still-cooked tty: the kernel echoes them (a plain transcript row) and hands the app
             # text + Enter in one read, which it takes for a pasted newline — the question sits
-            # unsent in a two-line draft. The status bar is painted by the running app, in raw mode.
-            wait_for("\u2624 fake-model \u2502", timeout=120)
+            # unsent in a two-line draft. The status bar is painted by the running app, in raw mode;
+            # its separator after the model differs by layout (glyph `·`, classic `│`), so match the name.
+            wait_for("\u2624 fake-model", timeout=120)
             time.sleep(2.0)
 
             ask(1)
@@ -145,6 +140,14 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
     expected = {f"t{t}w{i:03d}" for t, n in WORDS.items() for i in range(n)}
     assert sorted(w for w in expected if words[w] != 1) == [], final
     assert [final.count(f"zq{t}q") for t in WORDS] == [1, 1, 1], final
-    assert sum(1 for line in final.split("\n") if line.lstrip().startswith("❯")) == 1, final
-    blank_runs = [len(run) for run in re.findall(r"(?:^[ \t]*\n)+", final, flags=re.MULTILINE)]
+    # One composer row. The glyph layout also prints each sent message as a `❯ question` row.
+    sent = {f"question zq{t}q please" for t in WORDS}
+    assert sum(1 for line in final.split("\n")
+               if line.lstrip().startswith("❯") and line.strip()[1:].strip() not in sent) == 1, final
+    # Judge blank runs after the first submitted question, excluding startup spacing.
+    # This fixture selects classic layout: submitted questions use ●, while ❯ is the composer.
+    first_question = "● question zq1q please"
+    assert first_question in final, final
+    turns = final[final.index(first_question):]
+    blank_runs = [len(run) for run in re.findall(r"(?:^[ \t]*\n)+", turns, flags=re.MULTILINE)]
     assert max(blank_runs, default=0) <= 2, final  # the reply panel's own spacing, nothing more

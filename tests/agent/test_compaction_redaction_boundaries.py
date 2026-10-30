@@ -100,6 +100,36 @@ def test_serializer_input_redacts_content_and_tool_args():
     _assert_clean(serialized)
 
 
+def test_serializer_does_not_stringify_a_native_provider_block():
+    c = _compressor()
+    signature = "RXFSb3VuZDAxLXNpZ25hdHVyZS0x"
+    serialized = c._serialize_for_summary([
+        {
+            "role": "assistant",
+            "content": {"type": "thinking", "thinking": "working", "signature": signature},
+        }
+    ])
+
+    assert "[thinking]" in serialized
+    assert "working" not in serialized
+    assert signature not in serialized
+
+
+def test_serializer_removes_opaque_replay_values_from_flattened_text():
+    c = _compressor()
+    signature = "RXFSb3VuZDAxLXNpZ25hdHVyZS0x"
+    serialized = c._serialize_for_summary([
+        {
+            "role": "assistant",
+            "content": f"provider block metadata: {signature}",
+            "reasoning_details": [{"type": "thinking", "thinking": "working", "signature": signature}],
+        }
+    ])
+
+    assert "provider block metadata:" in serialized
+    assert signature not in serialized
+
+
 def test_fallback_summary_redacts_secrets():
     c = _compressor()
     turns = [
@@ -179,7 +209,7 @@ def test_previous_summary_redacted_before_iterative_prompt_reentry():
 
     assert result is not None
     prompt = mock_call.call_args.kwargs["messages"][0]["content"]
-    assert "PREVIOUS SUMMARY:" in prompt
+    assert "Previous summary:" in prompt
     _assert_clean(prompt)
     # After generation, _previous_summary holds the new (clean) LLM output —
     # the leaked secret must not have survived anywhere in it.
@@ -219,5 +249,5 @@ def test_resumed_handoff_summary_redacted_before_iterative_prompt():
         c.compress(messages)
 
     prompt = mock_call.call_args.kwargs["messages"][0]["content"]
-    assert "PREVIOUS SUMMARY:" in prompt
+    assert "Previous summary:" in prompt
     _assert_clean(prompt)

@@ -6,6 +6,8 @@
 * :func:`run_bounded_async` / :func:`run_bounded_sync` — wall-clock deadlines driven by
   a daemon ``threading.Timer`` / worker thread, so a blocked event loop cannot disable them.
 * :func:`kill_process_tree` — portable whole-tree termination.
+* :func:`poll_until` — the one "check until it holds or the deadline passes" loop; use it
+  instead of hand-writing ``deadline = time.monotonic() + t; while ...: time.sleep(...)``.
 
 Invariants: operation exceptions propagate unchanged (only the *timeout* outcome is reified
 as :class:`BoundedResult`); a timeout here is OUR deadline, not the provider's (classify
@@ -25,7 +27,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional, Protocol
+from typing import Any, Awaitable, Callable, Optional, Protocol, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +37,13 @@ __all__ = [
     "DeadlineExpired",
     "clamp_timeout",
     "kill_process_tree",
+    "poll_until",
     "resolve_timeout",
     "run_bounded_async",
     "run_bounded_sync",
 ]
+
+_T = TypeVar("_T")
 
 # Upper bound for any timeout handed to platform wait primitives.
 #
@@ -130,6 +135,26 @@ def clamp_timeout(timeout: Optional[float]) -> Optional[float]:
         logger.warning("clamp_timeout: NaN timeout; treating as unbounded")
         return None
     return None if value <= 0 else min(value, MAX_SAFE_TIMEOUT_S)
+
+
+def poll_until(predicate: Callable[[], _T], timeout: float, interval: float) -> _T:
+    """Call ``predicate`` every ``interval`` s until it returns something truthy or ``timeout`` s
+    pass; return its last result (falsy on timeout).
+
+    The first check runs at once and the last sleep is cut to the time left, so a condition that
+    holds when the deadline arrives still counts. ``timeout <= 0`` means exactly one check.
+    Only the sleeps are bounded: time spent inside ``predicate`` is not, so a predicate that blocks
+    (socket probes, subprocess calls) can carry the final check past the deadline.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        result = predicate()
+        if result:
+            return result
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return result
+        time.sleep(min(interval, remaining))
 
 
 # --- Timeout resolution: config ``timeouts:`` > legacy env var > default ------
@@ -419,7 +444,7 @@ def _process_tree_snapshot(pid: int, *, hard_kill: bool):
                 logger.debug("kill_process_tree: target already gone or resume refused", exc_info=True)
 
 
-def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
+def kill_process_tree(pid: int, *, sig: Optional[int] = None, signal_group: bool = True) -> bool:
     """Terminate ``pid`` and all its descendants, portably; True when anything was signalled.
 
     Windows: ``taskkill /F /T`` (``sig`` ignored). POSIX: snapshot descendants via
@@ -427,7 +452,9 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
     escape a stale snapshot. Signal identity-checked descendants before their
     parent, then its group when ``pid`` leads one. Stopping is best-effort with a
     bounded wait; unavailable psutil still leaves process-group cleanup. Other
-    signals do not suspend recipients. ``sig`` defaults to ``SIGKILL``."""
+    signals do not suspend recipients. ``sig`` defaults to ``SIGKILL``.
+    ``signal_group=False`` leaves group closure to a caller-owned once-only lifecycle;
+    the identity-checked descendant sweep and direct parent signal still run."""
     if sys.platform == "win32":
         try:
             from hermes_cli._subprocess_compat import windows_hide_flags
@@ -463,7 +490,7 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
         try:
             # getpgid→killpg has an inherent TOCTOU shared by every killpg site; the psutil
             # sweep below is identity-aware (PID + create time) and does not.
-            pgid = os.getpgid(pid)
+            pgid = os.getpgid(pid) if signal_group else None
         except (ProcessLookupError, PermissionError, OSError):
             pgid = None
         try:

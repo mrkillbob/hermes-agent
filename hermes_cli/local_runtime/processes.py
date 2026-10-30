@@ -9,8 +9,6 @@ import subprocess
 import sys
 import threading
 
-import psutil
-
 
 class _BasicLimits(ctypes.Structure):
     _fields_ = [
@@ -122,7 +120,7 @@ def spawn_server(cmd, **kwargs) -> tuple[subprocess.Popen, _WindowsJob | None]:
         kwargs["creationflags"] = kwargs.get("creationflags", 0) | 0x00000004  # CREATE_SUSPENDED
         proc = subprocess.Popen(cmd, **kwargs)
         job.assign(proc)
-        psutil.Process(proc.pid).resume()
+        _resume_process(proc)
         return proc, job
     except BaseException:
         try:
@@ -140,3 +138,18 @@ def spawn_server(cmd, **kwargs) -> tuple[subprocess.Popen, _WindowsJob | None]:
                             stream.close()
                     proc._handle.Close()
         raise
+
+
+def _resume_process(proc: subprocess.Popen) -> None:
+    """Resume the suspended owned process, including stdlib-only fleet bundles."""
+    try:
+        import psutil
+    except ImportError:
+        resume = ctypes.WinDLL("ntdll").NtResumeProcess
+        resume.argtypes = [wintypes.HANDLE]
+        resume.restype = wintypes.LONG
+        status = resume(int(proc._handle))
+        if status < 0:
+            raise OSError(f"NtResumeProcess failed with status {status}")
+    else:
+        psutil.Process(proc.pid).resume()

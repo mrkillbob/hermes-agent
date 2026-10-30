@@ -61,16 +61,35 @@ def _redact(line, scrub):
     return redact_sensitive_text(line, force=True)
 
 
-def drain_worker_stderr(stream, path, pid, scrub):
+def _budgeted_lines(stream, consume_bytes):
+    """Account flushed unterminated writes immediately; redact only assembled bounded lines."""
+    pending = bytearray()
+    read = getattr(stream, 'read1', stream.read)
+    while chunk := read(MAX_LINE_BYTES):
+        if consume_bytes is not None and not consume_bytes(len(chunk)):
+            pending.clear()
+            continue
+        pending.extend(chunk)
+        while pending:
+            newline = pending.find(b'\n')
+            size = min(newline + 1, MAX_LINE_BYTES) if newline >= 0 else MAX_LINE_BYTES
+            if len(pending) < size:
+                break
+            yield bytes(pending[:size])
+            del pending[:size]
+    if pending:
+        yield bytes(pending)
+
+
+def drain_worker_stderr(stream, path, pid, scrub, consume_bytes=None):
     """Thread body: read ``stream`` to EOF; ``scrub()`` returns this worker's exact secrets
     (launch key, assignment secret) known so far. Never stops reading on a write failure."""
     skipping = False
     warned = False
     try:
-        while True:
-            chunk = stream.readline(MAX_LINE_BYTES)
-            if not chunk:
-                return
+        for chunk in _budgeted_lines(stream, consume_bytes):
+            if path is None:
+                continue
             whole = chunk.endswith(b'\n')
             if skipping:
                 skipping = not whole

@@ -9,9 +9,9 @@ Two fixes, both covered here:
 1. Fast path: once a path is initialized in this process, `connect()` skips the
    cross-process init lock entirely (nothing left to serialize), so a held lock
    cannot block a steady-state connect.
-2. Bounded acquire: even on first-init, `_cross_process_init_lock` retries a
-   non-blocking acquire up to a deadline, then proceeds (with a WARNING) rather
-   than hanging.
+2. Bounded acquire: existing database initialization retains warning/fallback.
+   Missing database creation refuses after the same deadline while reserved,
+   then succeeds after release, without globally serializing initialized paths.
 """
 
 from __future__ import annotations
@@ -73,11 +73,11 @@ def test_initialized_path_connect_skips_init_lock(kanban_home):
         t.join(timeout=5)
 
 
-def test_first_init_connect_is_bounded_when_lock_held(kanban_home, monkeypatch):
-    """First-init connect must time out the cross-process lock and proceed,
-    not hang forever, when another holder owns it."""
+def test_existing_database_init_is_bounded_when_lock_held(kanban_home, monkeypatch):
+    """An existing uninitialized database keeps its bounded fallback contract."""
     monkeypatch.setattr(kbc, "_INIT_LOCK_TIMEOUT_SECONDS", 0.6)
     db_path = kb.kanban_db_path(board="default")
+    db_path.touch()
 
     release, t = _hold_init_lock(db_path)
     try:
@@ -91,3 +91,25 @@ def test_first_init_connect_is_bounded_when_lock_held(kanban_home, monkeypatch):
     finally:
         release.set()
         t.join(timeout=5)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_missing_database_reservation_timeout_does_not_create_and_can_retry(
+    kanban_home, monkeypatch, cached
+):
+    monkeypatch.setattr(kbc, "_INIT_LOCK_TIMEOUT_SECONDS", 0.6)
+    db_path = kb.kanban_db_path(board="default")
+    if cached:
+        with kbc.connect_closing():
+            pass
+        db_path.unlink()
+    release, thread = _hold_init_lock(db_path)
+    try:
+        with pytest.raises(TimeoutError, match="initialization reservation"):
+            kbc.connect()
+        assert not db_path.exists()
+    finally:
+        release.set()
+        thread.join(5)
+    with kbc.connect_closing() as conn:
+        assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0

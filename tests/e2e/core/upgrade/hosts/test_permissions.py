@@ -117,7 +117,9 @@ def test_update_on_a_read_only_tree_refuses_with_a_reason_and_recovers(world, pr
     assert world["ro_head"] == world["before"], "a refused update still moved the checkout"
     again = world["rw_update"]
     assert again.returncode == 0 and I.TRACEBACK not in again.stdout + again.stderr, (
-        "after the tree became writable again, hermes update still failed:\n" + I.describe(again))
+        "after the tree became writable again, hermes update still failed:\n"
+        + "first read-only update:\n" + I.describe(up)
+        + "recovery update:\n" + I.describe(again))
     assert I.git("rev-parse", "HEAD", cwd=world["sb"].checkout) == world["target"], (
         "update exited 0 but HEAD is not the new release")
     X.turn(world["sb"], provider, "turn after the recovered update")

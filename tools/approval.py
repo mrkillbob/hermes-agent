@@ -14,8 +14,10 @@ call time; sibling-defined names are imported from their defining module.
 from dataclasses import dataclass
 import hashlib
 import importlib
+from itertools import pairwise
 import logging
 import os
+import re
 import threading
 from typing import Optional
 
@@ -29,7 +31,10 @@ from tools.approval_context import (
     get_current_session_key,
 )
 from tools.approval_detection import (
-    _approval_key_aliases, _check_sudo_stdin_guard, detect_dangerous_command, detect_hardline_command,
+    _approval_key_aliases, _check_sudo_stdin_guard, _command_detection_variants,
+    _deobfuscate_shell_word_for_detection, _iter_shell_command_word_spans,
+    _iter_top_level_shell_segments, _shell_segment_tokens, detect_dangerous_command,
+    detect_hardline_command,
 )
 from tools.approval_floors import (
     _command_matches_permanent_allowlist, _hardline_block_result, _match_user_deny_rule, _sudo_stdin_block_result,
@@ -197,6 +202,16 @@ def list_gateway_approvals(session_key: str) -> list[dict]:
     """Return replay-safe snapshots of unresolved approvals for one session."""
     with _lock:
         return [dict(entry.data) for entry in _gateway_queues.get(session_key, [])]
+
+
+def find_gateway_approval_session(request_id: str) -> str | None:
+    """Return the session_key whose queue contains an entry with request_id, or None."""
+    with _lock:
+        for key, queue in _gateway_queues.items():
+            for entry in queue:
+                if str(entry.data.get("request_id") or "") == request_id:
+                    return key
+    return None
 
 
 def register_gateway_settle(session_key: str, request_id: str, settle) -> bool:
@@ -456,6 +471,9 @@ def _baseline_key() -> str:
 def load_permanent_allowlist() -> set:
     """Load ``command_allowlist`` from config and sync it into the approval state
     so is_approved() honors 'always' choices from previous sessions."""
+    from hermes_cli.startup_hold import active as startup_hold_active
+    if startup_hold_active():
+        return set()
     try:
         patterns = _read_permanent_allowlist()
         load_permanent(patterns)
@@ -1038,12 +1056,145 @@ def _run_approval_gate(
     )
 
 
+_GITHUB_ACTIONS_MUTATION_ENDPOINT = re.compile(
+    r"(?:^|/)actions/(?:"
+    r"runs/[0-9]+/(?:rerun|rerun-failed-jobs|cancel)"
+    r"|workflows/[^/]+/dispatches"
+    r")(?:$|[/?#])"
+    r"|(?:^|/)repos/[^/]+/[^/]+/dispatches(?:$|[/?#])",
+    re.IGNORECASE,
+)
+
+_GITHUB_PULL_REQUEST_CREATION_ENDPOINT = re.compile(
+    r"(?:^|/)repos/[^/]+/[^/]+/pulls(?:$|[/?#])",
+    re.IGNORECASE,
+)
+
+
+def _kanban_github_actions_mutation(command: str) -> bool:
+    """Detect GitHub Actions mutations forbidden to autonomous Kanban workers.
+
+    Kanban workers may inspect run/check state, but starting, rerunning, or
+    cancelling hosted CI is an operator-budget action. This guard uses the
+    existing ``HERMES_KANBAN_TASK`` execution identity and runs before all
+    container/yolo bypasses so a worker cannot gain that authority by changing
+    terminal backend or approval mode.
+    """
+
+    if not os.environ.get("HERMES_KANBAN_TASK", "").strip():
+        return False
+    for variant in _command_detection_variants(command):
+        for segment in _iter_top_level_shell_segments(variant):
+            for start, _, word in _iter_shell_command_word_spans(segment):
+                executable = os.path.basename(
+                    _deobfuscate_shell_word_for_detection(word)
+                ).casefold()
+                if executable not in {"gh", "curl"}:
+                    continue
+                tokens = _shell_segment_tokens(segment, start)
+                if not tokens:
+                    continue
+                lowered = [token.casefold() for token in tokens[1:]]
+                if executable == "gh":
+                    pairs = set(pairwise(lowered))
+                    if pairs.intersection(
+                        {("run", "rerun"), ("run", "cancel"), ("workflow", "run")}
+                    ):
+                        return True
+                if any(_GITHUB_ACTIONS_MUTATION_ENDPOINT.search(token) for token in lowered):
+                    return True
+    return False
+
+
+def _kanban_pull_request_creation(command: str) -> bool:
+    """Detect pull-request creation attempts by autonomous Kanban workers.
+
+    A worker may create a pull request only through the governed publication
+    path, which validates a fresh exact-head local-CI receipt before writing to
+    GitHub.  Raw ``gh`` and ``curl`` creation routes are denied before any
+    container or yolo bypass can grant them authority.
+    """
+
+    if not os.environ.get("HERMES_KANBAN_TASK", "").strip():
+        return False
+    for variant in _command_detection_variants(command):
+        for segment in _iter_top_level_shell_segments(variant):
+            for start, _, word in _iter_shell_command_word_spans(segment):
+                executable = os.path.basename(
+                    _deobfuscate_shell_word_for_detection(word)
+                ).casefold()
+                if executable not in {"gh", "curl"}:
+                    continue
+                tokens = _shell_segment_tokens(segment, start)
+                if not tokens:
+                    continue
+                lowered = [token.casefold() for token in tokens[1:]]
+                if executable == "gh" and ("pr", "create") in set(pairwise(lowered)):
+                    return True
+                if not any(
+                    _GITHUB_PULL_REQUEST_CREATION_ENDPOINT.search(token)
+                    for token in lowered
+                ):
+                    continue
+                if any(token in {"post", "-xpost", "--request=post"} for token in lowered):
+                    return True
+                if any(token in {"-x", "--request"} for token in lowered):
+                    for index, token in enumerate(lowered[:-1]):
+                        if token in {"-x", "--request"} and lowered[index + 1] == "post":
+                            return True
+                if executable == "gh" and any(
+                    token in {"-f", "--raw-field", "--field", "-fhead", "-fbase"}
+                    or token.startswith("-f")
+                    for token in lowered
+                ):
+                    return True
+                if executable == "curl" and any(
+                    token in {
+                        "-d", "--data", "--data-raw", "--data-binary",
+                        "--data-ascii", "--data-urlencode", "--json",
+                    }
+                    or token.startswith((
+                        "--data=", "--data-raw=", "--data-binary=",
+                        "--data-ascii=", "--data-urlencode=", "--json=", "-d=",
+                    ))
+                    or (token.startswith("-d") and token != "-d")
+                    for token in lowered
+                ):
+                    return True
+    return False
+
+
+def _kanban_github_actions_block_result() -> dict:
+    return {
+        "approved": False,
+        "kanban_policy": "github_actions_mutation",
+        "message": (
+            "BLOCKED: Kanban workers may inspect GitHub Actions, but may not "
+            "start, rerun, or cancel hosted CI. This consumes operator-owned "
+            "Actions budget and requires an explicit operator action outside "
+            "the worker."
+        ),
+    }
+
+
+def _kanban_pull_request_creation_block_result() -> dict:
+    return {
+        "approved": False,
+        "kanban_policy": "pull_request_creation_requires_exact_head_ci_receipt",
+        "message": (
+            "BLOCKED: Autonomous workers may not create pull requests through raw GitHub "
+            "commands. Run the governed pre-publication local-CI audit for the exact branch "
+            "head, then use the receipt-bound publication path."
+        ),
+    }
+
+
 def _should_skip_container_guards(env_type: str, has_host_access: bool = False) -> bool:
     """True when the backend is isolated enough to skip dangerous-command prompts. Docker is the
     exception once host paths are bind-mounted: ``rm -rf /workspace`` then reaches host files."""
     if env_type == "docker":
         return not has_host_access
-    if env_type in ("singularity", "modal", "daytona", "vercel_sandbox"):
+    if env_type in ("modal", "daytona", "vercel_sandbox"):
         return True
     # Plugin backends declare the same classification through the provider ABI (#94400);
     # fail-soft to False so an unknown or raising backend — or a raising registry
@@ -1098,6 +1249,14 @@ def check_dangerous_command(command: str, env_type: str,
     """Detect a dangerous command and handle approval (pattern layer only). ``has_host_access``:
     a Docker sandbox that bind-mounts host paths must not skip approval.
     Returns ``{"approved": True/False, "message": str or None, ...}``."""
+    # Kanban worker governed-write guards run first: these are receipt-bound authority
+    # operations that no container or yolo bypass may grant.
+    if _kanban_github_actions_mutation(command):
+        logger.warning("Kanban GitHub Actions mutation blocked: %s", command[:200])
+        return _kanban_github_actions_block_result()
+    if _kanban_pull_request_creation(command):
+        logger.warning("Kanban pull-request creation blocked: %s", command[:200])
+        return _kanban_pull_request_creation_block_result()
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return _user_deny_block(command) or _approved()
     blocked = _floor_block(command)
@@ -1154,6 +1313,14 @@ def check_all_command_guards(command: str, env_type: str,
     """Run all pre-exec security checks and return a single approval decision. Plugins that
     want to veto or escalate a command do it from ``pre_tool_call``.
     ``has_host_access``: a Docker sandbox with bind-mounted host paths takes the normal flow."""
+    # Kanban worker governed-write guards run first: these are receipt-bound authority
+    # operations that no container or yolo bypass may grant.
+    if _kanban_github_actions_mutation(command):
+        logger.warning("Kanban GitHub Actions mutation blocked: %s", command[:200])
+        return _kanban_github_actions_block_result()
+    if _kanban_pull_request_creation(command):
+        logger.warning("Kanban pull-request creation blocked: %s", command[:200])
+        return _kanban_pull_request_creation_block_result()
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return _user_deny_block(command) or _approved()
 

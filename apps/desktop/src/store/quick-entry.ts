@@ -57,19 +57,31 @@ function applyStatus(status: QuickEntryStatus | undefined): void {
   })
 }
 
+type QuickEntryBridge = NonNullable<Window['hermesDesktop']['quickEntry']>
+
+/** The shell's Quick Entry settings call, or undefined where there is none
+ *  (outside Electron, the Webapp's bridge). */
+function quickEntrySettingsCall<K extends 'getSettings' | 'setSettings'>(name: K): QuickEntryBridge[K] | undefined {
+  const call = typeof window === 'undefined' ? undefined : window.hermesDesktop?.quickEntry?.[name]
+
+  return typeof call === 'function' ? call : undefined
+}
+
 /** True when the shell exposes the Quick Entry capability (desktop only). */
 export function canUseQuickEntry(): boolean {
-  return typeof window !== 'undefined' && typeof window.hermesDesktop?.quickEntry?.getSettings === 'function'
+  return quickEntrySettingsCall('getSettings') !== undefined
 }
 
 /** Read the live registration state into the store (Settings mount). */
 export async function loadQuickEntrySettings(): Promise<void> {
-  if (!canUseQuickEntry()) {
+  const getSettings = quickEntrySettingsCall('getSettings')
+
+  if (!getSettings) {
     return
   }
 
   try {
-    applyStatus(await window.hermesDesktop.quickEntry.getSettings())
+    applyStatus(await getSettings())
   } catch {
     // A failed read leaves the store as-is; the row keeps its last known copy.
   }
@@ -81,7 +93,9 @@ export async function loadQuickEntrySettings(): Promise<void> {
  * instead of a silently-lost setting.
  */
 export async function saveQuickEntrySettings(patch: { enabled?: boolean; shortcut?: string }): Promise<void> {
-  if (!canUseQuickEntry()) {
+  const setSettings = quickEntrySettingsCall('setSettings')
+
+  if (!setSettings) {
     return
   }
 
@@ -91,7 +105,7 @@ export async function saveQuickEntrySettings(patch: { enabled?: boolean; shortcu
   $quickEntry.set({ ...previous, ...patch, registered: previous.registered })
 
   try {
-    applyStatus(await window.hermesDesktop.quickEntry.setSettings(patch))
+    applyStatus(await setSettings(patch))
   } catch {
     $quickEntry.set(previous)
   }
@@ -129,6 +143,8 @@ export interface QuickEntrySubmitPayload {
 }
 
 export interface QuickEntrySubmitResult {
+  /** Main-process relay correlation; retained through timeouts for reconciliation. */
+  correlationId?: string
   ok: boolean
   code?: string
   message?: string
@@ -166,6 +182,7 @@ export interface QuickComposerState {
    *  have accepted it. Kept so a late acknowledgement can reconcile, and never
    *  presented as retryable until non-acceptance is proven. */
   unknownSubmitId: number | null
+  unknownCorrelationId: string | null
   /** Where a submit lands: current / new / a stored session id. */
   target: string
   /** Whether the window should be visible. False asks the shell to hide. */
@@ -180,8 +197,8 @@ export type QuickComposerEvent =
   | { type: 'state'; connected: boolean; sessions: QuickEntrySessionOption[] }
   | { type: 'submit'; submitId?: number }
   | { type: 'submit-error'; message: string; submitId: number }
-  | { message: string; submitId: number; type: 'submit-unknown' }
-  | { message: string; ok: boolean; type: 'late-result' }
+  | { correlationId?: string; message: string; submitId: number; type: 'submit-unknown' }
+  | { correlationId: string; message: string; ok: boolean; retryable?: boolean; type: 'late-result' }
   | { type: 'submit-ok'; submitId: number }
   | { type: 'target'; target: string }
 
@@ -195,9 +212,10 @@ export function quickEntryResultEvent(result: QuickEntrySubmitResult, submitId: 
     return { submitId, type: 'submit-ok' }
   }
 
-  if (result.code === 'timeout') {
+  if (result.code === 'timeout' || result.retryable === false) {
     return {
       message: result.message || 'Hermes has not confirmed the prompt yet — it may still be delivered.',
+      ...(result.correlationId ? { correlationId: result.correlationId } : {}),
       submitId,
       type: 'submit-unknown'
     }
@@ -229,6 +247,7 @@ export const initialQuickComposerState: QuickComposerState = {
   submitting: false,
   target: QUICK_TARGET_CURRENT,
   unknownSubmitId: null,
+  unknownCorrelationId: null,
   visible: true
 }
 
@@ -255,6 +274,7 @@ export function quickComposerReducer(state: QuickComposerState, event: QuickComp
               submitting: false,
               target: QUICK_TARGET_CURRENT,
               unknownSubmitId: null,
+              unknownCorrelationId: null,
               visible: false
             }
       }
@@ -285,6 +305,7 @@ export function quickComposerReducer(state: QuickComposerState, event: QuickComp
           submitting: false,
           target: QUICK_TARGET_CURRENT,
           unknownSubmitId: null,
+          unknownCorrelationId: null,
           visible: true
         }
       }
@@ -361,6 +382,7 @@ export function quickComposerReducer(state: QuickComposerState, event: QuickComp
               pendingSubmitId: null,
               submitting: false,
               unknownSubmitId: null,
+              unknownCorrelationId: null,
               visible: false
             }
           }
@@ -382,6 +404,7 @@ export function quickComposerReducer(state: QuickComposerState, event: QuickComp
           pendingSubmitId: null,
           submitting: false,
           unknownSubmitId: event.submitId,
+          unknownCorrelationId: event.correlationId ?? null,
           visible: true
         }
       }
@@ -390,8 +413,16 @@ export function quickComposerReducer(state: QuickComposerState, event: QuickComp
     case 'late-result': {
       // A late outcome only reconciles a submit the window still holds as
       // UNKNOWN. Without one it must not clobber a fresh draft.
-      if (state.unknownSubmitId === null) {
+      if (
+        state.unknownSubmitId === null ||
+        !event.correlationId ||
+        state.unknownCorrelationId !== event.correlationId
+      ) {
         return { send: null, state }
+      }
+
+      if (!event.ok && event.retryable === false) {
+        return { send: null, state: { ...state, error: event.message, visible: true } }
       }
 
       return event.ok
@@ -404,6 +435,7 @@ export function quickComposerReducer(state: QuickComposerState, event: QuickComp
               lastSubmitText: '',
               orphanedFailure: null,
               unknownSubmitId: null,
+              unknownCorrelationId: null,
               visible: false
             }
           }
@@ -414,6 +446,7 @@ export function quickComposerReducer(state: QuickComposerState, event: QuickComp
               error: event.message,
               lastSubmitText: '',
               unknownSubmitId: null,
+              unknownCorrelationId: null,
               visible: true
             }
           }
@@ -439,7 +472,13 @@ export function quickComposerReducer(state: QuickComposerState, event: QuickComp
         // retry is legitimate, and keep the text.
         return {
           send: null,
-          state: { ...state, error: event.message, lastSubmitText: '', unknownSubmitId: null }
+          state: {
+            ...state,
+            error: event.message,
+            lastSubmitText: '',
+            unknownSubmitId: null,
+            unknownCorrelationId: null
+          }
         }
       }
 

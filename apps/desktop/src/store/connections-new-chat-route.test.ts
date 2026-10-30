@@ -135,10 +135,22 @@ it('keeps a draft the user pinned while the silent boot restore was in flight', 
 
 it('preserves the explicit draft when the target dial fails', async () => {
   const route = $newChatRoute.get()
-  getConnectionFor.mockRejectedValueOnce(new Error('offline'))
+  const foreground = { connectionId: $activeConnectionId.get(), profile: $activeGatewayProfile.get() }
+  // Local routing first probes whether it shares the primary backend, then dials
+  // the dedicated backend. Keep the target offline across both resolution paths.
+  getConnectionFor.mockImplementation(async ({ connectionId, profile }) => {
+    if (connectionId === 'local') {
+      throw new Error('offline')
+    }
+
+    return descriptor(connectionId, profile)
+  })
   await expect(selectConnection('local')).rejects.toThrow('offline')
   expect($newChatRoute.get()).toEqual(route)
   expect(resolveNewChatOwnerRoute()).toEqual(route)
+  expect($activeConnectionId.get()).toBe(foreground.connectionId)
+  expect(activeGatewayConnectionId()).toBe(foreground.connectionId)
+  expect($activeGatewayProfile.get()).toBe(foreground.profile)
 })
 
 it('does not overwrite a newer draft when remembering a committed switch settles late', async () => {

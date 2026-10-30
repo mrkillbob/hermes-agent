@@ -323,7 +323,12 @@ def test_native_windows_spawn_never_retries_without_breakaway(tmp_path, monkeypa
 def test_native_launchd_ambiguous_domains_cannot_start(tmp_path, monkeypatch):
     from hermes_cli.gateway_runtime_service import discover_existing_gateway_service, RuntimeStartError
     peer = tmp_path / "inert_launchd.py"
-    peer.write_text("print('state = not running')\n", encoding="utf-8")
+    argv = [sys.executable, "-m", "hermes_cli.main", "gateway", "run"]
+    output = ("job = {\n\tstate = not running\n\tprogram = " + argv[0]
+              + "\n\targuments = {\n" + "\n".join("\t\t" + arg for arg in argv)
+              + "\n\t}\n\tenvironment = {\n\t\tHERMES_HOME => " + str(tmp_path.resolve())
+              + "\n\t\tHERMES_SUPERVISED_CHILD => 1\n\t}\n}")
+    peer.write_text("print(" + repr(output) + ")\n", encoding="utf-8")
     actual = subprocess.run
     calls = []
     def boundary(argv, **kwargs):

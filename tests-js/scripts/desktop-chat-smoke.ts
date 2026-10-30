@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { type ConsoleMessage, expect, type Locator, type Page } from '@playwright/test'
+import { type ConsoleMessage, errors, expect, type Locator, type Page } from '@playwright/test'
 import { z } from 'zod'
 
+import { beginSelectionCapture, type ComposerSelection, type SelectionCapture } from './desktop-selection-diagnostics.ts'
 import { MOCK_MODEL_ID, validateMockUrl } from './mock-provider-config.ts'
 import { MOCK_REPLY } from './mock-server.ts'
 
@@ -17,6 +18,7 @@ export interface DesktopChatSmokeOptions {
   expectCommit?: string
   provenanceCommit?: string
   observePrompts?: () => Promise<readonly string[]>
+  selectionCapture?: SelectionCapture
 }
 
 export interface ChatIdentity {
@@ -90,19 +92,184 @@ export function assertChatCommit(identity: ChatIdentity, expected: string, prove
   }
 }
 
-export async function readMockPrompts(mockUrl: string): Promise<string[]> {
-  const response = await fetch(`${validateMockUrl(mockUrl)}/__e2e__/prompts`, {
-    signal: AbortSignal.timeout(5000), redirect: 'error',
-  })
+export async function readMockPrompts(mockUrl: string, { timeoutMs = 10_000, attempts = 3 } = {}): Promise<string[]> {
+  const url = `${validateMockUrl(mockUrl)}/__e2e__/prompts`
 
-  if (!response.ok) {
-    throw new Error(`Mock request witness returned HTTP ${response.status}`)
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'error' })
+
+      if (!response.ok) {
+        throw new Error(`Mock request witness returned HTTP ${response.status}`)
+      }
+
+      return z.object({ receivedPrompts: z.array(z.string()) }).parse(await response.json()).receivedPrompts
+    } catch (error) {
+      // The witness is polled while Electron and the backend start on a shared
+      // runner; one stalled response must not fail the whole checkpoint. A dead
+      // mock (connection refused) and bad payloads still fail at once.
+      if (!(error instanceof DOMException && error.name === 'TimeoutError') || attempt >= attempts) {
+        throw error
+      }
+    }
   }
-
-  return z.object({ receivedPrompts: z.array(z.string()) }).parse(await response.json()).receivedPrompts
 }
 
-export async function waitForChatReady(page: Page, timeoutMs = 120_000): Promise<Locator> {
+export interface ComposerClickPosition { x: number; y: number }
+
+/** Read-only hit testing also handles an editor clipped by a historical pane. */
+export function composerClickPosition(editor: Element): ComposerClickPosition | null {
+  const rect = editor.getBoundingClientRect()
+  const left = Math.max(0, rect.left)
+  const right = Math.min(window.innerWidth, rect.right)
+  const top = Math.max(0, rect.top)
+  const bottom = Math.min(window.innerHeight, rect.bottom)
+
+  if (right <= left || bottom <= top) { return null }
+
+  for (const yFraction of [0.5, 0.25, 0.75, 0.1, 0.9]) {
+    for (const xFraction of [0.5, 0.25, 0.75, 0.1, 0.9]) {
+      const x = left + (right - left) * xFraction
+      const y = top + (bottom - top) * yFraction
+      const hit = document.elementFromPoint(x, y)
+
+      if (hit && editor.contains(hit)) { return { x: x - rect.left, y: y - rect.top } }
+    }
+  }
+
+  return null
+}
+
+export interface PointerSample {
+  type: string; x: number; y: number; requestedX: number; requestedY: number; withinEditor: boolean
+}
+
+/** Confirm a uniform input-transport scale from delivered events, never from host/DPI guesses. */
+export function pointerTransportScale(samples: PointerSample[]): number | null {
+  if (samples.length < 2) { return null }
+
+  const scales = samples.flatMap(sample => [sample.requestedX / sample.x, sample.requestedY / sample.y])
+  const scale = scales.reduce((sum, value) => sum + value, 0) / scales.length
+
+  if (!Number.isFinite(scale) || scale <= 0 || Math.abs(scale - 1) < 0.02
+    || scales.some(value => !Number.isFinite(value) || Math.abs(value - scale) > 0.02)) { return null }
+
+  return scale
+}
+
+export async function clickComposer(composer: Locator, trial: boolean, timeoutMs = 120_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastClickFailure: string | undefined
+  let lastPosition: ComposerClickPosition | null = null
+
+  const pointer = await composer.evaluateHandle(el => {
+    const samples: PointerSample[] = []
+    let position: ComposerClickPosition | null = null
+
+    const observe = (event: MouseEvent) => {
+      if (position === null) { return }
+
+      const target = event.target instanceof Element ? event.target : null
+      const rect = el.getBoundingClientRect()
+
+      samples.push({ type: event.type, x: event.clientX, y: event.clientY,
+        requestedX: rect.x + position.x, requestedY: rect.y + position.y,
+        withinEditor: target !== null && el.contains(target) })
+
+      if (samples.length > 4) { samples.shift() }
+    }
+
+    window.addEventListener('mousemove', observe, true)
+    window.addEventListener('mousedown', observe, true)
+
+    return { samples, setPosition: (next: ComposerClickPosition) => { position = next }, stop: () => {
+      window.removeEventListener('mousemove', observe, true)
+      window.removeEventListener('mousedown', observe, true)
+    } }
+  })
+
+  try {
+    await expect.poll(async () => {
+      const position = await composer.evaluate(composerClickPosition)
+
+      lastPosition = position
+
+      if (position === null) { return false }
+      await pointer.evaluate((record, next) => record.setPosition(next), position)
+
+      try {
+        // Startup layout and scrolling can invalidate a point; remeasure bounded attempts.
+        await composer.click({ trial, position, timeout: Math.min(2000, Math.max(1, deadline - Date.now())) })
+
+        return true
+      } catch (error) {
+        if (!(error instanceof errors.TimeoutError)) { throw error }
+        lastClickFailure = error.message
+      }
+
+      // Historical Windows Electron delivers CDP mouse coordinates divided by window zoom.
+      // Correct only an observed uniform mismatch, then verify a delivered hover hits the editor.
+      const scale = pointerTransportScale(await pointer.evaluate(record => record.samples))
+
+      if (scale === null) { return false }
+
+      const target = await composer.evaluate((el, offset) => {
+        const rect = el.getBoundingClientRect()
+        const x = rect.x + offset.x
+        const y = rect.y + offset.y
+        const hit = document.elementFromPoint(x, y)
+
+        return hit && el.contains(hit) ? { x, y } : null
+      }, position)
+
+      if (target === null) { return false }
+      const mouse = composer.page().mouse
+      const corrected = { x: target.x * scale, y: target.y * scale }
+
+      await mouse.move(corrected.x, corrected.y)
+      const delivered = await pointer.evaluate(record => record.samples.at(-1))
+
+      if (!delivered?.withinEditor || Math.abs(delivered.x - target.x) > 2
+        || Math.abs(delivered.y - target.y) > 2) { return false }
+
+      if (!trial) {
+        await mouse.click(corrected.x, corrected.y)
+        const down = await pointer.evaluate(record => record.samples.at(-1))
+
+        if (down?.type !== 'mousedown' || !down.withinEditor) { return false }
+      }
+
+      return true
+    }, { timeout: timeoutMs, message: 'Composer must accept a normal click at a visible input point' }).toBe(true)
+  } catch (error) {
+    if (lastClickFailure === undefined) { throw error }
+
+    const geometry = await composer.evaluate(el => {
+      const rect = el.getBoundingClientRect()
+
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+        viewport: { width: innerWidth, height: innerHeight }, devicePixelRatio }
+    })
+
+    const box = await composer.boundingBox()
+    const events = await pointer.evaluate(record => record.samples)
+
+    throw new Error(`${(error as Error).message}\nLast normal click: ${lastClickFailure}`
+      + `\nClick geometry: ${JSON.stringify({ position: lastPosition, dom: geometry, playwright: box, events })}`)
+  } finally {
+    // A closed page cannot run diagnostic cleanup; it already discarded these listeners.
+    await pointer.evaluate(record => record.stop()).catch(() => {})
+    await pointer.dispose()
+  }
+}
+
+// An updated app can first ensure (75 s), time out its manual-owner restart
+// client (120 s), then re-ensure (75 s). Keep 30 s for renderer readiness beyond
+// that supported bounded path in each readiness stage; ordinary hit-tested
+// clicks remain mandatory. This is a per-stage allowance, not a total deadline.
+const DESKTOP_READY_TIMEOUT_MS = 300_000
+
+export async function waitForChatReady(page: Page, timeoutMs = DESKTOP_READY_TIMEOUT_MS): Promise<Locator> {
   // The visible editor is a contentEditable div. assistant-ui also renders an
   // aria-hidden, sr-only <textarea> that carries the composer binding: it is
   // "editable" but clipped out of the viewport, so a bare `textarea` selector
@@ -119,8 +286,7 @@ export async function waitForChatReady(page: Page, timeoutMs = 120_000): Promise
   try {
     await composer.waitFor({ state: 'visible', timeout: timeoutMs })
     await expect(composer).toBeEditable({ timeout: timeoutMs })
-    // Trial input checks hit testing, not merely a non-zero box behind the boot overlay.
-    await composer.click({ trial: true, timeout: timeoutMs })
+    await clickComposer(composer, true, timeoutMs)
   } catch (error) {
     throw new Error(`${(error as Error).message} -- composer not interactable `
       + `(composer-root=${await root.count()}, contenteditable=${await root.locator('[contenteditable]').count()}): `
@@ -215,32 +381,36 @@ async function rendererEvidence(page: Page, consoleLines: readonly string[]): Pr
   return ['--- renderer state ---', JSON.stringify(state, null, 2), '--- renderer console ---', ...consoleLines].join('\n')
 }
 
-/** Apps prettify a model id ("mock-model" renders as "Mock Model"), so compare with case and separators folded. */
-function foldModelName(text: string): string {
-  return text.toLowerCase().replace(/[\s_-]+/g, ' ')
-}
+const selectionValue = (value: string | null): string => value ?? 'missing'
 
-/**
- * Wait until the page shows the seeded mock model. Older desktops keep the
- * composer's model as renderer state and ship it as the session override on
- * session.create, so a send before the configured model has loaded goes to the
- * app's default provider and the mock never sees the prompt (v2026.7.1 sent to
- * openrouter and got a 401). The name is searched in the page text rather than
- * a selector because the chip's markup differs between app versions. An app
- * that never renders the name proceeds after the timeout and the
- * mock-received assertion still decides; the note lands in the renderer log.
- */
-async function waitForMockModel(page: Page, notes: string[], timeoutMs: number = 30_000): Promise<void> {
-  const wanted = foldModelName(MOCK_MODEL_ID)
+/** Require the exact inert route written by the smoke fixture before the driver types or sends. */
+export async function waitForMockSelection(
+  capture: SelectionCapture,
+  { timeoutMs = 30_000, intervalMs = 100 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<ComposerSelection> {
+  const initial = await capture.readSelection()
+
+  if (initial === null) {
+    throw new Error('Selection diagnostics unavailable; chat was not submitted')
+  }
+
+  let current: ComposerSelection = initial
+
+  const ready = (value: ComposerSelection): boolean => value.model === MOCK_MODEL_ID && value.provider === 'custom'
+
+  if (ready(current)) { return current }
 
   try {
-    await expect.poll(
-      async (): Promise<boolean> => foldModelName(await page.evaluate((): string => document.body.innerText)).includes(wanted),
-      { timeout: timeoutMs },
-    ).toBe(true)
+    await expect.poll(async (): Promise<boolean> => {
+      current = await capture.readSelection() ?? current
+
+      return ready(current)
+    }, { timeout: timeoutMs, intervals: [intervalMs] }).toBe(true)
   } catch {
-    notes.push(`[smoke] the page never showed "${MOCK_MODEL_ID}" within ${timeoutMs}ms; sending anyway`)
+    throw new Error(`Seeded mock selection did not become ready; chat was not submitted (model=${selectionValue(current.model)} provider=${selectionValue(current.provider)})`)
   }
+
+  return current
 }
 
 /** Lifecycle belongs to the caller, so this also runs inside the OLD update window. */
@@ -271,18 +441,21 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
   }
 
   page.on('console', onConsole)
+  const selectionCapture = options.selectionCapture ?? await beginSelectionCapture(page, outDir, phase)
 
   try {
     const composer = await waitForChatReady(page)
+    await selectionCapture.checkpoint('chat-ready')
 
-    await waitForMockModel(page, consoleLines)
+    await waitForMockSelection(selectionCapture)
 
     const identity = await readChatIdentity(page)
 
     if (expectCommit) { assertChatCommit(identity, expectCommit, options.provenanceCommit) }
     const beforeIds = (await readTranscript(page)).map((message: TranscriptMessage): string => message.id)
     const before = (await observe()).length
-    await composer.click()
+    await clickComposer(composer, false)
+    await expect(composer).toBeFocused()
     // The app persists its composer draft across launches, so a checkpoint that
     // types on top of a restored draft can submit the PREVIOUS checkpoint's text
     // (proved: the update window's turn carried the root checkpoint's prompt) and
@@ -300,7 +473,9 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
     await expect.poll(async (): Promise<string> => composerText(composer), {
       timeout: 15_000, message: 'The composer must hold the typed prompt before Enter (did the editor accept input?)',
     }).toContain(prompt)
+    await selectionCapture.checkpoint('before-submit')
     await composer.press('Enter')
+    await selectionCapture.checkpoint('after-submit')
     await expect.poll(async (): Promise<string> => composerText(composer),
     { timeout: 90_000, message: 'The submitted draft must clear before the idle control proves completion' }).toBe('')
     let witnessIndex = -1
@@ -318,6 +493,7 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
     // Stop and the streaming marker must settle even when all reply text arrived.
     await expect(page.locator('[data-slot="composer-root"] button[aria-label="Start voice conversation"]:visible, [data-slot="composer-root"] button[type="submit"][aria-label="Send"]:visible')).toBeVisible({ timeout: 90_000 })
     const pair = newCompletedPair(await readTranscript(page), beforeIds, prompt)
+    await selectionCapture.checkpoint('complete')
 
     if (!pair) {
       throw new Error('New transcript pair disappeared before the turn completed')
@@ -335,11 +511,13 @@ export async function runDesktopChatSmoke(page: Page, options: DesktopChatSmokeO
 
     return receipt
   } catch (error) {
+    await selectionCapture.checkpoint('failed')
     await page.screenshot({ path: screenshot }).catch((): void => {})
     fs.writeFileSync(evidencePath, `${await rendererEvidence(page, consoleLines)}\n`)
     fs.writeFileSync(receiptPath, `${JSON.stringify({ status: 'failed', phase, expectedCommit: expectCommit ?? null, prompt, error: String(error) }, null, 2)}\n`)
     throw error
   } finally {
+    if (!options.selectionCapture) { await selectionCapture.stop() }
     page.off('console', onConsole)
   }
 }

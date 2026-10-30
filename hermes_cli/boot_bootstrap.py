@@ -241,6 +241,9 @@ def run_boot_bootstrap(project_root: Path) -> dict:
 def maybe_run_boot_bootstrap(project_root: Path) -> None:
     """The one call boot paths use. Never raises: a bootstrap problem must
     not stop the gateway/serve/CLI from starting."""
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return
     try:
         run_boot_bootstrap(Path(project_root))
     except Exception as exc:

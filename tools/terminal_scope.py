@@ -127,6 +127,8 @@ def build_profile_terminal_scope(
     closes. It sits where the process env sits in the standalone bridge — explicit YAML keys
     still win (``apply_terminal_config_to_env``).
     """
+    from hermes_cli.config_backend import config_exists
+
     home = Path(hermes_home)
     scope = default_terminal_scope()
     default_image = scope.get("TERMINAL_DOCKER_IMAGE")
@@ -159,15 +161,15 @@ def build_profile_terminal_scope(
     # "unparseable" into {}): present-but-unparseable must fail closed.
     config_path = home / "config.yaml"
     try:
-        config_exists = config_path.exists()
+        has_config = config_exists(config_path)
     except Exception as exc:
         raise TerminalPolicyUnavailable(f"cannot resolve terminal config in {home}: {exc}") from exc
-    if config_exists:
-        from utils import load_yaml_file_readonly
+    if has_config:
+        from hermes_cli.config_backend import read_config_doc_readonly
 
         try:
             # Signature-cached: a scope is rebuilt per routed turn/poll, the file rarely changes.
-            raw = load_yaml_file_readonly(config_path)
+            raw = read_config_doc_readonly(config_path)
         except Exception as exc:
             raise TerminalPolicyUnavailable(f"cannot parse {config_path}: {exc}") from exc
         raw_terminal = raw.get("terminal") if isinstance(raw, dict) else None
@@ -204,6 +206,9 @@ def _resolve_scope_cwd_placeholder(scope: dict[str, str]) -> None:
 def install_profile_terminal_scope(
     hermes_home: Any, *, env_overlay: Optional[dict[str, str]] = None) -> Token:
     """Build AND install a profile's policy; on failure install the refusal scope. Never raises."""
+    from hermes_cli.startup_hold import active
+    if active():
+        return set_terminal_scope(TerminalPolicyRefusal('startup_hold'))
     try:
         return set_terminal_scope(build_profile_terminal_scope(hermes_home, env_overlay=env_overlay))
     except TerminalPolicyUnavailable as exc:

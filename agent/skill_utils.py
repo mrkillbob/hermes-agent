@@ -2,11 +2,15 @@
 Import-light by design: no tool registry, CLI config, or provider resolution."""
 
 import ast
+import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import logging
 import os
 import re
 import sys
+import threading
 from pathlib import Path, PurePath
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -21,7 +25,7 @@ logger = logging.getLogger(__name__)
 PLATFORM_MAP = {"macos": "darwin", "linux": "linux", "windows": "win32"}
 
 EXCLUDED_SKILL_DIRS = frozenset((
-    ".git", ".github", ".hub", ".archive", ".curator_backups", ".locks",
+    ".git", ".github", ".hub", ".archive", ".trash", ".curator_backups", ".locks",
     ".venv", "venv", "node_modules", "site-packages", "__pycache__",
     ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 ))
@@ -52,6 +56,29 @@ def is_skill_support_path(path, *, root: Optional[Path] = None) -> bool:
 
 
 _yaml_load_fn = None
+_SKILL_METADATA_CONFIG: ContextVar = ContextVar("skill_metadata_config", default=None)
+_SKILL_METADATA_PROJECT: ContextVar = ContextVar("skill_metadata_project", default=None)
+_SKILL_METADATA_WORKER: ContextVar = ContextVar("skill_metadata_worker", default=None)
+
+
+@contextmanager
+def skill_metadata_config(config: dict, *, project_start: Optional[Path] = None,
+                          worker_env: Optional[dict[str, str]] = None):
+    """Explicit profile settings for metadata resolution, never worker policy.
+
+    Cross-profile intake must not borrow its creator's frozen settings. Only
+    skill readers use this scoped copy; config/provider/worker-policy readers
+    retain their original snapshot. No scope escapes the caller's context.
+    """
+    token = _SKILL_METADATA_CONFIG.set({"skills": copy.deepcopy(config.get("skills", {}))})
+    project_token = _SKILL_METADATA_PROJECT.set(project_start)
+    worker_token = _SKILL_METADATA_WORKER.set(dict(worker_env or {}))
+    try:
+        yield
+    finally:
+        _SKILL_METADATA_WORKER.reset(worker_token)
+        _SKILL_METADATA_PROJECT.reset(project_token)
+        _SKILL_METADATA_CONFIG.reset(token)
 
 
 def yaml_load(content: str):
@@ -192,46 +219,59 @@ def skill_matches_apps(frontmatter: dict[str, Any]) -> bool:
 
 
 _RAW_CONFIG_CACHE: dict[tuple[str, int, int, int, int], dict[str, Any]] = {}
+# A multiplexed watcher rotates through up to ~32 published profile/project scopes plus
+# the ambient one (#141610), so a miss must not drop the whole cache — only a stale
+# signature entry. The bound retires entries a config's own edits leave behind.
+_RAW_CONFIG_CACHE_MAX = 128
+# Guards every cache read/publish/evict: concurrent tool threads share it, and an unlocked
+# ``pop(next(iter(...)))`` races another thread's insert (RuntimeError) or pop (KeyError).
+_RAW_CONFIG_CACHE_LOCK = threading.Lock()
 
 
 def _raw_config_cache_clear() -> None:
     """Test hook — drop the shared raw config cache."""
-    _RAW_CONFIG_CACHE.clear()
+    with _RAW_CONFIG_CACHE_LOCK:
+        _RAW_CONFIG_CACHE.clear()
 
 
-def _config_cache_key(config_path: Path) -> Optional[tuple[str, int, int, int, int]]:
-    """``(path, *file_signature)`` identity of config.yaml, or None when unreadable/absent."""
-    try:
-        from utils import file_signature
-        return (str(config_path), *file_signature(config_path.stat()))
-    except OSError:
-        return None
+def _config_cache_key(config_path: Path) -> Optional[tuple[Any, ...]]:
+    """``(path, *backend cache version)`` identity of config.yaml, or None when unreadable/absent."""
+    from hermes_cli.config_backend import config_cache_version_or_none
+    version = config_cache_version_or_none(config_path)
+    return None if version is None else (str(config_path), *version)
 
 
 def _load_raw_config() -> dict[str, Any]:
-    """Read config.yaml with an mtime+size keyed cache (no hermes_cli.config import)."""
+    """Read config.yaml with a version-keyed cache (no hermes_cli.config import)."""
     from agent.safe_worker_policy import worker_config_snapshot
+    from hermes_cli.config_backend import config_exists, read_config_doc
 
+    metadata_config = _SKILL_METADATA_CONFIG.get()
+    if metadata_config is not None:
+        return metadata_config
     snapshot = worker_config_snapshot()
     if snapshot is not None:
         return snapshot
     config_path = get_config_path()
-    if not config_path.exists():
+    if not config_exists(config_path):
         return {}
     cache_key = _config_cache_key(config_path)
-    cached = _RAW_CONFIG_CACHE.get(cache_key) if cache_key is not None else None
+    with _RAW_CONFIG_CACHE_LOCK:
+        cached = _RAW_CONFIG_CACHE.get(cache_key) if cache_key is not None else None
     if cached is not None:
         return cached
     try:
-        parsed = yaml_load(config_path.read_text(encoding="utf-8-sig"))
+        parsed = read_config_doc(config_path)
     except Exception as e:
         logger.debug("Could not read skill config %s: %s", config_path, e)
         return {}
     if not isinstance(parsed, dict):
         return {}
     if cache_key is not None:
-        _RAW_CONFIG_CACHE.clear()
-        _RAW_CONFIG_CACHE[cache_key] = parsed
+        with _RAW_CONFIG_CACHE_LOCK:
+            _RAW_CONFIG_CACHE[cache_key] = parsed
+            while len(_RAW_CONFIG_CACHE) > _RAW_CONFIG_CACHE_MAX:
+                _RAW_CONFIG_CACHE.pop(next(iter(_RAW_CONFIG_CACHE)))
     return parsed
 
 
@@ -249,6 +289,25 @@ def _skills_cfg_get(key: str) -> Any:
 
 def _expand_path(entry: str) -> Path:
     """Expand ``~`` and ``${VAR}`` in a config path entry."""
+    worker = _SKILL_METADATA_WORKER.get()
+    if worker is not None:
+        from agent.skill_path_env import expand_metadata_path
+        from hermes_cli.config import _env_ref_lookup, _expand_env_vars
+        from hermes_constants import get_hermes_home
+
+        destination = {key: worker[key] for key in (
+            "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE", "HERMES_KANBAN_WORKSPACES_ROOT",
+        ) if key in worker}
+        destination["HERMES_HOME"] = str(get_hermes_home())
+
+        def lookup(name):
+            key = name.upper() if os.name == "nt" else name
+            return destination[key] if key in destination else _env_ref_lookup(name)
+
+        expanded = expand_metadata_path(entry, destination, windows=os.name == "nt",
+                                        config_expand=lambda token: _expand_env_vars(token, lookup=lookup),
+                                        env_lookup=lookup)
+        return Path(os.path.expanduser(expanded))
     return Path(os.path.expanduser(os.path.expandvars(entry)))
 
 
@@ -322,13 +381,24 @@ def _config_str_list(raw) -> list[str]:
     return [e for e in (str(entry).strip() for entry in raw) if e]
 
 
+def _shared_user_skills_dir() -> Optional[Path]:
+    """``~/.agents/skills``: the cross-tool shared-skills convention (Claude Code, Codex,
+    and others all read from it). Returns it only when it already exists — Hermes never
+    creates it — and never resolves it (an operator's own symlink choice is theirs to keep)."""
+    shared = Path.home() / ".agents" / "skills"
+    return shared if shared.is_dir() else None
+
+
 def get_external_skills_dirs() -> list[Path]:
     """Validated, deduplicated ``skills.external_dirs`` (existing dirs only). Entries
-    are ``~``/``${VAR}`` expanded, relative to HERMES_HOME; the local skills dir is skipped."""
+    are ``~``/``${VAR}`` expanded, relative to HERMES_HOME; the local skills dir is skipped.
+    The shared user dir (``~/.agents/skills``) is excluded even if also listed here — it is
+    a distinct, higher-precedence category (see ``get_all_skills_dirs``), not an external one."""
+    from hermes_cli.config_backend import config_exists
     config_path = get_config_path()
-    if not config_path.exists():
+    if not config_exists(config_path):
         return []
-    full_key = _config_cache_key(config_path)
+    full_key = _config_cache_key(config_path) if _SKILL_METADATA_CONFIG.get() is None else None
     cache_key = full_key
     cached = _EXTERNAL_DIRS_CACHE.get(cache_key) if cache_key is not None else None
     if cached is not None:
@@ -337,10 +407,14 @@ def get_external_skills_dirs() -> list[Path]:
     if skills_cfg is None:
         return []
     local_skills = get_skills_dir().resolve()
+    shared_dir = _shared_user_skills_dir()
+    shared_resolved = shared_dir.resolve() if shared_dir is not None else None
     result: list[Path] = []
     for entry in _config_str_list(skills_cfg.get("external_dirs")):
         p = _home_relative(_expand_path(entry)).resolve()
         if p == local_skills or p in result:
+            continue
+        if shared_resolved is not None and p == shared_resolved:
             continue
         if p.is_dir():
             result.append(p)
@@ -383,10 +457,26 @@ def display_skill_create_dir() -> str:
     return create_dir.as_posix() + "/"
 
 
+def _append_unique_dir(dirs: list[Path], path: Path) -> None:
+    """Append *path* once, comparing resolved paths when possible."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    for existing in dirs:
+        try:
+            if existing.resolve() == resolved:
+                return
+        except OSError:
+            if existing == path:
+                return
+    dirs.append(path)
+
+
 # Cross-directory precedence, lowest tier wins: trusted project > local profile > skills.create_dir >
 # skills.external_dirs. Inside ONE tier two different skills sharing a name stay ambiguous — refused,
 # never guessed (59da8ec4e) — while identical copies under one root resolve to the shallowest.
-TIER_PROJECT, TIER_LOCAL, TIER_CREATE_DIR, TIER_EXTERNAL = range(4)
+TIER_PROJECT, TIER_LOCAL, TIER_CREATE_DIR, TIER_SHARED, TIER_EXTERNAL = range(5)
 # Leading words of every same-tier refusal (skill_view error, preload/cron label) — one spelling.
 AMBIGUOUS_SKILL_PREFIX = "Ambiguous skill name "
 # (shadowed path, *sorted higher-tier paths) already judged: the identity check (it hashes both
@@ -403,13 +493,17 @@ def get_skill_search_roots(local: Optional[Path] = None, *, include_project: boo
     create_dir = get_skill_create_dir()
     if create_dir is not None and create_dir.is_dir():
         roots.append((TIER_CREATE_DIR, create_dir))
+    shared_dir = _shared_user_skills_dir()
+    if shared_dir is not None:
+        roots.append((TIER_SHARED, shared_dir.resolve()))
     roots += [(TIER_EXTERNAL, d) for d in get_external_skills_dirs()]
     seen: set[Path] = set()
     return [(t, d) for t, d in roots if not (d in seen or seen.add(d))]
 
 
 def get_all_skills_dirs() -> list[Path]:
-    """Skill dirs: local ``~/.hermes/skills/`` first, then create_dir, then external.
+    """Skill dirs: local ``~/.hermes/skills/`` first, then create_dir, then the shared
+    cross-tool user dir (``~/.agents/skills``), then external.
     Trusted project dirs are NOT included (higher precedence; see get_project_skills_dirs)."""
     return [d for _tier, d in get_skill_search_roots(include_project=False)]
 
@@ -492,13 +586,18 @@ def resolve_skill_catalog(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
     return out
 
 
-# Project-local skills (<root>/.hermes/skills, <root>/.agents/skills; root = nearest
-# .git ancestor) are a prompt-injection vector if auto-sourced from any clone, so
-# they load only when the root is in ``skills.trusted_project_dirs``; then they
-# override same-named profile/bundled skills. cwd + trust list are session-fixed
-# so the skills index stays byte-stable.
+# Project-local skills (<root>/.hermes/skills, <root>/.agents/skills, <root>/.codex/skills,
+# <root>/.claude/skills; root = nearest .git ancestor) are a prompt-injection vector if
+# auto-sourced from any clone, so they load only when the root is in
+# ``skills.trusted_project_dirs``; then they override same-named profile/bundled skills.
+# cwd + trust list are session-fixed so the skills index stays byte-stable.
 
-PROJECT_SKILLS_SUBDIRS = (os.path.join(".hermes", "skills"), os.path.join(".agents", "skills"))
+PROJECT_SKILLS_SUBDIRS = (
+    os.path.join(".hermes", "skills"),
+    os.path.join(".agents", "skills"),
+    os.path.join(".codex", "skills"),
+    os.path.join(".claude", "skills"),
+)
 
 _PROJECT_ROOT_MAX_DEPTH = 64  # walk-up bound for pathological cwds
 
@@ -548,10 +647,67 @@ def _project_trusted_dirs_from_config() -> set[Path]:
     return result
 
 
-def is_project_root_trusted(root: Path) -> bool:
-    """True when *root* is listed in ``skills.trusted_project_dirs``."""
+def _git_common_dir(root: Path) -> Optional[Path]:
+    """Resolve the common Git directory shared by a checkout and its worktrees."""
+    marker = Path(root) / ".git"
     try:
-        return Path(root).resolve() in _project_trusted_dirs_from_config()
+        if marker.is_dir():
+            return marker.resolve()
+        if not marker.is_file():
+            return None
+        prefix = "gitdir:"
+        line = marker.read_text(encoding="utf-8-sig").strip()
+        if not line.casefold().startswith(prefix):
+            return None
+        git_dir = Path(line[len(prefix) :].strip())
+        if not git_dir.is_absolute():
+            git_dir = marker.parent / git_dir
+        git_dir = git_dir.resolve()
+        common_marker = git_dir / "commondir"
+        if not common_marker.is_file():
+            return git_dir
+        common = Path(common_marker.read_text(encoding="utf-8-sig").strip())
+        return (common if common.is_absolute() else git_dir / common).resolve()
+    except (OSError, UnicodeError):
+        return None
+
+
+def is_project_root_trusted(root: Path) -> bool:
+    """True for an explicit root, its linked worktree, or an owned worker root."""
+    try:
+        resolved_root = Path(root).resolve()
+        trusted_roots = _project_trusted_dirs_from_config()
+        if resolved_root in trusted_roots:
+            return True
+
+        common_dir = _git_common_dir(resolved_root)
+        if common_dir is not None and any(
+            _git_common_dir(candidate) == common_dir for candidate in trusted_roots
+        ):
+            return True
+
+        source = _SKILL_METADATA_WORKER.get()
+        source = os.environ if source is None else source
+        task_id = source.get("HERMES_KANBAN_TASK", "").strip()
+        workspace = source.get("HERMES_KANBAN_WORKSPACE", "").strip()
+        workspaces_root = source.get(
+            "HERMES_KANBAN_WORKSPACES_ROOT", ""
+        ).strip()
+        if not task_id or task_id != resolved_root.name or not workspace or not workspaces_root:
+            return False
+        resolved_workspace = Path(workspace).resolve()
+        resolved_workspaces_root = Path(workspaces_root).resolve()
+        board_owned_workspace = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent == resolved_workspaces_root
+            and resolved_workspaces_root.parent in trusted_roots
+        )
+        migrated_trusted_worktree = (
+            resolved_root == resolved_workspace
+            and resolved_root.parent.name == ".worktrees"
+            and resolved_root.parent.parent in trusted_roots
+        )
+        return board_owned_workspace or migrated_trusted_worktree
     except OSError:
         return False
 
@@ -574,7 +730,7 @@ def _current_project_root(trusted: bool) -> Optional[Path]:
     """cwd's project root when discovery is on and its trust state == *trusted*."""
     if _skills_cfg_get("project_discovery") is False:
         return None
-    root = find_project_root()
+    root = find_project_root(start=_SKILL_METADATA_PROJECT.get())
     return root if root is not None and is_project_root_trusted(root) == trusted else None
 
 
@@ -824,7 +980,12 @@ def resolve_skill_config_values(config_vars: list[dict[str, Any]]) -> dict[str, 
     return resolved
 
 
+# Max description chars shown per row of the system-prompt skill index. skill_manage rejects a new or changed
+# description over it and tests/skills/test_authoring_standards.py holds shipped skills to it, so only legacy or
+# hand-edited skills ever reach clip_skill_description().
 SKILL_PROMPT_DESC_LIMIT = 60
+_LAST_WHITESPACE_RE = re.compile(r"\s\S*$")
+_CLIP_TRAIL_RE = re.compile(r"[\s.,;:\-\u2013\u2014(/]+$")
 
 
 def _normalize_skill_description(frontmatter: dict[str, Any]) -> str:
@@ -833,10 +994,20 @@ def _normalize_skill_description(frontmatter: dict[str, Any]) -> str:
     return str(raw_desc).strip().strip("'\"") if raw_desc else ""
 
 
+def clip_skill_description(desc: str) -> str:
+    """*desc* fitted to SKILL_PROMPT_DESC_LIMIT, cut at a word boundary so the index never shows a half word."""
+    if len(desc) <= SKILL_PROMPT_DESC_LIMIT:
+        return desc
+    head = desc[:SKILL_PROMPT_DESC_LIMIT - 2]  # one char past the budget: whitespace there means the last word is whole
+    boundary = _LAST_WHITESPACE_RE.search(head)  # any whitespace (tab, NBSP, ...) separates words, not just " "
+    if not boundary or boundary.start() == 0:  # a single word longer than the budget has no boundary to cut at
+        return desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..."
+    return _CLIP_TRAIL_RE.sub("", head[:boundary.start()]) + "..."
+
+
 def extract_skill_description(frontmatter: dict[str, Any]) -> str:
     """Extract a system-prompt-length description from parsed frontmatter."""
-    desc = _normalize_skill_description(frontmatter)
-    return desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..." if len(desc) > SKILL_PROMPT_DESC_LIMIT else desc
+    return clip_skill_description(_normalize_skill_description(frontmatter))
 
 
 def is_skill_description_truncated_for_prompt(frontmatter: dict[str, Any]) -> bool:

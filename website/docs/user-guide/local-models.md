@@ -51,6 +51,19 @@ That's the whole flow. The server starts and stops with Hermes, restarts
 survive app restarts, and switching back to a cloud provider is one click
 in the model picker.
 
+### POSIX process-custody hold
+
+On macOS and Linux, the managed router currently has no OS containment handle
+covering children that outlive it. Its state is reserved durably before launch.
+After a router stops or crashes, Hermes preserves that record and refuses a
+replacement: root-process exit does not establish that every model child has
+released RAM or GPU memory. Initial launch and healthy serving remain available,
+but automatic router restart and subsequent launches are held until a separately
+qualified tree-recovery mechanism is available. Do not delete the state record
+or kill processes by executable name to work around this hold. Windows retains
+its owned Job Object cleanup/restart path. The native router-crash pilot is also
+held on POSIX; no native memory or cancellation guarantee is implied.
+
 From a terminal, `hermes model` → **Local models** runs the same setup: it
 lists the catalog priced for your machine (★ marks the recommendation),
 installs the pinned engine, downloads the model with live progress, starts

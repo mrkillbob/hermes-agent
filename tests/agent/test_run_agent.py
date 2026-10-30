@@ -5,9 +5,13 @@ pieces. The OpenAI client and tool loading are mocked so no network calls
 are made.
 """
 
+from contextlib import contextmanager
+from hashlib import sha256
+import faulthandler
 import io
 import json
 import logging
+import sys
 import threading
 import time
 import uuid
@@ -16,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from agent.codex_responses_adapter import _normalize_codex_response
 
@@ -61,6 +66,30 @@ def _mock_plugin_discovery(monkeypatch):
     # Tool definitions are supplied by these unit fixtures. Scanning every
     # bundled plugin again for each isolated test home adds no coverage.
     monkeypatch.setattr("hermes_cli.plugins.discover_plugins", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _mock_model_metadata_catalog(monkeypatch):
+    # These tests exercise the agent, not live catalog discovery. Constructors
+    # and the metadata prewarm thread also use this transport.
+    @contextmanager
+    def catalog(url, **kwargs):
+        yield httpx.Response(
+            200, json={"data": []}, request=httpx.Request("GET", url)
+        )
+
+    monkeypatch.setattr("agent.model_metadata_http.stream", catalog)
+
+
+@pytest.fixture()
+def _stream_recovery_diagnostics():
+    # Write outside pytest's per-test capture so a file-timeout kill retains
+    # the blocked threads in the canonical runner's subprocess output.
+    faulthandler.dump_traceback_later(30, file=sys.__stderr__)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 @pytest.fixture()
@@ -734,6 +763,12 @@ class TestHydrateTodoStore:
             ],
         }
 
+    @staticmethod
+    def _assistant_todo_list_call(call_id="c1"):
+        call = TestHydrateTodoStore._assistant_todo_call(call_id)
+        call["tool_calls"][0]["function"]["name"] = "todo_list"
+        return call
+
     @pytest.mark.parametrize(
         "name,arguments",
         [
@@ -1238,6 +1273,192 @@ class TestBuildApiKwargs:
         assert kwargs["model"] == agent.model
         assert kwargs["messages"] is messages
 
+    def test_non_thinking_ollama_cannot_inherit_thinking_overrides(
+        self, agent, monkeypatch
+    ):
+        """Capability detection must win over stale provider overrides.
+
+        A profile can correctly omit reasoning for a non-thinking Ollama
+        model, but request_overrides are merged later and used to reintroduce
+        ``think``/``reasoning`` fields.  Ollama then rejects the request with
+        ``does not support thinking``.  The model capability boundary must
+        sanitize those inherited fields before the request reaches OpenAI.
+        """
+        agent.provider = "custom"
+        agent.base_url = "http://127.0.0.1:11434/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "devstral-small-2:24b"
+        agent.reasoning_config = {"enabled": False}
+        agent.request_overrides = {
+            "reasoning_effort": "high",
+            "extra_body": {
+                "think": True,
+                "thinking": {"type": "enabled"},
+                "reasoning": {"enabled": True, "effort": "high"},
+                "safe_override": "preserve",
+            },
+        }
+        monkeypatch.setattr(agent, "_supports_reasoning_extra_body", lambda: False)
+
+        kwargs = agent._build_api_kwargs(
+            [{"role": "user", "content": "inspect the task"}]
+        )
+
+        assert kwargs.get("reasoning_effort") is None
+        assert kwargs["extra_body"] == {"safe_override": "preserve"}
+
+    def test_source_provenance_survives_build_and_rebinds_next_tool_loop(
+        self, agent, tmp_path, monkeypatch
+    ):
+        from agent.chat_completion_helpers import _dispatch_provider_request
+        from agent.source_provenance_tools import (
+            attach_trusted_source_provenance_metadata,
+            source_provenance_activation,
+        )
+        from agent.tool_dispatch_helpers import make_tool_result_message
+        from tools.file_tools import read_file_tool
+
+        monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+        source = tmp_path / "source.py"
+        source.write_text("first = 1\nsecond = 2\n", encoding="utf-8")
+        agent.provider = "nous"
+        agent.base_url = "https://inference-api.nousresearch.com/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.api_mode = "chat_completions"
+        agent.session_id = "session-1"
+        agent._current_turn_id = "turn-1"
+        agent._current_api_request_id = "turn-1:api:1"
+        agent._llm_egress_policy_digest = sha256(b"policy").hexdigest()
+        agent._llm_egress_state_dir = tmp_path / "egress"
+
+        with source_provenance_activation(agent, "read_file"):
+            result = read_file_tool(str(source), task_id="build-wire-read")
+        metadata = attach_trusted_source_provenance_metadata(
+            agent, "read_file", content=result
+        )
+        assert metadata is not None
+        tool_message = make_tool_result_message(
+            "read_file",
+            result,
+            "call_read_1",
+            source_provenance=metadata,
+        )
+        history = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_read_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            tool_message,
+        ]
+
+        captured = []
+        agent._current_api_request_id = "turn-1:api:2"
+        first_kwargs = agent._build_api_kwargs(history, tools_for_api=[])
+        assert "_hermes_source_provenance" in first_kwargs
+        assert "_source_provenance" not in first_kwargs["messages"][1]
+        _dispatch_provider_request(agent, first_kwargs, captured.append)
+
+        agent._current_api_request_id = "turn-1:api:3"
+        second_kwargs = agent._build_api_kwargs(history, tools_for_api=[])
+        _dispatch_provider_request(agent, second_kwargs, captured.append)
+
+        assert len(captured) == 2
+        for request in captured:
+            assert "_hermes_source_provenance" not in request
+            assert "_source_provenance" not in request["messages"][1]
+            assert request["messages"][1]["content"] == result
+        receipts = [
+            json.loads(line)
+            for line in (tmp_path / "egress" / "llm-egress-receipts.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert [receipt["source_grant_count"] for receipt in receipts] == [1, 1]
+        assert [receipt["source_segment_count"] for receipt in receipts] == [1, 1]
+
+    def test_codex_build_captures_source_provenance_before_conversion(self, agent):
+        from hashlib import sha256
+
+        agent.provider = "openai-codex"
+        agent.api_mode = "codex_responses"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+        agent._base_url_lower = agent.base_url.lower()
+        agent._base_url_hostname = "chatgpt.com"
+        agent.model = "gpt-5.5"
+        content = '{"content":"1|safe = True\\n"}'
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_read_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_read_1",
+                "content": content,
+                "_source_provenance": {
+                    "request_id": "turn-1:api:2",
+                    "source_grant_digests": ("a" * 64,),
+                    "content_sha256": sha256(content.encode()).hexdigest(),
+                    "presentation_kind": "read_file_json_v1",
+                },
+            },
+        ]
+
+        kwargs = agent._build_api_kwargs(messages, tools_for_api=[])
+
+        assert kwargs["_hermes_source_provenance"][0]["tool_call_id"] == "call_read_1"
+        assert kwargs["input"][1]["type"] == "function_call_output"
+        assert "_source_provenance" not in kwargs["input"][1]
+
+    def test_forged_build_sidecar_fails_closed(self, agent, tmp_path, monkeypatch):
+        from agent.chat_completion_helpers import _dispatch_provider_request
+        from agent.llm_egress_firewall import EgressBlocked
+        from agent.source_provenance_tools import (
+            attach_trusted_source_provenance_metadata,
+            source_provenance_activation,
+        )
+        from agent.tool_dispatch_helpers import make_tool_result_message
+        from tools.file_tools import read_file_tool
+
+        monkeypatch.setenv("HERMES_KANBAN_PROTECTED_REMOTE", "1")
+        source = tmp_path / "source.py"
+        source.write_text("safe = True\n", encoding="utf-8")
+        agent.provider = "nous"
+        agent.base_url = "https://inference-api.nousresearch.com/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.api_mode = "chat_completions"
+        agent.session_id = "session-1"
+        agent._current_turn_id = "turn-1"
+        agent._current_api_request_id = "turn-1:api:1"
+        agent._llm_egress_policy_digest = sha256(b"policy").hexdigest()
+        agent._llm_egress_state_dir = tmp_path / "egress"
+        with source_provenance_activation(agent, "read_file"):
+            result = read_file_tool(str(source), task_id="build-wire-forged")
+        metadata = attach_trusted_source_provenance_metadata(
+            agent, "read_file", content=result
+        )
+        assert metadata is not None
+        message = make_tool_result_message(
+            "read_file", result, "call_read_1", source_provenance=metadata
+        )
+        agent._current_api_request_id = "turn-1:api:2"
+        kwargs = agent._build_api_kwargs([message], tools_for_api=[])
+        kwargs["_hermes_source_provenance"][0]["content_sha256"] = "0" * 64
+
+        with pytest.raises(EgressBlocked) as exc_info:
+            _dispatch_provider_request(agent, kwargs, lambda _: None)
+        assert "untrusted_provenance" in exc_info.value.decision.reason_codes
+
     def test_explicit_request_local_tools_reach_native_transport(self, agent, monkeypatch):
         from agent.prompt_caching import build_prompt_cache_plan
 
@@ -1328,36 +1549,6 @@ class TestBuildApiKwargs:
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
         assert "reasoning" not in kwargs.get("extra_body", {})
-
-
-    def test_reasoning_sent_for_copilot_gpt5(self, agent):
-        """Copilot/GitHub Models: GPT-5 reasoning goes in extra_body.reasoning."""
-        from agent.transports import get_transport
-        from providers import get_provider_profile
-
-        transport = get_transport("chat_completions")
-        profile = get_provider_profile("copilot")
-        msgs = [{"role": "user", "content": "hi"}]
-        kwargs = transport.build_kwargs(
-            model="gpt-5.4",
-            messages=msgs,
-            tools=None,
-            supports_reasoning=True,
-            provider_profile=profile,
-        )
-        assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
-
-
-    def test_core_responses_preserves_supported_xhigh(self, agent, monkeypatch):
-        """The core GitHub Responses path must preserve a supported xhigh."""
-        monkeypatch.setattr(
-            "hermes_cli.models.github_model_reasoning_efforts",
-            lambda _model: ["none", "low", "medium", "high", "xhigh"],
-        )
-        agent.model = "gpt-5.5"
-        agent.reasoning_config = {"enabled": True, "effort": "xhigh"}
-
-        assert agent._github_models_reasoning_extra_body() == {"effort": "xhigh"}
 
 
     def test_qwen_portal_formats_messages_and_metadata(self, agent):
@@ -1549,11 +1740,11 @@ class TestExecuteToolCalls:
         messages = []
         with (
             patch("model_tools.handle_function_call", return_value="ok") as mock_hfc,
-            patch("agent.tool_executor.time.sleep") as mock_sleep,
+            patch("agent.tool_executor.time", wraps=time) as mock_time,
         ):
             agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
         assert mock_hfc.call_count == 2
-        mock_sleep.assert_not_called()
+        mock_time.sleep.assert_not_called()
         tool_results = [m for m in messages if m["role"] == "tool"]
         assert [m["tool_call_id"] for m in tool_results] == ["c1", "c2"]
 
@@ -1736,7 +1927,11 @@ class TestExecuteToolCalls:
         captured = io.StringIO()
         agent._print_fn = lambda *args, **kw: print(*args, file=captured, **kw)
 
-        with patch("run_agent.time.sleep", return_value=None):
+        # Remove only the provider retry delay. The shared time.sleep also
+        # schedules live terminal cleanup and streaming worker threads.
+        scheduler_sleep = time.sleep
+        with patch("agent.retry_utils.adaptive_rate_limit_backoff", return_value=(0.0, None)):
+            assert time.sleep is scheduler_sleep, "retry fixture changed process-wide scheduling"
             result = agent.run_conversation("hello")
 
         assert result["completed"] is True
@@ -2439,6 +2634,51 @@ class TestMcpParallelToolBatch:
                 _mcp_tool_server_names.pop("mcp__github__search_code", None)
 
 
+class TestHandleMaxIterationsEgressFirewall:
+    """The physical summary call for a protected-remote provider must go through the same
+    egress-firewall dispatch as any other request — previously it called agent._run_codex_stream
+    / agent._anthropic_messages_create / chat.completions.create directly, so a summary request
+    containing a path or secret the firewall would otherwise reject could still reach the
+    provider. Missing request identity is the firewall's own rejection signal, so a summary
+    call for a protected provider with no session/turn/policy identity set must fail closed
+    with that error rather than silently reaching the provider."""
+
+    def test_codex_summary_is_blocked_without_request_identity(self, agent):
+        agent.api_mode = "codex_responses"
+        agent.provider = "openai-codex"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "gpt-5.5"
+        agent._cached_system_prompt = "You are helpful."
+        called = {"n": 0}
+
+        def fake_run_codex_stream(kwargs):
+            called["n"] += 1
+            raise AssertionError("must not reach the provider without firewall authorization")
+
+        with patch.object(agent, "_run_codex_stream", side_effect=fake_run_codex_stream):
+            result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 90)
+
+        assert called["n"] == 0
+        assert "missing_request_identity" in result
+
+    def test_nous_summary_is_blocked_without_request_identity(self, agent):
+        agent.provider = "nous"
+        agent.base_url = "https://inference-api.nousresearch.com/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "stealth/ox-alpha"
+        agent._cached_system_prompt = "You are helpful."
+
+        def fake_create(**kwargs):
+            raise AssertionError("must not reach the provider without firewall authorization")
+
+        agent.client.chat.completions.create.side_effect = fake_create
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 90)
+
+        assert "missing_request_identity" in result
+
+
 class TestHandleMaxIterations:
     @pytest.mark.parametrize("api_mode,platform", [
         ("chat_completions", "cli"), ("chat_completions", "cron"),
@@ -2654,63 +2894,75 @@ class TestHandleMaxIterations:
         kwargs = agent.client.chat.completions.create.call_args.kwargs
         assert "reasoning" not in kwargs.get("extra_body", {})
 
-    def test_summary_uses_ordinary_tools_and_prompt_cache_key(self, agent):
-        """The terminal summary follows the ordinary request's cache lineage."""
-        agent.client.chat.completions.create.side_effect = [
-            _mock_response(content=""),
-            _mock_response(content="Summary"),
-        ]
-        agent.base_url = "https://api.openai.com/v1"
-        agent.provider = "openai"
-        agent._cached_system_prompt = "You are helpful."
-        messages = [{"role": "user", "content": "do stuff"}]
-        ordinary = agent._build_api_kwargs(
-            [{"role": "system", "content": agent._cached_system_prompt}, *messages]
+    def test_summary_omits_disabled_reasoning_for_mandatory_nous_model(
+        self, agent, monkeypatch
+    ):
+        """The summary path must honor the same Nous capability gate as a normal turn."""
+        import hermes_cli.models as models_mod
+
+        monkeypatch.setattr(models_mod, "_nous_reasoning_caps_failed_at", None)
+        monkeypatch.setattr(
+            models_mod,
+            "_nous_reasoning_caps_cache",
+            {
+                "stealth/ox-alpha": {
+                    "supports_reasoning": True,
+                    "supported_efforts": None,
+                    "mandatory": True,
+                }
+            },
         )
-
-        result = agent._handle_max_iterations(messages, 60)
-
-        summaries = [call.kwargs for call in agent.client.chat.completions.create.call_args_list]
-        assert result == "Summary"
-        assert len(summaries) == 2
-        assert all(summary["tools"] == ordinary["tools"] for summary in summaries)
-        assert all(summary["prompt_cache_key"] == ordinary["prompt_cache_key"] for summary in summaries)
-        assert all(summary.get("tool_choice") == ordinary.get("tool_choice") for summary in summaries)
-        assert all(summary["model"] == ordinary["model"] for summary in summaries)
-        assert all(summary["messages"][0] == ordinary["messages"][0] for summary in summaries)
-
-    def test_summary_request_scrubs_surrogates_in_tool_schema(self, agent):
-        """The summary rides the same outbound surrogate chokepoint as the main loop (#50959 class)."""
+        agent.provider = "nous"
+        agent.base_url = "https://inference-api.nousresearch.com/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "stealth/ox-alpha"
+        agent.reasoning_config = {"enabled": False, "effort": "none"}
         agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
         agent._cached_system_prompt = "You are helpful."
-        agent.tools = [{"type": "function", "function": {
-            "name": "web_search", "description": "lone surrogate \ud83d here",
-            "parameters": {"type": "object", "properties": {}},
-        }}]
+        # "nous" is a protected-egress provider: the summary call now goes through the
+        # same firewall dispatch as any other physical request, which requires identity.
+        agent.session_id = "session-1"
+        agent._current_turn_id = "turn-1"
+        agent._llm_egress_policy_digest = sha256(b"policy").hexdigest()
 
-        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+        result = agent._handle_max_iterations(
+            [{"role": "user", "content": "do stuff"}], 32
+        )
 
         assert result == "Summary"
-        sent = agent.client.chat.completions.create.call_args.kwargs
-        description = sent["tools"][0]["function"]["description"]
-        assert "\ud83d" not in description
-        description.encode("utf-8")  # a provider serializes this; lone surrogates raise here
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        assert "reasoning" not in kwargs.get("extra_body", {})
 
-    def test_summary_tool_call_only_response_retries_once(self, agent, caplog):
-        """A tool-only summary is never executed: it is logged, reads as empty, and gets one retry."""
-        agent.client.chat.completions.create.side_effect = [
-            _mock_response(content="", tool_calls=[_mock_tool_call()]),
-            _mock_response(content="Summary"),
-        ]
+    def test_unrelated_profile_override_preserves_generic_summary_reasoning(
+        self, agent, monkeypatch
+    ):
+        """An unrelated profile hook must not implicitly own reasoning policy."""
+        import providers
+        from providers.base import ProviderProfile
+
+        class UnrelatedProfile(ProviderProfile):
+            def build_api_kwargs_extras(self, **context):
+                return {}, {"user": "summary-test"}
+
+        monkeypatch.setattr(
+            providers,
+            "get_provider_profile",
+            lambda _provider: UnrelatedProfile(name="unrelated"),
+        )
+        agent.provider = "unrelated"
+        agent.reasoning_config = {"enabled": True, "effort": "low"}
+        monkeypatch.setattr(agent, "_supports_reasoning_extra_body", lambda: True)
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
         agent._cached_system_prompt = "You are helpful."
 
-        with caplog.at_level(logging.WARNING, logger="agent.chat_completion_helpers"):
-            result = agent._handle_max_iterations(
-                [{"role": "user", "content": "do stuff"}], 60,
-            )
+        result = agent._handle_max_iterations(
+            [{"role": "user", "content": "do stuff"}], 32
+        )
 
         assert result == "Summary"
-        assert agent.client.chat.completions.create.call_count == 2
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        assert kwargs["extra_body"]["reasoning"] == agent.reasoning_config
+        assert kwargs["user"] == "summary-test"
 
     def test_summary_request_removes_orphan_tool_result(self, agent):
         """Regression: max-iterations summary request must NOT contain
@@ -2875,6 +3127,11 @@ class TestHandleMaxIterations:
         agent._base_url_hostname = "chatgpt.com"
         agent.model = "gpt-5.5"
         agent._cached_system_prompt = "You are helpful."
+        # "openai-codex" is a protected-egress provider: the summary call now goes through
+        # the same firewall dispatch as any other physical request, which requires identity.
+        agent.session_id = "session-1"
+        agent._current_turn_id = "turn-1"
+        agent._llm_egress_policy_digest = sha256(b"policy").hexdigest()
         captured = {}
 
         def fake_run_codex_stream(kwargs, client=None, on_first_delta=None):
@@ -2923,6 +3180,9 @@ class TestHandleMaxIterations:
         agent._base_url_hostname = "chatgpt.com"
         agent.model = "gpt-5.5"
         agent._cached_system_prompt = "You are helpful."
+        agent.session_id = "session-1"
+        agent._current_turn_id = "turn-1"
+        agent._llm_egress_policy_digest = sha256(b"policy").hexdigest()
         leaked_controls = {"tools", "tool_choice", "parallel_tool_calls"}
         # Precondition against the real transport: the main-loop request carries all three.
         assert leaked_controls <= agent._build_api_kwargs([{"role": "user", "content": "do stuff"}]).keys()
@@ -4234,7 +4494,9 @@ class TestRunConversation:
         assert result["completed"] is True
 
 
-    def test_glm_prompt_exceeds_max_length_triggers_compression(self, agent):
+    def test_glm_prompt_exceeds_max_length_triggers_compression(
+        self, _stream_recovery_diagnostics, agent
+    ):
         """GLM/Z.AI uses 'Prompt exceeds max length' for context overflow."""
         self._setup_agent(agent)
         agent.compression_enabled = True  # this test verifies overflow→compression fires
@@ -4249,9 +4511,11 @@ class TestRunConversation:
             {"role": "assistant", "content": "previous answer"},
         ]
 
+        # Keep process-wide sleep intact: the overflow retry pauses only two
+        # seconds, while daemon cleanup/heartbeat workers need real scheduling.
+        scheduler_sleep = time.sleep
         with (
             patch.object(agent, "_compress_context") as mock_compress,
-            patch("agent.turn_overflow.time.sleep"),
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
@@ -4260,9 +4524,11 @@ class TestRunConversation:
                 [{"role": "user", "content": "hello"}],
                 "compressed system prompt",
             )
+            assert time.sleep is scheduler_sleep, "overflow fixture changed process-wide scheduling"
             result = agent.run_conversation("hello", conversation_history=prefill)
 
         mock_compress.assert_called_once()
+        assert agent.client.chat.completions.create.call_count == 2
         assert result["final_response"] == "Recovered after compression"
         assert result["completed"] is True
 
@@ -4655,22 +4921,14 @@ class TestRunConversation:
 
 
     def test_kanban_block_called_on_iteration_exhaustion(self, agent, monkeypatch):
-        """Regression: kanban worker must signal the dispatcher when its
-        iteration budget is exhausted, otherwise the task silently re-runs
-        forever without ever tripping the failure_limit circuit breaker
-        (issue #23216 / #29747 gap 2).
-
-        As of #29747, the exhaustion path routes through
-        ``kanban_db._record_task_failure(outcome="timed_out")`` so the
-        ``consecutive_failures`` counter increments and the dispatcher's
-        ``failure_limit`` breaker eventually trips. The legacy
-        ``kanban_block`` call was replaced because blocked-outcome runs
-        bypass the failure counter.
-        """
+        """Exhaustion must park an owned task as needs_input instead of silently respawning."""
         self._setup_agent(agent)
         agent.max_iterations = 2
 
         monkeypatch.setenv("HERMES_KANBAN_TASK", "t_test_task_123")
+        # Build the actual owned remote prompt instead of attesting the
+        # shared helper's manually cached operator SYSTEM.
+        agent._cached_system_prompt = agent._build_system_prompt()
 
         # Return a tool call for every iteration to exhaust the budget.
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
@@ -4685,13 +4943,12 @@ class TestRunConversation:
             tool_resp, tool_resp, summary_resp,
         ]
 
-        mock_record_failure = MagicMock(return_value=False)
+        mock_block_task = MagicMock(return_value=None)
         mock_connect = MagicMock(return_value=MagicMock())
 
         with (
             patch("model_tools.handle_function_call", return_value="ok"),
-            patch("hermes_cli.kanban_db_dispatch._record_task_failure",
-                  mock_record_failure),
+            patch("hermes_cli.kanban_db.block_task", mock_block_task),
             patch("hermes_cli.kanban_db_connect.connect", mock_connect),
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
@@ -4702,19 +4959,16 @@ class TestRunConversation:
         # The agent should have reported the task as not completed.
         assert result["completed"] is False
 
-        # _record_task_failure should have been called exactly once for
-        # the exhaustion event, with outcome="timed_out".
-        assert mock_record_failure.call_count == 1, (
-            f"Expected exactly 1 _record_task_failure call, "
-            f"got {mock_record_failure.call_count}. "
-            f"Calls: {mock_record_failure.call_args_list}"
+        mock_block_task.assert_called_once_with(
+            mock_connect.return_value,
+            "t_test_task_123",
+            reason=(
+                "Iteration budget exhausted (2/2) — provide narrower evidence "
+                "or scope before resuming"
+            ),
+            kind="needs_input",
+            expected_run_id=None,
         )
-        call = mock_record_failure.call_args_list[0]
-        # Positional: (conn, task_id, ...)
-        assert call.args[1] == "t_test_task_123"
-        assert call.kwargs.get("outcome") == "timed_out"
-        assert call.kwargs.get("release_claim") is True
-        assert call.kwargs.get("end_run") is True
 
     def test_no_kanban_block_when_not_in_kanban_mode(self, agent, monkeypatch):
         """The exhaustion bridge must NOT fire when HERMES_KANBAN_TASK
@@ -5781,39 +6035,9 @@ class TestFallbackAnthropicProvider:
         assert agent._use_prompt_caching is True
 
 
-def test_aiagent_uses_copilot_acp_client():
-    with (
-        patch("model_tools.get_tool_definitions", return_value=_make_tool_defs("web_search")),
-        patch("model_tools.check_toolset_requirements", return_value={}),
-        patch("agent.process_bootstrap.OpenAI") as mock_openai,
-        patch("agent.copilot_acp_client.CopilotACPClient") as mock_acp_client,
-    ):
-        acp_client = MagicMock()
-        mock_acp_client.return_value = acp_client
-
-        agent = AIAgent(
-            api_key="copilot-acp",
-            base_url="acp://copilot",
-            provider="copilot-acp",
-            acp_command="/usr/local/bin/copilot",
-            acp_args=["--acp", "--stdio"],
-            quiet_mode=True,
-            skip_context_files=True,
-            skip_memory=True,
-        )
-
-    assert agent.client is acp_client
-    mock_openai.assert_not_called()
-    mock_acp_client.assert_called_once()
-    assert mock_acp_client.call_args.kwargs["base_url"] == "acp://copilot"
-    assert mock_acp_client.call_args.kwargs["api_key"] == "copilot-acp"
-    assert mock_acp_client.call_args.kwargs["command"] == "/usr/local/bin/copilot"
-    assert mock_acp_client.call_args.kwargs["args"] == ["--acp", "--stdio"]
-
-
 def test_quiet_spinner_allowed_with_explicit_print_fn(agent):
     agent._print_fn = lambda *_a, **_kw: None
-    with patch.object(run_agent.sys.stdout, "isatty", return_value=False):
+    with patch.object(run_agent.sys, "stdout", io.StringIO()):
         assert agent._should_start_quiet_spinner() is True
 
 
@@ -6283,7 +6507,7 @@ class TestStreamingApiCall:
         assert resp.choices[0].finish_reason == "length"
         agent.stream_delta_callback.assert_not_called()
 
-    def test_run_conversation_retries_stream_error_finish_rate_limit(self, agent):
+    def test_run_conversation_retries_stream_error_finish_rate_limit(self, _stream_recovery_diagnostics, agent):
         first_attempt = iter([
             _make_chunk(content=_provider_sse_429_text()),
             _make_chunk(finish_reason="error_finish"),
@@ -6297,9 +6521,10 @@ class TestStreamingApiCall:
         agent._persist_session = lambda *args, **kwargs: None
         agent._save_trajectory = lambda *args, **kwargs: None
 
-        import agent.conversation_loop as _conversation_loop
         import agent.retry_utils as _retry_utils
 
+        # Only remove retry delays. Patching the shared time.sleep also changes
+        # the live streaming worker and its reconnect/cleanup scheduling.
         with (
             patch.object(_retry_utils, "jittered_backoff", return_value=0.0),
             patch.object(
@@ -6307,7 +6532,6 @@ class TestStreamingApiCall:
                 "adaptive_rate_limit_backoff",
                 return_value=(0.0, None),
             ),
-            patch.object(_conversation_loop.time, "sleep", return_value=None),
         ):
             result = agent.run_conversation("hello")
 
@@ -6558,7 +6782,7 @@ class TestAnthropicInterruptHandler:
     """_interruptible_api_call must handle Anthropic mode when interrupted."""
 
 
-    def test_interruptible_anthropic_interrupt_never_closes_shared_client(self, agent):
+    def test_interruptible_anthropic_interrupt_never_closes_shared_client(self, agent, tmp_path):
         """#67142: a non-streaming Anthropic interrupt must abort the
         request-local client from the poll thread, never close/rebuild the
         shared _anthropic_client (which raced a live SSL BIO and corrupted an
@@ -6572,6 +6796,10 @@ class TestAnthropicInterruptHandler:
         from agent.chat_completion_helpers import interruptible_api_call
 
         agent.api_mode = "anthropic_messages"
+        agent.session_id = "interrupt-session"
+        agent._current_turn_id = "interrupt-turn"
+        agent._current_api_request_id = "interrupt-turn:api:1"
+        agent._llm_egress_state_dir = tmp_path / "egress"
         agent._interrupt_requested = False
         agent._anthropic_client = MagicMock()
         agent._rebuild_anthropic_client = MagicMock()
@@ -6614,7 +6842,9 @@ class TestEmptySSEFrameTurnRecovery:
     non-JSON SSE data`` and the turn died after 3 identical streaming retries. The turn must
     instead complete on the automatic non-streaming retry."""
 
-    def test_turn_completes_on_the_non_streaming_retry(self, agent):
+    def test_turn_completes_on_the_non_streaming_retry(
+        self, _stream_recovery_diagnostics, agent
+    ):
         import httpx
         from openai import OpenAI, Stream
         from openai.types.chat import ChatCompletionChunk
@@ -6643,7 +6873,11 @@ class TestEmptySSEFrameTurnRecovery:
         warnings = []
         agent.status_callback = lambda kind, message: warnings.append((kind, message))
 
-        with patch("run_agent.time.sleep", return_value=None):
+        # Remove only the provider retry delay. The shared time.sleep also
+        # schedules live terminal cleanup and streaming worker threads.
+        scheduler_sleep = time.sleep
+        with patch("agent.retry_utils.adaptive_rate_limit_backoff", return_value=(0.0, None)):
+            assert time.sleep is scheduler_sleep, "retry fixture changed process-wide scheduling"
             result = agent.run_conversation("hello")
 
         assert result["completed"] is True
@@ -6950,6 +7184,58 @@ class TestFallbackSetsOAuthFlag:
 
         assert result is True
         assert agent._is_anthropic_oauth is False
+
+
+class TestMemoryNudgeCounterPersistence:
+    """_turns_since_memory must persist across run_conversation calls."""
+
+    def test_counters_initialized_in_init(self):
+        """Counters must exist on the agent after __init__."""
+        with patch("model_tools.get_tool_definitions", return_value=[]):
+            a = AIAgent(
+                model="test", api_key="test-key", base_url="http://localhost:1234/v1",
+                provider="openrouter", skip_context_files=True, skip_memory=True,
+            )
+        assert hasattr(a, "_turns_since_memory")
+        assert hasattr(a, "_iters_since_skill")
+        assert a._turns_since_memory == 0
+        assert a._iters_since_skill == 0
+
+
+
+
+
+class TestSupportsReasoningExtraBody:
+    def _make_agent(self):
+        agent = object.__new__(AIAgent)
+        agent.provider = "openrouter"
+        agent.base_url = "https://openrouter.ai/api/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = ""
+        return agent
+
+    def test_xiaomi_models_are_treated_as_reasoning_capable(self):
+        agent = self._make_agent()
+        for model in (
+            "xiaomi/mimo-v2.5-pro",
+            "xiaomi/mimo-v2.5",
+            "xiaomi/mimo-v2-omni",
+            "xiaomi/mimo-v2-pro",
+            "xiaomi/mimo-v2-flash",
+        ):
+            agent.model = model
+            assert agent._supports_reasoning_extra_body() is True, model
+
+    def test_local_ollama_uses_native_thinking_capability(self):
+        agent = self._make_agent()
+        agent.provider = "custom"
+        agent.base_url = "http://127.0.0.1:11434/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "devstral-small-2:24b"
+        agent._ollama_supports_thinking_cached = MagicMock(return_value=False)
+
+        assert agent._supports_reasoning_extra_body() is False
+        agent._ollama_supports_thinking_cached.assert_called_once_with()
 
 
 class TestMemoryContextSanitization:

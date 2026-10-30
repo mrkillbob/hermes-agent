@@ -83,10 +83,9 @@ def test_fresh_process_sweep_books_the_logged_exit_code(kanban_home, rc, event, 
             assert run["outcome"] == "rate_limited"
 
 
-def test_violation_budget_trip_holds_until_operator_unblock(kanban_home):
-    """The third consecutive clean exit trips the violation budget and ``recompute_ready``
-    must not promote the card back the same tick (``consecutive_failures`` is still below
-    ``failure_limit``); ``unblock_task`` lifts the hold."""
+def test_violation_budget_trip_routes_to_intake(kanban_home):
+    """The third consecutive clean exit trips the violation budget; the task is
+    routed to the intake router for repair rather than left stranded as ``blocked``."""
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="loop", assignee="a")
         for i in range(kbd._PROTOCOL_VIOLATION_FAILURE_LIMIT):
@@ -94,13 +93,38 @@ def test_violation_budget_trip_holds_until_operator_unblock(kanban_home):
             kbd.detect_crashed_workers(conn)
             kb.recompute_ready(conn, failure_limit=10)
         task = kb.get_task(conn, tid)
-        assert task.status == "blocked"
-        assert task.consecutive_failures < 10
+        assert task.status in ("ready", "triage")
+        assert task.assignee == "task-intake-router"
+    assert task.consecutive_failures < 10
 
-        kb.unblock_task(conn, tid)
-        assert kb.get_task(conn, tid).status == "ready"
-        kb.recompute_ready(conn, failure_limit=10)
-        assert kb.get_task(conn, tid).status == "ready"
+
+def test_guardrail_strategy_failure_routes_to_intake_instead_of_blocking(kanban_home):
+    """A loop guardrail is recoverable worker behavior, not a human blocker."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="paper safety", assignee="paper-safety-guardian")
+        host = kb._claimer_id().split(":", 1)[0]
+        claimed = kb.claim_task(conn, tid, claimer=f"{host}:guardrail")
+        assert claimed is not None
+        conn.execute(
+            "UPDATE tasks SET worker_pid=?, worker_started_at=? WHERE id=?",
+            (71099, int(time.time()) - 120, tid),
+        )
+        conn.commit()
+        log = kb.worker_log_path(tid)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            "Tool guardrail halted terminal: identical_call_streak_halt\n"
+            f"{KANBAN_WORKER_EXIT_TRAILER}1\n",
+            encoding="utf-8",
+        )
+
+        kbd.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+
+    assert task is not None
+    assert task.status in {"ready", "triage"}
+    assert task.status != "blocked"
+    assert task.assignee == "task-intake-router"
 
 
 def test_plain_budget_trip_still_auto_recovers(kanban_home):
@@ -130,6 +154,48 @@ def test_plain_budget_trip_still_auto_recovers(kanban_home):
         kb.assign_task(conn, tids[1], "other-profile")
         assert kb.recompute_ready(conn, failure_limit=2) == 1
         assert kb.get_task(conn, tids[1]).status == "ready"
+
+
+def test_dispatcher_failure_limit_reaches_crash_reclaim(kanban_home):
+    """Ordinary worker crashes use the same configured breaker threshold as other dispatch failures."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="crash limit", assignee="a")
+        _dead_worker_with_log(conn, tid, 72001, 1)
+        result = kbd.DispatchResult()
+
+        kbd._run_reclaim_phase(
+            conn,
+            result,
+            stale_timeout_seconds=0,
+            failure_limit=1,
+            reconcile_orphans=False,
+        )
+
+        task = kb.get_task(conn, tid)
+        assert result.crashed == [tid]
+        assert task.status == "blocked"
+        assert task.consecutive_failures == 1
+
+
+def test_systemic_crashes_still_trip_at_one_with_high_dispatcher_limit(kanban_home):
+    """Three same-fingerprint crashes in one reclaim sweep stay an immediate terminal hold."""
+    with kbc.connect() as conn:
+        tids = [kb.create_task(conn, title=f"systemic {i}", assignee="a") for i in range(3)]
+        for i, tid in enumerate(tids):
+            _dead_worker_with_log(conn, tid, 72100 + i, 1)
+        result = kbd.DispatchResult()
+
+        kbd._run_reclaim_phase(
+            conn,
+            result,
+            stale_timeout_seconds=0,
+            failure_limit=100,
+            reconcile_orphans=False,
+        )
+
+        assert set(result.auto_blocked) == set(tids)
+        assert all(kb.get_task(conn, tid).status == "blocked" for tid in tids)
+        assert all(kb.get_task(conn, tid).consecutive_failures == 1 for tid in tids)
 
 
 def test_exit_single_query_writes_trailer_only_for_kanban_workers(monkeypatch, capsys):

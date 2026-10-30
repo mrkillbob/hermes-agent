@@ -8,7 +8,8 @@ stripped PATH — gateway and service sessions don't inherit the interactive env
 
 from __future__ import annotations
 
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 import csv
 import logging
 import os
@@ -25,6 +26,7 @@ from hermes_cli.local_runtime.estimator import HardwareBudget
 from hermes_platform.host.facts import gpu_class
 
 logger = logging.getLogger(__name__)
+_PROBE_ENGINE = ContextVar("local_runtime_probe_engine", default=None)
 
 _GIB = 1 << 30
 # Reserve carved off the card before any grant: the desktop's own co-residents (compositor,
@@ -315,6 +317,16 @@ def _cuda_driver_pool() -> tuple[int, bool | None] | None:
     return None
 
 
+@contextmanager
+def engine_scope(engine):
+    """Price one verified serving engine without changing the caller's profile settings."""
+    token = _PROBE_ENGINE.set(engine)
+    try:
+        yield
+    finally:
+        _PROBE_ENGINE.reset(token)
+
+
 def _configured_engine():
     """The engine the probes below run: the managed server's own when one is up or booting, else
     the installed engine for ``local_runtime.backend``."""
@@ -322,7 +334,7 @@ def _configured_engine():
     from hermes_cli.local_runtime.binaries import installed_engine
     from hermes_cli.local_runtime.bootstrap import serving_engine
 
-    engine = serving_engine()
+    engine = _PROBE_ENGINE.get() or serving_engine()
     if engine is not None:
         return engine
     section = load_config_readonly().get("local_runtime") or {}
@@ -353,6 +365,9 @@ def _device_pool_view() -> tuple[int, bool | None] | None:
     """Best available allocator-side view, cached: a hit is permanent for the process, a miss
     retries after a short TTL (the engine binary can appear mid-session via a pane install)."""
     global _pool_probe_cache
+    if _PROBE_ENGINE.get() is not None:
+        # The general cache may have been populated using another profile's engine.
+        return _cuda_driver_pool() or _engine_device_pool()
     now = time.monotonic()
     if _pool_probe_cache is not None:
         stamp, view = _pool_probe_cache

@@ -412,12 +412,13 @@ async def test_a_served_profiles_bot_chat_takes_every_dm_with_no_client_attached
     chat = await deliver(1)
     assert await deliver(2) == chat
 
-    # A turn in a served profile's local chat records the launch profile as its transport; a restart
-    # reads the chat back over that row.
+    # A turn in a served profile's local chat records that profile's own LocalSessionAdapter as its
+    # transport (the source names it, so the chat resolves its own policy); a restart reads the chat
+    # back over that row.
     db = gateway.secondary.db.db_path
     await gateway.stop()
     with closing(sqlite3.connect(db)) as conn:
-        assert conn.execute('SELECT transport_profile FROM sessions WHERE id=?', (chat,)).fetchone() == ('default',)
+        assert conn.execute('SELECT transport_profile FROM sessions WHERE id=?', (chat,)).fetchone() == ('beta',)
     await gateway.start()
     sender = gateway.connect(gateway.secondary)
     assert [await deliver(count) for count in (3, 4)] == [chat, chat]

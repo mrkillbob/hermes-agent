@@ -181,7 +181,8 @@ def stop_recorded_orphan() -> bool:
         return False
     try:
         if not psutil.pid_exists(state["pid"]):
-            return True  # keep the dead record; endpoint resolution rejects it
+            # A dead router does not prove closure of its uncontained children.
+            return os.name == "nt"
         if is_modern(state):
             proc = recorded_process(state)
             if proc is None or not _owner_is_dead(state):
@@ -194,7 +195,7 @@ def stop_recorded_orphan() -> bool:
         LlamaServerSupervisor._terminate_tree(proc, verified_root=True)
         proc.wait(timeout=5)
         logger.info("stopped orphaned managed llama-server pid=%s", proc.pid)
-        return True
+        return os.name == "nt"  # POSIX tree closure remains unknown; retain the record.
     except (OSError, psutil.Error):
         logger.warning("could not verify or stop recorded managed llama-server")
         return False

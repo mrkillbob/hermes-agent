@@ -138,7 +138,7 @@ def test_restored_rows_fail_closed_on_intake_and_deliver_only_via_a_unique_owner
     # team_b's bot failed to connect and is queued for reconnect: it owns a credential, so the
     # route that also names it through the shared bot must not turn it into a satellite.
     r._profile_adapters["team_b"] = {}
-    r._profile_failed_platforms = {"team_b": {Platform.TELEGRAM: {}}}
+    r._profile_bot_platforms = {"team_b": {Platform.TELEGRAM}}
     assert r._delivery_adapter_for(restored("team_b")) is None
     assert r._authorization_home_for_source(restored("team_b")) is None
 
@@ -177,6 +177,8 @@ def test_inferred_primary_transport_does_not_hide_a_secondary_local_session_poli
     secondary_adapter.policies[source.chat_id] = picked_policy
 
     identity = resolve_identity(source, runner=runner)
-    assert identity.transport_inferred and identity.transport_profile == "default"
+    # A LOCAL source names its own session authority's adapter, so its transport is the secondary's,
+    # never an inference from the primary adapter.
+    assert not identity.transport_inferred and identity.transport_profile == "team_b"
     assert policy_for_source(runner, source) is picked_policy
     assert runner._delivery_adapter_for(source) is secondary_adapter

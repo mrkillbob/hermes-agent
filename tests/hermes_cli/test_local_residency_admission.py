@@ -97,10 +97,13 @@ def test_boot_hands_the_router_the_derived_cap(tmp_path, monkeypatch, configured
             self.proc = None
             self.base_url = "http://127.0.0.1:1/v1"
 
-        def start(self) -> None:
+        def start(self, **kwargs) -> None:
             return None
 
     monkeypatch.setattr(supervisor, "LlamaServerSupervisor", FakeSupervisor)
     config = {"local_runtime": {"enabled": True, "models_max": configured}}
-    assert bs.ensure_local_runtime(config) is not None
+    from hermes_cli.local_runtime.ownership import RuntimeOwner
+    from hermes_constants import get_hermes_home
+
+    assert bs.ensure_local_runtime(config, owner=RuntimeOwner(get_hermes_home())) is not None
     assert captured["models_max"] == expected

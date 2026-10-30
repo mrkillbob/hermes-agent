@@ -11,6 +11,9 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Mapping
+
+from hermes_yaml import YAMLError
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -18,13 +21,80 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
 
+if TYPE_CHECKING:
+    from hermes_cli.fleet_protocol import FleetTask
+
+
+def federated_enabled(config: Mapping[str, object] | None) -> bool:
+    """Return the explicit opt-in for the cross-machine Kanban lane."""
+    if not isinstance(config, Mapping):
+        return False
+    # Callers may provide the full config or the already-selected ``kanban``
+    # section (the CLI uses the latter).
+    section = config.get("kanban") if isinstance(config.get("kanban"), Mapping) else config
+    federated = section.get("federated") if isinstance(section, Mapping) else None
+    return bool(isinstance(federated, Mapping) and federated.get("enabled") is True)
+
+
+def fleet_task_from_kanban(task) -> FleetTask:
+    """Convert a local Kanban row to metadata safe to send to the coordinator."""
+    from hermes_cli.fleet_protocol import FleetTask, TaskRequirement
+
+    body = str(task.body or task.title or "").strip()
+    if not body:
+        raise ValueError("federated Kanban tasks require a title or body")
+    return FleetTask(
+        task_id=str(task.id),
+        title=str(task.title),
+        body=body,
+        requirement=TaskRequirement(
+            models=(task.model_override,) if task.model_override else (),
+            project=task.project_id or None,
+            workspace_kind=task.workspace_kind or None,
+        ),
+        idempotency_key=f"kanban:{task.id}",
+    )
+
+
+def federated_create_options(args) -> dict[str, object]:
+    """Return the local-row overrides for an unassigned federated card."""
+    if getattr(args, "assignee", None):
+        raise ValueError("federated Kanban tasks must not specify --assignee")
+    # ``create_task`` accepts ``running`` as the non-blocked admission input
+    # and resolves it to the durable ``ready`` state after parent checks.
+    return {"assignee": None, "initial_status": "running", "created_by": "fleet"}
+
+
+def submit_federated_task(task, config: Mapping[str, object] | None = None):
+    """Submit task metadata using the configured coordinator and secret token."""
+    from hermes_cli.fleet_client import FleetClient
+
+    config = _kanban_config() if config is None else config
+    section = (
+        config.get("kanban")
+        if isinstance(config, Mapping) and isinstance(config.get("kanban"), Mapping)
+        else config
+    )
+    federated = section.get("federated") if isinstance(section, Mapping) else None
+    if not isinstance(federated, Mapping):
+        raise RuntimeError("kanban.federated is not configured")
+    url = str(federated.get("coordinator_url") or "").strip()
+    token = os.environ.get("HERMES_FLEET_TOKEN", "").strip()
+    if not url or not token:
+        raise RuntimeError(
+            "federated Kanban requires kanban.federated.coordinator_url and HERMES_FLEET_TOKEN"
+        )
+    return FleetClient(url, token=token).submit_task(fleet_task_from_kanban(task))
+
 
 def _kanban_config() -> dict:
     """``config.yaml`` ``kanban:`` section, or ``{}`` when config can't be loaded."""
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
-        return (cfg.get("kanban", {}) if isinstance(cfg, dict) else {}) or {}
+        return kbd.shared_kanban_config(
+            (cfg.get("kanban", {}) if isinstance(cfg, dict) else {}) or {}
+        )
     except Exception:
         return {}
 
@@ -57,39 +127,44 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return _poll_loop(args.interval, tick)
 
 
+def _cli_dispatch_limits(args):
+    from hermes_cli.kanban_dispatch_tick import configured_dispatch_kwargs
+
+    limits = configured_dispatch_kwargs()
+    # Explicit flags override configured defaults, even when equal to old defaults.
+    for key, flag in (("max_spawn", "max"), ("failure_limit", "failure_limit")):
+        value = getattr(args, flag, None)
+        if value is not None:
+            limits[key] = value
+    return limits
+
+
 def _cmd_dispatch(args: argparse.Namespace) -> int:
-    # Honour kanban.default_assignee, kanban.max_in_progress,
-    # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
-    # semantics as the gateway dispatch path.
+    from hermes_cli.kanban_dispatch_tick import normalize_task_ids
+
     try:
-        from hermes_cli.config import load_config
-        _cfg = load_config()
-        _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
-        default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
-        max_in_progress_per_profile = kbd._positive_int(
-            _kanban_cfg.get("max_in_progress_per_profile"), None
-        )
-        # Memory-derived default when unset — same fallback the gateway applies.
-        max_in_progress = kbd.resolve_max_in_progress(
-            kbd._positive_int(_kanban_cfg.get("max_in_progress"), None)
-        )
-        # CLI --max is the more explicit signal, so it wins over kanban.max_spawn.
-        cli_max = getattr(args, "max", None)
-        max_spawn = (
-            cli_max if cli_max is not None else kbd._positive_int(_kanban_cfg.get("max_spawn"), None)
-        )
-    except Exception:
-        default_assignee = max_in_progress_per_profile = max_in_progress = None
-        max_spawn = getattr(args, "max", None)
+        task_ids = normalize_task_ids(getattr(args, "task_ids", None))
+        from hermes_cli.kanban_execution_budget import dispatch_budget
+        budget = dispatch_budget(args, task_ids)
+    except ValueError as exc:
+        return _err(f"kanban dispatch: {exc}", 2)
+    # Honour the same kanban.* limits and default_assignee as the gateway dispatch path.
+    try:
+        limits = _cli_dispatch_limits(args)
+    except Exception as exc:
+        if getattr(args, "json", False):
+            _print_json({"error": type(exc).__name__, "status": "config_unavailable"})
+        else:
+            print(f"Dispatch paused: configuration unavailable ({type(exc).__name__}).")
+        return 1
+    default_assignee = limits["default_assignee"]
     with kbc.connect_closing() as conn:
         res = kbd.dispatch_once(
             conn,
             dry_run=args.dry_run,
-            max_spawn=max_spawn,
-            max_in_progress=max_in_progress,
-            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
-            default_assignee=default_assignee,
-            max_in_progress_per_profile=max_in_progress_per_profile,
+            task_ids=task_ids,
+            **({"execution_budget": budget} if budget is not None else {}),
+            **limits,
         )
     if getattr(args, "json", False):
         _print_json({
@@ -113,7 +188,16 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             "rate_limited": res.rate_limited,
             "skipped_locked": res.skipped_locked,
             "memory_pressure": res.memory_pressure,
+            "paused": res.paused,
+            "routing_refused": [
+                {"task_id": tid, "assignee": who, "reason": reason}
+                for (tid, who, reason) in res.routing_refused
+            ],
         }, ascii=True)
+        return 0
+    if res.paused:
+        print("Dispatch paused by the global emergency stop (`hermes pause`); nothing was reclaimed or spawned. "
+              "Run `hermes resume` to lift it.")
         return 0
     print(f"Reclaimed:    {res.reclaimed}")
     if res.reaped_terminal_workers:
@@ -146,6 +230,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
             f"{', '.join(res.skipped_nonspawnable)}"
         )
+    for tid, who, reason in res.routing_refused:
+        print(f"Routing refused ({who}): {tid} - {reason}")
     for tid, reason in res.respawn_guarded:
         print(f"Guarded ({reason}): {tid}")
     if res.rate_limited:
@@ -177,6 +263,15 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     dispatchers against the same kanban.db."""
     if not getattr(args, "force", False):
         return _err(_DAEMON_DEPRECATED, 2)
+
+    try:
+        failure_limit = getattr(args, "failure_limit", None)
+        if failure_limit is None:
+            from hermes_cli.kanban_dispatch_config import load_dispatch_section
+            from hermes_cli.kanban_worker_logs import positive_int
+            failure_limit = positive_int(load_dispatch_section().get("failure_limit"), kbd.DEFAULT_FAILURE_LIMIT)
+    except (OSError, TypeError, ValueError, YAMLError) as exc:
+        return _err(f"kanban daemon: configuration unavailable ({type(exc).__name__})", 1)
 
     # Init before printing "started" so the DB path is right and init errors
     # surface immediately.
@@ -214,6 +309,9 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             return False
 
     def _on_tick(res):
+        if res.paused:
+            health_state["bad_ticks"] = 0
+            return
         ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
         if ready_pending and not res.spawned:
             health_state["bad_ticks"] += 1
@@ -253,7 +351,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         kbd.run_daemon(
             interval=args.interval,
             max_spawn=args.max,
-            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
+            failure_limit=failure_limit,
             on_tick=_on_tick,
         )
     finally:

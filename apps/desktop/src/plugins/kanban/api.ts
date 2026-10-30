@@ -34,6 +34,7 @@ import type {
   BoardImportResult,
   BoardMeta,
   BoardsResponse,
+  FleetStatusResponse,
   KanbanBoard,
   KanbanProfile,
   KanbanProject,
@@ -130,6 +131,49 @@ function boardSnapshotPath(slug: string): string {
   return slug ? `/board?board=${encodeURIComponent(slug)}` : '/board'
 }
 
+/** Heartbeats update liveness but do not change board membership or summaries. */
+export function eventsNeedBoardRefresh(events: CompletionEvent[]): boolean {
+  return events.some(event => event.kind !== 'heartbeat' && event.kind !== 'respawn_guarded')
+}
+
+export function applyHeartbeatEvents(board: KanbanBoard, events: CompletionEvent[]): KanbanBoard {
+  const heartbeats = new Map<string, number>()
+  let latestEventId = board.latest_event_id
+  let now = board.now
+
+  for (const event of events) {
+    if (event.kind !== 'heartbeat' || !event.task_id || typeof event.created_at !== 'number') {
+      continue
+    }
+
+    heartbeats.set(event.task_id, Math.max(heartbeats.get(event.task_id) ?? 0, event.created_at))
+
+    if (typeof event.id === 'number') {
+      latestEventId = Math.max(latestEventId, event.id)
+    }
+
+    now = Math.max(now, event.created_at)
+  }
+
+  if (heartbeats.size === 0) {
+    return board
+  }
+
+  return {
+    ...board,
+    columns: board.columns.map(column => ({
+      ...column,
+      tasks: column.tasks.map(task => {
+        const heartbeat = heartbeats.get(task.id)
+
+        return heartbeat === undefined ? task : { ...task, last_heartbeat_at: heartbeat }
+      })
+    })),
+    latest_event_id: latestEventId,
+    now
+  }
+}
+
 /** Cache-scope id for the active connection — the segment every query key
  *  embeds. `'local'` covers the pre-descriptor null; the SDK atom already
  *  reports 'local' for the local pool. For NON-rendering code (mutations,
@@ -149,6 +193,10 @@ export function useKanbanScope(): string {
  *  outgoing scope's key while a fetch would land on the incoming backend. */
 const routedScope = (): string => host.activeConnectionId() ?? LOCAL_SCOPE
 
+function activeSourceKey(): string {
+  return `${host.state.connectionId.get() ?? LOCAL_SCOPE}::${host.state.profile?.get() || 'default'}`
+}
+
 /** `enabled` for every kanban query: only fetch while the key's scope is the
  *  routed one. A switch's app-wide invalidation then leaves the outgoing
  *  observers alone (the incoming keys are already a cache miss) instead of
@@ -160,7 +208,14 @@ export const routedToScope = (query: { queryKey: readonly unknown[] }): boolean 
 /** One live `task_events` frame → precise cache invalidation: the board, plus
  *  each touched task's detail. The polls (8s board / 4s drawer) stay as the
  *  fallback — the socket just makes the board feel instant. */
-function onEventsFrame(scope: string, slug: string, data: unknown, selectedSlug = slug): void {
+function onEventsFrame(
+  scope: string,
+  slug: string,
+  data: unknown,
+  scheduleBoardRefresh: () => void,
+  sourceKey: string,
+  selectedSlug = slug
+): void {
   const frame = data as { cursor?: unknown; events?: CompletionEvent[] }
 
   if (typeof frame?.cursor === 'number') {
@@ -173,11 +228,20 @@ function onEventsFrame(scope: string, slug: string, data: unknown, selectedSlug 
     return
   }
 
-  void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
-  // Any event can change a board's card count — keep the switcher badge honest.
-  void queryClient.invalidateQueries({ queryKey: boardsKey(scope) })
+  queryClient.setQueriesData<KanbanBoard>({ queryKey: boardKeyPrefix(scope) }, cached =>
+    cached ? applyHeartbeatEvents(cached, events) : cached
+  )
 
-  for (const taskId of new Set(events.map(event => event.task_id).filter(Boolean))) {
+  if (eventsNeedBoardRefresh(events)) {
+    scheduleBoardRefresh()
+  }
+
+  const changedTaskIds = events
+    .filter(event => event.kind !== 'heartbeat' && event.kind !== 'respawn_guarded')
+    .map(event => event.task_id)
+    .filter(Boolean)
+
+  for (const taskId of new Set(changedTaskIds)) {
     void queryClient.invalidateQueries({ queryKey: taskKey(scope, slug, taskId!) })
 
     if (selectedSlug !== slug) {
@@ -187,7 +251,7 @@ function onEventsFrame(scope: string, slug: string, data: unknown, selectedSlug 
 
   // Completion notification (after invalidation so notify failure
   // never interferes with cache invalidation).
-  void onKanbanEventsFrame(slug, events).catch(() => undefined)
+  void onKanbanEventsFrame(slug, events, sourceKey).catch(() => undefined)
 }
 
 // A persisted, subscribable atom (the structural slice we need — avoids
@@ -230,34 +294,63 @@ export function bindApi(
 
   let close: (() => void) | null = null
   let socketGeneration = 0
+  let boardRefreshTimer: null | ReturnType<typeof setTimeout> = null
 
-  const dial = (scope: string, slug: string, since: number | undefined) => {
-    const generation = socketGeneration
-    const selectedSlug = $boardSlug.get()
+  const scheduleBoardRefresh = (scope: string, sourceKey: string) => {
+    if (boardRefreshTimer !== null) {
+      return
+    }
 
-    return socket(eventsUrl(slug, since), data => {
-      if (generation === socketGeneration) {
-        onEventsFrame(scope, slug, data, selectedSlug)
+    boardRefreshTimer = setTimeout(() => {
+      boardRefreshTimer = null
+
+      if (sourceKey !== activeSourceKey()) {
+        return
       }
-    })
+
+      void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
+      void queryClient.invalidateQueries({ queryKey: boardsKey(scope) })
+    }, 500)
   }
+
+  const dial = (
+    scope: string,
+    slug: string,
+    since: number | undefined,
+    generation: number,
+    sourceKey: string,
+    selectedSlug: string
+  ) =>
+    socket(eventsUrl(slug, since), data => {
+      if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
+        return
+      }
+
+      onEventsFrame(scope, slug, data, () => scheduleBoardRefresh(scope, sourceKey), sourceKey, selectedSlug)
+    })
 
   const open = (selectedSlug: string) => {
     const generation = ++socketGeneration
     const scope = kanbanConnectionScope()
+    const sourceKey = activeSourceKey()
 
     close?.()
     close = null
 
+    if (boardRefreshTimer !== null) {
+      clearTimeout(boardRefreshTimer)
+      boardRefreshTimer = null
+    }
+
     const openResolved = (slug: string) => {
-      if (generation !== socketGeneration) {
+      if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
         return
       }
 
       const since = eventsSince(scope, slug)
 
       if (since !== undefined) {
-        close = dial(scope, slug, since)
+        close = dial(scope, slug, since, generation, sourceKey, selectedSlug)
 
         return
       }
@@ -272,20 +365,20 @@ export function bindApi(
           queryKey: boardKey(scope, slug, false)
         })
         .then(board => {
-          if (generation !== socketGeneration) {
+          if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
             return
           }
 
           const tail = typeof board?.latest_event_id === 'number' ? board.latest_event_id : undefined
 
-          close = dial(scope, slug, tail)
+          close = dial(scope, slug, tail, generation, sourceKey, selectedSlug)
         })
         .catch(() => {
-          if (generation !== socketGeneration) {
+          if (generation !== socketGeneration || sourceKey !== activeSourceKey()) {
             return
           }
 
-          close = dial(scope, slug, undefined)
+          close = dial(scope, slug, undefined, generation, sourceKey, selectedSlug)
         })
     }
 
@@ -295,12 +388,11 @@ export function bindApi(
       return
     }
 
-    // Resolve the alias BEFORE the handshake: /events is pinned to its board
-    // when opened. Resolving on each frame could classify an old socket's
-    // events against a different server-current board's cursor.
+    // Resolve the server-current board before the handshake: /events is pinned
+    // to that board when opened, and notifications must stay on this generation.
     void r<BoardsResponse>('/boards')
       .then(boards => openResolved(typeof boards.current === 'string' ? boards.current : ''))
-      .catch(() => openResolved('')) // Keep live cache invalidation; notifications fail closed.
+      .catch(() => openResolved(''))
   }
 
   // The local connection keeps the BARE key (the bare-local rule of
@@ -336,12 +428,20 @@ export function bindApi(
       }
     })
   )
+  if (host.state.profile) {
+    unsubs.push(host.state.profile.listen(() => open($boardSlug.get())))
+  }
 
   return () => {
     socketGeneration += 1
     eventCursorByBoard.clear()
     unsubs.forEach(unsub => unsub())
     close?.()
+
+    if (boardRefreshTimer !== null) {
+      clearTimeout(boardRefreshTimer)
+      boardRefreshTimer = null
+    }
     rest = null
     os = null
   }
@@ -382,6 +482,7 @@ export const boardsKey = (scope: string) => ['kanban', 'boards', scope] as const
 export const profilesKey = (scope: string) => ['kanban', 'profiles', scope] as const
 export const projectsKey = (scope: string) => ['kanban', 'projects', scope] as const
 export const orchestrationKey = (scope: string) => ['kanban', 'orchestration', scope] as const
+export const FLEET_STATUS_KEY = ['kanban', 'fleet', 'status'] as const
 
 // ── reads ─────────────────────────────────────────────────────────────────────
 
@@ -401,6 +502,9 @@ export const fetchLog = (id: string) => call<WorkerLog>(withBoard(`/tasks/${id}/
 export const fetchBoards = () => call<BoardsResponse>('/boards')
 
 export const fetchProfiles = () => call<{ profiles: KanbanProfile[] }>('/profiles')
+
+/** Shared Mac/Windows runner state, read through the authenticated backend. */
+export const fetchFleetStatus = () => call<FleetStatusResponse>('/fleet/status')
 
 /** First-class Hermes projects, for scoping a board's default workspace. */
 export const fetchProjects = () => call<{ projects: KanbanProject[] }>('/projects')

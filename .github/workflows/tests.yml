@@ -3,6 +3,18 @@ name: Tests
 on:
   workflow_call:
     inputs:
+      slice_count:
+        description: Number of parallel Python test slices
+        type: number
+        default: 8
+      e2e_mode:
+        description: Run the short PR smoke checks or the complete E2E suite
+        type: string
+        default: smoke
+      run_unit:
+        description: Run the unit-test matrix
+        type: boolean
+        default: true
       commit:
         description: Commit to test and build. Empty keeps the triggering commit.
         type: string
@@ -30,28 +42,51 @@ on:
 permissions:
   contents: read
 
-# Cancel in-progress runs for the same ref
+# Keep independent callers (CI, Nightly E2E) separate while superseding the same caller/ref.
 concurrency:
-  group: tests-${{ (github.ref_type == 'tag' || inputs.commit != '') && github.run_id || github.ref }}
+  group: tests-${{ github.workflow }}-${{ (github.ref_type == 'tag' || inputs.commit != '') && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' && inputs.commit == '' }}
 
 jobs:
-  test:
-    # Two 32-core slices instead of one box: on one runner the suite is ~10 min of
-    # nearly fully packed work, and a single bigger runner (96-core) scaled ~1.8x for
-    # 3x the price because files contend for the shared machine. Separate machines
-    # scale linearly. run_tests_parallel.py partitions from the checkout alone, so
-    # both slices agree on the split without a planning job.
-    name: Run tests (${{ matrix.slice }}/2)
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        slice: [1, 2]
+  generate:
+    name: Generate test slices
+    runs-on: ubuntu-latest
+    if: inputs.run_unit
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+
+      - name: Generate test matrix
+        id: matrix
+        run: |
+          matrix="$(python3 scripts/run_tests_parallel.py --generate-slices '${{ inputs.slice_count }}')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+      - name: Check the checkout is clean
+        # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
+        # leaves an untracked or modified file in the checkout is reported here. Runs only when
+        # every earlier step passed: a step that failed midway can leave its own temp files
+        # (a half-extracted download, a worktree its later cleanup never removed).
+        uses: ./.github/actions/check-clean-worktree
+
+  test:
+    name: Run tests slice ${{ matrix.slice.index }}/${{ inputs.slice_count }}
+    needs: generate
+    if: inputs.run_unit
+    # NousResearch's 32-core runner is private to that repository. Fork PRs
+    # keep using standard hosted runners and the slice matrix above.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.generate.outputs.matrix) }}
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 60 }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
 
@@ -72,7 +107,7 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
           test-environment: 'true'
           prune-python-cache: true
 
@@ -97,9 +132,9 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: test_durations.json
-          key: test-durations-never-exact
+          key: test-durations-unit-never-exact
           restore-keys: |
-            test-durations-
+            test-durations-unit-
 
       - name: Run tests
         # Per-file isolation via scripts/run_tests.sh: each test file runs
@@ -107,14 +142,13 @@ jobs:
         # with bounded parallelism. No xdist, no shared workers, no
         # module-level state leakage between files.
         #
-        # No --files: the runner discovers the suite itself. The discovered
-        # set is identical to the list the removed matrix job used to pass in.
         run: |
           scripts/run_tests.sh
         env:
-          HERMES_TEST_SLICE: ${{ matrix.slice }}/2
-          HERMES_TEST_WORKERS: 32
-          HERMES_TEST_FILE_TIMEOUT: 600
+          HERMES_TEST_SLICE: ${{ matrix.slice.index }}/${{ inputs.slice_count }}
+          # Bound file concurrency to the available runner; preserve full fork slices.
+          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '32' || '4' }}
+          HERMES_TEST_FILE_TIMEOUT: "600"
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
@@ -127,9 +161,8 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: test_durations.json
-          # Per-slice key: each slice's file keeps the restored entries for the other
-          # slice's files and refreshes its own, so the cache stays complete.
-          key: test-durations-${{ github.run_id }}-${{ matrix.slice }}
+          # Per-slice key preserves the duration updates from each matrix job.
+          key: test-durations-unit-${{ github.run_id }}-${{ matrix.slice.index }}
 
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
@@ -139,14 +172,15 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   e2e:
-    # The core suites spawn real serve / gateway / tui_gateway / MCP / SQLite
-    # writer processes per test; a 4-vCPU runner serialises them into timeouts.
     if: inputs.e2e
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 30
+    # Keep the process-heavy suite in one job, as upstream does. The fork
+    # cannot access NousResearch's private runner groups, but one hosted runner
+    # avoids multiplying dependency setup and flooding the fork's runner quota.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 30 || 45 }}
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
 
@@ -168,8 +202,9 @@ jobs:
           prune-python-cache: true
 
       - name: Install Node deps and build the Ink TUI
+        if: inputs.e2e_mode == 'full'
         # tests/e2e/core/terminal drives the real `hermes --tui` over a PTY;
-        # HERMES_E2E_REQUIRE_TUI=1 below turns a missing build into a failure.
+        # build the TUI before the suite starts.
         uses: ./.github/actions/retry
         with:
           command: npm ci --workspace ui-tui --ignore-scripts --no-audit --no-fund && npm run build --workspace ui-tui
@@ -203,8 +238,18 @@ jobs:
         run: |
           "$HERMES_PYTHON" -c "import sqlite3, hermes_state_wal as w; print('sqlite', sqlite3.sqlite_version); assert not w.is_sqlite_wal_reset_vulnerable()"
 
+      - name: Restore per-file duration cache
+        # Keep E2E timing history per shard so every runner can balance from
+        # its own measured durations rather than whichever cache wrote last.
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: test_durations.json
+          key: test-durations-e2e-never-exact
+          restore-keys: |
+            test-durations-e2e-
+
       - name: Run messaging-gated gateway cases
-        # These gateway files drive the REAL Discord/Telegram SDKs and skip when the
+        # These files drive the REAL Discord/Telegram SDKs and skip when the
         # `messaging` extra is absent, which it is in the ordinary `test` slices; this is
         # the only job that installs it. Whole files (run_tests.sh drops ::node selectors),
         # and a skip here is a coverage hole, not a pass: fail on any.
@@ -215,7 +260,8 @@ jobs:
             tests/gateway/test_native_role_reauthorization.py \
             tests/gateway/test_native_telegram_startup_recovery.py \
             tests/gateway/test_native_pause_notice.py \
-            tests/gateway/test_native_reply_crash_recovery.py | tee "$log"
+            tests/gateway/test_native_reply_crash_recovery.py \
+            tests/plugins/test_telegram_webhook_http_compatibility.py | tee "$log"
           summary=$(grep '^=== Summary:' "$log")
           case "$summary" in
             *skipped*) echo "::error::messaging-gated gateway cases skipped: $summary"; exit 1 ;;
@@ -250,10 +296,19 @@ jobs:
           # exactly-once/compaction suites are race detectors, and a rare
           # corruption that passes on retry is still a corruption.
           HERMES_TEST_FILE_RETRIES: "0"
+          # Each E2E file is a process tree; cap concurrent trees at the
+          # empirically stable three on both hosted-runner configurations.
           HERMES_E2E_REQUIRE_TUI: "1"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
+
+      - name: Save per-file duration cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('test_durations.json') != ''
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: test_durations.json
+          key: test-durations-e2e-${{ github.run_id }}
 
       - name: Check the checkout is clean
         # Last step of every job (tests/ci/test_clean_worktree_check.py): a test or CI step that
@@ -270,13 +325,13 @@ jobs:
     # carries the whole tree's wall time against the 60-minute timeout.
     # Skipping this job skips every e2e-upgrade shard with it.
     if: inputs.e2e_upgrade
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
           # The clean-worktree step below loads its action from the checkout.
@@ -306,6 +361,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   e2e-upgrade:
+    if: inputs.e2e_upgrade
     # tests/e2e/core/upgrade: a real N-1 -> HEAD `hermes update` (clean,
     # autostash, killed mid-pull / mid-deps, offline), fresh-process import and
     # entrypoint smoke, the config round-trip property matrix, and the lane
@@ -314,26 +370,43 @@ jobs:
     # runs ~5-15 min. Sharded by suite directory (see e2e-upgrade-plan).
     name: e2e-upgrade (${{ matrix.shard }})
     needs: e2e-upgrade-plan
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 60
+    # NousResearch has dedicated high-core runners; forks use public hosted
+    # runners and a lower per-job worker cap to avoid starving updater processes.
+    runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-32-core' || 'ubuntu-latest' }}
+    timeout-minutes: ${{ github.repository == 'NousResearch/hermes-agent' && 60 || 120 }}
     strategy:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(needs.e2e-upgrade-plan.outputs.shards) }}
     steps:
       - name: Checkout code
-        uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ inputs.commit }}
-          # N-1 = `git describe --tags --abbrev=0 HEAD~1`.
+          # Upgrade E2E tests build a shared local bare origin and exercise real
+          # full-history clones from it. A blob-filtered checkout leaves promised
+          # historical objects unavailable to that local upload-pack server.
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Fetch official release tags
+        # Forks may not carry the newest upstream release tag. The upgrade
+        # base and historical updater scenario are defined by NousResearch tags.
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch --no-recurse-submodules upstream '+refs/tags/v20*:refs/tags/v20*'
 
       - name: Set up Node
         # `hermes update` builds the web UI / TUI workspaces.
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # 7.0.0
         with:
           node-version: 26
+          cache: npm
+
+      - name: Prepare shared Node dependencies for updater legs
+        run: |
+          echo "HERMES_E2E_NODE_CACHE=$HOME/.npm" >> "$GITHUB_ENV"
+          npm ci --workspace ui-tui --workspace web --include-workspace-root --no-audit --no-fund
 
       - name: Install ripgrep (prebuilt binary)
         run: |
@@ -350,7 +423,7 @@ jobs:
           rg --version
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           # Pin the uv version: unpinned, setup-uv resolves "latest" by
           # fetching a manifest from raw.githubusercontent.com on EVERY job —
@@ -366,6 +439,8 @@ jobs:
           # time, but resolves from the warm cache instead of re-downloading
           # and re-building wheels.
           enable-cache: true
+          # Preserve the pre-v9 cache size policy.
+          prune-cache: true
           cache-dependency-glob: |
             pyproject.toml
             uv.lock
@@ -385,8 +460,61 @@ jobs:
         # in the venv up front.
         uses: ./.github/actions/retry
         with:
-          command: uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+          command: uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web --extra keychain
 
+      - name: Verify upgrade release snapshots
+        # The real upgrade clone uses --shared from this complete checkout.
+        # Verify the exact N-1 and pre-handoff snapshots before running scenarios.
+        run: |
+          source .venv/bin/activate
+          python - <<'PY'
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          from tests.e2e.core.upgrade.test_upgrade_path import _refs
+          from tests.e2e.core.upgrade.test_fresh_process_entrypoints import _pre_handoff_tag
+
+          refs = _refs()
+          assert refs.base_tag, "N-1 release tag is not reachable from HEAD"
+
+          def hydrate(tag: str, *paths: str) -> None:
+              archive = subprocess.Popen(
+                  ["git", "archive", "--format=tar", tag, "--", *paths],
+                  stdout=subprocess.PIPE,
+              )
+              assert archive.stdout is not None
+              listing = subprocess.run(["tar", "-tf", "-"], stdin=archive.stdout, stdout=subprocess.DEVNULL)
+              archive.stdout.close()
+              assert archive.wait() == 0 and listing.returncode == 0, f"could not hydrate {tag}"
+
+          release_tags = subprocess.run(
+              ["git", "tag", "--merged", "HEAD", "--sort=-v:refname", "--list", "v20*"],
+              capture_output=True, text=True, check=True,
+          ).stdout.splitlines()[:15]
+          pre_handoff = None
+          for tag in release_tags:
+              # The discovery helper reads these files from each candidate.
+              hydrate(tag, "hermes_cli")
+              pre_handoff = _pre_handoff_tag()
+              if pre_handoff is not None:
+                  break
+          assert pre_handoff is not None, "pre-handoff release tag is not reachable from HEAD"
+
+          hydrate(refs.base_tag)
+          config = tomllib.loads(Path("pyproject.toml").read_text())
+          package_tops = {
+              entry.split(".", 1)[0]
+              for entry in config["tool"]["setuptools"]["packages"]["find"]["include"]
+          }
+          old_entries = subprocess.run(
+              ["git", "ls-tree", "--name-only", pre_handoff[0]],
+              capture_output=True, text=True, check=True,
+          ).stdout.splitlines()
+          old_entries = [name for name in old_entries if name.endswith(".py") or name in package_tops]
+          hydrate(pre_handoff[0], *old_entries)
+          print(f"Hydrated upgrade bases: {refs.base_tag}, {pre_handoff[0]}")
+          PY
       - name: Install bubblewrap
         # Every spawned updater runs in bwrap (own PID namespace, no user
         # systemd bus, only the test tmp writable). Ubuntu 24.04 restricts
@@ -426,8 +554,12 @@ jobs:
           # Each file drives real installs/updaters (process trees plus uv and
           # git I/O); cpu_count of them at once starves their deadlines. A
           # shard holds at most ~7 files, so this runs each shard in one wave.
-          HERMES_TEST_WORKERS: "6"
+          HERMES_TEST_WORKERS: ${{ github.repository == 'NousResearch/hermes-agent' && '6' || '3' }}
           HERMES_TEST_FILE_TIMEOUT: "3000"
+          # Each file contains deterministic, destructive-in-a-sandbox update scenarios; retrying
+          # the whole file after a failure repeats several full installs without adding evidence.
+          HERMES_TEST_FILE_RETRIES: "0"
+          HERMES_E2E_SEED_NODE_MODULES: "1"
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""

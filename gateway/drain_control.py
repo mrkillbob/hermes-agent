@@ -47,10 +47,12 @@ def restart_wait_open(runner) -> bool:
             and descriptor.get("drain_reason") == RESTART_WAIT_REASON)
 
 
-# The reads a client needs during that wait to find and open the conversation parked on
-# approval/clarify: Desktop's session picker, the session detail and its transcript pages, and the
-# health probes. GET only and still authenticated; every write and every other route keeps the
-# drain's refusal. The prompt itself (approval.pending / *.respond) rides the WebSocket.
+# The requests a client needs during that wait to find, open and answer the conversation parked on
+# approval/clarify: the GET reads below (Desktop's session picker, the session detail and its
+# transcript pages, and the health probes) and one write, a Webapp tab's mint of the one-use ticket
+# its /api/ws dial-back needs (restart_wait_socket_ticket). Both only pass the drain's refusal; the
+# listener's auth gate still runs on them. Every other write and route keeps that refusal. The
+# prompt itself (approval.pending / *.respond) rides the WebSocket.
 _RESTART_WAIT_READS = re.compile(
     r"/api/(?:health|status|profiles/sessions(?:/sidebar)?"
     r"|sessions/[^/]+(?:/messages(?:/around)?|/timeline)?)")
@@ -60,6 +62,16 @@ def restart_wait_read(runner, method, path) -> bool:
     """True for an allowlisted read request while *runner* is in a restart's after-turn wait."""
     return (method == "GET" and bool(_RESTART_WAIT_READS.fullmatch(path or ""))
             and restart_wait_open(runner))
+
+
+def restart_wait_socket_ticket(runner, method, path, query) -> bool:
+    """True for a gateway-socket ticket mint while *runner* is in a restart's after-turn wait.
+
+    Exempts the request from the drain's refusal only: it does not authenticate it."""
+    from urllib.parse import parse_qs
+    from hermes_cli.web_session_sockets import GATEWAY_SOCKET
+    return (method == "POST" and path == "/api/webapp/socket-ticket"
+            and parse_qs(query or "").get("socket") == [GATEWAY_SOCKET] and restart_wait_open(runner))
 
 # The WebSocket verbs an interactive client may still call during that wait: attach to and read the
 # parked session, answer its prompt (or interrupt the turn so the restart can finish) and commit
@@ -75,6 +87,8 @@ RESTART_WAIT_WS_METHODS = frozenset({
 
 def ws_method_refused_while_draining(runner, method) -> bool:
     """True when an interactive WebSocket verb must be refused because *runner* is draining."""
+    if getattr(runner, "_external_drain_active", False):
+        return method not in {'ping', 'runtime.describe', 'prompt.receipt', 'session.events.since', 'session.interrupt'}
     return bool(getattr(runner, "_draining", False)) and method not in RESTART_WAIT_WS_METHODS
 
 _DRAIN_REQUEST_FILENAME = ".drain_request.json"
@@ -112,6 +126,35 @@ def drain_request_path(home: Optional[Path] = None) -> Path:
     return Path(home if home is not None else get_hermes_home()) / _DRAIN_REQUEST_FILENAME
 
 
+@contextlib.contextmanager
+def drain_marker_lock(*, home=None):
+    """All canonical marker writers serialize check and replacement on one stable inode."""
+    from hermes_cli.kanban_db_connect import _try_lock_nb, _unlock
+    path = drain_request_path(home).with_suffix('.lock')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a+b') as handle:
+        if not _try_lock_nb(handle):
+            raise RuntimeError('drain marker busy')
+        try:
+            yield
+        finally:
+            _unlock(handle)
+
+
+def _protected_marker(home):
+    from hermes_cli.startup_hold import journal_present
+    if journal_present(home):
+        return True
+    try:
+        drain_request_path(home).stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    current = read_drain_request(home=home)
+    return not current or 'kanban_once' in current or 'startup_hold' in current
+
+
 def write_drain_request(
     *, principal: str = "drain-control", suppress_notification: bool = False, home: Optional[Path] = None
 ) -> dict[str, Any]:
@@ -123,23 +166,31 @@ def write_drain_request(
     are quiet is the caller's policy.  Stamped with the instantiation epoch so a
     copy surviving a machine restart on the durable volume reads as stale.
     """
-    payload = {
-        "action": "drain", "requested_at": datetime.now(UTC).isoformat(), "principal": principal,
-        "epoch": current_instantiation_epoch(), "suppress_notification": bool(suppress_notification),
-    }
-    atomic_json_write(drain_request_path(home), payload)
-    return payload
+    with drain_marker_lock(home=home):
+        if _protected_marker(home):
+            raise RuntimeError('kanban window requires verified restoration')
+        payload = {
+            "action": "drain", "requested_at": datetime.now(UTC).isoformat(), "principal": principal,
+            "epoch": current_instantiation_epoch(), "suppress_notification": bool(suppress_notification),
+        }
+        atomic_json_write(drain_request_path(home), payload)
+        return payload
 
 
 def clear_drain_request(*, home: Optional[Path] = None) -> bool:
-    """Remove the drain marker (cancel-drain, idempotent). Returns True if one existed."""
+    """Remove an ordinary marker; a window requires verified restoration."""
     path = drain_request_path(home)
+    if not path.parent.exists():
+        return False
     try:
-        path.unlink()
-        return True
-    except OSError as e:
-        if not isinstance(e, FileNotFoundError):
-            _log.warning("drain-control: failed to remove %s: %s", path, e)
+        with drain_marker_lock(home=home):
+            if _protected_marker(home):
+                return False
+            path.unlink()
+            return True
+    except (OSError, RuntimeError) as exc:
+        if not isinstance(exc, FileNotFoundError):
+            _log.warning("drain-control: failed to remove %s: %s", path, exc)
         return False
 
 
@@ -172,8 +223,15 @@ def _marker_is_expired(body: dict[str, Any]) -> bool:
 def _active_drain_body(home: Optional[Path]) -> Optional[dict[str, Any]]:
     """Marker body if present AND not stale (definite epoch mismatch or expired), else None."""
     body = read_drain_request(home=home)
+    from hermes_cli.startup_hold import journal_present
+    if journal_present(home):
+        return {'action': 'drain', 'startup_hold': {}}
     if body is None:
         return None
+    # A one-card permission may expire or lose its owner; the surrounding hold must
+    # survive both. Only verified restoration may remove this operator-owned marker.
+    if 'kanban_once' in body or 'startup_hold' in body:
+        return body
     current, marker_epoch = current_instantiation_epoch(), body.get("epoch")
     if (current and marker_epoch and marker_epoch != current) or _marker_is_expired(body):
         return None

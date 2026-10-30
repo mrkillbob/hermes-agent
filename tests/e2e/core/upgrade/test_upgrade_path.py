@@ -360,6 +360,55 @@ def _write_wrappers(leg_root: Path, install: Path, hermes_home: Path) -> Path:
     return wrap
 
 
+def _copy_node_modules_file(source: str, target: str) -> str:
+    """Hard-link the preinstalled workspace tree when possible; fall back across filesystems."""
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+    return target
+
+
+def _seed_node_dependencies(leg: Leg) -> None:
+    """Share this job's already-installed Node workspace across isolated update legs.
+
+    These scenarios all update the same lockfile. Installing the identical UI dependency graph
+    once per sandbox dominated the updater lane while exercising no behavior under test; each leg
+    still runs the real web build and the updater's lockfile readiness checks.
+    """
+    if os.environ.get("HERMES_E2E_SEED_NODE_MODULES") != "1":
+        return
+    changed = _git(
+        "diff", "--name-only", _refs().base, _refs().head, "--", "package*.json", "**/package.json",
+        "**/package-lock.json", cwd=H.WORKTREE,
+    ).splitlines()
+    if changed:
+        return
+    source = H.WORKTREE / "node_modules"
+    if not source.is_dir():
+        raise AssertionError("Node workspace preinstall did not create node_modules")
+    target = leg.install / "node_modules"
+    shutil.copytree(source, target, symlinks=True, copy_function=_copy_node_modules_file)
+    if not all((target / ".bin" / name).exists() for name in ("tsc", "vite")):
+        raise AssertionError("preinstalled Node workspace is missing the web build toolchain")
+
+    # Use the updater's own digest and cache path so the cloned install records a successful
+    # workspace install with the same manifest bytes, instead of reinstalling them per scenario.
+    from hermes_cli import main as cli_main
+    from hermes_cli.update_cmd_deps import _npm_lock_cache_file, _npm_manifests_digest
+
+    project_root = cli_main.PROJECT_ROOT
+    cli_main.PROJECT_ROOT = leg.install
+    try:
+        digest = _npm_manifests_digest()
+        stamp = _npm_lock_cache_file(leg.hermes_home)
+    finally:
+        cli_main.PROJECT_ROOT = project_root
+    if not digest:
+        raise AssertionError("could not compute Node manifest digest for the update leg")
+    stamp.write_text(digest, encoding="utf-8")
+
+
 def make_leg(root: Path, template_home: Path | None) -> Leg:
     root.mkdir(parents=True, exist_ok=True)
     origin = _make_origin(root)
@@ -392,7 +441,9 @@ def make_leg(root: Path, template_home: Path | None) -> Leg:
         shutil.copytree(template_home, hermes_home, symlinks=True)
     wrap = _write_wrappers(root, install, hermes_home)
     env = H.isolated_env(root, extra_path=[wrap])
-    return Leg(root=root, origin=origin, install=install, env=env, hermes_home=hermes_home, wrap_dir=wrap)
+    leg = Leg(root=root, origin=origin, install=install, env=env, hermes_home=hermes_home, wrap_dir=wrap)
+    _seed_node_dependencies(leg)
+    return leg
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +556,8 @@ def assert_healthy_at_head(leg: Leg, provider: FakeLLMServer, final: subprocess.
         expected = migrate_oracle(leg, name, orig)
         assert after == expected, (
             f"{name} config.yaml differs from HEAD's own migration of the pre-update file\n"
+            f"--- updater stdout (tail) ---\n{final.stdout[-6000:]}\n"
+            f"--- updater stderr (tail) ---\n{final.stderr[-3000:]}\n"
             f"--- after update ---\n{after.decode()}\n--- expected ---\n{expected.decode()}")
         # Independent of the oracle (a clobbering migration would be mirrored by it): the user's
         # values survive semantically and every comment line survives verbatim.
@@ -529,8 +582,12 @@ def assert_healthy_at_head(leg: Leg, provider: FakeLLMServer, final: subprocess.
     turn = leg.run("-z", marker)
     assert turn.returncode == 0 and TRACEBACK not in turn.stderr, H.describe(turn)
     assert provider.default_text in turn.stdout, H.describe(turn)
-    new = provider.main_requests()[n_before:]
-    assert len(new) == 1 and marker in json.dumps(new[0]["messages"]), "one-shot turn did not reach the provider once"
+    # The preserved nightly cron can become due while this long upgrade suite
+    # runs. Attribute requests by this turn's unique marker, not by every call
+    # the shared module-scoped provider received since n_before.
+    new = [request for request in provider.main_requests()[n_before:]
+           if marker in json.dumps(request["messages"])]
+    assert len(new) == 1, "one-shot turn did not reach the provider once"
     fp = db_fingerprint(leg.hermes_home / "state.db")
     assert fp["integrity"] == [("ok",)]
     assert len(fp["sessions"]) == len(before["default"]["db"]["sessions"]) + 1, "post-update turn not persisted"

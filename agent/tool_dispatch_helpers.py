@@ -16,11 +16,10 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent.compression_marker import _COMPRESSION_MARKER_ARTIFACT_RE
 from agent.message_metadata import stamp_message_timestamp
+from agent.pruned_tool_arguments import _context_pruned_argument_paths
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
-    tool_may_have_side_effect,
 )
 from tools.threat_patterns import scan_for_threats
 
@@ -65,38 +64,6 @@ _DESTRUCTIVE_PATTERNS = re.compile(
 )
 # Output redirects that overwrite files (> but not >>)
 _REDIRECT_OVERWRITE = re.compile(r'[^>]>[^>]|^>[^>]')
-
-def _context_pruned_argument_paths(tool_name: str, args: Any) -> list[str]:
-    """Paths whose values contain model-visible context-compression artifacts.
-
-    A minted marker is identified by its prefix plus the first rendered numeric
-    count. This catches a marker cut short before its fixed sentence while still
-    letting Hermes edit source/docs that mention the bare prefix or template.
-    Unknown/plugin/MCP tools stay effect-capable by default; known read-only
-    tools may inspect or quote compressed history.
-    """
-    if not tool_may_have_side_effect(tool_name):
-        return []
-
-    found: list[str] = []
-
-    def _walk(value: Any, path: str) -> None:
-        if isinstance(value, str):
-            if _COMPRESSION_MARKER_ARTIFACT_RE.search(value):
-                found.append(path)
-            return
-        if isinstance(value, dict):
-            for key, child in value.items():
-                key_text = str(key)
-                child_path = f"{path}.{key_text}" if key_text.isidentifier() else f"{path}[{key_text!r}]"
-                _walk(child, child_path)
-            return
-        if isinstance(value, (list, tuple)):
-            for index, child in enumerate(value):
-                _walk(child, f"{path}[{index}]")
-
-    _walk(args, "$")
-    return found
 
 
 def _is_destructive_command(cmd: str) -> bool:
@@ -451,6 +418,7 @@ def make_tool_result_message(
     tool_call_id: str,
     *,
     effect_disposition: str | None = None,
+    source_provenance: dict[str, Any] | None = None,
 ) -> dict:
     """Build a tool-result message: OpenAI ``name`` (wire format) plus internal ``tool_name``
     (session DB). High-risk tool content (web_extract, web_search, browser_*, mcp_*) is
@@ -477,6 +445,8 @@ def make_tool_result_message(
             message["_tool_output_risk"] = risk_metadata
     if effect_disposition is not None:
         message["effect_disposition"] = effect_disposition
+    if source_provenance is not None:
+        message["_source_provenance"] = dict(source_provenance)
     return message
 
 

@@ -48,16 +48,79 @@ def _key_visible_in_scope(key: ServerKey, scope: Optional[str]) -> bool:
     return _key_scope(key) == scope or scope in _core._server_tool_scopes.get(key, ())
 
 
-def _resolve_server_key(name: str, scope: Optional[str] = None, *, current: bool = True) -> ServerKey:
+def _resolve_server_key(
+    name: str, scope: Optional[str] = None, *, current: bool = True, lock_held: bool = False
+) -> ServerKey:
     """The connection key a call to *name* from *scope* must use: the scope's own connection
     (live, connecting or lazily registered) when it has one, else a shared connection it
-    adopted, else its own (not yet existing) key so bookkeeping lands under this scope."""
+    adopted, else its own (not yet existing) key so bookkeeping lands under this scope.
+
+    The connection ledgers are mutable from gateway and MCP-loop threads. Callers that already
+    hold the non-reentrant core lock pass ``lock_held=True``; all other callers get a short
+    lock-protected lookup.
+    """
     if scope is None and current:
         scope = _core._mcp_registry_scope()
-    own = _server_key(name, scope, current=False)
-    if scope is None or own in _core._servers or own in _core._lazy_server_configs:
+
+    def resolve_unlocked() -> ServerKey:
+        own = _server_key(name, scope, current=False)
+        # Older in-process callers may expose a human-readable scoped key. Prefer its
+        # explicit provenance metadata rather than parsing the key (server names may contain
+        # the delimiter), while keeping the tuple key for new connections.
+        if scope is not None:
+            for key in set(_core._servers) | set(_core._lazy_server_configs) | set(_core._server_scope_keys):
+                if (_core._server_scope_keys.get(key) == scope
+                        and _core._server_public_names.get(key) == name):
+                    return key
+        if scope is None or own in _core._servers or own in _core._lazy_server_configs:
+            return own
+        for key, scopes in tuple(_core._server_tool_scopes.items()):
+            if scope in scopes and _key_name(key) == name and key in _core._servers:
+                return key
         return own
-    for key, scopes in _core._server_tool_scopes.items():
-        if scope in scopes and _key_name(key) == name and key in _core._servers:
-            return key
-    return own
+
+    if lock_held:
+        return resolve_unlocked()
+    with _core._lock:
+        return resolve_unlocked()
+
+
+# Ledgers keyed by connection key (``tools.mcp_tool``).
+_KEYED_LEDGERS = (
+    "_servers", "_server_scope_keys", "_server_tool_scopes", "_server_connect_errors",
+    "_lazy_server_configs", "_lazy_server_fingerprints", "_lazy_server_tool_names",
+    "_server_connect_retry_after", "_server_connect_failures", "_server_error_counts",
+    "_server_breaker_opened_at", "_server_errors_all_application", "_server_trust_levels",
+    "_tool_read_only_hints", "_server_cost_policies")
+_KEYED_SETS = ("_server_connecting", "_parallel_safe_servers")
+
+
+def rekey_unscoped_connections(scope: str) -> None:
+    """Move every bare-name connection under ``(scope, name)``. A single-profile process keys its
+    connections by bare name; once it starts multiplexing, the launch profile's lookups resolve
+    ``(launch scope, name)``, so without this its live servers read as disconnected until a restart."""
+    from tools.registry import registry
+    with _core._lock:
+        for attr in _KEYED_LEDGERS:
+            ledger = getattr(_core, attr)
+            for key in [k for k in ledger if isinstance(k, str)]:
+                ledger[(scope, key)] = ledger.pop(key)
+        for attr in _KEYED_SETS:
+            keys = getattr(_core, attr)
+            bare = {k for k in keys if isinstance(k, str)}
+            keys.difference_update(bare)
+            keys.update((scope, k) for k in bare)
+        # The owner and the tools follow the key: status, config pruning and /reload-mcp select by
+        # owner == scope, and teardown deregisters from the owner's overlay, not the global map.
+        tool_names = []
+        for key in [k for k, owner in _core._server_scope_keys.items() if owner is None and _key_scope(k) == scope]:
+            _core._server_scope_keys[key] = scope
+            tool_names += getattr(_core._servers.get(key), "_registered_tool_names", None) or ()
+        for key in [k for k in _core._lazy_server_tool_names if _key_scope(k) == scope]:
+            tool_names += _core._lazy_server_tool_names[key]
+        for key in set(_core._servers) | set(_core._lazy_server_tool_names):
+            if _key_scope(key) == scope:
+                _core._server_tool_scopes.setdefault(key, set()).add(scope)
+    from tools.mcp_tool_costs import rekey_unscoped
+    rekey_unscoped(scope)  # chats' spend totals follow their server's policy key
+    registry.move_to_scope(tool_names, scope)

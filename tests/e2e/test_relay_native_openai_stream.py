@@ -19,15 +19,6 @@ def _sse(*chunk_bodies: bytes) -> bytes:
     return b"".join(_CHUNK_PREFIX + body + b"}\n\n" for body in chunk_bodies) + b"data: [DONE]\n\n"
 
 
-def _running_on(loop) -> bool:
-    import asyncio
-
-    try:
-        return asyncio.get_running_loop() is loop
-    except RuntimeError:
-        return False
-
-
 def _stream_through_relay(tmp_path, monkeypatch, response_body: bytes, *, finalize_before):
     """Stream ``response_body`` through Relay; Relay's finalizer is forced to complete before
     the consumer thread processes the first chunk matching ``finalize_before(chunk)``.
@@ -41,6 +32,7 @@ def _stream_through_relay(tmp_path, monkeypatch, response_body: bytes, *, finali
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
+    (tmp_path / "hermes-home" / "egress").mkdir(parents=True)
 
     def respond(request):
         return httpx.Response(200, headers={"content-type": "text/event-stream"},
@@ -53,6 +45,12 @@ def _stream_through_relay(tmp_path, monkeypatch, response_body: bytes, *, finali
                     model="test/model", quiet_mode=True, skip_context_files=True, skip_memory=True)
     agent.api_mode = "chat_completions"
     agent.session_id = "openai-relay-session"
+    agent._current_turn_id = "openai-relay-turn"
+    agent._current_api_request_id = "openai-relay-request"
+    from agent.source_provenance import DEFAULT_POLICY_DIGEST
+
+    agent._llm_egress_policy_digest = DEFAULT_POLICY_DIGEST
+    agent._llm_egress_state_dir = tmp_path / "hermes-home" / "egress"
     agent._interrupt_requested = False
     agent._create_request_openai_client = lambda *args, **kwargs: client
     lease = relay_runtime.SESSION_COORDINATOR.acquire_conversation(
@@ -63,24 +61,21 @@ def _stream_through_relay(tmp_path, monkeypatch, response_body: bytes, *, finali
     subscriber_name = "test.openai_stream"
     events = []
     relay_finalizer_started = threading.Event()
-    allow_relay_finalizer = threading.Event()
     relay_finalizer_finished = threading.Event()
     run_relay_finalizer = relay_llm.ManagedLlmStream._relay_finalizer
 
-    def run_synchronized_relay_finalizer(managed_stream, attempt):
+    def run_observed_relay_finalizer(managed_stream, attempt):
+        # Relay calls this INLINE on the consumer thread's own event loop, so it must never wait on
+        # the consumer: when Relay reaches EOF while the consumer is still inside ``__next__`` for the
+        # last chunk, the finalizer already runs before the consumer sees that chunk (the ordering
+        # under test) and a wait for the consumer to "release" it self-deadlocked for 30s.
         relay_finalizer_started.set()
         try:
-            # When the provider stream is exhausted before the consumer pulls its first chunk, Relay
-            # runs the finalizer inline on the stream's own loop, i.e. on the consumer thread inside
-            # ``__next__``: the consumer cannot release it from there, and the forced ordering
-            # (finalizer before the chosen chunk) already holds. Waiting would self-deadlock.
-            if not _running_on(managed_stream._loop):
-                assert allow_relay_finalizer.wait(30), "consumer did not release Relay's finalizer"
             return run_relay_finalizer(managed_stream, attempt)
         finally:
             relay_finalizer_finished.set()
 
-    monkeypatch.setattr(relay_llm.ManagedLlmStream, "_relay_finalizer", run_synchronized_relay_finalizer)
+    monkeypatch.setattr(relay_llm.ManagedLlmStream, "_relay_finalizer", run_observed_relay_finalizer)
 
     count_chunk = chat_completion_helpers._StreamingCall._count_chunk
 
@@ -88,14 +83,14 @@ def _stream_through_relay(tmp_path, monkeypatch, response_body: bytes, *, finali
         # Relay's producer is pumped by the consumer thread's OWN event loop (``ManagedLlmStream.
         # __next__`` -> ``run_until_complete``), so the finalizer can only start while that loop runs.
         # Blocking the consumer thread here and waiting for it therefore deadlocked whenever the loop
-        # had not reached EOF yet (~1 run in 6). Instead: release the finalizer and PUMP THE STREAM'S
-        # LOOP until it has completed, then hand the chunk to the consumer. That is a real
-        # happens-before (finalizer done -> consumer sees chunk) on every schedule, not a retry lottery.
+        # had not reached EOF yet (~1 run in 6). Instead: PUMP THE STREAM'S LOOP until the finalizer
+        # has completed (immediately, if it already ran), then hand the chunk to the consumer. That is
+        # a real happens-before (finalizer done -> consumer sees chunk) on every schedule, not a retry
+        # lottery.
         if finalize_before(chunk):
             import asyncio
 
             stream = self.managed_stream_holder["stream"]
-            allow_relay_finalizer.set()
             # A schedule probe may hold the provider generator at this chunk until the consumer has
             # taken it (adverse consumer-first ordering); release it so the pump below can reach EOF.
             gate = getattr(stream, "_review_gate", None)

@@ -14,7 +14,7 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-function fixture({ details = true, available = true, statusOverride } = {}) {
+function fixture({ details = true, available = true, statusOverride, bridgeStatuses } = {}) {
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(0)
   const { window } = new JSDOM('<body></body>', { runScripts: 'outside-only' })
@@ -28,18 +28,22 @@ function fixture({ details = true, available = true, statusOverride } = {}) {
     document.body.append(button)
     return button
   }
+  let status = statusOverride || { supported: true, behind: available ? 1 : 0 }
+  const pendingStatuses = [...(bridgeStatuses || [])]
   const revealUpdate = () => addButton('Update now')
   const check = addButton('Check now', () => {
     check.disabled = true
-    if (!available) return
+    if (!available || (bridgeStatuses && status.error)) return
     if (details) {
       const more = addButton("See what's new", () => { more.remove(); revealUpdate() })
     } else {
       revealUpdate()
     }
   })
-  const status = statusOverride || { supported: true, behind: available ? 1 : 0 }
-  window.hermesDesktop = { updates: { check: async () => status } }
+  window.hermesDesktop = { updates: { check: async () => {
+    status = pendingStatuses.shift() || status
+    return status
+  } } }
   const page = {
     getByRole(role, { name }) {
       expect(role).toBe('button')
@@ -67,6 +71,38 @@ test.each([true, false])('reveals the actual update button without applying (det
   expect(await update.isVisible()).toBe(true)
   expect(f.clicks).toEqual(details ? ['Check now', "See what's new"] : ['Check now'])
   expect(f.shot).toHaveBeenCalledWith(f.page, '04-update-available')
+})
+
+test('preflights staged main and recovers a cached ref race before requiring the update button', async () => {
+  const sha = 'a'.repeat(40)
+  const race = { supported: true, error: 'fetch-failed', message: "error: cannot lock ref 'refs/remotes/origin/main'" }
+  const ready = { supported: true, branch: 'main', currentSha: 'b'.repeat(40), targetSha: sha, behind: 1 }
+  const f = fixture({ statusOverride: race, bridgeStatuses: [race, ready] })
+  const update = await updateUi.waitForUpdate(f.page, { ...f, expectedTargetSha: sha })
+  expect(await update.isVisible()).toBe(true)
+  expect(f.log.mock.calls.filter(([line]) => line.startsWith('[source-branch-check]'))).toHaveLength(2)
+  expect(f.clicks).toEqual(['Check now', "See what's new"])
+})
+
+test.each([
+  { supported: true, branch: 'main', currentSha: 'b'.repeat(40), targetSha: 'c'.repeat(40), behind: 1 },
+  { supported: true, error: 'fetch-failed', message: 'fatal: Authentication failed' },
+])('refuses a staged update after an unrelated or failed bridge check: %j', async statusOverride => {
+  const f = fixture({ statusOverride })
+  await expect(updateUi.waitForUpdate(f.page, { ...f, expectedTargetSha: 'a'.repeat(40) }))
+    .rejects.toThrow(/refusing to click/)
+  expect(f.clicks).toEqual([])
+  expect(f.log.mock.calls.filter(([line]) => line.startsWith('[source-branch-check]'))).toHaveLength(1)
+})
+
+test('a valid staged target still requires a visible Update now button', async () => {
+  const sha = 'a'.repeat(40)
+  const f = fixture({ available: false, statusOverride: {
+    supported: true, branch: 'main', currentSha: 'b'.repeat(40), targetSha: sha, behind: 1,
+  } })
+  await expect(updateUi.waitForUpdate(f.page, { ...f, expectedTargetSha: sha }))
+    .rejects.toThrow(/"Update now" never appeared/)
+  expect(f.shot).toHaveBeenCalledWith(f.page, 'ERROR-no-update-now')
 })
 
 test('checks the live Desktop bridge against the staged target before opening About', async () => {
@@ -106,9 +142,17 @@ test('test-only source probe pins staged main without changing other Python invo
   expected.push('--branch', 'main')
   expect(sourceBranchProbe.branchProbeArgs(probe, root, '/real/git')).toEqual(expected)
   const managed = ['--run-module', 'hermes_cli.source_check', ...probe.slice(2)]
+  // Only the PM invocation selects `main`: an official-origin checkout otherwise reports `stable`,
+  // and the Desktop would apply that release channel instead of the staged commit.
   expect(sourceBranchProbe.branchProbeArgs(managed, root, '/real/git')).toEqual([
-    '--run-module', 'hermes_cli.source_check', ...expected.slice(2),
+    '--run-module', 'hermes_cli.source_check', ...expected.slice(2), '--channel', 'main',
   ])
+  for (const explicit of ['--channel', '--set-channel']) {
+    const chosen = [...managed, explicit, 'stable']
+    const selected = sourceBranchProbe.branchProbeArgs(chosen, root, '/real/git')
+    expect(selected.filter(arg => arg === '--channel' || arg === '--set-channel')).toEqual([explicit])
+    expect(selected.slice(-2)).toEqual(['--branch', 'main'])
+  }
   expect(sourceBranchProbe.branchProbeArgs(probe, '/other/install', '/real/git')).toBe(probe)
   expect(sourceBranchProbe.branchProbeArgs(managed, '/other/install', '/real/git')).toBe(managed)
   expect(sourceBranchProbe.branchProbeArgs(['-c', 'print("hermes_cli/source_check.py")'], root, '/real/git')).toEqual(['-c', 'print("hermes_cli/source_check.py")'])
@@ -118,7 +162,9 @@ test('test-only source probe pins staged main without changing other Python invo
   const cmd = ['/d', '/v:off', '/s', '/c', `""C:\\fixture\\hermes.cmd" "--run-module" "hermes_cli.source_check" "--install-root" "${root}" "--home" "/profile with spaces" "--git" "/shim/git" "--force""`]
   const rewritten = sourceBranchProbe.branchProbeArgs(cmd, root, '/real/git')
   expect(rewritten.slice(0, 4)).toEqual(cmd.slice(0, 4))
-  expect(rewritten[4]).toContain('"--git" "/real/git" "--force" "--branch" "main"')
+  expect(rewritten[4]).toContain('"--git" "/real/git" "--force" "--branch" "main" "--channel" "main""')
+  const chosen = [...cmd.slice(0, 4), cmd[4].replace(/"$/, ' "--set-channel" "stable""')]
+  expect(sourceBranchProbe.branchProbeArgs(chosen, root, '/real/git')[4]).toMatch(/"--branch" "main""$/)
   expect(sourceBranchProbe.branchProbeArgs(cmd, '/other/install', '/real/git')).toBe(cmd)
   expect(sourceBranchProbe.branchProbeArgs(cmd, root, '/real&git')).toBe(cmd)
 })
@@ -159,6 +205,9 @@ test.skipIf(process.platform === 'win32')('probe Git reaches the staged main eve
       '--install-root', checkout, '--home', home, '--git', git, '--force'],
     { cwd: checkout, encoding: 'utf8', env }))
     expect(status).toMatchObject({ supported: true, currentSha: base, branch: 'main', targetSha: sha, updateAvailable: true })
+    // The origin reads as the official repo, whose unconfigured default is `stable`. A reported channel makes
+    // the Desktop apply `--channel stable` (the latest upstream release) rather than this staged main.
+    expect(status).not.toHaveProperty('channel')
     expect(execFileSync(launcher, ['--version'], { cwd: checkout, env, encoding: 'utf8' }).trim()).toBe('--version')
     const other = path.join(root, 'other-checkout')
     fs.mkdirSync(other)
@@ -170,7 +219,7 @@ test.skipIf(process.platform === 'win32')('probe Git reaches the staged main eve
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
-})
+}, 60_000)
 
 test.skipIf(process.platform === 'win32')('historical venv install without a PM launcher still checks staged Git main', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-legacy-branch-'))

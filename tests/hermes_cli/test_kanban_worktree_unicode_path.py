@@ -33,7 +33,7 @@ def _nfc(text: str) -> str:
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", str(repo), *args],
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-C", str(repo), *args],
         capture_output=True,
         text=True,
         timeout=60,

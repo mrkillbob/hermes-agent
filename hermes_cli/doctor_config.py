@@ -266,7 +266,11 @@ def _validate_model_config(config_path, issues: list) -> None:
         except Exception:
             continue
     runtime_provider = catalog_provider = provider
+    user_provider_disabled = False
     if provider and provider not in {"auto", "custom"}:
+        provider_entry = (cfg.get("providers") or {}).get(provider)
+        from hermes_cli.config import is_provider_enabled
+        user_provider_disabled = isinstance(provider_entry, dict) and not is_provider_enabled(provider_entry)
         if resolve_auth is not None:
             try:
                 runtime_provider = resolve_auth(provider)
@@ -277,7 +281,14 @@ def _validate_model_config(config_path, issues: list) -> None:
             provider_def = resolve_full(provider, cfg.get("providers"), custom_providers)
             catalog_provider = provider_def.id if provider_def is not None else None
             accept.update({catalog_provider} - {None})
-    if provider and provider != "auto" and (catalog_provider is None or (known_providers and not (accept & valid_provider_ids))):
+    # ``resolve_provider`` is the runtime authority for aliases such as ``llamacpp``.  A
+    # local provider can be valid even when ``resolve_provider_full`` cannot return a
+    # ProviderDef yet (for example, before a managed llama.cpp endpoint is running).
+    # Requiring a catalog definition here made doctor disagree with the actual boot path.
+    provider_is_known = not user_provider_disabled and (
+        bool(accept & valid_provider_ids) or catalog_provider is not None
+    )
+    if provider and provider != "auto" and not provider_is_known:
         known_list = ", ".join(sorted(known_providers)) if known_providers else "(unavailable)"
         _fail_and_issue(f"model.provider '{provider_raw}' is not a recognised provider", f"(known: {known_list})",
                         f"model.provider '{provider_raw}' is unknown. Valid providers: {known_list}. "
@@ -309,6 +320,7 @@ def _validate_auxiliary_config(config_path, issues: list) -> None:
     """Resolve every routed ``auxiliary.<task>`` block through the real entry point the tasks use and report
     the ones that fail — an unresolvable block otherwise silently runs the task on the main model (#116055)."""
     from hermes_cli.config import read_user_config_raw
+    from hermes_cli.left_core_migration import provider_install_hint
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from utils import base_url_hostname
     aux = read_user_config_raw(config_path).get("auxiliary")
@@ -320,9 +332,11 @@ def _validate_auxiliary_config(config_path, issues: list) -> None:
         try:
             runtime = resolve_runtime_provider(requested=provider, target_model=model, explicit_api_key=api_key, explicit_base_url=base_url)
         except Exception as exc:
-            _fail_and_issue(f"auxiliary.{task}.provider '{provider}' does not resolve", f"({str(exc).splitlines()[0]})",
-                            f"auxiliary.{task}.provider '{provider}' cannot be resolved ({str(exc).splitlines()[0]}); the task "
-                            f"silently runs on the main model. Fix the provider name/credentials in auxiliary.{task}.", issues)
+            reason, moved = str(exc).splitlines()[0], provider_install_hint(provider or "")
+            _fail_and_issue(f"auxiliary.{task}.provider '{provider}' does not resolve", f"({reason})",
+                            f"auxiliary.{task}.provider '{provider}' cannot be resolved ({reason}); the task silently runs "
+                            f"on the main model. " + (moved or f"Fix the provider name/credentials in auxiliary.{task}."),
+                            issues)
             continue
         if not runtime.get("api_key") and not runtime.get("command"):
             check_warn(f"auxiliary.{task}.provider '{provider}' resolved without credentials", f"({runtime.get('provider')} @ {runtime.get('base_url')})")
@@ -335,10 +349,15 @@ def _validate_auxiliary_config(config_path, issues: list) -> None:
 @doctor_check()
 def _check_config_file(should_fix: bool, f: Finding) -> None:
     """config.yaml presence (project cli-config.yaml as fallback); model/provider validation."""
+    from hermes_cli.config_backend import config_exists, get_config_backend
     from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT, _DHH
     config_path = HERMES_HOME / 'config.yaml'
-    if config_path.exists():
-        check_ok(f"{_DHH}/config.yaml exists")
+    backend = get_config_backend()
+    if not backend.supports_file_tooling() and not _check_config_backend(backend, HERMES_HOME, f):
+        return
+    if config_exists(config_path):
+        if backend.supports_file_tooling():
+            check_ok(f"{_DHH}/config.yaml exists")
         with warn_on_error("Could not validate model/provider config"):
             _validate_model_config(config_path, f.issues)
         with warn_on_error("Could not validate auxiliary task routing"):
@@ -352,6 +371,22 @@ def _check_config_file(should_fix: bool, f: Finding) -> None:
         f.fixed += 1
     else:
         check_warn("config.yaml not found", "(using defaults)")
+
+
+def _check_config_backend(backend, home, f: Finding) -> bool:
+    """A backend without a config file (§4.7): report where config comes from instead of the file
+    checks, plus the backend's own warnings (remote mode flags an ignored managed config.yaml, D18)."""
+    try:
+        backend.read_user_doc(home)
+        check_ok(f"Config backend: {backend.describe(home)}")
+    except SystemExit as exc:  # ConfigBackendUnavailable: the plane cannot serve this profile
+        check_fail(f"Config backend {backend.name!r} unavailable", str(exc.code or ""))
+        f.issues.append(f"Config backend {backend.name!r} cannot serve config for {home}")
+        return False
+    for warning, hint, issue in backend.doctor_warnings(home):
+        check_warn(warning, hint)
+        f.issues.append(issue)
+    return True
 
 
 def _drift_config_version(f: Finding, should_fix: bool, config_path) -> None:
@@ -529,9 +564,10 @@ def _check_config_drift(should_fix: bool, f: Finding) -> None:
 
     Each step is independent and best-effort: a failure in one never hides the next.
     """
+    from hermes_cli.config_backend import config_exists
     from hermes_cli.doctor import HERMES_HOME
     config_path = HERMES_HOME / 'config.yaml'
-    if not config_path.exists():
+    if not config_exists(config_path):
         config_path = None
     for step in _CONFIG_DRIFT_STEPS if config_path else (_drift_deprecations,):
         with warn_on_error(""):

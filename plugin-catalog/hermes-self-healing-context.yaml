@@ -13,5 +13,5 @@ capabilities:
     - post_tool_call
     - pre_llm_call
 description: |
-  Intercepts runtime errors and dynamically patches the context window 
+  Intercepts runtime errors and dynamically patches the context window
   using local SQLite FTS5 memory for zero-downtime recovery.

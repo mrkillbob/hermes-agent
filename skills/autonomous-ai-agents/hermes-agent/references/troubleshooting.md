@@ -14,7 +14,7 @@
 1. `hermes doctor` — check config and dependencies
 2. `hermes auth` — re-authenticate OAuth providers (or `hermes auth add <provider>`)
 3. Check `.env` has the right API key
-4. **Copilot 403**: `gh auth login` tokens do NOT work for Copilot API. You must use the Copilot-specific OAuth device code flow via `hermes model` → GitHub Copilot.
+4. **GitHub Copilot** (`copilot` / `copilot-acp`) is bundled in this fork. Use `hermes auth add copilot` or a supported token; with no token env var, `gh auth token` is supported for the API profile.
 
 ### Changes not taking effect
 - **Tools/skills:** `/reset` starts a new session with updated toolset

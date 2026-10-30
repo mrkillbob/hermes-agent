@@ -8,6 +8,7 @@ is the inverse that ``restore_primary_runtime`` runs once its gates pass.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, Optional, Tuple
 
 from utils import base_url_host_matches
@@ -19,6 +20,9 @@ def bind_route_entry(agent: Any, entry: dict[str, Any], provider: str, model: st
     """Swap ``agent`` onto ``entry`` (a fallback-chain-shaped dict). Returns ``(old_model,
     old_provider)``, or None when the provider has no usable client. Sets ``_fallback_activated``
     so the next turn's ``restore_primary_runtime`` reverts it; raises on a failed swap."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only() or os.environ.get("HERMES_KANBAN_LOCAL_ONLY") == "1":
+        return None
     from agent.auxiliary_client import resolve_provider_client
     from agent.chat_completion_helpers import (
         _fallback_api_mode_hint, _fallback_api_mode_resolved, _rebind_fallback_credential_pool,
@@ -41,23 +45,17 @@ def bind_route_entry(agent: Any, entry: dict[str, Any], provider: str, model: st
         api_mode=api_mode)
     if client is None:
         return None
-    if provider == "moa":
-        # A MoA entry means the preset itself, exactly like ``provider: moa`` in config. The client
-        # is the preset's aggregator and only proves the preset resolves; bind the facade with the
-        # same pins every other MoA build site uses (#112525, #112623).
-        base_url, api_mode = "moa://local", "chat_completions"
-    else:
-        try:
-            from hermes_cli.model_normalize import normalize_model_for_provider
-            model = normalize_model_for_provider(model, provider)
-        except Exception as norm_err:  # health: allow BLE001 -- moved verbatim from try_activate_fallback; a bad catalog entry keeps the raw id
-            logger.warning("Could not normalize fallback model %r for provider %r: %s", model, provider, norm_err)
-        base_url = str(client.base_url)
-        from hermes_cli.providers import is_actual_route
-        if is_actual_route(provider, base_url):
-            api_mode = "chat_completions"
-        elif not api_mode_explicit and api_mode == "chat_completions":
-            api_mode = _fallback_api_mode_resolved(agent, provider, model, base_url)
+    try:
+        from hermes_cli.model_normalize import normalize_model_for_provider
+        model = normalize_model_for_provider(model, provider)
+    except Exception as norm_err:  # health: allow BLE001 -- moved verbatim from try_activate_fallback; a bad catalog entry keeps the raw id
+        logger.warning("Could not normalize fallback model %r for provider %r: %s", model, provider, norm_err)
+    base_url = str(client.base_url)
+    from hermes_cli.providers import is_actual_route
+    if is_actual_route(provider, base_url):
+        api_mode = "chat_completions"
+    elif not api_mode_explicit and api_mode == "chat_completions":
+        api_mode = _fallback_api_mode_resolved(agent, provider, model, base_url)
 
     old_model, old_provider, old_base_url = agent.model, agent.provider, agent.base_url
     # Clear the per-config context_length override so the new model's own context window is
@@ -77,6 +75,7 @@ def bind_route_entry(agent: Any, entry: dict[str, Any], provider: str, model: st
     if provider == "moa":
         from agent.moa_loop import bind_moa_runtime
         bind_moa_runtime(agent, model)
+        model, base_url, api_mode = agent.model, agent.base_url, agent.api_mode
     else:
         from agent.client_lifecycle import _swap_fallback_clients
         _swap_fallback_clients(agent, client, provider, model, base_url, api_mode)

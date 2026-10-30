@@ -8,6 +8,7 @@ import sys
 import threading
 from pathlib import Path
 from hermes_cli import source_check
+from hermes_cli.probe_lifecycle import ProbeScope, bind_probe_scope
 # Historical updater import (tests/compat/old_updater_surface.json). In-tree callers use the owner.
 from hermes_cli.source_check import _github_compare_behind
 from hermes_constants import get_hermes_home
@@ -245,11 +246,21 @@ def format_banner_version_label() -> str:
 
 _update_result: Optional[int] = None
 _update_check_done = threading.Event()
+_prefetch_probes = ProbeScope()
 
 
 def _daemon(name: Optional[str], target) -> None:
     """Start a daemon thread running ``target`` with any exception swallowed."""
-    threading.Thread(target=lambda: _quiet(target), name=name, daemon=True).start()
+    def run():
+        with bind_probe_scope(_prefetch_probes):
+            _quiet(target)
+
+    threading.Thread(target=run, name=name, daemon=True).start()
+
+
+def shutdown_prefetch_probes() -> None:
+    """Cancel the banner's owned probes even before their normal deadlines."""
+    _prefetch_probes.close()
 
 
 def _skip_background_prefetch() -> bool:

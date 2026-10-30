@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from ruamel.yaml import YAML
 
 from scripts.releases import lanes as lane_set
 
-from tests.ci.desktop_release_roles import gate
+from tests.ci.desktop_release_roles import evaluate, gate
 from tests.ci.workflow_steps import is_checkout
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -102,6 +103,8 @@ def test_release_reuses_whole_ci_and_docker_before_publication():
     for name in ("acceptance", "publication", "complete"):
         failed = {need: {"result": "failure"} for need in ancestors(jobs, name)}
         assert gate(jobs[name]["if"], {}, failed), name
+        assert not gate(jobs[name]["if"], {}, failed,
+                        github={"repository": "mrkillbob/hermes-agent"}), name
 
 
 LANE_SETS = {
@@ -218,10 +221,46 @@ def test_a_skipped_upgrade_arm_never_skips_a_gated_publish_job():
                 f"{name} skips whenever an upgrade arm skips")
 
 
-def test_all_applicable_ci_jobs_are_aggregated_and_desktop_e2e_stays_deferred():
+def test_all_applicable_ci_jobs_are_aggregated_and_desktop_e2e_stays_deferred(tmp_path):
     jobs = workflow("ci.yaml")["jobs"]
     checks = {name for name, job in jobs.items() if "uses" in job}
-    assert checks <= set(jobs["all-checks-pass"]["needs"])
+    required = set(jobs["all-checks-pass"]["needs"])
+    advisory = {name: jobs[name] for name in checks
+                if jobs[name].get("with", {}).get("platform_scope") == "windows"}
+    native_scopes = {"./.github/workflows/tests-os.yml": "macos",
+                     "./.github/workflows/bootstrap-installer.yml": "posix"}
+    assert len(advisory) == len(native_scopes)
+    assert {job["uses"] for job in advisory.values()} == set(native_scopes)
+    # Any unaggregated shared check or additional advisory caller still fails.
+    assert checks - required == set(advisory)
+    policy = next(step for step in jobs["detect"]["steps"] if step.get("id") == "platform-policy")
+    for index, (repository, release, ref_type, optional) in enumerate([
+        ("mrkillbob/hermes-agent", "false", "branch", True),
+        ("mrkillbob/hermes-agent", "true", "branch", False),
+        ("mrkillbob/hermes-agent", "false", "tag", False),
+        ("NousResearch/hermes-agent", "false", "branch", False),
+        ("another/hermes-agent", "false", "branch", False),
+    ]):
+        output = tmp_path / f"policy-{index}"
+        result = subprocess.run(
+            ["bash", "-c", policy["run"]], cwd=ROOT, capture_output=True,
+            text=True, timeout=10, env={**os.environ,
+                "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
+                "POLICY_REPOSITORY": repository, "POLICY_RELEASE": release,
+                "POLICY_REF_TYPE": ref_type, "GITHUB_OUTPUT": str(output)}, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        needs = {"detect": {"result": "success", "outputs": {
+            **outputs, "python": "true", "bootstrap": "true"}}}
+        for job in advisory.values():
+            assert gate(job["if"], {}, needs) == optional
+            counterpart = [jobs[name] for name in checks & required
+                           if jobs[name]["uses"] == job["uses"]]
+            assert len(counterpart) == 1
+            assert gate(counterpart[0]["if"], {}, needs)
+            scope = evaluate(counterpart[0]["with"]["platform_scope"], {}, needs)
+            assert scope == (native_scopes[job["uses"]] if optional else "all")
     assert not gate(jobs["e2e-desktop"]["if"], {}, {})
     assert "workflow_call" in workflow("ci.yaml")["on"]
 
@@ -371,11 +410,14 @@ def test_publication_reconciler_has_every_recovery_trigger_and_shared_lock():
     # a manual dispatch of the reconciler always runs.
     def run_of(**overrides):
         workflow_run = {"conclusion": "failure", "event": "workflow_dispatch",
-                        "head_repository": {"full_name": "o/r"}, **overrides}
-        return {"event_name": "workflow_run", "repository": "o/r", "event": {"workflow_run": workflow_run}}
+                        "head_repository": {"full_name": "NousResearch/hermes-agent"}, **overrides}
+        return {"event_name": "workflow_run", "repository": "NousResearch/hermes-agent",
+                "event": {"workflow_run": workflow_run}}
 
     assert gate(reconcile["if"], {}, {}, github=run_of())
     assert gate(reconcile["if"], {}, {}, github={"event_name": "workflow_dispatch"})
+    assert not gate(reconcile["if"], {}, {}, github={
+        "event_name": "workflow_dispatch", "repository": "mrkillbob/hermes-agent"})
     for refused in ({"conclusion": "success"}, {"event": "push"}, {"head_repository": {"full_name": "fork/r"}}):
         assert not gate(reconcile["if"], {}, {}, github=run_of(**refused)), refused
     checkout = reconcile["steps"][0]

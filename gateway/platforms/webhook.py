@@ -27,6 +27,8 @@ from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from typing import Any, Deque, Dict, List, Optional
 
+from hermes_cli.github_identity import GitHubIdentityError, run_as_github_automation
+
 try:
     from aiohttp import web
 
@@ -41,6 +43,8 @@ from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.tcp_site import start_tcp_site
 from gateway.platforms.webhook_coalesce import WebhookCoalescer, validate_coalesce_config
 from gateway.platforms.webhook_filters import DEFAULT_SCRIPT_TIMEOUT_SECONDS, WebhookRouteProcessor
+from gateway.platforms.webhook_mcp_events import (
+    handle_mcp_event_control, mcp_event_delivery_id, render_mcp_event_prompt)
 from gateway.response_filters import is_autonomous_silence_response
 
 logger = logging.getLogger(__name__)
@@ -62,14 +66,13 @@ DEFAULT_HOST = None
 DEFAULT_PORT = 8644
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
+_PERMISSION_RETRY_SECONDS = 60.0
 _RATE_WINDOW_SECONDS = 60.0
 # Hosts that only serve same-machine connections; anything else is a public bind.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "ip6-localhost", "ip6-loopback"})
 _V2_REPLAY_WINDOW_SECONDS = 300
 _TEMPLATE_KEY_RE = re.compile(r"\{([a-zA-Z0-9_.]+)\}")
 _REPO_RE = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
-# Credentials `gh` reads; a routed profile's github_comment must use its own, never the process env's.
-_GH_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 
 
 def _header_delivery_id(headers) -> str:
@@ -219,6 +222,9 @@ class WebhookAdapter(BasePlatformAdapter):
         self._static_routes: dict[str, dict] = extra.get("routes", {})
         self._dynamic_routes: dict[str, dict] = {}
         self._dynamic_routes_stat: Optional[tuple] = None
+        self._dynamic_routes_read_failed = False
+        self._dynamic_permissions_stat: Optional[tuple] = None
+        self._dynamic_permissions_retry_at = 0.0
         self._routes: dict[str, dict] = dict(self._static_routes)
         self._runner = None
         self._v1_signature_warned: set[str] = set()  # routes already warned about legacy V1 (once per route)
@@ -284,9 +290,6 @@ class WebhookAdapter(BasePlatformAdapter):
         app.router.add_post("/webhooks/{route_name}", self._handle_webhook)
         # /p/<profile>/ routes the event to that profile (honored only under gateway.multiplex_profiles).
         app.router.add_post("/p/{profile}/webhooks/{route_name}", self._handle_webhook)
-        # Without an api_server listener this port is the shared listener: forward a secondary's
-        # inbound-port platforms (Twilio, LINE, Teams, ...) registered in shared-listener mode.
-        app.router.add_route("*", "/p/{profile}/{tail:.*}", self._handle_profile_ingress)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         try:
@@ -297,8 +300,7 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.error("[webhook] Could not bind %s:%d: %s. Set a different host or port in config.yaml under "
                          "platforms.webhook.extra.", self._host or "all IPv4+IPv6 interfaces", self._port, exc)
             return False
-        from gateway.platforms.shared_ingress import listener_base_url
-        self._mark_connected(listener_base=listener_base_url(self._host, self._port))
+        self._mark_connected()
         logger.info("[webhook] Listening on %s:%d — routes: %s", self._host or "* (all interfaces, IPv4+IPv6)",
                     self._port, ", ".join(self._routes.keys()) or "(none configured)")
         self._wire_plugin_handlers(None)
@@ -437,31 +439,62 @@ class WebhookAdapter(BasePlatformAdapter):
         """Reload agent-created subscriptions when the file's stat identity changes.
 
         Runs on every POST before auth, so it never takes the CLI writer lock: writers publish via
-        atomic rename, which also gives the file a new inode, so a restored mtime cannot hide a change.
+        atomic rename, which also gives the file a new inode, so a restored mtime cannot hide a change;
+        ``file_cache_version`` also catches a same-tick same-size edit made in place (a hand edit).
         """
         from hermes_constants import get_hermes_home
+        from utils import file_cache_version
         subs_path = get_hermes_home() / _DYNAMIC_ROUTES_FILENAME
         try:
             st = subs_path.stat()
+            stat_key = file_cache_version(subs_path, st)
         except FileNotFoundError:
             if self._dynamic_routes:
                 self._dynamic_routes, self._routes = {}, dict(self._static_routes)
                 logger.debug("[webhook] Dynamic subscriptions file removed, cleared dynamic routes")
             self._dynamic_routes_stat = None
+            self._dynamic_routes_read_failed = False
+            self._dynamic_permissions_stat = None
+            self._dynamic_permissions_retry_at = 0.0
             return
-        stat_key = (st.st_mtime_ns, st.st_size, st.st_ino)
-        if stat_key == self._dynamic_routes_stat:
+        except OSError as e:
+            logger.error("[webhook] Failed to read dynamic routes: %s", e)
+            return
+        from utils import restrict_credential_file_permissions
+        # Repair before the content fast path; cache failed repairs for a bounded retry.
+        permission_key = (subs_path, st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size,
+                          st.st_mode, st.st_ctime_ns, st.st_uid, st.st_gid)
+        now = time.monotonic()
+        permission_due = permission_key != self._dynamic_permissions_stat or now >= self._dynamic_permissions_retry_at
+        if permission_due:
+            self._dynamic_permissions_stat = permission_key
+            self._dynamic_permissions_retry_at = now + _PERMISSION_RETRY_SECONDS
+            restrict_credential_file_permissions(subs_path, file_stat=st)
+            # A successful repair changes ctime/mode. Cache the version after that repair so
+            # the next request does not reparse unchanged routes, while a failed read still
+            # gets its bounded retry below. A replacement during repair gets a new stat key.
+            try:
+                stat_key = file_cache_version(subs_path, subs_path.stat())
+            except OSError as e:
+                logger.error("[webhook] Failed to read dynamic routes: %s", e)
+                return
+        if stat_key == self._dynamic_routes_stat and not (self._dynamic_routes_read_failed and permission_due):
             return  # No change
         try:
             data = json.loads(subs_path.read_text(encoding="utf-8-sig"))
         except ValueError as e:
             # Keep the last good snapshot, and remember this version so it is parsed once, not per POST.
             self._dynamic_routes_stat = stat_key
+            self._dynamic_routes_read_failed = False
             logger.error("[webhook] Failed to parse dynamic routes: %s", e)
             return
         except OSError as e:
+            # Inaccessible legacy stores stay intact; retry/log once per repair interval or metadata change.
+            self._dynamic_routes_stat = stat_key
+            self._dynamic_routes_read_failed = True
             logger.error("[webhook] Failed to read dynamic routes: %s", e)
             return
+        self._dynamic_routes_read_failed = False
         if not isinstance(data, dict):
             self._dynamic_routes_stat = stat_key  # keep the last good snapshot; parse this version once
             return
@@ -507,6 +540,16 @@ class WebhookAdapter(BasePlatformAdapter):
         except Exception:
             return _PROFILE_REJECTED
         return profile if profile in served else _PROFILE_REJECTED
+
+    async def _handle_profile_ingress(self, request: "web.Request") -> "web.StreamResponse":
+        """Forward a shared-listener profile path to the matching adapter app."""
+        from gateway.platforms.shared_ingress import dispatch_profile_ingress
+        return await dispatch_profile_ingress(
+            self.gateway_runner,
+            request.match_info.get("profile"),
+            request.match_info.get("tail", ""),
+            request,
+        )
 
     @staticmethod
     def _route_allows_profile(route_config: dict, request_profile: Optional[str]) -> bool:
@@ -681,6 +724,10 @@ class WebhookAdapter(BasePlatformAdapter):
         payload = self._parse_body(raw_body)
         if payload is _UNPARSEABLE:
             return _json_error("Cannot parse body", 400)
+        mcp_control = await handle_mcp_event_control(self, route_name, route_config, payload, profile)
+        if mcp_control is not None:
+            return mcp_control
+        delivery_id = mcp_event_delivery_id(route_config, payload) or delivery_id
         event_type = (headers.get("X-GitHub-Event", "") or headers.get("X-GitLab-Event", "")
                       or payload.get("event_type", "") or payload.get("type", "") or "unknown")
         allowed_events = route_config.get("events", [])
@@ -705,7 +752,8 @@ class WebhookAdapter(BasePlatformAdapter):
                     logger.info("[webhook] script ignored event=%s route=%s", event_type, route_name)
                     return web.json_response({"status": "ignored", "reason": "script", "route": route_name})
                 payload = transformed_payload or payload
-            prompt = self._render_prompt(route_config.get("prompt", ""), payload, event_type, route_name)
+            prompt = (render_mcp_event_prompt(self, route_config, payload, event_type, route_name)
+                      or self._render_prompt(route_config.get("prompt", ""), payload, event_type, route_name))
             # cron_job routes: the job's own skills apply; the rendered prompt is only per-run context.
             if (skills := route_config.get("skills", [])) and not route_config.get("cron_job"):
                 prompt = self._apply_skills(prompt, skills)
@@ -964,10 +1012,22 @@ class WebhookAdapter(BasePlatformAdapter):
             # Running it inline froze every adapter and timer on the gateway event loop for the duration
             # (Pattern A, #91912 class). asyncio.to_thread keeps the loop serving while the subprocess runs;
             # the worker thread is bounded by the subprocess timeout below.
-            result = await asyncio.to_thread(
-                subprocess.run, ["gh", "pr", "comment", str(pr_int), "--repo", repo, "--body", content],
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30,
-                env=self._github_env(delivery.get("profile")))
+            # Verified through the governed Hermes bot identity, not the ambient `gh` viewer —
+            # this delivery path posts as automation, not the operator (see hermes_cli.github_identity).
+            profile = delivery.get("profile")
+            with self._profile_scope(profile):
+                automation_env = None
+                if profile and profile != "default":
+                    from agent.secret_scope import current_secret_scope
+                    secrets = current_secret_scope() or {}
+                    automation_env = dict(os.environ)
+                    for name in ("HERMES_GITHUB_BOT_LOGIN", "HERMES_GITHUB_BOT_TOKEN"):
+                        if name in secrets:
+                            automation_env[name] = secrets[name]
+                result = await asyncio.to_thread(
+                    run_as_github_automation,
+                    ["gh", "pr", "comment", str(pr_int), "--repo", repo, "--body", content],
+                    timeout=30, environ=automation_env)
             if result.returncode == 0:
                 logger.info("[webhook] Posted comment on %s#%s", repo, pr_number)
                 return SendResult(success=True)
@@ -976,26 +1036,14 @@ class WebhookAdapter(BasePlatformAdapter):
         except FileNotFoundError:
             logger.error("[webhook] 'gh' CLI not found — install GitHub CLI for github_comment delivery")
             return SendResult(success=False, error="gh CLI not installed")
+        except GitHubIdentityError as e:
+            logger.error("[webhook] github_comment identity verification failed: %s", e)
+            return SendResult(success=False, error=str(e))
         except Exception as e:
             logger.error("[webhook] github_comment delivery error: %s", e)
             return SendResult(success=False, error=str(e))
 
-    def _github_env(self, profile: Optional[str]) -> Optional[dict]:
-        """``gh`` environment for a delivery: a routed profile authenticates with ITS ``GH_TOKEN`` /
-        ``GITHUB_TOKEN`` from the profile secret scope; under multiplex ``os.environ`` carries the default
-        profile's, so those keys are dropped when the profile has none (fail closed, ``gh`` then falls to
-        its own stored login). ``None`` (inherit) for bare/default-bound routes."""
-        if not profile or not isinstance(profile, str) or profile == "default":
-            return None
-        from agent.secret_scope import get_secret
-        env = {k: v for k, v in os.environ.items() if k not in _GH_TOKEN_VARS}
-        with self._profile_scope(profile):
-            for name in _GH_TOKEN_VARS:
-                if value := get_secret(name):
-                    env[name] = value
-        return env
-
-    def _find_adapter(self, target_platform: Platform, profile: Optional[str]):
+    def _find_adapter(self, target_platform: Platform, profile: Optional[str] = None):
         """The routed profile's own adapter, fail-closed. A ``/p/<profile>/`` route must never post as
         another profile's bot, and a bare (default-bound) route must not borrow a platform parked only on
         a secondary profile — both directions leaked before #65939."""
@@ -1010,14 +1058,11 @@ class WebhookAdapter(BasePlatformAdapter):
         except ValueError:
             return SendResult(success=False, error=f"Unknown platform: {platform_name}")
         profile = delivery.get("profile")
-        if not (adapter := self._find_adapter(target_platform, profile)):
-            return SendResult(success=False, error=f"Platform {platform_name} not connected")
-        extra = delivery.get("deliver_extra", {})
-        chat_id = extra.get("chat_id", "")
-        # Whole leg under the routed profile's scope: the home channel comes from THAT profile's config
-        # (``self.gateway_runner.config`` is the default profile's), and the adapter's send reads its
-        # credentials through the profile secret scope.
         with self._profile_scope(profile):
+            if not (adapter := self._find_adapter(target_platform, profile)):
+                return SendResult(success=False, error=f"Platform {platform_name} not connected")
+            extra = delivery.get("deliver_extra", {})
+            chat_id = extra.get("chat_id", "")
             if not chat_id:
                 home = self._delivery_config(profile).get_home_channel(target_platform)
                 if not home:

@@ -204,6 +204,22 @@ const mountLayout = (overlay: Partial<OverlayState> = {}, ui: Partial<UiState> =
 // re-arm that follows it) lands before we assert.
 const flush = () => new Promise(resolve => setTimeout(resolve, 20))
 
+// Poll until a condition is met, draining the event loop with setImmediate
+// (unaffected by the Date.now spy or setInterval spy).  Used where a single
+// flush() races against two React scheduler ticks (store → effect → re-render).
+const waitFor = async (check: () => void, { retries = 30, delayMs = 10 } = {}) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      check()
+      return
+    } catch {
+      await new Promise(resolve => setImmediate(resolve))
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+    }
+  }
+  check() // final throw on failure
+}
+
 let intervalSpy: IntervalSpy
 let nowSpy: ReturnType<typeof vi.spyOn<typeof Date, 'now'>>
 
@@ -304,16 +320,16 @@ describe('status-chrome timers under an occluding overlay', () => {
     nowSpy.mockReturnValue(T0 + 300_000)
     rule.clear()
     resetOverlayState()
-    // Poll for the reveal frame instead of a fixed tick: under CI load the
-    // store-driven re-render can land well after one 20ms scheduler turn.
-    await vi.waitFor(() => expect(rule.output()).toContain('6m 0s'), { interval: 10, timeout: 5_000 })
-
-    const resumed = rule.output()
 
     // Caught up to real elapsed time, not stuck on the pre-overlay values.
-    expect(resumed).toContain('6m 0s')
-    expect(resumed).toContain('✓ 5m 5s')
-    expect(resumed).not.toContain('1m 0s')
+    // Poll via setImmediate (unaffected by Date.now or setInterval spies):
+    // the re-render (store change → isOccluded flip → useEffect → setNow →
+    // second render) takes at least two React scheduler ticks.
+    await waitFor(() => {
+      expect(rule.output()).toContain('6m 0s')
+      expect(rule.output()).toContain('✓ 5m 5s')
+      expect(rule.output()).not.toContain('1m 0s')
+    })
 
     // …and the clocks are running again.
     expect(oneSecondTimers(intervalSpy)).toBe(2)

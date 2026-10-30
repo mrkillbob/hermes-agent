@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone, UTC
+from datetime import datetime, UTC
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,9 @@ class CapabilitySpec:
     """One declarable capability and the legacy gate it maps to."""
 
     id: str
-    legacy_path: tuple[str, ...]  # deprecated boolean under plugins.entries.<id>, e.g. ("llm", "allow_model_override")
+    # Deprecated boolean under plugins.entries.<id>, e.g. ("llm", "allow_model_override"); empty for a
+    # capability born after the consent flow, whose only gate is declare + consent.
+    legacy_path: tuple[str, ...]
     description: str  # one-line risk description shown on the consent screen
 
 
@@ -42,6 +44,9 @@ _CAPABILITY_ROWS = (
     ("llm.task_override", ("llm", "allow_task_override"),
      "Route its LLM calls through the host's built-in auxiliary "
      "task lanes"),
+    ("llm.side_question", (),
+     "Ask your agent a short question after each turn. It sees the "
+     "whole session, including memory, and spends your main model's tokens."),
     ("gateway.platform_actions", ("allow_platform_actions",),
      "Act on connected chat platforms as the gateway bot "
      "(add reactions, rename threads) via ctx.platform_actions"))
@@ -118,7 +123,9 @@ def granted_capabilities(plugin_id: str, config: Optional[Mapping[str, Any]] = N
 
 
 def _legacy_gate_set(entry: Mapping[str, Any], spec: CapabilitySpec) -> bool:
-    """True when the deprecated ``allow_*`` key for *spec* is truthy."""
+    """True when the deprecated ``allow_*`` key for *spec* is truthy (never for a consent-only one)."""
+    if not spec.legacy_path:
+        return False
     node: Any = entry
     for part in spec.legacy_path:
         if not isinstance(node, Mapping):
@@ -158,32 +165,90 @@ def _child_dict(parent: dict, key: str) -> dict:
     return child
 
 
+def _write_raw_config_values(
+    updates: Mapping[tuple[str, ...], Any], *, replace_sections: bool = False,
+) -> None:
+    """Change selected raw settings atomically; section deletion requires explicit intent.
+
+    Consent/plugin mutations keep the omission guard. Profile editors replacing
+    complete sections opt in so legacy keys deliberately omitted there are removed.
+    """
+    from hermes_cli import config as config_mod
+
+    with config_mod._CONFIG_LOCK:
+        if config_mod.is_managed():
+            config_mod.managed_error("save configuration")
+            return
+        # Validate every destination before mutating the raw document so a later managed
+        # leaf cannot leave an earlier capability or consent write behind.
+        for path in updates:
+            config_mod._exit_if_key_managed(".".join(path), "set")
+        config_path = config_mod.get_config_path()
+        raw = config_mod.require_readable_config_before_write(config_path)
+        loaded = config_mod.load_config()
+        for path, value in updates.items():
+            entry = raw
+            for segment in path[:-1]:
+                entry = _child_dict(entry, segment)
+            loaded_entry = loaded
+            for segment in path:
+                if not isinstance(loaded_entry, dict):
+                    loaded_entry = None
+                    break
+                loaded_entry = loaded_entry.get(segment)
+            entry[path[-1]] = config_mod._preserve_env_ref_templates(
+                value, entry.get(path[-1]), loaded_entry)
+        from hermes_cli.observability.shared_metrics_disabled import recording_raw_config_write
+        config_mod.ensure_hermes_home()
+        writer = config_mod.atomic_config_write
+        if replace_sections:
+            from functools import partial
+            writer = partial(writer, allowed_replacement_paths=tuple(updates))
+        recording_raw_config_write(config_path, raw, writer)
+        config_mod._secure_file(config_path)
+        config_mod._RAW_CONFIG_CACHE.pop(str(config_path), None)
+        config_mod._LOAD_CONFIG_CACHE.pop(str(config_path), None)
+        config_mod._LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = config_mod.load_config()
+
+
+def _write_raw_config_value(path: tuple[str, ...], value: Any) -> None:
+    """Change one setting without canonicalizing unrelated user configuration."""
+    _write_raw_config_values({path: value})
+
+
 def record_consent(plugin_id: str, granted: Iterable[str], declared: Iterable[str]) -> None:
     """Persist a consent decision: ``granted_capabilities`` (union with prior grants), the consent
     record (hash of the declared set the user saw + UTC timestamp), and the legacy ``allow_*`` key
     for each grant so existing enforcement sites keep working unchanged."""
-    from hermes_cli.config import load_config, save_config
-    config = load_config()
-    entry = _child_dict(_child_dict(_child_dict(config, "plugins"), "entries"), plugin_id)
-    previous = entry.get(GRANTED_KEY)
-    merged = (list(previous) if isinstance(previous, list) else []) + _known(granted)
-    entry[GRANTED_KEY] = sorted(_known(c for c in merged if isinstance(c, str)))
-    entry[CONSENT_KEY] = {
-        "hash": capability_set_hash(_known(declared)),
-        "granted_at": datetime.now(UTC).isoformat(timespec="seconds"),
-    }
-    # Bridge: mirror each grant into its legacy gate (enforcement sites still read allow_*).
-    for cap in entry[GRANTED_KEY]:
-        *parents, leaf = CAPABILITY_REGISTRY[cap].legacy_path
-        node = entry
-        for part in parents:
-            node = _child_dict(node, part)
-        node[leaf] = True
+    from hermes_cli import config as config_mod
 
-    save_config(config)
+    with config_mod._CONFIG_LOCK:
+        config = config_mod.load_config()
+        entry = _child_dict(_child_dict(_child_dict(config, "plugins"), "entries"), plugin_id)
+        previous = entry.get(GRANTED_KEY)
+        merged = (list(previous) if isinstance(previous, list) else []) + _known(granted)
+        granted_capabilities = sorted(_known(c for c in merged if isinstance(c, str)))
+        consent = {
+            "hash": capability_set_hash(_known(declared)),
+            "granted_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        }
+
+        updates: dict[tuple[str, ...], Any] = {
+            ("plugins", "entries", plugin_id, GRANTED_KEY): granted_capabilities,
+            ("plugins", "entries", plugin_id, CONSENT_KEY): consent,
+        }
+        # Bridge: mirror each grant into its legacy gate (enforcement sites still read allow_*).
+        for cap in granted_capabilities:
+            if not CAPABILITY_REGISTRY[cap].legacy_path:
+                continue
+            *parents, leaf = CAPABILITY_REGISTRY[cap].legacy_path
+            updates[("plugins", "entries", plugin_id, *parents, leaf)] = True
+
+        _write_raw_config_values(updates)
+
     logger.info(
         "capability_consent plugin=%s granted=%s declared_hash=%s", plugin_id,
-        ",".join(entry[GRANTED_KEY]) or "(none)", entry[CONSENT_KEY]["hash"][:12])
+        ",".join(granted_capabilities) or "(none)", consent["hash"][:12])
 
 
 def consent_hash(plugin_id: str, config: Optional[Mapping[str, Any]] = None) -> Optional[str]:

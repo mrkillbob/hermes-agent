@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tools import file_operations
 from tools.environments.local import LocalEnvironment
 from tools.file_operations import ExecuteResult, ShellFileOperations
 

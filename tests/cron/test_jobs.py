@@ -1516,6 +1516,7 @@ class TestLateEnvRepointScopesStore:
 
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()
+        (profiles_dir / ".deleted").mkdir()
         deleted_home = profiles_dir / "deleted"
 
         with jobs.use_cron_store(deleted_home):
@@ -1970,6 +1971,7 @@ class TestEnsureCronDirWidened:
 
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()
+        (profiles_dir / ".deleted").mkdir()
         deleted_home = profiles_dir / "deleted"
         # cron_dir doesn't exist because the profile was deleted
         output_dir = deleted_home / "cron" / "output" / "job_123"
@@ -1990,12 +1992,24 @@ class TestEnsureCronDirWidened:
         jobs._ensure_cron_dir(output_dir)
         assert output_dir.is_dir()
 
+    def test_ensure_cron_dir_custom_home_under_profiles_creates_hierarchy(self, tmp_path):
+        """A custom home may contain a ``profiles`` ancestor without being a named profile."""
+        from cron import jobs
+
+        custom_home = tmp_path / "srv" / "profiles" / "team-hermes"
+        cron_dir = custom_home / "cron" / "output"
+
+        jobs._ensure_cron_dir(cron_dir)
+
+        assert cron_dir.is_dir()
+
     def test_ensure_cron_dir_named_profile_cron_dir_fails_closed(self, tmp_path):
         """The cron dir of a deleted named profile must not be recreated."""
         from cron import jobs
 
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()
+        (profiles_dir / ".deleted").mkdir()
         deleted_home = profiles_dir / "deleted"
         cron_dir = deleted_home / "cron"
 
@@ -2022,6 +2036,7 @@ class TestEnsureCronDirWidened:
 
         profiles_dir = tmp_path / "profiles"
         profiles_dir.mkdir()
+        (profiles_dir / ".deleted").mkdir()
         deleted_home = profiles_dir / "deleted"
         scripts_dir = deleted_home / "scripts"
 

@@ -80,6 +80,12 @@ class SessionLifecycleMixin:
         after the self-heal re-homes the key, the id has no owner and would resolve to the launch
         store, which never holds a routed profile's rows (#118862).
         """
+        with self._lock:
+            if session_id in self._rows_pending:
+                # A route transition published this id and has not inserted/reopened its row yet
+                # (a /new racing a turn that resolves the route as it finishes): healing it here
+                # would hand the route back to the conversation the user just left.
+                return False
         db = self._db_for_key(session_key) if session_key else self._db_for_session_id(session_id)
         if not db or not session_id:
             return False
@@ -115,6 +121,29 @@ class SessionLifecycleMixin:
             return str(receipt["entry"]["session_id"]) or None
         except (RuntimeStoreError, sqlite3.Error, KeyError, TypeError, AttributeError):
             return None
+
+    def _api_bound(self, entry: Optional[SessionEntry]) -> bool:
+        """*entry*'s API route is the one its binding receipt names (``bind_api_session``). Like a
+        local receipt route it moves only through the authority, and its next admitted turn reopens a
+        stamped row (``reopen_api_session``): replacing it forked the caller's conversation onto a
+        minted id every later run on it refused (``admission_conflict``)."""
+        origin = getattr(entry, "origin", None)
+        if origin is None or getattr(origin, "platform", None) is None or origin.platform.value != "api_server":
+            return False
+        db = self._db_for_key(entry.session_key)
+        if db is None or getattr(db, "_read_ctx", None) is None:
+            return False
+        import json
+        import sqlite3
+
+        from hermes_state_local import API_BINDING_PREFIX
+        try:
+            with db._read_ctx() as conn:
+                saved = conn.execute("SELECT value FROM state_meta WHERE key=?",
+                                     (API_BINDING_PREFIX + str(origin.chat_id),)).fetchone()
+            return saved is not None and json.loads(saved[0])["entry"]["session_key"] == entry.session_key
+        except (sqlite3.Error, ValueError, KeyError, TypeError):
+            return False
 
     def _route_reset_reason(self, entry: SessionEntry) -> Optional[str]:
         """Only explicit suspension replaces a routed conversation; time never does."""
@@ -261,18 +290,40 @@ class SessionLifecycleMixin:
         cutoff = _now() - timedelta(days=max_age_days)
         with self._lock:
             self._ensure_loaded_locked()
-            removed_keys = [
-                key for key, entry in list(self._entries.items())
+            removed_entries = [
+                entry for entry in list(self._entries.values())
                 if not entry.suspended
                 # The callback is keyed by session_key, NOT session_id.
                 and not self._has_active_processes_safe(entry.session_key, context="prune")
                 and entry.updated_at < cutoff
             ]
-            for key in removed_keys:
-                self._entries.pop(key, None)
-            if removed_keys:
+            for entry in removed_entries:
+                self._entries.pop(entry.session_key, None)
+            if removed_entries:
                 self._save()
-        if removed_keys:
+        for entry in removed_entries:
+            self.reconcile_conversation_root_transition(entry, None)
+        if removed_entries:
             logger.info("SessionStore pruned %d entries older than %d days",
-                        len(removed_keys), max_age_days)
-        return len(removed_keys)
+                        len(removed_entries), max_age_days)
+        return len(removed_entries)
+
+    def suspend_recently_active(self, max_age_seconds: int = 120) -> int:
+        """Mark sessions active within *max_age_seconds* as ``resume_pending`` after a crash/fast
+        restart (already-pending and suspended entries are skipped). Returns the number marked.
+
+        Called on gateway startup after a crash or fast restart to preserve in-flight sessions instead of
+        destroying their conversation history (#7536). Only marks sessions updated within *max_age_seconds*
+        to avoid touching long-idle sessions. Sets ``resume_pending=True`` so the next incoming message on
+        the same session_key auto-resumes from the existing transcript.
+        """
+        cutoff = _now() - timedelta(seconds=max_age_seconds)
+
+        def _mark(entry: SessionEntry) -> bool:
+            if entry.resume_pending or entry.suspended or entry.updated_at < cutoff:
+                return False
+            entry.resume_pending = True
+            entry.resume_reason = "restart_interrupted"
+            entry.last_resume_marked_at = _now()
+            return True
+        return self._update_all_entries_locked(_mark)

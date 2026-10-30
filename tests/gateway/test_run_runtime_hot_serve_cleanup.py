@@ -185,6 +185,10 @@ async def test_failed_hot_serve_with_a_live_writer_parks_without_aborting_or_re_
         session_ticket_store=SimpleNamespace(profile_ids=frozenset()),
         _served_profile_homes={}, _served_profile_signatures={},
         _live_resource_claims=lambda active: {}, _record_served_profiles=lambda active, homes: None)
+    async def housekeeping(func, *args):
+        return await asyncio.to_thread(func, *args)
+    runner._run_housekeeping_in_executor = housekeeping
+    runner._record_profiles_with_metadata = GatewayProfileReconcileMixin._record_profiles_with_metadata.__get__(runner)
     runner.served_profile_names = lambda: sorted(runner._served_profile_homes)
     runner._serve_profile_runtime = GatewayProfileReconcileMixin._serve_profile_runtime.__get__(runner)
 

@@ -34,7 +34,8 @@ from tools.transcription_chunking import exceeds_upload_limit, transcribe_oversi
 from tools.transcription_local import (
     _get_idle_unload_seconds, _has_local_command, _join_confident_segments,
     _load_local_whisper_model, _looks_like_cuda_lib_error, _normalize_local_model,
-    _normalize_local_stt_language, _transcribe_local_command, _try_lazy_install_stt,
+    _normalize_local_stt_language, _should_force_faster_whisper_cpu,
+    _transcribe_local_command, _try_lazy_install_stt,
     build_local_transcribe_kwargs)
 # The ``_transcribe_<provider>`` handlers are looked up in this module's globals by _dispatch_stt_provider.
 from tools.transcription_cloud import (
@@ -349,8 +350,10 @@ def _get_or_load_local_model(model_name: str, local_cfg: dict[str, Any]):
             if _local_model is None or _local_model_name != model_name:
                 logger.info("Loading faster-whisper model '%s' (first load downloads the model)...", model_name)
                 # stt.local.device / compute_type pin a configuration where ``auto`` mis-detects.
-                _local_model = _load_local_whisper_model(model_name, device=local_cfg.get("device", "auto"),
-                                                         compute_type=local_cfg.get("compute_type", "auto"))
+                _local_model = _load_local_whisper_model(
+                    model_name, device=local_cfg.get("device", "auto"),
+                    compute_type=local_cfg.get("compute_type", "auto"),
+                    force_cpu=_should_force_faster_whisper_cpu())
                 _local_model_name = model_name
             model = _local_model
     return model
@@ -459,12 +462,14 @@ def _transcribe_prepared_audio(
                 file_path = trimmed
                 cleanup.callback(shutil.rmtree, os.path.dirname(trimmed), ignore_errors=True)
         if remote:
-            limit = upload_limit(provider, _limit_model_name(provider, stt_config, model))
+            # Hints are resolved once for the whole recording (not per segment), and BEFORE the
+            # limit: a ``pre_transcription`` hook may swap the model, whose caps differ.
+            hints = _resolve_dispatch_hints(file_path, provider, stt_config, model, source)
+            limit = upload_limit(provider, _limit_model_name(provider, stt_config, hints[0]))
             if exceeds_upload_limit(file_path, limit):
-                # Hints are resolved once for the whole recording, not once per segment.
-                hints = _resolve_dispatch_hints(file_path, provider, stt_config, model, source)
                 return transcribe_oversized(
                     file_path, limit, lambda part: _route_stt_provider(part, provider, stt_config, *hints))
+            return _dispatch_stt_provider(file_path, provider, stt_config, model, source, hints)
         return _dispatch_stt_provider(file_path, provider, stt_config, model, source)
 
 
@@ -513,10 +518,12 @@ def _resolve_dispatch_hints(
 
 def _dispatch_stt_provider(
     file_path: str, provider: str, stt_config: dict[str, Any], model: Optional[str] = None,
-    source: Optional[str] = None) -> dict[str, Any]:
-    """Route *file_path* to the handler for *provider* (built-in > command > plugin)."""
-    return _route_stt_provider(
-        file_path, provider, stt_config, *_resolve_dispatch_hints(file_path, provider, stt_config, model, source))
+    source: Optional[str] = None, hints: Optional[tuple] = None) -> dict[str, Any]:
+    """Route *file_path* to the handler for *provider* (built-in > command > plugin).
+    *hints* are pre-resolved ``(model, language, prompt)``; omitted, the hooks run here."""
+    if hints is None:
+        hints = _resolve_dispatch_hints(file_path, provider, stt_config, model, source)
+    return _route_stt_provider(file_path, provider, stt_config, *hints)
 
 
 def _route_stt_provider(

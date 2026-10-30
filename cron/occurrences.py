@@ -19,18 +19,25 @@ def scheduled_instant(value):
         return None
 
 
-def completed_occurrence(job, instant):
-    """Unknown/failed/pruned attempts cannot prove completion: keep them eligible."""
+class LedgerUnavailable(Exception):
+    """Completion evidence could not be read; this does not prove the slot never ran."""
+
+
+def _completion_evidence(job, instant, *, require_readable=False):
+    """Read exact completion evidence; one-shots also require readable legacy ledgers."""
     from cron.constants import FIRE_CLAIM_SKEW_SECONDS
     from cron.executions import _transaction
 
     instant = scheduled_instant(instant)
-    if instant is None:
+    if instant is None and not require_readable:
         return False
     # A skewed early fire (see claim_job_for_fire) legitimately completes just before its slot.
-    earliest_real = datetime.fromisoformat(instant) - timedelta(seconds=FIRE_CLAIM_SKEW_SECONDS)
+    earliest_real = (datetime.fromisoformat(instant) - timedelta(seconds=FIRE_CLAIM_SKEW_SECONDS)
+                     if instant is not None else None)
     try:
         with _transaction() as conn:
+            if instant is None:
+                return False  # readable, but legacy/ambiguous timestamps prove no exact completion
             rows = conn.execute(
                 "SELECT id, finished_at, claimed_at FROM executions "
                 "WHERE job_id=? AND scheduled_instant=? "
@@ -50,9 +57,30 @@ def completed_occurrence(job, instant):
                     row["finished_at"] or row["claimed_at"])
                 return True
         return False
-    except Exception:
+    except Exception as exc:
         logger.warning("Cannot check completed occurrence for job %s", job['id'], exc_info=True)
+        raise LedgerUnavailable(str(exc)) from exc
+
+
+def completed_occurrence(job, instant):
+    """Legacy lookup: keep cached schedulers' False-on-error contract across upgrades."""
+    try:
+        return _completion_evidence(job, instant)
+    except LedgerUnavailable:
         return False
+
+
+def occurrence_blocks_dispatch(job, instant):
+    """Completed slots block dispatch; unreadable evidence also blocks one-shots.
+
+    A one-shot must remain scheduled, without a claim or missed-run retirement, until
+    the ledger is readable. Preserve the established recurring fallback on read errors.
+    """
+    once = job.get("schedule", {}).get("kind") == "once"
+    try:
+        return _completion_evidence(job, instant, require_readable=once)
+    except LedgerUnavailable:
+        return once
 
 
 # --- Pending slot: the occurrence a tick took off the schedule but has not yet claimed ---
@@ -83,9 +111,6 @@ def unclaimed_pending_slot(job, now):
     THIS process on a job not running here is orphaned (dispatch refused). A stamp by another
     process is honoured while that owner may still be alive within the fire-claim lease — a
     second live gateway on the same store is mid-dispatch, not dead."""
-    from cron.constants import FIRE_CLAIM_TTL_SECONDS
-    from cron.jobs import _claim_is_live, _job_running_in_this_process, _machine_id
-
     pending = job.get("pending_slot")
     if not isinstance(pending, dict):
         return None
@@ -96,9 +121,18 @@ def unclaimed_pending_slot(job, now):
         datetime.fromisoformat(slot)
     except ValueError:
         return None
+    # Validate non-recurring/malformed records before touching cached state.
+    from cron.claim_owner import _fire_claim_owner_is_dead
+    from cron.constants import FIRE_CLAIM_TTL_SECONDS
+    from cron.jobs import _claim_is_live, _job_running_in_this_process, _machine_id
+
     if _job_running_in_this_process(str(job.get("id", ""))):
         return None
-    if pending.get("by") != _machine_id() and _claim_is_live(pending, now, FIRE_CLAIM_TTL_SECONDS):
+    if (
+        pending.get("by") != _machine_id()
+        and _claim_is_live(pending, now, FIRE_CLAIM_TTL_SECONDS)
+        and not _fire_claim_owner_is_dead(pending)
+    ):
         return None
     return slot
 

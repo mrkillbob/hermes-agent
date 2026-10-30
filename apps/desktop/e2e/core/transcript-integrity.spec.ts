@@ -37,6 +37,7 @@ import {
 } from './harness'
 import { assertTranscriptOracle, installDuplicateSampler, type OracleTarget } from './oracle'
 import { gate, startScriptedProvider } from './provider'
+import { observeTransportEvidence } from './transport-evidence-cdp'
 
 const nonce = Math.random()
   .toString(36)
@@ -85,8 +86,12 @@ test('transcript oracle holds across every transition', async () => {
 
   const sessionA: OracleTarget = { sessionId: '', expectUserMarkers: [] }
   const sessionB: OracleTarget = { sessionId: '', expectUserMarkers: [] }
+  let currentDocumentSocketStart = 0
+  let evidence: Awaited<ReturnType<typeof observeTransportEvidence>> | undefined
+  let failed = false
 
   try {
+    evidence = await observeTransportEvidence(page, 'transcript-integrity')
     await waitForInteractive(app, page)
     await installDuplicateSampler(page)
 
@@ -199,6 +204,11 @@ test('transcript oracle holds across every transition', async () => {
     await routePrimaryWebSocket(app, backendPort, proxy.port)
 
     await test.step('reload: hydrated transcript equals persisted', async () => {
+      // Playwright reports WebSockets opened by earlier documents on the same
+      // Page object; the recorder's close event is not a reliable document
+      // lifetime boundary during a full reload. Count only this renderer's
+      // sockets for the later one-host assertion.
+      currentDocumentSocketStart = ws.sockets.length
       await page.reload()
       await waitForInteractive(app, page)
       await installDuplicateSampler(page)
@@ -276,11 +286,15 @@ test('transcript oracle holds across every transition', async () => {
         .poll(
           () =>
             ws.sockets
-              .filter(s => !s.closed && sameBackend.has(new URL(s.url).port))
-              .map(s => s.url.replace(/token=[^&]+/, 'token=…')),
+              .filter(s => s.id >= currentDocumentSocketStart && !s.closed && sameBackend.has(new URL(s.url).port))
+              .map(s => {
+                const requests = ws.sent.filter(frame => frame.socket === s.id).map(frame => frame.method)
+
+                return `socket ${s.id} [${requests.join(', ')}] ${s.url.replace(/token=[^&]+/, 'token=…')}`
+              }),
           {
             timeout: 30_000,
-            message: 'live sockets to the one host backend'
+            message: 'live sockets to the one host backend from the current renderer document'
           }
         )
         .toHaveLength(1)
@@ -323,7 +337,11 @@ test('transcript oracle holds across every transition', async () => {
       await openSession(page, sessionB.sessionId, A(7))
       await assertTranscriptOracle(page, ws, provider, sessionB, 'final reload B')
     })
+  } catch (error) {
+    failed = true
+    throw error
   } finally {
+    await evidence?.finish(test.info(), failed)
     await app.close().catch(() => undefined)
 
     for (const proxy of proxies) {

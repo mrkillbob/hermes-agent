@@ -27,6 +27,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import venv
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,12 @@ def _probe_root(tmp_path):
     shutil.copy2(real / "run_tests_parallel.py", scripts)
     # The runner shares the platforms() spec resolver with the CI lane selector.
     shutil.copy2(real / "ci" / "list_os_marked_tests.py", scripts / "ci")
+    for name in ('runner_lifetime.py', 'managed_pytest.py', 'lifetime_python.py', 'protected-python'):
+        shutil.copy2(real / name, scripts)
+    (root / 'pm').mkdir(exist_ok=True)
+    for name in ('__init__.py', 'filesystem.py', 'lifetime.py', 'lifetime_handles.py', 'lifetime_launch.py'):
+        shutil.copy2(real.parent / 'pm' / name, root / 'pm')
+
     return root
 
 
@@ -106,6 +113,36 @@ def test_progress_output_tolerates_legacy_stdout_encoding(tmp_path: Path) -> Non
 
     assert proc.returncode == 0, proc.stdout
     assert "UnicodeEncodeError" not in proc.stdout
+    assert "1 tests passed" in proc.stdout
+
+
+def test_shard_selector_is_not_forwarded_to_test_processes(tmp_path: Path) -> None:
+    """The matrix shard selects this invocation, not nested test runners."""
+    repo_root = _probe_root(tmp_path)
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    probe = probe_dir / "test_probe_shard_env.py"
+    probe.write_text(
+        "import os\n"
+        "def test_slice_selector_is_not_inherited():\n"
+        "    assert 'HERMES_TEST_SLICE' not in os.environ\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["HERMES_TEST_SLICE"] = "1/1"
+    proc = subprocess.run(
+        [sys.executable, str(runner), "--paths", str(probe_dir), "-j", "1"],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60, check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout
     assert "1 tests passed" in proc.stdout
 
 
@@ -577,6 +614,120 @@ def test_interpreter_crash_is_reported_as_a_crash_not_as_no_tests_ran(tmp_path: 
     assert "NO TESTS RAN" not in proc.stdout
 
 
+def test_parse_summary_counts_setup_errors() -> None:
+    """"41 passed, 7 errors" parses both counts (the input the Summary relies on)."""
+    import importlib.util
+
+    runner = Path(__file__).resolve().parents[2] / "scripts" / "run_tests_parallel.py"
+    spec = importlib.util.spec_from_file_location("_rtp_errors_probe", runner)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    fake = (
+        "tests/tools/test_plugin_guard.py ....EEEEEEE\n"
+        "ERROR tests/tools/test_plugin_guard.py::test_x - RuntimeError: boom\n"
+        "======= 41 passed, 7 errors in 3.21s =======\n"
+    )
+    assert mod._parse_pytest_summary(fake) == {"passed": 41, "errors": 7}
+
+
+def test_setup_errors_are_named_on_the_summary_line(tmp_path: Path) -> None:
+    """Setup ERRORs must appear on the Summary line, not hide behind "0 failed".
+
+    A file whose tests all pass except for fixture-setup ERRORs exits 1, but
+    the Summary used to read "N tests passed, 0 failed" and the file was
+    filed under "all tests passed but pytest exited non-zero". The error
+    count must be on the Summary line and in its own failure bucket.
+    """
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    (probe_dir / "test_probe_setup_errors.py").write_text(
+        textwrap.dedent(
+            """
+            import pytest
+
+            @pytest.fixture
+            def broken():
+                raise RuntimeError("setup boom")
+
+            def test_ok_one():
+                assert True
+
+            def test_ok_two():
+                assert True
+
+            @pytest.mark.parametrize("n", range(3))
+            def test_needs_broken(broken, n):
+                assert True
+            """
+        )
+    )
+
+    proc = _run_runner(probe_dir, "--file-retries", "0")
+
+    assert proc.returncode == 1, proc.stdout
+    summary = next(l for l in proc.stdout.splitlines() if "=== Summary:" in l)
+    assert "2 tests passed, 0 failed, 3 errors" in summary, summary
+    assert "with pytest ERRORs" in proc.stdout
+    assert "(2 passed, 3 errors)" in proc.stdout
+    assert "all tests passed but pytest exited non-zero" not in proc.stdout
+    assert "where no tests ran" not in proc.stdout
+
+
+def test_clean_run_summary_has_no_errors_note(tmp_path: Path) -> None:
+    probe_dir = _make_probe_dir(tmp_path)
+    proc = _run_runner(probe_dir)
+    assert proc.returncode == 0, proc.stdout
+    summary = next(l for l in proc.stdout.splitlines() if "=== Summary:" in l)
+    assert "error" not in summary, summary
+
+
+def test_import_error_file_is_a_failed_file_on_the_summary_line(tmp_path: Path) -> None:
+    """A file that dies at import is a FAILED file on the Summary line, with its cause.
+
+    pytest interrupts it with exit 2 and ``collected 0 items / 1 error``, so
+    it has no failed-test count: the Summary used to read "2 tests passed,
+    0 failed" beside it. A file that collects nothing (pytest exit 5, e.g.
+    platform-gated) stays a pass.
+    """
+    probe_dir = _make_probe_dir(tmp_path)
+    (probe_dir / "test_probe_import_error.py").write_text(
+        "@pytest.mark.parametrize('n', [1])\ndef test_n(n):\n    assert n\n"
+    )
+    (probe_dir / "test_probe_collects_nothing.py").write_text("VALUE = 1\n")
+
+    proc = _run_runner(probe_dir, "--file-retries", "0")
+
+    assert proc.returncode == 1, proc.stdout
+    summary = next(l for l in proc.stdout.splitlines() if "=== Summary:" in l)
+    assert "2 tests passed, 0 failed, 1 error" in summary, summary
+    assert "FAILED: 1 of 3 files (1 at import/collection)" in summary, summary
+    lines = proc.stdout.splitlines()
+    header = lines.index("=== 1 file that FAILED AT IMPORT/COLLECTION (0 tests ran) ===")
+    cause = lines[header + 1]
+    assert "test_probe_import_error.py" in cause, proc.stdout
+    assert "NameError: name 'pytest' is not defined" in cause, proc.stdout
+    assert "where no tests ran" not in proc.stdout
+
+
+def test_named_test_path_that_does_not_exist_fails_the_run(tmp_path: Path) -> None:
+    """A mistyped or deleted file named on the command line must not run green without it."""
+    probe_dir = _make_probe_dir(tmp_path)
+    runner = _probe_root(tmp_path) / "scripts" / "run_tests_parallel.py"
+    missing = probe_dir / "test_probe_not_there.py"
+
+    proc = subprocess.run(
+        [sys.executable, str(runner), str(probe_dir / "test_flagprobe.py"), str(missing),
+         "-j", "1", "--file-timeout", "30"],
+        cwd=probe_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60, check=False,
+    )
+
+    assert proc.returncode == 2, proc.stdout
+    assert f"no such test path: {missing}" in proc.stdout
+    assert "=== Summary:" not in proc.stdout
+
+
 # ── --files-from: file-backed explicit file lists ───────────────────────────
 #
 # --files carries the whole list as ONE argv element, and Linux caps a
@@ -627,6 +778,105 @@ def test_files_from_dash_reads_the_list_from_stdin(tmp_path: Path) -> None:
     assert "✓2" in proc.stdout or "2 passed" in proc.stdout, proc.stdout
 
 
+@pytest.mark.skipif(shutil.which("bash") is None, reason="canonical runner requires bash")
+def test_canonical_runner_confines_explicit_scratch(tmp_path: Path) -> None:
+    """The shell and per-file runner honor the same caller-owned storage root."""
+    root = _probe_root(tmp_path)
+    real_scripts = Path(__file__).resolve().parents[2] / "scripts"
+    for name in ("run_tests.sh", "_activation.sh"):
+        shutil.copy2(real_scripts / name, root / "scripts" / name)
+    shutil.copy2(real_scripts.parent / "hermes_constants_scratch.py", root)
+    # A stdlib-only outside-state bootstrap, independent of the qualified test target.
+    venv.EnvBuilder(with_pip=False).create(root / ".venv")
+    from pm.environments import site_packages, venv_python
+    from pm.lifetime import activity, domain_for_generation
+
+    generation = tmp_path / "managed-state" / "environments" / "probe"
+    with activity(domain_for_generation(generation), create=True):
+        target = generation / "venv"
+        venv.EnvBuilder(with_pip=False).create(target)
+        (generation / ".lease-managed").touch()
+        (site_packages(target) / "probe-test-dependencies.pth").write_text(
+            "\n".join(path for path in sys.path if Path(path).name in {"site-packages", "dist-packages"}) + "\n",
+            encoding="utf-8")
+    scratch = tmp_path / "owned-scratch"
+    scratch.mkdir()
+    general_tmp = tmp_path / "general-tmp"
+    general_tmp.mkdir()
+    pycache = tmp_path / "pycache"
+    foreign = scratch / "foreign-evidence"
+    foreign.mkdir()
+    sentinel = foreign / "keep.txt"
+    sentinel.write_text("foreign evidence", encoding="utf-8")
+    stale = time.time() - 48 * 3600
+    os.utime(sentinel, (stale, stale))
+    os.utime(foreign, (stale, stale))
+    probe = root / "test_storage_probe.py"
+    probe.write_text(
+        "import os, sys, tempfile\nfrom pathlib import Path\n"
+        "def test_storage():\n"
+        "    root = Path(os.environ['HERMES_TEST_SCRATCH_ROOT'])\n"
+        "    assert Path(tempfile.gettempdir()).parent == root\n"
+        "    assert Path(os.environ['TMPDIR']).parent == root\n"
+        "    assert os.environ['TMP'] == os.environ['TEMP']\n"
+        "    assert Path(sys.pycache_prefix).name == 'pycache'\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("__HERMES_ACTIVATED", None)
+    env.update(HERMES_PYTHON=str(venv_python(target)), HERMES_TEST_SCRATCH_ROOT=str(scratch),
+               TMPDIR=str(general_tmp), TMP=str(general_tmp), TEMP=str(general_tmp),
+               PYTHONPYCACHEPREFIX=str(pycache), PYTHONDONTWRITEBYTECODE="1",
+               PYTHON_CPU_COUNT="1", HERMES_TEST_WORKERS="1", HERMES_TEST_FILE_RETRIES="0")
+    parked = subprocess.Popen(
+        [sys.executable, "-B", "-c", "import time; time.sleep(120)"], cwd=foreign,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        proc = subprocess.run(
+            [shutil.which("bash"), str(root / "scripts" / "run_tests.sh"), str(probe),
+             "-o", "cache_dir=" + str(tmp_path / "pytest-cache")],
+            cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=60, check=False,
+        )
+        assert proc.returncode == 0, proc.stdout
+        assert scratch.is_dir()
+        assert not list(scratch.glob("r-*"))
+        assert sentinel.read_text(encoding="utf-8") == "foreign evidence"
+        assert parked.poll() is None
+    finally:
+        if parked.poll() is None:
+            parked.terminate()
+        parked.wait(timeout=10)
+
+
+@pytest.mark.parametrize("invalid", ["absolute", "", "relative-root", "file"])
+def test_explicit_scratch_root_selection(tmp_path: Path, monkeypatch, invalid: str) -> None:
+    """An invalid caller selection fails instead of allocating shared fallback storage."""
+    import importlib
+
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    monkeypatch.syspath_prepend(str(scripts_dir))
+    runner = importlib.import_module("run_tests_parallel")
+    # Keep even the unmodified resolver's fallback inside this disposable fixture.
+    monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(tmp_path))
+    real_isdir = os.path.isdir
+    monkeypatch.setattr(runner.os.path, "isdir",
+                        lambda path: False if str(path) == "/var/tmp" else real_isdir(path))
+    selected = str(tmp_path / "owned-root") if invalid == "absolute" else invalid
+    if invalid == "file":
+        path = tmp_path / "file"
+        path.write_text("keep", encoding="utf-8")
+        selected = str(path)
+    monkeypatch.setenv("HERMES_TEST_SCRATCH_ROOT", selected)
+    if invalid == "absolute":
+        assert Path(runner._runner_scratch_root()) == Path(selected)
+        assert Path(selected).is_dir()
+    else:
+        with pytest.raises((ValueError, OSError)):
+            runner._runner_scratch_root()
+
+
 def test_scratch_root_is_per_user(tmp_path: Path, monkeypatch) -> None:
     """Two users on one host must never share the runner's scratch root.
 
@@ -640,6 +890,7 @@ def test_scratch_root_is_per_user(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.syspath_prepend(str(scripts_dir))
     runner = importlib.import_module("run_tests_parallel")
 
+    monkeypatch.delenv("HERMES_TEST_SCRATCH_ROOT", raising=False)
     # Exercise the non-/var/tmp arm so the probe never mints roots in the real shared dir.
     # (Narrow: on 3.14 ``Path.is_dir()`` itself goes through ``os.path.isdir``.)
     monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(tmp_path))

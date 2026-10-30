@@ -1,8 +1,12 @@
 """SQLite-backed store for Responses API state (``previous_response_id`` chaining, named conversations)."""
 
+import asyncio
+import functools
 import json
 import logging
 import sqlite3
+import stat
+import threading
 import time
 from contextlib import closing, suppress
 from pathlib import Path
@@ -16,6 +20,53 @@ MAX_STORED_RESPONSES = 100
 IDENTITY_RETENTION_FACTOR = 10
 # The stored terminal envelope of a body row; a corrupt body reads as absent, never raises.
 _RECORD = "json_extract(CASE WHEN json_valid(data) THEN data END, '$.response"
+
+
+def connect_response_store(db_path: str) -> sqlite3.Connection:
+    """Create and tighten the history file before SQLite can populate it."""
+    if db_path != ":memory:":
+        from hermes_state import _secure_state_db_files
+        try:
+            # Exclusive creation never opens/closes an existing inode holding SQLite locks.
+            _secure_state_db_files(Path(db_path), create_main=True)
+        except OSError as exc:
+            logger.warning("Could not restrict response store permissions for %s: %s", db_path, exc)
+            # A mount may deny chmod even for already-private files. Preserve that
+            # persistence only when metadata establishes privacy for the whole set;
+            # opening/closing an existing inode here would release SQLite's locks.
+            for suffix in ("", "-wal", "-shm"):
+                candidate = Path(f"{db_path}{suffix}")
+                try:
+                    mode = candidate.lstat().st_mode
+                except FileNotFoundError:
+                    if not suffix:
+                        raise
+                    continue
+                if not stat.S_ISREG(mode) or stat.S_IMODE(mode) & 0o077:
+                    raise PermissionError(f"Response store file is not private: {candidate}") from exc
+    return sqlite3.connect(db_path, check_same_thread=False)
+
+
+def tighten_response_store_file_permissions(db_path: str | None) -> None:
+    """Force owner-only permissions on the DB and SQLite sidecars."""
+    if not db_path:
+        return
+    for candidate in (Path(db_path), Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
+        try:
+            if candidate.exists():
+                candidate.chmod(0o600)
+        except OSError:
+            logger.debug("Failed to restrict response store permissions for %s", candidate, exc_info=True)
+
+
+def _locked(method):
+    """Hold the store's lock for the call: one sqlite3 connection, used from the loop's worker threads
+    and the admission steps, must never interleave two callers' statements or commits."""
+    @functools.wraps(method)
+    def _call(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return _call
 
 
 class ResponseStore:
@@ -38,6 +89,7 @@ class ResponseStore:
 
     def __init__(self, max_size: int = MAX_STORED_RESPONSES, db_path: Optional[str] = None,
                  max_identities: Optional[int] = None):
+        self._lock = threading.RLock()
         self._max_size = max_size
         self._max_identities = max_identities
         if db_path is None:
@@ -47,7 +99,7 @@ class ResponseStore:
                 db_path = str(get_hermes_home() / "response_store.db")
         self._db_path: Optional[str] = db_path if db_path != ":memory:" else None
         try:
-            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._conn = connect_response_store(db_path)
         except Exception:
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._db_path = None
@@ -82,19 +134,18 @@ class ResponseStore:
         # store that crashed past it would otherwise keep every settled identity until then).
         self._evict_and_commit()
         # Conversation history lives here: owner-only perms, once at init (not per commit).
-        self._tighten_file_permissions()
+        tighten_response_store_file_permissions(self._db_path)
 
-    def _tighten_file_permissions(self) -> None:
-        """Force owner-only permissions on the DB and SQLite sidecars."""
-        if not self._db_path:
-            return
-        for candidate in (Path(self._db_path), Path(f"{self._db_path}-wal"), Path(f"{self._db_path}-shm")):
-            try:
-                if candidate.exists():
-                    candidate.chmod(0o600)
-            except OSError:
-                logger.debug("Failed to restrict response store permissions for %s", candidate, exc_info=True)
+    def atomically(self, fn, /, *args, **kwargs):
+        """Run ``fn`` (a sequence of this store's calls) as one unit no other caller interleaves."""
+        with self._lock:
+            return fn(*args, **kwargs)
 
+    async def off_loop(self, fn, /, *args, **kwargs):
+        """Run an atomic store call on a worker thread, preserving read-after-write ordering."""
+        return await asyncio.to_thread(self.atomically, fn, *args, **kwargs)
+
+    @_locked
     def get(self, response_id: str) -> Optional[dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
         row = self._conn.execute(
@@ -113,6 +164,7 @@ class ResponseStore:
             self._conn.commit()
             return None
 
+    @_locked
     def put(self, response_id: str, data: dict[str, Any]) -> None:
         """Store a response, evicting the oldest if at capacity."""
         insert = 'INSERT OR IGNORE' if response_id.startswith('idem:') else 'INSERT OR REPLACE'
@@ -211,6 +263,7 @@ class ResponseStore:
                 self._conn.execute(f'DELETE FROM {table} WHERE request_key NOT IN (SELECT request_key FROM response_keys)')
         self._conn.commit()
 
+    @_locked
     def bind_request_key(self, key: str, fingerprint: str, *, model=None) -> bool:
         """Reserve one immutable digest before any canonical admission can run."""
         with self._conn:
@@ -220,6 +273,7 @@ class ResponseStore:
             row = self._conn.execute('SELECT fingerprint FROM response_keys WHERE request_key=?', (key,)).fetchone()
         return row[0] == fingerprint
 
+    @_locked
     def request_model(self, key: str, fallback):
         """The accepted wire label survives route changes and response-body LRU eviction."""
         with self._conn:
@@ -230,6 +284,7 @@ class ResponseStore:
             row = self._conn.execute('SELECT model_json FROM response_keys WHERE request_key=?', (key,)).fetchone()
         return json.loads(row[0]) if row is not None else fallback
 
+    @_locked
     def output_index(self, key: str, item_id: str) -> int:
         """Allocate before live publication; retries and parallel observers share this order.
 
@@ -244,21 +299,26 @@ class ResponseStore:
                                      (key, item_id)).fetchone()
         return row[0]
 
+    @_locked
     def order_output(self, key: str, items):
         return sorted(items, key=lambda item: self.output_index(key, item['id']))
 
+    @_locked
     def request_created_at(self, key: str) -> Optional[int]:
         row = self._conn.execute('SELECT created_at FROM response_keys WHERE request_key=?', (key,)).fetchone()
         return row[0] if row else None
 
+    @_locked
     def request_key_matches(self, key: str, fingerprint: str) -> bool:
         row = self._conn.execute('SELECT fingerprint FROM response_keys WHERE request_key=?', (key,)).fetchone()
         return row is None or row[0] == fingerprint
 
+    @_locked
     def request_admission(self, key: str) -> Optional[str]:
         row = self._conn.execute('SELECT admission_id FROM response_admissions WHERE request_key=?', (key,)).fetchone()
         return row[0] if row else None
 
+    @_locked
     def bind_request_admission(self, key: str, admission_id: str) -> None:
         from hermes_state_runtime import RuntimeStoreError
         with self._conn:
@@ -266,11 +326,13 @@ class ResponseStore:
             if self.request_admission(key) != admission_id:
                 raise RuntimeStoreError('admission_conflict')
 
+    @_locked
     def forget_unadmitted_request(self, key: str) -> None:
         with self._conn:
             self._conn.execute('DELETE FROM response_keys WHERE request_key=? AND NOT EXISTS '
                 '(SELECT 1 FROM response_admissions WHERE request_key=?)', (key, key))
 
+    @_locked
     def delete(self, response_id: str) -> bool:
         """Remove a response, conversation mappings to it and its settled Idempotency-Key
         identity (replay record included). True if anything was found and deleted."""
@@ -281,21 +343,25 @@ class ResponseStore:
         self._conn.commit()
         return cursor.rowcount > 0 or forgotten > 0
 
+    @_locked
     def get_conversation(self, name: str) -> Optional[str]:
         """Get the latest response_id for a conversation name."""
         row = self._conn.execute("SELECT response_id FROM conversations WHERE name = ?", (name,)).fetchone()
         return row[0] if row else None
 
+    @_locked
     def set_conversation(self, name: str, response_id: str) -> None:
         """Map a conversation name to its latest response_id."""
         self._conn.execute("INSERT OR REPLACE INTO conversations (name, response_id) VALUES (?, ?)", (name, response_id))
         self._conn.commit()
 
+    @_locked
     def close(self) -> None:
         """Close the database connection."""
         with suppress(Exception):
             self._conn.close()
 
+    @_locked
     def __len__(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()
         return row[0] if row else 0

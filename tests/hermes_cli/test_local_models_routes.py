@@ -333,6 +333,7 @@ def test_download_short_of_server_length_errors_and_cleans_up(client, monkeypatc
             requests.append(req.headers.get('Range'))
             return super().open(req, timeout)
     monkeypatch.setattr("pm.downloader._OPENER", Truncated(b"not the real body", content_length=32))
+    monkeypatch.setattr("pm.downloader.Download._wait_retry", lambda self, seconds: None)
     destination = models_dir() / 'truncated.gguf'
     monkeypatch.setattr(lm, '_download_plan', lambda *_: [('https://fixture.invalid/model', destination, 32)])
     monkeypatch.setattr('pm.paths.partials_root', lambda: tmp_path / 'partials')
@@ -707,6 +708,10 @@ def test_quickstart_pause_stops_the_sequence(client, monkeypatch, dl_server,
     _pin_budget(monkeypatch)
     from tests.pm._range_server import RangeHandler
     from hermes_cli.web_routers import local_models as lm
+    from hermes_cli.local_runtime import ownership
+    from hermes_constants import get_hermes_home
+
+    monkeypatch.setattr(ownership, '_OWNER', ownership.RuntimeOwner(get_hermes_home()))
 
     _serve_plan(monkeypatch, dl_server, tmp_path / "partials",
                 {"QsPartA": _BIG_BODY, "QsPartB": _BIG_BODY})

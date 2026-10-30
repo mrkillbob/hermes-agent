@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))  # run as a script: the repo root is not on sys.path
+from hermes_constants import get_hermes_home
 RESULTS = Path(os.environ.get("PRD_RESULTS") or HERE / "results")
 TASKS = ["vault_saved_login", "vault_first_login", "term_slow_tests", "term_dev_server", "term_wait_then_write",
          "search_cron_backup", "search_recall_dose"]
@@ -27,8 +29,7 @@ TIMEOUT = {"term_slow_tests": 600}
 def _inference_env():
     env = dict(os.environ)
     if not env.get("PRD_INFERENCE_KEY"):
-        home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-        nous = json.loads((home / "auth.json").read_text())["providers"]["nous"]
+        nous = json.loads((get_hermes_home() / "auth.json").read_text())["providers"]["nous"]
         env["PRD_INFERENCE_URL"], env["PRD_INFERENCE_KEY"] = nous["inference_base_url"], nous["agent_key"]
     return env
 

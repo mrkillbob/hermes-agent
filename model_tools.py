@@ -23,7 +23,6 @@ from tools.registry import _MAX_TOOL_ERROR_CHARS as _TOOL_ERROR_MAX_LEN
 from toolsets import resolve_toolset, validate_toolset
 from tools.arg_coercion import coerce_tool_args
 from tools.todo_tool import TODO_LEGACY_ALIASES, TODO_SCHEMA
-from utils import file_signature
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +180,6 @@ _LEGACY_TOOLSET_MAP = {
     "vision_tools": ["vision_analyze"],
     "image_tools": ["image_generate"],
     "skills_tools": ["skills_list", "skill_view", "skill_manage"],
-    "browser_tools": ["browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_scroll",
-                      "browser_back", "browser_press", "browser_get_images", "browser_vision", "browser_console"],
     "cronjob_tools": ["cronjob_manage"],
     "file_tools": ["read_file", "write_file", "patch", "search_files"],
     "tts_tools": ["text_to_speech"],
@@ -221,6 +218,9 @@ def get_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disabled_
     skip_tool_search_assembly returns raw schemas for every enabled tool — only
     the tool_search bridge should use it (it reads the real, uncollapsed catalog).
     """
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return []
     def compute():
         return _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
                                          skip_tool_search_assembly=skip_tool_search_assembly)
@@ -263,20 +263,22 @@ def _tool_defs_cache_key(
     registry generation, config.yaml stat signature (dynamic schemas), kanban
     context, profile scope. check_fn results are TTL-cached in the registry.
     """
+    from tools.tool_presentation import current_frozen_editor_tool_names
     profile_scope = check_fn_cache_scope()
     if profile_scope == CHECK_FN_CACHE_BYPASS:
         return None
     try:
         from hermes_cli.config import get_config_path
-        cfg_stat = get_config_path().stat()
-        cfg_fp = file_signature(cfg_stat)
+        from hermes_cli.config_backend import config_version
+        cfg_fp = config_version(get_config_path())
     except (FileNotFoundError, OSError, ImportError):
         cfg_fp = None
     return (
-        registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
+        registry.current_cache_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
         frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
         bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
         _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope,
+        current_frozen_editor_tool_names(),
     )
 
 
@@ -319,10 +321,18 @@ def _select_tool_names(enabled_toolsets: Optional[list[str]], disabled_toolsets:
     if enabled_toolsets is not None:
         enabled = list(enabled_toolsets)
         # Dispatcher-spawned kanban workers always get the lifecycle handoff
-        # tools, even when the assignee profile restricts its chat toolsets.
-        if (os.environ.get("HERMES_KANBAN_TASK") and not _is_delegated_child_context()
-                and _is_dispatcher_owned_worker() and "kanban" not in enabled):
-            enabled.append("kanban")
+        # and inter-agent messaging tools, even when the assignee profile
+        # restricts its chat toolsets. Keep messaging separate from the static
+        # kanban membership so platform-native toolset recovery remains sound.
+        if (
+            os.environ.get("HERMES_KANBAN_TASK")
+            and not _is_delegated_child_context()
+            and _is_dispatcher_owned_worker()
+        ):
+            if "kanban" not in enabled:
+                enabled.append("kanban")
+            if "inter_agent" not in enabled:
+                enabled.append("inter_agent")
         _apply_toolset_selection(tools, enabled, quiet_mode, disable=False)
     else:
         from toolsets import TOOLSET_SESSION_PLATFORMS, get_all_toolsets
@@ -367,17 +377,6 @@ def _discord_rewriter(schema_fn_name: str):
     return _rewrite
 
 
-def _rewrite_browser_navigate(td: dict[str, Any], available: set) -> Optional[dict[str, Any]]:
-    """Static schema is toolset-neutral; name the lightweight retrieval tools only when they are present
-    (#39797: a hard "prefer web_search" overrode the user's SOUL.md and was hallucinated when web was off)."""
-    web_tools = [name for name in ("web_search", "web_extract") if name in available]
-    if not web_tools:
-        return td
-    noun = "tool" if len(web_tools) == 1 else "tools"
-    hint = f" Available lightweight retrieval {noun}: {' and '.join(web_tools)}."
-    return _fn_def({**td["function"], "description": td["function"].get("description", "") + hint})
-
-
 def _rewrite_browser_cdp(td: dict[str, Any], available: set) -> Optional[dict[str, Any]]:
     """Same rule for the CDP docs pointer: mention web_extract only when the session has it."""
     if "web_extract" not in available:
@@ -391,6 +390,18 @@ def _rewrite_browser_exec(td: dict[str, Any], available: set) -> Optional[dict[s
     must not regain host execution via the browser toolset. Session-level gate rather
     than a check_fn because check_fns are TTL-cached process-wide across sessions."""
     return td if "terminal" in available else None
+
+
+def _rewrite_browser_exec_vision(td: dict[str, Any], available: set) -> Optional[dict[str, Any]]:
+    """Point a header that says screenshots are not attached at vision_analyze, only when the
+    session has it (an auxiliary vision route alone does not expose the tool)."""
+    from tools.browser_use_cli import SCREENSHOTS_DETACHED
+    fn = td["function"]
+    desc = fn.get("description", "")
+    if "vision_analyze" not in available or SCREENSHOTS_DETACHED not in desc:
+        return td
+    hint = " To inspect one, pass its capture_screenshot() path to vision_analyze."
+    return _fn_def({**fn, "description": desc.replace(SCREENSHOTS_DETACHED, SCREENSHOTS_DETACHED + hint, 1)})
 
 
 def _rewrite_delegate_task(td: dict[str, Any], available: set) -> Optional[dict[str, Any]]:
@@ -424,14 +435,11 @@ _VAULT_INPUT_TOOL_HINT = "the browser's input tool"
 
 
 def _rewrite_browser_vault(td: dict[str, Any], available: set) -> Optional[dict[str, Any]]:
-    """Name the concrete input tool for typing the login identifier: `fill_input` inside browser_exec code, or
-    browser_type on the built-in stack. Resolved here because the two live in different toolsets."""
-    if "browser_exec" in available:
-        concrete = "`fill_input` inside browser_exec"
-    elif "browser_type" in available:
-        concrete = "browser_type"
-    else:
+    """Name the concrete input tool for typing the login identifier (`fill_input` inside browser_exec code).
+    Resolved here because the two live in different toolsets."""
+    if "browser_exec" not in available:
         return td
+    concrete = "`fill_input` inside browser_exec"
     fn = td["function"]
     return _fn_def({**fn, "description": fn.get("description", "").replace(_VAULT_INPUT_TOOL_HINT, concrete)})
 
@@ -465,10 +473,8 @@ _DYNAMIC_SCHEMA_REWRITERS = {
     "execute_code": _rewrite_execute_code,
     "discord": _discord_rewriter("get_dynamic_schema_core"),
     "discord_admin": _discord_rewriter("get_dynamic_schema_admin"),
-    "browser_navigate": _rewrite_browser_navigate,
     "browser_cdp": _rewrite_browser_cdp,
-    "browser_exec": _compose_rewriters(_rewrite_browser_exec, _rewrite_input_tool_for_vault),
-    "browser_type": _rewrite_input_tool_for_vault,
+    "browser_exec": _compose_rewriters(_rewrite_browser_exec, _rewrite_browser_exec_vision, _rewrite_input_tool_for_vault),
     "browser_vault": _rewrite_browser_vault,
     "delegate_task": _rewrite_delegate_task,
 }
@@ -526,8 +532,14 @@ def _compute_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disa
     # Must be the LAST step (after sanitization); idempotent if called twice.
     try:
         from tools.tool_search import assemble_tool_defs, load_config as _load_ts_config
+        from tools.tool_presentation import current_frozen_editor_tool_names
         ts_cfg = _load_ts_config()
-        if not skip_tool_search_assembly and ts_cfg.enabled != "off":
+        # A frozen editor-only policy promises these exact schemas to the model.
+        # A narrowed or expanded catalog still follows ordinary progressive disclosure.
+        direct_names = current_frozen_editor_tool_names()
+        frozen_editor_catalog = direct_names is not None and direct_names == tuple(sorted(
+            tool['function']['name'] for tool in filtered_tools))
+        if not skip_tool_search_assembly and not frozen_editor_catalog and ts_cfg.enabled != "off":
             assembly = assemble_tool_defs(filtered_tools, context_length=_resolve_active_context_length(), config=ts_cfg)
             if assembly.activated and not quiet_mode:
                 print(f"🔎 Tool Search (tier {assembly.tier}): {assembly.deferred_count} "
@@ -727,7 +739,9 @@ def _dispatch_bridge_tool(function_name: str, function_args: dict[str, Any],
         return ts.dispatch_tool_search(args, current_tool_defs=current_defs, call=call), None
     if function_name == ts.TOOL_DESCRIBE_NAME:
         return ts.dispatch_tool_describe(args, current_tool_defs=current_defs, call=call), None
-    underlying_name, underlying_args, err = ts.resolve_underlying_call(args)
+    # Session-scoped names for the error path below: a core tool stripped from this
+    # session (clarify in a subagent) must not be told to "call it directly".
+    underlying_name, underlying_args, err = ts.resolve_underlying_call(args, ts.session_tool_names(current_defs))
     if err or not underlying_name:
         return tool_error(err or "tool_call could not be resolved"), None
     if underlying_name == ts.CONNECTOR_BATCH_SENTINEL:
@@ -739,9 +753,7 @@ def _dispatch_bridge_tool(function_name: str, function_args: dict[str, Any],
     # Session-gated GUI tools fail fast with their real reason (#120413):
     # tool_search can never surface them in this session.
     if underlying_name not in ts.scoped_deferrable_names(current_defs):
-        return tool_error(ts.out_of_scope_reason(underlying_name)
-                          or f"'{underlying_name}' is not available in this session. "
-                          "Use tool_search to find tools you can call."), None
+        return tool_error(ts.scope_block_reason(underlying_name)), None
     # Validate against the deferred tool's concrete schema — the generic
     # ``arguments: object`` bridge schema can't enforce it.
     probe_err = ts.validate_deferred_call_args(underlying_name, underlying_args)
@@ -880,12 +892,14 @@ def handle_function_call(
 ) -> str:
     """Route a tool call through hooks/middleware to the registry; returns a JSON string.
 
-    task_id isolates terminal/browser sessions; user_task feeds browser_snapshot.
+    task_id isolates terminal/browser sessions; user_task is forwarded to every handler as a kwarg.
     enabled_tools picks execute_code's sandbox tools (default: the process-global
     ``_last_resolved_tool_names``). skip_pre_tool_call_hook: caller already fired
     it (single-fire contract). enabled/disabled_toolsets scope the Tool Search
     bridge catalog to this session's grant (None = unrestricted).
     """
+    from agent.local_text_policy import require_tools_allowed
+    require_tools_allowed()
     function_args = coerce_tool_args(function_name, function_args)
     if not isinstance(function_args, dict):
         function_args = {}

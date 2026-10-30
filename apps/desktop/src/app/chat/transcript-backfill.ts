@@ -15,6 +15,11 @@
  * drift on the next page.
  */
 
+import {
+  dropPageFoldsCutByTheBoundary,
+  dropPageRowsOfStoppedTurns,
+  dropReceiptTurnsThePageHolds
+} from '@/app/chat/transcript-receipt-turns'
 import { transcriptRowIds } from '@/app/session/hooks/use-session-actions/pending-turn-identity'
 import { getOlderSessionMessages, getSessionMessages, type ProfileScope } from '@/hermes'
 import { type ChatMessage, chatMessageText, toChatMessages } from '@/lib/chat-messages'
@@ -294,6 +299,38 @@ interface StoredRowSlot {
   leading: ChatMessage[]
 }
 
+/** Defer only the replaced partial turn's leading user projections to reconciliation. */
+function leadingRowsForRefreshedTurn(
+  leading: ChatMessage[],
+  previous: ChatMessage,
+  refreshedBySource: Map<number, ChatMessage>,
+  fresh: boolean
+): ChatMessage[] {
+  const receipt = previous.persistedTurn
+  const userIds = receipt?.user_row_ids
+
+  if (
+    fresh ||
+    previous.role !== 'assistant' ||
+    previous.pending ||
+    previous.interim ||
+    receipt?.complete !== false ||
+    !Array.isArray(userIds) ||
+    userIds.length === 0 ||
+    new Set(userIds).size !== userIds.length ||
+    !transcriptRowIds(previous).some(id => refreshedBySource.get(id)?.role === 'assistant') ||
+    !userIds.every(id => Number.isSafeInteger(id) && id > 0 && refreshedBySource.get(id)?.role === 'user')
+  ) {
+    return leading
+  }
+
+  // These users precede the receipted reply; the caller reconciles them with
+  // the fresh stored users. Later unacknowledged repeats remain in the graft.
+  return leading.filter(
+    message => message.role !== 'user' || !message.id.startsWith('user-') || transcriptRowIds(message).length > 0
+  )
+}
+
 /**
  * Stored-id merge for a page that overlaps the window but does not anchor in
  * front of it. A row with no stored id travels with the next stored row after
@@ -317,6 +354,24 @@ function mergeOverlappingTail(previous: ChatMessage[], refreshedTail: ChatMessag
   }
 
   const byRowId = new Map<number, StoredRowSlot>()
+  // A turn the page holds whole is the page's to draw, whatever stored ids
+  // its live rows managed to bind (see transcript-receipt-turns).
+  const receiptDrop = dropReceiptTurnsThePageHolds(previous, refreshedTail)
+  // Local notices of a dropped turn, keyed by the page row they precede.
+  const anchored = new Map<number, ChatMessage[]>()
+
+  const anchorNotice = (message: ChatMessage): boolean => {
+    const anchor = receiptDrop.noticeAnchors.get(message.id)
+    const slot = anchor === undefined ? undefined : refreshedBySource.get(anchor)?.rowId
+
+    if (slot === undefined) {
+      return false
+    }
+
+    anchored.set(slot, [...(anchored.get(slot) ?? []), message])
+
+    return true
+  }
 
   const place = (messages: ChatMessage[], fresh: boolean): ChatMessage[] => {
     let pending: ChatMessage[] = []
@@ -360,7 +415,9 @@ function mergeOverlappingTail(previous: ChatMessage[], refreshedTail: ChatMessag
 
       // The fresh page replaces the row; keep the window's leading rows when
       // the page brought none of its own for it.
-      const leading = fresh && existing && pending.length === 0 ? existing.leading : pending
+      const ownLeading = leadingRowsForRefreshedTurn(pending, message, refreshedBySource, fresh)
+
+      const leading = fresh && existing && ownLeading.length === 0 ? existing.leading : ownLeading
       byRowId.set(rowId, { message, leading })
       pending = []
     }
@@ -368,14 +425,22 @@ function mergeOverlappingTail(previous: ChatMessage[], refreshedTail: ChatMessag
     return pending
   }
 
-  const previousTrailing = place(previous, false)
-  const refreshedTrailing = place(refreshedTail, true)
+  const previousTrailing = place(
+    receiptDrop.window.filter(message => !anchorNotice(message)),
+    false
+  )
+
+  const freshRows = dropPageRowsOfStoppedTurns(previous, dropPageFoldsCutByTheBoundary(previous, refreshedTail))
+  const refreshedTrailing = place(freshRows, true)
 
   const stored = [...byRowId.entries()]
     .sort((left, right) => left[0] - right[0])
-    .flatMap(([, { leading, message }]) => [...leading, message])
+    .flatMap(([rowId, { leading, message }]) => [...leading, ...(anchored.get(rowId) ?? []), message])
 
-  return [...stored, ...refreshedTrailing, ...previousTrailing]
+  // A notice whose anchor row the page dropped after all still stays on screen.
+  const unplaced = [...anchored.entries()].filter(([rowId]) => !byRowId.has(rowId)).flatMap(([, notices]) => notices)
+
+  return [...stored, ...refreshedTrailing, ...previousTrailing, ...unplaced]
 }
 
 export function graftRefreshedTailOntoBackfill(refreshedTail: ChatMessage[], previous: ChatMessage[]): ChatMessage[] {

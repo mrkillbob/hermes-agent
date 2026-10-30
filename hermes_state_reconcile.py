@@ -203,6 +203,9 @@ class _Budget:
         return max(self.remaining(), 0.05)
 
     def arm(self, conn) -> None:
+        self.check()
+        # Busy waits do not run the VM callback; refresh their allowance at each SQL phase.
+        conn.execute(f'PRAGMA busy_timeout={int(self.remaining() * 1000)}')
         def progress():
             if self._clock() >= self.deadline:
                 self.expired = True
@@ -214,6 +217,22 @@ class _Budget:
         if self.expired or self.remaining() <= 0:
             self.expired = True
             raise BrowseBudgetExceeded('browse schema catch-up exceeded its time budget')
+
+
+class _BudgetCursor:
+    """Stop shared schema helpers from swallowing an expired SQLite interruption."""
+
+    def __init__(self, cursor, budget: _Budget):
+        self._cursor = cursor
+        self._budget = budget
+
+    def execute(self, *args, **kwargs):
+        self._budget.check()
+        try:
+            return self._cursor.execute(*args, **kwargs)
+        except sqlite3.OperationalError:
+            self._budget.check()
+            raise
 
 
 def _apply_additive_schema(path: Path, budget: _Budget | None = None) -> None:
@@ -232,11 +251,13 @@ def _apply_additive_schema(path: Path, budget: _Budget | None = None) -> None:
     budget.check()
     with closing(connect_tracked(path, tracking_path=path, timeout=budget.busy_timeout(),
                                  isolation_level=None)) as conn:
-        _reapply_durability_barriers(conn)
         budget.arm(conn)
-        conn.execute('BEGIN IMMEDIATE')
+        _reapply_durability_barriers(conn)
+        # Durability PRAGMAs can parse a cold schema and suppress SQLite interruption.
         try:
-            cursor = conn.cursor()
+            budget.arm(conn)
+            conn.execute('BEGIN IMMEDIATE')
+            cursor = _BudgetCursor(conn.cursor(), budget)
             apply_declared_schema(cursor)
             # Postcondition, still inside the transaction: every declared table/column resolves.
             for statement in schema_read_probe_statements():
@@ -246,13 +267,13 @@ def _apply_additive_schema(path: Path, budget: _Budget | None = None) -> None:
                     if _schema_not_built(exc):
                         raise DeclarativeDriftError(str(exc)) from exc
                     raise
-            budget.check()
+            budget.arm(conn)
             conn.execute('COMMIT')
         except BaseException as exc:
             with contextlib.suppress(sqlite3.Error):
                 conn.execute('ROLLBACK')
-            if budget.expired and isinstance(exc, sqlite3.OperationalError):
-                raise BrowseBudgetExceeded('browse schema catch-up exceeded its time budget') from exc
+            if isinstance(exc, sqlite3.OperationalError):
+                budget.check()
             raise
 
 

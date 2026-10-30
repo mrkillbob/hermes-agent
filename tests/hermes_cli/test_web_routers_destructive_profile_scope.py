@@ -379,31 +379,20 @@ def test_memory_provider_readiness_is_judged_in_the_profile_being_written(
     assert "memory" not in _cfg(homes["launch"])
 
 
-def test_local_models_quickstart_activates_into_the_named_profile(client, homes, monkeypatch):
-    """Quickstart is ``activate`` plus a download; its config writes must follow ``?profile=``."""
-    from hermes_cli.config import get_hermes_home
+def test_local_models_quickstart_refuses_named_target_before_download(client, homes, monkeypatch):
+    """An explicit named target cannot borrow ambient root authority for a promised activation."""
     from hermes_cli.web_routers import local_models as lm
+    from hermes_cli.local_runtime import ownership
 
-    entry = type("_Entry", (), {"id": "m1", "display_name": "M One", "min_engine": None})()
-    variant = type("_Variant", (), {"model_id": "m1-q4"})()
-    seen = []
-
-    monkeypatch.setattr(lm.hardware, "probe_budget", lambda **_kw: None)
-    monkeypatch.setattr(lm, "_quickstart_target", lambda _body, _budget: (entry, variant))
-    monkeypatch.setattr(lm, "_runtime_target", lambda *_a: ("b1", "cpu"))
-    monkeypatch.setattr(lm, "_download_plan", lambda *_a: [])
-    monkeypatch.setattr(lm.binaries, "installed_engine", lambda _backend: "installed")
-    monkeypatch.setattr(lm.bootstrap, "staged_model_ids", lambda: {"m1-q4"})
-    monkeypatch.setattr(lm, "_set_runtime_enabled", lambda _on: (lambda: None))
-    monkeypatch.setattr(lm, "_ensure_server", lambda *_a, **_k: None)
-    monkeypatch.setattr(lm, "_assign_default", lambda *_a: seen.append(str(get_hermes_home())))
-    # Run the job body inline; the real spawner's ``on_exit`` is what frees the quickstart lock.
-    monkeypatch.setattr(lm, "_spawn_job", lambda job, name, body, **kw: (body(), kw["on_exit"]()))
-
-    resp = client.post("/api/local-models/quickstart?profile=worker_beta", json={})
-
-    assert resp.status_code == 200, resp.text
-    assert seen == [str(homes["worker_beta"])]
+    monkeypatch.setattr(ownership, '_OWNER', ownership.RuntimeOwner(homes['launch']))
+    monkeypatch.setattr(lm, '_quickstart_target', lambda *a: pytest.fail('named setup reached planning'))
+    before_jobs = set(lm._JOBS)
+    configs = {name: (home / 'config.yaml').read_bytes() for name, home in homes.items()}
+    response = client.post('/api/local-models/quickstart?profile=worker_beta', json={})
+    assert response.status_code == 409, response.text
+    assert 'default profile' in response.json()['detail']
+    assert set(lm._JOBS) == before_jobs
+    assert configs == {name: (home / 'config.yaml').read_bytes() for name, home in homes.items()}
 
 
 # --- the read/side-effect routes scoped in the same sweep ---------------------------

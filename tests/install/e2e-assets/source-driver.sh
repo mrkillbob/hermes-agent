@@ -27,6 +27,7 @@ source_hermes() {
 # install-method detection and refuse any other dirty state.
 accept_installer_marker() {
   local root="$1" status
+  "${HERMES_E2E_NODE:-node}" "$(dirname "${BASH_SOURCE[0]}")/source-churn.mjs" "$root" || return 1
   status="$(git -C "$root" status --porcelain --untracked-files=all)" || return 1
   if [ "$status" = '?? .install_method' ] && [ "$(cat "$root/.install_method")" = git ]; then
     printf '\n/.install_method\n' >> "$(git -C "$root" rev-parse --absolute-git-dir)/info/exclude"

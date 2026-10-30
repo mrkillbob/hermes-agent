@@ -17,6 +17,7 @@ with it":
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tarfile
 import time
@@ -360,3 +361,150 @@ def test_import_rejects_a_future_format_version(kanban_root, tmp_path):
     kanban_root("target")
     with pytest.raises(ValueError, match="newer than this Hermes"):
         kt.import_board(str(bumped))
+
+
+def test_merge_moves_all_cards_history_and_attachments(kanban_root, tmp_path):
+    target_root = kanban_root("source")
+    ids = _seed_board("source")
+    kb.create_board("target", name="Target")
+    result = kt.merge_board("source", "target", str(tmp_path / "source-backup"))
+    assert result["tasks"] == 2
+    assert result["counts"]["task_comments"] == 1
+    assert result["counts"]["task_links"] == 1
+    assert result["counts"]["task_attachments"] == 1
+    assert Path(result["backup"]).is_file()
+    assert kb.board_exists("source")
+    assert _tasks_by_title("source") == {}
+    assert set(_tasks_by_title("target")) == {"scratch task", "worktree task"}
+    with kbc.connect_closing(board="target") as conn:
+        comment = conn.execute("SELECT body FROM task_comments WHERE task_id=?", (ids["scratch"],)).fetchone()
+        attachment = conn.execute("SELECT stored_path FROM task_attachments WHERE task_id=?", (ids["scratch"],)).fetchone()
+        links = conn.execute("SELECT parent_id, child_id FROM task_links").fetchall()
+    assert comment["body"] == "a comment"
+    assert target_root in Path(attachment["stored_path"]).parents
+    assert Path(attachment["stored_path"]).read_bytes() == b"hello attachment"
+    assert [(row["parent_id"], row["child_id"]) for row in links] == [(ids["scratch"], ids["worktree"])]
+
+
+def test_merge_refuses_active_source_claim_without_copying(kanban_root, tmp_path):
+    kanban_root("source")
+    ids = _seed_board("source")
+    _claim(ids["scratch"], "source")
+    kb.create_board("target", name="Target")
+    with pytest.raises(ValueError, match="live task claims"):
+        kt.merge_board("source", "target", str(tmp_path / "source-backup"))
+    assert _tasks_by_title("target") == {}
+    assert kb.board_exists("source")
+
+
+def test_merge_rejects_selection_that_splits_a_task_dependency(kanban_root, tmp_path):
+    kanban_root("source")
+    ids = _seed_board("source")
+    kb.create_board("target", name="Target")
+    with pytest.raises(ValueError, match="merge all linked cards together"):
+        kt.merge_board("source", "target", str(tmp_path / "source-backup"), task_ids=[ids["scratch"]])
+    assert _tasks_by_title("target") == {}
+    assert set(_tasks_by_title("source")) == {"scratch task", "worktree task"}
+
+
+@pytest.mark.parametrize("change", ["body", "comment", "event"])
+def test_merge_retains_both_copies_when_source_changes_before_prune(kanban_root, tmp_path, monkeypatch, change):
+    task = _seed_board("source")["scratch"]
+    kb.create_board("target", name="Target")
+    remove = kt._remove_source_task_rows
+
+    def change_then_remove(*args, **kwargs):
+        with kbc.connect_closing(board="source") as conn, kb.write_txn(conn):
+            task = conn.execute("SELECT id FROM tasks WHERE title='scratch task'").fetchone()["id"]
+            if change == "body":
+                conn.execute("UPDATE tasks SET body='concurrent body' WHERE id=?", (task,))
+            elif change == "comment":
+                kb.add_comment(conn, task, "writer", "concurrent comment")
+            else:
+                kb._append_event(conn, task, "concurrent_event", {"evidence": "unique"})
+        return remove(*args, **kwargs)
+
+    monkeypatch.setattr(kt, "_remove_source_task_rows", change_then_remove)
+    with pytest.raises(ValueError, match="changed|match"):
+        kt.merge_board("source", "target", str(tmp_path / "backup"))
+    assert len(_tasks_by_title("source")) == len(_tasks_by_title("target")) == 2
+    with kbc.connect_closing(board="source") as conn:
+        if change == "body":
+            assert conn.execute("SELECT body FROM tasks WHERE id=?", (task,)).fetchone()[0] == "concurrent body"
+        elif change == "comment":
+            assert conn.execute("SELECT COUNT(*) FROM task_comments WHERE body='concurrent comment'").fetchone()[0] == 1
+        else:
+            assert conn.execute("SELECT COUNT(*) FROM task_events WHERE kind='concurrent_event'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("changed_table", [None, "task_comments", "task_events", "task_runs"])
+def test_merge_recovery_verifies_full_history_with_remapped_ids(kanban_root, tmp_path, monkeypatch, changed_table):
+    ids = _seed_board("source")
+    kb.create_board("target", name="Target")
+    for board, task in (("source", ids["scratch"]), ("target", None)):
+        with kbc.connect_closing(board=board) as conn, kb.write_txn(conn):
+            if task is None:
+                task = kb.create_task(conn, title="unrelated target")
+            run = conn.execute(
+                "INSERT INTO task_runs (task_id,status,started_at,summary) VALUES (?,'done',1,'original run')", (task,)
+            ).lastrowid
+            kb._append_event(conn, task, "historical_run", {"evidence": "original"}, run_id=run)
+
+    remove = kt._remove_source_task_rows
+    with monkeypatch.context() as patch:
+        def interrupted(*args, **kwargs):
+            raise RuntimeError("prune interrupted")
+        patch.setattr(kt, "_remove_source_task_rows", interrupted)
+        with pytest.raises(RuntimeError, match="prune interrupted"):
+            kt.merge_board("source", "target", str(tmp_path / "backup"))
+    assert kt._remove_source_task_rows is remove
+    if changed_table:
+        column = {"task_comments": "body", "task_events": "payload", "task_runs": "summary"}[changed_table]
+        with kbc.connect_closing(board="source") as conn, kb.write_txn(conn):
+            conn.execute(f"UPDATE {changed_table} SET {column}=? WHERE task_id=?", ('concurrent edit', ids["scratch"]))
+        with pytest.raises(ValueError, match="match"):
+            kt.merge_board("source", "target", str(tmp_path / "retry"))
+        assert len(_tasks_by_title("source")) == 2
+    else:
+        result = kt.merge_board("source", "target", str(tmp_path / "retry"))
+        assert result["already_copied"] is True
+        assert _tasks_by_title("source") == {}
+    assert len(_tasks_by_title("target")) == 3
+
+
+def test_merge_final_verification_fences_both_boards_until_source_prune(kanban_root, tmp_path, monkeypatch):
+    task = _seed_board("source")["scratch"]
+    kb.create_board("target", name="Target")
+    verify = kt._verify_task_copy
+
+    def verify_and_contend(*args, **kwargs):
+        counts = verify(*args, **kwargs)
+        for board in ("source", "target"):
+            with sqlite3.connect(kb.kanban_db_path(board), timeout=0) as writer:
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    writer.execute("UPDATE tasks SET body='unverified edit' WHERE id=?", (task,))
+        return counts
+
+    monkeypatch.setattr(kt, "_verify_task_copy", verify_and_contend)
+    kt.merge_board("source", "target", str(tmp_path / "backup"))
+    assert _tasks_by_title("source") == {}
+    with kbc.connect_closing(board="target") as conn:
+        assert conn.execute("SELECT body FROM tasks WHERE id=?", (task,)).fetchone()[0] == "body"
+
+
+def test_merge_preserves_interleaved_two_task_attachments(kanban_root, tmp_path):
+    ids = _seed_board("source")  # First attachment belongs to scratch.
+    with kbc.connect_closing(board="source") as conn:
+        kb.store_attachment_bytes(conn, ids["worktree"], "middle.txt", b"middle upload", board="source")
+        kb.store_attachment_bytes(conn, ids["scratch"], "last.txt", b"last upload", board="source")
+    kb.create_board("target", name="Target")
+    result = kt.merge_board("source", "target", str(tmp_path / "backup"))
+    assert result["counts"]["task_attachments"] == 3
+    assert _tasks_by_title("source") == {}
+    with kbc.connect_closing(board="target") as conn:
+        attachments = conn.execute("SELECT task_id, stored_path FROM task_attachments ORDER BY id").fetchall()
+    assert [(row["task_id"], Path(row["stored_path"]).read_bytes()) for row in attachments] == [
+        (ids["scratch"], b"hello attachment"),
+        (ids["worktree"], b"middle upload"),
+        (ids["scratch"], b"last upload"),
+    ]

@@ -136,6 +136,13 @@ catalog model has a context-length entry (relationship). If it reads like a snap
 it; if it reads like a contract between two pieces of data, keep it. Reviewers reject new
 change-detectors; authors convert them before re-review.
 
+**One deliberate exception:** `tests/ci/test_prompt_surface.py` compares the freshly rendered system
+prompt and `tools[]` array with the committed `tests/fixtures/prompt_surface/` snapshot. It is the
+mechanism, not an accident: a change to what every session sends must carry the regenerated snapshot,
+which is what routes it to the `hermes-agent-core` approval that `CODEOWNERS` requires on that directory
+(`scripts/ci/prompt_surface.py` has the full contract). Regenerate with one command; do not loosen it into
+loose invariants, and do not copy the pattern to other data.
+
 ## Never read source code in tests
 
 A test that reads a `.py`/`.ts`/`.tsx` file's text tests the *shape of the source*, not

@@ -43,9 +43,9 @@ def _read_qwen_cli_tokens() -> dict[str, Any]:
 
 
 def _save_qwen_cli_tokens(tokens: dict[str, Any]) -> Path:
-    from hermes_cli.auth import _qwen_cli_auth_path, _save_private_json
+    from hermes_cli.auth import _qwen_cli_auth_path, _write_private_file_atomic
     auth_path = _qwen_cli_auth_path()
-    _save_private_json(auth_path, tokens, sort_keys=True)
+    _write_private_file_atomic(auth_path, json.dumps(tokens, indent=2, sort_keys=True) + "\n")
     return auth_path
 
 
@@ -111,6 +111,10 @@ def _mark_qwen_oauth_active(creds: dict[str, Any]) -> None:
         _save_auth_store(auth_store)
 
 
+def _qwen_base_url() -> str:
+    return os.getenv("HERMES_QWEN_BASE_URL", "").strip().rstrip("/") or DEFAULT_QWEN_BASE_URL
+
+
 def resolve_qwen_runtime_credentials(
     *, force_refresh: bool = False, refresh_if_expiring: bool = True,
     refresh_skew_seconds: int = QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
@@ -128,7 +132,7 @@ def resolve_qwen_runtime_credentials(
 
     return {
         "provider": "qwen-oauth",
-        "base_url": os.getenv("HERMES_QWEN_BASE_URL", "").strip().rstrip("/") or DEFAULT_QWEN_BASE_URL,
+        "base_url": _qwen_base_url(),
         "api_key": access_token, "source": "qwen-cli", "expires_at_ms": tokens.get("expiry_date"),
         "auth_file": str(_qwen_cli_auth_path()),
     }

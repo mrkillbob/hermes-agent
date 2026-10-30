@@ -120,6 +120,18 @@ arm_redirect() {
 }
 
 desktop_checkpoint() { # phase, expected commit, selected method
+  # Bootstrap/update may leave an automatically launched successor running.
+  # A second smoke instance would attach to its backend and cannot prove its
+  # own listener ownership. Close only this installed executable normally.
+  local installed_bin
+  installed_bin="$(find_installed_app)/Contents/MacOS/Hermes"
+  if ! osascript -l JavaScript "$ASSETS/macos-app-quit.cjs" "$installed_bin"; then
+    # Observe the ephemeral runner only after failure. Capture no window
+    # contents/argv/env and never dismiss a prompt or alter permissions.
+    "$HERMES_E2E_NODE" "$ASSETS/macos-network-prompt.cjs" "$installed_bin" \
+      > "$LOG_DIR/desktop-$1-quit-diagnostics.json" || true
+    fail "installed app did not close normally; no smoke launch attempted"
+  fi
   source_build_env "$HERMES_E2E_NODE" "$ASSETS/source-desktop-smoke.mjs" \
     --root "$INSTALL_DIR" --home "$HERMES_HOME" --user-data "$HERMES_DESKTOP_USER_DATA_DIR" \
     --out "$LOG_DIR" --phase "$1" --expect-commit "$2" --desktop present --method "$3"
@@ -248,26 +260,12 @@ phase_install() {
   ok "hermes --version works: $(head -c 120 "$LOG_DIR/version-old.log" | tr -d '\n')"
   find_installed_app >/dev/null || fail "no installed Hermes.app after the dmg bootstrap"
   ok "installed app: $(find_installed_app)"
-  # The bootstrap can leave its launched app running. Preserve that handoff,
-  # then request normal Quit of only this installed binary before smoke owns it.
-  local installed_bin
-  installed_bin="$(find_installed_app)/Contents/MacOS/Hermes"
-  osascript -l JavaScript -e 'ObjC.import("AppKit"); function run(args) {
-    const apps = $.NSWorkspace.sharedWorkspace.runningApplications;
-    for (let i = 0; i < apps.count; i++) {
-      const app = apps.objectAtIndex(i);
-      if (app.executableURL && ObjC.unwrap(app.executableURL.path) === args[0]) {
-        if (!app.terminate) throw new Error("normal Quit refused");
-        // AppKit updates `terminated` only from the run loop, and delay()
-        // does not run it, so poll by spinning the run loop instead.
-        const deadline = Date.now() + 120000;
-        while (!app.terminated && Date.now() < deadline) {
-          $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.2));
-        }
-        if (!app.terminated) throw new Error("installed app did not quit normally");
-      }
-    }
-  }' "$installed_bin" || fail "installed app did not close normally; no smoke launch attempted"
+  # The OLD chat is persisted with the endpoint it ran on, and the updated app resumes that chat on
+  # its saved route. One mock serves both checkpoints (phase_update reuses it, or restarts it on the
+  # same port): a checkpoint-private mock is gone by then and the resumed turn never reaches a server.
+  # shellcheck source=../install/e2e-assets/mock-provider.sh
+  source "$ASSETS/mock-provider.sh"
+  PATH="$(dirname "$HERMES_E2E_NODE"):$PATH" mock_start "$WORK_ROOT"
   desktop_checkpoint old "$OLD_SHA" desktop-installer@latest
 }
 

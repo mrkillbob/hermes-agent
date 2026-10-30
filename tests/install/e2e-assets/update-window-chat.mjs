@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readChatIdentity, runDesktopChatSmoke, waitForChatReady } from '../../../tests-js/scripts/desktop-chat-smoke.ts';
+import { beginSelectionCapture } from '../../../tests-js/scripts/desktop-selection-diagnostics.ts';
 import { assertBackendOrigin, localBackendProcess, readInstallationCommit } from '../../../tests-js/scripts/desktop-smoke-process.ts';
 
 /**
@@ -10,11 +11,11 @@ import { assertBackendOrigin, localBackendProcess, readInstallationCommit } from
  * Electron app. Windows CIM exposes neither cwd nor environment for this
  * module launch. The verified identity and listener ownership prove provenance.
  */
-export function assertUpdateWindowBackendOrigin(backend, identity, root, origin) {
+export function assertUpdateWindowBackendOrigin(backend, identity, root, origin, installedCommit) {
   if (origin === 'source' && fs.realpathSync(identity.hermesRoot) !== fs.realpathSync(root)) {
     throw new Error('OLD update-window chat resolved another source installation');
   }
-  assertBackendOrigin(backend, root, origin, { appReportedRoot: identity.hermesRoot });
+  assertBackendOrigin(backend, root, origin, { appReportedRoot: identity.hermesRoot, installedCommit });
 }
 
 /**
@@ -37,12 +38,15 @@ export function assertUpdateWindowProcess(running, options) {
  * @param {import('@playwright/test').ElectronApplication} app
  * @param {import('@playwright/test').Page} page
  * @param {{mockUrl: string, outDir: string, expectCommit: string,
- *   origin: 'source'|'bundled', root: string, executable: string, userData: string}} options
+ *   origin: 'source'|'bundled', root: string, executable: string, userData: string, hermesHome: string,
+ *   prepare?: () => Promise<void>}} options
  */
 export async function runUpdateWindowChat(app, page, options) {
   const receiptPath = path.join(options.outDir, 'desktop-chat-old.json');
   fs.mkdirSync(options.outDir, { recursive: true });
+  const selectionCapture = await beginSelectionCapture(page, options.outDir, 'old');
   try {
+    await options.prepare?.();
     const running = await app.evaluate(({ app: electronApp }) => ({
       pid: process.pid, executable: process.execPath, resources: process.resourcesPath,
       userData: electronApp.getPath('userData'),
@@ -56,11 +60,12 @@ export async function runUpdateWindowChat(app, page, options) {
     if (connection.mode !== 'local' || !['127.0.0.1', 'localhost', '[::1]'].includes(base.hostname)) {
       throw new Error('OLD update-window chat did not use the local installed backend');
     }
-    const backend = localBackendProcess(Number(base.port), running.pid);
+    const backend = localBackendProcess(Number(base.port), running.pid, identity.hermesHome ?? options.hermesHome);
     assertUpdateWindowBackendOrigin(backend, identity, options.root, options.origin);
     const provenanceCommit = readInstallationCommit(options.root, options.origin);
+    assertUpdateWindowBackendOrigin(backend, identity, options.root, options.origin, provenanceCommit);
     if (provenanceCommit !== options.expectCommit) throw new Error('Installed OLD commit differs from the expected commit');
-    const chat = await runDesktopChatSmoke(page, { ...options, phase: 'old', provenanceCommit });
+    const chat = await runDesktopChatSmoke(page, { ...options, phase: 'old', provenanceCommit, selectionCapture });
     const result = { ...chat, origin: options.origin, root: options.root,
       executable: options.executable, appPid: running.pid,
       backend: { pid: backend.pid, parentPid: backend.parentPid, executable: backend.executable },
@@ -68,10 +73,15 @@ export async function runUpdateWindowChat(app, page, options) {
       launchKind: 'pre-update-window' };
     fs.writeFileSync(receiptPath, JSON.stringify(result, null, 2) + '\n');
   } catch (error) {
+    await selectionCapture.checkpoint('failed').catch(() => {});
     await page.screenshot({ path: path.join(options.outDir, 'desktop-chat-old-failed.png') }).catch(() => {});
-    fs.writeFileSync(receiptPath, JSON.stringify({ status: 'failed', phase: 'old',
-      expectedCommit: options.expectCommit, origin: options.origin, root: options.root,
-      error: String(error) }, null, 2) + '\n');
+    try {
+      fs.writeFileSync(receiptPath, JSON.stringify({ status: 'failed', phase: 'old',
+        expectedCommit: options.expectCommit, origin: options.origin, root: options.root,
+        error: String(error) }, null, 2) + '\n');
+    } catch { /* Failure evidence must not replace the original checkpoint error. */ }
     throw error;
+  } finally {
+    await selectionCapture.stop().catch(() => {});
   }
 }

@@ -207,3 +207,21 @@ def test_release_fixture_seed_is_shared_and_never_repairs_damage(tmp_path):
     assert retry.returncode != 0
     assert not witness.exists()
     assert not vpp.verify_home(str(home), snap)["ok"]
+
+
+@pytest.mark.parametrize("existing", [None, "config.yaml", ".env"])
+def test_release_fixture_seed_refuses_existing_profile_before_writing(tmp_path, existing):
+    home, external = tmp_path / "home", tmp_path / "external"
+    profile = home / "profiles/e2e-preserve"
+    profile.mkdir(parents=True)
+    if existing:
+        (profile / existing).write_bytes(b"existing-profile-bytes\n")
+    before = {str(p.relative_to(profile)): p.read_bytes() for p in profile.rglob("*") if p.is_file()}
+
+    with pytest.raises(FileExistsError, match="preservation fixture"):
+        vpp.seed_fixtures(home, external)
+
+    assert {str(p.relative_to(profile)): p.read_bytes() for p in profile.rglob("*") if p.is_file()} == before
+    assert not (profile / "plugins").exists()
+    assert not (home / "plugins").exists()
+    assert not external.exists()

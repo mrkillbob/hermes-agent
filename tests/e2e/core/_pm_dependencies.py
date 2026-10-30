@@ -80,9 +80,16 @@ def select_test_dependencies(hermes_home: Path, checkout: Path) -> None:
     target = environment / selected.relative_to(test_venv)
     target.parent.mkdir(parents=True)
     target.symlink_to(selected, target_is_directory=True)
-    (state / "facts.json").write_text(json.dumps({"schema": 1, "packages": {"venv": {
-        "environment": str(environment),
-    }}}), encoding="utf-8")
+    # This isolated home borrows the canonical locked test interpreter as a
+    # superset, but it owns no selected app dependency generation. Record only
+    # the verified core subset so plugin admission can publish a dependency-free
+    # portable plugin without trying to build another full environment. A real
+    # Python member still changes the stamp and takes the normal build path.
+    from pm.lock import Facts
+    from pm.packages import Venv
+
+    facts = Facts(state / "facts.json")
+    facts.record_state("venv", Venv(checkout).expected_stamp([], plugin_dirs=[]), [], environment=environment)
 
     if _PREPARED_TOOLS is None:
         return

@@ -31,6 +31,7 @@ interface Dictation {
   warmup: Promise<void>
   /** Live STT session (stt.streaming): resolves to null when the host has no live wire. */
   live?: () => Promise<DictationStreamSession | null>
+  cancelLive: () => void
 }
 
 export function useVoiceRecorder({
@@ -79,6 +80,7 @@ export function useVoiceRecorder({
       dictationRef.current = null
 
       if (dictation) {
+        dictation.cancelLive()
         void syncSttLease(VOICE_INPUT_LEASE, false, dictation.owner)
       }
     },
@@ -115,8 +117,12 @@ export function useVoiceRecorder({
         return
       }
 
-      const transcript =
-        (await liveTranscript(dictation)) ?? (await onTranscribeAudio(result.audio, dictation.owner)).trim()
+      const streamed = await liveTranscript(dictation)
+      // Cancellation may have ended the stream while stop() awaited its final response.
+      if (!live()) {
+        return
+      }
+      const transcript = streamed ?? (await onTranscribeAudio(result.audio, dictation.owner)).trim()
 
       if (!live()) {
         return
@@ -162,7 +168,7 @@ export function useVoiceRecorder({
   const finish = (dictation: Dictation) => {
     dictationRef.current = null
     setPartial('')
-    void dictation.live?.().then(session => session?.cancel())
+    dictation.cancelLive()
     void syncSttLease(VOICE_INPUT_LEASE, false, dictation.owner)
   }
 
@@ -173,20 +179,36 @@ export function useVoiceRecorder({
       return
     }
 
+    const owner = resolveOwnerNow(ownerRef.current)
+    let dictation: Dictation
+    const stream = liveStream(owner, text => {
+      if (dictationRef.current === dictation) {
+        setPartial(text)
+      }
+    })
+    dictation = { cancelLive: stream.cancel, live: stream.session, owner, warmup: Promise.resolve() }
+    // Publish before mic startup: unmount must retire pending stream opens too.
+    dictationRef.current = dictation
     try {
-      const owner = resolveOwnerNow(ownerRef.current)
-      const stream = liveStream(owner)
       await handle.start({
-        onError: error => notifyError(error, voiceCopy.recordingFailed),
+        onError: error => {
+          if (dictationRef.current === dictation) {
+            notifyError(error, voiceCopy.recordingFailed)
+          }
+        },
         onPcm: stream.push,
         onPcmRate: stream.open
       })
+      if (dictationRef.current !== dictation) {
+        handle.cancel()
+        return
+      }
       // The mic is open, so a transcript is coming: warm the backend's STT
       // engine now so a cold local model loads while the user is still
       // speaking instead of inside the transcription timeout (#105955).
       // Fire-and-forget for the MIC UX — but keep the promise: stop() awaits
       // it as the readiness barrier before transcription (see above).
-      dictationRef.current = { live: stream.session, owner, warmup: syncSttLease(VOICE_INPUT_LEASE, true, owner) }
+      dictation.warmup = syncSttLease(VOICE_INPUT_LEASE, true, owner)
       startedAtRef.current = Date.now()
       setElapsedSeconds(0)
       setVoiceStatus('recording')
@@ -195,24 +217,51 @@ export function useVoiceRecorder({
       const cap = Math.max(1, Math.min(Math.trunc(maxRecordingSeconds), 600))
       timeoutRef.current = window.setTimeout(() => void stop(), cap * 1000)
     } catch (error) {
-      setVoiceStatus('idle')
-      notifyError(error, voiceCopy.recordingFailed)
+      stream.cancel()
+      if (dictationRef.current === dictation) {
+        dictationRef.current = null
+        setPartial('')
+        setVoiceStatus('idle')
+        notifyError(error, voiceCopy.recordingFailed)
+      }
     }
   }
 
   // Live dictation plumbing for one take: chunks captured before the socket opens are buffered
   // (bounded) and flushed, so the first words reach the provider too. `session()` is null when the
   // host has no live wire, or when the meter never reported a rate (no PCM tap this take).
-  const liveStream = (owner: ResolvedOwner) => {
+  const liveStream = (owner: ResolvedOwner, onPartial: (text: string) => void) => {
     let session: DictationStreamSession | null = null
     let settled = false
+    let cancelled = false
+    // Startup buffer overflowed: the provider would miss audio, so the recorded blob is the transcript.
+    let overflowed = false
     let buffered: ArrayBuffer[] = []
     let opening: Promise<DictationStreamSession | null> | null = null
 
     const open = (sampleRate: number) => {
+      if (cancelled) {
+        return
+      }
       opening = (async () => {
         const config = await fetchVoiceClientConfigFor(owner).catch(() => null)
-        const opened = config?.stt.streaming ? await openDictationStream(owner, sampleRate, setPartial) : null
+        if (cancelled) {
+          return null
+        }
+        const opened = config?.stt.streaming
+          ? await openDictationStream(owner, sampleRate, text => {
+              if (!cancelled) {
+                onPartial(text)
+              }
+            })
+          : null
+        if (cancelled || overflowed) {
+          opened?.cancel()
+          settled = true
+          buffered = []
+
+          return null
+        }
 
         for (const chunk of opened ? buffered : []) {
           opened!.pushAudio(chunk)
@@ -223,18 +272,37 @@ export function useVoiceRecorder({
         session = opened
 
         return opened
-      })()
+      })().catch(() => {
+        settled = true
+        buffered = []
+        return null
+      })
     }
 
     const push = (chunk: ArrayBuffer) => {
+      if (cancelled) {
+        return
+      }
       if (session) {
         session.pushAudio(chunk)
-      } else if (!settled && buffered.length < 64) {
-        buffered.push(chunk)
+      } else if (!settled) {
+        if (buffered.length < 64) {
+          buffered.push(chunk)
+        } else {
+          overflowed = true
+          buffered = []
+        }
       }
     }
 
-    return { open, push, session: () => opening ?? Promise.resolve(null) }
+    const cancel = () => {
+      cancelled = true
+      settled = true
+      buffered = []
+      session?.cancel()
+    }
+
+    return { cancel, open, push, session: () => opening ?? Promise.resolve(null) }
   }
 
   const dictate = () => {

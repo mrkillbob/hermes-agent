@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from gateway.owner_identity import host_owner_subject as _owner
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from hermes_cli.active_sessions import active_session_registry_snapshot
 from hermes_cli.browser_connect import ChromeDebugLaunch
@@ -1199,6 +1200,65 @@ def test_write_json_serializes_concurrent_writes(monkeypatch):
     assert len(ours) == 8
 
 
+def test_write_json_keeps_session_event_sequence_in_transport_order(monkeypatch):
+    """A second worker cannot dispatch seq 2 while seq 1 is stamped but not yet written."""
+    from tui_gateway import event_replay, hosted_room_member_activity
+
+    session_id = "event-write-order"
+    event_replay.reset_replay_state()
+    monkeypatch.setattr(hosted_room_member_activity, "project_room_member_activity", lambda *_: None)
+    first_stamped = threading.Event()
+    second_stamped = threading.Event()
+    release_first = threading.Event()
+    written: list[int] = []
+
+    class RecordingTransport:
+        def write(self, frame: dict) -> bool:
+            written.append(frame["params"]["seq"])
+            return True
+
+    monkeypatch.setitem(server._sessions, session_id, {"transport": RecordingTransport()})
+    stamp = event_replay._stamp_event
+
+    def pause_after_first_stamp(frame: dict) -> None:
+        stamp(frame)
+        seq = frame["params"]["seq"]
+
+        if seq == 1:
+            first_stamped.set()
+            release_first.wait(timeout=5)
+        elif seq == 2:
+            second_stamped.set()
+
+    monkeypatch.setattr(event_replay, "_stamp_event", pause_after_first_stamp)
+
+    def emit(seq: int) -> None:
+        server.write_json({
+            "jsonrpc": "2.0",
+            "method": "event",
+            "params": {"session_id": session_id, "type": "message.delta", "payload": {"text": str(seq)}},
+        })
+
+    first = threading.Thread(target=emit, args=(1,))
+    second = threading.Thread(target=emit, args=(2,))
+    first.start()
+    try:
+        assert first_stamped.wait(timeout=2)
+        second.start()
+        # The timeout is only a scheduling window while seq 1 is deliberately
+        # paused. A missing dispatch lock lets seq 2 stamp/write in this window.
+        assert not second_stamped.wait(timeout=2)
+    finally:
+        release_first.set()
+        first.join(timeout=5)
+        if second.ident is not None:
+            second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert written == [1, 2]
+
+
 def test_write_json_returns_false_on_broken_pipe(monkeypatch):
     monkeypatch.setattr(server, "_real_stdout", _BrokenStdout())
 
@@ -1894,7 +1954,7 @@ def test_prompt_submit_typed_stop_phrase_ends_voice_chat(monkeypatch):
     monkeypatch.setenv("HERMES_VOICE", "1")
     monkeypatch.setenv("HERMES_VOICE_TTS", "1")
 
-    resp = server.dispatch(
+    resp = _dispatch_sync(
         {
             "id": "typed-stop",
             "method": "prompt.submit",
@@ -1923,7 +1983,7 @@ def test_prompt_submit_typed_stop_passes_through_when_voice_off(monkeypatch):
     )
     monkeypatch.setenv("HERMES_VOICE", "0")
 
-    resp = server.dispatch(
+    resp = _dispatch_sync(
         {
             "id": "typed-stop-off",
             "method": "prompt.submit",
@@ -3090,6 +3150,7 @@ def _two_repo_project_skill_sessions(tmp_path, monkeypatch) -> tuple[Path, Path]
         f"skills:\n  external_dirs: []\n  trusted_project_dirs: ['{repo_a}', '{repo_b}']\n")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(skills_tool, "SKILLS_DIR", home / "skills")
+    monkeypatch.setattr(skill_utils, "_shared_user_skills_dir", lambda: None)
     monkeypatch.setattr(skill_utils, "_skills_cfg", lambda: {
         "external_dirs": [], "trusted_project_dirs": [str(repo_a), str(repo_b)]})
     skill_utils._external_dirs_cache_clear()
@@ -4665,18 +4726,17 @@ def _capture_make_agent_kwargs(monkeypatch) -> dict:
 
 
 @pytest.mark.parametrize("identity, user_id", [
-    ({"user_id": "oidc|abc123", "provider": "oidc"}, "oidc:oidc|abc123"),
-    ({"user_id": "alice", "provider": "basic"}, "basic:alice"),
-    ({"user_id": "alice", "provider": "oidc"}, "oidc:alice"),
+    ({"user_id": "oidc|abc123", "provider": "oidc"}, _owner()),
+    ({"user_id": "alice", "provider": "basic"}, _owner()),
+    ({"user_id": "alice", "provider": "oidc"}, _owner()),
     (None, None),
     ({"user_id": "server-internal", "provider": "server-internal"}, None),
     ({"user_id": "", "provider": "oidc"}, None),
     ({"user_id": "abc", "provider": ""}, None),
 ])
 def test_make_agent_passes_the_authenticated_dashboard_user_as_user_id(monkeypatch, identity, user_id):
-    """WSTransport.auth_identity reaches the agent as ``user_id`` prefixed with the login provider, so a
-    basic-auth ``alice`` and an OIDC ``alice`` stay two memory peers. The legacy token, stdio and the PTY
-    child's server-internal credential name no human, so the agent gets no user id for them."""
+    """A signed-in login is the machine owner (gateway.owner_identity): the agent gets native Desktop's OS subject
+    as ``user_id``. The legacy token, stdio and the PTY child's server-internal credential stay unstamped."""
     captured = _capture_make_agent_kwargs(monkeypatch)
     transport = types.SimpleNamespace(auth_identity=identity)
     monkeypatch.setitem(server._sessions, "sid-auth", {"session_key": "k", "transport": transport})
@@ -4723,11 +4783,11 @@ def test_make_agent_keeps_the_login_after_a_second_window_attaches_and_detaches(
 
     assert server._attach_session_transport(record, popout)
     server._make_agent("sid-popout", "k")
-    assert captured["user_id"] == "basic:alice"
+    assert captured["user_id"] == _owner()
 
     server._detach_session_transport(record, popout)
     server._make_agent("sid-popout", "k")
-    assert captured["user_id"] == "basic:alice"
+    assert captured["user_id"] == _owner()
 
 
 def test_build_branch_agent_carries_the_parent_login(monkeypatch, tmp_path):
@@ -4750,8 +4810,8 @@ def test_build_branch_agent_carries_the_parent_login(monkeypatch, tmp_path):
     finally:
         reset_transport(token)
 
-    assert captured["user_id"] == "basic:alice"
-    assert server._sessions["sid-branch"]["auth_user_id"] == "basic:alice"
+    assert captured["user_id"] == _owner()
+    assert server._sessions["sid-branch"]["auth_user_id"] == _owner()
 
 
 def test_deferred_session_record_stamps_the_creating_login():
@@ -4762,8 +4822,8 @@ def test_deferred_session_record_stamps_the_creating_login():
     finally:
         reset_transport(token)
 
-    assert record["auth_user_id"] == "oidc:carol"
-    assert server._session_auth_user_id(record) == "oidc:carol"
+    assert record["auth_user_id"] == _owner()
+    assert server._session_auth_user_id(record) == _owner()
 
 
 def test_compute_host_turn_frame_carries_the_session_login(monkeypatch):
@@ -4773,7 +4833,7 @@ def test_compute_host_turn_frame_carries_the_session_login(monkeypatch):
 
     frame = server._compute_host_turn_frame("rid", "sid-host", record, "hello")
 
-    assert frame["auth_user_id"] == "basic:alice"
+    assert frame["auth_user_id"] == _owner()
 
 
 def test_attaching_a_different_login_keeps_the_creator_and_warns_once(monkeypatch):
@@ -4785,7 +4845,7 @@ def test_attaching_a_different_login_keeps_the_creator_and_warns_once(monkeypatc
     assert server._attach_session_transport(record, other)
     assert server._attach_session_transport(record, other)
 
-    assert server._session_auth_user_id(record) == "basic:alice"
+    assert server._session_auth_user_id(record) == _owner()
 
 
 def test_background_agent_kwargs_preserves_full_fallback_chain(monkeypatch):
@@ -7383,6 +7443,59 @@ def test_prompt_submit_resolves_row_id_swallowed_by_plain_user_merge(monkeypatch
         assert len(server._sessions["plain-merge-sid"]["history"]) == 3
     finally:
         server._sessions.pop("plain-merge-sid", None)
+
+
+def test_prompt_submit_preserves_first_row_when_rewinding_inside_first_merged_carrier(monkeypatch):
+    """The physical prefix is nonempty even when its repaired carrier has ordinal zero.
+
+    Pre-materialization validation must retain the first durable row rather than
+    demand confirmation to erase everything based on the merged live projection.
+    """
+    import contextlib
+    import copy
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    verbatim = [
+        {"_row_id": 401, "role": "user", "content": "first interrupted prompt"},
+        {"_row_id": 402, "role": "user", "content": "resend to edit"},
+    ]
+    repaired = copy.deepcopy(verbatim)
+    assert repair_message_sequence(None, repaired) == 1
+    assert len(repaired) == 1
+    replaced = []
+    db = _mk_merge_fake_db(verbatim, repaired, replaced)
+
+    @contextlib.contextmanager
+    def session_db(_session):
+        yield db
+
+    sid = "first-carrier-rewind"
+    server._sessions[sid] = _session(history=copy.deepcopy(repaired))
+    monkeypatch.setattr(server, "_session_db", session_db)
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_start_inflight_turn", lambda *a, **kw: None)
+    try:
+        before = copy.deepcopy(server._sessions[sid]["history"])
+        params = {"session_id": sid, "text": "edited resend", "truncate_before_row_id": 402}
+        refused = server.handle_request({"id": "refuse", "method": "prompt.submit", "params": params})
+        assert refused["error"]["code"] == 4029
+        assert server._sessions[sid]["history"] == before and replaced == []
+
+        # Validation remains detached: resolving the absorbed row must not stamp
+        # the live carrier or write any DB rows before the admitted cut.
+        assert server._validate_truncation_before_materializing(
+            "validate", sid, server._sessions[sid], {**params, "confirm_truncate": True}) is None
+        assert server._sessions[sid]["history"] == before and replaced == []
+        response = server.handle_request({"id": "accept", "method": "prompt.submit",
+                                          "params": {**params, "confirm_truncate": True}})
+        assert "error" not in response, response
+        assert len(replaced) == 1
+        assert [row["_row_id"] for row in replaced[0][1]] == [401]
+        assert [row["content"] for row in replaced[0][1]] == ["first interrupted prompt"]
+        assert [row["content"] for row in server._sessions[sid]["history"]] == ["first interrupted prompt"]
+    finally:
+        server._sessions.pop(sid, None)
 
 
 def test_prompt_submit_row_id_ignores_platform_id_fallback(monkeypatch):
@@ -16317,6 +16430,11 @@ def test_session_branch_writes_to_parent_profile_db(monkeypatch, tmp_path):
             seen["title"] = (key, title)
             return True
 
+        def set_auto_title(self, _key, _title, *, source="llm"):
+            seen["title_source"] = source
+            seen["title"] = (_key, _title)
+            return True
+
         def get_session(self, key):
             return {"id": key, "cwd": str(tmp_path)}
 
@@ -16799,6 +16917,9 @@ def test_session_branch_installs_parent_profile_secret_scope(monkeypatch, tmp_pa
             return list(range(1, len(messages) + 1))
 
         def set_session_title(self, key, title):
+            return True
+
+        def set_auto_title(self, _key, _title, *, source="llm"):
             return True
 
         def get_session(self, key):
@@ -18748,14 +18869,14 @@ def test_decode_attach_base64_helper():
     import base64 as _b64
 
     raw = _b64.b64encode(b"hello").decode("ascii")
-    assert server._decode_attach_base64(raw, mime_prefix="image/") == b"hello"
+    assert server._decode_attach_base64(raw, mime_prefix="image/", max_bytes=5) == b"hello"
     assert (
-        server._decode_attach_base64(f"data:image/png;base64,{raw}", mime_prefix="image/")
+        server._decode_attach_base64(f"data:image/png;base64,{raw}", mime_prefix="image/", max_bytes=5)
         == b"hello"
     )
     # whitespace inside payload is tolerated
-    assert server._decode_attach_base64(raw[:4] + "\n" + raw[4:], mime_prefix="image/") == b"hello"
-    assert server._decode_attach_base64("@@@", mime_prefix="image/") is None
+    assert server._decode_attach_base64(raw[:4] + "\n" + raw[4:], mime_prefix="image/", max_bytes=5) == b"hello"
+    assert server._decode_attach_base64("@@@", mime_prefix="image/", max_bytes=5) is None
 
 
 def test_sniff_image_ext_magic_and_filename():

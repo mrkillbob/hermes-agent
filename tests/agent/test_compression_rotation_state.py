@@ -36,6 +36,13 @@ from hermes_state import SessionDB
 import itertools
 
 
+@pytest.fixture(autouse=True)
+def _isolated_compression_provider_ports(monkeypatch):
+    """These tests cover state/DB behavior, with provider probing kept inert."""
+    monkeypatch.setattr("agent.context_compressor.get_model_context_length", lambda *args, **kwargs: 256_000)
+    monkeypatch.setattr("agent.conversation_compression.check_compression_model_feasibility", lambda agent: None)
+
+
 def _build_agent_with_db(db: SessionDB, session_id: str, platform: str = "telegram"):
     with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
         from run_agent import AIAgent
@@ -546,7 +553,7 @@ class TestRotationChildFlushDedup:
             {
                 "role": "user",
                 "content": "drifted neighbor",
-                "_todo_snapshot_synthetic": True,
+                "_empty_recovery_synthetic": True,
             },
         ]
 
@@ -556,7 +563,7 @@ class TestRotationChildFlushDedup:
             {
                 "role": "user",
                 "content": "handoff scaffolding",
-                "_todo_snapshot_synthetic": True,
+                "_empty_recovery_synthetic": True,
             },
         )
 
@@ -604,7 +611,7 @@ class TestRotationChildFlushDedup:
             {
                 "role": "user",
                 "content": "scaffolding",
-                "_todo_snapshot_synthetic": True,
+                "_empty_recovery_synthetic": True,
             },
         )
 
@@ -684,7 +691,7 @@ class TestRotationChildFlushDedup:
             {
                 "role": "user",
                 "content": "handoff scaffolding",
-                "_todo_snapshot_synthetic": True,
+                "_empty_recovery_synthetic": True,
             },
         )
 
@@ -773,8 +780,8 @@ class TestRotationChildFlushDedup:
             {"role": "user", "content": "current ask\n\n[merged summary]"},
             {
                 "role": "user",
-                "content": "Current todos:\n- [ ] leftover",
-                "_todo_snapshot_synthetic": True,
+                "content": "Recovery scaffolding",
+                "_empty_recovery_synthetic": True,
             },
         ]
 
@@ -794,7 +801,7 @@ class TestRotationChildFlushDedup:
             {
                 "role": "user",
                 "content": "handoff scaffolding",
-                "_todo_snapshot_synthetic": True,
+                "_empty_recovery_synthetic": True,
             },
         ]
 
@@ -865,7 +872,7 @@ class TestRotationChildFlushDedup:
             {
                 "role": "user",
                 "content": [{"type": "text", "text": "scaffolding"}],
-                "_todo_snapshot_synthetic": True,
+                "_empty_recovery_synthetic": True,
             },
         )
 
@@ -948,7 +955,7 @@ class TestRotationChildFlushDedup:
             {
                 "role": "user",
                 "content": "handoff scaffolding",
-                "_todo_snapshot_synthetic": True,
+                "_empty_recovery_synthetic": True,
             },
         )
 
@@ -1258,497 +1265,213 @@ class TestCooldownPersistFailureIsNotAClearedRow:
         assert compressor._ineffective_compression_count == 0
 
 
-class TestTodoSnapshotMergedNotDuplicated:
-    """Todo snapshots preserve tail content without duplicate user turns."""
+class TestTodoSnapshotToolState:
+    """Full state survives both publication modes without gaining human authority."""
 
-    def test_snapshot_merges_into_trailing_user(self, tmp_path: Path):
+    @pytest.mark.parametrize("in_place", [False, True])
+    @pytest.mark.parametrize("status", ["pending", "completed", "cancelled", "cleared"])
+    def test_full_state_and_human_multimodal_round_trip(self, tmp_path, in_place, status):
+        import json
+        from agent.compression_todo_state import is_todo_state_result
+        from agent.context_compressor import ContextCompressor
+        from tools.todo_tool import todo_tool
+
         db = SessionDB(db_path=tmp_path / "state.db")
-        parent = "PARENT_TODO_MERGE"
+        parent = "todo-tool-state"
         db.create_session(parent, source="cli")
         agent = _build_agent_with_db(db, parent, platform="cli")
-
+        agent.compression_in_place = in_place
+        agent._compression_feasibility_checked = True
+        parts = [{"type": "text", "text": "Inspect this image"},
+                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}]
+        original = [{"role": "user" if i % 2 == 0 else "assistant", "content": "bulk " + "x" * 1000}
+                    for i in range(20)]
+        original.extend([{"role": "user", "content": parts}, {"role": "assistant", "content": "Finished reply"}])
         agent.context_compressor.compress.return_value = [
-            {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
-            {"role": "assistant", "content": "acknowledged"},
-            {"role": "user", "content": "tail"},
+            {"role": "user", "content": SUMMARY_PREFIX + " earlier turns"},
+            {"role": "assistant", "content": "Earlier acknowledgement"},
+            {"role": "user", "content": parts},
+            {"role": "assistant", "content": "Finished reply"},
         ]
-        agent._todo_store._todos = [
-            {"id": "t1", "content": "task A", "status": "pending"}
-        ]
-        agent._todo_store.format_for_injection = (
-            lambda: "## Current Tasks\n- [ ] task A"
-        )
+        agent._todo_store.write([{"id": "t1", "content": "Unique saved task", "status": "pending"}])
+        if status == "cleared":
+            agent._todo_store.write([])
+        elif status != "pending":
+            agent._todo_store.write([{"id": "t1", "content": "Unique saved task", "status": status}])
+        snapshot = agent._todo_store.snapshot()
+        compressed, _ = agent._compress_context(original, "sys", approx_tokens=120_000)
+        assert compressed[-1]["content"] == "Finished reply" and not compressed[-1].get("tool_calls")
+        assert ContextCompressor._find_inflight_user_task(compressed) is None
+        assert any(m.get("role") == "user" and m.get("content") == parts for m in compressed)
+        carriers = [m for m in compressed if is_todo_state_result(m)]
+        assert len(carriers) == 1
+        payload = json.loads(carriers[0]["content"])
+        assert {key: payload[key] for key in snapshot} == snapshot
+        assert all("Unique saved task" not in str(m.get("content")) for m in compressed if m.get("role") != "tool")
+        projected = db.get_messages_as_conversation(agent.session_id)
+        fresh = _build_agent_with_db(db, agent.session_id, platform="cli")
+        fresh._hydrate_todo_store(projected)
+        assert fresh._todo_store.snapshot() == snapshot
+        assert json.loads(db.get_latest_todo_result(agent.session_id))["todos"] == snapshot["todos"]
+        assert json.loads(todo_tool(store=fresh._todo_store))["revision"] == snapshot["revision"]
+        db.close()
 
-        compressed, _ = agent._compress_context(
-            _msgs(), "sys", approx_tokens=120_000
-        )
-
-        assert len(compressed) == 3
-        tail = compressed[-1]
-        assert tail["role"] == "user"
-        assert "tail" in tail["content"]
-        assert "task A" in tail["content"]
-        assert not any(
-            previous.get("role") == current.get("role") == "user"
-            for previous, current in itertools.pairwise(compressed)
-        )
-
-
-
-
-    def test_multimodal_snapshot_merge_is_persisted_in_place(self, tmp_path: Path):
+    def test_adopted_newer_history_reconciles_live_store_without_a_write(self, tmp_path):
+        import json
+        from tools.todo_tool import todo_tool
         db = SessionDB(db_path=tmp_path / "state.db")
-        parent = "PARENT_TODO_MULTIMODAL_INPLACE"
-        db.create_session(parent, source="cli")
-        agent = _build_agent_with_db(db, parent, platform="cli")
+        db.create_session("adopt-todo", source="cli")
+        agent = _build_agent_with_db(db, "adopt-todo", platform="cli")
+        agent._compression_feasibility_checked = True
+        snapshot = {"todos": [{"id": "1", "content": "recovered task", "status": "completed"}], "revision": 7}
+        adopted = [{"role": "user" if i % 2 == 0 else "assistant", "content": "bulk " + "x" * 1000}
+                   for i in range(20)]
+        adopted.extend([
+            {"role": "assistant", "tool_calls": [{"id": "read", "function": {"name": "todo_list", "arguments": "{}"}}]},
+            {"role": "tool", "tool_name": "todo_list", "tool_call_id": "read", "content": json.dumps(snapshot)},
+            {"role": "user", "content": "latest request"}, {"role": "assistant", "content": "Completed"},
+        ])
+        agent.context_compressor.compress.return_value = [
+            {"role": "user", "content": SUMMARY_PREFIX + " earlier turns"},
+            {"role": "assistant", "content": "ack"},
+            {"role": "user", "content": "latest request"}, {"role": "assistant", "content": "Completed"},
+        ]
+        with patch("agent.conversation_compression._adopt_grown_durable_parent", return_value=adopted):
+            _compressed, _ = agent._compress_context([{"role": "user", "content": "stale"}], "sys", force=True)
+        assert agent._todo_store.snapshot() == snapshot
+        assert json.loads(todo_tool(store=agent._todo_store))["todos"] == snapshot["todos"]
+        todo_tool(todos=[{"id": "2", "content": "new task", "status": "pending"}], store=agent._todo_store)
+        assert agent._todo_store.snapshot()["revision"] == 8
+        assert agent.session_id != "adopt-todo"
+        db.close()
+
+    @pytest.mark.parametrize("newly_pruned_skill", [False, True])
+    def test_partial_compaction_keeps_one_verbatim_carrier_or_defers(self, tmp_path, newly_pruned_skill):
+        from agent.compression_todo_state import is_todo_state_result
+        from agent.context_compressor import _skill_pruned_marker
+        from agent.conversation_compression import _fold_todo_snapshot
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("partial-todo", source="cli")
+        agent = _build_agent_with_db(db, "partial-todo", platform="cli")
         agent.compression_in_place = True
-
-        original_parts = [
-            {"type": "text", "text": "last user msg"},
-            {
-                "type": "image_url",
-                "image_url": {"url": "https://example.com/context.png"},
-            },
-        ]
-        agent.context_compressor.compress.return_value = None
-
-        def _keep_last_reply(messages, **_kwargs):
-            # Conforming-engine shape (#118900): the retained tail assistant
-            # row is the transcript's own last reply, kept verbatim — the
-            # commit guard reinserts a dropped last reply, so a stub that
-            # invents a new tail row would (correctly) come back with the
-            # original alongside it.
-            return [
-                {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
-                {"role": "assistant", "content": messages[-1]["content"]},
-                {"role": "user", "content": list(original_parts)},
-            ]
-
-        agent.context_compressor.compress.side_effect = _keep_last_reply
-        agent._todo_store._todos = [
-            {"id": "t1", "content": "inspect image", "status": "in_progress"}
-        ]
-        agent._todo_store.format_for_injection = (
-            lambda: "## Current Tasks\n- [ ] inspect image"
-        )
-
-        # Input transcript must be large enough that the fake compressor's
-        # output is a genuine shrink — the no-growth commit guard refuses
-        # to persist a compression that grows the transcript.
-        input_msgs = [
-            {
-                "role": "user" if i % 2 == 0 else "assistant",
-                "content": f"m{i} " + "x" * 400,
-            }
-            for i in range(20)
-        ]
-        compressed, _ = agent._compress_context(
-            input_msgs, "sys", approx_tokens=120_000
-        )
-
-        assert len(compressed) == 3
-        tail = compressed[-1]
-        assert tail["role"] == "user"
-        assert isinstance(tail["content"], list)
-        assert tail["content"][: len(original_parts)] == original_parts
-        assert any(
-            isinstance(part, dict) and "inspect image" in (part.get("text") or "")
-            for part in tail["content"]
-        )
-        assert not any(
-            previous.get("role") == current.get("role") == "user"
-            for previous, current in itertools.pairwise(compressed)
-        )
-
-        db_msgs = db.get_messages(agent.session_id)
-        persisted_tail = db_msgs[-1]
-        assert persisted_tail["role"] == "user"
-        assert persisted_tail["content"][: len(original_parts)] == original_parts
-        assert any(
-            isinstance(part, dict) and "inspect image" in (part.get("text") or "")
-            for part in persisted_tail["content"]
-        )
-        assert not any(
-            previous.get("role") == current.get("role") == "user"
-            for previous, current in itertools.pairwise(db_msgs)
-        )
-
-
-class TestTodoSnapshotScaffoldingTails:
-    """Scaffolding tails must never absorb the todo snapshot (#69292)."""
-
-    @staticmethod
-    def _agent_with_todo(db: SessionDB, session_id: str, tail: dict):
-        db.create_session(session_id, source="cli")
-        agent = _build_agent_with_db(db, session_id, platform="cli")
+        agent._compression_feasibility_checked = True
+        agent._todo_store.write([{"id": "1", "content": "saved task", "status": "pending"}])
+        tail = [{"role": "user", "content": "kept human"}, {"role": "assistant", "content": "kept reply"}]
+        _fold_todo_snapshot(agent, tail)
+        tail_before = copy.deepcopy(tail)
+        head = [{"role": "user" if i % 2 == 0 else "assistant", "content": "bulk " + "x" * 1000}
+                for i in range(20)]
+        head_before = copy.deepcopy(head)
+        summary = SUMMARY_PREFIX + " earlier turns"
+        if newly_pruned_skill:
+            summary += "\n" + _skill_pruned_marker("newly-pruned")
         agent.context_compressor.compress.return_value = [
-            {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
-            {"role": "assistant", "content": "acknowledged"},
-            tail,
-        ]
-        agent._todo_store.write(
-            [{"id": "t1", "content": "task A", "status": "pending"}]
-        )
-        return agent
+            {"role": "user", "content": summary}, {"role": "assistant", "content": "old head reply"}]
+        with patch.object(agent, "_build_system_prompt", return_value="new prompt") as rebuild:
+            result, _ = agent._compress_context(head, "sys", force=True, verbatim_tail=tail)
+        if newly_pruned_skill:
+            assert result == head_before and tail == tail_before
+            assert db.get_messages("partial-todo") == []
+            rebuild.assert_not_called()
+            assert agent._compression_todo_deferred_reason
+        else:
+            assert sum(is_todo_state_result(m) for m in result) == 1
+            assert result[-1]["content"] == "kept reply"
+            assert sum(is_todo_state_result(m) for m in db.get_messages_as_conversation(agent.session_id)) == 1
+        db.close()
 
-
-
-
-    def test_previously_merged_snapshot_is_stripped_before_reinjection(
-        self, tmp_path: Path
-    ):
+    @pytest.mark.parametrize("legacy", [
+        "merged", "standalone", "structured", "notice_only", "unknown_store", "unhydrated",
+    ])
+    def test_ambiguous_legacy_boundary_defers_without_publication(self, tmp_path, legacy):
         from tools.todo_tool import TODO_INJECTION_HEADER
-
-        previously_merged = (
-            "please fix the login bug\n\n"
-            f"{TODO_INJECTION_HEADER}\n- [ ] t0. old finished task (pending)"
-        )
         db = SessionDB(db_path=tmp_path / "state.db")
-        agent = self._agent_with_todo(
-            db,
-            "PARENT_TODO_RESTRIP",
-            {
-                "role": "user",
-                "content": previously_merged,
-                "api_content": "stale wire copy containing the old task",
-            },
-        )
+        db.create_session("legacy", source="cli")
+        agent = _build_agent_with_db(db, "legacy", platform="cli")
+        agent._todo_store.write([{"id": "new", "content": "new task", "status": "pending"}])
+        text = TODO_INJECTION_HEADER + "\n- [ ] old. old task (pending)"
+        row = {"role": "user", "content": text, "_todo_snapshot_synthetic": True}
+        from tools.todo_tool import TodoStore
+        row = {
+            "merged": {"role": "user", "content": "Human text\n\n" + text},
+            "structured": {"role": "user", "_todo_snapshot_synthetic": True,
+                           "content": [{"type": "text", "text": text},
+                                       {"type": "image_url", "image_url": {"url": "image"}}]},
+            "notice_only": {"role": "user", "_todo_snapshot_synthetic": True,
+                            "content": "[Pruned skill reload reference] reload prior policy"},
+        }.get(legacy, row)
+        agent._todo_store = {
+            "unknown_store": type("LegacyStore", (), {"format_for_injection": lambda self: text})(),
+            "unhydrated": TodoStore(),
+        }.get(legacy, agent._todo_store)
+        original = [row, {"role": "assistant", "content": "Completed"}]
+        before = copy.deepcopy(original)
+        agent._last_compression_attempt_in_place = True
+        previous_history = [{"role": "user", "content": "already persisted"}]
+        with patch("agent.conversation_compression._begin_compression_attempt", side_effect=AssertionError("attempt mutation")):
+            returned, prompt = agent._compress_context(original, "sys", force=True)
+        from agent.conversation_compression import conversation_history_after_compression
+        assert returned is original and returned == before and prompt == "sys"
+        assert conversation_history_after_compression(agent, returned, previous_history) is previous_history
+        agent.context_compressor.compress.assert_not_called()
+        assert agent.session_id == "legacy" and db.get_messages("legacy") == []
+        db.close()
 
-        compressed, _ = agent._compress_context(
-            _msgs(), "sys", approx_tokens=120_000
-        )
-
-        tail = compressed[-1]
-        assert tail["role"] == "user"
-        assert "please fix the login bug" in tail["content"]
-        assert "task A" in tail["content"]
-        assert "old finished task" not in tail["content"]
-        assert tail["content"].count(TODO_INJECTION_HEADER) == 1
-        assert "api_content" not in tail
-        assert not any(
-            previous.get("role") == current.get("role") == "user"
-            for previous, current in itertools.pairwise(compressed)
-        )
-
-    def test_empty_todo_store_injects_nothing(self, tmp_path: Path):
-        from tools.todo_tool import TODO_INJECTION_HEADER
-
+    def test_damaged_salvage_refuses_before_prompt_or_db_mutation(self, tmp_path):
         db = SessionDB(db_path=tmp_path / "state.db")
-        session_id = "PARENT_TODO_EMPTY"
-        db.create_session(session_id, source="cli")
-        agent = _build_agent_with_db(db, session_id, platform="cli")
-        expected = [
-            {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
-            {"role": "assistant", "content": "acknowledged"},
-            {"role": "user", "content": "tail"},
-        ]
-        agent.context_compressor.compress.return_value = [
-            dict(message) for message in expected
-        ]
-        agent._todo_store.write(
-            [{"id": "t1", "content": "done thing", "status": "completed"}]
-        )
+        db.create_session("damaged-salvage", source="cli")
+        agent = _build_agent_with_db(db, "damaged-salvage", platform="cli")
+        agent._compression_feasibility_checked = True
+        agent._cached_system_prompt = "cached system"
+        agent._todo_store.write([{"id": "1", "content": "complete saved task", "status": "pending"}])
+        original = [{"role": "user" if i % 2 == 0 else "assistant", "content": "bulk " + "x" * 1000}
+                    for i in range(20)]
+        before = copy.deepcopy(original)
+        original_count = agent.context_compressor.compression_count
 
-        compressed, _ = agent._compress_context(
-            _msgs(), "sys", approx_tokens=120_000
-        )
+        def summarize(messages, **kwargs):
+            agent.context_compressor.compression_count += 1
+            return [{"role": "user", "content": "retained human"},
+                    {"role": "assistant", "content": messages[-1]["content"]}]
 
-        assert [
-            {
-                k: v
-                for k, v in m.items()
-                if k not in {"_row_id", "timestamp", "message_uid", _DB_PERSISTED_MARKER, DB_ROW_SNAPSHOT}
-            }
-            for m in compressed
-        ] == expected
-        # The rotation handoff stamps each child row's stored digest, so a re-flush takes the versioned path.
-        assert all(isinstance(m.get(DB_ROW_SNAPSHOT), str) for m in compressed)
-        assert not any(
-            TODO_INJECTION_HEADER in str(message.get("content") or "")
-            for message in compressed
-        )
+        def damage(_agent, _original, candidate, **kwargs):
+            from agent.compression_todo_state import is_todo_state_result
+            result = copy.deepcopy(candidate)
+            next(m for m in result if is_todo_state_result(m))["content"] = "[pruned]"
+            return result, None
 
-    def test_empty_todo_store_removes_previous_compaction_snapshot(
-        self, tmp_path: Path
-    ):
-        """Completed items make the store authoritative and clear old work."""
-        from tools.todo_tool import TODO_INJECTION_HEADER
+        agent.context_compressor.compress.side_effect = summarize
+        with patch("agent.conversation_compression._salvage_or_refuse_grown_transcript", side_effect=damage), \
+                patch.object(agent, "_build_system_prompt", side_effect=AssertionError("prompt changed")):
+            returned, prompt = agent._compress_context(original, "sys", force=True)
+        assert returned == before and prompt == "sys"
+        assert agent.context_compressor.compression_count == original_count
+        assert agent._cached_system_prompt == "cached system"
+        assert db.get_messages("damaged-salvage") == []
+        assert agent._active_compression_lock_holder is None
+        db.close()
 
+    def test_near_break_even_guard_does_not_price_internal_tail_tags(self, tmp_path):
+        from agent.model_metadata import estimate_messages_tokens_rough
         db = SessionDB(db_path=tmp_path / "state.db")
-        session_id = "PARENT_TODO_CLEARED"
-        db.create_session(session_id, source="cli")
-        agent = _build_agent_with_db(db, session_id, platform="cli")
-        stale_task = "- [ ] stale-task. This task was already cleared"
-        agent.context_compressor.compress.return_value = [
-            {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
-            {"role": "assistant", "content": "acknowledged"},
-            {
-                "role": "user",
-                "content": (
-                    "Keep this user context.\n\n"
-                    f"{TODO_INJECTION_HEADER}\n{stale_task}"
-                ),
-                "api_content": "stale wire copy containing the old snapshot",
-            },
-        ]
-        agent._todo_store.write(
-            [{"id": "done", "content": "done thing", "status": "completed"}]
-        )
-
-        compressed, _ = agent._compress_context(
-            _msgs(), "sys", approx_tokens=120_000
-        )
-
-        combined = "\n".join(str(m.get("content") or "") for m in compressed)
-        assert "Keep this user context." in combined
-        assert TODO_INJECTION_HEADER not in combined
-        assert stale_task not in combined
-        retained = next(
-            message
-            for message in compressed
-            if "Keep this user context." in str(message.get("content") or "")
-        )
-        assert "api_content" not in retained
-
-    def test_cancelled_only_store_is_authoritative(self, tmp_path: Path):
-        """Cancelled work retires the old snapshot just like completed work."""
-        from tools.todo_tool import TODO_INJECTION_HEADER
-
-        db = SessionDB(db_path=tmp_path / "state.db")
-        session_id = "PARENT_TODO_CANCELLED"
-        db.create_session(session_id, source="cli")
-        agent = _build_agent_with_db(db, session_id, platform="cli")
-        agent.context_compressor.compress.return_value = [
-            {"role": "user", "content": "Keep the request"},
-            {"role": "assistant", "content": "acknowledged"},
-            {
-                "role": "user",
-                "content": f"{TODO_INJECTION_HEADER}\n- [ ] obsolete task",
-                "_todo_snapshot_synthetic": True,
-            },
-        ]
-        agent._todo_store.write(
-            [{"id": "nope", "content": "obsolete task", "status": "cancelled"}]
-        )
-
-        compressed, _ = agent._compress_context(
-            _msgs(), "sys", approx_tokens=120_000
-        )
-
-        assert [message.get("role") for message in compressed] == [
-            "user",
-            "assistant",
-        ]
-        assert all(
-            TODO_INJECTION_HEADER not in str(message.get("content") or "")
-            for message in compressed
-        )
-
-    def test_structured_snapshot_only_tail_is_removed(self, tmp_path: Path):
-        """A flagged list row is removable only when no other part remains."""
-        from tools.todo_tool import TODO_INJECTION_HEADER
-
-        db = SessionDB(db_path=tmp_path / "state.db")
-        session_id = "PARENT_TODO_STRUCTURED_ONLY"
-        db.create_session(session_id, source="cli")
-        agent = _build_agent_with_db(db, session_id, platform="cli")
-        agent.context_compressor.compress.return_value = [
-            {"role": "user", "content": "Keep the request"},
-            {"role": "assistant", "content": "acknowledged"},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"{TODO_INJECTION_HEADER}\n- [ ] stale task",
-                    }
-                ],
-                "_todo_snapshot_synthetic": True,
-            },
-        ]
-        agent._todo_store.write(
-            [{"id": "done", "content": "stale task", "status": "completed"}]
-        )
-
-        compressed, _ = agent._compress_context(
-            _msgs(), "sys", approx_tokens=120_000
-        )
-
-        assert [message.get("role") for message in compressed] == [
-            "user",
-            "assistant",
-        ]
-
-    def test_non_tail_snapshot_deletion_repairs_assistant_alternation(
-        self, tmp_path: Path
-    ):
-        from tools.todo_tool import TODO_INJECTION_HEADER
-
-        db = SessionDB(db_path=tmp_path / "state.db")
-        session_id = "PARENT_TODO_MIDDLE"
-        db.create_session(session_id, source="cli")
-        agent = _build_agent_with_db(db, session_id, platform="cli")
-        agent.context_compressor.compress.return_value = [
-            {"role": "user", "content": "Keep the request"},
-            {
-                "role": "assistant",
-                "content": "before snapshot",
-                "api_content": "stale assistant wire copy",
-            },
-            {
-                "role": "user",
-                "content": f"{TODO_INJECTION_HEADER}\n- [ ] stale task",
-                "_todo_snapshot_synthetic": True,
-            },
-            {"role": "assistant", "content": "after snapshot"},
-            {"role": "user", "content": "new request"},
-        ]
-        agent._todo_store.write(
-            [{"id": "done", "content": "stale task", "status": "completed"}]
-        )
-
-        compressed, _ = agent._compress_context(
-            _msgs(), "sys", approx_tokens=120_000
-        )
-
-        assert [message.get("role") for message in compressed] == [
-            "user",
-            "assistant",
-            "user",
-        ]
-        repaired = compressed[1]
-        assert "before snapshot" in repaired["content"]
-        assert "after snapshot" in repaired["content"]
-        assert "api_content" not in repaired
-        assert not any(
-            previous.get("role") == current.get("role")
-            for previous, current in itertools.pairwise(compressed)
-        )
-
-    def test_multimodal_content_survives_and_synthetic_provenance_clears(
-        self, tmp_path: Path
-    ):
-        from tools.todo_tool import TODO_INJECTION_HEADER
-
-        db = SessionDB(db_path=tmp_path / "state.db")
-        session_id = "PARENT_TODO_MULTIMODAL_RETIRE"
-        db.create_session(session_id, source="cli")
-        agent = _build_agent_with_db(db, session_id, platform="cli")
-        surviving_parts = [
-            {"type": "text", "text": "Keep this caption"},
-            {
-                "type": "image_url",
-                "image_url": {"url": "https://example.com/context.png"},
-            },
-            {"type": "input_audio", "input_audio": {"data": "audio-data"}},
-        ]
-        agent.context_compressor.compress.return_value = [
-            {"role": "user", "content": "summary"},
-            {"role": "assistant", "content": "acknowledged"},
-            {
-                "role": "user",
-                "content": surviving_parts
-                + [
-                    {
-                        "type": "text",
-                        "text": f"{TODO_INJECTION_HEADER}\n- [ ] stale task",
-                    }
-                ],
-                "api_content": "stale wire copy containing the snapshot",
-                "_todo_snapshot_synthetic": True,
-                "unrelated_metadata": "keep-me",
-            },
-        ]
-        agent._todo_store.write(
-            [{"id": "done", "content": "stale task", "status": "completed"}]
-        )
-
-        input_msgs = [
-            {
-                "role": "user" if index % 2 == 0 else "assistant",
-                "content": f"message {index} " + "x" * 1000,
-            }
-            for index in range(40)
-        ]
-        compressed, _ = agent._compress_context(
-            input_msgs, "sys", approx_tokens=120_000
-        )
-
-        retained = next(
-            message for message in compressed if isinstance(message.get("content"), list)
-        )
-        assert retained["content"] == surviving_parts
-        assert retained["unrelated_metadata"] == "keep-me"
-        assert "api_content" not in retained
-        assert "_todo_snapshot_synthetic" not in retained
-
-    @pytest.mark.parametrize("authority_mode", ["missing", "raises"])
-    def test_unknown_store_authority_preserves_snapshot(
-        self, tmp_path: Path, authority_mode: str
-    ):
-        """Legacy or broken stores fail conservative, never erasing pending work."""
-        from tools.todo_tool import TODO_INJECTION_HEADER
-
-        db = SessionDB(db_path=tmp_path / "state.db")
-        session_id = f"PARENT_TODO_COMPAT_{authority_mode.upper()}"
-        db.create_session(session_id, source="telegram")
-        agent = _build_agent_with_db(db, session_id, platform="telegram")
-        pending_task = "- [ ] pending-task. Preserve conservatively"
-        agent.context_compressor.compress.return_value = [
-            {"role": "user", "content": "Keep the request"},
-            {"role": "assistant", "content": "acknowledged"},
-            {
-                "role": "user",
-                "content": f"{TODO_INJECTION_HEADER}\n{pending_task}",
-                "_todo_snapshot_synthetic": True,
-            },
-        ]
-
-        class LegacyStore:
-            def format_for_injection(self):
-                return None
-
-        store = LegacyStore()
-        if authority_mode == "raises":
-            store.has_items = MagicMock(side_effect=RuntimeError("store unavailable"))
-        agent._todo_store = store
-
-        compressed, _ = agent._compress_context(
-            _msgs(), "sys", approx_tokens=120_000
-        )
-
-        combined = "\n".join(str(message.get("content") or "") for message in compressed)
-        assert TODO_INJECTION_HEADER in combined
-        assert pending_task in combined
-
-    def test_unhydrated_empty_todo_store_preserves_pending_snapshot(
-        self, tmp_path: Path
-    ):
-        """A fresh empty store must not erase pending work retained by compression."""
-        from tools.todo_tool import TODO_INJECTION_HEADER
-
-        db = SessionDB(db_path=tmp_path / "state.db")
-        session_id = "PARENT_TODO_UNHYDRATED"
-        db.create_session(session_id, source="telegram")
-        agent = _build_agent_with_db(db, session_id, platform="telegram")
-        pending_task = "- [ ] pending-task. Continue after the next compaction"
-        agent.context_compressor.compress.return_value = [
-            {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
-            {"role": "assistant", "content": "acknowledged"},
-            {
-                "role": "user",
-                "content": f"{TODO_INJECTION_HEADER}\n{pending_task}",
-                "_todo_snapshot_synthetic": True,
-            },
-        ]
-
-        compressed, _ = agent._compress_context(
-            _msgs(), "sys", approx_tokens=120_000
-        )
-
-        combined = "\n".join(str(m.get("content") or "") for m in compressed)
-        assert TODO_INJECTION_HEADER in combined
-        assert pending_task in combined
+        db.create_session("tail-tags", source="cli")
+        agent = _build_agent_with_db(db, "tail-tags", platform="cli")
+        agent.compression_in_place = True
+        original = [{"role": "user", "content": "x" * 100}, {"role": "assistant", "content": "y" * 100},
+                    {"role": "user", "content": "latest human"}, {"role": "assistant", "content": "final reply"}]
+        candidate = copy.deepcopy(original)
+        candidate[0]["content"] = "x" * 90
+        assert estimate_messages_tokens_rough(candidate) < estimate_messages_tokens_rough(original)
+        for message in candidate:
+            message["_compaction_tail"] = True
+        assert estimate_messages_tokens_rough(candidate) > estimate_messages_tokens_rough(original)
+        agent.context_compressor.compress.return_value = candidate
+        compressed, _ = agent._compress_context(original, "sys", force=True)
+        assert agent._last_compaction_in_place is True
+        assert compressed[0]["content"] == "x" * 90
+        assert all("_compaction_tail" not in message for message in compressed)
+        agent.context_compressor.record_rejected_compaction.assert_not_called()
+        db.close()
 
 
 class TestArchivedParentActivityLabelsCleared:

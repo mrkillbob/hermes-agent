@@ -132,6 +132,7 @@ def request_permissions_grant(driver_cmd: Optional[str] = None) -> int:
     print("Requesting Accessibility + Screen Recording for CuaDriver.\n"
           f"macOS will show a dialog attributed to CuaDriver ({CUA_DRIVER_BUNDLE_ID}) — approve it, then return here.")
     try:
+        # health: allow HX006 -- macOS permission dialog that waits for the user to approve
         return int(subprocess.run([binary, "permissions", "grant"], env=_child_env(), stdin=subprocess.DEVNULL, check=False).returncode)
     except KeyboardInterrupt:  # pragma: no cover - interactive
         return 130

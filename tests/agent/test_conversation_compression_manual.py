@@ -49,6 +49,22 @@ def test_compressed_result_rejoins_verbatim_tail_and_never_mutates_input():
     assert agent._compress_context.call_args.kwargs["force"] is True
 
 
+def test_todo_state_deferral_reports_reason_and_preserves_complete_partial_history():
+    from agent.conversation_compression_manual import render_compress_result
+    agent, history = _agent(), _history()
+    before = copy.deepcopy(history)
+
+    def defer(head, system_message, **kwargs):
+        agent._compression_todo_deferred_reason = "complete todo result exceeds recovery limit"
+        return head, system_message
+
+    agent._compress_context.side_effect = defer
+    result = compress_now(agent, history, parse_compress_args("here 1"))
+    assert result.after_messages == before and history == before
+    assert "deferred" in " ".join(render_compress_result(result)).lower()
+    assert "recovery limit" in " ".join(render_compress_result(result))
+
+
 @pytest.mark.parametrize("surface", ["cli", "gateway", "tui", "acp"])
 def test_every_surface_honours_preview_without_compressing(surface, monkeypatch):
     """The prompt-cache-breaking mutation must be gated by the same ``--preview`` on all four surfaces."""

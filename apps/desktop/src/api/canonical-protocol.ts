@@ -1,7 +1,25 @@
 // Canonical local authority wire adapter. Remote legacy transports keep their
 // existing protocol; unsupported explicit semantics fail before network admission.
 
+import { randomUuid } from '@hermes/shared'
+
+import { acceptExecutionEvent, type ExecutionStampedEvent } from '@/lib/execution-authority'
+
 export const CANONICAL_GATEWAY_PROTOCOL = 'hermes-gateway-v1'
+
+/** Dial `/api/ws` or a sibling stream beside it. A local gateway's one-use ticket leaves the URL
+ *  for the gateway subprotocol; a remote route keeps its own query credential. */
+export function openGatewaySocket(url: string): WebSocket {
+  const parsed = new URL(url)
+
+  if (!parsed.searchParams.has('native_dial')) {return new WebSocket(url)}
+  const ticket = parsed.searchParams.get('ticket')
+
+  if (!ticket) {throw new Error('Native gateway requires a fresh private ticket')}
+  parsed.searchParams.delete('ticket')
+
+  return new WebSocket(parsed.toString(), [CANONICAL_GATEWAY_PROTOCOL, `hermes-gateway-ticket.${ticket}`])
+}
 
 export const canonicalProfile = (profile: unknown): string =>
   typeof profile === 'string' && profile ? profile : 'default'
@@ -195,7 +213,7 @@ function canonicalProducerFrame(method: string, params: Record<string, unknown>)
 
   // The owner admits identified input only. An identityless producer (session tile, quick entry,
   // bot chats) is a fresh send on every call, which is what the legacy wire did with it.
-  if (method === 'prompt.submit' && !params.submission_id && !params.input_id) { return { ...params, submission_id: crypto.randomUUID() } }
+  if (method === 'prompt.submit' && !params.submission_id && !params.input_id) { return { ...params, submission_id: randomUuid() } }
 
   return method === 'bot_relay.deliver' ? canonicalBotDelivery(params) : params
 }
@@ -234,6 +252,7 @@ export class CanonicalDesktopProtocol {
   private revisions = new Map<string, number>()
   private mutations = new Map<string, Record<string, unknown>>()
   private generations = new Map<string, number>()
+  private executionAuthorities: Parameters<typeof acceptExecutionEvent>[0] = new Map()
   private prompts = new Map<string, Record<string, unknown>>()
   // admission_id → generation of a turn the authority recovered as `unknown`
   // (owner died mid-turn). Only these rows may be acknowledged, and only with
@@ -321,7 +340,7 @@ export class CanonicalDesktopProtocol {
 
     if (withGeneration && generation === undefined) { throw new Error('Session execution identity unavailable; reconnect before this command') }
 
-    const mutation: Record<string, unknown> = { session_id: sessionId, request_id: crypto.randomUUID(), expected_revision: revision,
+    const mutation: Record<string, unknown> = { session_id: sessionId, request_id: randomUuid(), expected_revision: revision,
       ...(withGeneration ? { expected_generation: generation } : {}), operation, payload }
 
     this.mutations.set(key, mutation)
@@ -523,7 +542,7 @@ export class CanonicalDesktopProtocol {
       ['request_id', 'cwd', 'model', 'provider', 'toolsets', 'reasoning', 'title', 'hidden', 'follow_profile_config', 'service_tier', 'cwd_explicit'].includes(key) || (key === 'profile' && typeof value === 'string' && value !== '')))
 
     const key = JSON.stringify(result)
-    const requestId = params.request_id ?? this.creates.get(key) ?? crypto.randomUUID()
+    const requestId = params.request_id ?? this.creates.get(key) ?? randomUuid()
     this.creates.set(key, String(requestId))
 
     return { ...result, request_id: requestId, source: 'gui' }
@@ -574,13 +593,18 @@ export class CanonicalDesktopProtocol {
     }
   }
 
-  event(event: { type: string; session_id?: string; profile?: string; execution_generation?: unknown; payload?: unknown }) {
+  event(event: ExecutionStampedEvent & { type: string; session_id?: string; profile?: string }) {
     const payload = event.payload as Record<string, unknown> | undefined
 
-    if (!payload || !event.session_id) { return }
+    if (!event.session_id) { return }
     const sid = event.session_id
     const profile = canonicalProfile(event.profile)
     const owner = canonicalSessionKey(sid, profile)
+    // Observe lifecycle order for delayed snapshots; event adaptation below
+    // keeps its existing generation and metadata rules.
+    acceptExecutionEvent(this.executionAuthorities, owner, event.type, event)
+
+    if (!payload) { return }
 
     if (Array.isArray(payload.pending)) { payload.pending_submissions = payload.pending.map(row => ({ ...row, user: row.text })) }
 
@@ -721,9 +745,43 @@ export class CanonicalDesktopProtocol {
     }
   }
 
+  // Called only when an attach snapshot identifies the implicit launch route's
+  // named owner. Carry its matching terminal fence, never another profile's
+  // caches or a fence older than the named owner's established authority.
+  bindImplicitLaunchProfile(sessionId: string, profile: string, snapshot: ExecutionStampedEvent): void {
+    if (canonicalProfile(profile) === 'default') { return }
+    const implicit = this.executionAuthorities.get(canonicalSessionKey(sessionId, 'default'))
+
+    if (!implicit?.terminal || implicit.epoch !== String(snapshot.authority_epoch)
+        || implicit.generation !== snapshot.execution_generation) { return }
+
+    const owner = canonicalSessionKey(sessionId, profile)
+    const named = this.executionAuthorities.get(owner)
+
+    // Epochs are opaque: an existing different epoch cannot be replaced by an
+    // alias ACK. Keep both owners' retired epochs when their fences can unite.
+    if (named && (named.epoch !== implicit.epoch || named.generation > implicit.generation
+        || named.retiredEpochs.has(implicit.epoch))) { return }
+
+    this.executionAuthorities.set(owner, {
+      ...implicit,
+      retiredEpochs: new Set([...implicit.retiredEpochs, ...(named?.retiredEpochs ?? [])])
+    })
+  }
+
   private snapshotResult(value: any, route: unknown): any {
     const sid = value.session_id
     const profile = canonicalProfile(route)
+    const execution = this.executionAuthorities.get(canonicalSessionKey(sid, profile))
+
+    // Attach subscribes before its inventory awaits. A terminal frame can beat
+    // the older running snapshot's ACK; only that exact owner's execution may
+    // settle it. Pending admissions/prompts retain their own authority.
+    if (value.running === true && execution?.terminal && execution.epoch === String(value.authority_epoch)
+        && execution.generation === value.execution_generation) {
+      value = { ...value, running: false }
+    }
+
     this.event({ type: 'session.info', session_id: sid, profile, payload: value })
 
     const prompts = (value.prompts ?? []).map((prompt: Record<string, unknown>) => {
@@ -733,9 +791,10 @@ export class CanonicalDesktopProtocol {
       return projected
     })
 
-    const open_requests = prompts.map((prompt: Record<string, unknown>) => ({
+    // The owner's server requests (setup cards, batch clarify, sudo) ride beside the projected prompts.
+    const open_requests = [...(value.open_requests ?? []), ...prompts.map((prompt: Record<string, unknown>) => ({
       id: prompt.prompt_id, method: prompt.kind, params: canonicalPromptParams(prompt.kind, sid, prompt)
-    }))
+    }))]
 
     return { ...value, open_requests, pending_approval: prompts.find((p: any) => p.kind === 'approval'), pending_clarify: prompts.find((p: any) => p.kind === 'clarify'), info: { ...value.info, stored_session_id: value.stored_session_id, pending_submissions: value.pending_submissions, replay_epoch: value.replay_epoch, last_sequence: value.last_sequence, execution_generation: value.execution_generation, running: value.running } }
   }

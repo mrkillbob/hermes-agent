@@ -307,10 +307,8 @@ class GatewayAgentCacheMixin:
         state = self._peek_session_state(session_key)
         if state is not None:
             if state.turn.lease is not None:
-                try:
-                    state.turn.lease.release()
-                except Exception:
-                    logger.debug("Failed to release active session slot", exc_info=True)
+                from gateway.active_lease_io import release_soon
+                release_soon(state.turn.lease)
             # One structured reset instead of a drifting pop-list. Turn-lease tokens are deliberately NOT
             # cleared here — _release_turn_lease owns them.
             state.turn.clear()
@@ -815,6 +813,7 @@ class GatewayAgentCacheMixin:
                 (p.value, _s(getattr(hc, "name", "")), _s(getattr(hc, "chat_id", "")))
                 for p, hc in context.home_channels.items()
             ),
+            tuple(sorted((str(k), _s(v)) for k, v in (getattr(context, "conversation_worktree", None) or {}).items())),
             bool(redact_pii), home_display,
         )
         return hashlib.sha256(repr(key_tuple).encode("utf-8")).hexdigest()

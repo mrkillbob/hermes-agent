@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
+@pytest.mark.parametrize('present,budget', [(False, None), (True, None),
+    (True, {'wall_seconds': 2, 'output_bytes': 1024, 'requests': 1})])
+def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch, present, budget):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
     from gateway.session_contract import Principal
@@ -17,6 +19,9 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
     monkeypatch.delenv('HERMES_KANBAN_DB', raising=False)
     monkeypatch.delenv('HERMES_DELEGATED_CHILD', raising=False)
     monkeypatch.setattr('hermes_cli.profiles.resolve_profile_env', lambda name: str(tmp_path) if name == 'default' else str(tmp_path / name))
+    skill = tmp_path / 'skills' / 'owned-skill'
+    skill.mkdir(parents=True)
+    (skill / 'SKILL.md').write_text('---\nname: owned-skill\ndescription: synthetic policy fixture\n---\nFixture.\n')
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     (workspace / 'pyproject.toml').write_text('[project]\nname = "task"\n')  # a code worktree
@@ -31,11 +36,16 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
     actor = Principal('owner', str(tmp_path), frozenset({'session:create'}), 'transport')
     connection = SimpleNamespace(authority=SimpleNamespace(profile_id=str(tmp_path)), actor=actor, native_owner=True)
     params = dict(board='owned', task_id=task.id, run_id=task.current_run_id, claim_lock=task.claim_lock)
+    if present:
+        params['execution_budget'] = budget
     from gateway.session_kanban import build_kanban_policy
     config = {'model': {'default': 'loop-model', 'provider': 'custom'}, 'platform_toolsets': {'cli': ['terminal', 'file']},
               'agent': {'coding_context': 'focus'}}  # the worktree must not collapse a worker into the coding posture
     policy, _secrets = build_kanban_policy(connection, params, config)
     context = json.loads(policy.kanban_json)
+    assert context.get('execution_budget') == budget
+    if budget is None:
+        assert 'execution_budget' not in context
     assert policy.source == 'kanban' and policy.cwd == str(workspace)
     assert policy.model == task.model_override and policy.provider == task.provider_override
     assert {'kanban', 'terminal', 'file'} <= set(policy.toolsets)
@@ -54,7 +64,7 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
         build_policy({'source': 'kanban', 'cwd': str(workspace)}, config)
 
 
-@pytest.mark.parametrize('mode', ['complete', 'timeout', 'rate_limit', 'billing', 'crash'])
+@pytest.mark.parametrize('mode', ['complete', 'timeout', 'rate_limit', 'billing', 'crash', 'budget'])
 def test_real_dispatcher_lifecycle(tmp_path, mode):
     import os
     import subprocess
@@ -69,6 +79,10 @@ def test_real_dispatcher_lifecycle(tmp_path, mode):
     receipt = json.loads((tmp_path / 'state' / 'receipt.json').read_text())
     print(json.dumps(receipt))
     if mode != 'complete':
+        if mode == 'budget':
+            assert receipt['physical_requests'] == 1 and receipt['worker_exit_code'] == 130
+            assert receipt['task_status'] != 'done'
+            return
         assert receipt['task_status'] == 'ready'
         return
     assert receipt['task_status'] == 'done' and receipt['source'] == 'kanban'
@@ -146,3 +160,13 @@ def test_claim_reclaimed_before_admission_marker_is_refused(tmp_path, monkeypatc
     assert calls == []
     with closing(connect(board='owned')) as conn:
         assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='owner_admitted'", (task_id,)).fetchone()[0] == 0
+
+
+def test_retry_of_a_routed_attempt_matches_its_frozen_claim():
+    from gateway.session_kanban import retry_matches_frozen_claim
+    route = {'provider': 'ollama', 'model': 'm', 'reasoning': None, 'base_url': 'http://localhost:11434'}
+    params = dict(board='b', task_id='t', run_id=1, claim_lock='c', route=route)
+    frozen = dict(params, workspace='/w')
+    assert retry_matches_frozen_claim(params, frozen)
+    assert not retry_matches_frozen_claim(params | {'route': dict(route, model='other')}, frozen)
+    assert not retry_matches_frozen_claim(params | {'cwd': '/tmp'}, frozen)

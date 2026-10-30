@@ -9,12 +9,13 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
+from hermes_cli.process_identity import worker_birth
 from hermes_state import SessionDB
 import hermes_state_runtime as rt
 
 
 def hello(process):
-    return {'type': 'hello', 'pid': process.pid, 'birth': psutil.Process(process.pid).create_time(),
+    return {'type': 'hello', 'pid': process.pid, 'birth': worker_birth(psutil.Process(process.pid)),
             'ancestors': [os.getpid()]}
 
 
@@ -53,7 +54,7 @@ def test_resolve_unknown_retires_the_physical_worker_row(tmp_path):
         rt.admit_session_input(db, epoch=epoch, principal_id='human', session_id=logical,
                                request_id='second', payload={'text': 'second'})
         row = rt.claim_session_input(db, epoch=epoch, session_id=logical)
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id='profile', _require_admission_open=lambda: None)
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id='profile', _require_admission_open=lambda *, session_id=None: None)
         child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -75,7 +76,7 @@ def test_resolve_unknown_retires_the_physical_worker_row(tmp_path):
         # The follower must now be claimable and a fresh managed child reservable on the physical row.
         follower = rt.claim_session_input(db, epoch=epoch, session_id=logical)
         assert follower is not None and follower['request_id'] == 'second'
-        authority = SimpleNamespace(db=db, epoch=epoch, profile_id='profile', _require_admission_open=lambda: None)
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id='profile', _require_admission_open=lambda *, session_id=None: None)
         child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

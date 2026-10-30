@@ -26,9 +26,115 @@ transcript for the new session_id, never the bloated child's transcript.
 
 from __future__ import annotations
 
+import ast
+import inspect
+
+from gateway import run_turn_persistence as gateway_run_turn_persistence
 from gateway.config import GatewayConfig, Platform
 from gateway.session import SessionSource, SessionStore
 from hermes_state import SessionDB
+
+
+# ---------------------------------------------------------------------------
+# AST invariant: the auto-reset block re-syncs the topic binding
+# ---------------------------------------------------------------------------
+_RESET_CALLS = {"reset_session", "reset_and_rehome_messages"}
+
+
+def _reset_call_name(node) -> str | None:
+    """The reset call's name when *node* is ``store.reset_session(...)`` or ``reset_and_rehome_messages(...)``."""
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+    return name if name in _RESET_CALLS else None
+
+
+def _find_compression_exhausted_reset_block() -> ast.AsyncFunctionDef:
+    """Return ``_hmwa_rotate_exhausted_session``, the body that performs the compression-exhaustion reset
+    (the ``if agent_result.get('compression_exhausted')`` branch only dispatches to it)."""
+    tree = ast.parse(inspect.getsource(gateway_run_turn_persistence))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_hmwa_rotate_exhausted_session":
+            # Only the function that actually performs the reset, not a wrapper that merely names it.
+            if any(_reset_call_name(sub) for sub in ast.walk(node)):
+                return node
+    raise AssertionError(
+        "Could not locate the compression-exhausted auto-reset body "
+        "(_hmwa_rotate_exhausted_session calling reset_session / reset_and_rehome_messages) "
+        "in gateway/run_turn_persistence.py — the structure changed or the AST walker is stale."
+    )
+
+
+class TestAutoResetBlockReSyncsBinding:
+    def test_reset_session_return_is_captured(self):
+        """``reset_session`` must be assigned, not called-and-discarded —
+        the fresh entry is needed to re-point the binding and drop the stale
+        reference to the bloated compressed child (#35809)."""
+        block = _find_compression_exhausted_reset_block()
+        captured = False
+        for stmt in ast.walk(block):
+            if isinstance(stmt, ast.Assign):
+                val = stmt.value
+                # reset_session is async at the gateway boundary, so the
+                # assignment value is Await(Call(...)), not a bare Call.
+                if isinstance(val, ast.Await):
+                    val = val.value
+                if _reset_call_name(val):
+                    captured = True
+        assert captured, (
+            "gateway/run.py auto-reset block calls reset_session() but discards "
+            "its return value. The fresh SessionEntry must be captured so the "
+            "topic binding can be re-pointed at it; otherwise the next message "
+            "resolves back to the bloated compressed child (#35809)."
+        )
+
+    def test_topic_binding_is_resynced_after_reset(self):
+        """The block must re-sync the topic binding so the next inbound message
+        cannot ``switch_session`` back onto the bloated compressed child."""
+        block = _find_compression_exhausted_reset_block()
+
+        def _references_helper(node):
+            # Direct call: self._sync_telegram_topic_binding(...)
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_sync_telegram_topic_binding"
+            ):
+                return True
+            # Offloaded: await asyncio.to_thread(self._sync_telegram_topic_binding, ...)
+            # — the helper is passed as an argument, not the call's func.
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "_sync_telegram_topic_binding"
+            ):
+                return True
+            return False
+
+        sync_calls = [sub for sub in ast.walk(block) if _references_helper(sub)]
+        assert sync_calls, (
+            "gateway/run.py auto-reset block does not call "
+            "_sync_telegram_topic_binding after reset_session. Without it the "
+            "(chat_id, thread_id) -> bloated-child binding survives the reset "
+            "and the binding-heal walk re-anchors the fresh lane onto the "
+            "oversized compressed transcript, re-triggering the loop (#35809)."
+        )
+
+    def test_old_root_lease_is_reconciled_after_agent_eviction(self):
+        block = _find_compression_exhausted_reset_block()
+        calls = {
+            node.func.attr: node.lineno
+            for node in ast.walk(block)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr
+            in {"_evict_cached_agent", "reconcile_conversation_root_transition"}
+        }
+
+        assert "reconcile_conversation_root_transition" in calls
+        assert calls["reconcile_conversation_root_transition"] > calls[
+            "_evict_cached_agent"
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -93,4 +199,3 @@ class TestAutoResetLoadsCleanContext:
         )
         # The old transcript is still searchable, not destroyed.
         assert len(store.load_transcript(bloated_sid)) == 120
-

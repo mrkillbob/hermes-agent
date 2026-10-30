@@ -47,33 +47,23 @@ def _assistant_row_missing_visible_text(msg: dict) -> bool:
 def _record_kanban_budget_exhausted(
     kanban_task: str, api_call_count: int, max_iterations: int, logger: logging.Logger
 ) -> None:
-    """Record a terminal ``timed_out`` outcome for a kanban worker out of budget.
-
-    Routed via ``_record_task_failure`` (not ``kanban_block``) so it counts toward the
-    consecutive-failure circuit breaker. Idempotent via the ``_end_run`` CAS
-    (``WHERE ended_at IS NULL``), so safe from multiple exit paths.
-
-    This is a bounded fallback (#87096): the CAS invariant in ``_end_run`` (``WHERE ended_at IS NULL``)
-    guarantees idempotence — if another path already closed the run this is a no-op — so it is safe to call
-    from multiple exit paths.
-    """
+    """Park exhausted work for narrower scope instead of restarting the same exploration."""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return
     try:
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_connect as _kbc
-        from hermes_cli import kanban_db_dispatch as _kbd
         _conn = _kbc.connect()
         try:
-            _kbd._record_task_failure(
-                _conn,
-                kanban_task,
-                error=(
-                    f"Iteration budget exhausted ({api_call_count}/{max_iterations}) — "
-                    "task could not complete within the allowed iterations"
-                ),
-                outcome="timed_out",
-                release_claim=True,
-                end_run=True,
-                event_payload_extra={"budget_used": api_call_count, "budget_max": max_iterations},
+            task = _kb.get_task(_conn, kanban_task)
+            if task is None:
+                return
+            expected = os.environ.get("HERMES_KANBAN_RUN_ID") or task.current_run_id
+            _kb.block_task(
+                _conn, kanban_task,
+                reason=f"Iteration budget exhausted ({api_call_count}/{max_iterations}) — provide narrower evidence or scope before resuming",
+                kind="needs_input", expected_run_id=int(expected) if expected is not None else None,
             )
         finally:
             with suppress(Exception):
@@ -81,6 +71,66 @@ def _record_kanban_budget_exhausted(
     except Exception:
         logger.warning(
             "Failed to record budget-exhausted failure for task %s", kanban_task, exc_info=True
+        )
+
+
+def _record_kanban_guardrail_halt(
+    kanban_task: str,
+    decision,
+    logger: logging.Logger,
+) -> None:
+    """Close a Kanban run stopped by a tool-loop safety guard.
+
+    A controlled guardrail halt returns a normal CLI response and process exit
+    code.  Without an explicit board transition the dispatcher mistakes that
+    clean process exit for a missing ``kanban_complete``/``kanban_block`` call
+    and retries it as a protocol violation.  Route the halt through the normal
+    failure circuit instead, preserving bounded retries and the task override.
+    """
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        return
+    import hermes_cli.kanban_db_connect as _hermes_cli_kanban_db_connect
+    tool_name = str(getattr(decision, "tool_name", "") or "unknown")
+    code = str(getattr(decision, "code", "") or "tool_guardrail_halt")
+    error = f"Tool guardrail halted {tool_name}: {code}"
+    try:
+        from hermes_cli import kanban_db as _kb
+
+        from hermes_cli import kanban_db_dispatch as _kbd
+        _conn = _hermes_cli_kanban_db_connect.connect()
+        try:
+            failure_kwargs = {
+                "outcome": "crashed",
+                "release_claim": True,
+                "end_run": True,
+                "event_payload_extra": {
+                    "guardrail": code,
+                    "tool_name": tool_name,
+                },
+            }
+            raw_run_id = os.environ.get("HERMES_KANBAN_RUN_ID", "").strip()
+            if raw_run_id.isdigit():
+                failure_kwargs["expected_run_id"] = int(raw_run_id)
+            claim_lock = os.environ.get("HERMES_KANBAN_CLAIM_LOCK", "").strip()
+            if claim_lock:
+                failure_kwargs["expected_claim_lock"] = claim_lock
+            _kbd._record_task_failure(
+                _conn,
+                kanban_task,
+                error,
+                **failure_kwargs,
+            )
+        finally:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+    except Exception:
+        logger.warning(
+            "Failed to record tool-guardrail halt for task %s",
+            kanban_task,
+            exc_info=True,
         )
 
 
@@ -126,13 +176,26 @@ def _resolve_budget_fallback(
     _pending_verification_response, _pending_verification_response_previewed, logger,
 ) -> tuple[Any, Any, bool, Any]:
     """Iteration-budget exhaustion. Returns ``(final_response, _turn_exit_reason,
-    preserved_verification_fallback, interrupted)``."""
+    preserved_verification_fallback, interrupted)``"""
+    from agent.local_text_policy import local_text_only
+    if local_text_only():
+        # The exact owner settles this bounded result; no legacy board write or summary call.
+        return final_response, _turn_exit_reason, False, interrupted
+    _guardrail_decision = getattr(agent, "_tool_guardrail_halt_decision", None)
+    if _guardrail_decision is not None:
+        # A controlled tool-loop halt is terminal; record it only for the dispatcher-owned worker.
+        if is_dispatcher_owned_worker_context():
+            _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
+            if _kanban_task:
+                _record_kanban_guardrail_halt(_kanban_task, _guardrail_decision, logger)
+        return final_response, _turn_exit_reason, False, interrupted
     budget_exhausted = (
         api_call_count >= agent.max_iterations or agent.iteration_budget.remaining <= 0
     )
     preserved_verification_fallback = False
     if (
-        final_response is None and budget_exhausted and not interrupted and not failed
+        not flatten_message_text(final_response).strip()
+        and budget_exhausted and not interrupted and not failed
         and str(_turn_exit_reason) in {"unknown", "budget_exhausted"}
     ):
         _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
@@ -171,25 +234,10 @@ def _resolve_budget_fallback(
                 final_response = f"{INTERRUPT_WAITING_FOR_MODEL_PREFIX}{time.time() - _summary_start:.1f}s elapsed)."
 
     # A kanban worker must record a terminal outcome whether or not a fallback path
-    # was eligible, so the dispatcher learns the worker could not complete. Only the
-    # dispatcher-owned worker owns the task: an in-process delegate_task child or cron run
-    # inherits ``HERMES_KANBAN_TASK`` via os.environ but exhausting ITS budget must not
-    # close the parent's run and release its claim (#112817).
-    _kanban_task = (
-        os.environ.get("HERMES_KANBAN_TASK")
-        if budget_exhausted and is_dispatcher_owned_worker_context() else None
-    )
-    # If running as a kanban worker, signal the dispatcher that the worker could not complete (rather than
-    # treating it as a protocol violation). This applies whether the user-facing fallback came from the
-    # summary call or an explicitly pending continuation; both exhausted the task budget and must advance
-    # the failure circuit. We route through ``_record_task_failure(outcome="timed_out")`` rather than
-    # ``kanban_block`` so this counts toward the dispatcher's consecutive-failure circuit breaker (#29747
-    # gap 2).
-    # Bounded fallback (#87096): budget was exhausted but none of the normal fallback paths were eligible
-    # (interrupted / failed / anomalous exit_reason). If running as a kanban worker we must still record a
-    # terminal outcome so the task does not remain in an ambiguous lifecycle state. The worker's run is
-    # closed via ``_record_task_failure`` (compare-and-swap receipt path) which is a no-op if another path
-    # closed it — the CAS invariant in ``_end_run`` (``WHERE ended_at IS NULL``) guarantees idempotence.
+    # was eligible, so the dispatcher learns the worker could not complete.
+    _kanban_task = os.environ.get("HERMES_KANBAN_TASK") if budget_exhausted else None
+    # A budget stop requires narrower scope; pin the block to this worker's run
+    # so an old process cannot park work that another worker has already reclaimed.
     if _kanban_task:
         _record_kanban_budget_exhausted(_kanban_task, api_call_count, agent.max_iterations, logger)
     return final_response, _turn_exit_reason, preserved_verification_fallback, interrupted
@@ -244,7 +292,7 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, _recove
     # providers don't see ``tool → user`` (placeholder: final_response is usually empty).
     if interrupted:
         from agent.message_sanitization import close_interrupted_tool_sequence
-        close_interrupted_tool_sequence(messages, final_response)
+        close_interrupted_tool_sequence(messages, final_response, stopped=True)
 
     # Recovery ``break`` sites can return a final_response with no closing assistant
     # row; enforce "delivered final_response ⇒ assistant row" here. Compare content,
@@ -282,6 +330,22 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, _recove
     _apply_override = getattr(agent, "_apply_persist_user_message_override", None)
     if callable(_apply_override):
         _apply_override(messages)
+
+
+def _store_rewrite_on_tail(agent, messages, raw, final) -> None:
+    """A recovery exit whose text is already the unflushed tail row (the iteration-budget summary, a
+    stop gate's answer kept as the budget fallback) stores the rewrite the user gets, not the model
+    text (#44239). A held turn's hidden answer becomes the published reply; the model already saw
+    it, so ``api_content`` keeps its bytes on the wire."""
+    tail = messages[-1] if messages else None
+    if not (isinstance(tail, dict) and tail.get("role") == "assistant" and tail.get("content") == raw
+            and not tail.get(_DB_PERSISTED_MARKER)):
+        return
+    if tail.get("display_kind") == "hidden" and getattr(agent, "_hold_stream", False) is True:
+        del tail["display_kind"]
+        if final != raw:
+            tail.setdefault("api_content", raw)
+    tail["content"] = final
 
 
 def _micro_compact_after_turn(agent, messages, final_response, logger, task_id) -> None:
@@ -466,6 +530,14 @@ def _apply_output_hooks(
     )
     # Detached forks are internal work and must not publish turns under the parent's session ID.
     if not getattr(agent, "_persist_disabled", False):
+        # Leased on the turn thread so the capture holds this turn's context; None unless a
+        # loaded plugin holds llm.side_question. The response must survive a failed capture.
+        try:
+            from agent.side_question_lease import issue_side_question_token
+            side_question_token = issue_side_question_token(agent, messages, turn_id)
+        except Exception:
+            side_question_token = None
+            logger.warning("side question lease failed", exc_info=True)
         _invoke_hook_safely(
             "post_llm_call", logger,
             session_id=agent.session_id,
@@ -476,6 +548,7 @@ def _apply_output_hooks(
             conversation_history=list(messages),
             model=agent.model,
             platform=platform,
+            side_question_token=side_question_token,
         )
     return final_response, transformed, pre_transform
 
@@ -506,20 +579,60 @@ def apply_llm_output_transform(
     if platform is None:
         platform = getattr(agent, "platform", None) or ""
     transformed, pre_transform = False, None
-    # First hook to return a string wins; None/empty leaves the text unchanged.
-    for _hook_result in _invoke_hook_safely(
-        "transform_llm_output", logger,
-        response_text=final_response,
-        session_id=agent.session_id or "",
-        model=agent.model,
-        platform=platform,
-        turn_id=turn_id,  # per-turn identity for the hook callback gate
-    ):
-        if isinstance(_hook_result, str) and _hook_result:
-            pre_transform, final_response, transformed = final_response, _hook_result, True
-            break
+    payload = dict(response_text=final_response, session_id=agent.session_id or "", model=agent.model,
+                   platform=platform, turn_id=turn_id)  # turn_id: per-turn identity for the hook callback gate
+    held = getattr(agent, "_held_transforms", None) if getattr(agent, "_hold_stream", False) else None
+    if held:
+        rewrite = _run_held_transforms(held, payload, logger)
+    else:
+        # First hook to return a string wins; None/empty leaves the text unchanged.
+        rewrite = next((r for r in _invoke_hook_safely("transform_llm_output", logger, **payload)
+                        if isinstance(r, str) and r), None)
+    if rewrite:
+        pre_transform, final_response, transformed = final_response, rewrite, True
     agent._llm_output_transform = (turn_id, transformed, pre_transform)
     return final_response, transformed, pre_transform
+
+
+HELD_TRANSFORM_FAILED_REPLY = "This reply was withheld: the plugin that rewrites replies in this session failed."
+
+
+def _run_held_transforms(callbacks, payload: dict, logger) -> Optional[str]:
+    """A held turn runs the transforms captured at its start (``held_stream_transforms``), not the live
+    registry a mid-turn reload empties. When none rewrote and one raised or timed out, the user gets a
+    fixed notice, never the text the plugin had to see first."""
+    from hermes_cli.plugins import get_plugin_manager
+
+    try:
+        rewrite, failed = get_plugin_manager().run_held_transforms(callbacks, **payload)
+    except Exception:  # fail closed: whatever broke dispatch, the original stays withheld
+        logger.warning("held transform_llm_output dispatch failed", exc_info=True)
+        rewrite, failed = None, True
+    return HELD_TRANSFORM_FAILED_REPLY if failed else rewrite
+
+
+def settle_held_final(agent, result: Any) -> None:
+    """A held turn's reply leaves only through its transform snapshot. ``finish_text_response``,
+    ``finalize_turn``, the Codex runtime and the truncation ceiling run it before persisting; every
+    other exit (provider errors, retry exhaustion, interrupts, compression failures, ...) returns its
+    text through ``run_conversation``, which calls this, so no path hands the user text the plugin
+    did not see first, and a failed transform yields the withheld notice."""
+    if getattr(agent, "_hold_stream", False) is not True or not isinstance(result, dict):
+        return
+    text, turn_id = result.get("final_response"), getattr(agent, "_current_turn_id", "") or ""
+    recorded = getattr(agent, "_llm_output_transform", None)
+    if not isinstance(text, str) or not text or (isinstance(recorded, tuple) and recorded[:1] == (turn_id,)):
+        return
+    final, transformed, _ = apply_llm_output_transform(agent, text, turn_id=turn_id)
+    if result.get("error") == text:  # keep the mirror an error card reads
+        result["error"] = final
+    result.update(final_response=final, response_transformed=transformed, pre_transform_response=None)
+
+
+def public_pre_transform(agent, pre_transform: Optional[Any]) -> Optional[Any]:
+    """``pre_transform_response`` for a turn result: a held turn's original never leaves the agent
+    (receipts, replay-gap recovery, post-stream suffix painting all see only the rewrite)."""
+    return None if getattr(agent, "_hold_stream", False) else pre_transform
 
 
 def finalize_turn(
@@ -552,6 +665,7 @@ def finalize_turn(
     if (
         not final_response
         and not interrupted
+        and _turn_exit_reason != "kanban_terminal_transition"
         and messages
         and isinstance(messages[-1], dict)
         and messages[-1].get("role") == "tool"
@@ -589,7 +703,11 @@ def finalize_turn(
         final_response is not None
         and not failed
         and not interrupted
-        and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
+        and (
+            api_call_count < agent.max_iterations
+            or str(_turn_exit_reason).startswith("text_response(")
+            or _turn_exit_reason == "kanban_terminal_transition"
+        )
     )
 
     _rollback_interrupted_preflight_display(agent, interrupted)
@@ -628,7 +746,9 @@ def finalize_turn(
         # gets the recorded outcome back. Either way the tail close below writes the text the
         # user will see, never the raw model text (#44239).
         if final_response and not interrupted:
+            _raw = final_response
             final_response, _, _ = apply_llm_output_transform(agent, final_response, turn_id=turn_id, logger=logger)
+            _store_rewrite_on_tail(agent, messages, _raw, final_response)
         _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream)
         if not interrupted and not failed:
             _micro_compact_after_turn(agent, messages, final_response, logger, effective_task_id)
@@ -695,7 +815,7 @@ def finalize_turn(
         "partial": False,  # True only when stopped due to invalid tool calls
         "interrupted": interrupted,
         "response_transformed": _response_transformed,
-        "pre_transform_response": _pre_transform_response,
+        "pre_transform_response": public_pre_transform(agent, _pre_transform_response),
         "response_previewed": getattr(agent, "_response_was_previewed", False),
         # The final is byte-for-byte a response this turn already delivered (no footer or
         # explanation appended since): it carries no new text for the client to paint.
@@ -790,6 +910,11 @@ def finalize_turn(
                 messages_snapshot=list(messages), review_memory=_should_review_memory,
                 review_skills=_should_review_skills,
             )
+
+    # Opt-in (compression.prepare_ahead): near the trigger, write the next compaction summary
+    # between turns. No-op otherwise; never raises.
+    from agent.prepared_compaction import maybe_prepare
+    maybe_prepare(agent, messages, origin="turn-end")
 
     # Memory provider on_session_end()/shutdown_all() are NOT called here:
     # run_conversation() runs once per message; CLI/gateway own session-end cleanup.

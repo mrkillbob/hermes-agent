@@ -19,6 +19,7 @@ import json
 import os
 import random
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -26,7 +27,10 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-HOME = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # run as a script: the repo root is not on sys.path
+from hermes_constants import get_hermes_home
+
+HOME = get_hermes_home()
 AUTH_JSON = HOME / "auth.json"
 DOTENV = HOME / ".env"
 
@@ -924,7 +928,7 @@ def main() -> None:
     r.add_argument("--route", required=True, help=f"one of {sorted(ROUTES)} or 'custom'")
     r.add_argument("--kind", choices=("chat", "responses", "gemini"), help="custom routes")
     r.add_argument("--base-url")
-    r.add_argument("--key-env", help="env var (process env, then ~/.hermes/.env) holding the key")
+    r.add_argument("--key-env", help="env var (process env, then $HERMES_HOME/.env) holding the key")
     r.add_argument("--models", required=True, help="comma list, or 'portal-all' / 'portal-max:<usd per M out>'")
     r.add_argument("--exclude", default="")
     r.add_argument("--out", required=True)

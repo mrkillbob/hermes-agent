@@ -143,6 +143,20 @@ class GatewayBusySessionMixin:
         # else: no adapter — leave the head in place so we don't silently drop it.
         return pending_event
 
+    def _take_wake_admitted_before_drain(self, session_key: str, adapter: Any) -> Optional[MessageEvent]:
+        """Pop the first wake admitted before the drain began from the pending slot, else from the
+        overflow FIFO, keeping the slot filled while overflow remains; every other event stays
+        queued. Its producer holds a receipt and will not retry it, so a follow-up ahead of it that
+        the drain rejects must not strand it."""
+        slot = getattr(adapter, "_pending_messages", None)
+        if slot and getattr(slot.get(session_key), "_admitted_before_drain", False) is True:
+            return self._promote_queued_event(session_key, adapter, slot.pop(session_key))
+        overflow = self._overflow_queue(session_key) or []
+        for index, event in enumerate(overflow):
+            if event._admitted_before_drain is True:
+                return overflow.pop(index)
+        return None
+
     def _defer_past_exhaustion_reset(
         self, result: Any, adapter: Any, source: SessionSource, session_key: str, pending_event: MessageEvent,
     ) -> None:
@@ -962,6 +976,15 @@ class GatewayBusySessionMixin:
         Shared by the in-process busy handler and the session authority's busy preempt."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         effective_mode, redirected = _steer.effective_mode, _steer.redirected
+        # A voice fast-lane follow-up must not discard an in-progress voice reply or task: queue
+        # it behind the current turn instead of interrupting, the same exemption TEXT queue-mode
+        # gets above (checked here, not there, because this event's message_type is VOICE).
+        _voice_fast_lane_queue = (
+            event.message_type == MessageType.VOICE
+            and bool(getattr(event.source, "_voice_fast_lane", False))
+        )
+        if _voice_fast_lane_queue:
+            effective_mode = "queue"
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
         is_redirect_mode = effective_mode == "interrupt" and redirected

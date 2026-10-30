@@ -4,6 +4,7 @@ import concurrent.futures
 import contextlib
 import contextvars
 import copy
+from dataclasses import replace
 import hashlib
 import importlib
 import inspect
@@ -27,18 +28,20 @@ from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, s
 from hermes_constants import (
     get_hermes_home, get_hermes_home_override, get_process_hermes_home, profile_name_for_home,
     reset_hermes_home_override, set_hermes_home_override)
+from hermes_cli import config_backend as _config_backend
+from hermes_cli.config_backend import Changes, ConfigBackendUnavailable, config_exists, supports_file_tooling
 from hermes_cli.env_loader import load_hermes_dotenv
-from utils import file_signature, is_truthy_value
+from tui_gateway.pet_sheet import _clone_pet_payload, _pet_row_frame_counts, _pet_sheet_revision, _pet_state_rows
+from utils import is_truthy_value
 from hermes_state_ids import new_session_id
 from tools.environments.local import hermes_subprocess_env
 from agent.fast_mode import STATIC_TIERS
-from agent.replay_cleanup import canonicalize_replay_history
-from agent.reasoning_effort import clamp_effort, route_supported_efforts
+from agent.replay_cleanup import canonicalize_replay_history, sanitize_replay_history
 from agent.voice_turn_route import session_runtime_view
 from agent.compaction_display import project_compaction_message_for_display
 from agent.skill_commands import describe_skill_invocation
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
-from tui_gateway import git_probe
+from tui_gateway import git_probe, stream_segments
 from tui_gateway.checkpoints import (_load_checkpoints_enabled, _resolve_checkpoint_hash,
                                      resolve_checkpoints_enabled as _resolve_checkpoints_enabled)
 from tui_gateway._env import env_float, env_int
@@ -53,7 +56,39 @@ from tui_gateway.transport import (FanoutTransport, StdioTransport, Transport, b
 
 logger = logging.getLogger(__name__)
 
-_hermes_home = _HERMES_HOME_AT_IMPORT = get_hermes_home()
+_failed_conversation_root_leases: list[object] = []
+_failed_conversation_root_leases_lock = threading.Lock()
+_failed_conversation_root_lease_retry_timer = None
+
+
+def _remember_failed_conversation_root_lease(lease) -> None:
+    global _failed_conversation_root_lease_retry_timer
+    with _failed_conversation_root_leases_lock:
+        if all(existing is not lease for existing in _failed_conversation_root_leases):
+            _failed_conversation_root_leases.append(lease)
+        timer = _failed_conversation_root_lease_retry_timer
+        if timer is None or not timer.is_alive():
+            timer = threading.Timer(1.0, _retry_failed_conversation_root_leases)
+            timer.daemon = True
+            _failed_conversation_root_lease_retry_timer = timer
+            timer.start()
+
+
+def _retry_failed_conversation_root_leases() -> None:
+    global _failed_conversation_root_lease_retry_timer
+    with _failed_conversation_root_leases_lock:
+        pending = list(_failed_conversation_root_leases)
+        _failed_conversation_root_leases.clear()
+        _failed_conversation_root_lease_retry_timer = None
+    for lease in pending:
+        try:
+            lease.release()
+        except Exception:
+            _remember_failed_conversation_root_lease(lease)
+            logger.warning("Failed to retry TUI conversation root lease release", exc_info=True)
+
+_hermes_home = get_hermes_home()
+_HERMES_HOME_AT_IMPORT = _hermes_home
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent.parent / ".env")
 
 
@@ -95,6 +130,13 @@ from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
 _methods: dict[str, callable] = {}
+_pending: dict[str, tuple[str, threading.Event]] = {}
+_pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
+_answers: dict[str, str] = {}
+# Batch clarify accumulators: rid → {"qids": [...], "answers": {qid: answer}}. Written by
+# clarify.respond (per-question lock, update-in-place), read out by _block on resolution/timeout
+# so locked answers survive the deadline.
+_batch_clarify: dict[str, dict] = {}
 _db = None
 _db_error: str | None = None
 _stdout_lock = threading.Lock()
@@ -107,13 +149,19 @@ _cfg_cache: dict | None = None
 _cfg_sig: tuple | None = None
 _cfg_path = None
 
-# Idempotency registry for session.create: maps client-supplied key → sid so a
-# retried create (e.g. response lost in transit) returns the same session
-# instead of spawning a duplicate child. Entries expire with the session.
-_idempotency_keys: dict[str, tuple[str, float]] = {}
+# Creation retry cache: (resolved home, caller authority, operation, parent, client key) → sid.
+# Publication follows successful creation; entries expire with the session.
+_idempotency_keys: dict[tuple, tuple[str, float]] = {}
 _IDEMPOTENCY_KEY_TTL = 300.0  # 5 min: longer than any realistic retry window
 _session_resume_lock = threading.Lock()
 _SLASH_WORKER_TIMEOUT_S = max(5.0, env_float("HERMES_TUI_SLASH_TIMEOUT_S", 45.0))
+
+
+def _session_prompt_submit_lock(session: dict):
+    """Return the per-session admission lock, including records created by older clients."""
+    history_lock = session.setdefault("history_lock", threading.Lock())
+    with history_lock:
+        return session.setdefault("prompt_submit_lock", threading.Lock())
 
 def _ws_orphan_setting(env_var: str, cfg_key: str, default: float) -> float:
     """``dashboard.<cfg_key>`` seconds; the env var is an internal override that wins when set."""
@@ -121,8 +169,10 @@ def _ws_orphan_setting(env_var: str, cfg_key: str, default: float) -> float:
     if raw is None or not str(raw).strip():
         raw = None
         with contextlib.suppress(Exception):
-            from hermes_cli.config import load_config
-            raw = (load_config().get("dashboard") or {}).get(cfg_key)
+            from hermes_cli.startup_hold import active as startup_hold_active
+            if not startup_hold_active():
+                from hermes_cli.config import load_config
+                raw = (load_config().get("dashboard") or {}).get(cfg_key)
     with contextlib.suppress(ValueError, TypeError):
         return max(0.0, float(raw) if raw is not None else default)
     return max(0.0, default)
@@ -192,6 +242,7 @@ _LONG_HANDLERS = frozenset({
     "setup.runtime_check", "setup.status", "free_tier.provision", "voice.toggle", "voice.record", "voice.tts", "wake.start",
     "wake.status", "session.active_list", "session.branch", "session.compress", "session.list",
     "session.resume", "session.save", "session.workspace.move", "shell.exec", "skills.manage", "slash.exec",
+    "prompt.submit",
     "onboarding.start", "onboarding.state",
     "command.dispatch",  # /goal draft invokes the auxiliary model; never block the RPC reader
     "shared_metrics.set",  # consent reconcile waits on the metrics store's write lock
@@ -263,7 +314,7 @@ class _SlashWorker:
         # ``--provider`` pins the child to the parent agent's virtual provider: without it the
         # worker re-resolves provider from config, so a MoA session (provider=moa, model=<preset>)
         # dispatched its preset NAME to the configured real provider and 402/503'd (#57283).
-        argv = [sys.executable, "-m", "tui_gateway.slash_worker", "--session-key", session_key,
+        argv = [sys.executable, "-P", "-m", "tui_gateway.slash_worker", "--session-key", session_key,
                 "--parent-pid", str(os.getpid())] \
             + (["--model", model] if model else []) \
             + (["--provider", provider] if provider else [])
@@ -285,7 +336,7 @@ class _SlashWorker:
         env = _prepend_tool_paths(served_profile_child_env(
             target_home=profile_home or (_hermes_home if is_multiplex_active() else None),
             inherit_credentials=True))
-        # Internal slash workers must import the same checkout as their parent.
+        # Internal slash workers must import the same checkout as their parent; -P keeps their cwd off sys.path.
         module_root = str(Path(__file__).resolve().parent.parent)
         env["PYTHONPATH"] = os.pathsep.join(
             part for part in (module_root, env.get("PYTHONPATH", "")) if part
@@ -493,6 +544,305 @@ def _open_profile_session_db(profile_home):
         raise RuntimeError(f"profile session store unavailable: {db_path}: {exc}") from exc
 
 
+def _conversation_worktree_metadata(binding) -> dict:
+    """Return the UI/prompt-safe projection of a certified binding."""
+    return {"root_session_id": str(binding.root_session_id), "path": str(binding.path),
+            "branch": str(binding.branch), "base_commit": str(binding.base_commit)}
+
+
+def _acquire_conversation_root_lease(binding, *, surface: str):
+    from agent.conversation_worktree import acquire_conversation_root_lease
+    return acquire_conversation_root_lease(root_session_id=str(binding.root_session_id),
+                                           worktree_path=Path(binding.path),
+                                           repo_common_dir=Path(binding.repo_common_dir), surface=surface)
+
+
+def _remove_failed_conversation_worktree(session: dict, binding, db) -> None:
+    """Release a seeded root and remove its checkout before surfacing metadata failure."""
+    lease = session.get("conversation_root_lease")
+    if lease is not None:
+        try:
+            lease.release()
+        except Exception:
+            _remember_failed_conversation_root_lease(lease)
+            logger.warning("Failed to release failed conversation root lease", exc_info=True)
+        else:
+            session.pop("conversation_root_lease", None)
+    try:
+        manager, _, owns_db = _conversation_worktree_manager(
+            profile_home=session.get("profile_home"),
+            db=db,
+            session_cwd=session.get("cwd"),
+        )
+        remover = getattr(manager, "remove_after_explicit_request", None)
+        if callable(remover):
+            result = remover(
+                str(binding.root_session_id),
+                active_session_bound=False,
+                retain_for_retry=True,
+            )
+            if not getattr(result, "removed", False):
+                logger.warning(
+                    "Failed to remove failed seeded conversation worktree %s",
+                    binding.root_session_id,
+                )
+        else:
+            logger.warning(
+                "Conversation worktree manager cannot remove failed seeded root %s",
+                binding.root_session_id,
+            )
+        if owns_db:
+            with contextlib.suppress(Exception):
+                db.close()
+    except Exception:
+        logger.warning(
+            "Failed to remove failed seeded conversation worktree %s",
+            binding.root_session_id,
+            exc_info=True,
+        )
+
+
+def _conversation_worktree_policy_for_session(policy, session_cwd: str | None):
+    """Use the session's repository when it differs from the configured default.
+
+    The desktop sends the selected project root as ``cwd``.  Conversation
+    isolation is lazy, so this is the last boundary where that project
+    identity must be carried into worktree creation.  Keep the configured
+    root for its repository to preserve existing bindings; give another
+    repository a deterministic child root so repositories can never share a
+    worktree namespace.
+    """
+    if not policy.enabled or not session_cwd or policy.source_worktree is None:
+        return policy
+    source = git_probe.repo_root(str(session_cwd))
+    if not source:
+        candidate = Path(session_cwd).expanduser().resolve()
+        while candidate != candidate.parent:
+            if (candidate / ".git").exists():
+                from agent.conversation_worktree import ConversationWorktreeError
+                raise ConversationWorktreeError(
+                    "selected session repository could not be identified", phase="identity"
+                )
+            candidate = candidate.parent
+        return policy
+    source_path = Path(source).resolve()
+    configured_path = policy.source_worktree.resolve()
+    if source_path == configured_path:
+        return policy
+
+    configured_common = git_probe.common_repo_root(str(configured_path))
+    selected_common = git_probe.common_repo_root(str(source_path))
+    if not configured_common or not selected_common:
+        from agent.conversation_worktree import ConversationWorktreeError
+        raise ConversationWorktreeError(
+            "selected session repository common identity could not be established",
+            phase="identity",
+        )
+    same_repository = Path(configured_common).resolve() == Path(selected_common).resolve()
+    if same_repository and source_path == configured_path:
+        return policy
+    if policy.worktree_root is None:
+        return policy
+
+    selected_common_path = Path(selected_common).resolve()
+    suffix = hashlib.sha256(str(selected_common_path).encode()).hexdigest()[:12]
+    namespace = f"{selected_common_path.name}-{suffix}"
+    configured_root = policy.worktree_root.resolve()
+    repository_worktrees = {configured_path, selected_common_path}
+    for common_path in (Path(configured_common).resolve(), selected_common_path):
+        listing = git_probe.run_git(str(common_path), "worktree", "list", "--porcelain")
+        repository_worktrees.update(
+            Path(line.removeprefix("worktree ")).resolve()
+            for line in listing.splitlines()
+            if line.startswith("worktree ")
+        )
+    if not any(configured_root.is_relative_to(worktree) for worktree in repository_worktrees):
+        worktree_root = policy.worktree_root / namespace
+    else:
+        # A conventional ``<repo>/.worktrees`` root is valid for its own
+        # repository, but cannot host a different repository's checkout. Keep
+        # alternate-project roots in the Hermes home, outside either repo.
+        worktree_root = get_hermes_home() / "conversation-worktrees" / namespace
+    logger.warning(
+        "conversation_worktree.project_source_override session_cwd=%s "
+        "configured_source=%s selected_source=%s worktree_root=%s",
+        session_cwd,
+        configured_path,
+        source_path,
+        worktree_root,
+    )
+    # Keep the selected checkout as the manager source so its HEAD becomes the
+    # immutable conversation base.  ``selected_common`` remains the durable
+    # repository namespace and ownership identity used above.
+    return replace(policy, source_worktree=source_path, worktree_root=worktree_root)
+
+
+def _conversation_worktree_manager(*, profile_home=None, db=None, session_cwd=None):
+    """Construct the policy-governed manager against the owning profile DB."""
+    owns_db = False
+    home_token = set_hermes_home_override(str(profile_home)) if profile_home else None
+    try:
+        from agent.conversation_worktree import ConversationWorktreeError, ConversationWorktreeManager
+        from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+        policy = resolve_conversation_worktree_policy(_load_cfg())
+        policy = _conversation_worktree_policy_for_session(policy, session_cwd)
+        if not policy.enabled:
+            return None, db, owns_db
+        if db is None:
+            if profile_home:
+                db = _open_profile_session_db(profile_home)
+                owns_db = True
+            else:
+                db = _get_db()
+        if db is None:
+            raise ConversationWorktreeError("state.db is unavailable", phase="state")
+        return ConversationWorktreeManager(policy, db), db, owns_db
+    except Exception:
+        if owns_db and db is not None:
+            with contextlib.suppress(Exception):
+                db.close()
+        raise
+    finally:
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
+
+
+def _bind_new_interactive_conversation_worktree(
+    root_session_id: str, *, profile_home=None, db=None, session_cwd=None
+):
+    """Create/recover one worktree for a brand-new interactive root only."""
+    manager = owned_db = None
+    owns_db = False
+    try:
+        manager, owned_db, owns_db = _conversation_worktree_manager(
+            profile_home=profile_home, db=db, session_cwd=session_cwd
+        )
+        return None if manager is None else manager.bind_new_root_session(
+            root_session_id, conversation_kind="interactive")
+    finally:
+        if owns_db and owned_db is not None:
+            with contextlib.suppress(Exception):
+                owned_db.close()
+
+
+def _resolve_existing_conversation_worktree(
+    root_session_id: str, *, profile_home=None, db=None, session_cwd=None
+):
+    """Resolve a ready binding without ever creating a worktree on resume."""
+    manager = owned_db = None
+    owns_db = False
+    try:
+        manager, owned_db, owns_db = _conversation_worktree_manager(
+            profile_home=profile_home, db=db, session_cwd=session_cwd
+        )
+        return None if manager is None else manager.resolve_existing_session(root_session_id)
+    finally:
+        if owns_db and owned_db is not None:
+            with contextlib.suppress(Exception):
+                owned_db.close()
+
+
+def _bind_conversation_worktree_for_new_root(
+    root_session_id: str, *, profile_home=None, db=None, session_cwd=None
+):
+    """Named seam for root boundaries; distinct from continuation lookup."""
+    kwargs = {"profile_home": profile_home, "db": db}
+    if session_cwd:
+        kwargs["session_cwd"] = session_cwd
+    return _bind_new_interactive_conversation_worktree(root_session_id, **kwargs)
+
+
+def _bind_conversation_worktree_on_submit(session: dict) -> None:
+    """Materialize a desktop/TUI draft's worktree when its first prompt makes it durable."""
+    if (session.get("conversation_worktree")
+            or session.get("conversation_worktree_historical")
+            or session.get("source") not in {"desktop", "tui"}):
+        return
+    key = str(session.get("session_key") or "")
+    if not key:
+        return
+    prior_cwd = session.get("cwd")
+    prior_explicit_cwd = bool(session.get("explicit_cwd"))
+    with _session_db(session) as db:
+        binding = _bind_conversation_worktree_for_new_root(
+            key,
+            profile_home=session.get("profile_home"),
+            db=db,
+            session_cwd=prior_cwd,
+        )
+        if binding is None:
+            return
+        metadata = _conversation_worktree_metadata(binding)
+        root_lease = _acquire_conversation_root_lease(
+            binding, surface=session.get("source") or "desktop")
+        session["conversation_worktree"] = metadata
+        session["conversation_root_lease"] = root_lease
+        session["cwd"] = metadata["path"]
+        session["explicit_cwd"] = True
+        _register_session_cwd(session)
+        if db is not None:
+            common_root = git_probe.common_repo_root(metadata["path"])
+            if not common_root:
+                common_root = str(binding.repo_common_dir)
+            try:
+                db.update_session_cwd(
+                    key, metadata["path"], metadata.get("branch", ""),
+                    common_root, replace_git_meta=True)
+            except Exception:
+                _remove_failed_conversation_worktree(session, binding, db)
+                # The checkout is gone; leave the live draft retryable instead of making its
+                # deleted binding truthy and routing the next submit into a dead directory.
+                session["conversation_worktree"] = {}
+                session["cwd"] = prior_cwd
+                session["explicit_cwd"] = prior_explicit_cwd
+                session.pop("conversation_root_lease", None)
+                _register_session_cwd(session)
+                raise
+
+
+def _resolve_conversation_worktree_for_resume(session_id: str, *, profile_home=None, db=None):
+    """Find the existing root binding, recovering a failed root claim when possible."""
+    current, seen = str(session_id or "").strip(), set()
+    while current and current not in seen:
+        seen.add(current)
+        try:
+            session_cwd = None
+            if db is not None and hasattr(db, "get_session"):
+                session_cwd = (db.get_session(current) or {}).get("cwd")
+            kwargs = {"profile_home": profile_home, "db": db}
+            if session_cwd:
+                kwargs["session_cwd"] = session_cwd
+            binding = _resolve_existing_conversation_worktree(current, **kwargs)
+        except Exception as exc:
+            from agent.conversation_worktree import ConversationWorktreeError
+
+            if not isinstance(exc, ConversationWorktreeError):
+                raise
+            record = db.get_conversation_worktree(current) if db is not None else None
+            if record is None or record.state != "creation_failed":
+                raise
+            manager, _, _ = _conversation_worktree_manager(
+                profile_home=profile_home, db=db, session_cwd=session_cwd
+            )
+            binding = manager.bind_new_root_session(current, conversation_kind="interactive")
+        if binding is not None:
+            return binding
+        if db is None or not hasattr(db, "get_session"):
+            return None
+        if db.is_explicit_fork_child(current):
+            return None
+        current = str((db.get_session(current) or {}).get("parent_session_id") or "").strip()
+    return None
+
+
+def _conversation_worktree_prompt_fragment(metadata: dict | None) -> str:
+    if not isinstance(metadata, dict) or not metadata.get("path"):
+        return ""
+    return ("This interactive conversation is isolated in a certified Git worktree. "
+            f"Use {metadata['path']} as its workspace (branch {metadata.get('branch') or 'unknown'}, "
+            f"base {metadata.get('base_commit') or 'unknown'}). Do not switch to the stable source checkout.")
+
+
 def _bootstrap_served_profile_store(db_path: Path) -> None:
     """A served profile whose first RPC is a read (Bot Chat registry lookup on a fresh bot) has no
     ``state.db`` yet. Browsing never creates a store, but THIS process is the profile's session
@@ -673,10 +1023,13 @@ def _profile_configured_cwd(profile_home: Path | None) -> str | None:
     """
     if profile_home is None:
         return None
-    with contextlib.suppress(Exception):
-        from hermes_cli.config_effective import load_user_config_effective
-        p = Path(profile_home) / "config.yaml"
-        return _configured_cwd_from_cfg(load_user_config_effective(p)) if p.exists() else None
+    try:
+        with contextlib.suppress(Exception):
+            from hermes_cli.config_effective import load_user_config_effective
+            p = Path(profile_home) / "config.yaml"
+            return _configured_cwd_from_cfg(load_user_config_effective(p)) if config_exists(p) else None
+    except ConfigBackendUnavailable as exc:  # a SystemExit: the agent build reports it; the cwd is a hint
+        logger.warning("terminal.cwd of %s unavailable: %s", profile_home, exc.code)
     return None
 
 
@@ -694,11 +1047,28 @@ def _default_session_cwd() -> str:
     return _launch_configured_cwd() or os.getenv("TERMINAL_CWD") or os.getcwd()
 
 
+_SESSION_EVENT_WRITE_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
 def write_json(obj: dict) -> bool:
     """Emit one JSON frame via the most-specific transport: (1) event frames with a session id → that
     session's transport (async events reach the owner even from threads with no contextvar binding);
     (2) the context-bound transport (:func:`dispatch`); (3) module stdio (tests monkey-patch ``_real_stdout``).
-    Every event frame gets a per-session monotonic ``seq`` + replay-ring entry so ``session.events.since`` can resume."""
+    Every event frame gets a per-session monotonic ``seq`` + replay-ring entry so ``session.events.since`` can resume.
+    Keep stamping and dispatch under the same per-session lock: otherwise two worker threads can stamp seq 173
+    and 174, then reach the transport in the opposite order."""
+    params = obj.get("params") if isinstance(obj, dict) else None
+    sid = params.get("session_id") if isinstance(params, dict) else None
+    if obj.get("method") == "event" and sid:
+        # Bounded lock striping avoids retaining a lock for every session ever created.
+        lock = _SESSION_EVENT_WRITE_LOCKS[hash(str(sid)) % len(_SESSION_EVENT_WRITE_LOCKS)]
+        with lock:
+            return _write_json_frame(obj)
+
+    return _write_json_frame(obj)
+
+
+def _write_json_frame(obj: dict) -> bool:
     from tui_gateway.event_replay import _stamp_event
     from tui_gateway.hosted_room_member_activity import project_room_member_activity
     _stamp_event(obj)
@@ -724,7 +1094,7 @@ def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
     from agent.notification_presentation import event_presentation_muted
     if event_presentation_muted(event, sid):
         return False
-    return write_json(_event_frame(event, sid, payload))
+    return write_json(_event_frame(event, sid, stream_segments.stamp_session_frame(_sessions.get(sid), event, payload)))
 
 
 from tui_gateway import server_requests as _server_requests
@@ -997,44 +1367,86 @@ def _load_cfg_raw() -> dict:
     expansion applied here would be persisted on the next save). Behavioral reads use :func:`_load_cfg`.
     Cache keyed on the resolved path so profiles don't clobber."""
     global _cfg_cache, _cfg_sig, _cfg_path
+    from hermes_cli.config_backend import config_cache_version, config_exists
     from hermes_cli.config import read_user_config_raw
     from hermes_cli.config_read_errors import FailedConfigRead
     try:
         p = _active_config_path()
-        sig = file_signature(p.stat()) if p.exists() else None
+        try:
+            sig = config_cache_version(p)
+        except FileNotFoundError:  # absent; any other stat error is a failed read, never "no config"
+            sig = None
         with _cfg_lock:
             if _cfg_cache is not None and _cfg_sig == sig and _cfg_path == p:
                 return copy.deepcopy(_cfg_cache)
-        data = read_user_config_raw(p) if p.exists() else {}
-    except Exception as exc:
+        data = read_user_config_raw(p) if config_exists(p) else {}
+    except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- served as a FailedConfigRead, refused by _save_cfg
         return FailedConfigRead(error=exc)  # readable as {}, refused by _save_cfg
     with _cfg_lock:  # cache the RAW config: _save_cfg writes _cfg_cache back to disk
         _cfg_cache, _cfg_sig, _cfg_path = copy.deepcopy(data), sig, p
     return data
 
 
+def _expand_cfg(cfg: dict) -> dict:
+    """``${ENV_VAR}`` expansion (same as ``load_config_readonly``); non-dict results keep the input."""
+    from hermes_cli.config import _expand_env_vars
+    expanded = _expand_env_vars(cfg)
+    return expanded if isinstance(expanded, dict) else cfg
+
+
 def _load_cfg() -> dict:
-    """Behavioral config read: the effective USER config (managed overlay, ``${VAR}`` expansion, model-key
-    canon) minus the DEFAULT_CONFIG merge — callers treat a missing key as "unset", so merging would break
-    ``_load_cfg() == {}`` sentinels. Fail-open to ``{}``. Never pass the result to ``_save_cfg`` (use
-    ``_load_cfg_raw()``)."""
+    """Behavioral config read: raw user file + managed overlay + ${VAR} expansion — ``load_config_readonly``
+    minus the DEFAULT_CONFIG merge (callers treat a missing key as "unset"; merging would break
+    ``_load_cfg() == {}`` sentinels). Never pass the result to ``_save_cfg`` (use ``_load_cfg_raw()``)."""
+    cfg = _apply_managed(_load_cfg_raw())
     with contextlib.suppress(Exception):
-        from hermes_cli.config_effective import load_user_config_effective
-        return load_user_config_effective(_active_config_path())
-    return {}
+        cfg = _expand_cfg(cfg)
+    return cfg
+
+
+def _sync_agent_turn_limit_with_config(session: dict) -> None:
+    """Adopt config max-turn edits for an already-built Desktop/TUI agent."""
+    agent = session.get("agent")
+    if agent is None:
+        return
+    from tui_gateway.agent_callbacks import _cfg_max_turns
+
+    agent.max_iterations = _cfg_max_turns(_load_cfg(), 500)
+
+
+def _apply_managed(cfg: dict) -> dict:
+    """Overlay administrator-pinned managed-scope values (read-side only, fail-open): this backend builds
+    config independently of load_config, so managed skin/reasoning_effort/service_tier/provider_routing
+    would otherwise be silently ignored."""
+    with contextlib.suppress(Exception):
+        from hermes_cli import managed_scope
+        return managed_scope.apply_managed_overlay(cfg if isinstance(cfg, dict) else {})
+    return cfg
 
 
 def _save_cfg(cfg: dict):
     global _cfg_cache, _cfg_sig, _cfg_path
     from hermes_cli.config import atomic_config_replace
+    from hermes_cli.config_backend import config_cache_version, supports_file_tooling
     path = _active_config_path()
     atomic_config_replace(path, cfg)
+    if not supports_file_tooling():
+        # The backend saves what it accepts (a bulk save omits locked keys), not what was proposed:
+        # drop the cache so the next raw read returns the accepted document.
+        _drop_cfg_cache()
+        return
     with _cfg_lock:
         _cfg_cache, _cfg_path = copy.deepcopy(cfg), path
         try:
-            _cfg_sig = file_signature(path.stat())
+            _cfg_sig = config_cache_version(path)
         except Exception:
             _cfg_sig = None
+
+
+def _drop_cfg_cache() -> None:
+    global _cfg_cache, _cfg_sig, _cfg_path
+    with _cfg_lock:
+        _cfg_cache, _cfg_sig, _cfg_path = None, None, None
 
 
 def _session_for_key(session_key: str) -> dict | None:
@@ -1052,7 +1464,6 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
         resolved = cwd if cwd is not None else (str(sess.get("cwd") or "") if sess is not None else "")
         source = _resolve_session_platform()
         profile = _current_profile_name()
-        browser_control_principal = browser_control_transport_family = ""
         # Live conversation id for subprocess HERMES_SESSION_ID: an explicitly empty contextvar is authoritative
         # (no os.environ fallback), so never leave it "" — agent's durable session_id, then session_key.
         session_id = session_key
@@ -1061,16 +1472,9 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
             # App-global backends multiplex profiles: prefer the live session's own home.
             profile = profile_name_for_home(sess.get("profile_home")) or profile
             session_id = getattr(sess.get("agent"), "session_id", None) or session_key
-            identity = getattr(sess.get("transport"), "auth_identity", None)
-            if _methods_browser_control._is_authenticated_identity(identity):
-                browser_control_principal = _methods_browser_control._principal_digest(identity)
-                browser_control_transport_family = _methods_browser_control._CLOUD_TRANSPORT_FAMILY
         return set_session_vars(
             session_key=session_key, session_id=session_id, source=source,
-            profile=profile,
-            browser_control_principal=browser_control_principal,
-            browser_control_transport_family=browser_control_transport_family, cwd=resolved,
-            ui_session_id=ui_session_id, cron_session="")
+            profile=profile, cwd=resolved, ui_session_id=ui_session_id, cron_session="")
     return []
 
 
@@ -1086,7 +1490,19 @@ def _enable_gateway_prompts() -> None:
     os.environ.update(HERMES_GATEWAY_SESSION="1", HERMES_EXEC_ASK="1", HERMES_INTERACTIVE="1")
 
 
-# ── Blocking prompt factory ──────────────────────────────────────────
+# ── Blocking prompt factory / respond bridge ─────────────────────────
+
+
+def _respond(rid, params, key, *, allow_expired=False):
+    """Handle a *.respond method call: route the client's answer to the open server request."""
+    from tui_gateway import server_requests
+    request_id = str(params.get("request_id") or "")
+    if not request_id:
+        return _err(rid, 4009, "request_id required")
+    frame = {"id": request_id, "result": {key: params.get(key, "")}}
+    if server_requests.resolve_response(frame):
+        return _ok(rid, {"status": "ok"})
+    return _ok(rid, {"status": "expired"}) if allow_expired else _err(rid, 4009, f"no pending request for id {request_id!r}")
 
 
 def _ask(method: str, sid: str, params: dict, timeout: float | None = 300) -> str:
@@ -1230,6 +1646,11 @@ def _clear_pending(sid: str | None = None) -> None:
     prompts), or every one when *sid* is None (process exit). Each one gets a ``request.cancel``."""
     from tui_gateway import server_requests
     server_requests.cancel(sid, reason="interrupted" if sid else "shutdown")
+    to_clear = [rid for rid, (s, _) in list(_pending.items()) if sid is None or s == sid]
+    for rid in to_clear:
+        _, ev = _pending.pop(rid)
+        ev.set()
+        _answers[rid] = ""
 
 
 # ── Agent factory ────────────────────────────────────────────────────
@@ -1338,15 +1759,38 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
         logger.warning("failed to persist model switch marker", exc_info=True)
 
 
+def _write_config_changes(sets: dict, unsets: tuple = ()) -> None:
+    """Explicit keyed edits through a config backend without a file (remote): ONE write that sets
+    and unsets exactly these dotted keys and refuses a locked one (ConfigLockedError) instead of
+    the bulk save's silent omission, so a setter never reports a refused value as saved. Nothing is
+    applied when it raises. The file backend keeps its raw round-trip (callers branch on
+    ``supports_file_tooling()``)."""
+    try:
+        _config_backend.get_config_backend().write_changes(_active_config_path().parent, Changes(set=dict(sets), unset=tuple(unsets)))
+    finally:
+        _drop_cfg_cache()
+
+
 def _write_config_key(key_path: str, value):
+    _write_config_keys({key_path: value})
+
+
+def _write_config_keys(updates: dict) -> None:
+    """Set related dotted keys together: ONE backend write without a config file (remote), so a
+    refused key changes none of them; one raw round-trip save with the file backend."""
+    if not supports_file_tooling():
+        _write_config_changes(updates)
+        return
     # Write-back round-trip: raw read is mandatory — saving the overlaid/expanded view would persist it.
-    cfg = current = _load_cfg_raw()
-    *parents, leaf = key_path.split(".")
-    for key in parents:
-        if not isinstance(current.get(key), dict):
-            current[key] = {}
-        current = current[key]
-    current[leaf] = value
+    cfg = _load_cfg_raw()
+    for key_path, value in updates.items():
+        current = cfg
+        *parents, leaf = key_path.split(".")
+        for key in parents:
+            if not isinstance(current.get(key), dict):
+                current[key] = {}
+            current = current[key]
+        current[leaf] = value
     _save_cfg(cfg)
 
 
@@ -1421,6 +1865,10 @@ def _get_usage(agent) -> dict:
             for _key, _val in (("avg_latency_s", _total_lat / _n), ("avg_tps", _avg_vel)):
                 if _val is not None and _val == _val and 0 < _val < 1e6:  # guard NaN/negative/absurd provider timings
                     usage[_key] = round(float(_val), 1)
+    # Window plans only: the desktop status bar's allowance (the canonical feed carries the same one).
+    from gateway.session_usage import plan_gauge
+    if (gauge := plan_gauge(agent)) is not None:
+        usage["plan_gauge"] = gauge
     # Live count of background/async subagents (CLI status bar ⛓ parity, same async_delegation registry).
     with contextlib.suppress(Exception):
         from tools.async_delegation import active_count as _async_active_count
@@ -1522,8 +1970,10 @@ def _live_session_identity(session: dict) -> tuple[str, str]:
     override = session.get("model_override") or {}
     model = (str(pending.get("display_model") or "").strip() or mirror.get("model")
              or getattr(agent, "model", "") or override.get("model"))
+    agent_provider = getattr(agent, "provider", "")
+    agent_provider = _scoped_session_provider(agent, session) if agent_provider == "custom" else agent_provider
     provider = (str(pending.get("display_provider") or "").strip() or mirror.get("provider")
-                or getattr(agent, "provider", "") or override.get("provider"))
+                or agent_provider or override.get("provider"))
     default = ("", "") if model else _session_default_route(session)
     return str(model or default[0]), str(provider or default[1])
 
@@ -1574,20 +2024,15 @@ def _session_info(agent, session: dict | None = None) -> dict:
     pending_switch = sess.get("pending_model_switch") or {}
     pending_model = str(pending_switch.get("display_model") or "").strip()
     pending_provider = str(pending_switch.get("display_provider") or "").strip()
+    model = pending_model or mirror.get("model", getattr(agent, "model", ""))
     provider = mirror.get("provider", getattr(agent, "provider", ""))
     if provider == "custom" and "provider" not in mirror and agent is not None:
-        # Clients reuse this identity for new chats without carrying the endpoint or key.
-        # Broadcast/resume callers need not be bound to this session's profile.
-        with _profile_build_scope(sess.get("profile_home") or _hermes_home):
-            provider = _runtime_model_config(agent).get("provider", provider)
-    model = pending_model or mirror.get("model", getattr(agent, "model", ""))
-    # The level the route's entry clamp actually sends (== reasoning_effort when verbatim), so the
-    # Desktop can say "ultra sends max on this route" like `/reasoning` does instead of presenting a
-    # Hermes-internal step (#61634) as a wire level the route does not have.
-    reasoning_effort_wire = ""
-    if reasoning_effort and reasoning_effort != "none":
-        reasoning_effort_wire = str(clamp_effort(reasoning_effort, route_supported_efforts(
-            pending_provider or provider, model, getattr(agent, "api_mode", None))) or "")
+        provider = _scoped_session_provider(agent, sess)
+    from agent.reasoning_effort import clamp_effort, route_supported_efforts
+    reasoning_effort_wire = "" if reasoning_effort in {"", "none"} else clamp_effort(
+        reasoning_effort,
+        route_supported_efforts(pending_provider or provider, model, getattr(agent, "api_mode", None)),
+    )
     info: dict = {
         "model": model,
         "provider": pending_provider or provider,
@@ -1726,10 +2171,12 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
     try:
         if db is not None:
             row = db.get_session(key) if hasattr(db, "get_session") else None
-            if row and _resumable_stored_cwd(row.get("cwd"), profile_home):
-                # An ssh session's stored cwd is its workspace: explicit, so the remote terminal uses it instead of
-                # the profile's ~. Other backends keep main's semantics (resolved outside the sessions lock: I/O).
-                remote = _cwd_is_remote(profile_home)
+            if (row and _resumable_stored_cwd(row.get("cwd"), profile_home)
+                    and not (_sessions.get(sid) or {}).get("conversation_worktree")):
+                # An ssh or sandbox session's stored cwd is its workspace: explicit, so the remote terminal uses it
+                # instead of the backend default (an unpicked launch dir is never persisted for them). Host backends
+                # keep main's semantics (resolved outside the sessions lock: I/O).
+                remote = not _host_cwd_is_terminal_cwd(profile_home)
                 with _sessions_lock:
                     if sid in _sessions:
                         _sessions[sid]["cwd"] = row["cwd"]
@@ -1766,43 +2213,6 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
 # breaking the (cosmetic) pet surface.
 _pet_payload_cache_lock = threading.Lock()
 _pet_payload_cache: dict[tuple, dict] = {}
-
-
-def _pet_sheet_revision(spritesheet) -> str:
-    """Stable revision id for one spritesheet file."""
-    with contextlib.suppress(Exception):
-        stat = spritesheet.stat()
-        return f"{stat.st_mtime_ns}:{stat.st_size}"
-    return "0:0"
-
-
-def _clone_pet_payload(payload: dict) -> dict:
-    """Shallow-clone cached payloads so callers can't mutate shared state."""
-    out = dict(payload)
-    for key, kind in (("framesByState", dict), ("framesByRow", dict), ("stateRows", list)):
-        if isinstance(payload.get(key), kind):
-            out[key] = kind(payload[key])
-    return out
-
-
-def _pet_row_frame_counts(spritesheet) -> dict:
-    """Real frame count per concrete spritesheet row name."""
-    with contextlib.suppress(Exception):
-        from PIL import Image
-        from agent.pet import constants, render
-        with Image.open(spritesheet) as opened:
-            image = opened.convert("RGBA")
-        W, H = constants.FRAME_W, constants.FRAME_H
-        cols = max(1, image.width // W)
-        row_count = max(1, image.height // H)
-        rows = constants.state_rows_for_grid(row_count)
-        out: dict[str, int] = {}
-        for row_idx, name in enumerate(rows[:row_count]):
-            top = row_idx * H
-            blank = lambda col: render._frame_is_blank(image.crop((col * W, top, col * W + W, top + H)))
-            out[name] = next((col for col in range(cols) if blank(col)), cols)  # frames before the first blank cell
-        return out
-    return {}
 
 
 def _pet_cfg() -> dict:
@@ -1869,17 +2279,6 @@ def _pet_active_selection():
     enabled = is_truthy_value(pet_cfg.get("enabled"), default=False)
     pet = store.resolve_active_pet(str(pet_cfg.get("slug", "") or "")) if enabled else None
     return enabled, pet, float(pet_cfg.get("scale", constants.DEFAULT_SCALE) or constants.DEFAULT_SCALE)
-
-
-def _pet_state_rows(spritesheet) -> list[str]:
-    """Row taxonomy for the concrete sheet (legacy 8-row or current 9-row atlas), in the renderer's `PetState` names."""
-    from agent.pet import constants
-    with contextlib.suppress(Exception):
-        from PIL import Image
-        with Image.open(spritesheet) as image:
-            row_count = max(1, image.height // constants.FRAME_H)
-        return list(constants.state_rows_for_grid(row_count))
-    return list(constants.STATE_ROWS)
 
 
 def _pet_gen_root():
@@ -2156,7 +2555,7 @@ from . import (
     compute_host_bridge as _compute_host_bridge, session_workdir as _session_workdir,
     session_lifecycle as _session_lifecycle, session_reaper as _session_reaper,
     session_transports as _session_transports, prompt_turn as _prompt_turn, billing_view as _billing_view,
-    methods_browser_control as _methods_browser_control, methods_bot_relay as _methods_bot_relay,
+    methods_bot_relay as _methods_bot_relay,
     methods_complete as _methods_complete, methods_config as _methods_config,
     methods_config_set as _methods_config_set, methods_images as _methods_images,
     methods_profiles as _methods_profiles, methods_prompt as _methods_prompt, methods_session as _methods_session,
@@ -2175,7 +2574,7 @@ for _m in (
     _session_compression, _change_watcher, _tool_progress, _session_notifications,
     _prompt_attachments, _session_history, _agent_callbacks, _session_auto_continue, _plugin_inject, _rpc_dispatch,
     _methods_complete_helpers, _methods_slash, _methods_voice, _methods_browser,
-    _methods_browser_control, _methods_session, _methods_prompt, _methods_config,
+    _methods_session, _methods_prompt, _methods_config,
     _methods_config_set, _methods_complete, _methods_tools, _methods_tools_plugin_servers, _methods_profiles, _methods_images,
     _methods_bot_relay, _prompt_turn, _billing_view, _methods_projects, _methods_session_foreign,
     _methods_session_control, _methods_subagents, _methods_vault, _methods_free_tier, _methods_connectors,

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import types
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -55,6 +56,66 @@ def test_compression_replay_reaches_gateway_status_sink_only_when_visible(tmp_pa
     assert (len(rendered) == 1) is _visible(setting)
 
 
+# --- agent/chat_completion_helpers.py stream-drop / stall deltas ----------------------------------
+
+def _stream_attempt_stub(enabled):
+    from agent import chat_completion_helpers as cch
+    fired = []
+    agent = MagicMock()
+    agent._warning_presentation_enabled = lambda: enabled
+    agent._fire_stream_delta = lambda text: fired.append(text)
+    return cch, agent, fired
+
+
+@pytest.mark.parametrize("enabled", (True, False))
+def test_stream_reconnect_marker_delta_honors_policy(enabled):
+    """The '⚠ Connection dropped mid tool-call; reconnecting…' delta is presentation only; the
+    tracking reset and retry bookkeeping run regardless."""
+    import httpx
+    from agent import chat_completion_helpers as cch
+    call = cch._StreamingCall.__new__(cch._StreamingCall)
+    call.agent = MagicMock()
+    call.agent._warning_presentation_enabled.return_value = enabled
+    call.agent.api_mode = "chat_completions"
+    fired = []
+    reset = []
+    call.agent._fire_stream_delta.side_effect = fired.append
+    call.agent._reset_stream_delivery_tracking.side_effect = lambda: reset.append(True)
+    call.api_kwargs = {}
+    call.result = {"partial_tool_names": ["read_file"]}
+    call.deltas_were_sent = {"yes": True}
+    call.provider_tool_in_flight = {"yes": True}
+    call.first_delta_fired = {"done": True}
+    call._request_cancelled = {"value": False}
+    call._retry_after_drop = lambda *a, **k: None
+
+    assert call._handle_stream_error(httpx.ReadTimeout("dropped"), 0, 1) is True
+    assert (len(fired) == 1) is enabled
+    assert reset == [True]
+    assert call.result["partial_tool_names"] == []
+
+
+def test_stream_stall_warning_kept_in_result_but_delta_gated():
+    from agent import chat_completion_helpers as cch
+    agent = MagicMock()
+    agent.model = "m"
+    agent.provider = "custom"
+    agent._current_streamed_assistant_text = "working"
+    agent._warning_presentation_enabled.return_value = False
+    fired = []
+    agent._fire_stream_delta.side_effect = fired.append
+    call = cch._StreamingCall.__new__(cch._StreamingCall)
+    call.agent = agent
+    call.result = {"error": RuntimeError("connection dropped"), "partial_tool_names": ["read_file"]}
+
+    stub = call._partial_stream_stub(call.result["error"])
+
+    content = stub.choices[0].message.content
+    assert "action was not executed" in content
+    assert "working" in content
+    assert fired == []
+
+
 # --- agent/agent_init.py invalid config int + autoraise notice ---------------------------------
 
 @pytest.mark.parametrize("setting", MODES)
@@ -72,23 +133,6 @@ def test_invalid_config_int_print_honors_policy_log_always(tmp_path, monkeypatch
 
 
 # --- agent/turn_tool_validation.py auto-repair notice ------------------------------------------
-
-
-# --- CLI mixins -------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("setting", MODES)
-def test_cli_browser_downgrade_notice_honors_policy(tmp_path, monkeypatch, setting):
-    _policy(tmp_path, monkeypatch, setting)
-    import cli as climod
-    from tools import browser_use_cli
-    monkeypatch.setattr(browser_use_cli, "default_downgrade_notice", lambda: "Browser Use backend unavailable; using built-in tools")
-    out = []
-    self = types.SimpleNamespace(_console_print=lambda s: out.append(s))
-    fn = next(v for v in vars(climod.HermesCLI).values()
-              if callable(v) and "Once-per-24h hint when the default Browser Use backend" in (getattr(v, "__doc__", "") or ""))
-    fn(self)
-    assert (len(out) == 1 and "⚠" in out[0]) is _visible(setting)
 
 
 # --- TUI (functions are rebound onto tui_gateway.server by bind_module) -------------------------

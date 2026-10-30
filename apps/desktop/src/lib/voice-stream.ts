@@ -1,3 +1,4 @@
+import { openGatewaySocket } from '@/api/canonical-protocol'
 import type { ResolvedOwner } from '@/hermes'
 import { resolveSiblingWsUrl } from '@/lib/sibling-ws-url'
 
@@ -24,6 +25,8 @@ export interface DictationStreamSession {
 }
 
 const OPEN_TIMEOUT_MS = 5_000
+// The host finalizer waits up to 20 seconds; allow transport slack, then use the recorded blob.
+export const DICTATION_FINAL_TIMEOUT_MS = 30_000
 
 export async function openDictationStream(
   owner: ResolvedOwner,
@@ -43,11 +46,12 @@ export async function openDictationStream(
     url.searchParams.set('profile', owner.profile)
   }
 
-  const ws = new WebSocket(url.toString())
+  const ws = openGatewaySocket(url.toString())
   ws.binaryType = 'arraybuffer'
 
   let settled = false
   let failure: Error | null = null
+  let finalTimer: number | null = null
   let pending: { reject: (error: Error) => void; resolve: (text: string) => void } | null = null
 
   const settle = (outcome: Error | string) => {
@@ -56,6 +60,10 @@ export async function openDictationStream(
     }
 
     settled = true
+    if (finalTimer !== null) {
+      window.clearTimeout(finalTimer)
+      finalTimer = null
+    }
 
     if (typeof outcome !== 'string') {
       failure = outcome
@@ -65,9 +73,13 @@ export async function openDictationStream(
     }
 
     pending = null
+    ws.close()
   }
 
   ws.onmessage = event => {
+    if (settled) {
+      return
+    }
     let message: { message?: string; text?: string; transcript?: string; type?: string }
 
     try {
@@ -80,10 +92,8 @@ export async function openDictationStream(
       onPartial?.(message.text)
     } else if (message.type === 'final') {
       settle((message.transcript ?? '').trim())
-      ws.close()
     } else if (message.type === 'error') {
       settle(new Error(message.message || 'live transcription failed'))
-      ws.close()
     }
   }
 
@@ -95,17 +105,18 @@ export async function openDictationStream(
       resolve(true)
     }
 
-    ws.onerror = () => {
+    ws.onerror = ws.onclose = () => {
       window.clearTimeout(timer)
+      settle(new Error('live transcription connection failed'))
       resolve(false)
     }
   })
 
   ws.onclose = () => settle(new Error('live transcription connection closed'))
+  ws.onerror = () => settle(new Error('live transcription connection failed'))
 
   if (!opened || settled) {
-    ws.close()
-
+    settle(new Error('live transcription connection did not open'))
     return null
   }
 
@@ -126,12 +137,18 @@ export async function openDictationStream(
         }
 
         pending = { reject, resolve }
-        ws.send(JSON.stringify({ eos: true }))
+        finalTimer = window.setTimeout(
+          () => settle(new Error('live transcription final response timed out')),
+          DICTATION_FINAL_TIMEOUT_MS
+        )
+        try {
+          ws.send(JSON.stringify({ eos: true }))
+        } catch (error) {
+          settle(error instanceof Error ? error : new Error('live transcription send failed'))
+        }
       }),
     cancel: () => {
-      settled = true
-      pending = null
-      ws.close()
+      settle(new Error('live transcription cancelled'))
     }
   }
 }

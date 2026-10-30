@@ -197,7 +197,7 @@ def test_force_close_tcp_sockets_descends_httpcore_1_connection_wrapper():
     descriptors (kanban.db) and let TLS bytes overwrite SQLite headers. The
     owning httpx thread is responsible for closing FDs on its own unwind.
     """
-    from agent.agent_runtime_helpers import force_close_tcp_sockets
+    from agent.agent_runtime_helpers_connections import force_close_tcp_sockets
 
     class FakeSocket:
         def __init__(self):
@@ -233,7 +233,7 @@ def test_force_close_tcp_sockets_finds_sockets_on_httpx_mounts():
     stream was still mid-recv on a mounted proxy pool, so interrupt logged
     success and the provider kept the slot for minutes.
     """
-    from agent.agent_runtime_helpers import force_close_tcp_sockets
+    from agent.agent_runtime_helpers_connections import force_close_tcp_sockets
 
     class FakeSocket:
         def __init__(self):
@@ -274,7 +274,7 @@ def test_force_close_tcp_sockets_finds_in_flight_pool_request_sockets():
     falsy) returned tcp_force_closed=0 while the hung recv was still on
     the in-flight request. Must shut that socket down without close().
     """
-    from agent.agent_runtime_helpers import force_close_tcp_sockets
+    from agent.agent_runtime_helpers_connections import force_close_tcp_sockets
 
     class FakeSocket:
         def __init__(self):
@@ -312,7 +312,7 @@ def test_force_close_tcp_sockets_finds_in_flight_pool_request_sockets():
 def test_force_close_tcp_sockets_clears_timeout_before_shutdown():
     """Hung SSL recv with timeout=None can ignore SHUT_RDWR until the
     socket timeout is cleared (#85252). Still no close() (#29507)."""
-    from agent.agent_runtime_helpers import force_close_tcp_sockets
+    from agent.agent_runtime_helpers_connections import force_close_tcp_sockets
 
     class FakeSocket:
         def __init__(self):

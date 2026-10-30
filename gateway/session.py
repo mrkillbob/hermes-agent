@@ -10,10 +10,11 @@ import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, fields
-from typing import Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any
 
 from .config import Platform, GatewayConfig, HomeChannel
 from .whatsapp_identity import canonical_whatsapp_identifier
+from gateway.session_detached import detached_route_of
 from gateway.session_identity import transport_profile_of
 from gateway.session_persistence import SessionPersistenceMixin, _DB_UNPINNED
 from gateway.session_prompt_pin import SessionPromptPinMixin, sanitize_prompt_pin
@@ -96,10 +97,17 @@ class SessionSource:
     # Discord auto-thread continuity: the thread id a CHANNEL message WILL be delivered into, so
     # the initiating message and later in-thread follow-ups share ONE session.
     prospective_thread_id: Optional[str] = None
+    # Private transport lane used by voice fast-path routing.  It is persisted so restart events
+    # continue to use the same session key rather than falling back to the ordinary chat lane.
+    _session_key_lane: Optional[str] = field(default=None, repr=False, compare=False)
     # Wire-INVISIBLE trust signal (never in to_dict/from_dict, so a peer cannot forge it): came
     # over the authenticated relay WebSocket. ``platform`` is the UNDERLYING platform, not
     # ``relay``, so authz must key upstream trust off THIS flag.
     delivered_via_upstream_relay: bool = False
+    # Wire-INVISIBLE: the key of a conversation its chat moved past, still run from the apps
+    # (gateway/session_detached.py). It replaces the chat's key, so nothing keyed by route reaches
+    # the chat's current conversation, and delivery goes nowhere.
+    detached_route: Optional[str] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # Mirror scope_id/guild_id onto each other (scope_id wins) so readers of EITHER agree.
@@ -128,7 +136,7 @@ class SessionSource:
     _ALWAYS_FIELDS = ("chat_id", "chat_name", "chat_type", "user_id", "user_name", "thread_id", "chat_topic")
     _OPTIONAL_PRE_SCOPE = ("user_id_alt", "chat_id_alt")
     _OPTIONAL_POST_SCOPE = ("parent_chat_id", "message_id", "profile")
-    _OPTIONAL_TAIL = ("auto_thread_initial_name", "prospective_thread_id")
+    _OPTIONAL_TAIL = ("auto_thread_initial_name", "prospective_thread_id", "_session_key_lane")
 
     def to_dict(self) -> dict[str, Any]:
         d = {"platform": self.platform.value}
@@ -174,6 +182,8 @@ class SessionContext:
     session_id: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    cwd: Optional[str] = None
+    conversation_worktree: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -183,6 +193,7 @@ class SessionContext:
             "shared_multi_user_session": self.shared_multi_user_session,
             "session_key": self.session_key, "session_id": self.session_id,
             "created_at": _iso(self.created_at), "updated_at": _iso(self.updated_at),
+            "cwd": self.cwd, "conversation_worktree": self.conversation_worktree,
         }
 
 
@@ -441,6 +452,19 @@ def build_session_context_prompt(context: SessionContext, *, redact_pii: bool = 
     ]
     lines.append(f"**Connected Platforms:** {', '.join(platforms_list)}")
 
+    worktree = getattr(context, "conversation_worktree", None) or {}
+    worktree_path = worktree.get("worktree_path") or worktree.get("path")
+    if worktree_path:
+        # The path was produced by the certified worktree manager. Keep it
+        # lossless so the model receives the actual executable workspace.
+        safe_path = json.dumps(str(worktree_path), ensure_ascii=False)
+        lines += [
+            "",
+            "**Conversation workspace:** This conversation is isolated in the certified worktree "
+            f"`{safe_path}`. Use this directory for terminal and file operations; do not switch "
+            "to another workspace unless the user explicitly asks.",
+        ]
+
     if context.home_channels:
         lines += ["", "**Home Channels (default destinations):**"]
         for platform, home in context.home_channels.items():
@@ -480,6 +504,32 @@ def sanitize_model_override(override: Optional[dict[str, Any]]) -> Optional[dict
     return cleaned or None
 
 
+def _default_conversation_worktree_manager_factory(db):
+    """Build the enabled manager or fail before an interactive route exists."""
+    from agent.conversation_worktree import ConversationWorktreeError, ConversationWorktreeManager
+    from agent.conversation_worktree_policy import resolve_conversation_worktree_policy
+    from hermes_cli.config import load_config
+
+    try:
+        policy = resolve_conversation_worktree_policy(load_config())
+    except Exception as exc:
+        raise ConversationWorktreeError(
+            f"conversation worktree policy could not be resolved: {exc}", phase="policy"
+        ) from exc
+    if not policy.enabled:
+        return None
+    if db is None:
+        raise ConversationWorktreeError(
+            "conversation worktree policy is enabled but SessionDB is unavailable", phase="state"
+        )
+    try:
+        return ConversationWorktreeManager(policy, db)
+    except Exception as exc:
+        raise ConversationWorktreeError(
+            f"conversation worktree manager is unavailable: {exc}", phase="state"
+        ) from exc
+
+
 @dataclass
 class SessionEntry:
     """Routing-index entry: maps a session key to its current session ID and metadata."""
@@ -491,6 +541,9 @@ class SessionEntry:
     display_name: Optional[str] = None
     platform: Optional[Platform] = None
     chat_type: str = "dm"
+    # The receiving bot can differ from the profile that owns the session.
+    # Persist it independently of origin so restored sessions keep the same delivery route.
+    transport_profile: Optional[str] = None
     # Small, JSON-serializable per-entry state (e.g. Slack thread watermarks).
     metadata: dict[str, Any] = field(default_factory=dict)
     # Token tracking
@@ -532,12 +585,9 @@ class SessionEntry:
     # Session-scoped /model override (model/provider/base_url ONLY — never credentials, see
     # sanitize_model_override). Persisted so a restart keeps the chosen model.
     model_override: Optional[dict[str, str]] = None
-    # Profile owning the bot that received this lane's traffic (``RoutingIdentity.transport_profile``,
-    # "default" spelled out). The key namespace only says where the turn RUNS; after a restart this is
-    # what says which bot may deliver to it. None = unknown (row predates the field, or standalone).
-    transport_profile: Optional[str] = None
-    # Exact session-context/channel inputs from the last human turn. Append-only dataclass field so
-    # older positional construction of transport_profile keeps its meaning.
+    cwd: Optional[str] = None
+    conversation_worktree: dict[str, str] = field(default_factory=dict)
+    # Exact session-context/channel inputs from the last human turn.
     prompt_pin: Optional[dict[str, Any]] = None
     # Gateway ``/yolo`` bypass for this lane, mirrored from ``tools.approval``'s in-memory set so a restart
     # keeps it. Tri-state: True/False is an explicit toggle (an OFF stays off, even over a ``--yolo`` launch);
@@ -564,7 +614,10 @@ class SessionEntry:
             "display_name": self.display_name,
             "platform": self.platform.value if self.platform else None,
             "chat_type": self.chat_type, "metadata": self.metadata,
+            "cwd": self.cwd, "conversation_worktree": self.conversation_worktree,
         }
+        if self.transport_profile is not None:
+            result["transport_profile"] = self.transport_profile
         result.update((name, getattr(self, name)) for name in self._PLAIN_FIELDS)
         # ``yolo`` keeps the pre-tri-state meaning (ON only) for older readers; ``yolo_toggle`` is authoritative.
         result["yolo"], result["yolo_toggle"] = self.yolo is True, self.yolo
@@ -576,11 +629,9 @@ class SessionEntry:
             # Defence-in-depth against an unsanitized dict stored directly.
             result["model_override"] = sanitize_model_override(self.model_override)
         if self.prompt_pin:
-            # Same defence-in-depth: routing JSON must never preserve malformed pin state.
+            # Routing JSON must never preserve malformed pin state.
             if pin := sanitize_prompt_pin(self.prompt_pin):
                 result["prompt_pin"] = pin
-        if self.transport_profile:
-            result["transport_profile"] = self.transport_profile
         if self.origin:
             result["origin"] = self.origin.to_dict()
         return result
@@ -614,18 +665,23 @@ class SessionEntry:
         # Rows written before the tri-state stored a bare ``yolo`` bool where False also meant "never
         # toggled": only their ON is a real toggle; False follows the launch policy, as it did then.
         plain["yolo"] = data["yolo_toggle"] if "yolo_toggle" in data else (True if data.get("yolo") is True else None)
-        transport_profile = data.get("transport_profile")
         return cls(
             session_key=session_key, session_id=session_id,
             created_at=datetime.fromisoformat(data["created_at"]),
             updated_at=datetime.fromisoformat(data["updated_at"]), origin=origin,
             display_name=data.get("display_name"), platform=platform,
             chat_type=data.get("chat_type", "dm"), metadata=dict(data.get("metadata") or {}),
+            transport_profile=data.get("transport_profile") if isinstance(data.get("transport_profile"), str) else None,
             last_resume_marked_at=_parse_iso(data.get("last_resume_marked_at")),
             active_turn_token=token, active_turn_started_at=started_at,
             model_override=sanitize_model_override(data.get("model_override")),
             prompt_pin=sanitize_prompt_pin(data.get("prompt_pin")),
-            transport_profile=transport_profile if isinstance(transport_profile, str) and transport_profile else None,
+            cwd=data.get("cwd") if isinstance(data.get("cwd"), str) else None,
+            conversation_worktree={
+                str(key): str(value)
+                for key, value in (data.get("conversation_worktree") or {}).items()
+                if isinstance(key, str) and isinstance(value, str)
+            } if isinstance(data.get("conversation_worktree"), dict) else {},
             **plain,
         )
 
@@ -665,10 +721,8 @@ def is_shared_multi_user_session(
 def _session_key_namespace(profile: Optional[str]) -> str:
     """``agent:<ns>`` prefix for a session key: default/None profile → ``agent:main``
     (BYTE-IDENTICAL to every historical key); named profile → ``agent:<name>`` so two
-    profiles serving the same chat never collide. A profile literally named ``main`` would
-    otherwise produce the default's namespace and share every session (routing index, agent
-    cache, store) with it, so it is marked ``main~``: ``~`` is outside the profile-id alphabet,
-    so the marked form can never be another profile's id."""
+    profiles serving the same chat never collide. A profile literally named ``main`` is
+    marked ``main~`` so it cannot share the default profile's namespace."""
     if not profile or profile == "default":
         return "agent:main"
     return "agent:main~" if profile == "main" else f"agent:{profile}"
@@ -695,6 +749,8 @@ def build_session_key(
     session per platform. Groups add the participant id only when ``group_sessions_per_user`` and
     not in a thread (threads are shared unless ``thread_sessions_per_user``).
     """
+    if detached := detached_route_of(source):
+        return detached
     is_dm = source.chat_type == "dm"
     chat_id = source.chat_id
     if is_dm and source.platform == Platform.WHATSAPP:
@@ -724,14 +780,23 @@ def build_session_key(
     user_part = [str(participant_id)] if isolate_user and participant_id else []
     thread_part = [thread_id] if thread_id else []
     parts += user_part + thread_part if is_dm else thread_part + user_part
+    # A private conversational surface can share delivery coordinates without
+    # sharing the ordinary text transcript. This marker is not serialized.
+    lane = str(getattr(source, "_session_key_lane", "") or "").strip()
+    if lane:
+        parts.extend(("lane", lane))
     return ":".join(str(part) for part in parts)
 
 
 class _SessionFlight:
     def __init__(self) -> None:
         self.event = threading.Event()
+        self.closed = False
         self.result: Optional[SessionEntry] = None
         self.error: Optional[BaseException] = None
+        self.post_actions: list[
+            tuple[Callable[[SessionEntry], SessionEntry], threading.Event, list, list]
+        ] = []
 
 
 @dataclass
@@ -781,6 +846,12 @@ class AsyncSessionStore:
 
         return _offloaded
 
+    async def get_or_create_session_and_switch(self, *args, **kwargs) -> Any:
+        """Keep the handoff operation on the store's single-flight worker."""
+        return await asyncio.to_thread(
+            self._store.get_or_create_session_and_switch, *args, **kwargs
+        )
+
 
 class SessionStore(
     SessionPersistenceMixin, SessionRecoveryMixin, SessionLifecycleMixin, SessionTranscriptMixin,
@@ -788,7 +859,10 @@ class SessionStore(
 ):
     """Session routing index + transcripts: SQLite (SessionDB), legacy JSONL fallback."""
 
-    def __init__(self, sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=None):
+    def __init__(
+        self, sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=None,
+        conversation_worktree_manager_factory: Optional[Callable[[Any], Any]] = None,
+    ):
         self.sessions_dir = sessions_dir
         self.config = config
         self._entries: dict[str, SessionEntry] = {}
@@ -805,6 +879,10 @@ class SessionStore(
         self._fast_persisted_entries: dict[str, tuple[int, str]] = {}
         self._inflight_lock = threading.Lock()
         self._inflight_sessions: dict[str, _SessionFlight] = {}
+        self._interactive_worktree_upgrade_lock = threading.Lock()
+        # Ids a route names before their state.db row is live: a route transition publishes under
+        # _lock and inserts/reopens the row after releasing it. Guarded by _lock.
+        self._rows_pending: set[str] = set()
         # An unscoped legacy Slack key is claimed once per process (two workspaces must not both
         # revive one session).
         self._legacy_slack_claim_lock = threading.Lock()
@@ -815,10 +893,16 @@ class SessionStore(
         self._transcript_reroutes: dict[str, str] = {}
         self._dirty_transcripts: dict[str, list[dict[str, Any]]] = {}
         self._transcript_append_failures: dict[str, int] = {}
-        # Monotonic timestamp of the last FTS5 rebuild attempt, or None before any attempt; see
-        # SessionTranscriptMixin._rebuild_fts_once for the cooldown this gates.
         self._fts_rebuild_last_attempt_at: Optional[float] = None
         self._has_active_processes_fn = has_active_processes_fn
+        self._conversation_worktree_manager_factory = (
+            conversation_worktree_manager_factory or _default_conversation_worktree_manager_factory
+        )
+        self._conversation_root_leases: dict[str, Any] = {}
+        self._conversation_root_leases_lock = threading.Lock()
+        self._failed_conversation_root_leases: set[str] = set()
+        self._conversation_root_lease_retry_lock = threading.Lock()
+        self._conversation_root_lease_retry_timer: Optional[threading.Timer] = None
         self._write_sessions_json = bool(getattr(config, "write_sessions_json", True))
 
         # SQLite handles are cached per path and resolved through ``_db`` per call, never bound
@@ -841,6 +925,9 @@ class SessionStore(
         # session_id -> owning key for ids proven but not yet published in ``_entries`` (a
         # compression child row is written before its reroute is published).
         self._session_owner_hints: dict[str, str] = {}
+        # Called with (key, session id, origin) once a route names another conversation; the owner
+        # wires it so a conversation its chat moved past detaches at once (gateway/session_detached.py).
+        self.route_named = None
         from gateway.session_db_recovery import RecoverableHandleCache
 
         self._db_handle_cache = RecoverableHandleCache(
@@ -894,44 +981,125 @@ class SessionStore(
 
     def get_or_create_session(
         self, source: SessionSource, force_new: bool = False, touch_activity: bool = True,
+        conversation_kind: str = "interactive", _post_action=None,
     ) -> SessionEntry:
         """Single-flight session lookup/create per routing key: overlapping calls for one key (even
         concurrent ``force_new``) share the owner's result so only one transition and SQLite row is
         created. ``touch_activity=False`` (internal events) preserves the user-activity clock."""
+        if detached_route_of(source):
+            from gateway.session_detached import detached_entry
+            return detached_entry(self, source)
         session_key = self._generate_session_key(source)
+        # Conversation kind changes the work performed after routing ownership is
+        # established, not the routing identity itself.  A task handoff and an
+        # interactive message for one channel must never publish competing roots.
+        flight_key = session_key
         inflight_lock = self._lazy("_inflight_lock", threading.Lock)
         self._lazy("_inflight_sessions", dict)
 
         with inflight_lock:
-            slot = self._inflight_sessions.get(session_key)
+            slot = self._inflight_sessions.get(flight_key)
             owner = slot is None
             if owner:
-                slot = self._inflight_sessions[session_key] = _SessionFlight()
+                slot = self._inflight_sessions[flight_key] = _SessionFlight()
 
         if not owner:
+            action_waiter = None
+            if _post_action is not None:
+                action_waiter = (threading.Event(), [], [])
+                with inflight_lock:
+                    if not slot.closed:
+                        slot.post_actions.append((_post_action, *action_waiter))
+                    else:
+                        action_waiter = None
+            if _post_action is not None and action_waiter is None:
+                return self.get_or_create_session(
+                    source, force_new=force_new, touch_activity=touch_activity,
+                    conversation_kind=conversation_kind, _post_action=_post_action,
+                )
             slot.event.wait()
             if slot.error is not None:
                 raise slot.error
+            if action_waiter is not None:
+                action_waiter[0].wait()
+                if action_waiter[1]:
+                    raise action_waiter[1][0]
+                assert action_waiter[2]
+                result = action_waiter[2][0]
+            else:
+                result = None
             assert slot.result is not None
+            if conversation_kind == "interactive":
+                self._upgrade_route_for_interactive(result or slot.result)
             if touch_activity:
-                self.update_session(slot.result.session_key)
-            return slot.result
+                self.update_session((result or slot.result).session_key)
+            return result or slot.result
 
         try:
             slot.result = self._get_or_create_session_impl(
                 source, force_new=force_new, touch_activity=touch_activity,
+                conversation_kind=conversation_kind,
             )
-            return slot.result
+            owner_result = slot.result
+            if _post_action is not None:
+                owner_result = _post_action(slot.result)
+                slot.result = owner_result
+            while True:
+                with inflight_lock:
+                    actions = slot.post_actions
+                    slot.post_actions = []
+                if not actions:
+                    # Close acceptance under the same lock as the empty check. A late handoff must
+                    # start a new flight instead of waiting on an action the owner can no longer drain.
+                    with inflight_lock:
+                        if slot.post_actions:
+                            continue
+                        slot.closed = True
+                    break
+                for action, event, error, result_holder in actions:
+                    try:
+                        assert slot.result is not None
+                        action_result = action(slot.result)
+                        result_holder.append(action_result)
+                        slot.result = action_result
+                    except BaseException as exc:
+                        error.append(exc)
+                    finally:
+                        event.set()
+            return owner_result if _post_action is not None else slot.result
         except BaseException as exc:
             slot.error = exc
             raise
         finally:
             slot.event.set()
             with inflight_lock:
-                self._inflight_sessions.pop(session_key, None)
+                self._inflight_sessions.pop(flight_key, None)
+
+    def get_or_create_session_and_switch(
+        self, source: SessionSource, target_session_id: str, *,
+        conversation_kind: str = "task", persisted_cwd: Optional[str] = None,
+        preserve_prompt_pin: bool = True,
+    ) -> Optional[SessionEntry]:
+        """Route and complete a handoff before releasing the routing flight."""
+        def _switch(_entry: SessionEntry) -> SessionEntry:
+            switched = self.switch_session(
+                _entry.session_key, target_session_id,
+                conversation_kind=conversation_kind, persisted_cwd=persisted_cwd,
+                preserve_prompt_pin=preserve_prompt_pin,
+            )
+            if switched is None:
+                raise RuntimeError(
+                    f"could not switch session key {_entry.session_key} → {target_session_id}"
+                )
+            return switched
+
+        return self.get_or_create_session(
+            source, conversation_kind=conversation_kind, _post_action=_switch,
+        )
 
     def _get_or_create_session_impl(
         self, source: SessionSource, force_new: bool = False, touch_activity: bool = True,
+        conversation_kind: str = "interactive",
     ) -> SessionEntry:
         """One routing transition for the single-flight owner. All blocking I/O (SQLite SELECTs,
         index rewrite + fsync, recovery queries) runs *outside* ``self._lock``, which protects
@@ -949,11 +1117,12 @@ class SessionStore(
         checks = None
         if not force_new and observed is not None:
             sid = observed.session_id
-            # A local route the authority holds by receipt is never stale: a stamped row is
+            # A local or API route the authority holds by receipt is never stale: a stamped row is
             # reopened by its next admitted turn, never replaced (#140642).
             checks = _RouteChecks(
                 sid, self._compression_tip_for_session_id(sid),
-                self._is_session_ended_in_db(sid) and self._local_receipt_target(observed) is None,
+                self._is_session_ended_in_db(sid) and self._local_receipt_target(observed) is None
+                and not self._api_bound(observed),
                 self._route_reset_reason(observed),
             )
         # Phase 2 (lock): apply the decisions to _entries.
@@ -962,22 +1131,48 @@ class SessionStore(
         # Phase 3 (no lock): recovery + create + save + DB ops.
         if decision.needs_recover and decision.prev_session_id is None:
             self._route_recover(decision, session_key, source, now)
-        create_kwargs = None
-        if decision.entry is None:
-            create_kwargs = self._route_create(
-                decision, session_key, source, now, force_new, observed
+        try:
+            create_kwargs = None
+            if decision.entry is None:
+                create_kwargs = self._route_create(
+                    decision, session_key, source, now, force_new, observed, conversation_kind
+                )
+            elif not force_new:
+                workspace_changed = self._resolve_conversation_worktree_for_existing_entry(
+                    decision.entry, conversation_kind
+                )
+                if conversation_kind == "interactive" and decision.entry.cwd is None:
+                    self._upgrade_route_for_interactive(decision.entry)
+                    workspace_changed = workspace_changed or bool(decision.entry.conversation_worktree)
+                decision.needs_save = decision.needs_save or workspace_changed
+            if decision.needs_save:
+                if decision.metadata_only_save:
+                    self._save_entry(session_key)
+                else:
+                    self._save_entries()
+        except BaseException:
+            with self._lock:
+                current = self._entries.get(session_key)
+                if current is decision.entry or current is None:
+                    if observed is None:
+                        self._entries.pop(session_key, None)
+                    else:
+                        self._entries[session_key] = observed
+            self.reconcile_conversation_root_transition(decision.entry, observed)
+            if create_kwargs:
+                self._row_settled(create_kwargs["session_id"])
+            raise
+        try:
+            self._finish_route_transition(
+                session_key, end_session_id=decision.prev_session_id,
+                end_reason=decision.reset_reason or "session_reset", create_kwargs=create_kwargs,
+                origin=source, display_name=decision.entry.display_name,
             )
-        if decision.needs_save:
-            if decision.metadata_only_save:
-                self._save_entry(session_key)
-            else:
-                self._save_entries()
-
-        self._finish_route_transition(
-            session_key, end_session_id=decision.prev_session_id,
-            end_reason=decision.reset_reason or "session_reset", create_kwargs=create_kwargs,
-            origin=source, display_name=decision.entry.display_name,
-        )
+        finally:
+            if create_kwargs:
+                self._row_settled(create_kwargs["session_id"])
+        if observed is None or decision.entry.session_id != observed.session_id:
+            self._announce_route(session_key, decision.entry)
         return decision.entry
 
     def _apply_route_checks(
@@ -1041,7 +1236,7 @@ class SessionStore(
 
     def _route_create(
         self, decision: _RouteDecision, session_key: str, source: SessionSource, now: datetime,
-        force_new: bool, observed: Optional[SessionEntry],
+        force_new: bool, observed: Optional[SessionEntry], conversation_kind: str = "interactive",
     ) -> Optional[dict[str, Any]]:
         """Create a candidate outside the lock and publish it only if the key is still vacant;
         returns ``create_session`` kwargs when the candidate won."""
@@ -1049,23 +1244,328 @@ class SessionStore(
         candidate = SessionEntry(
             session_key=session_key, session_id=session_id, created_at=now, updated_at=now,
             origin=source, display_name=source.chat_name, platform=source.platform,
-            chat_type=source.chat_type, was_auto_reset=decision.reset_reason is not None,
+            chat_type=source.chat_type, transport_profile=transport_profile_of(source),
+            was_auto_reset=decision.reset_reason is not None,
             auto_reset_reason=decision.reset_reason, reset_had_activity=decision.reset_had_activity,
-            prev_session_id=decision.prev_session_id, transport_profile=transport_profile_of(source),
+            prev_session_id=decision.prev_session_id,
         )
+        self._bind_conversation_worktree_for_new_entry(candidate, conversation_kind)
         with self._lock:
             current = self._entries.get(session_key)
             if current is None or (force_new and current is observed):
                 self._entries[session_key] = current = candidate
+                self._rows_pending.add(session_id)
         decision.entry = current
         decision.needs_save = True
         if current is not candidate:
+            # A candidate may have acquired a root lease before another route
+            # won publication. Do not retain an unpublished root.
+            self.reconcile_conversation_root_transition(candidate, current)
+            self._retire_unpublished_conversation_worktree(candidate)
             return None
         return self._session_create_kwargs(
             session_id=session_id, session_key=session_key, origin=source,
             source_value=source.platform.value, display_name=source.chat_name,
             parent_session_id=decision.prev_session_id,
         )
+    @staticmethod
+    def _supports_conversation_worktree(source: Optional[SessionSource]) -> bool:
+        return source is not None
+
+    def _conversation_worktree_manager(self, session_key: Optional[str] = None):
+        db = self._db_for_key(session_key) if session_key else self._db
+        return self._conversation_worktree_manager_factory(db)
+
+    def conversation_worktree_isolation_enabled(self, session_key: Optional[str] = None) -> bool:
+        """Expose the resolved policy state to handoff compatibility checks."""
+        return self._conversation_worktree_manager(session_key) is not None
+
+    def _upgrade_route_for_interactive(self, entry: SessionEntry) -> None:
+        """Apply interactive-only workspace setup after a shared task flight wins."""
+        if entry.conversation_worktree or not self._supports_conversation_worktree(entry.origin):
+            return
+        upgrade_lock = self._lazy("_interactive_worktree_upgrade_lock", threading.Lock)
+        with upgrade_lock:
+            if entry.conversation_worktree:
+                return
+            self._bind_conversation_worktree_for_new_entry(entry, conversation_kind="interactive")
+            if entry.conversation_worktree:
+                self._save_entry(entry.session_key)
+
+    @staticmethod
+    def _binding_metadata(binding) -> dict[str, str]:
+        return {
+            "root_session_id": str(binding.root_session_id),
+            "worktree_path": str(binding.path),
+            "branch": str(binding.branch),
+            "base_commit": str(binding.base_commit),
+            "repo_common_dir": str(binding.repo_common_dir),
+        }
+
+    def _ensure_conversation_root_lease(self, binding) -> bool:
+        root_session_id = str(binding.root_session_id)
+        with self._conversation_root_leases_lock:
+            if root_session_id in self._conversation_root_leases:
+                return False
+            from agent.conversation_worktree import acquire_conversation_root_lease
+
+            self._conversation_root_leases[root_session_id] = acquire_conversation_root_lease(
+                root_session_id=root_session_id,
+                worktree_path=Path(binding.path),
+                repo_common_dir=Path(binding.repo_common_dir),
+                surface="gateway",
+            )
+            return True
+
+    def _apply_conversation_worktree_binding(self, entry: SessionEntry, binding) -> bool:
+        lease_acquired = self._ensure_conversation_root_lease(binding)
+        metadata = self._binding_metadata(binding)
+        changed = entry.cwd != str(binding.path) or entry.conversation_worktree != metadata
+        entry.cwd = str(binding.path)
+        entry.conversation_worktree = metadata
+        return lease_acquired or changed
+
+    def _schedule_conversation_root_lease_retry(self) -> None:
+        """Retry failed root-lease releases independently of a future route transition."""
+        retry_lock = self._lazy("_conversation_root_lease_retry_lock", threading.Lock)
+        with retry_lock:
+            timer = getattr(self, "_conversation_root_lease_retry_timer", None)
+            if timer is not None and timer.is_alive():
+                return
+            timer = threading.Timer(1.0, self._retry_failed_conversation_root_leases)
+            timer.daemon = True
+            self._conversation_root_lease_retry_timer = timer
+            timer.start()
+
+    def _retry_failed_conversation_root_leases(self) -> None:
+        retry_lock = self._lazy("_conversation_root_lease_retry_lock", threading.Lock)
+        with retry_lock:
+            self._conversation_root_lease_retry_timer = None
+        leases_lock = self._conversation_root_leases_lock
+        with leases_lock:
+            failed = self._lazy("_failed_conversation_root_leases", set)
+            roots = set(failed)
+            failed.difference_update(roots)
+        for root_session_id in roots:
+            self.release_conversation_root_lease(root_session_id)
+
+    def _bind_conversation_worktree_for_new_entry(
+        self, entry: SessionEntry, conversation_kind: str,
+    ) -> None:
+        if conversation_kind not in {"interactive", "task"}:
+            raise ValueError("conversation_kind must be 'interactive' or 'task'")
+        if conversation_kind == "task" or not self._supports_conversation_worktree(entry.origin):
+            return
+        manager = self._conversation_worktree_manager(entry.session_key)
+        if manager is None:
+            return
+        binding = manager.bind_new_root_session(
+            entry.session_id, conversation_kind=conversation_kind
+        )
+        if binding is not None:
+            self._apply_conversation_worktree_binding(entry, binding)
+
+    def _resolve_conversation_worktree_lineage(
+        self, manager, session_id: str, *, session_key: Optional[str] = None,
+        recover_failed: bool = True,
+    ):
+        """Compression inherits the nearest binding; a fork never inherits its parent."""
+        from agent.conversation_worktree import ConversationWorktreeError
+
+        current = session_id
+        seen = set()
+        db = self._db_for_key(session_key) if session_key is not None else self._db
+        while current not in seen:
+            seen.add(current)
+            try:
+                binding = manager.resolve_existing_session(current)
+            except ConversationWorktreeError:
+                if not recover_failed:
+                    raise  # Detached turns never create or repair a root claim.
+                # A transient bootstrap failure leaves a durable creation_failed
+                # claim.  The manager can recover it when the worktree still
+                # exists; do not strand /resume or /branch behind the failed
+                # read-only resolution path.
+                record = db.get_conversation_worktree(current) if db is not None else None
+                if record is None or record.state != "creation_failed":
+                    raise
+                binding = manager.bind_new_root_session(current, conversation_kind="interactive")
+            if binding is not None:
+                return current, binding
+            if db is None:
+                return current, None
+            if db.get_conversation_worktree(current) is not None:
+                raise ConversationWorktreeError(
+                    "saved conversation worktree is no longer ready", phase="recovery"
+                )
+            row = db.get_session(current)
+            if not row or db.is_explicit_fork_child(current):
+                return current, None
+            parent = row.get("parent_session_id")
+            if not parent:
+                return current, None
+            current = parent
+        raise ConversationWorktreeError("cyclic gateway conversation lineage", phase="state")
+
+    def _resolve_conversation_worktree_for_existing_entry(
+        self, entry: SessionEntry, conversation_kind: str,
+    ) -> bool:
+        if conversation_kind not in {"interactive", "task"}:
+            raise ValueError("conversation_kind must be 'interactive' or 'task'")
+        if conversation_kind == "task" or not self._supports_conversation_worktree(entry.origin):
+            return False
+        manager = self._conversation_worktree_manager()
+        if manager is None:
+            return False
+        root_session_id = entry.conversation_worktree.get("root_session_id") or entry.session_id
+        root_session_id, binding = self._resolve_conversation_worktree_lineage(manager, root_session_id)
+        if binding is None:
+            from agent.conversation_worktree import ConversationWorktreeError
+
+            if entry.conversation_worktree:
+                raise ConversationWorktreeError(
+                    "saved conversation worktree is no longer ready; refusing source checkout fallback",
+                    phase="recovery",
+                )
+            # Rows created before isolation was enabled are historical sessions.  Keep their
+            # recorded cwd; first-use binding belongs only to a new root, never to resume.
+            return False
+        return self._apply_conversation_worktree_binding(entry, binding)
+
+    def release_conversation_root_lease(self, root_session_id: str) -> bool:
+        root_session_id = str(root_session_id)
+        with self._conversation_root_leases_lock:
+            # Keep the registry lock across the liveness check and release.  Otherwise a new
+            # route can acquire the same root between the check and the old lease's release.
+            with self._lock:
+                self._ensure_loaded_locked()
+                if any(
+                    str((entry.conversation_worktree or {}).get("root_session_id", "")) == root_session_id
+                    for entry in self._entries.values()
+                ):
+                    return False
+            live_check = getattr(self, "_conversation_live_root_check", None)
+            if live_check is not None and live_check(root_session_id):
+                return False
+            lease = self._conversation_root_leases.get(root_session_id)
+            if lease is None:
+                return True
+            try:
+                lease.release()
+            except Exception:
+                logger.warning("Failed to release gateway conversation root lease %s", root_session_id,
+                               exc_info=True)
+                self._lazy("_failed_conversation_root_leases", set).add(root_session_id)
+                self._schedule_conversation_root_lease_retry()
+                return False
+            if self._conversation_root_leases.get(root_session_id) is lease:
+                self._conversation_root_leases.pop(root_session_id, None)
+            self._failed_conversation_root_leases.discard(root_session_id)
+        return True
+
+    def release_unreferenced_conversation_root_leases(self) -> None:
+        """Retry roots held while a detached live session was being retired."""
+        with self._conversation_root_leases_lock:
+            roots = tuple(self._conversation_root_leases)
+        for root in roots:
+            self.release_conversation_root_lease(root)
+
+
+    def _retire_unpublished_conversation_worktree(self, entry: SessionEntry) -> None:
+        metadata = entry.conversation_worktree or {}
+        root_session_id = str(metadata.get("root_session_id") or "")
+        if not root_session_id:
+            return
+        manager = self._conversation_worktree_manager(entry.session_key)
+        remover = getattr(manager, "remove_after_explicit_request", None) if manager is not None else None
+        if callable(remover):
+            try:
+                result = remover(root_session_id, active_session_bound=False)
+                if getattr(result, "removed", False):
+                    return
+                logger.warning(
+                    "Could not remove unpublished conversation worktree %s before retirement",
+                    root_session_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to remove unpublished conversation worktree %s",
+                    root_session_id,
+                    exc_info=True,
+                )
+            return
+        db = self._db_for_key(entry.session_key)
+        marker = getattr(db, "mark_conversation_worktree_removed", None) if db is not None else None
+        if callable(marker):
+            try:
+                marker(root_session_id)
+            except Exception:
+                logger.warning("Failed to retire unpublished conversation worktree %s",
+                               root_session_id, exc_info=True)
+
+    def close_all_db_handles(self) -> None:
+        """Close database handles and release every gateway-owned root lease."""
+        super().close_all_db_handles()
+        with self._conversation_root_leases_lock:
+            leases = list(self._conversation_root_leases.items())
+        first_error = None
+        for root_session_id, lease in leases:
+            try:
+                lease.release()
+            except Exception as exc:
+                # One damaged registry must not strand the other roots. Keep
+                # the failed lease registered so a later close can retry it.
+                with self._conversation_root_leases_lock:
+                    self._lazy("_failed_conversation_root_leases", set).add(root_session_id)
+                self._schedule_conversation_root_lease_retry()
+                if first_error is None:
+                    first_error = exc
+            else:
+                with self._conversation_root_leases_lock:
+                    if self._conversation_root_leases.get(root_session_id) is lease:
+                        self._conversation_root_leases.pop(root_session_id, None)
+        if first_error is not None:
+            raise first_error
+
+    def reconcile_conversation_root_transition(self, displaced_entry: Any, retained_entry: Any) -> bool:
+        displaced_metadata = (
+            displaced_entry if isinstance(displaced_entry, dict)
+            else getattr(displaced_entry, "conversation_worktree", None)
+        ) or {}
+        retained_metadata = (
+            retained_entry if isinstance(retained_entry, dict)
+            else getattr(retained_entry, "conversation_worktree", None)
+        ) or {}
+        displaced_root = str(displaced_metadata.get("root_session_id", ""))
+        retained_root = str(retained_metadata.get("root_session_id", ""))
+        if not displaced_root or displaced_root == retained_root:
+            return False
+        return self.release_conversation_root_lease(displaced_root)
+
+    def resolve_task_owned_workspace(self, target_session_id: str, persisted_cwd: str) -> tuple[str, dict[str, str]]:
+        from agent.conversation_worktree import ConversationWorktreeError
+
+        raw_cwd = str(persisted_cwd or "").strip()
+        path = Path(raw_cwd).expanduser()
+        if not raw_cwd or not path.is_absolute() or not path.is_dir():
+            raise ConversationWorktreeError("CLI handoff has no usable verified workspace", phase="cwd")
+        path = path.resolve()
+        manager = self._conversation_worktree_manager()
+        if manager is None:
+            return str(path), {}
+        db = self._db
+        if db is None:
+            raise ConversationWorktreeError(
+                "conversation worktree policy is enabled but SessionDB is unavailable", phase="state"
+            )
+        _, binding = self._resolve_conversation_worktree_lineage(manager, target_session_id)
+        if binding is None or Path(binding.path).resolve() != path:
+            raise ConversationWorktreeError(
+                "CLI handoff workspace does not match its ready conversation binding", phase="recovery"
+            )
+        # This is preflight only: switch_session acquires the lease when it
+        # prepares the route, so a failed handoff leaves no unowned lease.
+        return str(path), self._binding_metadata(binding)
 
     def update_session(
         self, session_key: str, last_prompt_tokens: int | None = None, touch_activity: bool = True,
@@ -1082,11 +1582,9 @@ class SessionStore(
                 entry.last_prompt_tokens = last_prompt_tokens
             # Snapshot peer fields under _lock so a concurrent reset/heal cannot tear the row.
             peer_sid, peer_origin, peer_name = entry.session_id, entry.origin, entry.display_name
-            peer_transport = entry.transport_profile
         # Metadata-only: single-row UPSERT, outside ``_lock``.
         self._save_entry(session_key)
-        self._record_gateway_session_peer(
-            peer_sid, session_key, peer_origin, display_name=peer_name, transport_profile=peer_transport)
+        self._record_gateway_session_peer(peer_sid, session_key, peer_origin, display_name=peer_name)
 
     def get_session_metadata(self, session_key: str, key: str, default: Any = None) -> Any:
         """Return a metadata value stored on a live session entry."""
@@ -1136,8 +1634,12 @@ class SessionStore(
             entry = self._entry_locked(session_key)
             return dict(entry.model_override) if entry and entry.model_override else None
 
-    def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
-        """Force reset a session, creating a new session ID."""
+    def reset_session(
+        self, session_key: str, display_name: Optional[str] = None,
+        conversation_kind: str = "interactive",
+    ) -> Optional[SessionEntry]:
+        """Force reset a session, certifying a new root before route rotation."""
+        db_create_kwargs = None
         with self._lock:
             old_entry = self._entry_locked(session_key)
             if old_entry is None:
@@ -1147,32 +1649,68 @@ class SessionStore(
             if old_entry.origin and old_entry.origin.platform == Platform.LOCAL:
                 from gateway.session_local_recovery import reset_local_session
                 return reset_local_session(self, old_entry, session_id, now, display_name)
-            new_entry = self._replace_route_locked(
-                session_key, old_entry, session_id, now,
+            candidate = SessionEntry(
+                session_key=session_key, session_id=session_id, created_at=now, updated_at=now,
+                origin=old_entry.origin,
                 display_name=display_name if display_name is not None else old_entry.display_name,
+                platform=old_entry.platform, chat_type=old_entry.chat_type,
+                transport_profile=old_entry.transport_profile,
                 is_fresh_reset=True,
             )
-            db_create_kwargs = self._session_create_kwargs(
-                session_id=session_id, session_key=session_key, origin=old_entry.origin,
-                source_value=old_entry.platform.value if old_entry.platform else "unknown",
-                display_name=old_entry.display_name, parent_session_id=old_entry.session_id,
-            )
-        self._finish_route_transition(
-            session_key, end_session_id=old_entry.session_id, end_reason="session_reset",
-            create_kwargs=db_create_kwargs, origin=old_entry.origin,
-            display_name=new_entry.display_name, during=" during reset",
+
+        # Bootstrap can fail or block. Keep the old route authoritative until
+        # the replacement root is ready.
+        self._bind_conversation_worktree_for_new_entry(
+            candidate, conversation_kind=conversation_kind
         )
-        return new_entry
+
+        try:
+            with self._lock:
+                if self._entries.get(session_key) is not old_entry:
+                    winner = self._entries.get(session_key)
+                else:
+                    winner = None
+                    self._entries[session_key] = candidate
+                    try:
+                        self._save()
+                    except BaseException:
+                        self._entries[session_key] = old_entry
+                        raise
+                    db_create_kwargs = self._session_create_kwargs(
+                        session_id=session_id, session_key=session_key, origin=old_entry.origin,
+                        source_value=old_entry.platform.value if old_entry.platform else "unknown",
+                        display_name=candidate.display_name, parent_session_id=old_entry.session_id,
+                    )
+                    self._rows_pending.add(session_id)
+        except BaseException:
+            self.reconcile_conversation_root_transition(candidate, old_entry)
+            raise
+        if winner is not None:
+            self.reconcile_conversation_root_transition(candidate, winner)
+            return winner
+        try:
+            self._finish_route_transition(
+                session_key, end_session_id=old_entry.session_id, end_reason="session_reset",
+                create_kwargs=db_create_kwargs, origin=old_entry.origin,
+                display_name=candidate.display_name, during=" during reset",
+            )
+        finally:
+            self._row_settled(session_id)
+        self._announce_route(session_key, candidate)
+        self.reconcile_conversation_root_transition(old_entry, candidate)
+        return candidate
 
     def _replace_route_locked(self, session_key, old_entry, session_id, now, **fields) -> SessionEntry:
         """Publish a fresh entry (inheriting origin/platform/chat_type) and save. Lock held."""
         new_entry = SessionEntry(
             session_key=session_key, session_id=session_id, created_at=now, updated_at=now,
             origin=old_entry.origin, platform=old_entry.platform, chat_type=old_entry.chat_type,
-            transport_profile=old_entry.transport_profile, **fields,
+            transport_profile=old_entry.transport_profile,
+            **fields,
         )
         self._entries[session_key] = new_entry
         self._save()
+        self._rows_pending.add(session_id)  # after the save: a raising save leaves nothing pending
         return new_entry
 
     def rekey_profile_routing(self, old_name: str, new_name: str) -> int:
@@ -1252,8 +1790,9 @@ class SessionStore(
     # background compression on an idle session cannot make it look fresh to the
     # restart-resume freshness gate (#85709).
     def switch_session(
-        self, session_key: str, target_session_id: str, *, expected_session_id: Optional[str] = None,
-        preserve_prompt_pin: bool = True,
+        self, session_key: str, target_session_id: str, conversation_kind: str = "interactive",
+        persisted_cwd: Optional[str] = None, expected_session_id: Optional[str] = None,
+        *, preserve_prompt_pin: bool = True,
     ) -> Optional[SessionEntry]:
         """Point a session key at an existing session ID (``/resume``): ends the current row and
         reopens the target so resume matches the CLI.
@@ -1269,40 +1808,99 @@ class SessionStore(
             if old_entry is None:
                 return None
             if expected_session_id is not None and old_entry.session_id != expected_session_id:
-                logger.info(
-                    "Session switch for %s refused: route moved from %s to %s after the caller's snapshot",
-                    session_key, expected_session_id, old_entry.session_id,
-                )
                 return None
-            if old_entry.session_id == target_session_id:
+            if old_entry.session_id == target_session_id and persisted_cwd is None:
                 return old_entry
-            new_entry = self._replace_route_locked(
-                session_key, old_entry, target_session_id, _now(),
-                display_name=old_entry.display_name, model_override=old_entry.model_override,
+            candidate = SessionEntry(
+                session_key=session_key, session_id=target_session_id,
+                created_at=_now(), updated_at=_now(), origin=old_entry.origin,
+                display_name=old_entry.display_name, platform=old_entry.platform,
+                chat_type=old_entry.chat_type, transport_profile=old_entry.transport_profile,
+                model_override=old_entry.model_override,
                 yolo=old_entry.yolo,
                 prompt_pin=(
-                    dict(old_entry.prompt_pin)
+                    sanitize_prompt_pin(old_entry.prompt_pin)
                     if preserve_prompt_pin and old_entry.prompt_pin is not None else None
                 ),
             )
+        new_entry = candidate
+        try:
+            if persisted_cwd is not None:
+                candidate.cwd, candidate.conversation_worktree = self.resolve_task_owned_workspace(
+                    target_session_id, persisted_cwd
+                )
+                self._resolve_conversation_worktree_for_existing_entry(candidate, "interactive")
+            else:
+                manager = self._conversation_worktree_manager(session_key)
+                db = self._db_for_key(session_key)
+                if conversation_kind == "interactive" and manager is not None and db is not None:
+                    _root_session_id, binding = self._resolve_conversation_worktree_lineage(
+                        manager, target_session_id
+                    )
+                    if binding is None and db.is_explicit_fork_child(target_session_id):
+                        binding = manager.bind_new_root_session(
+                            target_session_id, conversation_kind="interactive"
+                        )
+                    if binding is not None:
+                        self._apply_conversation_worktree_binding(candidate, binding)
+                    elif (row := db.get_session(target_session_id)) is not None:
+                        # A pre-isolation row is historical rather than a new root. Preserve its
+                        # recorded workspace, but never silently fall back to the profile checkout.
+                        historical_cwd = str(row.get("cwd") or "").strip()
+                        if not historical_cwd or not os.path.isdir(historical_cwd):
+                            from agent.conversation_worktree import ConversationWorktreeError
 
-        if self._db_for_key(session_key) and old_entry.session_id:
-            self._promote_session_reset(
-                session_key, old_entry.session_id, "session_switch",
-                log=lambda e: logger.debug("Session DB end_session failed: %s", e),
-            )
-        if self._db_for_key(session_key):
-            # An explicit /resume/handoff/branch repoint is real user activity: the row is
-            # reopened (a repoint onto a finalized row must resume it, not write into a dead row).
-            # Mount-time reads (TUI session.resume) no longer reopen (#85303) — only this path does.
-            self._reopen_session_row(
-                session_key, target_session_id, log_prefix="Session DB reopen_session failed"
-            )
-            self._record_gateway_session_peer(
-                target_session_id, session_key, new_entry.origin,
-                display_name=new_entry.display_name, include_compression_ancestors=True,
-                transport_profile=new_entry.transport_profile,
-            )
+                            raise ConversationWorktreeError(
+                                "historical session has no usable recorded workspace",
+                                phase="resume",
+                            )
+                        candidate.cwd = historical_cwd
+                else:
+                    self._resolve_conversation_worktree_for_existing_entry(
+                        candidate, conversation_kind
+                    )
+            with self._lock:
+                if self._entries.get(session_key) is not old_entry:
+                    winner = self._entries.get(session_key)
+                else:
+                    winner = None
+                    self._entries[session_key] = candidate
+                    try:
+                        self._save()
+                        self._rows_pending.add(target_session_id)
+                    except BaseException:
+                        self._entries[session_key] = old_entry
+                        raise
+            if winner is not None:
+                self.reconcile_conversation_root_transition(candidate, winner)
+                if expected_session_id is not None and winner.session_id != expected_session_id:
+                    return None
+                return winner
+        except BaseException:
+            self.reconcile_conversation_root_transition(candidate, old_entry)
+            raise
+
+        try:
+            if self._db_for_key(session_key) and old_entry.session_id != target_session_id:
+                self._promote_session_reset(
+                    session_key, old_entry.session_id, "session_switch",
+                    log=lambda e: logger.debug("Session DB end_session failed: %s", e),
+                )
+            if self._db_for_key(session_key):
+                # An explicit /resume/handoff/branch repoint is real user activity: the row is
+                # reopened (a repoint onto a finalized row must resume it, not write into a dead row).
+                # Mount-time reads (TUI session.resume) no longer reopen (#85303) — only this path does.
+                self._reopen_session_row(
+                    session_key, target_session_id, log_prefix="Session DB reopen_session failed"
+                )
+                self._record_gateway_session_peer(
+                    target_session_id, session_key, new_entry.origin,
+                    display_name=new_entry.display_name, include_compression_ancestors=True,
+                )
+            self.reconcile_conversation_root_transition(old_entry, new_entry)
+        finally:
+            self._row_settled(target_session_id)
+        self._announce_route(session_key, new_entry)
         return new_entry
 
     def list_sessions(self, active_minutes: Optional[int] = None) -> list[SessionEntry]:
@@ -1358,4 +1956,6 @@ def build_session_context(
         context.session_key = session_entry.session_key
         context.session_id = session_entry.session_id
         context.created_at, context.updated_at = session_entry.created_at, session_entry.updated_at
+        context.cwd = session_entry.cwd
+        context.conversation_worktree = dict(session_entry.conversation_worktree)
     return context

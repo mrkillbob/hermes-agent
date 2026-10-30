@@ -68,13 +68,16 @@ class CustomProfile(ProviderProfile):
         # the main loop after the route rejected the reasoning field — an unset main
         # effort arrives here already filled by default_reasoning_config). Never emit
         # think=True (Ollama-only flag).
+        ollama_endpoint = _looks_like_ollama_endpoint(ctx.get("base_url"))
         if reasoning_config and isinstance(reasoning_config, dict):
             effort = (reasoning_config.get("effort") or "").strip().lower()
             if effort == "none" or reasoning_config.get("enabled", True) is False:
                 # See #14820.
                 top_level["reasoning_effort"] = "none"
-                if _looks_like_ollama_endpoint(ctx.get("base_url")):
+                if ollama_endpoint:
                     extra_body["think"] = False
+            elif ollama_endpoint and ctx.get("supports_reasoning") is False:
+                pass
             elif effort and base_url_host_matches(str(ctx.get("base_url") or ""), "api.groq.com"):
                 # Groq's OpenAI-compatible wire accepts top-level reasoning_effort only as
                 # "none" / "default"; any graded level ("medium", "high") 400s (#75089).
@@ -82,6 +85,22 @@ class CustomProfile(ProviderProfile):
             elif effort:
                 top_level["reasoning_effort"] = clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
         return extra_body, top_level
+
+    def sanitize_request_kwargs(self, api_kwargs: dict[str, Any], **context: Any) -> dict[str, Any]:
+        """Drop inherited reasoning overrides when an Ollama probe rules out thinking."""
+        # For other custom hosts this flag only gates nested extra_body.reasoning; it
+        # does not rule out the OpenAI-compatible top-level reasoning_effort field.
+        if (not _looks_like_ollama_endpoint(context.get("base_url"))
+                or context.get("supports_reasoning") is not False):
+            return api_kwargs
+        api_kwargs.pop("reasoning_effort", None)
+        extra_body = api_kwargs.get("extra_body")
+        if isinstance(extra_body, dict):
+            for key in ("think", "thinking", "reasoning"):
+                extra_body.pop(key, None)
+            if not extra_body:
+                api_kwargs.pop("extra_body", None)
+        return api_kwargs
 
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0

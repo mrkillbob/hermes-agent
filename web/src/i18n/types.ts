@@ -28,7 +28,6 @@ export interface Translations {
     delete: string;
     refresh: string;
     retry: string;
-    /** Optional — English fallback until translated. "{what}" = the noun that failed to load. */
     loadFailed?: string;
     loadFailedDetails?: string;
     search: string;
@@ -135,10 +134,17 @@ export interface Translations {
     sharedMetricsBody?: string;
     sharedMetricsReaskBody?: string;
     sharedMetricsShare?: string;
-    sharedMetricsLocal?: string;
     sharedMetricsOff?: string;
     sharedMetricsDetails?: string;
     sharedMetricsSaveFailed?: string;
+  };
+
+  // ── System page: Memory section ──
+  systemMemory: {
+    activeProvider: string;
+    noProvider: string;
+    builtinLayer: string;
+    builtinNote: string;
   };
 
   // ── Status page ──
@@ -288,9 +294,7 @@ export interface Translations {
 
   // ── Cron page ──
   cron: {
-    /** Optional — English fallback until translated. */
     loadWhat?: string;
-    scriptRequired?: string;
     confirmDeleteMessage: string;
     confirmDeleteTitle: string;
     newJob: string;
@@ -393,6 +397,10 @@ export interface Translations {
     updateGit: string;
     /** Optional: locales without it fall back to the English body at the call site. */
     updateConsentBody?: (name: string, sha: string) => string;
+    /** Optional, English fallback: the scan rated an update caution; confirming retries with force. */
+    updateScanBody?: (name: string, count: number) => string;
+    /** Optional, English fallback: the scan rated an update dangerous; never overridable. */
+    updateScanBlocked?: (name: string) => string;
     versionBadge: string;
     showInSidebar: string;
     hideFromSidebar: string;
@@ -481,12 +489,9 @@ export interface Translations {
 
   // ── Skills page ──
   skills: {
+    loadWhat?: string;
     title: string;
     searchPlaceholder: string;
-    /** Optional — English fallback until translated. */
-    loadWhat?: string;
-    browseHub?: string;
-    createSkill?: string;
     enabledOf: string;
     all: string;
     categories: string;

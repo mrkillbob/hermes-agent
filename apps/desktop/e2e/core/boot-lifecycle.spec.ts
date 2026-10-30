@@ -29,6 +29,7 @@ import {
   createCoreSandbox,
   currentSessionId,
   launchCoreApp,
+  quitCoreApp,
   recordWebSockets,
   sandboxProcesses,
   send,
@@ -152,7 +153,7 @@ test('boot handshake, supervised respawn, and zero orphans on quit', async () =>
       const [gateway] = backendProcesses(sandbox)
       expect(gateway).toBeTruthy()
 
-      await app.close()
+      await quitCoreApp(app)
       closed = true
       clearInterval(census)
       // Electron main + helpers leave; the gateway they attached to stays and keeps its turn.
@@ -170,7 +171,8 @@ test('boot handshake, supervised respawn, and zero orphans on quit', async () =>
       hold.open()
 
       // Teardown on request: the CLI stop takes the daemon and its tool child down.
-      const stopped = stopSandboxGateway(sandbox)
+      // The turn is still live, so the stop must be told to interrupt it.
+      const stopped = stopSandboxGateway(sandbox, { interrupt: true })
       expect(stopped.code, stopped.output).toBe(0)
       await expect
         .poll(
@@ -249,7 +251,7 @@ test('relaunching the same home: one gateway across every boot, transcript intac
         }
 
         await assertTranscriptOracle(page, ws, provider, session, `launch ${launch}`)
-        await app.close()
+        await quitCoreApp(app)
         live = null
         await expect
           .poll(

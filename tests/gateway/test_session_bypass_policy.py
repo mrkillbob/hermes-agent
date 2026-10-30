@@ -31,7 +31,8 @@ def test_bypass_policy_is_typed_frozen_and_safe_implies_ignore(tmp_path):
         restore_policy({**asdict(safe), 'ignore_user_config': False})  # implication must hold in cold receipts too
 
 
-def test_bypass_session_freezes_code_defaults_without_reading_profile(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bypass_mode", ["safe_mode", "ignore_user_config"])
+def test_bypass_session_freezes_code_defaults_without_reading_profile(tmp_path, monkeypatch, bypass_mode):
     """The frozen snapshot of a bypass session is code defaults + explicit options; the profile's
     (possibly malformed) config.yaml, .env and plugin toolsets are never consulted."""
     from types import SimpleNamespace
@@ -62,7 +63,12 @@ def test_bypass_session_freezes_code_defaults_without_reading_profile(tmp_path, 
     cwd = tmp_path / 'work'
     cwd.mkdir()
     params = {'cwd': str(cwd), 'model': 'safe-fixture', 'provider': 'custom',
-              'base_url': 'http://127.0.0.1:9/v1', 'safe_mode': True, 'toolsets': ['terminal']}
+              'base_url': 'http://127.0.0.1:9/v1', bypass_mode: True, 'toolsets': ['terminal']}
+    def no_profile_route(*args, **kwargs):
+        pytest.fail("bypass construction consulted profile route resolution")
+    # Also catches a warm module cache hiding the import-time profile probe in the second mode.
+    monkeypatch.setattr(gateway.session_policy, '_with_entry_pick', no_profile_route)
+    monkeypatch.setattr(gateway.session_policy, '_keeps_profile_route', no_profile_route)
     private = {}
     policy = _bypass_policy(params, private_secrets=private)
     sys.audit('hermes.test.done')  # audit hooks cannot be removed; close the witness window

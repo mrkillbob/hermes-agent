@@ -187,6 +187,9 @@ def _quarantine_stamp_ms(stale: Path) -> int | None:
 
 def _recover_update_debts_on_startup() -> None:
     """The startup half of a previous update, run on every launch before dispatch."""
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return
     # Dependency recovery already ran before imports. Report any fleet restart
     # still owed by a previous update without restarting services here.
     if "update" not in sys.argv[1:]:
@@ -214,6 +217,9 @@ def _cleanup_quarantined_exes(scripts_dir: Path | None = None) -> None:
 
     Deleting it converts a one-rename recovery into a full reinstall. See #75584.
     """
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance():
+        return
     if not _is_windows():
         return
     scripts_dir = scripts_dir if scripts_dir is not None else _venv_scripts_dir()

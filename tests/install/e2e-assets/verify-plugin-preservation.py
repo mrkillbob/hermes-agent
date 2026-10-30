@@ -210,8 +210,12 @@ def verify_home(home: str, snap: dict) -> dict:
 def seed_fixtures(home: Path, external: Path) -> None:
     """Only create fresh fixtures; retries must not repair damaged witnesses."""
     wrapper = home / "plugins/mnemosyne-wrapper"
-    profile = home / "profiles/e2e-preserve/plugins/second-plugin"
-    for path in (wrapper, profile, external):
+    profile_home = home / "profiles/e2e-preserve"
+    profile = profile_home / "plugins/second-plugin"
+    # The journey also configures this profile for its own mock provider.
+    # Claim the whole fresh profile before creating any fixture, so existing
+    # profile settings and credentials can never become journey-owned state.
+    for path in (wrapper, profile_home, external):
         if os.path.lexists(path):
             raise FileExistsError(f"refusing to replace preservation fixture: {path}")
     for path in (wrapper, profile, external):

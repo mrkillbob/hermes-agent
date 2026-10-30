@@ -98,6 +98,7 @@ def journey(tmp_path_factory):
 
 
 def test_update_fetches_into_the_installers_partial_clone(journey: Journey) -> None:
+    journey.require_steps("install", "install_ok")
     m, run, flt = journey.machine, journey["update"], journey["partial_filter"]
     assert flt, fail_with(m, "harness: the installer's clone is not partial (no remote.origin.partialclonefilter); "
                              "serve.git should allow filters")
@@ -109,6 +110,7 @@ def test_update_fetches_into_the_installers_partial_clone(journey: Journey) -> N
 
 
 def test_list_venv_holders_reports_live_holders(journey: Journey) -> None:
+    journey.require_steps("install", "install_ok")
     m, pids, run = journey.machine, journey["holders"], journey["list_live"]
     reported = _reported(run)
     assert reported is not None, fail_with(m, "--list-venv-holders printed no JSON list", run)
@@ -122,6 +124,7 @@ def test_list_venv_holders_reports_live_holders(journey: Journey) -> None:
 
 
 def test_list_venv_holders_empty_once_they_exit(journey: Journey) -> None:
+    journey.require_steps("install", "install_ok")
     m, run = journey.machine, journey["list_none"]
     journey["holders_stopped"]
     reported = _reported(run)

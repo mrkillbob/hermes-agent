@@ -23,22 +23,23 @@ _PROBE = textwrap.dedent("""
     async def main():
         from gateway.run_api import start_gateway_api, stop_gateway_api
         from gateway.runtime_bootstrap import TicketStore
-        import tui_gateway.ws
 
         async def fake_handle_ws(ws, **kwargs):
             await ws.accept(subprotocol="hermes-gateway-v1")
             await ws.send_json({"native": True, "dashboard_loaded": "hermes_cli.web_server" in sys.modules})
             await ws.close()
-        tui_gateway.ws.handle_ws = fake_handle_ws
-
         home = sys.argv[1]
         tickets = TicketStore("owner", [home])
         authority = types.SimpleNamespace(db=types.SimpleNamespace(db_path=home + "/state.db"), profile_id=home)
         runner = types.SimpleNamespace(_draining=False, session_runtime_descriptor={"state": "ready"},
                                        session_authority=authority, session_ticket_store=tickets)
         out = {}
+        assert "tui_gateway.ws" not in sys.modules, "probe must exercise a cold native import"
         handle = await start_gateway_api(runner)
         try:
+            native = sys.modules.get("tui_gateway.ws")
+            assert native is not None, "ready listener has not loaded its native handler"
+            native.handle_ws = fake_handle_ws
             out["after_bind"] = sorted(m for m in ("hermes_cli.web_server", "fastapi") if m in sys.modules)
             url = handle.api_origin.replace("http:", "ws:") + "/api/ws"
             def protocols():

@@ -109,7 +109,8 @@ def _split(ffmpeg: str, path: str, work_dir: str, cuts: list[float]) -> list[str
     _run_quiet([ffmpeg, "-y", "-loglevel", "error", "-i", path, "-vn", "-c", "copy", "-f", "segment",
                 "-segment_times", ",".join(f"{c:.3f}" for c in cuts), "-reset_timestamps", "1", pattern],
                timeout=300)
-    return sorted(os.path.join(work_dir, name) for name in os.listdir(work_dir) if name.startswith("part"))
+    return sorted(os.path.join(work_dir, name) for name in os.listdir(work_dir)
+                  if re.fullmatch(r"part\d{3}\.m4a", name))
 
 
 def transcribe_oversized(
@@ -136,7 +137,13 @@ def transcribe_oversized(
         target = max_bytes * _SEGMENT_HEADROOM * duration / os.path.getsize(compact)
         if max_seconds:
             target = min(target, max_seconds * _SEGMENT_HEADROOM)
-        parts = _split(ffmpeg, compact, work_dir, _cut_points(duration, target, _silence_midpoints(ffmpeg, compact)))
+        try:
+            parts = _split(ffmpeg, compact, work_dir,
+                           _cut_points(duration, target, _silence_midpoints(ffmpeg, compact)))
+        except (OSError, subprocess.SubprocessError) as exc:  # disk full, ffmpeg timeout, missing muxer
+            return _too_large(path, max_bytes, f"segmenting failed: {exc}")
+        if not parts:
+            return _too_large(path, max_bytes, "segmenting produced no files")
         logger.info("Transcribing %s (%.0fs) in %d segments of <= %.0fs",
                     os.path.basename(path), duration, len(parts), math.ceil(target))
         transcripts: list[str] = []

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -115,6 +116,15 @@ def _installed(candidates: tuple[str, ...], allow_outdated: bool) -> Engine | No
 
 def installed_engine(backend: str = "auto", *, allow_outdated: bool = True) -> Engine | None:
     """Boot may retain a prior PM pin and moves a pre-PM engine into PM's store once; it never downloads."""
+    if sys.platform == 'darwin':
+        # Metadata-only absence is conclusive before vendor/adoption probes can run.
+        # Auto must consider every backend, not infer availability from an unprobed vendor.
+        choices = tuple(BACKEND_PACKAGES) if backend == 'auto' else _candidates(backend, None, pm.current_target())
+        if _installed(choices, allow_outdated) is None and not any(_legacy_installs(c) for c in choices):
+            return None
+        from hermes_cli.local_runtime.generation_evidence import reserve_for_engine_probe
+
+        reserve_for_engine_probe()
     vendor = None
     if backend == "auto":
         from hermes_cli.local_runtime.bootstrap import _detect_gpu_vendor
@@ -125,6 +135,16 @@ def installed_engine(backend: str = "auto", *, allow_outdated: bool = True) -> E
     if engine is None and any(adopt_legacy_engine(candidate) for candidate in candidates):
         engine = _installed(candidates, allow_outdated)
     return engine
+
+
+def engine_for_binary(binary: Path) -> Engine | None:
+    """Read-only matching of a live executable to registered PM engine facts."""
+    resolved = binary.resolve()
+    for backend in BACKEND_PACKAGES:
+        engine = _installed((backend,), allow_outdated=True)
+        if engine is not None and engine.binary.resolve() == resolved:
+            return engine
+    return None
 
 
 # Before PM owned binaries, Hermes installed each engine to runtimes/llamacpp/b<tag>/<backend>/

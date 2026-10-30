@@ -1,6 +1,5 @@
 """Tests for tui_gateway JSON-RPC protocol plumbing."""
 
-import io
 import json
 import os
 import subprocess
@@ -13,71 +12,11 @@ from pathlib import Path
 
 import pytest
 
-_original_stdout = sys.stdout
+from tests.tui_gateway.protocol_fixtures import (
+    _restore_stdout as _restore_stdout, capture as capture, server as server,  # noqa: PLC0414
+)
 
 
-@pytest.fixture(autouse=True)
-def _restore_stdout():
-    yield
-    sys.stdout = _original_stdout
-
-
-@pytest.fixture()
-def server():
-    # The sys.modules mocks only need to cover the *initial* import — once
-    # tui_gateway.server is cached, they are inert. Keeping them active for
-    # the whole test poisons any module first imported inside a test body:
-    # e.g. hermes_cli.active_sessions would bind the mocked get_hermes_home
-    # (a fixed shared path) forever, leaking active-session registry entries
-    # across every later test in the process. Scope the patch to the import.
-    #
-    # Import server_requests (pure stdlib) and transport BEFORE the window: the patch drops every module first
-    # imported inside it, so otherwise the module server.py binds its sinks on (write/emit/answerable) would vanish
-    # from sys.modules and a test's own ``from tui_gateway import server_requests`` would get a fresh,
-    # unbound copy whose default sinks drop frames and treat every client as answerable. Likewise a test's
-    # ``from tui_gateway.transport import bind_transport`` would bind a fresh module's ContextVar that the
-    # server's ``current_transport()`` never reads (first-in-process test sees ``_stdio_transport`` as caller).
-    import tui_gateway.server_requests
-    import tui_gateway.transport
-    import hermes_constants  # real get_process_hermes_home: a mocked one put state.db under the cwd (repo)
-    with patch.dict("sys.modules", {
-        "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test"),
-                                      get_process_hermes_home=hermes_constants.get_process_hermes_home),
-        "hermes_cli.env_loader": MagicMock(),
-        "hermes_cli.banner": MagicMock(),
-        "hermes_state": MagicMock(),
-    }):
-        import importlib
-        mod = importlib.import_module("tui_gateway.server")
-
-    # Snapshot the RPC registry: several tests below stub handlers
-    # ("slash.exec", "fast.ping", ...) directly in the module-level dict,
-    # which is shared with every other test file in the process.
-    methods = dict(mod._methods)
-    real_stdout = mod._real_stdout
-    yield mod
-    # Reset module-level state without re-importing. importlib.reload
-    # would re-register the module's atexit hooks (ThreadPoolExecutor
-    # shutdown, _shutdown_sessions); the duplicates race the stderr
-    # buffer at interpreter shutdown and surface as Fatal Python error:
-    # _enter_buffered_busy. Restoring the dicts in place gives the next
-    # test a clean slate.
-    mod._methods.clear()
-    mod._methods.update(methods)
-    mod._real_stdout = real_stdout
-    for sid in list(mod._sessions):
-        mod._close_session_by_id(sid, end_reason="test_cleanup")
-    from tui_gateway import server_requests
-    server_requests.reset_for_tests()
-    mod._live_transports.clear()
-
-
-@pytest.fixture()
-def capture(server):
-    """Redirect server's real stdout to a StringIO and return (server, buf)."""
-    buf = io.StringIO()
-    server._real_stdout = buf
-    return server, buf
 
 
 # ── JSON-RPC envelope ────────────────────────────────────────────────
@@ -712,6 +651,41 @@ def test_approval_respond_falls_back_to_stored_session_id(server, monkeypatch):
     ]
 
 
+def test_approval_respond_finds_exact_request_after_live_session_record_is_gone(server):
+    """A still-blocked approval remains answerable after its UI runtime is re-minted."""
+    from tools import approval, approval_gateway_wait
+
+    session_key = "orphaned-agent-session"
+    request_id = "req-orphaned-approval"
+    entry = approval_gateway_wait._ApprovalEntry(
+        {
+            "command": "git branch -D stale-branch",
+            "description": "force delete a local branch",
+            "request_id": request_id,
+        }
+    )
+    approval._gateway_queues[session_key] = [entry]
+    try:
+        response = server.handle_request(
+            {
+                "id": "r-orphaned-approval",
+                "method": "approval.respond",
+                "params": {
+                    "session_id": "gone-ui-session",
+                    "request_id": request_id,
+                    "choice": "once",
+                },
+            }
+        )
+
+        assert response["result"] == {"resolved": 1}
+        assert entry.result == "once"
+        assert entry.event.is_set()
+        assert approval.list_gateway_approvals(session_key) == []
+    finally:
+        approval._gateway_queues.pop(session_key, None)
+
+
 def test_approval_respond_4001_when_nothing_resolves(server, monkeypatch):
     from tools import approval
 
@@ -725,6 +699,54 @@ def test_approval_respond_4001_when_nothing_resolves(server, monkeypatch):
     )
 
     assert response["error"]["code"] == 4001
+
+
+def test_message_react_accepts_stored_session_key_after_runtime_id_remint(server, monkeypatch):
+    """Multi-agent UI actions may retain the durable key after the live id changes."""
+    stored_key = "stored-parent-session"
+    server._sessions["reminted-runtime-id"] = {
+        "session_key": stored_key,
+        "history": [],
+    }
+    db = MagicMock()
+    db.set_message_reaction.return_value = [
+        {"emoji": "👍", "author": "user", "at": 1.0}
+    ]
+    db_context = MagicMock()
+    db_context.__enter__.return_value = db
+    db_context.__exit__.return_value = False
+    monkeypatch.setattr(server, "_session_db", lambda _session: db_context)
+
+    response = server.handle_request(
+        {
+            "id": "r-react-reminted",
+            "method": "message.react",
+            "params": {
+                "session_id": stored_key,
+                "row_id": 42,
+                "emoji": "👍",
+                "author": "user",
+            },
+        }
+    )
+
+    assert response["result"] == {
+        "row_id": 42,
+        "reactions": [{"emoji": "👍", "author": "user", "at": 1.0}],
+    }
+    db.set_message_reaction.assert_called_once_with(
+        stored_key, 42, "👍", author="user"
+    )
+
+
+def test_clear_pending(server):
+    ev = threading.Event()
+    # _pending values are (sid, Event) tuples
+    server._pending["r1"] = ("sid-x", ev)
+    server._clear_pending()
+
+    assert ev.is_set()
+    assert server._answers["r1"] == ""
 
 
 # ── Session lookup ───────────────────────────────────────────────────
@@ -1174,8 +1196,7 @@ def test_idle_reaper_rearms_missing_ws_orphan_timer(server, monkeypatch, tmp_pat
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=30,
-        check=False,
+        timeout=30, check=False,
     )
     assert successor.returncode == 0, successor.stderr
     assert [entry["session_id"] for entry in active_session_registry_snapshot(home)] == [sibling_sid]
@@ -1444,51 +1465,6 @@ def test_command_dispatch_stacked_split_keeps_unknown_tokens_as_instruction(serv
     # No stacked notice — the single-skill path ran with the post-split text intact.
     assert "notice" not in result
     assert "/not-a-skill-command but /model is a registry command" in result["message"]
-
-
-def test_sessionless_slash_palette_follows_profile_param(server, tmp_path, monkeypatch):
-    """A Desktop draft has no session yet: ``commands.catalog`` / ``complete.slash`` must scan the
-    named ``profile``'s home, not the launch profile's — A→B→A under multiplexing (#124651). The
-    palette's quick_commands are that profile's too, and an unknown profile is 4064, not a
-    launch-profile palette."""
-    import agent.skill_commands as sc_mod
-    from agent.secret_scope import is_multiplex_active, set_multiplex_active
-
-    root = tmp_path / "hermes_home"
-    for name in ("s6probe-a", "s6probe-b"):
-        skill_dir = tmp_path / f"external_{name}" / f"{name}-only"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(f"---\nname: {name}-only\ndescription: Only in {name}.\n---\n\n# x\n")
-        (root / "profiles" / name).mkdir(parents=True)
-        (root / "profiles" / name / "config.yaml").write_text(
-            f"skills:\n  external_dirs:\n    - {skill_dir.parent}\n"
-            f"quick_commands:\n  {name}-qc:\n    type: exec\n    command: echo {name}\n")
-    monkeypatch.setenv("HERMES_HOME", str(root))
-    monkeypatch.setattr(server, "_hermes_home", str(root))
-
-    def palette(profile):
-        catalog = server.handle_request({"id": "r1", "method": "commands.catalog", "params": {"profile": profile}})
-        typed = server.handle_request({
-            "id": "r2", "method": "complete.slash", "params": {"text": "/s6probe", "profile": profile}})
-        assert "result" in catalog and "result" in typed, (catalog, typed)
-        quick = {key for key, _ in catalog["result"]["pairs"] if key.endswith("-qc")}
-        return set(catalog["result"]["skills"]), {item["text"].strip("/") for item in typed["result"]["items"]}, quick
-
-    previous = is_multiplex_active()
-    set_multiplex_active(True)
-    try:
-        with (
-            patch("tools.skills_tool.SKILLS_DIR", tmp_path / "no-local-skills"),
-            patch.object(sc_mod, "_skill_commands_by_key", {}),
-        ):
-            assert palette("s6probe-a") == ({"/s6probe-a-only"}, {"s6probe-a-only"}, {"/s6probe-a-qc"})
-            assert palette("s6probe-b") == ({"/s6probe-b-only"}, {"s6probe-b-only"}, {"/s6probe-b-qc"})
-            assert palette("s6probe-a") == ({"/s6probe-a-only"}, {"s6probe-a-only"}, {"/s6probe-a-qc"})
-            for method in ("commands.catalog", "skills.reload"):
-                bad = server.handle_request({"id": "r3", "method": method, "params": {"profile": "../x"}})
-                assert bad.get("error", {}).get("code") == 4064, (method, bad)
-    finally:
-        set_multiplex_active(previous)
 
 
 class _BannerWorker:
@@ -2009,7 +1985,6 @@ def _stub_session_create_dependencies(server, monkeypatch):
     monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: None)
     monkeypatch.setattr(server, "_profile_home", lambda p: None)
     monkeypatch.setattr(server, "_profile_build_scope", _null_scope)
-    monkeypatch.setattr(server, "_seed_row", lambda *a, **kw: None)
     monkeypatch.setattr(server, "_seed_branch_row", lambda *a, **kw: None)
     monkeypatch.setattr(server, "_ensure_session_db_row", lambda *a, **kw: None)
     # Fresh registry per test: the server and the rebound handler share the
