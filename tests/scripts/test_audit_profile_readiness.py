@@ -104,3 +104,30 @@ def test_audit_is_read_only(tmp_path):
     before = {p: p.stat().st_mtime_ns for p in home.rglob("*") if p.is_file()}
     audit.audit_home(home, receipts)
     assert before == {p: p.stat().st_mtime_ns for p in home.rglob("*") if p.is_file()}
+
+
+def test_auxiliary_routes_are_audited(tmp_path):
+    home, receipts = _home(tmp_path)
+    _profile(home, "p", {
+        "model": {"provider": "nvidia", "default": "m"},
+        "auxiliary": {"compression": {"provider": "ollama-launch", "model": "qwen3.5:4b"}, "transient_retries": 1},
+    })
+    assert "OLLAMA_PIN" in _kinds(audit.audit_home(home, receipts), "p")
+
+
+def test_primary_effort_is_read_from_agent_config(tmp_path):
+    home, receipts = _home(tmp_path)
+    _profile(home, "p", {
+        "model": {"provider": "llamacpp", "default": "Qwen3.5-4B-Q6_K"},
+        "agent": {"reasoning_effort": "none"},
+    })
+    assert "LOCAL_UNQUALIFIED" not in _kinds(audit.audit_home(home, receipts), "p")
+
+
+def test_missing_models_directory_reports_every_local_model_missing(tmp_path):
+    home, receipts = _home(tmp_path)
+    for f in (home / "models").iterdir():
+        f.unlink()
+    (home / "models").rmdir()
+    _profile(home, "p", {"model": {"provider": "llamacpp", "default": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}})
+    assert "LOCAL_MODEL_MISSING" in _kinds(audit.audit_home(home, receipts), "p")

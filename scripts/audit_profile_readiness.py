@@ -59,12 +59,19 @@ def _route(entry: Any, slot: str) -> dict[str, str] | None:
 
 def config_routes(cfg: dict[str, Any]) -> list[dict[str, str]]:
     routes = [r for r in [_route(cfg.get("model"), "primary")] if r]
+    # Federation seeding writes the primary effort to agent.reasoning_effort, not into model.
+    agent_effort = str((cfg.get("agent") or {}).get("reasoning_effort") or "")
+    if routes and not routes[0]["effort"]:
+        routes[0]["effort"] = agent_effort
     for i, fb in enumerate(cfg.get("fallback_providers") or []):
         if r := _route(fb, f"fallback{i}"):
             routes.append(r)
     comp = (cfg.get("compression") or {}).get("model")
     if r := _route(comp, "compression"):
         routes.append(r)
+    for task, aux in (cfg.get("auxiliary") or {}).items():
+        if r := _route(aux, f"aux:{task}"):
+            routes.append(r)
     return routes
 
 
@@ -103,7 +110,7 @@ def _load(path: Path, loader) -> Any:
 
 
 def audit_profile(
-    name: str, pdir: Path, models_dir: Path | None, receipts: set[tuple[str, str, str]]
+    name: str, pdir: Path, models_dir: Path, receipts: set[tuple[str, str, str]]
 ) -> dict[str, Any]:
     cfg = _load(pdir / "config.yaml", yaml.safe_load) or {}
     role = _load(pdir / "federation_role.json", json.loads) or {}
@@ -118,7 +125,7 @@ def audit_profile(
         elif r["class"] == "paid-cloud":
             findings.append(f"PAID_ROUTE {tag}")
         elif r["class"] == "local-llamacpp":
-            if models_dir is not None and not (models_dir / f"{r['model']}.gguf").is_file():
+            if not (models_dir / f"{r['model']}.gguf").is_file():
                 findings.append(f"LOCAL_MODEL_MISSING {tag}")
             if (r["provider"], r["model"], r["effort"]) not in receipts:
                 findings.append(f"LOCAL_UNQUALIFIED {tag}@{r['effort'] or 'unset'}")
@@ -160,10 +167,10 @@ def audit_home(home: Path, receipt_dir: Path | None = None) -> dict[str, Any]:
     rows = []
     root_cfg_present = (home / "config.yaml").is_file()
     if root_cfg_present:
-        rows.append(audit_profile("@root", home, models_dir if models_dir.is_dir() else None, receipts))
+        rows.append(audit_profile("@root", home, models_dir, receipts))
     pdirs = sorted(p for p in (home / "profiles").glob("*") if p.is_dir()) if (home / "profiles").is_dir() else []
     for p in pdirs:
-        rows.append(audit_profile(p.name, p, models_dir if models_dir.is_dir() else None, receipts))
+        rows.append(audit_profile(p.name, p, models_dir, receipts))
     kinds = Counter(f.split(" ", 1)[0] for r in rows for f in r["findings"])
     return {
         "profile_dirs": len(pdirs),
