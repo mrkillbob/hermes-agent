@@ -330,15 +330,15 @@ class LlamaServerSupervisor:
                 continue
             if self._stopping:
                 return
+            # A dead router's empty group no longer owns a process-group number. Release that
+            # registration even when native tree custody is unverified and restart must refuse.
+            release_process_group_once_empty(proc.pid, proc=proc, timeout=0)
             if self._job is None and not self._owned_job_closed:
                 # Polling the dead root cannot establish that its native children exited.
                 # Keep the pre-spawn record across owner restart; do not reap by PID/name.
                 logger.error("llama-server exited rc=%s; tree custody unverified, restart refused", rc)
                 self._stop_event.set()
                 return
-            # An already-empty group is released now, not after the backoff: its number is free for
-            # reuse meanwhile, and the survivor stop below would then signal a stranger's group.
-            release_process_group_once_empty(proc.pid, proc=proc, timeout=0)
             backoff = _RESTART_BACKOFF_S[min(self._restarts, len(_RESTART_BACKOFF_S) - 1)]
             logger.warning("llama-server exited rc=%s; restart #%s in %ss", rc, self._restarts + 1, backoff)
             if self._stop_event.wait(backoff):

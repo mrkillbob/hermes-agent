@@ -24,6 +24,12 @@ def _isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(wrc, "_cache_dir", lambda: cache_dir)
     monkeypatch.setattr(wrc, "_web_config", dict)
     monkeypatch.setattr(wte, "_extract_timeout_seconds", lambda: 0)
+    # This suite exercises redirect policy and cache keys, not the sync provider's process
+    # timeout. Keep its stubbed requests call in this process so call counts are observable.
+    async def inline_extract(provider, urls, format, _timeout):
+        return provider.extract(urls, format=format)
+
+    monkeypatch.setattr(wte, "_run_sync_extract_terminable", inline_extract)
     _policy(monkeypatch)
 
 

@@ -2628,9 +2628,11 @@ def load_env() -> dict[str, str]:
     """Load ~/.hermes/.env as a dict. Memoised inside ``load_env_file`` (``get_env_value()`` runs
     hundreds of times per interactive menu render). Each assignment's value is opaque data for
     boundary discovery."""
-    # A frozen-policy worker never opens the profile's files; its secrets arrive
-    # through the owner-installed scope, so the .env layer is empty here.
-    if _worker_config_snapshot() is not None:
+    # A held bootstrap and a frozen-policy worker never open the profile's private files.
+    # This is a per-call refusal, not a cached empty dotenv: ordinary reads resume after
+    # the hold clears, and provider metadata may still be enumerated while held.
+    from hermes_cli.startup_hold import defer_maintenance
+    if defer_maintenance() or _worker_config_snapshot() is not None:
         return {}
     from agent.secret_scope import load_env_file  # the one .env tokenizer; also installs profile scopes
 

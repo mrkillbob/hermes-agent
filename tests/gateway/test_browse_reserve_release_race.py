@@ -1,5 +1,5 @@
 """Boot must retry a real reservation when maintenance releases between conflict probes."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import os
 import select
 import subprocess
@@ -9,7 +9,7 @@ import pytest
 
 
 @contextmanager
-def _maintenance_holder(home):
+def _lock_holder(home, *, runtime=False):
     program = """
 from pathlib import Path
 import sys
@@ -17,13 +17,15 @@ from gateway.runtime_ownership import ProfileOwnership
 from hermes_state_reconcile import BROWSE_RECONCILE_PURPOSE
 owner = ProfileOwnership()
 try:
-    owner.reserve([Path(sys.argv[1])], purpose=BROWSE_RECONCILE_PURPOSE)
+    owner.reserve([Path(sys.argv[1])],
+                  purpose=None if sys.argv[2] == 'runtime' else BROWSE_RECONCILE_PURPOSE)
     print('held', flush=True)
     sys.stdin.read()
 finally:
     owner.close()
 """
-    child = subprocess.Popen([sys.executable, '-c', program, str(home)], env=os.environ,
+    child = subprocess.Popen([sys.executable, '-c', program, str(home),
+                              'runtime' if runtime else 'maintenance'], env=os.environ,
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True)
 
@@ -32,7 +34,7 @@ finally:
         assert child.returncode == 0, stdout + stderr
 
     try:
-        assert select.select([child.stdout], [], [], 10)[0], 'maintenance holder did not become ready'
+        assert select.select([child.stdout], [], [], 10)[0], 'lock holder did not become ready'
         assert child.stdout.readline().strip() == 'held'
         yield release
     finally:
@@ -52,7 +54,7 @@ def test_boot_retries_when_maintenance_releases_before_conflict_probe(tmp_path, 
     homes = [tmp_path / 'a-free', held] if multiple_homes else [held]
     booting = ProfileOwnership()
     original = ownership._conflicting_homes
-    with _maintenance_holder(held) as release:
+    with _lock_holder(held) as release:
         def release_before_probe(requested):
             # The first real reserve failed. Its partial multi-home reservation must be gone.
             assert not booting.homes
@@ -77,13 +79,14 @@ def test_release_gap_does_not_bypass_a_new_runtime_owner(tmp_path, monkeypatch):
 
     held = tmp_path / 'b-maintenance'
     homes = [tmp_path / 'a-free', held]
-    booting, runtime = ProfileOwnership(), ProfileOwnership()
+    booting = ProfileOwnership()
     original = ownership._conflicting_homes
     probes = []
-    with _maintenance_holder(held) as release:
+    runtime_release = []
+    with _lock_holder(held) as release, ExitStack() as runtime_stack:
         def replace_before_probe(requested):
             release()
-            runtime.reserve([held])
+            runtime_release.append(runtime_stack.enter_context(_lock_holder(held, runtime=True)))
             conflicting = original(requested)
             probes.append(conflicting)
             return conflicting
@@ -94,7 +97,8 @@ def test_release_gap_does_not_bypass_a_new_runtime_owner(tmp_path, monkeypatch):
                 bootstrap._reserve_waiting_out_browse_reconcile(booting, homes)
             assert probes == [[held]]
             assert not booting.homes
-            assert runtime.owns(held)
+            owner_pid = ownership.live_runtime_owner(held)
+            assert owner_pid is not None and owner_pid != os.getpid()
             free = ProfileOwnership()
             try:
                 free.reserve([homes[0]])
@@ -103,7 +107,8 @@ def test_release_gap_does_not_bypass_a_new_runtime_owner(tmp_path, monkeypatch):
                 free.close()
         finally:
             booting.close()
-            runtime.close()
+            for release_runtime in runtime_release:
+                release_runtime()
 
 
 @pytest.mark.platforms('linux', 'macos')

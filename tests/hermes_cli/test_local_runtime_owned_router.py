@@ -144,17 +144,20 @@ def test_stop_after_a_router_crash_still_stops_its_surviving_model_child(monkeyp
         process_identity.release_process_groups([pgid])
 
 
-def test_a_crash_restart_stops_the_old_routers_survivors_and_releases_its_group(monkeypatch, tmp_path):
-    """The watcher restarts a crashed router: the old group's model child must not outlive the restart."""
+def test_crash_without_native_custody_refuses_restart_and_retains_survivor_group(monkeypatch, tmp_path):
+    """A POSIX group alone does not prove native tree custody; do not restart over survivors."""
     from hermes_cli import process_identity
     from hermes_cli.local_runtime import supervisor
 
     monkeypatch.setattr(supervisor, "runtimes_root", lambda: tmp_path)
-    monkeypatch.setattr(supervisor, "_RESTART_BACKOFF_S", (0,))
     sup = supervisor.LlamaServerSupervisor(tmp_path, tmp_path, port=59996)
-    monkeypatch.setattr(sup, "_reap_orphaned_children", lambda: None)
-    monkeypatch.setattr(sup, "_wait_health", lambda timeout: None)
-    monkeypatch.setattr(sup, "_spawn", lambda: setattr(sup, "proc", None))  # the replacement; ends the watch
+    spawned = []
+    monkeypatch.setattr(supervisor, "stop_owned_group_survivors",
+                        lambda *_a, **_k: pytest.fail("unverified router tree must not be stopped for restart"))
+    monkeypatch.setattr(sup, "_reap_orphaned_children",
+                        lambda: pytest.fail("unverified router tree must not be reaped for restart"))
+    monkeypatch.setattr(sup, "_spawn", lambda: spawned.append(True))
+    monkeypatch.setattr(sup, "_wait_health", lambda *_a, **_k: pytest.fail("no replacement health probe"))
     receipt = tmp_path / "model.pid"
     old = subprocess.Popen(  # detached-spawn: ok — test router stand-in; its group is killed below
         [sys.executable, "-c",
@@ -168,18 +171,18 @@ def test_a_crash_restart_stops_the_old_routers_survivors_and_releases_its_group(
                                               what="model child receipt")))
         sup.proc = old
         sup._watch()
-        wait_until(lambda: not model.is_running() or model.status() == psutil.STATUS_ZOMBIE, timeout=10,
-                   what="the restart to stop the crashed router's surviving model child")
-        assert old.pid not in process_identity._supervised_pgids
+        assert model.is_running() and model.status() != psutil.STATUS_ZOMBIE
+        assert old.pid in process_identity._supervised_pgids
+        assert sup._stop_event.is_set()
+        assert sup.proc is old and not spawned
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(old.pid, 9)  # windows-footgun: ok — posix-marked test
         process_identity.release_process_groups([old.pid])
 
 
-def test_a_crashed_routers_empty_group_is_released_before_the_restart_backoff(monkeypatch, tmp_path):
-    """Kept registered through the backoff, the freed number could be reused by a stranger's group,
-    which the restart's survivor stop would then TERM and KILL."""
+def test_a_crashed_routers_empty_group_is_released_before_restart_refusal(monkeypatch, tmp_path):
+    """Even a refused restart must release an empty group's reusable number."""
     from hermes_cli import process_identity
     from hermes_cli.local_runtime import supervisor
 
@@ -192,13 +195,15 @@ def test_a_crashed_routers_empty_group_is_released_before_the_restart_backoff(mo
 
     def backoff_wait(_seconds):
         registered_during_backoff.append(old.pid in process_identity._supervised_pgids)
-        return True  # stop() arrived during the backoff: ends the watch
+        return True
 
     try:
         old.wait(timeout=30)  # the router crashed and left nothing in its group
         sup.proc = old
         monkeypatch.setattr(sup._stop_event, "wait", backoff_wait)
         sup._watch()
-        assert registered_during_backoff == [False], "the empty group stayed registered through the backoff"
+        assert registered_during_backoff == [], "an uncontained router must not enter restart backoff"
+        assert old.pid not in process_identity._supervised_pgids
+        assert sup._stop_event.is_set()
     finally:
         process_identity.release_process_groups([old.pid])

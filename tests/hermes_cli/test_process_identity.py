@@ -493,31 +493,34 @@ def test_concurrent_processes_never_drop_each_others_ledger_rows(tmp_path):
             w.wait(timeout=30)
 
 
-@pytest.mark.platforms("posix")  # an fcntl lock holder
-def test_a_stalled_ledger_lock_holder_never_blocks_register_child(tmp_path, monkeypatch, caplog):
-    """A holder stopped mid-write (SIGSTOP, a debugger) kept the lock: every spawn_owned on the
-    machine then waited forever. Past the timeout the row is written under the thread lock alone, and
-    that is logged once at WARNING (rows of concurrent writers can be lost meanwhile)."""
-    import fcntl
-    import logging
-    import threading
-
+@pytest.mark.platforms("posix")  # a real cross-process flock holder
+def test_a_stalled_ledger_lock_holder_refuses_writes_until_release(tmp_path, monkeypatch):
+    """A timed-out writer must fail closed, then register after the real gate becomes free."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    monkeypatch.setattr(pi, "_LEDGER_LOCK_TIMEOUT_S", 0.3)
-    monkeypatch.setattr(pi, "_ledger_lock_warned", False)
-    caplog.set_level(logging.DEBUG, logger=pi.logger.name)
     ledger = pi._ledger_path()
     ledger.parent.mkdir(parents=True, exist_ok=True)
-    with open(ledger.with_name(ledger.name + ".lock"), "a+b") as holder:
-        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)  # the stalled holder
-        done = []
-        writer = threading.Thread(target=lambda: done.append(pi.register_child(os.getpid(), "stalled-lock")),
-                                  daemon=True)
-        writer.start()
-        writer.join(timeout=10)
-        assert done == [True], "register_child waited on a stalled lock holder"
-        assert pi.register_child(os.getpid(), "stalled-again") is True  # a second write past the lock
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "spawn ledger lock" in r.getMessage()]
-    assert len(warnings) == 1, f"{len(warnings)} warnings for two writes past a stalled lock"
+    gate = ledger.parent / ".spawn-ledger.lock"
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600); "
+         "fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.readline()",
+         str(gate)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        started = time.monotonic()
+        assert pi.register_child(os.getpid(), "stalled-lock") is False
+        assert time.monotonic() - started < 10, "register_child waited indefinitely on the holder"
+        assert not ledger.exists(), "a writer without custody modified the spawn ledger"
+    finally:
+        holder.stdin.close()
+        try:
+            assert holder.wait(timeout=10) == 0
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.wait(timeout=10)
+            raise
+    assert pi.register_child(os.getpid(), "after-release") is True
     rows = json.loads(ledger.read_text(encoding="utf-8"))
-    assert any(r.get("purpose") == "stalled-again" for r in rows), "the row was not written past the timeout"
+    assert [r.get("purpose") for r in rows] == ["after-release"]

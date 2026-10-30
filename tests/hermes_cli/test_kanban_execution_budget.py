@@ -37,11 +37,10 @@ def test_budget_requires_single_exact_selection_before_database_access(ids, maxi
 
 def test_bounded_worker_never_starts_a_missing_owner(monkeypatch):
     import asyncio
-    from types import SimpleNamespace
     from hermes_cli import gateway_client, gateway_runtime, kanban_worker_client
     monkeypatch.delenv('HERMES_TUI_GATEWAY_URL', raising=False)
     monkeypatch.setattr(gateway_runtime, 'discover_gateway_endpoint',
-                        lambda home: SimpleNamespace(state='missing', endpoint=None))
+                        lambda home: gateway_runtime.GatewayDiscovery(state='missing'))
 
     def forbidden(**kwargs):
         pytest.fail('bounded worker tried to start/connect an unprepared owner')
@@ -69,18 +68,40 @@ def test_worker_client_carries_route_and_budget_together(monkeypatch, tmp_path):
 
 def test_late_owner_budget_refusal_dominates_early_success_event(monkeypatch, tmp_path):
     import asyncio
+    import time
+    from contextlib import asynccontextmanager
     from hermes_cli import kanban_worker_client
+    from hermes_cli import gateway_client, gateway_runtime
     from gateway import session_kanban
     monkeypatch.setattr(session_kanban, 'worker_result', lambda path, params: {'exit_code': 0})
+    monkeypatch.setattr(gateway_runtime, 'discover_gateway_endpoint',
+                        lambda home: gateway_runtime.GatewayDiscovery(state='ready', endpoint='ws://fixture'))
     reads = []
 
     class Client:
+        def __init__(self):
+            self.events = asyncio.Queue()
+
         async def rpc(self, method, **params):
             if method == 'kanban.run':
                 return {'session_id': 's', 'receipt': {'admission_id': 'a', 'status': 'terminal'}}
             reads.append(params)
             return {'status': 'terminal', 'result': {'completed': False, 'interrupted': True,
                 'failed': True, 'turn_exit_reason': 'worker_request_budget_exhausted'}}
-    assert asyncio.run(kanban_worker_client._submit_claim(Client(), {'execution_budget': BUDGET},
-                                                       str(tmp_path / 'board.db'))) == 130
+
+    @asynccontextmanager
+    async def connect(**kwargs):
+        assert kwargs == {'endpoint': 'ws://fixture'}
+        yield Client()
+
+    monkeypatch.setattr(gateway_client, 'connect_gateway', connect)
+    params = {'execution_budget': BUDGET}
+    database = str(tmp_path / 'board.db')
+
+    async def submit():
+        claim = kanban_worker_client._Claim(answered=time.monotonic())
+        receipt, final_code = await kanban_worker_client._connect_once(params, database, claim)
+        return kanban_worker_client._exit_code(receipt, params, database, final_code)
+
+    assert asyncio.run(submit()) == 130
     assert reads == [{'session_id': 's', 'admission_id': 'a', 'include_result': True}]

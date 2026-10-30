@@ -20,7 +20,7 @@ def test_slash_worker_disables_conversation_worktree_management(monkeypatch):
     cli_module.HermesCLI = cli_type
 
     with (
-        patch.object(slash_worker, "_start_parent_death_watchdog"),
+        patch.object(slash_worker, "_start_legacy_parent_watchdog"),
         patch.object(slash_worker, "_prepare_slash_worker_runtime"),
         patch.dict(sys.modules, {"cli": cli_module}),
     ):

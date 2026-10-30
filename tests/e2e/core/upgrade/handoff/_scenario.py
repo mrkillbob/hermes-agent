@@ -314,11 +314,16 @@ def run(column: str, root: Path) -> SimpleNamespace:
             o.job_id = job["id"]
             assert not model.cron_calls, "premise: the job ran before it was due"
 
-            o.up = inst.update()
+            # The fork waits for an admitted Kanban turn to finish before replacing the owner.
+            # Hold it across the update, then release it before observing the replacement;
+            # otherwise this fixture itself keeps the restart wait open for the full timeout.
+            try:
+                o.up = inst.update()
+            finally:
+                model.release.set()
             o.sha_after = inst.sha()
 
             o.ident = X.settle_gateway(inst, o.old_pid)
-            model.release.set()
             o.chat_after = X.chat(inst.port, "hello after the update") if o.ident else (0, "")
             o.card2 = create_card(inst, "created after the update")
 
