@@ -200,3 +200,21 @@ def test_split_gguf_with_punctuated_model_id_is_found(tmp_path):
     assert audit.model_on_disk(models, "Qwen3.8-Flash-Next-UD-IQ4_XS")
     assert audit.model_on_disk(models, "Odd[1]")
     assert not audit.model_on_disk(models, "Qwen3.8-Flash")
+
+
+def test_provider_aliases_resolve_to_billing_class():
+    assert audit.classify("chatgpt", "gpt-6-luna") == "paid-cloud"
+    assert audit.classify("claude", "x") == "paid-cloud"
+    assert audit.classify("nim", "m") == "free-cloud"
+
+
+def test_root_level_provider_with_string_model_is_audited(tmp_path):
+    home, receipts = _home(tmp_path)
+    _profile(home, "p", {"model": "Not-Staged-Q4", "provider": "llamacpp"})
+    assert {"LOCAL_MODEL_MISSING", "LOCAL_UNQUALIFIED"} <= _kinds(audit.audit_home(home, receipts), "p")
+
+
+def test_model_name_alias_is_read_as_default(tmp_path):
+    home, receipts = _home(tmp_path)
+    _profile(home, "p", {"model": {"provider": "llamacpp", "name": "Gone-Q4"}})
+    assert "LOCAL_MODEL_MISSING" in _kinds(audit.audit_home(home, receipts), "p")

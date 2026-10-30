@@ -48,8 +48,20 @@ def model_on_disk(models_dir: Path, model: str) -> bool:
     return False
 
 
+# Subset of hermes_cli/providers.py _ALIAS_GROUPS that decides a route's billing class; this script
+# stays free of runtime imports, so the table is mirrored here.
+_PROVIDER_ALIASES = {
+    "claude": "anthropic", "claude-code": "anthropic",
+    "chatgpt": "openai-codex", "chatgpt-codex": "openai-codex",
+    "openai": "openrouter",
+    "x-ai": "xai", "x.ai": "xai", "grok": "xai",
+    "nim": "nvidia", "nvidia-nim": "nvidia", "build-nvidia": "nvidia", "nemotron": "nvidia",
+}
+
+
 def classify(provider: str, model: str) -> str:
     p = (provider or "").strip().lower()
+    p = _PROVIDER_ALIASES.get(p, p)
     if p in LLAMACPP:
         return "local-llamacpp"
     if p in OLLAMA:
@@ -77,8 +89,22 @@ def _route(entry: Any, slot: str) -> dict[str, str] | None:
     }
 
 
+def _normalized_model(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """Mirror hermes_cli/config.py _normalize_root_model_keys: ``model: <id>`` plus root-level
+    ``provider``/``base_url``, and ``model.model`` / ``model.name`` as aliases of ``model.default``."""
+    raw = cfg.get("model")
+    model = dict(raw) if isinstance(raw, dict) else {"default": raw} if raw else {}
+    for key in ("model", "name"):
+        if not model.get("default") and isinstance(model.get(key), str):
+            model["default"] = model[key]
+    for key in ("provider", "base_url"):
+        if not model.get(key) and cfg.get(key):
+            model[key] = cfg[key]
+    return model or None
+
+
 def config_routes(cfg: dict[str, Any]) -> list[dict[str, str]]:
-    routes = [r for r in [_route(cfg.get("model"), "primary")] if r]
+    routes = [r for r in [_route(_normalized_model(cfg), "primary")] if r]
     # Federation seeding writes the primary effort to agent.reasoning_effort, not into model.
     agent_effort = str((cfg.get("agent") or {}).get("reasoning_effort") or "")
     if routes and not routes[0]["effort"]:
