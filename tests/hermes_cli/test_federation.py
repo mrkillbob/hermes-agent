@@ -137,7 +137,7 @@ def test_seed_apply_writes_role_identity_metadata(tmp_path: Path) -> None:
     parsed_config = yaml.safe_load(config)
     assert parsed_config["toolsets"] == ["file"]
     assert "auxiliary:" in config
-    assert "qwen3.5:4b" in config
+    assert "Qwen3.5-4B-Q6_K" in config
     assert "Your working style:" in (profile_dir / "SOUL.md").read_text()
 
 

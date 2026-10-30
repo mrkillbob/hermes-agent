@@ -13,12 +13,12 @@
       "fallback_providers": [
         {"provider": "openai-codex", "model": "gpt-5.6-luna", "reasoning_effort": "low"},
         {"provider": "nous", "model": "tencent/hy3:free", "reasoning_effort": "none"},
-        {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       ],
       "auxiliary": {
-        "compression": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "title_generation": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "approval": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        "compression": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "title_generation": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "approval": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       }
     },
     "engineering": {
@@ -26,24 +26,24 @@
       "fallback_providers": [
         {"provider": "openai-codex", "model": "gpt-5.6-luna", "reasoning_effort": "low"},
         {"provider": "nous", "model": "tencent/hy3:free", "reasoning_effort": "none"},
-        {"provider": "ollama-launch", "model": "devstral-small-2:24b", "reasoning_effort": "none"}
+        {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       ],
       "auxiliary": {
-        "compression": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "title_generation": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "approval": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        "compression": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "title_generation": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "approval": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       }
     },
     "research_intelligence": {
       "primary": {"provider": "nous", "model": "tencent/hy3:free", "reasoning_effort": "low"},
       "fallback_providers": [
         {"provider": "openai-codex", "model": "gpt-5.5", "reasoning_effort": "low"},
-        {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       ],
       "auxiliary": {
-        "compression": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "title_generation": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "approval": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        "compression": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "title_generation": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "approval": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       }
     },
     "knowledge_commons": {
@@ -51,36 +51,36 @@
       "fallback_providers": [
         {"provider": "openai-codex", "model": "gpt-5.6-luna", "reasoning_effort": "low"},
         {"provider": "nous", "model": "tencent/hy3:free", "reasoning_effort": "none"},
-        {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       ],
       "auxiliary": {
-        "compression": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "title_generation": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "approval": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        "compression": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "title_generation": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "approval": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       }
     },
     "memory": {
       "primary": {"provider": "openai-codex", "model": "gpt-5.5", "reasoning_effort": "low"},
       "fallback_providers": [
         {"provider": "openai-codex", "model": "gpt-5.6-luna", "reasoning_effort": "low"},
-        {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       ],
       "auxiliary": {
-        "compression": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "title_generation": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "approval": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        "compression": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "title_generation": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "approval": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       }
     },
     "arts_media": {
       "primary": {"provider": "openai-codex", "model": "gpt-5.5", "reasoning_effort": "low"},
       "fallback_providers": [
         {"provider": "openai-codex", "model": "gpt-5.6-luna", "reasoning_effort": "low"},
-        {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       ],
       "auxiliary": {
-        "compression": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "title_generation": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "vision": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        "compression": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "title_generation": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "vision": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       }
     },
     "content_studio": {
@@ -88,12 +88,12 @@
       "fallback_providers": [
         {"provider": "openai-codex", "model": "gpt-5.6-luna", "reasoning_effort": "low"},
         {"provider": "nous", "model": "tencent/hy3:free", "reasoning_effort": "none"},
-        {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       ],
       "auxiliary": {
-        "compression": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "title_generation": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"},
-        "approval": {"provider": "ollama-launch", "model": "qwen3.5:4b", "reasoning_effort": "none"}
+        "compression": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "title_generation": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"},
+        "approval": {"provider": "llamacpp", "model": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}
       }
     }
   },
