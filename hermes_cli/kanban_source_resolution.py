@@ -52,13 +52,20 @@ def _require_settled_source(rows):
         require_historical_heartbeat(rows, _TERMINAL_RUNS, int(kb.time.time()))
 
 
-def archive_resolved_source_task(conn, task_id, *, board, expected_revision, evidence):
+def archive_resolved_source_task(conn, task_id, *, board, expected_revision, evidence,
+                                 allow_nested: bool = False):
     """Change only status plus one audit event, preserving failures, runs and workspace.
 
     Dependency edges and external/workflow contracts refuse rather than releasing
     their acceptance. Historical started_at and failure fields remain untouched.
     No run closing, readiness recomputation, notifications or cleanup is invoked.
+
+    Explicit allow_nested=True composes this primitive inside an operator-owned
+    guarded transaction. Success then releases only a savepoint; it is not durable
+    until the outer transaction commits. The default refuses nested composition.
     """
+    if type(allow_nested) is not bool:
+        raise ValueError('allow_nested must be a bool')
     if not isinstance(evidence, SourceSupersessionEvidence):
         raise ValueError('explicit reviewed source evidence is required')
     payload = evidence.payload()
@@ -68,7 +75,7 @@ def archive_resolved_source_task(conn, task_id, *, board, expected_revision, evi
     actual = kbc._main_db_file(conn)
     if actual is None or Path(actual).resolve() != kb.kanban_db_path(board=board).resolve():
         raise ValueError('source resolution connection does not match canonical board')
-    with kb.write_txn(conn):
+    with kb.write_txn(conn, allow_nested=allow_nested):
         rows = _selected_task_rows(conn, [task_id])
         require_task_revision(expected_revision, board, task_id, rows)
         _require_settled_source(rows)
