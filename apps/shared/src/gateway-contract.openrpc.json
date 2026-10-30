@@ -9717,6 +9717,11 @@
             "title": "Session Id",
             "type": "string"
           },
+          "breadcrumb_candidate": {
+            "default": false,
+            "title": "Breadcrumb Candidate",
+            "type": "boolean"
+          },
           "title": {
             "anyOf": [
               {
