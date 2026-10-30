@@ -520,7 +520,7 @@ def _spawn_hermes_action(
     # Named-profile actions get a scrubbed, pinned environment so the child cannot inherit the
     # dashboard profile's credentials; see _profile_action_environment (also drops _HERMES_GATEWAY).
     action_env = _profile_action_environment(subcommand, env_overrides)
-    detach = {"creationflags": windows_detach_flags()} if sys.platform == "win32" else {"start_new_session": True}
+    detach = {"creationflags": windows_detach_flags()} if sys.platform == "win32" else {"start_new_session": True}  # detached-spawn: ok — dashboard action outlives dashboard.
     popen_kwargs = dict(
         cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT,
         env=action_env,

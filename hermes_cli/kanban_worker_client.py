@@ -59,9 +59,7 @@ class _Claim:
 
 async def run(params, board_db):
     from agent.retry_utils import jittered_backoff
-    from hermes_cli.gateway_client import (
-        connect_gateway, GatewayClientError, GatewayUnavailableError, outside_restart_wait,
-    )
+    from hermes_cli.gateway_client import GatewayClientError
     from websockets.exceptions import WebSocketException
     if os.environ.get('HERMES_TUI_GATEWAY_URL'):
         raise GatewayClientError('Kanban requires the assigned local profile owner')
@@ -74,46 +72,7 @@ async def run(params, board_db):
     while True:
         seen = claim.answered
         try:
-            # Never into a restart's after-turn wait: it cut this socket so the turn's submitter
-            # waits for the NEXT owner, and a worker polling its receipt inside the wait keeps the
-            # turn it waits on alive, holding `hermes update` until restart_after_turn_timeout.
-            with outside_restart_wait():
-                options = {}
-                if "execution_budget" in params:
-                    # Bounded work may attach only to an already prepared local owner.
-                    # Starting a replacement would also start cron and dispatcher services.
-                    from hermes_constants import get_hermes_home
-                    from hermes_cli.gateway_runtime import discover_gateway_endpoint, gateway_profile_home
-                    from gateway.drain_kanban import REASON as KANBAN_HOLD
-                    home = gateway_profile_home(get_hermes_home())
-                    found = await asyncio.to_thread(discover_gateway_endpoint, home)
-                    held_owner = found.state == "draining" and found.reason_code == KANBAN_HOLD
-                    if (found.state != "ready" and not held_owner) or found.endpoint is None:
-                        raise GatewayUnavailableError(
-                            "Bounded Kanban requires an existing ready owner",
-                            found.state, found.reason_code)
-                    options["endpoint"] = found.endpoint
-                async with connect_gateway(**options) as client:
-                    # kanban.run subscribes this socket to the card's session, but only receipts
-                    # matter here: discard the turn's events, or they fill the client's bounded
-                    # queue and its reader stops, with the next receipt behind it.
-                    drain = asyncio.create_task(_discard(client.events))
-                    try:
-                        receipt = await _await_receipt(client, params, board_db, claim)
-                        final_code = 0
-                        if receipt["status"] == "terminal" and "execution_budget" in params:
-                            # The final owner result outranks an earlier optimistic board event.
-                            settled = await client.rpc(
-                                "prompt.receipt", session_id=claim.session_id,
-                                admission_id=claim.admission_id, include_result=True)
-                            if settled.get("status") != "terminal" or not isinstance(settled.get("result"), dict):
-                                raise GatewayClientError("Bounded Kanban requires the final owner result")
-                            from hermes_cli.turn_exit import turn_exit_code
-                            final_code = turn_exit_code(settled["result"], kanban_worker=True)
-                            if final_code:
-                                print("Kanban owner returned a non-success result.", file=sys.stderr)
-                    finally:
-                        drain.cancel()
+            receipt, final_code = await _connect_once(params, board_db, claim)
         # A restart also surfaces as a refused or reset dial, a failed handshake, or an answer
         # that never came.
         except (GatewayClientError, WebSocketException, OSError, TimeoutError) as exc:
@@ -131,6 +90,53 @@ async def run(params, board_db):
         # Jittered (1-2 s first, up to 16 s): workers of one dead owner do not all redial, and so
         # start a replacement, in the same instant.
         await asyncio.sleep(jittered_backoff(failures, base_delay=1.0, max_delay=8.0, jitter_ratio=1.0))
+
+
+async def _connect_once(params, board_db, claim):
+    from hermes_cli.gateway_client import (
+        connect_gateway, GatewayClientError, GatewayUnavailableError, outside_restart_wait,
+    )
+    # Never into a restart's after-turn wait: it cut this socket so the turn's submitter
+    # waits for the NEXT owner, and a worker polling its receipt inside the wait keeps the
+    # turn it waits on alive, holding `hermes update` until restart_after_turn_timeout.
+    with outside_restart_wait():
+        options = {}
+        if "execution_budget" in params:
+            # Bounded work may attach only to an already prepared local owner.
+            # Starting a replacement would also start cron and dispatcher services.
+            from hermes_constants import get_hermes_home
+            from hermes_cli.gateway_runtime import discover_gateway_endpoint, gateway_profile_home
+            from gateway.drain_kanban import REASON as KANBAN_HOLD
+            home = gateway_profile_home(get_hermes_home())
+            found = await asyncio.to_thread(discover_gateway_endpoint, home)
+            held_owner = found.state == "draining" and found.reason_code == KANBAN_HOLD
+            if (found.state != "ready" and not held_owner) or found.endpoint is None:
+                raise GatewayUnavailableError(
+                    "Bounded Kanban requires an existing ready owner",
+                    found.state, found.reason_code)
+            options["endpoint"] = found.endpoint
+        async with connect_gateway(**options) as client:
+            # kanban.run subscribes this socket to the card's session, but only receipts
+            # matter here: discard the turn's events, or they fill the client's bounded
+            # queue and its reader stops, with the next receipt behind it.
+            drain = asyncio.create_task(_discard(client.events))
+            try:
+                receipt = await _await_receipt(client, params, board_db, claim)
+                final_code = 0
+                if receipt["status"] == "terminal" and "execution_budget" in params:
+                    # The final owner result outranks an earlier optimistic board event.
+                    settled = await client.rpc(
+                        "prompt.receipt", session_id=claim.session_id,
+                        admission_id=claim.admission_id, include_result=True)
+                    if settled.get("status") != "terminal" or not isinstance(settled.get("result"), dict):
+                        raise GatewayClientError("Bounded Kanban requires the final owner result")
+                    from hermes_cli.turn_exit import turn_exit_code
+                    final_code = turn_exit_code(settled["result"], kanban_worker=True)
+                    if final_code:
+                        print("Kanban owner returned a non-success result.", file=sys.stderr)
+            finally:
+                drain.cancel()
+    return receipt, final_code
 
 
 def _restartable(exc):

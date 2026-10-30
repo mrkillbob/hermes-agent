@@ -20,9 +20,9 @@ from typing import Iterator, List, Optional, Tuple
 from tools.plugin_guard_context import (
     STEP_DOWN, catalog_cap, is_agent_facing, is_authorized_keys_prose, is_base64_archive_roundtrip,
     is_base64_media, is_benign_lazy_os_import, is_ci_workflow, is_coin_name_only,
-    is_disclosed_config_note, is_doc_prose, is_env_dump_in_safety_clause, is_hex_in_char_class,
-    is_inert_fixture_line, is_json_prose_value, is_locale_catalog, is_loopback_continuation,
-    is_loopback_only, is_own_proc_read, is_pip_install_in_prose_literal, is_public_client_key,
+    is_disclosed_config_note, is_doc_prose, is_env_dump_in_safety_clause, is_google_installed_app_secret,
+    is_hex_in_char_class, is_inert_fixture_line, is_json_prose_value, is_locale_catalog,
+    is_loopback_continuation, is_loopback_only, is_pip_install_in_prose_literal,
     is_quoted_injection_phrase, is_regex_alternation_token, is_repo_root_traversal,
     is_self_uninstall_doc, is_sudo_inert, is_test_tree, is_trusted_installer_pipe, logical_line, prose_cap)
 from tools.skills_guard import (
@@ -265,7 +265,6 @@ def _inert_context_cap(f: Finding, rel_path: str, line: str, joined: str, is_cod
         or is_loopback_continuation(f, line, joined)   # loopback health check over a `\`-continuation
         or is_hex_in_char_class(f, line)          # `[\x00-\x1F]`: a control-char filter, not a payload
         or (is_code and is_pip_install_in_prose_literal(f, line))  # "no pip install is needed" message
-        or is_own_proc_read(f, joined)            # `/proc/self/cgroup`: container placement, read only
     )
     if to_low:
         return "low"
@@ -283,8 +282,8 @@ def _inert_context_cap(f: Finding, rel_path: str, line: str, joined: str, is_cod
     )
     if to_medium:
         return _at_most(sev, "medium")
-    if is_public_client_key(f, line):
-        return _at_most(sev, "high")    # public-by-design client key (GOCSPX-, phc_), reviewable caution
+    if is_google_installed_app_secret(f, line):
+        return _at_most(sev, "high")    # public installed-app OAuth client secret, reviewable caution
     return sev
 
 

@@ -1695,7 +1695,7 @@ class ConversationWorktreeManager:
         popen_kwargs = (
             {"creationflags": windows_hide_flags()}
             if IS_WINDOWS
-            else {"process_group": 0}
+            else {"process_group": 0}  # detached-spawn: ok — bounded bootstrap kills its group on timeout.
         )
         from tools.environments.local import served_profile_child_env
 

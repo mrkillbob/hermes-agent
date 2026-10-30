@@ -83,6 +83,7 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
     for key in (*DAEMON_STRIPPED_ENV, *_VAR_MAP):
         env.pop(key, None)
     remaining(deadline)
+    # detached-spawn: ok — the gateway service must outlive the launching CLI or Desktop app.
     launch_options = windows_detach_popen_kwargs()
     logs = home / "logs"
     logs.mkdir(parents=True, exist_ok=True)

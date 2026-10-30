@@ -1224,9 +1224,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
         host_prefix = _kb._host_prefix()
-        from hermes_cli.kanban_owner_recovery import (
-            apply_attempt_note, managed_run_result, owner_reclaim_blocked,
-        )
+        from hermes_cli.kanban_owner_recovery import apply_attempt_note, managed_run_result, owner_reclaim_blocked
         for row in rows:
             lock = row["claim_lock"] or ""
             if not lock.startswith(host_prefix):

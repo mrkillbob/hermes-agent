@@ -215,8 +215,8 @@ class GitHubSource(SkillSource):
         # NVIDIA-verified skills (CUDA-X, NeMo, cuOpt, ...), each with a signed skill.oms.sig
         # + governance card; `trusted` via tools/skills_guard.py::TRUSTED_REPOS.
         {"repo": "NVIDIA/skills", "path": "skills/"},
-        # Vendor-maintained skills for their own products; they replaced our copied
-        # weights-and-biases / qdrant / pinecone optional skills.
+        # Vendor-maintained sources remain community-rated until separately reviewed;
+        # browsing them does not relax the skill scanner or installation policy.
         {"repo": "wandb/skills", "path": "skills/"},
         {"repo": "qdrant/skills", "path": "skills/"},
         {"repo": "pinecone-io/skills", "path": "skills/"},

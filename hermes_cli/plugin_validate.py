@@ -398,7 +398,7 @@ def _run_capability_probe(
                 stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace",
                 env=env,
-                **({"process_group": 0} if os.name != "nt" else {}),
+                **({"process_group": 0} if os.name != "nt" else {}),  # detached-spawn: ok — bounded probe group is stopped in finally.
             )
             if os.name != "nt":
                 process_group = os.getpgid(proc.pid)

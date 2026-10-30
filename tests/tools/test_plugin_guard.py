@@ -974,9 +974,9 @@ class TestProcKeyAndBytecodeShapes:
     """Shapes real catalog pins tripped (telesec, hermes-lcm-x, hermes-emotion), each next to the
     attack twin that must keep its severity."""
 
-    def test_benign_proc_reads_and_public_client_key_install_without_a_block(self, tmp_path):
-        # #144123 (hermes-lcm-x cpu_capacity.py): container placement reads, plus the pid-reuse
-        # start-time read. Kept visible at low, never deleted.
+    def test_proc_reads_and_posthog_key_keep_fork_admission_block(self, tmp_path):
+        # The fork retains its conservative procfs admission policy, including reads of
+        # container placement and pid-reuse metadata from another process.
         files = {**BASE_FILES, "capacity.py": (
             "from pathlib import Path\n"
             'groups = Path("/proc/self/cgroup").read_text()\n'
@@ -986,15 +986,15 @@ class TestProcKeyAndBytecodeShapes:
         )}
         result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
         proc = [f for f in result.findings if f.pattern_id == "proc_access"]
-        assert len(proc) == 4 and {f.severity for f in proc} == {"low"}, format_scan_report(result)
-        assert result.verdict == "safe", format_scan_report(result)
+        assert len(proc) == 4 and {f.severity for f in proc} == {"high"}, format_scan_report(result)
+        assert result.verdict == "caution", format_scan_report(result)
 
-        # telesec telemetry.py:27: a PostHog project key is a write-only ingest key, public by design.
+        # A vendor's public-key convention does not make arbitrary plugin literals trusted.
         files = {**BASE_FILES, "telemetry.py": f'API_KEY = "phc_{_FAKE_KEY_BODY}"  # public\n'}
         (tmp_path / "posthog").mkdir()
         result = scan_plugin(_mk_plugin(tmp_path / "posthog", files), source="owner/repo")
-        assert result.verdict == "caution", format_scan_report(result)
-        assert [f.severity for f in result.findings if f.pattern_id == "hardcoded_secret"] == ["high"]
+        assert result.verdict == "dangerous", format_scan_report(result)
+        assert [f.severity for f in result.findings if f.pattern_id == "hardcoded_secret"] == ["critical"]
 
     @pytest.mark.parametrize("rel,text,pattern_id,severity", [
         ("probe.py", 'Path("/proc/1/environ").read_bytes()\n', "proc_access", "high"),

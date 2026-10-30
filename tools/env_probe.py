@@ -82,7 +82,6 @@ def _run(cmd: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
                     cmd, stdout=out_f, stderr=err_f,
                     # CREATE_NO_WINDOW (0 on POSIX): pythonw hosts would flash a console
                     stdin=subprocess.DEVNULL, creationflags=windows_hide_flags(),
-                    start_new_session=(os.name != "nt"),
                 )
                 try:
                     process.wait(timeout=timeout)

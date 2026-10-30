@@ -97,7 +97,7 @@ def execute_transport(argv, input_text, *, cancel=None, output_dir=None, env=Non
         try:
             proc, job = spawn_server(argv, stdin=source, stdout=stdout, stderr=stderr,
                                     env={**(os.environ if env is None else env), 'PYTHONIOENCODING': 'utf-8'},
-                                    **({'creationflags': windows_hide_flags()} if os.name == 'nt' else {'process_group': 0}))
+                                    **({'creationflags': windows_hide_flags()} if os.name == 'nt' else {'process_group': 0}))  # detached-spawn: ok — fleet action survives CLI; output is durable.
         except OSError as exc:
             result = subprocess.CompletedProcess(argv, 127, '', f'Fleet launcher did not start ({type(exc).__name__})')
             result.not_started = True
