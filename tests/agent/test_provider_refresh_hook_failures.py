@@ -56,6 +56,7 @@ class _Agent:
     _try_refresh_provider_runtime_credentials = ClientLifecycleMixin._try_refresh_provider_runtime_credentials
 
     def __init__(self):
+        self._runtime_mutation_state = None
         self.activated = []
 
     def _has_pending_fallback(self):

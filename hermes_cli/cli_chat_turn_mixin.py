@@ -123,6 +123,10 @@ class CLIChatTurnMixin:
             }
             return None
 
+        from hermes_cli.cli_one_turn_runtime import (
+            carry_gateway_one_turn_controller, remember_gateway_one_turn_controller,
+        )
+        remember_gateway_one_turn_controller(self)
         turn_route = self._resolve_turn_agent_config(message)
         if turn_route["signature"] != self._active_agent_route_signature:
             _retire_agent(self)
@@ -141,6 +145,7 @@ class CLIChatTurnMixin:
         agent = self.agent
         if agent is None:
             return None
+        carry_gateway_one_turn_controller(self)
         self._sync_fallback_chain_with_config(agent)  # chain added after this chat opened reaches this turn
         message = self._chat_route_images(message, images)
 
