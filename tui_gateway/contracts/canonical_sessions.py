@@ -57,6 +57,8 @@ class CanonicalCreateParams(ProfileParams):
 
 class CanonicalResumeParams(ProfileParams):
     session_id: str = ''
+    # Only implicit terminal breadcrumbs require a nonempty or admitted session.
+    breadcrumb_candidate: bool = False
     title: str | None = None
     # Bare `-c` / `--resume latest`: the owner resolves the most recent session of this surface
     # family (``workspace`` = the caller's git root / cwd, tried first).

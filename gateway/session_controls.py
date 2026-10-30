@@ -653,7 +653,12 @@ class AuthorityConnection:
 
     async def resume(self, ref, params):
         from gateway.session_local_inventory import snapshot_info
-        replay_from = self.replay_cursors.pop(ref.session_id, None)
+        if 'breadcrumb_candidate' in params and not isinstance(params['breadcrumb_candidate'], bool):
+            raise RuntimeStoreError('invalid_params')
+        if params.get('breadcrumb_candidate') and (
+                not ref.session_id or 'latest' in params or 'title' in params):
+            raise RuntimeStoreError('invalid_params')
+        replay_from = None if params.get('breadcrumb_candidate') else self.replay_cursors.pop(ref.session_id, None)
         requested = ref.session_id
         if 'latest' in params:
             # Bare `-c` / `--resume latest`: the most recent session of that surface family the
@@ -689,6 +694,13 @@ class AuthorityConnection:
                 # its lane's turns stream to; the reply names that root.
                 from gateway.session_route_recovery import messaging_owner_ref
                 ref = messaging_owner_ref(self.authority, ref)
+        if params.get('breadcrumb_candidate'):
+            # This is an implicit terminal hint, not a deliberate ID resume.  Authorize before
+            # the eligibility check and refuse an empty hint like a missing session.
+            self.authority.authorize(self.actor, ref, 'session:read')
+            from gateway.session_local_title import eligible_breadcrumb
+            if not eligible_breadcrumb(self.authority, ref.session_id):
+                raise RuntimeStoreError('not_found')
         if params.get('editor') is not None:
             self.authority.authorize(self.actor, ref, 'session:control')
             from gateway.session_local_mcp import resume_editor_mcp
@@ -713,6 +725,8 @@ class AuthorityConnection:
         # ``omit_messages``: the client pages the transcript itself (Desktop over REST), so the attach reads no
         # compression lineage (a whole-lineage read here made every open of a long chat cost seconds).
         omit = params.get('omit_messages') is True
+        if params.get('breadcrumb_candidate'):
+            replay_from = self.replay_cursors.pop(requested, None)
         snapshot = await self.authority.attach(
             self.actor, ref, history=not omit, replay_from=replay_from if ref.session_id == requested else None)
         self.subscriptions[ref.session_id] = snapshot.subscription_id

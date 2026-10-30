@@ -146,9 +146,13 @@ async def _resume_latest(client, args):
     crumb = (read_breadcrumb() or {}).get("session_id") if getattr(args, "continue_last", None) is True else None
     if isinstance(crumb, str) and crumb:
         try:
-            return await _resume(client, args, session_id=crumb)
+            return await _resume(client, args, session_id=crumb, breadcrumb_candidate=True)
         except GatewayClientError as exc:
-            if str(exc) not in RESUME_REFUSALS:
+            from hermes_cli.gateway_client import GatewayRPCError
+            unsupported = (isinstance(exc, GatewayRPCError) and exc.code == 4001
+                           and str(exc) == 'invalid_params'
+                           and exc.data.get('fields') == ['breadcrumb_candidate'])
+            if str(exc) not in RESUME_REFUSALS and not unsupported:
                 raise
     workspace = await asyncio.to_thread(_workspace_key, _caller_cwd(args))
     try:

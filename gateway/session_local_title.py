@@ -9,6 +9,59 @@ from __future__ import annotations
 from hermes_state_runtime import RuntimeStoreError
 
 
+def eligible_breadcrumb(authority, session_id):
+    """Reject only a proven empty implicit hint; uncertain lineage remains resumable."""
+    import json
+    from hermes_state_common import _NOT_A_LAUNCH_STUB_SQL
+    from hermes_state_local import POLICY_PREFIX
+    from hermes_state_local_lineage import validate_local_lineage
+    db = authority.db
+    with db._read_ctx() as conn:
+        # One SQLite snapshot covers receipt validation, reset boundaries and admissions.
+        owns_snapshot = not conn.in_transaction
+        if owns_snapshot:
+            conn.execute('BEGIN')
+        try:
+            saved = conn.execute('SELECT value FROM state_meta WHERE key=?',
+                                 (POLICY_PREFIX + session_id,)).fetchone()
+            if saved is None:
+                return True  # Legacy or missing proof of the complete lineage.
+            try:
+                receipt = json.loads(saved[0])
+                if receipt['session_id'] != session_id:
+                    return True
+                validated_tip = validate_local_lineage(conn, receipt)
+                ids = receipt.get('lineage', [validated_tip])
+            except (RuntimeStoreError, KeyError, TypeError, ValueError):
+                return True  # A malformed or unverified receipt cannot prove emptiness.
+            start = 0
+            for index, sid in enumerate(ids[:-1]):
+                row = conn.execute('SELECT end_reason FROM sessions WHERE id=?', (sid,)).fetchone()
+                if row and row[0] == 'session_reset':
+                    start = index + 1
+            has_admissions = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_admissions'"
+            ).fetchone() is not None
+            if not has_admissions:
+                return True  # A legacy store cannot prove that no admission exists.
+            predicate = _NOT_A_LAUNCH_STUB_SQL
+            if any(conn.execute(
+                f'SELECT 1 FROM sessions s WHERE s.id=? AND {predicate} LIMIT 1', (sid,)
+            ).fetchone() is not None for sid in ids[start:]):
+                return True
+            # Logical FIFO admissions survive reset. Old terminal rows have no universal reset
+            # watermark, so their presence is ambiguous and must preserve the hint too.
+            if has_admissions and conn.execute(
+                'SELECT 1 FROM session_admissions WHERE target_session_id=? LIMIT 1',
+                (session_id,),
+            ).fetchone() is not None:
+                return True
+            return False
+        finally:
+            if owns_snapshot:
+                conn.rollback()
+
+
 def resolve_titled_session(authority, actor, name, *, missing_ok=False):
     """Exact session id first, then title (latest ``"<title> #N"`` continuation wins over
     the bare title), projected forward to the compression tip. Only a local session the

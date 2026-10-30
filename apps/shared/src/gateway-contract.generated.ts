@@ -5145,6 +5145,7 @@ export interface CanonicalSnapshotInfo {
 export interface CanonicalResumeParams {
   profile?: string | null
   session_id?: string
+  breadcrumb_candidate?: boolean
   title?: string | null
   latest?: 'cli' | 'tui' | null
   workspace?: string | null
