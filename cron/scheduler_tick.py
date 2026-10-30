@@ -6,7 +6,7 @@ import logging
 import time
 
 from cron import store_health
-from cron.constants import is_recurring
+from cron.recurrence_kind import is_recurring
 
 logger = logging.getLogger("cron.scheduler")
 

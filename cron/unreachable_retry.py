@@ -23,7 +23,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from cron.constants import is_recurring
+from cron.recurrence_kind import is_recurring
 from hermes_time import now as _hermes_now
 
 logger = logging.getLogger("cron.scheduler")

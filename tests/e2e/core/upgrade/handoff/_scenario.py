@@ -328,9 +328,8 @@ def run(column: str, root: Path) -> SimpleNamespace:
                     assert marker.exists(), "premise: the update exited before entering its fenced phase"
                     assert dt.datetime.now(dt.UTC) < due and not model.cron_calls, (
                         "premise: the cron instant arrived before the update held the checkout")
-                    until_due = (due + dt.timedelta(seconds=5) - dt.datetime.now(dt.UTC)).total_seconds()
-                    if until_due > 0:
-                        time.sleep(until_due)
+                    X.wait_for(lambda: dt.datetime.now(dt.UTC) > due + dt.timedelta(seconds=5),
+                               timeout=90, what="the cron instant during the update")
                     assert not pending.done(), "premise: the update finished before the cron instant"
                 finally:
                     model.release.set()

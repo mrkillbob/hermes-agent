@@ -9,6 +9,7 @@ import threading
 from typing import Optional
 
 from agent.interrupt_compat import request_hard_interrupt
+from agent.interrupt_wording import USER_INTERRUPT_REASONS, interrupt_skip_wording
 from tools.interrupt import request_yield as _request_yield
 from tools.interrupt import set_interrupt as _set_interrupt
 
@@ -21,7 +22,6 @@ logger = logging.getLogger("run_agent")
 _REASON_HARD_STOP = "explicit stop requested"
 _REASON_NEW_MESSAGE = "user sent a new message"
 _REASON_USER_INTERRUPT = "user interrupt"
-USER_INTERRUPT_REASONS = frozenset({_REASON_HARD_STOP, _REASON_NEW_MESSAGE, _REASON_USER_INTERRUPT})
 # ``tool_reason`` the gateway's restart/shutdown stop passes (gateway.run._INTERRUPT_TOOL_REASON_GATEWAY_SHUTDOWN).
 _REASON_GATEWAY_SHUTDOWN = "gateway shutdown"
 
@@ -32,19 +32,6 @@ def interrupt_issuer(agent) -> Optional[str]:
     if not reason or reason in USER_INTERRUPT_REASONS:
         return None
     return str(reason).strip().replace(" ", "_")
-
-
-def interrupt_skip_wording(agent) -> str:
-    """Reason a tool call was skipped/cancelled, in words safe for tool output.
-
-    Derived from the RECORDED reason rather than the call site, so a system-initiated
-    abort reads as one instead of asserting a user message that never existed (#130207)."""
-    reason = getattr(agent, "_tool_interrupt_reason", None)
-    if not reason:
-        return "Turn interrupted"
-    if reason in USER_INTERRUPT_REASONS:
-        return reason.capitalize()
-    return f"Turn aborted — {str(reason).replace('_', ' ')}"
 
 
 def interrupted_during_api_call_reason(agent) -> str:

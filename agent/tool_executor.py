@@ -33,7 +33,8 @@ from agent.display import (
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
 from agent.pruned_tool_arguments import _context_pruned_argument_paths
 from agent.tool_executor_arguments import _parse_tool_arguments
-from agent.interrupt_control import _REASON_USER_INTERRUPT, interrupt_skip_wording
+from agent.interrupt_control import _REASON_USER_INTERRUPT
+from agent.interrupt_wording import interrupt_skip_wording
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.onboarding import observe_tool_result as observe_onboarding_result
 from agent import plugin_live_notes
