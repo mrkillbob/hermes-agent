@@ -37,9 +37,10 @@ def model_on_disk(models_dir: Path, model: str) -> bool:
     """A single ``<model>.gguf``, or a split model with every ``-NNNNN-of-MMMMM`` part present."""
     if (models_dir / f"{model}.gguf").is_file():
         return True
-    for first in models_dir.glob(f"{re.escape(model)}-00001-of-*.gguf") if models_dir.is_dir() else ():
+    # Compare the literal prefix; glob would read "[", "?" or "*" in a model id as a pattern.
+    for first in models_dir.glob("*-00001-of-*.gguf") if models_dir.is_dir() else ():
         m = _SPLIT_FIRST_PART.search(first.name)
-        if m and all(
+        if m and first.name[: m.start()] == model and all(
             (models_dir / f"{model}-{i:05d}-of-{m.group(1)}.gguf").is_file()
             for i in range(2, int(m.group(1)) + 1)
         ):

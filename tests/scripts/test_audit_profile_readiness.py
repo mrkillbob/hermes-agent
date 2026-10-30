@@ -189,3 +189,14 @@ def test_duplicate_fallback_across_keys_is_reported_once(tmp_path):
     })
     row = next(r for r in audit.audit_home(home, receipts)["rows"] if r["profile"] == "p")
     assert sum(f.startswith("OLLAMA_PIN") for f in row["findings"]) == 1
+
+
+def test_split_gguf_with_punctuated_model_id_is_found(tmp_path):
+    models = tmp_path / "models"
+    models.mkdir()
+    for i in (1, 2):
+        (models / f"Qwen3.8-Flash-Next-UD-IQ4_XS-{i:05d}-of-00002.gguf").write_bytes(b"")
+    (models / "Odd[1]-00001-of-00001.gguf").write_bytes(b"")
+    assert audit.model_on_disk(models, "Qwen3.8-Flash-Next-UD-IQ4_XS")
+    assert audit.model_on_disk(models, "Odd[1]")
+    assert not audit.model_on_disk(models, "Qwen3.8-Flash")
