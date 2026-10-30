@@ -24,12 +24,12 @@ from functools import lru_cache
 import ctypes
 import re
 import subprocess
-import sys
 import threading
 
 import psutil
 
 from agent.memory_provider import spawn_context_thread
+from hermes_platform.host.facts import os_family
 
 _MIB = 1 << 20
 _RUSAGE_INFO_V2 = 2
@@ -148,7 +148,7 @@ def model_child(router, model_id: str, resident_models: list[str]):
 
 def phys_footprint(pid: int) -> int | None:
     """Kernel-accounted physical footprint of ``pid`` in bytes (macOS), else None."""
-    if sys.platform != "darwin":
+    if os_family() != "darwin":
         return None
     try:
         lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
