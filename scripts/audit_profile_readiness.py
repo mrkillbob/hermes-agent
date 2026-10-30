@@ -87,7 +87,7 @@ def load_receipts(receipt_dir: Path | None) -> set[tuple[str, str, str]]:
         return found
     for f in receipt_dir.rglob("*.json"):
         try:
-            d = json.loads(f.read_text())
+            d = json.loads(f.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         if isinstance(d, dict) and d.get("model") and d.get("provider") and "score" in d:
@@ -97,7 +97,7 @@ def load_receipts(receipt_dir: Path | None) -> set[tuple[str, str, str]]:
 
 def _load(path: Path, loader) -> Any:
     try:
-        return loader(path.read_text())
+        return loader(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, yaml.YAMLError):
         return None
 

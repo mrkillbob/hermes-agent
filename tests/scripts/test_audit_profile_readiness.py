@@ -20,9 +20,9 @@ RECEIPT = {"model": "Qwen3.5-4B-Q6_K", "provider": "llamacpp", "reasoning_effort
 def _profile(root: Path, name: str, cfg: dict, role: dict | None = None) -> None:
     d = root / "profiles" / name
     d.mkdir(parents=True)
-    (d / "config.yaml").write_text(yaml.safe_dump(cfg))
+    (d / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
     if role is not None:
-        (d / "federation_role.json").write_text(json.dumps(role))
+        (d / "federation_role.json").write_text(json.dumps(role), encoding="utf-8")
 
 
 def _home(tmp_path: Path) -> tuple[Path, Path]:
@@ -31,7 +31,7 @@ def _home(tmp_path: Path) -> tuple[Path, Path]:
     (home / "models" / "Qwen3.5-4B-Q6_K.gguf").write_bytes(b"")
     receipts = tmp_path / "receipts"
     receipts.mkdir()
-    (receipts / "q.json").write_text(json.dumps(RECEIPT))
+    (receipts / "q.json").write_text(json.dumps(RECEIPT), encoding="utf-8")
     return home, receipts
 
 
