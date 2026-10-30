@@ -225,3 +225,10 @@ def test_unlisted_remote_providers_are_metered_unless_free():
     assert audit.classify("minimax", "m") == "paid-cloud"
     assert audit.classify("some-new-provider", "m:free") == "free-cloud"
     assert audit.classify("custom", "m") == "other-cloud"
+
+
+def test_local_server_providers_and_loopback_endpoints_are_not_paid():
+    assert audit.classify("lmstudio", "m") == "local-server"
+    assert audit.classify("vllm", "m") == "local-server"
+    assert audit.classify("some-provider", "m", "http://127.0.0.1:8000/v1") == "local-server"
+    assert audit.classify("some-provider", "m", "https://api.example.com/v1") == "paid-cloud"

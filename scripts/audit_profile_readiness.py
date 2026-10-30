@@ -28,6 +28,9 @@ OLLAMA = frozenset({"ollama", "ollama-launch"})
 FREE_CLOUD = frozenset({"nvidia"})  # NIM entitlement, no per-token charge
 # Endpoint decides the cost (custom base_url); not classifiable from provider name alone.
 UNCLASSIFIED = frozenset({"", "custom", "auto"})
+# Local-server providers (hermes_cli/providers.py: LM Studio; vllm maps to custom): not metered.
+LOCAL_SERVERS = frozenset({"lmstudio", "lm-studio", "lm_studio", "vllm"})
+_LOOPBACK = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:|/|$)", re.IGNORECASE)
 TOOL_HEAVY = frozenset({"computer_use", "browser", "delegation", "code_execution"})
 
 
@@ -61,7 +64,7 @@ _PROVIDER_ALIASES = {
 }
 
 
-def classify(provider: str, model: str) -> str:
+def classify(provider: str, model: str, base_url: str = "") -> str:
     p = (provider or "").strip().lower()
     p = _PROVIDER_ALIASES.get(p, p)
     if p in LLAMACPP:
@@ -70,6 +73,8 @@ def classify(provider: str, model: str) -> str:
         return "ollama"
     if p in FREE_CLOUD or str(model).endswith(":free"):
         return "free-cloud"
+    if p in LOCAL_SERVERS or _LOOPBACK.match(str(base_url or "")):
+        return "local-server"
     if p in UNCLASSIFIED:
         return "other-cloud"
     return "paid-cloud"
@@ -87,7 +92,7 @@ def _route(entry: Any, slot: str) -> dict[str, str] | None:
         "provider": str(provider or ""),
         "model": str(model or ""),
         "effort": str(entry.get("reasoning_effort") or ""),
-        "class": classify(str(provider or ""), str(model or "")),
+        "class": classify(str(provider or ""), str(model or ""), str(entry.get("base_url") or "")),
     }
 
 
