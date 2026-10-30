@@ -2884,7 +2884,7 @@ def claim_job_for_fire(
                     job["next_run_at"] = nxt
                     save_jobs(jobs)
             return False
-        if instant is not None and not manual_fire:
+        if expected is not None and expected[0] == job_id and instant is not None and not manual_fire:
             from cron.missed_runs import skip_missed_external_claim
             if skip_missed_external_claim(jobs, job, now):
                 return False

@@ -12,7 +12,7 @@ from datetime import timedelta
 
 import pytest
 
-from cron.jobs import _hermes_now, create_job, get_job, load_jobs, save_jobs
+from cron.jobs import _hermes_now, claim_job_for_fire, create_job, get_due_jobs, get_job, load_jobs, save_jobs
 from cron.scheduler_provider import (
     CronScheduler,
     InProcessCronScheduler,
@@ -76,6 +76,22 @@ def _park_in_past(job_id, minutes):
 
 
 class TestFireOverdueJobs:
+    def test_admitted_builtin_oneshot_survives_worker_queue_delay(self, tmp_cron_dir, monkeypatch):
+        """The due scan admitted this slot before another worker held the only queue lane."""
+        clock = {"now": _hermes_now()}
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: clock["now"])
+        job = create_job(prompt="p", schedule="in 1h")
+        jobs = load_jobs()
+        jobs[0]["next_run_at"] = (clock["now"] - timedelta(seconds=30)).isoformat()
+        save_jobs(jobs)
+        assert [due["id"] for due in get_due_jobs()] == [job["id"]]
+        assert get_job(job["id"])["run_claim"] is not None
+
+        clock["now"] += timedelta(minutes=3)
+        claimed = claim_job_for_fire(job["id"], return_job=True)
+        assert isinstance(claimed, dict)
+        assert claimed["fire_claim"] is not None
+
     def test_noop_for_builtin_provider(self, tmp_cron_dir):
         """The in-process ticker self-heals past-due jobs — the sweep must
         never double-dispatch under it."""
