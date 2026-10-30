@@ -358,6 +358,11 @@ class CronScheduler(ABC):
             claim_kwargs["force"] = True
         if manual:
             claim_kwargs["manual"] = True
+        if not (force or manual):
+            # Provider callbacks, including Chronos webhooks and housekeeping, use the same
+            # fenced missed-slot policy. The built-in worker queue claims directly after
+            # admission and is deliberately exempt.
+            claim_kwargs["provider_admission"] = True
         skip_token = _external_skip_saved.set(False)
         try:
             try:

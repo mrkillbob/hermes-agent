@@ -342,7 +342,7 @@ def test_fire_due_default_claims_then_runs(monkeypatch):
     )
 
     assert InProcessCronScheduler().fire_due("j1") is True
-    assert claims == [("j1", {"return_job": True})]
+    assert claims == [("j1", {"return_job": True, "provider_admission": True})]
     assert ran == [("j1", "exact-owner")]
 
 

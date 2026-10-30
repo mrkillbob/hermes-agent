@@ -76,6 +76,44 @@ def _park_in_past(job_id, minutes):
 
 
 class TestFireOverdueJobs:
+    def test_delayed_external_webhook_skips_and_rearms_recurring_miss(self, tmp_cron_dir):
+        """A provider webhook arriving before housekeeping cannot bypass catch-up policy."""
+        job = create_job(prompt="p", schedule="every 1h", catch_up=False)
+        _park_in_past(job["id"], minutes=90)
+        first = get_job(job["id"])["next_run_at"]
+        provider = RecordingProvider()
+
+        assert provider.claim_fire(job["id"]) is None
+        assert provider.changed == 1
+        assert provider.change_contexts == [None]
+        assert get_job(job["id"])["next_run_at"] != first
+        assert get_job(job["id"]).get("fire_claim") is None
+        from cron.executions import list_executions
+        assert any(row["status"] == "missed" for row in list_executions(job_id=job["id"]))
+
+    def test_delayed_external_webhook_respects_oneshot_catch_up(self, tmp_cron_dir):
+        stale = create_job(prompt="p", schedule="in 1h")
+        _park_in_past(stale["id"], minutes=90)
+        provider = RecordingProvider()
+        assert provider.claim_fire(stale["id"]) is None
+        assert get_job(stale["id"]) is None
+        assert provider.changed == 1
+
+        opted_in = create_job(prompt="p", schedule="in 1h", catch_up=True)
+        _park_in_past(opted_in["id"], minutes=90)
+        assert isinstance(provider.claim_fire(opted_in["id"]), dict)
+        assert provider.changed == 1
+
+    def test_delayed_external_webhook_respects_expired_cron_grace(self, tmp_cron_dir):
+        pytest.importorskip("croniter")
+        job = create_job(prompt="p", schedule="*/5 * * * *", grace_minutes=0)
+        _park_in_past(job["id"], minutes=30)
+        provider = RecordingProvider()
+
+        assert provider.claim_fire(job["id"]) is None
+        assert provider.changed == 1
+        assert get_job(job["id"])["next_run_at"] > _hermes_now().isoformat()
+
     def test_admitted_builtin_oneshot_survives_worker_queue_delay(self, tmp_cron_dir, monkeypatch):
         """The due scan admitted this slot before another worker held the only queue lane."""
         clock = {"now": _hermes_now()}

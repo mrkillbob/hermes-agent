@@ -2824,14 +2824,16 @@ def _machine_id() -> str:
 
 def claim_job_for_fire(
     job_id: str, *, claim_ttl_seconds: int = FIRE_CLAIM_TTL_SECONDS, force: bool = False,
-    manual: bool = False, return_job: bool = False,
+    manual: bool = False, return_job: bool = False, provider_admission: bool = False,
 ) -> bool | dict[str, Any]:
     """Atomically claim a job for one external 'fire' (multi-machine at-most-once); True iff THIS
     caller won (``CronScheduler.fire_due``: exactly one of N replicas runs a job). Under the
     fence + file lock: reject missing/terminal/paused jobs unless ``force`` (explicit manual
     fire, which also resumes the job atomically; external callbacks must leave it false so a
     stale callback cannot resurrect a paused job). ``manual`` = off-tick run-now without the
-    resume: no occurrence stamp, so the still-pending ``next_run_at`` slot is not skipped. Lose if a claim younger than
+    resume: no occurrence stamp, so the still-pending ``next_run_at`` slot is not skipped.
+    ``provider_admission`` applies the missed-slot policy to an inbound provider fire; the
+    built-in ticker's already-admitted worker claim remains exempt. Lose if a claim younger than
     ``claim_ttl_seconds`` exists (the TTL lets another fire reclaim after a crash; mark_job_run
     clears the claim). Otherwise stamp ``fire_claim`` and, for recurring jobs, advance
     ``next_run_at`` so a stale re-delivery cannot re-fire."""
@@ -2887,7 +2889,11 @@ def claim_job_for_fire(
                     job["next_run_at"] = nxt
                     save_jobs(jobs)
             return False
-        if expected is not None and expected[0] == job_id and instant is not None and not manual_fire:
+        # External webhooks and the missed-fire backstop share this fenced policy. The built-in
+        # ticker may have admitted a one-shot before it sat in a worker queue; its later claim
+        # must not become a new missed-fire decision merely because the queue was busy.
+        if ((provider_admission or (expected is not None and expected[0] == job_id))
+                and instant is not None and not manual_fire):
             from cron.missed_runs import skip_missed_external_claim
             if skip_missed_external_claim(jobs, job, now):
                 return False
