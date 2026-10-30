@@ -63,9 +63,9 @@ def install(tmp_path, monkeypatch):
     home.mkdir()
     # pid 0 is never a live process: the marker a killed update leaves behind.
     (home / update_lock.MARKER_NAME).write_text(f"0\n{int(time.time())}\nct:1.000\n", encoding="utf-8")
-    # _update_fenced probes the running checkout's lock (no install_root): make that this one.
-    named = update_lock.checkout_lock_path
-    monkeypatch.setattr(update_lock, "checkout_lock_path", lambda install_root=None: named(install_root or root))
+    # _update_fenced probes the running checkout's lock (no install_root). Point its default
+    # root at this fixture checkout; checkout_lock_held passes that root to checkout_lock_path.
+    monkeypatch.setattr(update_lock, "_default_install_root", lambda: root)
     return root, home
 
 

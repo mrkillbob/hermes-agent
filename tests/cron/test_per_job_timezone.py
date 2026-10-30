@@ -276,6 +276,35 @@ class TestGraceMinutesOverride:
                 prompt="p", schedule="every 5m", model="fixture", deliver="local",
                 grace_minutes=30)
 
+    def test_schedule_change_revalidates_inherited_grace(self, la_profile, cron_store):
+        job = jobs.create_job(
+            prompt="p", schedule=DAILY_9AM, model="fixture", deliver="local",
+            grace_minutes=0)
+        with pytest.raises(ValueError, match="grace_minutes only applies to cron"):
+            jobs.update_job(job["id"], {"schedule": "every 1h"})
+        stored = jobs.get_job(job["id"])
+        assert stored["schedule"]["kind"] == "cron"
+        assert stored["grace_minutes"] == 0
+
+        updated = jobs.update_job(job["id"], {
+            "schedule": "every 1h", "grace_minutes": None,
+        })
+        assert updated["schedule"]["kind"] == "interval"
+        assert updated.get("grace_minutes") is None
+
+    def test_schedule_and_repeat_update_preserves_valid_inherited_grace(
+        self, la_profile, cron_store,
+    ):
+        job = jobs.create_job(
+            prompt="p", schedule=DAILY_9AM, model="fixture", deliver="local",
+            grace_minutes=0)
+        updated = jobs.update_job(job["id"], {
+            "schedule": "0 10 * * *", "repeat": 3,
+        })
+        assert updated["schedule"]["kind"] == "cron"
+        assert updated["grace_minutes"] == 0
+        assert updated["repeat"]["times"] == 3
+
     @pytest.mark.parametrize("minutes, expected", [(0, 120), (45, 45 * 60)])  # 0 floors at tick tolerance
     def test_stored_grace_round_trips(self, la_profile, cron_store, minutes, expected):
         job = jobs.create_job(

@@ -2183,10 +2183,13 @@ def update_job(job_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]
                 _normalize_job_optional_text(updated.get("script")))
         if any(k in updates for k in _PAYLOAD_FIELDS) and job_payload_is_empty(updated):
             raise ValueError(EMPTY_PAYLOAD_ERROR)
-        if {"timezone", "grace_minutes"}.intersection(updates):
+        if {"schedule", "timezone", "grace_minutes"}.intersection(updates):
+            schedule = updated.get("schedule") or {}
+            if isinstance(schedule, str):
+                schedule = parse_schedule(schedule, timezone=updated.get("timezone"))
+                updated["schedule"] = schedule
             validate_schedule_knobs(
-                updated.get("schedule") or {}, updated.get("timezone"),
-                updated.get("grace_minutes"))
+                schedule, updated.get("timezone"), updated.get("grace_minutes"))
             jobs_time.prune_inherited_knobs(updated)
         if "schedule" in updates:
             _apply_schedule_update(updated, updates, job_id)
