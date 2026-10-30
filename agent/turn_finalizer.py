@@ -635,6 +635,18 @@ def public_pre_transform(agent, pre_transform: Optional[Any]) -> Optional[Any]:
     return None if getattr(agent, "_hold_stream", False) else pre_transform
 
 
+def _consume_skill_review_due(agent):
+    """Consume the skill trigger using only this turn's completed iteration count."""
+    due = (
+        agent._skill_nudge_interval > 0
+        and agent._iters_since_skill >= agent._skill_nudge_interval
+        and "skill_manage" in agent.valid_tool_names
+    )
+    if due:
+        agent._iters_since_skill = 0
+    return due
+
+
 def finalize_turn(
     agent, *, final_response, api_call_count, interrupted, failed, messages, conversation_history,
     effective_task_id, turn_id, user_message, original_user_message, _should_review_memory,
@@ -878,16 +890,11 @@ def finalize_turn(
     # A voice turn's model route ends with the turn: memory sync and the background review
     # below (and the next turn) run on the session's main model.
     from agent.voice_turn_route import end_voice_turn_route
-    end_voice_turn_route(agent)
+    from agent.primary_runtime_snapshot import finish_turn_result
+    if end_voice_turn_route(agent) == 'deferred':
+        return finish_turn_result(agent, result)
 
-    # Skill trigger is checked NOW — based on how many tool iterations THIS turn used.
-    _should_review_skills = (
-        agent._skill_nudge_interval > 0
-        and agent._iters_since_skill >= agent._skill_nudge_interval
-        and "skill_manage" in agent.valid_tool_names
-    )
-    if _should_review_skills:
-        agent._iters_since_skill = 0
+    _should_review_skills = _consume_skill_review_due(agent)
 
     # External memory provider: sync the completed turn + queue next prefetch.
     agent._sync_external_memory_for_turn(
@@ -932,6 +939,4 @@ def finalize_turn(
             platform=_platform,
         )
 
-    agent._turn_preflight_display_snapshot = None
-    agent._turn_received_provider_response = False
-    return result
+    return finish_turn_result(agent, result)

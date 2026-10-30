@@ -47,9 +47,10 @@ class TestSwitchModelReasoningOverride:
 
     def test_restore_primary_runtime_restores_reasoning(self):
         """restore_primary_runtime should restore reasoning_config from snapshot."""
-        from agent.agent_runtime_helpers import restore_primary_runtime
+        from agent.primary_runtime_snapshot import restore_primary_runtime
 
         agent = MagicMock()
+        agent._runtime_mutation_state = None  # Let the real controller initialize.
         agent._primary_runtime = {
             "model": "claude-opus-4.5",
             "provider": "anthropic",

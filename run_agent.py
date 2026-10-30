@@ -462,7 +462,7 @@ class AIAgent(
             self.model, self.base_url, getattr(self, "api_key", ""), config_context_length, return_load_result=True,
         )
 
-    switch_model = _forward("agent.agent_runtime_helpers", "switch_model")
+    switch_model = _forward("agent.primary_runtime_snapshot", "switch_model")
 
     def _disable_codex_reasoning_replay(
         self, messages: Optional[list[dict[str, Any]]] = None, *, keep_replay: bool = False,
@@ -1226,7 +1226,7 @@ class AIAgent(
 
     _interruptible_api_call = _forward("agent.chat_completion_helpers", "interruptible_api_call")
     _interruptible_streaming_api_call = _forward("agent.chat_completion_helpers", "interruptible_streaming_api_call")
-    _try_activate_fallback = _forward("agent.chat_completion_helpers", "try_activate_fallback")
+    _try_activate_fallback = _forward("agent.primary_runtime_snapshot", "try_activate_fallback")
 
     def _has_pending_fallback(self) -> bool:
         """Whether a fallback provider remains (mirrors ``try_activate_fallback``'s guard) — gates the
@@ -1236,8 +1236,8 @@ class AIAgent(
         """
         return getattr(self, "_fallback_index", 0) < len(getattr(self, "_fallback_chain", None) or [])
 
-    _restore_primary_runtime = _forward("agent.agent_runtime_helpers", "restore_primary_runtime")
-    _try_recover_primary_transport = _forward("agent.agent_runtime_helpers", "try_recover_primary_transport")
+    _restore_primary_runtime = _forward("agent.primary_runtime_snapshot", "restore_primary_runtime")
+    _try_recover_primary_transport = _forward("agent.primary_runtime_snapshot", "try_recover_primary_transport")
     _build_api_kwargs = _forward("agent.chat_completion_helpers", "build_api_kwargs")
 
     def _set_tool_guardrail_halt(self, decision: ToolGuardrailDecision) -> None:
