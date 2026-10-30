@@ -26,7 +26,7 @@ _MAX_BYTES = 1024 * 1024
 
 
 @contextlib.contextmanager
-def existing_artifact_connection(*, board):
+def existing_artifact_connection(*, board, preserve_current_journal: bool = False):
     """Open a canonical existing board with normal tracked connection settings.
 
     No creation, migration, quarantine, schema repair or initialized-cache
@@ -34,13 +34,17 @@ def existing_artifact_connection(*, board):
     quiescence under its guarded writer transaction before calling archival.
     Ordinary SQLite WAL/SHM bookkeeping remains possible.
     """
+    if type(preserve_current_journal) is not bool:
+        raise ValueError("preserve_current_journal must be an exact boolean")
     board = kb._require_slug(board)
     path = kb.kanban_db_path(board=board)
     kb._assert_not_delegated_child_mutation(path)
     if not path.is_file():
         raise ValueError('an existing initialized Kanban board is required')
-    conn, _ = kbc._open_configured(path, kbc._schema_is_present,
-                                  existing_only=True, require_schema=True)
+    options = dict(existing_only=True, require_schema=True)
+    if preserve_current_journal:
+        options["preserve_current_journal"] = True
+    conn, _ = kbc._open_configured(path, kbc._schema_is_present, **options)
     with contextlib.closing(conn):
         yield conn
 

@@ -687,13 +687,21 @@ def _schema_is_present(conn: sqlite3.Connection) -> bool:
 
 
 def _open_configured(path: Path, under_lock, *, existing_only: bool = False,
-                     require_schema: bool = False) -> tuple[sqlite3.Connection, Any]:
+                     require_schema: bool = False, preserve_current_journal: bool = False) -> tuple[sqlite3.Connection, Any]:
     """Open ``path`` with the kanban PRAGMA set, then run ``under_lock(conn)``.
     WAL activation and ``under_lock`` share the ``_INIT_LOCK`` critical section:
     WAL setup can take an exclusive lock while SQLite creates sidecars for a
     fresh DB, and concurrent gateway startup threads must not race before
     ``_INITIALIZED_PATHS`` is populated. ``require_schema`` refuses empty files
     before WAL setup can initialize their header. Closed if anything raises."""
+    if type(preserve_current_journal) is not bool:
+        raise ValueError("preserve_current_journal must be an exact boolean")
+    if preserve_current_journal:
+        if existing_only is not True or require_schema is not True or under_lock is not _schema_is_present:
+            raise ValueError("preserve_current_journal requires the existing schema-only path")
+        from hermes_cli.startup_hold import active as startup_hold_active
+        if startup_hold_active():
+            raise sqlite3.OperationalError("startup hold forbids journal tuning")
     conn = _sqlite_connect(path, existing_only=True) if existing_only else _sqlite_connect(path)
     try:
         conn.row_factory = sqlite3.Row
@@ -703,8 +711,12 @@ def _open_configured(path: Path, under_lock, *, existing_only: bool = False,
         with _INIT_LOCK:
             # WAL doesn't work on network filesystems; the helper falls back to
             # DELETE with one ERROR log (see hermes_state_wal._WAL_INCOMPAT_MARKERS).
-            from hermes_state_wal import apply_wal_with_fallback
-            apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
+            if preserve_current_journal:
+                from hermes_state_wal import preserve_existing_journal_mode
+                journal_mode = preserve_existing_journal_mode(conn, db_label=f"kanban.db ({path.name})")
+            else:
+                from hermes_state_wal import apply_wal_with_fallback
+                apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
             # FULL (not NORMAL): fsync before each checkpoint to narrow the
             # crash window that can leave a b-tree page header torn.
             conn.execute("PRAGMA synchronous=FULL")
@@ -719,8 +731,13 @@ def _open_configured(path: Path, under_lock, *, existing_only: bool = False,
             # Surface corrupt cells as read errors instead of silent wrong data.
             conn.execute("PRAGMA cell_size_check=ON")
             out = under_lock(conn)
-    except Exception:
-        conn.close()
+            if preserve_current_journal:
+                from hermes_state_wal import _on_disk_journal_mode
+                if _on_disk_journal_mode(conn) != journal_mode:
+                    raise sqlite3.OperationalError("existing journal mode changed during open")
+    except BaseException as exc:
+        if preserve_current_journal or isinstance(exc, Exception):
+            conn.close()
         raise
     return conn, out
 

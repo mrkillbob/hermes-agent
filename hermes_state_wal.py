@@ -266,6 +266,30 @@ def _held_journal_mode(conn: sqlite3.Connection, require_wal: bool) -> str:
     raise sqlite3.OperationalError("startup hold cannot verify the on-disk journal mode")
 
 
+def preserve_existing_journal_mode(conn: sqlite3.Connection, *, db_label: str = "state.db") -> str:
+    """Verify an existing journal without consulting config or changing its mode.
+
+    Caller must require an initialized existing database. Configured transitions are
+    deliberately deferred; this is not a general replacement for WAL policy.
+    """
+    from hermes_cli.startup_hold import active as startup_hold_active
+    if startup_hold_active():
+        raise sqlite3.OperationalError("startup hold forbids journal tuning")
+    current = _on_disk_journal_mode(conn)
+    if current not in ("wal", "delete"):
+        raise sqlite3.OperationalError("cannot verify existing journal mode")
+    if current == "wal":
+        if is_sqlite_wal_reset_vulnerable():
+            # The ordinary repair-hint helper imports config. Keep the safety
+            # warning while avoiding that import on this explicitly scoped path.
+            logger.warning("%s: linked SQLite %s is vulnerable to the WAL-reset corruption bug; "
+                           "existing WAL retained to avoid a live downgrade. Upgrade SQLite "
+                           "to 3.51.3+ or the 3.50.7 / 3.44.6 backports", db_label, sqlite3.sqlite_version)
+        _warn_existing_wal_on_cross_vm_fs(conn)
+        _apply_wal_companions(conn)
+    return current
+
+
 def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.db", require_wal: bool = False) -> str:
     """Set ``journal_mode=WAL`` on ``conn``, falling back to DELETE on failure.
 
