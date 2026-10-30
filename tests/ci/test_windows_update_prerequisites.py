@@ -1,9 +1,12 @@
 """Dependent interpreter cells report the installer failure that prevented their work."""
+from types import SimpleNamespace
+
 import pytest
 
 from tests.e2e.core.windows_update._machine import Journey
 from tests.e2e.core.windows_update import test_interpreter as interpreter
 from tests.e2e.core.windows_update import test_git_and_holders as git_holders
+from tests.e2e.core.windows_update import test_upgrade_over_old_gateway_standard_user as standard_user
 
 
 class _Machine:
@@ -71,3 +74,37 @@ def test_git_holder_cells_surface_original_installer_failure(cell, failed_step):
 
     assert caught.value.__cause__ is original
     assert "never ran" not in str(caught.value)
+
+
+_STANDARD_CELLS = [standard_user.test_standard_user_old_gateway_held_lock_before_update,
+                   standard_user.test_standard_user_update_replaces_old_gateway,
+                   standard_user.test_standard_user_status_and_turn_after_update]
+
+
+@pytest.mark.parametrize("cell", _STANDARD_CELLS)
+@pytest.mark.parametrize("failed_step", ["install", "install_ok"])
+def test_standard_user_cells_surface_original_install_failure(cell, failed_step):
+    journey = Journey(_Machine())
+    original = AssertionError("synthetic installer prerequisite failed")
+    journey.results["install"] = "completed"
+    journey.results[failed_step] = original
+
+    with pytest.raises(RuntimeError, match=f"journey step '{failed_step}' failed") as caught:
+        cell(journey)
+
+    assert caught.value.__cause__ is original
+    assert "never ran" not in str(caught.value)
+
+
+def test_standard_user_cells_continue_after_successful_install(monkeypatch):
+    journey = Journey(_Machine())
+    journey.results.update(install="completed", install_ok=None,
+                           stop_user=SimpleNamespace(returncode=0), user_stopped=True)
+    calls = []
+    for name in ("_assert_old_gateway_held_lock", "_assert_update_replaced_gateway", "_assert_status_sees", "_assert_turn"):
+        monkeypatch.setattr(standard_user, name, lambda *args, _name=name: calls.append(_name))
+
+    for cell in _STANDARD_CELLS:
+        cell(journey)
+
+    assert calls == ["_assert_old_gateway_held_lock", "_assert_update_replaced_gateway", "_assert_status_sees", "_assert_turn"]
