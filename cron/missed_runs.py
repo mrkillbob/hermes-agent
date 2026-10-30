@@ -75,6 +75,81 @@ def _book_missed(
         logger.warning("Job '%s': could not book its missed occurrences", job.get("id"), exc_info=True)
 
 
+def skip_missed_external_claim(jobs: list[dict[str, Any]], job: dict[str, Any],
+                               now: datetime) -> bool:
+    """Apply missed-slot policy at the fenced external claim's fresh store snapshot.
+
+    Return True when this occurrence cannot be claimed. A skipped slot and its pending marker
+    are persisted together; diagnostics/ledger writes happen only after that save succeeds.
+    """
+    from cron import store_health
+    from cron.jobs import (
+        ONESHOT_GRACE_SECONDS, _compute_grace_seconds, _current_cron_store, _external_skip_saved,
+        _elapsed_seconds, _parse_aware, compute_next_run, record_cron_missed, save_jobs,
+    )
+
+    first = job.get("next_run_at")
+    due = _parse_aware(first) if first else None
+    if due is None or _elapsed_seconds(now, due) < 0:
+        return False
+    schedule = job.get("schedule") or {}
+    kind = schedule.get("kind")
+    lateness = _elapsed_seconds(now, due)
+    if kind == "once":
+        if lateness <= ONESHOT_GRACE_SECONDS or job_catches_up(job):
+            return False
+        if store_health.outage_covers(
+                _current_cron_store().cron_dir, due.timestamp(), ONESHOT_GRACE_SECONDS):
+            return False
+        claim = job.get("run_claim")
+        if (claim or job.get("fire_claim")):
+            return True  # an in-flight attempt may still settle; do not retire it
+        from cron.jobs_oneshot_diagnostics import write_missed
+        jobs.remove(job)
+        save_jobs(jobs, removed_ids={str(job["id"])})
+        _external_skip_saved.set(True)
+        write_missed(job, first)
+        record_cron_missed(job)
+        _book_missed(job, 1, first, "one-shot past its grace window; catch-up off", capped=False)
+        return True
+    if kind not in {"cron", "interval"}:
+        return False
+    grace = _compute_grace_seconds(schedule, job.get("grace_minutes"))
+    if lateness <= grace or job_catches_up(job):
+        return False
+    following = compute_next_run(schedule, now.isoformat(), timezone=job.get("timezone"))
+    if not following:
+        return True  # fail closed; never keep claiming a slot that policy says to skip
+    missed = count_missed_slots(schedule, first, now, timezone=job)
+    job["next_run_at"] = following
+    job.pop("pending_slot", None)
+    save_jobs(jobs)
+    _external_skip_saved.set(True)
+    record_cron_missed(job)
+    _book_missed(job, missed, first, f"skipped, catch-up off; next run {following}",
+                 capped=missed >= _MAX_COUNTED_SLOTS)
+    return True
+
+
+def book_external_catch_up(job: dict[str, Any], first: str, now: datetime) -> None:
+    """Record collapsed recurring slots after an external claim was saved successfully."""
+    from cron.jobs import _compute_grace_seconds, _elapsed_seconds, _parse_aware
+
+    schedule = job.get("schedule") or {}
+    due = _parse_aware(first)
+    if (schedule.get("kind") not in {"cron", "interval"} or due is None
+            or _elapsed_seconds(now, due) <= _compute_grace_seconds(
+                schedule, job.get("grace_minutes"))):
+        return
+    from cron.occurrences import record_catch_up_occurrence
+
+    missed = count_missed_slots(schedule, first, now, timezone=job)
+    record_catch_up_occurrence()
+    if missed > 1:
+        _book_missed(job, missed - 1, first, "collapsed into one catch-up run",
+                     capped=missed >= _MAX_COUNTED_SLOTS)
+
+
 def fast_forward_missed_recurring(d: Any, grace: int) -> bool:
     """Re-anchor accumulated misses; return whether catch-up is off for this job (skip the fire).
 

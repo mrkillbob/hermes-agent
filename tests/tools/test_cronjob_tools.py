@@ -838,6 +838,15 @@ class TestScheduleKnobToolSurface:
         cronjob(action="create", prompt="x", schedule="0 9 * * *", grace_minutes=0)
         assert self._stored()["grace_minutes"] == 0
 
+    def test_interval_to_cron_and_grace_in_one_update(self):
+        created = json.loads(cronjob(action="create", prompt="x", schedule="every 2h"))
+        updated = json.loads(cronjob(
+            action="update", job_id=created["job_id"],
+            schedule="0 9 * * *", grace_minutes=30))
+        assert updated["success"] is True, updated
+        assert self._stored()["schedule"]["kind"] == "cron"
+        assert self._stored()["grace_minutes"] == 30
+
     def test_update_clears_the_zone_and_the_override(self):
         created = json.loads(cronjob(
             action="create", prompt="x", schedule="0 9 * * *",

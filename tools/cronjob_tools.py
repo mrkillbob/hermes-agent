@@ -973,12 +973,10 @@ def _update_run_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[str
         updates["grace_minutes"] = (
             None if isinstance(a["grace_minutes"], str) and not a["grace_minutes"].strip()
             else a["grace_minutes"])
-        if _pick(updates, job, "grace_minutes") is not None:
-            kind = (_pick(updates, job, "schedule") or {}).get("kind")
-            if kind != "cron":
-                return "grace_minutes only applies to cron schedules."
+        # The merged schedule/grace pair is validated by update_job after parsing below.
     if a["schedule"] is not None:
-        parsed_schedule = parse_schedule(a["schedule"])
+        parsed_schedule = parse_schedule(
+            a["schedule"], timezone=_pick(updates, job, "timezone"))
         updates["schedule"] = parsed_schedule
         updates["schedule_display"] = parsed_schedule.get("display", a["schedule"])
         if job.get("state") != "paused":

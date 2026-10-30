@@ -134,6 +134,9 @@ class _CronStorePaths:
 
 _cron_store_override: ContextVar[Optional[_CronStorePaths]] = ContextVar(
     "cron_store_override", default=None)
+_backstop_expected_slot: ContextVar[Optional[tuple[str, str]]] = ContextVar(
+    "cron_backstop_expected_slot", default=None)
+_external_skip_saved: ContextVar[bool] = ContextVar("cron_external_skip_saved", default=False)
 
 
 class _SelfRemovalDelivery:
@@ -784,7 +787,7 @@ def _interval_schedule(minutes: int) -> dict[str, Any]:
     return {"kind": "interval", "minutes": minutes, "display": f"every {minutes}m"}
 
 
-def parse_schedule(schedule: str) -> dict[str, Any]:
+def parse_schedule(schedule: str, *, timezone: Any = None) -> dict[str, Any]:
     """Parse a schedule string into ``{"kind": "once"|"interval"|"cron", ...}`` with ``run_at`` /
     ``minutes`` / ``expr``. "30m" and "every 30m" are recurring intervals; "every monday 9am" and
     "0 9 * * *" are cron; an ISO timestamp is once."""
@@ -817,15 +820,10 @@ def parse_schedule(schedule: str) -> dict[str, Any]:
     if 'T' in schedule or re.match(r'^\d{4}-\d{2}-\d{2}', schedule):
         try:
             dt = datetime.fromisoformat(schedule)
-            # Naive timestamps become aware in the CONFIGURED Hermes timezone (not server-local):
-            # the due-check compares against hermes_time.now().
-            # Make naive timestamps timezone-aware at parse time so the stored value doesn't depend on the
-            # system timezone matching at check time. UTC) while now() runs in Asia/Kolkata, the stored
-            # instant would land hours off from the user's wall-clock intent — far enough that one-shots
-            # never become due and recurring jobs fire at the wrong time. Using the configured zone makes
-            # "20:07" mean 20:07 on the same clock the scheduler checks against (#51021).
+            # A naive one-shot is wall time in its job zone, falling back to the profile zone.
+            # Explicit offsets already identify an instant and must remain untouched.
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=_hermes_now().tzinfo)
+                dt = dt.replace(tzinfo=jobs_time.zone_for_job(timezone) or _hermes_now().tzinfo)
             return {
                 "kind": "once",
                 "run_at": dt.isoformat(),
@@ -1905,7 +1903,7 @@ def create_job(
         raise ValueError("paused_reason must be a string.")
     if paused_reason is not None and not paused:
         raise ValueError("paused_reason requires paused=True.")
-    parsed_schedule = parse_schedule(schedule)
+    parsed_schedule = parse_schedule(schedule, timezone=timezone)
     # Normalize repeat: treat 0 or negative values as None (infinite). String forms
     # ('forever'/'once'/numeric) coerce via normalize_repeat_value — the shared chokepoint with update paths
     # (#66824/#64520/#7142/#71987/#95706).
@@ -2111,7 +2109,8 @@ def _rederive_repeat_for_schedule_change(
         return
     new_schedule = updates["schedule"]
     if isinstance(new_schedule, str):
-        new_schedule = parse_schedule(new_schedule)
+        new_schedule = parse_schedule(
+            new_schedule, timezone=updates.get("timezone", job.get("timezone")))
         updates["schedule"] = new_schedule
     old_kind = (job.get("schedule") or {}).get("kind")
     new_kind = new_schedule.get("kind")
@@ -2133,7 +2132,7 @@ def _apply_schedule_update(updated: dict[str, Any], updates: dict[str, Any], job
     """Parse a string schedule, refresh ``schedule_display`` and (unless paused) ``next_run_at``."""
     updated_schedule = updated["schedule"]
     if isinstance(updated_schedule, str):
-        updated_schedule = parse_schedule(updated_schedule)
+        updated_schedule = parse_schedule(updated_schedule, timezone=updated.get("timezone"))
         updated["schedule"] = updated_schedule
     updated["schedule_display"] = updates.get(
         "schedule_display", updated_schedule.get("display", updated.get("schedule_display")))
@@ -2364,7 +2363,7 @@ def rearm_oneshot(job_id: str, run_at: Any) -> Optional[dict[str, Any]]:
         return None
     if isinstance(run_at, datetime):
         run_at = run_at.isoformat()
-    parsed_schedule = parse_schedule(str(run_at))
+    parsed_schedule = parse_schedule(str(run_at), timezone=job_ref.get("timezone"))
     if parsed_schedule.get("kind") != "once":
         raise ValueError(_REARM_RECURRING_ERROR)
     next_run_at = compute_next_run(parsed_schedule, timezone=job_ref.get("timezone"))
@@ -2843,7 +2842,14 @@ def claim_job_for_fire(
         # (Trigger-now on a paused job) bypasses the gate and atomically resumes the job below.
         if not force and not is_job_runnable(job):
             return False
+        expected = _backstop_expected_slot.get()
+        if expected is not None and expected[0] == job_id and job.get("next_run_at") != expected[1]:
+            return False  # the unlocked backstop scan saw a slot since edited or claimed
         now = _hermes_now()
+        if expected is not None and expected[0] == job_id:
+            due = _parse_aware(expected[1])
+            if due is None or _instant_after(due, now):
+                return False
         if (_claim_is_live(job.get("fire_claim"), now, claim_ttl_seconds)
                 and not _fire_claim_owner_is_dead(job.get("fire_claim"))):
             return False  # someone holds a fresh claim
@@ -2854,6 +2860,7 @@ def claim_job_for_fire(
         # stamping it would make completed_occurrence() skip that slot when it arrives.
         manual_fire = force or manual or job.get("manual_run_at") == job.get("next_run_at")
         instant = None if manual_fire else scheduled_instant(job.get("next_run_at"))
+        claimed_slot = job.get("next_run_at") if instant is not None else None
         # A scheduled tick only ever fires when now >= next_run_at
         # (_evaluate_due_job returns False while the stored occurrence is still
         # in the future), so a claim arriving BEFORE the stored next occurrence
@@ -2877,6 +2884,10 @@ def claim_job_for_fire(
                     job["next_run_at"] = nxt
                     save_jobs(jobs)
             return False
+        if instant is not None and not manual_fire:
+            from cron.missed_runs import skip_missed_external_claim
+            if skip_missed_external_claim(jobs, job, now):
+                return False
         if force:
             _activate_job_record(job)
         # Per-acquisition token: a process may legitimately reclaim its own stale lease, and the
@@ -2892,6 +2903,9 @@ def claim_job_for_fire(
             if nxt:
                 job["next_run_at"] = nxt
         save_jobs(jobs)
+        if claimed_slot is not None:
+            from cron.missed_runs import book_external_catch_up
+            book_external_catch_up(job, claimed_slot, now)
         return dict(copy.deepcopy(job), _scheduled_instant=instant) if return_job else True
 
     return _under_fire_fence(job_id, lambda: _with_job(job_id, apply, False))

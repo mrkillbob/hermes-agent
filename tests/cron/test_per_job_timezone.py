@@ -126,6 +126,23 @@ class TestPinnedTimezoneIsDue:
 
         assert [j["id"] for j in jobs.get_due_jobs()] == [job_id]
 
+    def test_naive_oneshot_uses_job_zone_on_create_and_update(self, la_profile, cron_store):
+        run_at = "2026-10-31T09:00:00"
+        job = jobs.create_job(
+            prompt="p", schedule=run_at, model="fixture", deliver="local",
+            timezone="America/New_York")
+        assert jobs.get_job(job["id"])["next_run_at"] == "2026-10-31T09:00:00-04:00"
+        updated = jobs.update_job(job["id"], {
+            "schedule": "2026-11-02T09:00:00", "timezone": "America/New_York"})
+        assert updated["next_run_at"] == "2026-11-02T09:00:00-05:00"
+
+    def test_explicit_offset_keeps_its_instant(self, la_profile, cron_store):
+        job = jobs.create_job(
+            prompt="p", schedule="2026-10-31T09:00:00+02:00", model="fixture",
+            deliver="local", timezone="America/New_York")
+        assert datetime.fromisoformat(job["next_run_at"]).timestamp() == datetime.fromisoformat(
+            "2026-10-31T07:00:00+00:00").timestamp()
+
 
 class TestComputeNextRunUsesTheJobZone:
     def test_next_run_lands_on_the_job_wall_clock(self, la_profile):

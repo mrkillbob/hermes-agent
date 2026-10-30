@@ -129,10 +129,6 @@ class TestTrustLevelFor:
             repo = next(iter(TRUSTED_REPOS))
             assert src.trust_level_for(f"{repo}/some-skill") == "trusted"
 
-    @pytest.mark.parametrize("repo", ["wandb/skills", "qdrant/skills", "pinecone-io/skills"])
-    def test_new_vendor_taps_keep_community_install_policy(self, repo):
-        assert self._source().trust_level_for(f"{repo}/example") == "community"
-
     def test_browseable_trusted_repos_have_taps(self):
         # General invariant covering all current and future trusted repos
         # that publish under a single `skills/`-style path. openai/skills

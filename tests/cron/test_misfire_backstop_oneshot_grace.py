@@ -69,7 +69,8 @@ class TestMisfireBackstopOneShotGrace:
         stale = _job("stale-once", "once", now - timedelta(hours=2))
         provider, fired = _run_backstop(monkeypatch, [stale])
         assert fired == 0
-        assert provider.claimed == []
+        # The current stored occurrence is checked inside the provider claim fence.
+        assert provider.claimed == ["stale-once"]
 
     def test_overdue_recurring_job_still_fires(self, monkeypatch):
         now = _hermes_now()
