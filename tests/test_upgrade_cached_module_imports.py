@@ -49,3 +49,28 @@ for predicate in (retry.is_recurring, tick.is_recurring):
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_deferred_lsp_import_does_not_load_new_client_against_cached_old_owner():
+    root = Path(__file__).resolve().parents[1]
+    code = f"""
+import sys
+sys.path.insert(0, {str(root)!r})
+import hermes_cli.process_identity as old_owner
+del old_owner.own_process_groups
+del old_owner.release_process_group_once_empty
+
+# A new tool executor may load during a held N-1 worker's turn. Merely
+# forwarding deferred diagnostics must not import the native LSP client, whose
+# owned-child APIs are unavailable in that worker's cached old owner module.
+import agent.tool_executor as tools
+from agent.lsp import deferred
+assert callable(deferred.forward_to_agent)
+assert "agent.lsp.manager" not in sys.modules
+assert "agent.lsp.client" not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", code], cwd=root, text=True, capture_output=True, timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

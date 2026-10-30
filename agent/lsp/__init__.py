@@ -11,9 +11,10 @@ from __future__ import annotations
 import atexit
 import logging
 import threading
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from agent.lsp.manager import LSPService
+if TYPE_CHECKING:
+    from agent.lsp.manager import LSPService
 
 logger = logging.getLogger("agent.lsp")
 
@@ -24,6 +25,26 @@ _service: Optional[LSPService] = None
 _services_by_home: dict = {}
 _atexit_registered = False
 _service_lock = threading.Lock()
+
+
+def _service_class():
+    """Defer manager/client imports until LSP is used, not when tool results are forwarded.
+
+    During an in-place update an old worker keeps process_identity cached. The new LSP
+    client requires owner-death APIs absent from that old module, so importing it just
+    to forward a deferred note would abort an unrelated, already-admitted tool call.
+    """
+    service_class = globals().get("LSPService")
+    if service_class is None:
+        from agent.lsp.manager import LSPService as service_class
+        globals()["LSPService"] = service_class
+    return service_class
+
+
+def __getattr__(name: str):
+    if name == "LSPService":
+        return _service_class()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _active(svc: Optional[LSPService]) -> Optional[LSPService]:
@@ -53,13 +74,13 @@ def get_service() -> Optional[LSPService]:
         home_key = hermes_home_key()
         with _service_lock:
             if home_key not in _services_by_home:
-                _services_by_home[home_key] = LSPService.create_from_config()
+                _services_by_home[home_key] = _service_class().create_from_config()
                 _register_atexit_once()
             return _active(_services_by_home[home_key])
     if _service is None:
         with _service_lock:
             if _service is None:
-                _service = LSPService.create_from_config()
+                _service = _service_class().create_from_config()
                 _register_atexit_once()
     return _active(_service)
 
