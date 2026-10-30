@@ -465,7 +465,8 @@ class GatewayRuntimeAPI:
                 return await self.app(scope, receive, send)
         from gateway.drain_kanban import held
         allow_draining = not operator or held(self.runner)
-        admitted_in_wait = restart_wait_open(self.runner)
+        # The ticket policy is checked at socket admission, closing the discovery race.
+        admitted_in_wait = restart_wait_open(self.runner) and not grant.get('refuse_restart_wait')
         # A restart's after-turn wait still owns its turns: an interactive client attaches to answer
         # a parked approval/clarify (#139041); stop() closes this window.
         if ((descriptor['state'] != 'ready' or self.runner._draining) and not allow_draining

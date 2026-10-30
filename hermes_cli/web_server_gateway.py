@@ -527,6 +527,7 @@ def _spawn_hermes_action(
     )
     try:
         try:
+            # detached-spawn: ok — dashboard actions outlive the dashboard.
             proc = subprocess.Popen(cmd, **popen_kwargs, **detach)
         except OSError as exc:
             # Electron's parent job can forbid breakaway. Preserve hidden-console spawning,
