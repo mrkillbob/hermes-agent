@@ -23,9 +23,11 @@ import yaml
 
 LLAMACPP = frozenset({"llamacpp", "llama.cpp", "llama-cpp", "local"})
 OLLAMA = frozenset({"ollama", "ollama-launch"})
-# Metered or subscription-quota providers. Only ``:free`` models (Nous, OpenRouter) are not metered.
-PAID = frozenset({"nous", "openai-codex", "openai", "anthropic", "openrouter", "gemini", "xai", "bedrock", "vertex"})
-FREE_CLOUD = frozenset({"nvidia", "nim"})
+# Fail closed: any remote provider is metered unless it is listed here or the model is ``:free``.
+# A denylist of paid providers would silently pass every provider it forgot.
+FREE_CLOUD = frozenset({"nvidia"})  # NIM entitlement, no per-token charge
+# Endpoint decides the cost (custom base_url); not classifiable from provider name alone.
+UNCLASSIFIED = frozenset({"", "custom", "auto"})
 TOOL_HEAVY = frozenset({"computer_use", "browser", "delegation", "code_execution"})
 
 
@@ -66,11 +68,11 @@ def classify(provider: str, model: str) -> str:
         return "local-llamacpp"
     if p in OLLAMA:
         return "ollama"
-    if p in PAID and not str(model).endswith(":free"):
-        return "paid-cloud"
     if p in FREE_CLOUD or str(model).endswith(":free"):
         return "free-cloud"
-    return "other-cloud"
+    if p in UNCLASSIFIED:
+        return "other-cloud"
+    return "paid-cloud"
 
 
 def _route(entry: Any, slot: str) -> dict[str, str] | None:

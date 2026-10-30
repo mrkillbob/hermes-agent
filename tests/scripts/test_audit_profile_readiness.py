@@ -218,3 +218,10 @@ def test_model_name_alias_is_read_as_default(tmp_path):
     home, receipts = _home(tmp_path)
     _profile(home, "p", {"model": {"provider": "llamacpp", "name": "Gone-Q4"}})
     assert "LOCAL_MODEL_MISSING" in _kinds(audit.audit_home(home, receipts), "p")
+
+
+def test_unlisted_remote_providers_are_metered_unless_free():
+    assert audit.classify("deepseek", "deepseek-flash") == "paid-cloud"
+    assert audit.classify("minimax", "m") == "paid-cloud"
+    assert audit.classify("some-new-provider", "m:free") == "free-cloud"
+    assert audit.classify("custom", "m") == "other-cloud"
