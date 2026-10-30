@@ -91,6 +91,11 @@ def config_routes(cfg: dict[str, Any]) -> list[dict[str, str]]:
     for task, aux in (cfg.get("auxiliary") or {}).items():
         if r := _route(aux, f"aux:{task}"):
             routes.append(r)
+        # agent/auxiliary_client.py tries these in order when the task's own provider fails.
+        chain = aux.get("fallback_chain") if isinstance(aux, dict) else None
+        for i, entry in enumerate(chain if isinstance(chain, list) else []):
+            if r := _route(entry, f"aux:{task}:fallback{i}"):
+                routes.append(r)
     return routes
 
 

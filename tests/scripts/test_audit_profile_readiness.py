@@ -147,3 +147,19 @@ def test_split_gguf_counts_only_when_every_part_is_staged(tmp_path):
     (models / "Big-00002-of-00003.gguf").write_bytes(b"")
     assert audit.model_on_disk(models, "Big")
     assert not audit.model_on_disk(models, "Bi")
+
+
+def test_auxiliary_fallback_chain_entries_are_audited(tmp_path):
+    home, receipts = _home(tmp_path)
+    _profile(home, "p", {
+        "model": {"provider": "nvidia", "default": "m"},
+        "auxiliary": {"compression": {
+            "provider": "nvidia", "model": "m",
+            "fallback_chain": [
+                {"provider": "openai-codex", "model": "gpt-6-luna"},
+                {"provider": "ollama-launch", "model": "qwen3.5:4b"},
+                "not-a-route",
+            ],
+        }},
+    })
+    assert {"PAID_ROUTE", "OLLAMA_PIN"} <= _kinds(audit.audit_home(home, receipts), "p")
