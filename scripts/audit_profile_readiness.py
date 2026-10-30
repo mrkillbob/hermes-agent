@@ -80,6 +80,19 @@ def classify(provider: str, model: str, base_url: str = "") -> str:
     return "paid-cloud"
 
 
+def canonical_effort(value: Any) -> str:
+    """Mirror hermes_constants.parse_reasoning_effort: false/"disabled"/{enabled: false} all mean
+    "none"; unset (None/True/empty) is "". Receipts and routes are compared in this form."""
+    if value is None or value is True:
+        return ""
+    if isinstance(value, dict):
+        if value.get("enabled", True) is False:
+            return "none"
+        value = value.get("effort") or ""
+    text = str(value).strip().lower()
+    return "none" if text in {"none", "false", "disabled"} else text
+
+
 def _route(entry: Any, slot: str) -> dict[str, str] | None:
     if not isinstance(entry, dict):
         return None
@@ -91,7 +104,7 @@ def _route(entry: Any, slot: str) -> dict[str, str] | None:
         "slot": slot,
         "provider": str(provider or ""),
         "model": str(model or ""),
-        "effort": str(entry.get("reasoning_effort") or ""),
+        "effort": canonical_effort(entry.get("reasoning_effort")),
         "class": classify(str(provider or ""), str(model or ""), str(entry.get("base_url") or "")),
     }
 
@@ -113,7 +126,7 @@ def _normalized_model(cfg: dict[str, Any]) -> dict[str, Any] | None:
 def config_routes(cfg: dict[str, Any]) -> list[dict[str, str]]:
     routes = [r for r in [_route(_normalized_model(cfg), "primary")] if r]
     # Federation seeding writes the primary effort to agent.reasoning_effort, not into model.
-    agent_effort = str((cfg.get("agent") or {}).get("reasoning_effort") or "")
+    agent_effort = canonical_effort((cfg.get("agent") or {}).get("reasoning_effort"))
     if routes and not routes[0]["effort"]:
         routes[0]["effort"] = agent_effort
     # Mirrors hermes_cli/fallback_config.get_fallback_chain: both keys, list or single mapping, de-duplicated.
@@ -164,7 +177,7 @@ def load_receipts(receipt_dir: Path | None) -> set[tuple[str, str, str]]:
         except (OSError, ValueError):
             continue
         if isinstance(d, dict) and d.get("model") and d.get("provider") and "score" in d:
-            found.add((str(d["provider"]), str(d["model"]), str(d.get("reasoning_effort", ""))))
+            found.add((str(d["provider"]), str(d["model"]), canonical_effort(d.get("reasoning_effort"))))
     return found
 
 

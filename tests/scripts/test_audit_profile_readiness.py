@@ -232,3 +232,24 @@ def test_local_server_providers_and_loopback_endpoints_are_not_paid():
     assert audit.classify("vllm", "m") == "local-server"
     assert audit.classify("some-provider", "m", "http://127.0.0.1:8000/v1") == "local-server"
     assert audit.classify("some-provider", "m", "https://api.example.com/v1") == "paid-cloud"
+
+
+def test_reasoning_disablement_spellings_match_none_receipt(tmp_path):
+    assert {audit.canonical_effort(v) for v in (False, "false", "Disabled", "none", {"enabled": False})} == {"none"}
+    assert audit.canonical_effort(None) == audit.canonical_effort(True) == ""
+    assert audit.canonical_effort({"enabled": True, "effort": "High"}) == "high"
+    home, receipts = _home(tmp_path)
+    _profile(home, "route", {"model": {"provider": "llamacpp", "default": "Qwen3.5-4B-Q6_K", "reasoning_effort": False}})
+    _profile(home, "agent", {
+        "model": {"provider": "llamacpp", "default": "Qwen3.5-4B-Q6_K"},
+        "agent": {"reasoning_effort": False},
+    })
+    report = audit.audit_home(home, receipts)
+    assert "LOCAL_UNQUALIFIED" not in _kinds(report, "route") | _kinds(report, "agent")
+
+
+def test_receipt_effort_is_canonicalized(tmp_path):
+    home, receipts = _home(tmp_path)
+    (receipts / "q.json").write_text(json.dumps({**RECEIPT, "reasoning_effort": "disabled"}), encoding="utf-8")
+    _profile(home, "p", {"model": {"provider": "llamacpp", "default": "Qwen3.5-4B-Q6_K", "reasoning_effort": "none"}})
+    assert "LOCAL_UNQUALIFIED" not in _kinds(audit.audit_home(home, receipts), "p")
