@@ -5,7 +5,7 @@ filesystem/power-loss qualification and protection against directory/DB rollback
 remain deployment prerequisites, not guarantees inferred from these unit tests.
 """
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -104,18 +104,16 @@ class ClaimJournal:
     def _connection(self):
         if self._owner is None or not self._owner.in_transaction:
             raise ProtocolError("runner state is not exclusively owned")
-        connection = sqlite3.connect(self.path, timeout=2)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA synchronous=FULL")
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            yield connection
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        with closing(sqlite3.connect(self.path, timeout=2)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA synchronous=FULL")
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
 
     def _meta(self, connection):
         rows = connection.execute("SELECT value FROM journal_meta").fetchall()
