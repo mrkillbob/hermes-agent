@@ -21,7 +21,6 @@ from hermes_constants import get_process_hermes_home
 from tools.environments.base import BaseEnvironment
 from tools.environments.base_output import _pipe_stdin
 from hermes_cli._subprocess_compat import windows_hide_flags
-from hermes_cli.process_identity import own_process_groups, release_process_groups
 from tools.environments.local_env_policy import (
     _ALWAYS_STRIP_FOLDED, _ALWAYS_STRIP_KEYS, _HERMES_PROVIDER_ENV_BLOCKLIST, _HERMES_PROVIDER_ENV_FORCE_PREFIX,
     _is_hermes_internal_secret, _is_provider_env_blocklisted, _is_terminal_first_party_env,
@@ -35,6 +34,12 @@ from tools.environments.local_pythonpath import (
 _IS_WINDOWS = platform.system() == "Windows"
 
 logger = logging.getLogger(__name__)
+
+
+def _owned_group_support():
+    """Resolve both custody operations before a detached local command can spawn."""
+    from hermes_cli.process_identity import own_process_groups, release_process_groups
+    return own_process_groups, release_process_groups
 
 # The foreground terminal is the operator's trusted shell. Preserve the
 # operator's Git/GitHub configuration and auth there so ordinary authenticated
@@ -1215,6 +1220,11 @@ class LocalEnvironment(BaseEnvironment):
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
         self._recover_cwd()
+        if not _IS_WINDOWS:
+            # Resolve custody before spawning. A pre-update worker can retain the old
+            # process_identity module while this environment loads from new source.
+            # Missing ownership support must refuse the command, not launch it free.
+            own_process_groups, _ = _owned_group_support()
         # Not spawn_owned: an awaited command needs no spawn-ledger entry; own_process_groups below hands
         # its group to the owner-death supervisor and _wait_for_process releases it.
         proc = subprocess.Popen(
@@ -1250,6 +1260,7 @@ class LocalEnvironment(BaseEnvironment):
             return super()._wait_for_process(proc, *args, **kwargs)
         finally:
             if (owned_pgid := getattr(proc, "_hermes_owned_pgid", None)) is not None:
+                _, release_process_groups = _owned_group_support()
                 proc._hermes_owned_pgid = None
                 release_process_groups([owned_pgid])
 

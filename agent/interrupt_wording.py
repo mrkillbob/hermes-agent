@@ -12,6 +12,20 @@ USER_INTERRUPT_REASONS = frozenset({
 })
 
 
+def interrupt_issuer(agent) -> str | None:
+    """Slug of the system producer, or None for a human interrupt."""
+    reason = getattr(agent, "_tool_interrupt_reason", None)
+    if not reason or reason in USER_INTERRUPT_REASONS:
+        return None
+    return str(reason).strip().replace(" ", "_")
+
+
+def interrupted_during_api_call_reason(agent) -> str:
+    """Turn exit reason for an API call cut short by an interrupt."""
+    issuer = interrupt_issuer(agent)
+    return f"interrupted_during_api_call({issuer})" if issuer else "interrupted_during_api_call"
+
+
 def interrupt_skip_wording(agent) -> str:
     """Describe the recorded interrupt reason without assigning a system abort to the user."""
     reason = getattr(agent, "_tool_interrupt_reason", None)

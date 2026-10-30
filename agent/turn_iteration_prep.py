@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
 from agent.display import KawaiiSpinner
-from agent.interrupt_control import interrupt_issuer, interrupted_during_api_call_reason
+from agent.interrupt_wording import interrupt_issuer, interrupted_during_api_call_reason
 from agent.turn_context_compaction import _reanchor
 from agent.turn_truncation import boosted_output_cap
 

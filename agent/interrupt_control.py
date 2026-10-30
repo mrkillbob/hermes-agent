@@ -9,7 +9,10 @@ import threading
 from typing import Optional
 
 from agent.interrupt_compat import request_hard_interrupt
-from agent.interrupt_wording import USER_INTERRUPT_REASONS, interrupt_skip_wording
+from agent.interrupt_wording import (
+    USER_INTERRUPT_REASONS, interrupt_issuer, interrupt_skip_wording,
+    interrupted_during_api_call_reason,
+)
 from tools.interrupt import request_yield as _request_yield
 from tools.interrupt import set_interrupt as _set_interrupt
 
@@ -24,20 +27,6 @@ _REASON_NEW_MESSAGE = "user sent a new message"
 _REASON_USER_INTERRUPT = "user interrupt"
 # ``tool_reason`` the gateway's restart/shutdown stop passes (gateway.run._INTERRUPT_TOOL_REASON_GATEWAY_SHUTDOWN).
 _REASON_GATEWAY_SHUTDOWN = "gateway shutdown"
-
-
-def interrupt_issuer(agent) -> Optional[str]:
-    """Slug of the system producer behind the pending interrupt, or ``None`` for a human stop."""
-    reason = getattr(agent, "_tool_interrupt_reason", None)
-    if not reason or reason in USER_INTERRUPT_REASONS:
-        return None
-    return str(reason).strip().replace(" ", "_")
-
-
-def interrupted_during_api_call_reason(agent) -> str:
-    """Turn exit reason for an API call cut short by an interrupt (``turn_explainers`` matches the prefix)."""
-    issuer = interrupt_issuer(agent)
-    return f"interrupted_during_api_call({issuer})" if issuer else "interrupted_during_api_call"
 
 
 def _fence_cancel_before_commit(fence, *, when_in_flight: bool, failure_log: str) -> None:
