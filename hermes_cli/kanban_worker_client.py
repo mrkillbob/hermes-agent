@@ -135,7 +135,7 @@ async def run(params, board_db):
 
 def _restartable(exc):
     """False when *exc* is the owner's own final answer; True for a restarting owner or a lost transport."""
-    from hermes_cli.gateway_client import GatewayRPCError, GatewayUnavailableError
+    from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError, GatewayUnavailableError
     if isinstance(exc, GatewayClientError) and str(exc) == "Bounded Kanban requires the final owner result":
         return False
     if isinstance(exc, GatewayRPCError):
