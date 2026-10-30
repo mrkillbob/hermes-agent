@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -314,13 +315,26 @@ def run(column: str, root: Path) -> SimpleNamespace:
             o.job_id = job["id"]
             assert not model.cron_calls, "premise: the job ran before it was due"
 
-            # The fork waits for an admitted Kanban turn to finish before replacing the owner.
-            # Hold it across the update, then release it before observing the replacement;
-            # otherwise this fixture itself keeps the restart wait open for the full timeout.
-            try:
-                o.up = inst.update()
-            finally:
-                model.release.set()
+            # Hold the admitted turn while the update starts and the cron instant arrives, then
+            # release it *during* the restart wait. Releasing only after a synchronous update
+            # returns makes the fixture consume the whole after-turn budget and expire the
+            # one-shot's 120-second grace before the replacement gateway can tick.
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="handoff-update") as updater:
+                pending = updater.submit(inst.update)
+                try:
+                    marker = inst.hermes_home / ".hermes-update-in-progress"
+                    X.wait_for(lambda: marker.exists() or pending.done(), timeout=60,
+                               what="the update to acquire its live marker")
+                    assert marker.exists(), "premise: the update exited before entering its fenced phase"
+                    assert dt.datetime.now(dt.UTC) < due and not model.cron_calls, (
+                        "premise: the cron instant arrived before the update held the checkout")
+                    until_due = (due + dt.timedelta(seconds=5) - dt.datetime.now(dt.UTC)).total_seconds()
+                    if until_due > 0:
+                        time.sleep(until_due)
+                    assert not pending.done(), "premise: the update finished before the cron instant"
+                finally:
+                    model.release.set()
+                o.up = pending.result()
             o.sha_after = inst.sha()
 
             o.ident = X.settle_gateway(inst, o.old_pid)
