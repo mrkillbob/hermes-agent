@@ -163,3 +163,29 @@ def test_auxiliary_fallback_chain_entries_are_audited(tmp_path):
         }},
     })
     assert {"PAID_ROUTE", "OLLAMA_PIN"} <= _kinds(audit.audit_home(home, receipts), "p")
+
+
+def test_legacy_fallback_model_and_single_mapping_are_audited(tmp_path):
+    home, receipts = _home(tmp_path)
+    _profile(home, "legacy", {
+        "model": {"provider": "nvidia", "default": "m"},
+        "fallback_model": {"provider": "openai-codex", "model": "gpt-6-luna"},
+    })
+    _profile(home, "mapping", {
+        "model": {"provider": "nvidia", "default": "m"},
+        "fallback_providers": {"provider": "ollama-launch", "model": "qwen3.5:4b"},
+    })
+    report = audit.audit_home(home, receipts)
+    assert "PAID_ROUTE" in _kinds(report, "legacy")
+    assert "OLLAMA_PIN" in _kinds(report, "mapping")
+
+
+def test_duplicate_fallback_across_keys_is_reported_once(tmp_path):
+    home, receipts = _home(tmp_path)
+    dup = {"provider": "ollama-launch", "model": "qwen3.5:4b"}
+    _profile(home, "p", {
+        "model": {"provider": "nvidia", "default": "m"},
+        "fallback_providers": [dup], "fallback_model": dup,
+    })
+    row = next(r for r in audit.audit_home(home, receipts)["rows"] if r["profile"] == "p")
+    assert sum(f.startswith("OLLAMA_PIN") for f in row["findings"]) == 1

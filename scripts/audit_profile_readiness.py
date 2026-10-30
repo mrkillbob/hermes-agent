@@ -82,9 +82,17 @@ def config_routes(cfg: dict[str, Any]) -> list[dict[str, str]]:
     agent_effort = str((cfg.get("agent") or {}).get("reasoning_effort") or "")
     if routes and not routes[0]["effort"]:
         routes[0]["effort"] = agent_effort
-    for i, fb in enumerate(cfg.get("fallback_providers") or []):
-        if r := _route(fb, f"fallback{i}"):
-            routes.append(r)
+    # Mirrors hermes_cli/fallback_config.get_fallback_chain: both keys, list or single mapping, de-duplicated.
+    seen: set[tuple[str, str, str]] = set()
+    for key in ("fallback_providers", "fallback_model"):
+        raw = cfg.get(key)
+        for fb in raw if isinstance(raw, list) else [raw]:
+            identity = (str(fb.get("provider")), str(fb.get("model")), str(fb.get("base_url"))) if isinstance(fb, dict) else None
+            if identity in seen:
+                continue
+            if r := _route(fb, f"fallback{len(seen)}"):
+                seen.add(identity)
+                routes.append(r)
     comp = (cfg.get("compression") or {}).get("model")
     if r := _route(comp, "compression"):
         routes.append(r)
