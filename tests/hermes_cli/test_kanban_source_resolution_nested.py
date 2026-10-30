@@ -144,17 +144,18 @@ def test_nested_opt_in_preserves_all_refusal_guards(case, guard):
                        failure_class='provider_egress_blocked' if guard == 'provider' else None)
         conn.execute('INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,?,?,3)',
                      (TASK, kind, json.dumps(payload)))
-    elif guard == 'claim':
-        conn.execute("UPDATE tasks SET claim_lock='synthetic-claim' WHERE id=?", (TASK,))
-    elif guard == 'dependency':
-        conn.execute("INSERT INTO tasks(id,title,status,created_at) VALUES('t_abcdef02','Dependency','blocked',1)")
-        conn.execute("INSERT INTO task_links(parent_id,child_id) VALUES('t_abcdef02',?)", (TASK,))
-    elif guard == 'unfinished':
-        conn.execute('UPDATE task_runs SET ended_at=NULL WHERE task_id=?', (TASK,))
-    elif guard == 'unknown_run':
-        conn.execute("UPDATE task_runs SET status='unknown' WHERE task_id=?", (TASK,))
-    elif guard == 'historical_heartbeat':
-        conn.execute('UPDATE tasks SET last_heartbeat_at=1 WHERE id=?', (TASK,))
+    mutations = {
+        'claim': [("UPDATE tasks SET claim_lock='synthetic-claim' WHERE id=?", (TASK,))],
+        'dependency': [
+            ("INSERT INTO tasks(id,title,status,created_at) VALUES('t_abcdef02','Dependency','blocked',1)", ()),
+            ("INSERT INTO task_links(parent_id,child_id) VALUES('t_abcdef02',?)", (TASK,)),
+        ],
+        'unfinished': [('UPDATE task_runs SET ended_at=NULL WHERE task_id=?', (TASK,))],
+        'unknown_run': [("UPDATE task_runs SET status='unknown' WHERE task_id=?", (TASK,))],
+        'historical_heartbeat': [('UPDATE tasks SET last_heartbeat_at=1 WHERE id=?', (TASK,))],
+    }
+    for statement, parameters in mutations.get(guard, ()):
+        conn.execute(statement, parameters)
     conn.commit()
     if guard != 'stale_revision':
         revision = task_revision(BOARD, TASK, rows(conn))
