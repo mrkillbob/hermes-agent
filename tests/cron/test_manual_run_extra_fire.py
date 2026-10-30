@@ -5,6 +5,7 @@ claim_dispatch -> mark_job_run), the same calls the cronjob tool, the dashboard 
 ticker make around the agent run.
 """
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -151,6 +152,37 @@ def test_run_at_or_after_the_due_slot_is_the_scheduled_fire(clock):
 
     done = get_job(job["id"])
     assert (done["state"], done["repeat"]["completed"]) == ("completed", 1)
+
+
+def test_second_dst_fold_manual_run_consumes_first_fold_oneshot(clock, monkeypatch):
+    """01:15 EST is after 01:30 EDT despite its smaller wall-clock minute."""
+    import hermes_time
+
+    monkeypatch.setenv("HERMES_TIMEZONE", "America/New_York")
+    hermes_time.reset_cache()
+    try:
+        job = create_job("remind me", "2026-11-01T01:30:00-04:00", name="reminder")
+        clock["now"] = datetime(2026, 11, 1, 1, 15, tzinfo=ZoneInfo("America/New_York"), fold=1)
+        _fire(job["id"], manual=True)
+        done = get_job(job["id"])
+        assert (done["state"], done["repeat"]["completed"]) == ("completed", 1)
+    finally:
+        hermes_time.reset_cache()
+
+
+def test_first_dst_fold_preserves_second_fold_future_slot(clock, monkeypatch):
+    from cron.extra_fire import pending_slot
+    import hermes_time
+
+    monkeypatch.setenv("HERMES_TIMEZONE", "America/New_York")
+    hermes_time.reset_cache()
+    try:
+        now = datetime(2026, 11, 1, 1, 45, tzinfo=ZoneInfo("America/New_York"), fold=0)
+        clock["now"] = now
+        future = "2026-11-01T01:15:00-05:00"
+        assert pending_slot({"next_run_at": future}, now, manual_fire=True) == future
+    finally:
+        hermes_time.reset_cache()
 
 
 def test_trigger_landing_during_a_manual_run_survives_its_completion(clock):

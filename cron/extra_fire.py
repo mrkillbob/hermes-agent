@@ -29,10 +29,10 @@ def restore_target(job: dict[str, Any]) -> Optional[str]:
 
 
 def _future_slot(value: Any, now: datetime) -> Optional[str]:
-    from cron.jobs import _parse_aware
+    from cron.jobs import _instant_after, _parse_aware
 
     parsed = _parse_aware(value) if isinstance(value, str) else None
-    return value if parsed is not None and parsed > now else None
+    return value if parsed is not None and _instant_after(parsed, now) else None
 
 
 def pending_slot(job: dict[str, Any], now: datetime, manual_fire: bool) -> Optional[str]:
