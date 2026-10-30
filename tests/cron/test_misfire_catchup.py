@@ -157,6 +157,9 @@ class TestFireOverdueJobs:
         job = create_job(prompt="p", schedule="every 1h", catch_up=False)
         _park_in_past(job["id"], minutes=90)
         first = get_job(job["id"])["next_run_at"]
+        stored_jobs = load_jobs()
+        stored_jobs[0]["pending_slot"] = {"scheduled_at": first, "at": first, "by": "dead-owner"}
+        save_jobs(stored_jobs)
         provider = RecordingProvider()
         assert fire_overdue_jobs(provider) == 0
         assert provider.fired == []

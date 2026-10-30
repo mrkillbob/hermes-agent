@@ -506,7 +506,7 @@ def fire_overdue_jobs(
         # A stale load here must never decide whether a concurrent edit is eligible to fire.
         logger.warning(
             "Misfire catch-up: job %s (%s) was due %s (%.0f min overdue) and "
-            "no external fire arrived — firing locally.",
+            "no external fire arrived — checking the stored catch-up policy.",
             job_id,
             job.get("name") or "unnamed",
             next_run_at,
