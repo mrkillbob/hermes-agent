@@ -64,14 +64,17 @@ def test_standard_user_harness_token_is_standard(standard_user: Journey) -> None
 
 
 def test_standard_user_old_gateway_held_lock_before_update(standard_user: Journey) -> None:
+    standard_user.require_steps("install", "install_ok")
     _assert_old_gateway_held_lock(standard_user)
 
 
 def test_standard_user_update_replaces_old_gateway(standard_user: Journey) -> None:
+    standard_user.require_steps("install", "install_ok")
     _assert_update_replaced_gateway(standard_user)
 
 
 def test_standard_user_status_and_turn_after_update(standard_user: Journey) -> None:
+    standard_user.require_steps("install", "install_ok")
     _assert_status_sees(standard_user, "status_user", "new_state", "standard user")
     _assert_turn(standard_user, "user_turn", "standard user")
     m = standard_user.machine
