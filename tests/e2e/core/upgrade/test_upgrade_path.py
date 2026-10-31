@@ -77,6 +77,7 @@ pytestmark = [
 TRACEBACK = "Traceback (most recent call last)"
 UPDATE_TIMEOUT = 1500  # seconds; a cold dependency sync on a loaded CI box is minutes
 CLI_TIMEOUT = 600
+SEEDED_CRON_PROMPT = "summarize the day"
 
 
 def _git(*args: str, cwd: Path, check: bool = True) -> str:
@@ -475,6 +476,46 @@ def db_fingerprint(db: Path) -> dict:
     }
 
 
+
+def _sessions_containing(db: Path, text: str) -> set[str]:
+    """Find sessions containing a fixture prompt without treating it as a SQL pattern."""
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        return {session_id for session_id, content in con.execute(
+            "SELECT session_id, content FROM messages") if text in str(content)}
+    finally:
+        con.close()
+
+
+def _assert_post_update_session(db: Path, before: set[str], after: set[str], marker: str) -> None:
+    """Require the requested turn while allowing the seeded nightly cron to run once."""
+    added = after - before
+    requested = _sessions_containing(db, marker) & added
+    scheduled = _sessions_containing(db, SEEDED_CRON_PROMPT) & added
+    assert len(requested) == 1, "post-update turn not persisted in a distinct session"
+    assert len(scheduled) <= 1, "seeded nightly cron created multiple sessions"
+    assert added == requested | scheduled, f"unexpected sessions after update: {added - requested - scheduled}"
+
+
+def test_post_update_session_oracle_attributes_a_due_cron(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    marker = "post-update turn unique-fixture-marker"
+    with contextlib.closing(sqlite3.connect(db)) as con:
+        con.execute("CREATE TABLE messages (session_id TEXT, content TEXT)")
+        con.executemany("INSERT INTO messages VALUES (?, ?)", [
+            ("old", "pre-update turn"),
+            ("requested", marker),
+            ("nightly", SEEDED_CRON_PROMPT),
+        ])
+        con.commit()
+
+    _assert_post_update_session(db, {"old"}, {"old", "requested", "nightly"}, marker)
+    with pytest.raises(AssertionError, match="post-update turn not persisted"):
+        _assert_post_update_session(db, {"old"}, {"old", "nightly"}, marker)
+    with pytest.raises(AssertionError, match="unexpected sessions"):
+        _assert_post_update_session(db, {"old"}, {"old", "requested", "nightly", "unknown"}, marker)
+
+
 def _profile_homes(leg: Leg) -> dict[str, Path]:
     return {"default": leg.hermes_home, "work": leg.hermes_home / "profiles" / "work"}
 
@@ -590,7 +631,8 @@ def assert_healthy_at_head(leg: Leg, provider: FakeLLMServer, final: subprocess.
     assert len(new) == 1, "one-shot turn did not reach the provider once"
     fp = db_fingerprint(leg.hermes_home / "state.db")
     assert fp["integrity"] == [("ok",)]
-    assert len(fp["sessions"]) == len(before["default"]["db"]["sessions"]) + 1, "post-update turn not persisted"
+    _assert_post_update_session(
+        leg.hermes_home / "state.db", before["default"]["db"]["sessions"], fp["sessions"], marker)
     # HEAD's first real use of the DB (its schema migrations run on open) keeps every old row intact.
     old = before["default"]["db"]["messages"]
     assert {k: fp["messages"].get(k) for k in old} == old, "pre-update messages lost/changed by HEAD's first use"
@@ -630,7 +672,7 @@ def template_home(tmp_path_factory, provider) -> Path:
     (work / ".env").write_text("OPENAI_API_KEY=sk-fake-e2e-work\n", encoding="utf-8")
     cp = seed.run("-p", "work", "-z", "work profile session before the upgrade")
     assert cp.returncode == 0, H.describe(cp)
-    cp = seed.run("cron", "create", "--name", "nightly", "0 3 * * *", "summarize the day")
+    cp = seed.run("cron", "create", "--name", "nightly", "0 3 * * *", SEEDED_CRON_PROMPT)
     assert cp.returncode == 0, H.describe(cp)
     # Configs were written by hand AFTER the N-1 CLI touched them; re-pin them to the user's bytes.
     (seed.hermes_home / "config.yaml").write_text(cfg, encoding="utf-8")

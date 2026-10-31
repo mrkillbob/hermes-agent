@@ -84,6 +84,17 @@ def _start_time(pid: int) -> int | None:
     return None if fields[0] == "Z" else int(fields[19])
 
 
+def _process_identity(pid: int) -> str:
+    """Failure-only /proc snapshot; the supervisor argument is a PGID, not an owner PID."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        ppid, pgid, sid, started = (int(fields[i]) for i in (1, 2, 3, 19))
+    except (OSError, IndexError, ValueError):
+        return f"pid={pid} identity=unavailable cmd={cmdline(pid)!r}"
+    return (f"pid={pid} start={started} ppid={ppid} parent_start={_start_time(ppid)} "
+            f"pgid={pgid} sid={sid} cmd={cmdline(pid)!r} parent_cmd={cmdline(ppid)!r}")
+
+
 def session_members(sid: int) -> list[int]:
     out = []
     for entry in os.listdir("/proc"):
@@ -295,15 +306,26 @@ class PtyHermes:
         tears it down with the rest of this harness's tree."""
         from gateway.status import looks_like_gateway_command_line
 
-        def alive() -> list[int]:
+        def tracked_live() -> set[int]:
             pids = set(session_members(self.sid))
             # Same pid AND same start time: a recycled pid is not our leftover.
             pids |= {pid for pid, started in self.seen_members if _start_time(pid) == started}
-            return sorted(pid for pid in pids if not looks_like_gateway_command_line(cmdline(pid)))
+            return pids
+
+        def alive() -> list[int]:
+            return sorted(pid for pid in tracked_live()
+                          if not looks_like_gateway_command_line(cmdline(pid)))
+
         try:
             poll(lambda: not alive(), timeout=timeout, what="the PTY session to empty")
         except AssertionError:
-            return [f"{p}: {cmdline(p)}" for p in alive()]
+            # Keep the same failure condition. Show positively identified gateway candidates
+            # and process/parent birth identities before deciding whether any supervisor is exempt.
+            gateways = sorted(pid for pid in tracked_live()
+                              if looks_like_gateway_command_line(cmdline(pid)))
+            gateway_details = [_process_identity(pid) for pid in gateways]
+            return [f"{_process_identity(pid)}; exempt_gateway_candidates={gateway_details}"
+                    for pid in alive()]
         return []
 
     def close(self) -> None:
