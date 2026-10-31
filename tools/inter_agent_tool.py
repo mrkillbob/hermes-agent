@@ -277,7 +277,7 @@ def _ensure_broker() -> None:
             process = subprocess.Popen(
                 argv,
                 **popen_kwargs,
-                **windows_detach_popen_kwargs(),
+                **windows_detach_popen_kwargs(),  # detached-spawn: ok — shared broker outlives this caller and is reused.
             )
         except OSError:
             if os.name != "nt":

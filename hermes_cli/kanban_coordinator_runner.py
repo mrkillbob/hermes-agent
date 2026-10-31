@@ -193,7 +193,8 @@ def _execute(executor, delivery, plan, seconds):
         started = time.monotonic()
         process = subprocess.Popen([sys.executable, '-I', str(FIXTURE_PROGRAM), plan.behavior],
             stdin=prompt, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=root,
-            env={'HOME': str(root), 'PATH': str(Path(sys.executable).parent), 'LANG': 'C.UTF-8'}, start_new_session=True)
+            env={'HOME': str(root), 'PATH': str(Path(sys.executable).parent), 'LANG': 'C.UTF-8'},
+            start_new_session=True)  # detached-spawn: ok — inert fixture is bounded and group-killed.
         birth = None
         reason, counts, settled = 'receiver_interrupted', {'stdout': 0, 'stderr': 0}, False
         try:

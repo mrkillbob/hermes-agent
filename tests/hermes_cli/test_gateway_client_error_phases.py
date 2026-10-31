@@ -45,12 +45,15 @@ async def test_dial_failures_remain_sanitized_without_local_fallback(monkeypatch
 @pytest.mark.parametrize("mode", ["rpc_timeout", "caller_io"])
 async def test_connected_body_errors_keep_their_phase_and_close_the_viewer(monkeypatch, mode):
     from websockets.asyncio import client as transport
+    from websockets.protocol import State
     from hermes_cli.gateway_client import connect_gateway
 
     _remote_only(monkeypatch)
     calls, closed = [], []
 
     class Socket:
+        state = State.OPEN
+
         async def send(self, value):
             calls.append(value)
 

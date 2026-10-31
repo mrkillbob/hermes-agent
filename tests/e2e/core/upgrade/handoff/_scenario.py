@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -314,11 +315,28 @@ def run(column: str, root: Path) -> SimpleNamespace:
             o.job_id = job["id"]
             assert not model.cron_calls, "premise: the job ran before it was due"
 
-            o.up = inst.update()
+            # Hold the admitted turn while the update starts and the cron instant arrives, then
+            # release it *during* the restart wait. Releasing only after a synchronous update
+            # returns makes the fixture consume the whole after-turn budget and expire the
+            # one-shot's 120-second grace before the replacement gateway can tick.
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="handoff-update") as updater:
+                pending = updater.submit(inst.update)
+                try:
+                    marker = inst.hermes_home / ".hermes-update-in-progress"
+                    X.wait_for(lambda: marker.exists() or pending.done(), timeout=60,
+                               what="the update to acquire its live marker")
+                    assert marker.exists(), "premise: the update exited before entering its fenced phase"
+                    assert dt.datetime.now(dt.UTC) < due and not model.cron_calls, (
+                        "premise: the cron instant arrived before the update held the checkout")
+                    X.wait_for(lambda: dt.datetime.now(dt.UTC) > due + dt.timedelta(seconds=5),
+                               timeout=90, what="the cron instant during the update")
+                    assert not pending.done(), "premise: the update finished before the cron instant"
+                finally:
+                    model.release.set()
+                o.up = pending.result()
             o.sha_after = inst.sha()
 
             o.ident = X.settle_gateway(inst, o.old_pid)
-            model.release.set()
             o.chat_after = X.chat(inst.port, "hello after the update") if o.ident else (0, "")
             o.card2 = create_card(inst, "created after the update")
 

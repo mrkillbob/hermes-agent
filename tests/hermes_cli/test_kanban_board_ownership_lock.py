@@ -113,10 +113,10 @@ def test_board_removal_waits_for_owned_creation_and_preserves_lock_inode(monkeyp
     errors = []
     original_flock = active_sessions._flock
 
-    def observe_attempt(fh, *, lock):
+    def observe_attempt(fh, *, lock, timeout=None):
         if lock:
             attempted.set()
-        return original_flock(fh, lock=lock)
+        return original_flock(fh, lock=lock, timeout=timeout)
 
     def remove():
         try:

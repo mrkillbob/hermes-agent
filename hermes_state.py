@@ -84,6 +84,7 @@ from hermes_state_titles import SessionTitlesMixin
 from hermes_state_worktrees import (
     ConversationWorktreeConflict, ConversationWorktreeRecord, SessionWorktreesMixin,
 )
+from hermes_state_prompt_refresh import SessionPromptRefreshMixin
 from hermes_state_usage import SessionUsageMixin
 from hermes_state_maintenance import SessionMaintenanceMixin
 from hermes_state_gateway import SessionGatewayMixin
@@ -480,6 +481,7 @@ class SessionDB(
     SessionGatewayMixin, SessionMaintenanceMixin, SessionUsageMixin, SessionTitlesMixin,
     SessionMessagesMixin, SessionPruneRewriteMixin, SessionApiContentMixin, SessionCoverageMixin, SessionRewindMixin, SessionProfileRepairMixin,
     SessionWorktreesMixin,
+    SessionPromptRefreshMixin,
 ):
     """SQLite-backed session storage with FTS5 search; many reader threads, one writer (WAL)."""
 

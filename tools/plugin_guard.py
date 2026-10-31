@@ -11,6 +11,8 @@ needs confirmation, ``dangerous`` is blocked and ``--force`` does NOT override.
 from __future__ import annotations
 
 import ast
+import os
+import subprocess
 from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
@@ -27,7 +29,7 @@ from tools.skills_guard import (
     Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
     scan_file)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-v11"
+PLUGIN_SCANNER_VERSION = "plugin-guard-v12"
 
 # Never scanned: VCS internals, caches, vendored envs.
 EXCLUDED_DIRS = {
@@ -106,6 +108,11 @@ MAIN_GUARD_DEMOTIONS = {"hardcoded_secret": "high"}
 MAX_PLUGIN_FILE_COUNT = 400
 MAX_PLUGIN_TOTAL_SIZE_KB = 10 * 1024   # 10MB of scannable tree
 MAX_PLUGIN_SINGLE_FILE_KB = 1024       # 1MB single file
+
+# Committed bytecode (catalog rule 17): an unchecked-hash or sourceless ``.pyc`` is imported in
+# place of the ``.py`` this scanner read, so it is the same reviewable-but-unscannable tier as a
+# bundled binary (``SEVERITY_REMAP["binary_file"]``).
+_BYTECODE_SUFFIXES = (".pyc", ".pyo")
 
 
 def _walk(plugin_dir: Path) -> Iterator[tuple[Path, str]]:
@@ -307,9 +314,31 @@ def _dangerous_findings_summary(findings: list[Finding]) -> str:
     return f"{len(critical)} critical of {len(findings)} findings{names}"
 
 
+def _tracked_bytecode(plugin_dir: Path) -> set[str]:
+    """``.pyc``/``.pyo`` the checkout tracks. ``hermes plugins validate`` imports the plugin before
+    it scans, so an untracked ``__pycache__`` that run wrote is not shipped content; only the index
+    says what the pinned commit carries. Not a checkout (or no git) → empty."""
+    try:
+        out = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "-C", str(plugin_dir), "ls-files", "-z", "--", "*.pyc", "*.pyo"],
+            capture_output=True, check=True, timeout=60, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {os.fsdecode(p) for p in out.split(b"\0") if p}
+
+
+def _bytecode_findings(plugin_dir: Path) -> list[Finding]:
+    """Tracked bytecode anywhere, plus bytecode outside ``__pycache__`` (CPython 3 never writes it
+    there, so it was shipped even when the tree is not a checkout)."""
+    loose = {rel for f, rel in _walk(plugin_dir) if rel.endswith(_BYTECODE_SUFFIXES) and f.is_file()}
+    return [_finding("bytecode_file", SEVERITY_REMAP["binary_file"], "structural", rel, "committed bytecode",
+                     "committed Python bytecode runs in place of the scanned source (catalog rule 17)")
+            for rel in sorted(loose | _tracked_bytecode(plugin_dir))]
+
+
 def _check_plugin_structure(plugin_dir: Path) -> list[Finding]:
     """Structural checks sized for plugin repositories."""
-    findings: list[Finding] = []
+    findings: list[Finding] = _bytecode_findings(plugin_dir)
     file_count = 0
     total_size = 0
     resolved_root = plugin_dir.resolve()

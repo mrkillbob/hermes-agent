@@ -33,7 +33,8 @@ from agent.display import (
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
 from agent.pruned_tool_arguments import _context_pruned_argument_paths
 from agent.tool_executor_arguments import _parse_tool_arguments
-from agent.interrupt_control import _REASON_USER_INTERRUPT, interrupt_skip_wording
+from agent.interrupt_control import _REASON_USER_INTERRUPT
+from agent.interrupt_wording import interrupt_skip_wording
 from agent.message_sanitization import coalesce_tool_call_id
 from agent.onboarding import observe_tool_result as observe_onboarding_result
 from agent import plugin_live_notes
@@ -45,8 +46,10 @@ from agent.inline_tool_executors import (
     emit_terminal_post_tool_call,
     tool_hook_ids,
 )
-from agent.message_metadata import stamp_data_use
-from agent.session_persistence import sync_rewritten_tool_rows
+from agent.tool_result_persistence import (
+    _stamp_data_use_if_required,
+    _sync_rewritten_tool_rows_if_needed,
+)
 from agent.tool_dispatch_helpers import (
     _NEVER_PARALLEL_TOOLS,
     _is_destructive_command,
@@ -921,7 +924,7 @@ def _run_sequential_tool_execution_middleware(
     generic deadline would report ``tool_timeout`` while the prompt is still live. They
     are ``_NEVER_PARALLEL_TOOLS`` and run inline below, before any deadline is armed, so
     they need no ``_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS`` entry."""
-    from agent.tool_dispatch_helpers import _extend_tool_timeout
+    from agent.tool_deadline import _extend_tool_timeout
 
     timeout_s = None if function_name in _SEQUENTIAL_DEADLINE_EXEMPT_TOOLS else _resolve_sequential_tool_timeout()
     timeout_s = _extend_tool_timeout(function_name, timeout_s)
@@ -1186,7 +1189,7 @@ def _commit_tool_result(
                 tool_message["display_metadata"] = metadata
         except Exception as callback_error:
             logging.debug("Tool result metadata callback error: %s", callback_error)
-    stamp_data_use(tool_message, sorted(data_use))
+    _stamp_data_use_if_required(tool_message, data_use)
     messages.append(tool_message)
     committed = _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}")
     from agent.native_metadata_capture import commit_native_metadata_presentation
@@ -1247,7 +1250,7 @@ def _finalize_tool_batch(agent, messages: list, effective_task_id: str, num_tool
     contents_before = [message.get("content") for message in batch]
     enforce_turn_budget(batch, env=get_active_env(effective_task_id), config=budget)
     plugin_live_notes.keep_after_turn_budget(agent, batch)
-    sync_rewritten_tool_rows(agent, batch, contents_before)
+    _sync_rewritten_tool_rows_if_needed(agent, batch, contents_before)
     record_tool_batch(agent, batch, contents_before)
     agent._apply_pending_steer_to_tool_results(messages, num_tools)
 

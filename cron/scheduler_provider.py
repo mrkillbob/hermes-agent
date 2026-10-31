@@ -350,7 +350,7 @@ class CronScheduler(ABC):
         """Durably claim one fire + create its audit attempt. Transports call this synchronously
         before acknowledging, then pass the exact snapshot to ``fire_claimed`` off-thread."""
         from cron.executions import create_execution, finish_execution, set_execution_occurrence
-        from cron.jobs import claim_job_for_fire
+        from cron.jobs import _backstop_expected_slot, _external_skip_saved, claim_job_for_fire
 
         execution = create_execution(job_id, source=self.name)
         claim_kwargs = {"return_job": True}
@@ -358,21 +358,39 @@ class CronScheduler(ABC):
             claim_kwargs["force"] = True
         if manual:
             claim_kwargs["manual"] = True
+        if not (force or manual):
+            # Provider callbacks, including Chronos webhooks and housekeeping, use the same
+            # fenced missed-slot policy. The built-in worker queue claims directly after
+            # admission and is deliberately exempt.
+            claim_kwargs["provider_admission"] = True
+        skip_token = _external_skip_saved.set(False)
         try:
-            claimed_job = claim_job_for_fire(job_id, **claim_kwargs)
-            if isinstance(claimed_job, dict):
-                set_execution_occurrence(execution["id"], claimed_job.get("_scheduled_instant"))
-        except BaseException as exc:
-            finish_execution(
-                execution["id"], success=False,
-                error=f"Fire claim failed before dispatch: {type(exc).__name__}: {exc}",
-            )
-            raise
-        if not isinstance(claimed_job, dict):
-            finish_execution(execution["id"], success=False, error="Fire claim was not acquired")
-            return None
-        claimed_job["execution_id"] = execution["id"]
-        return claimed_job
+            try:
+                claimed_job = claim_job_for_fire(job_id, **claim_kwargs)
+                if isinstance(claimed_job, dict):
+                    set_execution_occurrence(execution["id"], claimed_job.get("_scheduled_instant"))
+            except BaseException as exc:
+                finish_execution(
+                    execution["id"], success=False,
+                    error=f"Fire claim failed before dispatch: {type(exc).__name__}: {exc}",
+                )
+                raise
+            if not isinstance(claimed_job, dict):
+                finish_execution(execution["id"], success=False, error="Fire claim was not acquired")
+                return None
+            claimed_job["execution_id"] = execution["id"]
+            return claimed_job
+        finally:
+            skipped = _external_skip_saved.get()
+            _external_skip_saved.reset(skip_token)
+            if skipped:
+                expected_token = _backstop_expected_slot.set(None)
+                try:
+                    self.on_jobs_changed()  # re-arm the external trigger for the next slot
+                except Exception:
+                    logger.warning("Cron provider could not re-arm a skipped job", exc_info=True)
+                finally:
+                    _backstop_expected_slot.reset(expected_token)
 
     def fire_claimed(
         self, claimed_job: dict, *, adapters: Any = None, loop: Any = None,
@@ -467,7 +485,7 @@ def fire_overdue_jobs(
         return 0
 
     from cron.jobs import (
-        ONESHOT_GRACE_SECONDS, _elapsed_seconds, _ensure_aware, _hermes_now,
+        _backstop_expected_slot, _elapsed_seconds, _ensure_aware, _hermes_now,
         is_job_runnable, load_jobs,
     )
 
@@ -489,26 +507,11 @@ def fire_overdue_jobs(
         if overdue_seconds < grace_minutes * 60:
             continue
         job_id = str(job.get("id") or "")
-        # One-shots past ONESHOT_GRACE_SECONDS "will never fire"; don't resurrect them hours late.
-        # One-shot jobs share the module-wide policy: more than ONESHOT_GRACE_SECONDS past their run time
-        # means "will never fire" (create/update/resume/recovery and, since #89571, the due-scan all enforce
-        # it). The misfire backstop must not resurrect them hours late after downtime — that's #93526.
-        schedule = job.get("schedule") or {}
-        if str(schedule.get("kind") or "") == "once" and overdue_seconds > ONESHOT_GRACE_SECONDS:
-            logger.warning(
-                "Misfire catch-up: one-shot job %s (%s) was due %s "
-                "(%.0f min overdue) — outside the %ss one-shot grace "
-                "window, not firing.",
-                job_id,
-                job.get("name") or "unnamed",
-                next_run_at,
-                overdue_seconds / 60,
-                ONESHOT_GRACE_SECONDS,
-            )
-            continue
+        # The fresh, fenced store claim enforces per-job catch-up/grace, including one-shots.
+        # A stale load here must never decide whether a concurrent edit is eligible to fire.
         logger.warning(
             "Misfire catch-up: job %s (%s) was due %s (%.0f min overdue) and "
-            "no external fire arrived — firing locally.",
+            "no external fire arrived — checking the stored catch-up policy.",
             job_id,
             job.get("name") or "unnamed",
             next_run_at,
@@ -516,7 +519,11 @@ def fire_overdue_jobs(
         )
         try:
             # Claim synchronously (CAS loss = external retry beat us), run off-thread: never block.
-            claimed = provider.claim_fire(job_id)
+            token = _backstop_expected_slot.set((job_id, next_run_at))
+            try:
+                claimed = provider.claim_fire(job_id)
+            finally:
+                _backstop_expected_slot.reset(token)
             if claimed is None:
                 continue
             threading.Thread(

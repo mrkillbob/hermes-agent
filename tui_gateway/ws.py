@@ -162,6 +162,7 @@ class WSTransport:
         self._token_flush_armed = False
         # Socket writes need an async boundary: several batches can queue on the loop during a stall.
         self._send_lock = asyncio.Lock()
+        self._send_tail: concurrent.futures.Future | None = None
         self._abort_requested = False
 
     def _on_loop(self) -> bool:
@@ -188,17 +189,14 @@ class WSTransport:
         # Non-streaming frame: append behind any buffered tokens and flush the whole batch NOW so it
         # can never overtake them. The send is scheduled INSIDE the lock so wire order matches buffer
         # order even if the coalesce timer fires on the loop at the same moment.
-        from agent.async_utils import safe_schedule_threadsafe
         with self._token_lock:
             self._pending_tokens.append(line)
             batch, self._pending_tokens = self._pending_tokens, []
-            if on_loop:
-                self._loop.create_task(self._safe_send_many(batch))
-                return True
-            fut = safe_schedule_threadsafe(self._safe_send_many(batch), self._loop)
+            fut = self._schedule_send_many(batch)
             if fut is None:
-                self._closed = True
                 return False
+        if on_loop:
+            return True
         try:
             fut.result(timeout=_WS_WRITE_TIMEOUT_S)
             return not self._closed
@@ -225,7 +223,44 @@ class WSTransport:
             self._token_flush_armed = False
             batch, self._pending_tokens = self._pending_tokens, []
             if batch and not self._closed:
-                self._loop.create_task(self._safe_send_many(batch))
+                self._schedule_send_many(batch)
+
+    def _admit_send(self) -> tuple[concurrent.futures.Future | None, concurrent.futures.Future]:
+        """Allocate FIFO completion tickets while _token_lock is held."""
+        previous = self._send_tail
+        completed = concurrent.futures.Future()
+        self._send_tail = completed
+        return previous, completed
+
+    def _finish_send(self, previous: concurrent.futures.Future | None, completed: concurrent.futures.Future) -> None:
+        # A cancelled waiter skips its own batch, but cannot release later batches ahead
+        # of the predecessor it was waiting for. Tickets are private and never cancelled.
+        if previous is None or previous.done():
+            completed.set_result(None)
+        else:
+            # Future callbacks run inline; defer each skipped ticket so a long chain of
+            # cancellations cannot recurse through set_result and strand later sends.
+            previous.add_done_callback(lambda _: self._loop.call_soon_threadsafe(completed.set_result, None))
+
+    async def _send_admitted_many(self, lines: list[str], previous: concurrent.futures.Future | None,
+                                  completed: concurrent.futures.Future, *,
+                                  is_current: Callable[[], bool] | None = None, unguarded_prefix: int = 0) -> None:
+        try:
+            if previous is not None:
+                await asyncio.shield(asyncio.wrap_future(previous))
+            await self._safe_send_many(lines, is_current=is_current, unguarded_prefix=unguarded_prefix)
+        finally:
+            self._finish_send(previous, completed)
+
+    def _schedule_send_many(self, lines: list[str]) -> concurrent.futures.Future | None:
+        """Queue a synchronous/timer batch with _token_lock held."""
+        from agent.async_utils import safe_schedule_threadsafe
+        previous, completed = self._admit_send()
+        future = safe_schedule_threadsafe(self._send_admitted_many(lines, previous, completed), self._loop)
+        if future is None:
+            self._finish_send(previous, completed)
+            self._closed = True
+        return future
 
     @property
     def closed(self) -> bool:
@@ -244,7 +279,8 @@ class WSTransport:
         with self._token_lock:
             batch, self._pending_tokens = self._pending_tokens, []
             batch.append(serialize_frame(obj, self._peer, _log))
-        await self._safe_send_many(batch)
+            previous, completed = self._admit_send()
+        await self._send_admitted_many(batch, previous, completed)
         return not self._closed
 
     async def write_many_async(self, frames: list[dict]) -> bool:
@@ -259,7 +295,9 @@ class WSTransport:
             batch, self._pending_tokens = self._pending_tokens, []
             unguarded_prefix = len(batch)
             batch.extend(serialize_frame(frame, self._peer, _log) for frame in frames)
-        await self._safe_send_many(batch, is_current=is_current, unguarded_prefix=unguarded_prefix)
+            previous, completed = self._admit_send()
+        await self._send_admitted_many(batch, previous, completed,
+                                       is_current=is_current, unguarded_prefix=unguarded_prefix)
         return not self._closed
 
     async def _safe_send_many(self, lines: list[str], *, is_current: Callable[[], bool] | None = None,

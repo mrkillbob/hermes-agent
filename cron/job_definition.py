@@ -15,6 +15,7 @@ JOB_DEFINITION_FIELDS = frozenset({
     "script", "no_agent", "monitor_script", "monitor_url", "context_from",
     "schedule", "schedule_display", "deliver", "origin", "enabled_toolsets",
     "workdir", "attach_to_session", "reasoning_effort", "failure_deliver",
+    "timezone", "grace_minutes", "catch_up",
 })
 
 
@@ -30,9 +31,14 @@ def merge_job_definition(local: dict[str, Any], authored: dict[str, Any]) -> dic
         "times": (authored.get("repeat") or {}).get("times"),
     }
     if isinstance(merged.get("schedule"), str):
-        merged["schedule"] = parse_schedule(merged["schedule"])
+        merged["schedule"] = parse_schedule(merged["schedule"], timezone=merged.get("timezone"))
 
-    if local.get("schedule") != merged.get("schedule"):
+    # A zone change moves wall-clock occurrences; an elapsed interval keeps its deadline and
+    # pending claim when only its timezone pin changes. An expression change still replaces both.
+    schedule_changed = local.get("schedule") != merged.get("schedule")
+    timezone_changed = local.get("timezone") != merged.get("timezone")
+    schedule = merged.get("schedule") or {}
+    if schedule_changed or (timezone_changed and schedule.get("kind") != "interval"):
         merged.pop("pending_slot", None)
         _clear_quota_hold(merged)
         if is_job_runnable(merged):

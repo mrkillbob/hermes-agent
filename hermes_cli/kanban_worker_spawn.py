@@ -16,7 +16,7 @@ class SpawnedWorker:
 def spawn_worker(argv, *, cwd, stdin, stdout, stderr, env, start_new_session, creationflags):
     if os_family() != "darwin":
         return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=stdout, stderr=stderr,
-                                env=env, start_new_session=start_new_session, creationflags=creationflags)
+                                env=env, start_new_session=start_new_session, creationflags=creationflags)  # detached-spawn: ok — card worker survives dispatcher restart.
     if stdin != subprocess.DEVNULL or stderr != subprocess.STDOUT or not start_new_session or creationflags:
         raise ValueError("unsupported native managed-worker launch options")
     # Raw libc would bypass Python's existing fleet/startup audit fences.
