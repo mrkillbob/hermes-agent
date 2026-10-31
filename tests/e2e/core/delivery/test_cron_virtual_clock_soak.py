@@ -159,9 +159,11 @@ class Model:
         for job in self.active():
             if job.trigger:
                 job.trigger = False
-                job.fired += 1
                 self.fires.append((job.name, None, t))
-                job.advance_from(t)
+                # A run-now is extra while its scheduled slot is still future.
+                if job.pending is None or job.pending <= t:
+                    job.fired += 1
+                    job.advance_from(t)
                 continue
             if job.pending is None or job.pending > t:
                 continue
@@ -174,12 +176,54 @@ class Model:
 
     def manual(self, name: str, t: float) -> None:
         job = self.jobs[name]
-        job.fired += 1
         self.fires.append((name, None, t))
-        if job.kind == "interval":
-            job.pending = t + job.interval
-        if job.times is not None and job.fired >= job.times:
-            job.done, job.pending = True, None
+        if job.pending is None or job.pending <= t:
+            job.fired += 1
+            job.advance_from(t)
+
+
+def test_extra_fires_keep_a_future_interval_slot_and_repeat_budget():
+    model = Model()
+    job = ModelJob("interval", "interval", 7200.0, interval=7200.0, times=2)
+    model.jobs[job.name] = job
+    model.manual(job.name, 600.0)
+    assert (job.pending, job.fired, job.done) == (7200.0, 0, False)
+    job.trigger = True
+    model.tick(1800.0)
+    assert (job.pending, job.fired, job.done) == (7200.0, 0, False)
+    job.trigger = True
+    model.tick(7200.0)
+    assert (job.pending, job.fired, job.done) == (14400.0, 1, False)
+    assert model.fires == [
+        ("interval", None, 600.0), ("interval", None, 1800.0), ("interval", None, 7200.0)]
+
+
+def _assert_unstarted_ledger_row(row: dict, where: str) -> None:
+    """A booked missed slot never ran; every other non-run must report a failure."""
+    if row["status"] == "missed":
+        assert row.get("source") == "scheduler", f"{where} non-scheduler missed row {row}"
+        assert row.get("started_at") is None, f"{where} started missed row {row}"
+        assert row.get("finished_at"), f"{where} unfinished missed row {row}"
+        assert row.get("handoff_pending") == 0, f"{where} pending missed row {row}"
+        assert str(row.get("error") or "").startswith("missed ×"), f"{where} unaccounted missed row {row}"
+        assert row.get("scheduled_instant"), f"{where} unslotted missed row {row}"
+        return
+    assert row["status"] in ("failed", "unknown", "skipped"), f"{where} ghost row {row}"
+
+
+def test_missed_ledger_row_requires_terminal_nonexecution_accounting():
+    row = {
+        "status": "missed", "source": "scheduler", "started_at": None,
+        "finished_at": "2026-03-10T12:00:20-04:00", "handoff_pending": 0,
+        "error": "missed ×2 (collapsed into one catch-up run)",
+        "scheduled_instant": "2026-03-10T11:01:00+00:00",
+    }
+    _assert_unstarted_ledger_row(row, "fixture")
+    for field, invalid in (("source", "worker"), ("started_at", row["finished_at"]),
+                           ("finished_at", None), ("handoff_pending", 1),
+                           ("error", "unknown"), ("scheduled_instant", None)):
+        with pytest.raises(AssertionError):
+            _assert_unstarted_ledger_row({**row, field: invalid}, "fixture")
 
 
 # --- the soak driver -------------------------------------------------------------------------
@@ -551,7 +595,7 @@ class Soak:
                 assert not ok_sent or ok_sent[0]["exec_in_text"], f"{label}: wrong body delivered"
         for exec_id, row in rows.items():
             if exec_id not in starts:  # attempts that never ran must say so truthfully
-                assert row["status"] in ("failed", "unknown", "skipped"), f"{where} ghost row {row}"
+                _assert_unstarted_ledger_row(row, where)
         if hasattr(self, "long_run_exec"):
             row = rows[self.long_run_exec]
             assert (row["status"], H.effective_outcome(row, deliveries)) == ("completed", "delivered"), (
