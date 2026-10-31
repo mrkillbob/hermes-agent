@@ -206,6 +206,26 @@ class TestInheritanceAndDegradation:
         assert after != before, "the instant belongs to the old zone; it must move"
         assert datetime.fromisoformat(after).astimezone(HK).hour == 9
 
+    @pytest.mark.parametrize("new_zone", ["America/New_York", ""])
+    def test_interval_timezone_edit_keeps_pending_deadline(self, la_profile, cron_store, new_zone):
+        # A zone does not define interval timing. Editing it just before a due
+        # occurrence must not postpone that occurrence or discard its claim stamp.
+        cron_store.set(datetime(2026, 10, 22, 9, 59, tzinfo=LA))
+        job = jobs.create_job(
+            prompt="p", schedule="every 24h", model="fixture", deliver="local",
+            timezone="Asia/Hong_Kong")
+        due = datetime(2026, 10, 22, 10, 0, tzinfo=LA).isoformat()
+        stored = jobs.load_jobs()
+        stored[0]["next_run_at"] = due
+        stamp = {"scheduled_at": due, "at": due, "by": "old-owner"}
+        stored[0]["pending_slot"] = stamp
+        jobs.save_jobs(stored)
+
+        updated = jobs.update_job(job["id"], {"timezone": new_zone})
+
+        assert updated["next_run_at"] == due
+        assert jobs.get_job(job["id"])["pending_slot"] == stamp
+
     def test_a_corrupt_stored_zone_does_not_break_the_scan(self, la_profile, cron_store):
         nine_la = datetime(2026, 10, 22, 9, 0, tzinfo=LA)
         cron_store.set(nine_la)

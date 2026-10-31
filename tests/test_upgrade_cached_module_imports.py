@@ -39,6 +39,7 @@ with patch.object(old_persistence, "sync_rewritten_tool_rows", return_value=1) a
         modern_agent, modern_batch, ["full body"]) == 1
     rewrite.assert_called_once()
 sys.modules.pop("agent.tool_executor")
+sys.modules.pop("agent.tool_result_persistence")
 sys.modules.pop("agent.interrupt_wording")
 sys.modules.pop("agent.tool_deadline")
 sys.modules.pop("cron.scheduler_tick")
