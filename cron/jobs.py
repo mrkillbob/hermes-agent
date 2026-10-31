@@ -2204,7 +2204,8 @@ def update_job(job_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]
                 repeat["times"] = 1 if new_schedule_kind == "once" else None
                 repeat.setdefault("completed", 0)
                 updated["repeat"] = repeat
-        elif "timezone" in updates and updated.get("state") != "paused":
+        elif ("timezone" in updates and updated.get("state") != "paused"
+              and updated["schedule"].get("kind") != "interval"):
             # The instant on file was computed in the OLD zone; leaving it would make the new
             # zone fire it at the wrong wall clock (or skip it). Only overwrite when the new
             # zone can compute one (a past one-shot keeps its recorded instant).
@@ -2212,7 +2213,8 @@ def update_job(job_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]
                 updated["schedule"], timezone=updated.get("timezone"))
             if recomputed is not None:
                 updated["next_run_at"] = recomputed
-        if {"schedule", "next_run_at", "enabled", "state", "timezone"}.intersection(updates):
+        if ({"schedule", "next_run_at", "enabled", "state"}.intersection(updates)
+                or ("timezone" in updates and updated["schedule"].get("kind") != "interval")):
             # An explicit schedule/lifecycle rewrite supersedes any occurrence the dispatcher
             # left unclaimed — pause/resume/edit must not resurrect a slot from before the edit.
             updated.pop("pending_slot", None)

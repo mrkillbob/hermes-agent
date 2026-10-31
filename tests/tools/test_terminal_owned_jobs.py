@@ -133,14 +133,12 @@ def test_a_checkpoint_recovering_hosts_jobs_outlive_its_crash(tmp_path):
 
 def _record_calls(monkeypatch):
     from tools import process_registry_ownership as registry_mod
-    from tools.environments import local as local_mod
+    from hermes_cli import process_identity as identity_mod
 
     calls = []
-    for mod in (registry_mod, local_mod):
+    for mod in (registry_mod, identity_mod):
         monkeypatch.setattr(mod, "own_process_groups", lambda pgids: calls.append(("own", list(pgids))))
         monkeypatch.setattr(mod, "release_process_groups", lambda pgids: calls.append(("release", list(pgids))))
-    monkeypatch.setattr("hermes_cli.process_identity.own_process_groups",
-                        lambda pgids: calls.append(("own", list(pgids))))
     monkeypatch.setattr("hermes_cli.process_identity.register_child", lambda pid, purpose: None)
     return calls
 
