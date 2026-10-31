@@ -1,7 +1,9 @@
 """Concrete coordinator receipts never turn offers into model completion."""
 from dataclasses import replace
 import hashlib
+import os
 from pathlib import Path
+import stat
 import threading
 import time
 
@@ -119,14 +121,76 @@ def test_execution_deadline_output_cap_and_descendant_uncertainty(context, behav
     limits = ex.CoordinatorLimits(execution_seconds=2, terminate_grace_seconds=.2, kill_grace_seconds=1)
     tid, delivery, executor, _lanes, plan = offered(context, behavior, limits)
     started = time.monotonic()
-    outcome = receive(context, delivery, plan, limits)
-    assert time.monotonic() - started < 8
-    assert outcome.state in {'error_settled', 'uncertain'}
-    assert kb.get_task(conn, tid).status != 'done'
-    assert (plan.evidence_root / 'stdout').stat().st_size <= limits.stream_bytes
-    if behavior == 'descendant':
-        assert outcome.state == 'uncertain'
-    assert executor.lookup(delivery).kind != 'completed'
+    lifetime_descriptor = None
+    try:
+        outcome = receive(context, delivery, plan, limits)
+        assert time.monotonic() - started < 8
+        assert outcome.state in {'error_settled', 'uncertain'}
+        assert kb.get_task(conn, tid).status != 'done'
+        assert (plan.evidence_root / 'stdout').stat().st_size <= limits.stream_bytes
+        if behavior == 'descendant':
+            import fcntl
+            from tests.waiting import wait_until
+            ready = plan.evidence_root / 'descendant-ready'
+            parent_pipe_closed = plan.evidence_root / 'descendant-parent-pipe-closed'
+            assert ready.exists(), 'descendant did not reach the readiness handshake'
+            assert wait_until(parent_pipe_closed.exists, timeout=5), 'leader handshake pipe did not close'
+            lifetime_descriptor = os.open(plan.evidence_root / 'descendant-live.lock', os.O_RDONLY | os.O_NOFOLLOW)
+            assert stat.S_ISREG(os.fstat(lifetime_descriptor).st_mode)
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(lifetime_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert outcome.state == 'uncertain'
+            exit_events = [event for event in kb.list_events(conn, tid)
+                           if event.kind == 'external_process_exit' and event.run_id == delivery.run_id]
+            assert len(exit_events) == 1
+            assert exit_events[0].payload['settled'] is False
+            assert exit_events[0].payload['reason'] == 'execution_deadline'
+            uncertain_events = [event for event in kb.list_events(conn, tid)
+                                if event.kind == 'external_receiver_uncertain' and event.run_id == delivery.run_id]
+            assert len(uncertain_events) == 1
+            assert uncertain_events[0].payload['reason'] == 'process_group_unsettled'
+        assert executor.lookup(delivery).kind != 'completed'
+    finally:
+        if behavior == 'descendant':
+            import fcntl
+            from tests.waiting import wait_until
+            fifo = plan.evidence_root / 'descendant-release'
+            ready = plan.evidence_root / 'descendant-ready'
+            done = plan.evidence_root / 'descendant-done'
+            try:
+                release_error = None
+                if fifo.exists():
+                    expected_fifo = fifo.lstat()
+                    assert stat.S_ISFIFO(expected_fifo.st_mode)
+                    try:
+                        descriptor = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+                        try:
+                            actual_fifo = os.fstat(descriptor)
+                            assert stat.S_ISFIFO(actual_fifo.st_mode)
+                            assert (actual_fifo.st_dev, actual_fifo.st_ino) == (expected_fifo.st_dev, expected_fifo.st_ino)
+                            os.write(descriptor, b'R')
+                        finally:
+                            os.close(descriptor)
+                    except OSError as exc:
+                        release_error = exc
+                if ready.exists():
+                    assert wait_until(done.exists, timeout=5), 'descendant did not acknowledge release'
+                    assert done.read_bytes() == b'released'
+                    if lifetime_descriptor is None:
+                        lifetime_descriptor = os.open(plan.evidence_root / 'descendant-live.lock', os.O_RDONLY | os.O_NOFOLLOW)
+                        assert stat.S_ISREG(os.fstat(lifetime_descriptor).st_mode)
+                    def lock_released():
+                        try:
+                            fcntl.flock(lifetime_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            return False
+                        return True
+                    assert wait_until(lock_released, timeout=5), 'descendant still holds its lifetime lock'
+                    fcntl.flock(lifetime_descriptor, fcntl.LOCK_UN)
+                    assert release_error is None, f'descendant release failed: {release_error}'
+            finally:
+                if lifetime_descriptor is not None:
+                    os.close(lifetime_descriptor)
 
 
 def test_submit_lookup_are_bounded_and_lookup_is_read_only(context):
