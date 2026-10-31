@@ -46,7 +46,7 @@ import { isSecondaryWindow } from '@/store/windows'
 import { MessageRenderBoundary } from '../message-render-boundary'
 import { PendingApprovalStack } from '../tool/approval'
 
-import { createTranscriptMessageKeyCache, transcriptMessageKeys } from './message-identity'
+import { useTranscriptMessageKeys } from './message-identity'
 import { responseMessageRole, ResponseMessages } from './response-group'
 import { holdSessionSwitching } from './session-switching'
 import { resolveShowEarlierAction, shouldAutoShowEarlier, useTranscriptWindow } from './transcript-window'
@@ -55,6 +55,20 @@ import { useStickyPromptClip } from './use-sticky-prompt-clip'
 import { useTimelineReveal } from './use-timeline-reveal'
 
 type ThreadMessageComponents = ComponentProps<typeof ThreadPrimitive.MessageByIndex>['components']
+
+function useThreadMessageSignatures(): [string, string] {
+  // Keep structure separate from content weight: stream appends update the
+  // render budget without invalidating the transcript row identities.
+  const structuralSignature = useAuiState(s =>
+    s.thread.messages.map((message, index) => `${index}:${message.id}:${responseMessageRole(message)}`).join('\n')
+  )
+
+  const weightSignature = useAuiState(s =>
+    s.thread.messages.map(message => messagePaintWeight(message.content)).join(',')
+  )
+
+  return [structuralSignature, weightSignature]
+}
 
 export type MessageGroup = { id: string; weight: number } & (
   { index: number; kind: 'standalone' } | { indices: number[]; kind: 'turn' }
@@ -316,6 +330,15 @@ export function buildGroups(signature: string): MessageGroup[] {
   return groups
 }
 
+function useThreadMessageGroups(): readonly [MessageGroup[], string, string] {
+  const [structuralSignature, weightSignature] = useThreadMessageSignatures()
+  // Row structure is memoized on the structural signature only, so streaming
+  // part-appends can't churn group identity and defeat the rows memo.
+  const groups = useMemo(() => buildGroups(structuralSignature), [structuralSignature])
+
+  return [groups, weightSignature, structuralSignature]
+}
+
 // Walk turns newest-first, summing their render weights until the budget is met;
 // everything before the first kept turn is hidden. `minVisible` turns are kept
 // regardless of weight (the exempt newest turn counts as one of them). With
@@ -481,43 +504,9 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   sessionKey,
   sessionLoading = false
 }) => {
-  // TWO signatures, deliberately split. The STRUCTURAL one (ids/roles/count)
-  // changes only when messages are added/removed/swapped — it keys the error
-  // boundaries and the row identity. The WEIGHT one (parts + character cost)
-  // ticks while a streaming turn appends content — it feeds only the render
-  // budget. Folding weights into the structural key handed every boundary a
-  // new resetKey per appended part, which reconciled every turn's subtree on
-  // every tick (measured: 540 wasted Block renders per explain() sample with
-  // two threads streaming).
-  const structuralSignature = useAuiState(s =>
-    s.thread.messages.map((message, index) => `${index}:${message.id}:${responseMessageRole(message)}`).join('\n')
-  )
-
-  const weightSignature = useAuiState(s =>
-    s.thread.messages.map(message => messagePaintWeight(message.content)).join(',')
-  )
-
   const { t } = useI18n()
-  // Row structure is memoized on the STRUCTURAL signature only, so streaming
-  // part-appends can't churn group identity (that would defeat the rows memo
-  // below on every tick). Weights are folded in separately for the budget.
-  const groups = useMemo(() => buildGroups(structuralSignature), [structuralSignature])
-
-  const messageKeySignature = useAuiState(s =>
-    JSON.stringify(
-      s.thread.messages.map(message => ({
-        id: message.id,
-        rowId: typeof message.metadata.custom.rowId === 'number' ? message.metadata.custom.rowId : undefined
-      }))
-    )
-  )
-
-  const messageKeyCache = useRef(createTranscriptMessageKeyCache())
-
-  const messageKeys = useMemo(
-    () => transcriptMessageKeys(JSON.parse(messageKeySignature), messageKeyCache.current),
-    [messageKeySignature]
-  )
+  const [groups, weightSignature, structuralSignature] = useThreadMessageGroups()
+  const messageKeys = useTranscriptMessageKeys()
 
   const renderEmpty = groups.length === 0 && Boolean(emptyPlaceholder)
 

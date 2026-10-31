@@ -1,3 +1,6 @@
+import { useAuiState } from '@assistant-ui/react'
+import { useMemo, useRef } from 'react'
+
 interface TranscriptMessageIdentity {
   id: string
   rowId?: number
@@ -37,4 +40,19 @@ export function transcriptMessageKeys(
 
     return uniqueKey
   })
+}
+
+export function useTranscriptMessageKeys(): string[] {
+  const signature = useAuiState(s =>
+    JSON.stringify(
+      s.thread.messages.map(message => ({
+        id: message.id,
+        rowId: typeof message.metadata.custom.rowId === 'number' ? message.metadata.custom.rowId : undefined
+      }))
+    )
+  )
+
+  const cache = useRef(createTranscriptMessageKeyCache())
+
+  return useMemo(() => transcriptMessageKeys(JSON.parse(signature), cache.current), [signature])
 }
