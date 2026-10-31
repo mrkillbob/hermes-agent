@@ -165,31 +165,32 @@ def export_candidate(prepared) -> Path:
         raise ValueError("candidate export already exists; use a fresh prepared job")
     with tempfile.TemporaryDirectory(prefix="candidate-unpacked-", dir=request.work) as temporary:
         unpacked = Path(temporary)
-        subprocess.run(["ditto", "-x", "-k", str(package), str(unpacked)], check=True)
+        subprocess.run(["ditto", "-x", "-k", str(package), str(unpacked)], check=True, timeout=600)
         apps = list(unpacked.glob("*.app"))
         if len(apps) != 1 or apps[0].is_symlink():
             raise ValueError("candidate ZIP must contain exactly one regular app bundle")
         app = apps[0]
-        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True, timeout=600)
         signature = subprocess.run(["codesign", "-d", "--verbose=4", str(app)],
-                                   capture_output=True, text=True, check=True)
+                                   capture_output=True, text=True, encoding="utf-8", check=True, timeout=30)
         verify_signature_report(signature.stdout + signature.stderr)
         info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
         executable = info["CFBundleExecutable"]
         if (not isinstance(executable, str) or not executable
                 or any(character in executable for character in ("/", chr(92), chr(0)))):
             raise ValueError("candidate executable identity is invalid")
-        arch = subprocess.check_output(["lipo", "-archs", str(app / "Contents/MacOS" / executable)], text=True)
+        arch = subprocess.check_output(["lipo", "-archs", str(app / "Contents/MacOS" / executable)],
+                                       text=True, encoding="utf-8", timeout=30)
         if arch.split() != ["arm64"]:
             raise ValueError("candidate executable is not exclusively arm64")
         stamp_bytes, payload = verify_stamps(app, request.commit)
         payload_evidence = verify_payload_facts(payload, request.commit, request.source / "pm/lock.json")
         assessment = subprocess.run(["spctl", "--assess", "--type", "execute", str(app)],
-                                    capture_output=True, text=True, check=False)
+                                    capture_output=True, text=True, encoding="utf-8", check=False, timeout=60)
         receipt = {
             "schema": 1, "commit": request.commit,
             "tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"],
-                                             cwd=request.source, text=True).strip(),
+                                             cwd=request.source, text=True, encoding="utf-8", timeout=30).strip(),
             "target": request.target, "signingMode": "development-adhoc",
             "requestDigest": request.identity_digest(), "packagingReceiptSha256": sha256(prepared.packager),
             "artifact": {"name": package.name, "size": package.stat().st_size, "sha256": package_hash},

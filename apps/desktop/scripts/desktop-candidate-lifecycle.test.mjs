@@ -71,7 +71,7 @@ test.runIf(process.platform === 'darwin' && process.arch === 'arm64')(
         hardenedRuntime: true,
         ignore: file => fs.statSync(file).isFile() && !isMachO(file)
       }
-      let nullIdentityCalls = 0
+      let skippedSigningCalls = 0
       let candidateCalls = 0
       const events = []
       const afterSign = createCandidateAfterSign(policy, {
@@ -107,9 +107,15 @@ test.runIf(process.platform === 'darwin' && process.arch === 'arm64')(
             const wire = await getCurrentFuseWire(app)
             assert.equal(wire[FuseV1Options.RunAsNode], FuseState.ENABLE)
             events.push('afterPack')
-            const helper = context.packager.helper
-            const handleNullIdentity = helper.handleNullIdentity.bind(helper)
-            helper.handleNullIdentity = () => { nullIdentityCalls++; return handleNullIdentity() }
+            const normalSign = context.packager.sign.bind(context.packager)
+            context.packager.sign = async (...args) => {
+              assert.equal(context.packager.getPlatformConfig(args[3]).config.sign, null)
+              const signed = await normalSign(...args)
+              assert.equal(signed, false)
+              skippedSigningCalls++
+              events.push('ordinary signing skipped')
+              return signed
+            }
             Object.defineProperty(context.packager, 'codeSigningInfo', {
               configurable: true, get: () => { assert.fail('candidate must not resolve a keychain after afterPack') }
             })
@@ -117,8 +123,8 @@ test.runIf(process.platform === 'darwin' && process.arch === 'arm64')(
           afterSign
         }
       })
-      assert.deepEqual(events, ['afterPack', 'candidate signer'])
-      assert.equal(nullIdentityCalls, 1)
+      assert.deepEqual(events, ['afterPack', 'ordinary signing skipped', 'candidate signer'])
+      assert.equal(skippedSigningCalls, 1)
       assert.equal(candidateCalls, 1)
       assert.equal(treeDigest(electronDist), inputDigest)
       assert.equal(treeDigest(originalElectron), originalDigest)

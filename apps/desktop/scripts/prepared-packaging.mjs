@@ -6,7 +6,7 @@ import { validateCandidateReceipt } from './desktop-candidate-policy.mjs'
 
 /** @typedef {{ path: string, digest: string }} PreparedFile */
 /** @typedef {{ sevenZip: string, icons: string, winCodeSign?: string, appimage?: string, fpm?: string }} PackagingToolsets */
-/** @typedef {{ schema: number, source: string, out: string, identity: string, target: string, formats: string[], electron: string, toolsets: PackagingToolsets, windows: import('./windows-bundle-tools.mjs').WindowsBundleTools | null, dmgbuild: string | null, files: PreparedFile[], desktopCandidate?: { request: Record<string, any>, requestDigest: string } }} PreparedPackaging */
+/** @typedef {{ schema: number, source: string, out: string, identity: string, target: string, formats: string[], electron: string, toolsets: PackagingToolsets, windows: import('./windows-bundle-tools.mjs').WindowsBundleTools | null, dmgbuild: string | null, files: PreparedFile[], desktopCandidate?: import('./desktop-candidate-policy.mjs').CandidateReceipt }} PreparedPackaging */
 
 /** @param {string} message @returns {Error} */
 export function preparationRequired(message) {

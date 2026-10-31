@@ -6,7 +6,12 @@ import { createMacSigner } from './mac-sign.mjs'
 import { readPackagingInputs } from './prepared-packaging.mjs'
 import { validateCandidateReceipt } from './desktop-candidate-policy.mjs'
 
-/** Read-only hook admission: assets are deliberately overlaid during packaging. */
+/**
+ * Read-only admission: assets are deliberately overlaid during packaging.
+ * @param {string} source
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {import('./desktop-candidate-policy.mjs').CandidateRequest | null}
+ */
 export function candidateFromEnvironment(source, env = process.env) {
   const manifest = env.HERMES_PREPARED_PACKAGING
   if (!manifest) return null
@@ -30,8 +35,11 @@ export function candidateFromEnvironment(source, env = process.env) {
  * alpha.6 emits afterSign even when mac.sign=null: all framework/fuse mutations
  * have completed, and normal certificate signer has returned before keychain
  * resolution. The pinned lifecycle test and ZIP gate must fail if this changes.
+ * @param {Parameters<typeof createMacSigner>[0]} policy
+ * @param {{ source: string, env?: NodeJS.ProcessEnv, sign?: typeof import('@electron/osx-sign').sign }} options
+ * @returns {(context: import('app-builder-lib').AfterPackContext) => Promise<void>}
  */
-export function createCandidateAfterSign(policy, { source, env = process.env, sign } = {}) {
+export function createCandidateAfterSign(policy, { source, env = process.env, sign }) {
   return async context => {
     const { Arch } = await import('app-builder-lib')
     if (!source || !candidateFromEnvironment(source, env) ||
@@ -39,14 +47,16 @@ export function createCandidateAfterSign(policy, { source, env = process.env, si
         context.packager.config.mac?.sign !== null) {
       throw new Error('development candidate final signing requires its admitted native packaging context')
     }
-    const app = path.join(context.appOutDir, context.packager.appInfo.productFilename + '.app')
+    const packager = /** @type {import('app-builder-lib').MacPackager} */ (context.packager)
+    const app = path.join(context.appOutDir, packager.appInfo.productFilename + '.app')
+    /** @type {Parameters<typeof createMacSigner>[0]} */
     const candidatePolicy = { ...policy, timestamp: 'none' }
-    const opts = await context.packager.helper.buildSignOptions(
+    const opts = await packager.helper.buildSignOptions(
       app, { name: '-', hash: undefined }, candidatePolicy, undefined, Arch.arm64, 'mac')
     const signer = createMacSigner(candidatePolicy, { env, sign })
     await signer({
       ...opts, identity: '-', identityValidation: false, keychain: undefined,
       provisioningProfile: undefined, preEmbedProvisioningProfile: false, preAutoEntitlements: false
-    }, context.packager)
+    }, packager)
   }
 }
