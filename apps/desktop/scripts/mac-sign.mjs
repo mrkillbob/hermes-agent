@@ -4,12 +4,16 @@ import { createMacSignCache, identityTeam, looseMachOFiles } from './mac-sign-ca
 import { rehashPayloadDigests } from './payload-digests.mjs'
 
 /**
- * @param {Pick<import('app-builder-lib').ElectronSignOptions, 'entitlements' | 'entitlementsInherit' | 'hardenedRuntime'> & { ignore: (file: string) => boolean }} policy
+ * @param {Pick<import('app-builder-lib').ElectronSignOptions, 'entitlements' | 'entitlementsInherit' | 'hardenedRuntime'> & { ignore: (file: string) => boolean, timestamp?: 'none' }} policy
  * @param {{ env?: NodeJS.ProcessEnv, makeCache?: typeof createMacSignCache, team?: typeof identityTeam, sign?: typeof import('@electron/osx-sign').sign }} [deps]
  * @returns {(opts: import('@electron/osx-sign').SignOptions, packager: { helper: Pick<import('app-builder-lib').MacPackager['helper'], 'getOptionsForFile'> }) => Promise<void>}
  */
 export function createMacSigner(policy, { env = process.env, makeCache = createMacSignCache, team = identityTeam, sign: signApp } = {}) {
   return async (opts, packager) => {
+    if (policy.timestamp === 'none' && (opts.identity !== '-' || opts.keychain ||
+        opts.provisioningProfile || opts.platform !== 'darwin' || env.HERMES_MAC_SIGNATURE_CACHE)) {
+      throw new Error('development candidate requires ad-hoc identity without keychain, profile or signature cache')
+    }
     const target = opts.platform === 'mas' ? (opts.type === 'development' ? 'mas-dev' : 'mas') : 'mac'
     const optionsForFile = await packager.helper.getOptionsForFile(opts.app, target, policy)
     const inheritedIgnore = opts.ignore

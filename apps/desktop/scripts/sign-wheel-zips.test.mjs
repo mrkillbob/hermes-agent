@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { signWheelZipMembers } from './sign-wheel-zips.mjs'
 
 function crc32(data) {
@@ -85,7 +86,8 @@ describe('signWheelZipMembers', () => {
 })
 
 describe('signWheelZipMembers machinery', () => {
-  it('walks Mach-O members and gates on verify', () => {
+  it.each([{ identity: 'DEVID' }, { identity: '-', timestamp: 'none' }])(
+    'walks Mach-O members and gates on verify with %j', signing => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wz-'))
     try {
       const payload = path.join(root, 'agent-payload')
@@ -143,8 +145,12 @@ describe('signWheelZipMembers machinery', () => {
           fs.writeFileSync(out, storedZip(members))
         }
       }
-      const result = signWheelZipMembers(payload, { identity: 'DEVID', exec: fakeExec })
+      const result = signWheelZipMembers(payload, { ...signing, exec: fakeExec })
       expect(result.signed).toBe(1)
+      const seal = calls.find(c => c[0] === 'codesign' && c.includes('--sign'))
+      expect(seal[seal.indexOf('--sign') + 1]).toBe(signing.identity)
+      expect(seal).toContain(signing.timestamp === 'none' ? '--timestamp=none' : '--timestamp')
+      expect(seal).not.toContain('--keychain')
       const commands = calls.map(c => c[0])
       expect(commands).toContain('unzip')
       expect(commands).toContain('codesign')
@@ -172,4 +178,38 @@ describe('signWheelZipMembers machinery', () => {
       fs.rmSync(root, { recursive: true, force: true })
     }
   })
+})
+
+
+it.each([
+    { identity: 'DEVID', timestamp: 'none' },
+    { identity: '-' },
+    { identity: '-', timestamp: 'none', keychain: '/fixture/keychain' }
+  ])('refuses mixed candidate/release signing options %j', options => {
+    expect(() => signWheelZipMembers('/nonexistent/payload', {
+      ...options, exec: () => { throw new Error('must reject before any native command') }
+    })).toThrow(/development candidate/)
+  })
+
+
+it.runIf(process.platform === 'darwin')('ad-hoc Mach-O signature survives the actual wheel ZIP roundtrip', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'candidate-wheel-native-'))
+  try {
+    const payload = path.join(root, 'payload')
+    // Sign only an owned copy; never execute or modify the system fixture.
+    const wheel = makeWheel(payload, 'native-fixture', { 'fixture/native.so': fs.readFileSync('/usr/bin/true') })
+    const result = signWheelZipMembers(payload, { identity: '-', timestamp: 'none' })
+    expect(result).toEqual({ wheels: 1, signed: 1, failed: 0 })
+    const extracted = path.join(root, 'independent')
+    fs.mkdirSync(extracted)
+    execFileSync('unzip', ['-q', wheel, '-d', extracted])
+    const binary = path.join(extracted, 'fixture/native.so')
+    execFileSync('codesign', ['--verify', '--strict', binary])
+    const report = spawnSync('codesign', ['-d', '--verbose=4', binary], { encoding: 'utf8' })
+    expect(report.status).toBe(0)
+    expect(report.stderr).toMatch(/^Signature=adhoc$/m)
+    expect(report.stderr).not.toMatch(/^Authority=/m)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

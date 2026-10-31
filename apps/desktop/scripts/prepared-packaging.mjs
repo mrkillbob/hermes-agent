@@ -1,10 +1,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { validateCandidateReceipt } from './desktop-candidate-policy.mjs'
 
 /** @typedef {{ path: string, digest: string }} PreparedFile */
 /** @typedef {{ sevenZip: string, icons: string, winCodeSign?: string, appimage?: string, fpm?: string }} PackagingToolsets */
-/** @typedef {{ schema: number, source: string, out: string, identity: string, target: string, formats: string[], electron: string, toolsets: PackagingToolsets, windows: import('./windows-bundle-tools.mjs').WindowsBundleTools | null, dmgbuild: string | null, files: PreparedFile[] }} PreparedPackaging */
+/** @typedef {{ schema: number, source: string, out: string, identity: string, target: string, formats: string[], electron: string, toolsets: PackagingToolsets, windows: import('./windows-bundle-tools.mjs').WindowsBundleTools | null, dmgbuild: string | null, files: PreparedFile[], desktopCandidate?: import('./desktop-candidate-policy.mjs').CandidateReceipt }} PreparedPackaging */
 
 /** @param {string} message @returns {Error} */
 export function preparationRequired(message) {
@@ -51,7 +53,7 @@ export function treeDigest(root) {
 /** @param {string} source @returns {string} */
 export function packagingIdentity(source) {
   const files = ['package-lock.json', 'apps/desktop/package.json', 'apps/desktop/electron-builder.config.cjs']
-  const recipe = ['prepare-packaging-tools.mjs', 'prepared-packaging.mjs', 'prepare-dmgbuild.mjs', 'prepare_dmgbuild.py', 'windows-bundle-tools.mjs', 'run-electron-builder.mjs']
+  const recipe = ['prepare-packaging-tools.mjs', 'prepared-packaging.mjs', 'prepare-dmgbuild.mjs', 'prepare_dmgbuild.py', 'windows-bundle-tools.mjs', 'run-electron-builder.mjs', 'desktop-candidate.mjs', 'desktop-candidate-policy.mjs']
   return createHash('sha256').update(JSON.stringify([
     ...files.map(file => fileDigest(path.join(source, file))),
     ...recipe.map(file => fileDigest(path.join(import.meta.dirname, file))),
@@ -101,15 +103,20 @@ export async function publishPackagingInputs(inputs) {
  * @param {string} manifest
  * @param {string} source
  * @param {string} [target]
+ * @param {NodeJS.ProcessEnv} [env]
  * @returns {PreparedPackaging}
  */
-export function readPackagingInputs(manifest, source, target = `${process.platform}-${process.arch}`) {
+export function readPackagingInputs(manifest, source, target = `${process.platform}-${process.arch}`, env = process.env) {
   try {
     /** @type {PreparedPackaging} */
     const result = JSON.parse(fs.readFileSync(manifest, 'utf8'))
     if (result.schema !== 1 || result.source !== fs.realpathSync(source) || result.out !== fs.realpathSync(path.dirname(manifest)) ||
         result.target !== target || result.identity !== packagingIdentity(source)) {
       throw preparationRequired('Stale or foreign packaging inputs')
+    }
+    if (result.desktopCandidate != null) {
+      const commit = execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+      validateCandidateReceipt(result.desktopCandidate, { source: result.source, commit, target }, env)
     }
     const required = [result.electron, result.toolsets.sevenZip, result.toolsets.icons, ...Object.values(result.toolsets)]
     if (target.startsWith('win32-')) {

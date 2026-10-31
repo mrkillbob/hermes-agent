@@ -174,12 +174,12 @@ export async function resolveSigningIdentity(packager, exec = execFileSync) {
   return { identity: findDeveloperId(exec, keychain), keychain }
 }
 
-function codesign(exec, identity, entitlements, keychain, target, deep) {
+function codesign(exec, identity, entitlements, keychain, target, deep, timestamp) {
   const args = [
     '--force',
     '--sign',
     identity,
-    '--timestamp',
+    timestamp === 'none' ? '--timestamp=none' : '--timestamp',
     '--options',
     'runtime',
     '--entitlements',
@@ -193,6 +193,10 @@ function codesign(exec, identity, entitlements, keychain, target, deep) {
 
 export function signNestedChromium(payload, opts = {}) {
   const identity = opts.identity
+  if ((identity === '-') !== (opts.timestamp === 'none') ||
+      (opts.timestamp === 'none' && opts.keychain)) {
+    throw new Error('development candidate timestamp-none requires only an explicit ad-hoc identity')
+  }
   if (!identity) return { signed: 0, repaired: 0, identity: null }
   const entitlements = opts.entitlements
   if (!entitlements || !fs.existsSync(entitlements)) {
@@ -205,11 +209,11 @@ export function signNestedChromium(payload, opts = {}) {
   for (const root of chromiumRoots(payload)) {
     repaired += repairFrameworkLinks(root)
     for (const app of listTopLevelApps(root)) {
-      codesign(exec, identity, entitlements, keychain, app, true)
+      codesign(exec, identity, entitlements, keychain, app, true, opts.timestamp)
       signed += 1
     }
     for (const file of listLooseMachO(root)) {
-      codesign(exec, identity, entitlements, keychain, file, false)
+      codesign(exec, identity, entitlements, keychain, file, false, opts.timestamp)
       signed += 1
     }
   }

@@ -50,6 +50,10 @@ function run(exec, command, args, options = {}) {
 
 export function signWheelZipMembers(payload, opts = {}) {
   const identity = opts.identity
+  if ((identity === '-') !== (opts.timestamp === 'none') ||
+      (opts.timestamp === 'none' && opts.keychain)) {
+    throw new Error('development candidate timestamp-none requires only an explicit ad-hoc identity')
+  }
   const wheels = listWheelFiles(payload)
   if (!identity) return { wheels: wheels.length, signed: 0, failed: 0 }
   const exec = opts.exec ?? execFileSync
@@ -76,7 +80,7 @@ export function signWheelZipMembers(payload, opts = {}) {
       walk(extract)
       for (const member of members) {
         if (!isMachO(member)) continue
-        const args = ['--force', '--sign', identity, '--timestamp', '--options', 'runtime']
+        const args = ['--force', '--sign', identity, opts.timestamp === 'none' ? '--timestamp=none' : '--timestamp', '--options', 'runtime']
         if (keychain) args.push('--keychain', keychain)
         args.push(member)
         run(exec, 'codesign', args)
@@ -104,7 +108,7 @@ export function signWheelZipMembers(payload, opts = {}) {
           failed += 1
           throw new Error(
             `sign-wheel-zips: ${path.basename(wheel)}:${rel} lost its signature through the repack ` +
-            `(embedded Developer ID signatures must survive a zip roundtrip): ${error.message}`)
+            `(embedded code signatures must survive a zip roundtrip): ${error.message}`)
         }
       }
       fs.copyFileSync(repacked, wheel)

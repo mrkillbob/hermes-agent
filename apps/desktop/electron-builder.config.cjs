@@ -14,6 +14,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const feedContract = require('./update-feed.cjs')
 const { createMacSigner } = require('./scripts/mac-sign.mjs')
+const { candidateFromEnvironment, createCandidateAfterSign } = require('./scripts/desktop-candidate.mjs')
 
 const {
   light,
@@ -69,6 +70,22 @@ if (!/^\d+\.\d+\.\d+$/.test(electronVersion)) {
 const macFeed = channelRequest ? null : feedContract.darwinFeed(channel === 'canary' || channel === 'light-canary' ? 'canary' : 'stable', light)
 const publicUrl = feedContract.feedBaseUrl(process.env.CLOUDFLARE_R2_PUBLIC_URL)
 
+const macSignPolicy = {
+  entitlements: path.join(__dirname, 'electron/entitlements.mac.plist'),
+  entitlementsInherit: path.join(__dirname, 'electron/entitlements.mac.inherit.plist'),
+  hardenedRuntime: true,
+  ignore: (/** @type {string} */ file) => {
+    try {
+      if (fs.lstatSync(file).isDirectory()) return false
+      return !isMachO(file)
+    } catch {
+      return true
+    }
+  }
+}
+const candidateSource = path.resolve(__dirname, '../..')
+const developmentCandidate = candidateFromEnvironment(candidateSource)
+
 /** @satisfies {Configuration} */
 module.exports = {
   electronVersion,
@@ -93,7 +110,7 @@ module.exports = {
   // var (local, or a fork without the R2 vars) keep the github provider, which
   // is exactly today's behavior. The store build has no feed at all (the Store
   // owns its distribution and updates).
-  publish: channelRequest ? null : !channel
+  publish: developmentCandidate ? null : channelRequest ? null : !channel
     ? null
     : [
         publicUrl
@@ -123,7 +140,11 @@ module.exports = {
   // rewritten file (#105629). afterPack keeps the signing/payload work.
   afterExtract: 'scripts/after-extract.mjs',
   afterPack: 'scripts/after-pack.mjs',
-  ...(process.platform === 'darwin' ? { afterSign: 'scripts/notarize.mjs' } : {}),
+  ...(process.platform === 'darwin' ? {
+    afterSign: developmentCandidate
+      ? createCandidateAfterSign(macSignPolicy, { source: candidateSource })
+      : 'scripts/notarize.mjs'
+  } : {}),
   extraResources: [
     {
       from: 'build/install-stamp.json',
@@ -153,7 +174,7 @@ module.exports = {
     // Electron 44 no longer supports macOS 11 or 12.
     minimumSystemVersion: '13.0',
     // The packaged client reads this generated app-update.yml by default.
-    publish: channelRequest?.receiverCandidate
+    publish: developmentCandidate ? null : channelRequest?.receiverCandidate
       ? [{ provider: 'generic', url: `${channelRequest.publicBase}/releases/darwin/stable/`, channel: 'stable' }]
       : channelRequest
       ? [{ provider: 'generic', url: `${channelRequest.publicBase}/releases/channel-builds/${channelRequest.buildId}/darwin/`, channel: 'latest' }]
@@ -180,21 +201,7 @@ module.exports = {
       NSAppleEventsUsageDescription: `${displayName} uses Apple Events to automate apps you explicitly ask it to control.`
     },
     target: ['dmg', 'zip'],
-    sign: createMacSigner({
-      entitlements: path.join(__dirname, 'electron/entitlements.mac.plist'),
-      entitlementsInherit: path.join(__dirname, 'electron/entitlements.mac.inherit.plist'),
-      hardenedRuntime: true,
-      ignore: (/** @type {string} */ file) => {
-        try {
-          if (fs.lstatSync(file).isDirectory()) {
-            return false
-          }
-          return !isMachO(file)
-        } catch {
-          return true
-        }
-      }
-    })
+    sign: developmentCandidate ? null : createMacSigner(macSignPolicy)
   },
   dmg: {
     // Avoid the failing optional APFS shrink pass; keep compressed conversion.
