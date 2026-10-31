@@ -46,44 +46,36 @@ def test_gateway_supervisor_exemption_requires_live_tracked_identities(monkeypat
     from tests.e2e.core.terminal import _pty
 
     stat = {100: (1, 100, 100, 11), 201: (100, 201, 201, 21)}
+    stat.update({
+        "owner_group_differs": {100: (1, 88, 88, 11)},
+        "dead_owner": {100: None},
+        "reused_owner": {100: (1, 100, 100, 12)},
+        "reused_supervisor": {201: (100, 201, 201, 22)},
+        "not_new_session": {201: (100, 100, 100, 21)},
+    }.get(case, {}))
     seen = {(100, 11), (201, 21)}
-    gateways = {100}
+    seen.difference_update({
+        "untracked_owner": {(100, 11)},
+        "untracked_supervisor": {(201, 21)},
+    }.get(case, set()))
+    gateways = set() if case == "unrelated_owner" else {100}
     commands = {100: "gateway"}
     script = str(_pty.REPO_ROOT / "hermes_cli" / "process_supervisor.sh")
-    argv = ["/bin/sh", script, "100"]
-    if case == "owner_group_differs":
-        stat[100] = (1, 88, 88, 11)
-        argv[2] = "88"
-    elif case == "dead_owner":
-        stat[100] = None
-    elif case == "reused_owner":
-        stat[100] = (1, 100, 100, 12)
-    elif case == "reused_supervisor":
-        stat[201] = (100, 201, 201, 22)
-    elif case == "untracked_owner":
-        seen.remove((100, 11))
-    elif case == "untracked_supervisor":
-        seen.remove((201, 21))
-    elif case == "unrelated_owner":
-        gateways.clear()
-    elif case == "wrong_script":
-        argv[1] = "/tmp/process_supervisor.sh"
-    elif case == "wrong_group":
-        argv[2] = "999"
-    elif case == "not_new_session":
-        stat[201] = (100, 100, 100, 21)
-    elif case == "owner_exits_during_check":
-        pass
-    elif case == "supervisor_exits_during_check":
-        pass
+    argv = [
+        "/bin/sh",
+        "/tmp/process_supervisor.sh" if case == "wrong_script" else script,
+        {"owner_group_differs": "88", "wrong_group": "999"}.get(case, "100"),
+    ]
+    exit_on_second = {
+        "owner_exits_during_check": 100,
+        "supervisor_exits_during_check": 201,
+    }.get(case)
 
     calls = {100: 0, 201: 0}
 
     def live_stat(pid):
         calls[pid] += 1
-        if case == "owner_exits_during_check" and pid == 100 and calls[pid] > 1:
-            return None
-        if case == "supervisor_exits_during_check" and pid == 201 and calls[pid] > 1:
+        if pid == exit_on_second and calls[pid] > 1:
             return None
         return stat[pid]
 
