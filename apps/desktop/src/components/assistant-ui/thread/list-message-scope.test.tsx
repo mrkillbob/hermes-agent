@@ -35,6 +35,7 @@ function BoundMessage() {
 
   const text = useAuiState(s => s.message.content.flatMap(part => (part.type === 'text' ? [part.text] : [])).join(''))
 
+  const messageId = useAuiState(s => s.message.id)
   const [owner] = useState(identity)
   const [held, setHeld] = useState(false)
   const record = useContext(CommitObserver)
@@ -42,7 +43,13 @@ function BoundMessage() {
   useLayoutEffect(() => record(owner, identity), [identity, owner, record])
 
   return (
-    <button aria-pressed={held} onClick={() => setHeld(value => !value)} type="button">
+    <button
+      aria-pressed={held}
+      data-identity={identity}
+      data-message-id={messageId}
+      onClick={() => setHeld(value => !value)}
+      type="button"
+    >
       hold {text}
     </button>
   )
@@ -52,10 +59,12 @@ const components = { Message: BoundMessage }
 
 function Transcript({
   messages,
-  record
+  record,
+  sessionKey = 'scope-test'
 }: {
   messages: ChatMessage[]
   record: (owner: string, current: string) => void
+  sessionKey?: string
 }) {
   const messageRepository = useRuntimeMessageRepository(messages)
 
@@ -73,8 +82,8 @@ function Transcript({
         <ThreadMessageList
           clampToComposer={false}
           components={components}
-          sessionId="scope-test"
-          sessionKey="scope-test"
+          sessionId={sessionKey}
+          sessionKey={sessionKey}
         />
       </CommitObserver.Provider>
     </AssistantRuntimeProvider>
@@ -165,8 +174,47 @@ it('keeps message-local state when a streamed reply becomes persisted and is hyd
 
   const persistedReply = { ...streamedReply, rowId: 11 }
   rerender(<Transcript messages={[prompt, persistedReply]} record={record} />)
+  await waitFor(() => expect(reply().getAttribute('data-identity')).toBe('row:11'))
   expect(reply().getAttribute('aria-pressed')).toBe('true')
 
   rerender(<Transcript messages={[prompt, { ...persistedReply, id: '11-1-assistant' }]} record={record} />)
+  await waitFor(() => expect(reply().getAttribute('data-message-id')).toBe('11-1-assistant'))
   expect(reply().getAttribute('aria-pressed')).toBe('true')
+})
+
+it('keeps an existing reply mounted when a process notice becomes the first response row', async () => {
+  const rows = [initialRows[0]!, initialRows[2]!]
+  const record = () => {}
+  const { getByRole, rerender } = render(<Transcript messages={toChatMessages(rows)} record={record} />)
+  const reply = () => getByRole('button', { name: 'hold Noted the process' })
+
+  await waitFor(() => expect(reply().getAttribute('data-message-id')).toBe('14-1-assistant'))
+  fireEvent.click(reply())
+  expect(reply().getAttribute('aria-pressed')).toBe('true')
+
+  rerender(<Transcript messages={toChatMessages([rows[0]!, processNotice, rows[1]!])} record={record} />)
+  await waitFor(() => expect(reply().getAttribute('data-message-id')).toBe('14-2-assistant'))
+  expect(getByRole('button', { name: 'hold Background Process Finished: scope' })).not.toBeNull()
+  expect(reply().getAttribute('aria-pressed')).toBe('true')
+})
+
+it('does not carry message-local state between sessions that reuse row and renderer ids', async () => {
+  const rows = toChatMessages([initialRows[0]!, initialRows[2]!])
+  const record = () => {}
+  const { getByRole, rerender } = render(
+    <Transcript messages={rows} record={record} sessionKey="connection-a/profile-a/chat" />
+  )
+
+  const reply = getByRole('button', { name: 'hold Noted the process' })
+  fireEvent.click(reply)
+  expect(reply.getAttribute('aria-pressed')).toBe('true')
+
+  const otherRows = toChatMessages([
+    { ...initialRows[0]!, content: 'A different session prompt' },
+    { ...initialRows[2]!, content: 'A different session reply' }
+  ])
+
+  rerender(<Transcript messages={otherRows} record={record} sessionKey="connection-b/profile-b/chat" />)
+  await waitFor(() => expect(getByRole('button', { name: 'hold A different session reply' })).not.toBeNull())
+  expect(getByRole('button', { name: 'hold A different session reply' }).getAttribute('aria-pressed')).toBe('false')
 })
