@@ -506,7 +506,7 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
 }) => {
   const { t } = useI18n()
   const [groups, weightSignature, structuralSignature] = useThreadMessageGroups()
-  const messageKeys = useTranscriptMessageKeys()
+  const messageKeys = useTranscriptMessageKeys({ profile: scrollProfile, sessionId, sessionKey })
 
   const renderEmpty = groups.length === 0 && Boolean(emptyPlaceholder)
 
