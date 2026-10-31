@@ -64,12 +64,13 @@ def npm_command(node: str) -> list[str]:
 
 
 def build(repo: Path, tag: str | None, variant: str, builder_args: list[str],
-          commit_build: str | None = None) -> None:
+          commit_build: str | None = None, *, development_candidate: bool = False) -> None:
     from scripts.bundles.desktop_prepare import BuildRequest, prepare
     from scripts.releases.bundle_env import decode
     request = BuildRequest.create(repo, tag=tag, commit=commit_build, variant=variant,
                                   work=repo / ".build/desktop-job", cache=repo / ".cache/desktop-inputs",
-                                  bundle_env=decode(os.environ.get("HERMES_BUNDLE_ENV_JSON", "")))
+                                  bundle_env=decode(os.environ.get("HERMES_BUNDLE_ENV_JSON", "")),
+                                  development_candidate=development_candidate)
     build_prepared(prepare(request), builder_args)
 
 
@@ -97,6 +98,8 @@ def _build_prepared(prepared, builder_args: list[str], variant: str | None) -> N
         env["HERMES_RELEASE_EPOCH"] = str(request.release_epoch)
     desktop = repo / "apps/desktop"
     targets = {"win32": ["--win", "msix"], "darwin": ["--mac", "dmg", "zip"], "linux": ["--linux", "AppImage"]}[sys.platform]
+    if request.development_candidate:
+        targets = ["--mac", "zip"]
     package_args = ["--prepared", str(prepared.packager), "--native-deps", str(prepared.native),
                     *targets, f"-c.extraMetadata.version={request.version}"]
     run([node, "scripts/run-electron-builder.mjs", "--validate-only", *package_args, *builder_args],
@@ -134,8 +137,13 @@ def _build_prepared(prepared, builder_args: list[str], variant: str | None) -> N
             quad = capture([node, "-e", script, request.tag], repo, env)
             version_args = [f'-c.extraMetadata.shortVersion={quad}', f'-c.extraMetadata.shortVersionWindows={quad}']
         run([node, "scripts/run-electron-builder.mjs", *package_args, *version_args, *builder_args], cwd=desktop,
-            env=packaging_environment(env, os.environ, request.target))
+            env=packaging_environment(env, os.environ, request.target,
+                                      development_candidate=request.development_candidate))
     require_source(repo, request.commit)
+    if request.development_candidate:
+        run([str(prepared.python), "-I", "-S", "-B",
+             str(repo / "scripts/bundles/desktop_candidate_artifact.py"),
+             "--prepared", str(request.work / "prepared.json")], cwd=repo, env=env)
 
 
 def main() -> None:
@@ -145,6 +153,8 @@ def main() -> None:
     parser.add_argument("--commit", dest="commit_build", default=None,
                         help="Commit-only build: exact full 40-char SHA the checkout is at; "
                              "version comes from the target pyproject, no tag is referenced")
+    parser.add_argument("--development-candidate", action="store_true",
+                        help="Development-only ad-hoc macOS arm64 bundled commit ZIP; never a release")
     parser.add_argument("--release-commit", help="Admitted commit for a stable tag not created until green")
     parser.add_argument("--channel-request", type=Path, help="Immutable admitted channel request JSON")
     parser.add_argument("--variant", choices=["bundled", "store", "light"])
@@ -161,7 +171,7 @@ def main() -> None:
     try:
         if args.prepared:
             if (args.tag or args.commit_build or args.release_commit or args.channel_request
-                    or args.prepare_only or args.work or args.cache or args.clean):
+                    or args.development_candidate or args.prepare_only or args.work or args.cache or args.clean):
                 parser.error("--prepared supplies the complete build request")
             build_prepared(args.prepared, builder_args, args.variant)
         else:
@@ -174,7 +184,8 @@ def main() -> None:
                                           bundle_env=decode(os.environ.get("HERMES_BUNDLE_ENV_JSON", "")),
                                           channel_request=json.loads(args.channel_request.read_text(encoding="utf-8-sig"))
                                           if args.channel_request else None,
-                                          release_commit=args.release_commit)
+                                          release_commit=args.release_commit,
+                                          development_candidate=args.development_candidate)
             if args.prepare_only and builder_args:
                 parser.error("builder arguments belong to the build phase")
             result = prepare(request, clean=args.clean)

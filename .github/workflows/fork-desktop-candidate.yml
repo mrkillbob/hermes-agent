@@ -1,0 +1,150 @@
+name: Fork Desktop development candidate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/fork-desktop-candidate.yml'
+      - 'apps/desktop/electron-builder.config.cjs'
+      - 'apps/desktop/scripts/**'
+      - 'scripts/bundles/**'
+      - 'tests/scripts/test_desktop_candidate*'
+      - 'package-lock.json'
+      - 'pm/lock.json'
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Accepted full fork commit; must be an ancestor of main.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-desktop-candidate-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.commit }}
+  cancel-in-progress: false
+
+jobs:
+  native-contracts:
+    if: github.repository == 'mrkillbob/hermes-agent' && github.event_name == 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          extras: '[]'
+          test-environment: 'true'
+
+      - name: Prepare locked Desktop test inputs
+        run: |
+          node scripts/build/node-deps.mjs --source . --workspace apps/desktop --workspace tests-js --reuse
+          node scripts/build/electron-runtime.mjs --source .
+
+      - name: Qualify request and final-byte evidence contracts
+        env:
+          HERMES_TEST_FILE_RETRIES: '0'
+        run: bash scripts/run_tests.sh -j1 tests/scripts/test_desktop_candidate_request.py tests/scripts/test_desktop_candidate_artifact.py
+
+      - name: Qualify the pinned native signing lifecycle
+        working-directory: apps/desktop
+        run: >-
+          node ../../node_modules/vitest/vitest.mjs run --project electron
+          scripts/mac-candidate-policy.test.mjs
+          scripts/desktop-candidate-policy.test.mjs
+          scripts/desktop-candidate-lifecycle.test.mjs
+          scripts/mac-sign.test.mjs
+          scripts/sign-nested-chromium.test.mjs
+          scripts/sign-wheel-zips.test.mjs
+          --maxWorkers=1
+
+      - uses: ./.github/actions/check-clean-worktree
+
+  macos-arm64:
+    if: >-
+      github.repository == 'mrkillbob/hermes-agent' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - name: Validate immutable source input
+        id: pin
+        shell: bash
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          printf 'sha=%s\n' "$CANDIDATE_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ steps.pin.outputs.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Require accepted fork ancestry and a clean source
+        shell: bash
+        env:
+          CANDIDATE_COMMIT: ${{ steps.pin.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          git merge-base --is-ancestor "$CANDIDATE_COMMIT" refs/remotes/origin/main
+          test -z "$(git status --porcelain)"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+
+      # No release environment, secrets, signature cache, feed or notarization.
+      # The maintained driver refuses ambient signing inputs and verifies the
+      # actual ZIP before it creates candidate-artifact/.
+      - name: Build and verify governed development candidate
+        shell: bash
+        env:
+          CANDIDATE_COMMIT: ${{ steps.pin.outputs.sha }}
+        run: |
+          python -S -B scripts/bundles/desktop.py --commit "$CANDIDATE_COMMIT" \
+            --variant bundled --development-candidate \
+            --work "$RUNNER_TEMP/desktop-candidate-job" \
+            --cache "$RUNNER_TEMP/desktop-candidate-inputs"
+
+      - name: Bind retained evidence to this workflow run
+        env:
+          CANDIDATE_COMMIT: ${{ steps.pin.outputs.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "desktop-candidate-job/candidate-artifact"
+          path = root / "candidate.json"
+          receipt = json.loads(path.read_text())
+          if (receipt["commit"] != os.environ["CANDIDATE_COMMIT"]
+                  or receipt["signingMode"] != "development-adhoc"
+                  or receipt["codeSignatureVerified"] is not True
+                  or receipt["architectureVerified"] is not True
+                  or receipt["installationAuthorized"] is not False):
+              raise ValueError("candidate verification receipt is incomplete")
+          receipt.update(repository=os.environ["GITHUB_REPOSITORY"],
+                         workflowCommit=os.environ["GITHUB_SHA"],
+                         runId=os.environ["GITHUB_RUN_ID"],
+                         runAttempt=os.environ["GITHUB_RUN_ATTEMPT"])
+          path.write_text(json.dumps(receipt, indent=2) + "\n")
+          print(json.dumps(receipt, indent=2))
+          PY
+
+      - name: Retain candidate for review only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-development-candidate-darwin-arm64-${{ steps.pin.outputs.sha }}
+          path: ${{ runner.temp }}/desktop-candidate-job/candidate-artifact/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1

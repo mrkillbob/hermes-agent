@@ -99,17 +99,25 @@ class BuildRequest:
     bundle_env: dict[str, str | None]
     channel_request: dict | None = None
     release_epoch: int | None = None
+    development_candidate: bool = False
 
     @classmethod
     def create(cls, source: Path, *, tag: str | None, commit: str | None, variant: str,
                work: Path, cache: Path, bundle_env: dict[str, str | None],
-               channel_request: dict | None = None, release_commit: str | None = None) -> BuildRequest:
+               channel_request: dict | None = None, release_commit: str | None = None,
+               development_candidate: bool = False) -> BuildRequest:
         from pm.store import current_target
         from scripts.bundles.desktop import release_version
         from scripts.releases.bundle_env import validate
         from scripts.releases.commit_build import require_commit, version_at
         from scripts.termux.deb_version import channel_for_tag
 
+        from scripts.bundles.desktop_candidate import validate_selection
+
+        target = current_target()
+        validate_selection({"development_candidate": development_candidate, "variant": variant,
+                            "target": target, "commit": commit, "tag": tag,
+                            "channel_request": channel_request, "release_commit": release_commit}, os.environ)
         if channel_request is not None:
             channel_request = validate_channel_request(channel_request)
             if variant != "bundled":
@@ -172,8 +180,8 @@ class BuildRequest:
             if version != channel_request["sourceVersion"]:
                 raise ValueError("channel sourceVersion differs from checkout project version")
             version = channel_request["version"]
-        return cls(source, work, cache, commit, tag, version, variant, current_target(), bundle_env,
-                   channel_request, release_epoch)
+        return cls(source, work, cache, commit, tag, version, variant, target, bundle_env,
+                   channel_request, release_epoch, development_candidate)
 
     def data(self) -> dict:
         return {**asdict(self), "source": str(self.source), "work": str(self.work), "cache": str(self.cache)}
@@ -185,6 +193,9 @@ class BuildRequest:
         return request
 
     def validate_channel(self) -> None:
+        from scripts.bundles.desktop_candidate import validate_selection
+
+        validate_selection(self.data(), os.environ)
         if self.channel_request is None:
             return
         channel = validate_channel_request(self.channel_request)
@@ -249,7 +260,8 @@ class PreparedDesktop:
     def validate(self) -> None:
         from pm.store import current_target
         self.request.validate_channel()
-        if (self.request_digest is not None or self.request.channel_request is not None) and self.request_digest != self.request.identity_digest():
+        if (self.request_digest is not None or self.request.channel_request is not None
+                or self.request.development_candidate) and self.request_digest != self.request.identity_digest():
             raise ValueError("preparation request identity changed; prepare again")
         require_source(self.request.source, self.request.commit)
         if self.request.target != current_target():
@@ -264,6 +276,8 @@ class PreparedDesktop:
         for path in paths:
             if not path.is_absolute() or not path.exists() or fingerprint(path) != self.digests[str(path)]:
                 raise ValueError(f"preparation input changed or is missing: {path}; prepare again")
+        from scripts.bundles.desktop_candidate import validate_packaging
+        validate_packaging(self.request, self.packager)
 
 
 def clean_outputs(request: BuildRequest) -> None:
@@ -351,8 +365,8 @@ def prepare_in_worker(request: BuildRequest) -> Path:
     run([str(node), "apps/desktop/scripts/stage-native-deps.mjs", "--source", str(request.source),
          "--out", str(native), "--native-toolchain", native_toolchain], cwd=request.source, env=env)
     packager = request.work / "packager"
-    dmg_args = []
-    if request.target.startswith("darwin-"):
+    dmg_args = ["--format", "zip"] if request.development_candidate else []
+    if request.target.startswith("darwin-") and not request.development_candidate:
         from apps.desktop.scripts.prepare_dmgbuild import prepare_dmgbuild
         dmg = prepare_dmgbuild(request.cache / "tools", request.cache / "python/build")
         dmg_args = ["--dmgbuild", str(dmg)]
@@ -369,6 +383,8 @@ def prepare_in_worker(request: BuildRequest) -> Path:
                                  source=request.source, cache=Path(env["UV_CACHE_DIR"]),
                                  tools=request.cache / "tools", env=env)
     require_source(request.source, request.commit)
+    from scripts.bundles.desktop_candidate import bind_packaging
+    bind_packaging(request, packager / "prepared.json")
     prepared = PreparedDesktop.record(request, python=python, node=node, icon_python=icon_python,
                                       native=native, packager=packager / "prepared.json", payload=payload,
                                       native_toolchain=native_toolchain)

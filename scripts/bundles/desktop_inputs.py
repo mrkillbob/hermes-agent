@@ -76,6 +76,8 @@ def identity_environment(request: BuildRequest, variant: str, inherited: Mapping
 
 
 def validate_builder_identity(request: BuildRequest, args: list[str]) -> None:
+    if request.development_candidate and args:
+        raise ValueError("development candidate accepts no builder overrides")
     if request.channel_request is not None and any(
         re.match(r"(?:-c|--config)\.extraMetadata\.(?:version|shortVersion|shortVersionWindows)=", arg)
         for arg in args
@@ -84,9 +86,9 @@ def validate_builder_identity(request: BuildRequest, args: list[str]) -> None:
 
 
 def packaging_environment(build: Mapping[str, str], inherited: Mapping[str, str],
-                          target: str) -> dict[str, str]:
+                          target: str, *, development_candidate: bool = False) -> dict[str, str]:
     env = dict(build)
-    if target.startswith("darwin-"):
+    if target.startswith("darwin-") and not development_candidate:
         # Security.framework needs the login HOME for both key import and signing,
         # even with an explicit keychain. Keep dependency preparation isolated.
         env["HOME"] = inherited.get("HERMES_REAL_HOME") or inherited.get("HOME") or str(Path.home())

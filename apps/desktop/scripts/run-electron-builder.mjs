@@ -59,6 +59,10 @@ export function validatePreparedBuilderArgs(args, inputs) {
       continue
     }
     if (arg === '--dir' || arg === '--publish=never' || arg === '--') continue
+    if (inputs.desktopCandidate && /^(?:-c|--config)\./.test(arg) &&
+        arg !== '-c.extraMetadata.version=' + inputs.desktopCandidate.request.version) {
+      throw preparationRequired('development candidate refuses packaging overrides: ' + arg)
+    }
     if (/^(?:-c|--config)\.(?:extraMetadata\.(?:version|shortVersion|shortVersionWindows)|directories\.output|mac\.identity)=/.test(arg)) continue
     if (!arg.startsWith('-') && inputs.formats.includes(arg)) continue
     throw preparationRequired(`Argument is not admitted by prepared packaging: ${arg}`)

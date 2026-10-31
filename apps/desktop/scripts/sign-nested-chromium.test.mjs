@@ -177,3 +177,39 @@ test('identity preparation failures abort instead of selecting another keychain 
     vi.unstubAllEnvs()
   }
 })
+
+
+test('development nested signing uses no keychain or timestamp service', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'candidate-chromium-'))
+  try {
+    const app = path.join(root, 'tools', 'chromium-123', 'Browser.app')
+    fs.mkdirSync(app, { recursive: true })
+    const entitlements = path.join(root, 'child.plist')
+    fs.writeFileSync(entitlements, '<plist/>')
+    const calls = []
+    const result = signNestedChromium(root, {
+      identity: '-', timestamp: 'none', entitlements,
+      exec: (command, args) => calls.push([command, ...args])
+    })
+    assert.equal(result.signed, 1)
+    assert.equal(calls.length, 1)
+    const args = calls[0]
+    assert.equal(args[0], 'codesign')
+    assert.equal(args[args.indexOf('--sign') + 1], '-')
+    assert.ok(args.includes('--timestamp=none') && args.includes('runtime'))
+    assert.ok(!args.includes('--keychain'))
+    assert.equal(args.at(-1), app)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test.each([
+  { identity: 'DEVID', timestamp: 'none' },
+  { identity: '-' },
+  { identity: '-', timestamp: 'none', keychain: '/fixture/keychain' }
+])('nested signing refuses mixed candidate/release options %j', options => {
+  assert.throws(() => signNestedChromium('/nonexistent/payload', {
+    ...options, exec: () => { assert.fail('must reject before native commands') }
+  }), /development candidate/)
+})

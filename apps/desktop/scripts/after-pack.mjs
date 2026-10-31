@@ -21,6 +21,7 @@ import { batchSignAppTree } from './batch-sign-binaries.mjs'
 import { rehashPayloadDigests } from './payload-digests.mjs'
 import { resolveSigningIdentity, signNestedChromium } from './sign-nested-chromium.mjs'
 import { signWheelZipMembers } from './sign-wheel-zips.mjs'
+import { candidateFromEnvironment } from './desktop-candidate.mjs'
 import { sanitizeTree } from './sanitize-pe-signatures.mjs'
 
 /**
@@ -82,15 +83,18 @@ export default async function afterPack(context) {
     await restoreMacLocaleMarkers(context)
     if (fs.existsSync(payload)) {
       const entitlements = path.join(import.meta.dirname, '..', 'electron', 'entitlements.mac.inherit.plist')
-      const { identity, keychain } = await resolveSigningIdentity(context.packager)
-      const nested = signNestedChromium(payload, { entitlements, identity, keychain })
+      const candidate = candidateFromEnvironment(path.resolve(import.meta.dirname, '../../..'))
+      const signing = candidate ? { identity: '-', keychain: null, timestamp: 'none' }
+        : await resolveSigningIdentity(context.packager)
+      const { identity } = signing
+      const nested = signNestedChromium(payload, { entitlements, ...signing })
       console.log(
         `[after-pack] repaired ${nested.repaired} framework links; signed ${nested.signed} nested chromium targets` +
           (identity ? ` as ${identity}` : ' (no Developer ID in the builder keychain)')
       )
       // uv-cache wheel zips carry Mach-O members the notary validates but
       // electron-osx-sign cannot reach; sign them in place (see module doc).
-      const wheels = signWheelZipMembers(payload, { identity, keychain })
+      const wheels = signWheelZipMembers(payload, signing)
       if (wheels.signed > 0) {
         console.log(
           `[after-pack] signed ${wheels.signed} Mach-O members across ${wheels.wheels} payload wheel zips` +
