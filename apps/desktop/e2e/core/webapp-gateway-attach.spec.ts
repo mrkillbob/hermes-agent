@@ -511,6 +511,19 @@ test('signing out of a Webapp behind sign-in signs the browser out', async () =>
     browser = await chromium.launch({ executablePath: process.env.HERMES_E2E_CHROMIUM || undefined })
     const page: Page = await (await browser.newContext({ viewport: { width: 1280, height: 860 } })).newPage()
     const ws = recordWebSockets(page)
+    const lifecycle: string[] = []
+    const startedAt = performance.now()
+    let phase = 'signed-in-page'
+    const observed = (event: string) => {
+      lifecycle.push(`${Math.round(performance.now() - startedAt)}ms ${phase} ${event}`)
+      if (lifecycle.length > 16) lifecycle.shift()
+    }
+    page.on('close', () => observed('page-close'))
+    page.on('crash', () => observed('page-crash'))
+    page.on('framenavigated', frame => {
+      if (frame === page.mainFrame()) observed('main-frame-navigated')
+    })
+    browser.on('disconnected', () => observed('browser-disconnected'))
 
     const signIn = () =>
       page.request.post(`${origin}/auth/password-login`, {
@@ -526,15 +539,27 @@ test('signing out of a Webapp behind sign-in signs the browser out', async () =>
       .toBe(true)
 
     const open = ws.sockets.filter(socket => !socket.closed)
+    phase = 'sign-out-command'
     const signedOut = hermesWebapp(sandbox, '--sign-out')
     expect(signedOut.code, signedOut.output).toBe(0)
+    phase = 'waiting-for-socket-close'
     await expect
       .poll(() => open.every(socket => socket.closed), { timeout: 30_000, message: "sign-out closed the tab's socket" })
       .toBe(true)
     expect(signedOut.output).toMatch(/closed [1-9]\d* browser connections?\./)
     expect(signedOut.output).toContain('Every browser login behind sign-in has ended')
+    phase = 'checking-revoked-session'
     expect((await page.request.get(`${origin}/api/sessions`)).status()).toBe(401)
-    await page.reload()
+    phase = 'reloading-after-revocation'
+    try {
+      await page.reload()
+    } catch (error) {
+      throw new Error(
+        `reload after sign-out failed; pageClosed=${page.isClosed()}; ` +
+          `browserConnected=${browser.isConnected()}; lifecycle=${lifecycle.join(' | ')}`,
+        { cause: error }
+      )
+    }
     await expect(page).toHaveURL(/\/login/, { timeout: 60_000 })
     await expect(composer(page)).toBeHidden()
 
