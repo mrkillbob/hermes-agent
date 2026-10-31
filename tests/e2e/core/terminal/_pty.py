@@ -95,6 +95,61 @@ def _process_identity(pid: int) -> str:
             f"pgid={pgid} sid={sid} cmd={cmdline(pid)!r} parent_cmd={cmdline(ppid)!r}")
 
 
+
+def _live_process_stat(pid: int) -> tuple[int, int, int, int] | None:
+    """Live /proc identity as (ppid, pgid, sid, start); fail closed on exit or reuse."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if fields[0] == "Z":
+            return None
+        return (int(fields[1]), int(fields[2]), int(fields[3]), int(fields[19]))
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _process_argv(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    if not raw:
+        return []
+    parts = raw.split(b"\0")
+    if parts[-1] == b"":
+        parts.pop()
+    return [os.fsdecode(part) for part in parts]
+
+
+def _gateway_owned_supervisor(
+    pid: int, gateways: set[int], seen_members: set[tuple[int, int]],
+    is_gateway: Callable[[str], bool],
+) -> bool:
+    """Exempt only this harness's live gateway's exact, still-owned shell supervisor."""
+    child = _live_process_stat(pid)
+    if child is None:
+        return False
+    parent_pid, pgid, sid, start = child
+    if pgid != pid or sid != pid or parent_pid not in gateways or (pid, start) not in seen_members:
+        return False
+    parent = _live_process_stat(parent_pid)
+    if parent is None or (parent_pid, parent[3]) not in seen_members:
+        return False
+    argv = _process_argv(pid)
+    script = str(REPO_ROOT / "hermes_cli" / "process_supervisor.sh")
+    if argv not in (["/bin/sh", script, str(parent[1])],
+                    ["/system/bin/sh", script, str(parent[1])]):
+        return False
+    parent_command = cmdline(parent_pid)
+    if not is_gateway(parent_command):
+        return False
+    # The two tracked birth identities, parent command, and exact supervisor argv must
+    # still agree after classification; a dead owner or recycled PID stays a leftover.
+    return (child == _live_process_stat(pid)
+            and parent == _live_process_stat(parent_pid)
+            and argv == _process_argv(pid)
+            and parent_command == cmdline(parent_pid))
+
+
 def session_members(sid: int) -> list[int]:
     out = []
     for entry in os.listdir("/proc"):
@@ -313,8 +368,12 @@ class PtyHermes:
             return pids
 
         def alive() -> list[int]:
-            return sorted(pid for pid in tracked_live()
-                          if not looks_like_gateway_command_line(cmdline(pid)))
+            pids = tracked_live()
+            gateways = {pid for pid in pids if looks_like_gateway_command_line(cmdline(pid))}
+            return sorted(pid for pid in pids
+                          if pid not in gateways
+                          and not _gateway_owned_supervisor(
+                              pid, gateways, self.seen_members, looks_like_gateway_command_line))
 
         try:
             poll(lambda: not alive(), timeout=timeout, what="the PTY session to empty")
