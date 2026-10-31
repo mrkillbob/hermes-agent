@@ -32,9 +32,9 @@ function BoundMessage() {
 
     return typeof rowId === 'number' ? `row:${rowId}` : s.message.id
   })
-  const text = useAuiState(s =>
-    s.message.content.flatMap(part => (part.type === 'text' ? [part.text] : [])).join('')
-  )
+
+  const text = useAuiState(s => s.message.content.flatMap(part => (part.type === 'text' ? [part.text] : [])).join(''))
+
   const [owner] = useState(identity)
   const [held, setHeld] = useState(false)
   const record = useContext(CommitObserver)
@@ -103,14 +103,17 @@ it('keeps message-local state attached to its durable reply when hydration inser
   // identity. A custom list keyed/scoped by position hands its state to row 13.
   // This reproduces the identity boundary, not the hosted trace's scheduling.
   const mismatches: string[] = []
+
   const record = (owner: string, current: string) => {
     if (owner !== current) {
       mismatches.push(`${owner} -> ${current}`)
     }
   }
+
   const { getByRole, queryByRole, rerender } = render(
     <Transcript messages={toChatMessages(initialRows)} record={record} />
   )
+
   const reply = () => getByRole('button', { name: 'hold Noted the process' })
 
   await waitFor(() => expect(reply()).not.toBeNull())
@@ -120,22 +123,18 @@ it('keeps message-local state attached to its durable reply when hydration inser
   const refreshed = [...initialRows.slice(0, 2), processNotice, ...initialRows.slice(2)]
   rerender(<Transcript messages={toChatMessages(refreshed)} record={record} />)
 
-  await waitFor(() =>
-    expect(getByRole('button', { name: 'hold Background Process Finished: scope' })).not.toBeNull()
-  )
+  await waitFor(() => expect(getByRole('button', { name: 'hold Background Process Finished: scope' })).not.toBeNull())
   expect(reply().getAttribute('aria-pressed')).toBe('true')
-  expect(
-    getByRole('button', { name: 'hold Background Process Finished: scope' }).getAttribute('aria-pressed')
-  ).toBe('false')
+  expect(getByRole('button', { name: 'hold Background Process Finished: scope' }).getAttribute('aria-pressed')).toBe(
+    'false'
+  )
   expect(getByRole('button', { name: 'hold Next answer' }).getAttribute('aria-pressed')).toBe('false')
   expect(mismatches).toEqual([])
 
   // Retire the inserted id and then the whole response; stale providers must
   // disappear instead of borrowing the next row's content or local state.
   rerender(<Transcript messages={toChatMessages(initialRows)} record={record} />)
-  await waitFor(() =>
-    expect(queryByRole('button', { name: 'hold Background Process Finished: scope' })).toBeNull()
-  )
+  await waitFor(() => expect(queryByRole('button', { name: 'hold Background Process Finished: scope' })).toBeNull())
   expect(reply().getAttribute('aria-pressed')).toBe('true')
   fireEvent.click(getByRole('button', { name: 'hold Next answer' }))
   expect(getByRole('button', { name: 'hold Next answer' }).getAttribute('aria-pressed')).toBe('true')
@@ -143,4 +142,31 @@ it('keeps message-local state attached to its durable reply when hydration inser
   await waitFor(() => expect(queryByRole('button', { name: 'hold Noted the process' })).toBeNull())
   expect(getByRole('button', { name: 'hold Next answer' }).getAttribute('aria-pressed')).toBe('true')
   expect(mismatches).toEqual([])
+})
+
+it('keeps message-local state when a streamed reply becomes persisted and is hydrated under a new id', async () => {
+  const prompt = toChatMessages([initialRows[0]!])[0]!
+
+  const streamedReply: ChatMessage = {
+    id: 'assistant-stream-scope',
+    role: 'assistant',
+    parts: [{ type: 'text', text: 'Settled reply' }]
+  }
+
+  const record = () => {}
+
+  const { getByRole, rerender } = render(<Transcript messages={[prompt, streamedReply]} record={record} />)
+
+  const reply = () => getByRole('button', { name: 'hold Settled reply' })
+
+  await waitFor(() => expect(reply()).not.toBeNull())
+  fireEvent.click(reply())
+  expect(reply().getAttribute('aria-pressed')).toBe('true')
+
+  const persistedReply = { ...streamedReply, rowId: 11 }
+  rerender(<Transcript messages={[prompt, persistedReply]} record={record} />)
+  expect(reply().getAttribute('aria-pressed')).toBe('true')
+
+  rerender(<Transcript messages={[prompt, { ...persistedReply, id: '11-1-assistant' }]} record={record} />)
+  expect(reply().getAttribute('aria-pressed')).toBe('true')
 })
