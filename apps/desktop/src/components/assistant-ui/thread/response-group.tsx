@@ -1,7 +1,8 @@
 import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
-import { type ComponentProps, createContext, useMemo } from 'react'
+import { type ComponentProps, createContext, useMemo, useRef } from 'react'
 
 import { contentHasVisibleText, messageContentText, PROCESS_NOTIFICATION_RE } from './content'
+import { createTranscriptMessageKeyCache, transcriptMessageKeys } from './message-identity'
 
 interface GroupMessage {
   role: string
@@ -31,6 +32,7 @@ interface ResponseMessagesProps {
 interface ResponseRow {
   index: number
   id: string
+  rowId?: number
   role: string
   hasText: boolean
 }
@@ -38,12 +40,15 @@ interface ResponseRow {
 interface ResponseSection {
   key: string
   indices: number[]
+  messageKeys: string[]
   assistantIds: string[]
   response: boolean
 }
 
 /** Keep message runtimes intact; only their visual container and footer are shared. */
 export function ResponseMessages({ components, indices }: ResponseMessagesProps) {
+  const messageKeyCache = useRef(createTranscriptMessageKeyCache())
+
   const signature = useAuiState(s =>
     JSON.stringify(
       indices.flatMap(index => {
@@ -55,6 +60,7 @@ export function ResponseMessages({ components, indices }: ResponseMessagesProps)
               {
                 index,
                 id: message.id,
+                rowId: typeof message.metadata.custom.rowId === 'number' ? message.metadata.custom.rowId : undefined,
                 role: responseMessageRole(message),
                 hasText: contentHasVisibleText(message.content)
               }
@@ -67,19 +73,24 @@ export function ResponseMessages({ components, indices }: ResponseMessagesProps)
   const sections = useMemo(() => {
     const rows = JSON.parse(signature) as ResponseRow[]
     const result: ResponseSection[] = []
+    const messageKeys = transcriptMessageKeys(rows, messageKeyCache.current)
 
-    for (const row of rows) {
+    for (const [rowIndex, row] of rows.entries()) {
       const response = row.role === 'assistant' || row.role === 'background'
       const previous = result.at(-1)
+      const messageKey = messageKeys[rowIndex]!
 
       const section: ResponseSection =
-        response && previous?.response ? previous : { key: row.id, indices: [], assistantIds: [], response }
+        response && previous?.response
+          ? previous
+          : { key: messageKey, indices: [], messageKeys: [], assistantIds: [], response }
 
       if (section !== previous) {
         result.push(section)
       }
 
       section.indices.push(row.index)
+      section.messageKeys.push(messageKey)
 
       if (row.role === 'assistant' && row.hasText) {
         section.assistantIds.push(row.id)
@@ -93,13 +104,21 @@ export function ResponseMessages({ components, indices }: ResponseMessagesProps)
     section.response ? (
       <ResponseMessageIds.Provider key={section.key} value={section.assistantIds}>
         <div className="group flex min-w-0 flex-col gap-(--scaffold-block-gap)" data-slot="aui_response-group">
-          {section.indices.map(index => (
-            <ThreadPrimitive.MessageByIndex components={components} index={index} key={index} />
+          {section.indices.map((index, messageIndex) => (
+            <ThreadPrimitive.MessageByIndex
+              components={components}
+              index={index}
+              key={section.messageKeys[messageIndex]}
+            />
           ))}
         </div>
       </ResponseMessageIds.Provider>
     ) : (
-      <ThreadPrimitive.MessageByIndex components={components} index={section.indices[0]!} key={section.key} />
+      <ThreadPrimitive.MessageByIndex
+        components={components}
+        index={section.indices[0]!}
+        key={section.messageKeys[0]}
+      />
     )
   )
 }
