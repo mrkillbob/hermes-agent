@@ -33,10 +33,12 @@ def merge_job_definition(local: dict[str, Any], authored: dict[str, Any]) -> dic
     if isinstance(merged.get("schedule"), str):
         merged["schedule"] = parse_schedule(merged["schedule"], timezone=merged.get("timezone"))
 
-    # A zone change moves every wall-clock occurrence exactly like an expr change: the instant on
-    # file belongs to the old zone and the next scan would re-anchor past it without firing.
-    if (local.get("schedule") != merged.get("schedule")
-            or local.get("timezone") != merged.get("timezone")):
+    # A zone change moves wall-clock occurrences; an elapsed interval keeps its deadline and
+    # pending claim when only its timezone pin changes. An expression change still replaces both.
+    schedule_changed = local.get("schedule") != merged.get("schedule")
+    timezone_changed = local.get("timezone") != merged.get("timezone")
+    schedule = merged.get("schedule") or {}
+    if schedule_changed or (timezone_changed and schedule.get("kind") != "interval"):
         merged.pop("pending_slot", None)
         _clear_quota_hold(merged)
         if is_job_runnable(merged):
