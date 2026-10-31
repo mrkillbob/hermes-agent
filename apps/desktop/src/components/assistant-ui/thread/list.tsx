@@ -46,6 +46,7 @@ import { isSecondaryWindow } from '@/store/windows'
 import { MessageRenderBoundary } from '../message-render-boundary'
 import { PendingApprovalStack } from '../tool/approval'
 
+import { createTranscriptMessageKeyCache, transcriptMessageKeys } from './message-identity'
 import { responseMessageRole, ResponseMessages } from './response-group'
 import { holdSessionSwitching } from './session-switching'
 import { resolveShowEarlierAction, shouldAutoShowEarlier, useTranscriptWindow } from './transcript-window'
@@ -411,39 +412,6 @@ export function liveTailStart(
   return Math.min(floor, Math.max(ceiling, start))
 }
 
-/**
- * React identity of the row a message opens. A stored row's renderer id is
- * built from its position in the page it was read from, so every newest-page
- * re-read that slides the window hands every row in it a new id. Keyed by
- * that id, each settled turn remounted the whole page: a remounted row is a
- * new element with no remembered size, so an off-screen one drops to the
- * contain-intrinsic-size placeholder, the transcript height jumps, and the
- * scrollTop clamp reads as a scroll-up to use-stick-to-bottom (the view stops
- * following). The durable row id is the same row in every page.
- */
-export function transcriptRowKey(message: { id: string; metadata?: { custom?: Record<string, unknown> } }): string {
-  const rowId = message.metadata?.custom?.rowId
-
-  return typeof rowId === 'number' ? `row:${rowId}` : message.id
-}
-
-/**
- * Per-message React keys, indexed like thread.messages. Two rendered messages
- * can carry one durable row (hydration splits a stored row it renders in
- * parts); the later copy keeps its own renderer id as its key.
- */
-export function turnRowKeys(rowKeySignature: string, structuralSignature: string): string[] {
-  const seen = new Set<string>()
-  const ids = structuralSignature.split('\n').map(row => row.split(':')[1])
-
-  return rowKeySignature.split('\n').map((key, index) => {
-    const unique = seen.has(key) ? (ids[index] ?? key) : key
-    seen.add(unique)
-
-    return unique
-  })
-}
-
 interface TurnRowProps {
   components: ThreadMessageComponents
   group: MessageGroup
@@ -534,7 +502,23 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // part-appends can't churn group identity (that would defeat the rows memo
   // below on every tick). Weights are folded in separately for the budget.
   const groups = useMemo(() => buildGroups(structuralSignature), [structuralSignature])
-  const rowKeySignature = useAuiState(s => s.thread.messages.map(transcriptRowKey).join('\n'))
+
+  const messageKeySignature = useAuiState(s =>
+    JSON.stringify(
+      s.thread.messages.map(message => ({
+        id: message.id,
+        rowId: typeof message.metadata.custom.rowId === 'number' ? message.metadata.custom.rowId : undefined
+      }))
+    )
+  )
+
+  const messageKeyCache = useRef(createTranscriptMessageKeyCache())
+
+  const messageKeys = useMemo(
+    () => transcriptMessageKeys(JSON.parse(messageKeySignature), messageKeyCache.current),
+    [messageKeySignature]
+  )
+
   const renderEmpty = groups.length === 0 && Boolean(emptyPlaceholder)
 
   // use-stick-to-bottom owns scrollTop (single writer): follow while locked,
@@ -1585,18 +1569,16 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // "MessageRenderBoundary (children only)" by explain()). With it, React
   // bails out on element identity and a scroll flip re-renders nothing below.
   const rows = useMemo(() => {
-    const rowKeys = turnRowKeys(rowKeySignature, structuralSignature)
-
     return visibleGroups.map((group, indexInVisible) => (
       <TurnRow
         components={components}
         group={group}
-        key={rowKeys[group.kind === 'turn' ? group.indices[0] : group.index] ?? group.id}
+        key={messageKeys[group.kind === 'turn' ? group.indices[0] : group.index] ?? group.id}
         resetKey={structuralSignature}
         virtualized={indexInVisible < tailStart}
       />
     ))
-  }, [visibleGroups, components, rowKeySignature, structuralSignature, tailStart])
+  }, [visibleGroups, components, messageKeys, structuralSignature, tailStart])
 
   useMessagesBelow({ contentRef, scrollRef, isAtBottom, paneVisible, rows, sessionKey, sessionId: scrollSessionId })
   useStickyPromptClip({ contentRef, scrollRef, paneVisible, rows })
