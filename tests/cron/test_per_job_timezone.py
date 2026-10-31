@@ -357,6 +357,30 @@ class TestSlotMovesFollowThePin:
         merged = merge_job_definition(dict(local), authored)
         assert datetime.fromisoformat(merged["next_run_at"]) == datetime(2026, 10, 23, 9, 0, tzinfo=NY)
 
+    @pytest.mark.parametrize("new_zone", ["Asia/Hong_Kong", None])
+    def test_distribution_interval_zone_only_change_keeps_pending_deadline(
+        self, la_profile, cron_store, new_zone,
+    ):
+        from cron.job_definition import merge_job_definition
+
+        cron_store.set(datetime(2026, 10, 22, 9, 59, tzinfo=NY))
+        local = jobs.create_job(
+            prompt="p", schedule="every 24h", model="fixture", deliver="local",
+            timezone="America/New_York",
+        )
+        due = datetime(2026, 10, 22, 10, 0, tzinfo=NY).isoformat()
+        stamp = {"scheduled_at": due, "at": due, "by": "dead-owner"}
+        local["next_run_at"] = due
+        local["pending_slot"] = stamp
+        authored = {"prompt": "p", "schedule": local["schedule"], "timezone": new_zone}
+
+        merged = merge_job_definition(local, authored)
+
+        assert merged["timezone"] == new_zone
+        assert merged["schedule"] == local["schedule"]
+        assert merged["next_run_at"] == due
+        assert merged["pending_slot"] == stamp
+
 
 class TestZeroGraceAtTickResolution:
     """The ticker fires seconds after the slot; ``0`` must mean "skip real misses", not "every
