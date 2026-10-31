@@ -22,7 +22,7 @@ import psutil
 from hermes_cli.kanban_coordinator_executor import CoordinatorExecutor, CoordinatorLimits, bounded_connection, digest
 from hermes_cli.kanban_external import Artifact, ExternalLanes, Lane, TERMINAL
 
-FIXTURE_SHA256 = '5cc6a054c2eeb89895ff2f4249260d6408030f2e9cae8e4d864cf5311f73180e'
+FIXTURE_SHA256 = '2a7ecb96f31f042189e0c916f38b997257fc73642850a1d378034d2b30a7cc6f'
 FIXTURE_PROGRAM = Path(__file__).resolve().parents[1] / 'tests/hermes_cli/fixtures/fake_coordinator_cli.py'
 BEHAVIORS = frozenset({'success', 'hold', 'question', 'fail', 'malformed', 'wrong_binding',
                        'provider', 'fallback', 'ignore_term', 'overflow', 'descendant'})
