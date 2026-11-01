@@ -107,7 +107,7 @@ test('diagnostics sample only the revalidated installed app and retain no window
     resolveExecutable: value => value,
     execute: async (command, args, options) => {
       commands.push({ command, args })
-      assert.ok(options.timeout > 0 && options.timeout <= 2000)
+      assert.ok(options.timeout > 0 && options.timeout <= (command === '/usr/bin/sample' ? 8000 : 2000))
       if (command === '/usr/bin/osascript') return JSON.stringify(snapshot)
       if (command === '/bin/ps') return processes
       assert.equal(command, '/usr/bin/sample')
@@ -148,4 +148,62 @@ test('changed identity, ambiguous targets, denied observation and budget expiry 
     assert.ok(commands.length <= 3)
     assert.equal(JSON.stringify(report).includes('credential-sentinel'), false)
   }
+})
+
+test.each([
+  { name: 'unused budget covers sample completion overhead', delays: [300, 400, 500], verificationDelay: 0,
+    expectedTimeout: 6800, expectedStatus: 'captured', expectedElapsed: 4200 },
+  { name: 'late verification preserves the overall deadline', delays: [1900, 1900, 1900], verificationDelay: 1000,
+    expectedTimeout: 1300, expectedStatus: 'command-deadline', expectedElapsed: 8000 },
+])('$name', async ({ delays, verificationDelay, expectedTimeout, expectedStatus, expectedElapsed }) => {
+  const calls = []
+  let time = 0
+  let observations = 0
+  let chargedVerification = false
+  const report = await collectQuitEvidence(executable, {
+    now: () => time,
+    resolveExecutable: value => {
+      if (observations === 2 && !chargedVerification) {
+        chargedVerification = true
+        time += verificationDelay
+      }
+      return value
+    },
+    execute: async (command, args, options) => {
+      calls.push({ command, args, timeout: options.timeout })
+      if (command !== '/usr/bin/sample') {
+        assert.ok(options.timeout > 0 && options.timeout <= 2000)
+        const elapsed = delays[calls.length - 1]
+        assert.ok(elapsed <= options.timeout, 'each preliminary command honors its own bound')
+        time += elapsed
+        if (command === '/usr/bin/osascript') {
+          observations++
+          return JSON.stringify(snapshot)
+        }
+        assert.equal(command, '/bin/ps')
+        return processes
+      }
+      // One second of sampling plus synthetic cold completion overhead.
+      const needed = 3000
+      time += Math.min(needed, options.timeout)
+      if (options.timeout < needed) {
+        throw Object.assign(new Error('credential-sentinel'), { code: 'ETIMEDOUT', killed: true })
+      }
+      return 'Thread_1 com.apple.main-thread\n + CFRunLoopRun\nThread_2 worker\n + LocalNetwork credential-sentinel\n'
+    },
+  })
+  assert.equal(report.status, expectedStatus)
+  assert.equal(time, expectedElapsed)
+  const sample = calls.at(-1)
+  assert.deepEqual(sample.args, ['200', '1', '10', '-file', '/dev/stdout'])
+  assert.equal(sample.timeout, expectedTimeout)
+  assert.ok(sample.timeout > 0 && 8000 - (delays.reduce((sum, delay) => sum + delay, 0) + verificationDelay) >= sample.timeout)
+  assert.deepEqual(calls.map(call => call.command), [
+    '/usr/bin/osascript', '/bin/ps', '/usr/bin/osascript', '/usr/bin/sample',
+  ])
+  assert.equal(report.target.pid, 200)
+  assert.equal(report.alertClientAttribution, 'unverified')
+  assert.equal(JSON.stringify(report).includes('credential-sentinel'), false)
+  if (expectedStatus === 'captured') assert.deepEqual(report.stack.frameMarkers, ['CFRunLoopRun'])
+  else assert.equal(report.stack, undefined)
 })

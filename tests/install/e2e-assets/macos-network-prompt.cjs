@@ -90,11 +90,12 @@ async function collectQuitEvidence(executable, { execute = executeNative, now = 
     try { return resolveExecutable(path) === canonical; }
     catch { return false; }
   }
-  const deadline = now() + 8000;
-  async function read(command, args) {
+  const evidenceBudgetMs = 8000;
+  const deadline = now() + evidenceBudgetMs;
+  async function read(command, args, commandBudgetMs = 2000) {
     const remaining = deadline - now();
     if (remaining <= 0) throw Object.assign(new Error('budget expired'), { code: 'EVIDENCE_BUDGET' });
-    return execute(command, args, { timeout: Math.min(2000, remaining) });
+    return execute(command, args, { timeout: Math.min(commandBudgetMs, remaining) });
   }
   const observe = async () => JSON.parse(await read('/usr/bin/osascript', ['-l', 'JavaScript', '-e', OBSERVER, executable, canonical]));
   try {
@@ -134,7 +135,8 @@ async function collectQuitEvidence(executable, { execute = executeNative, now = 
     report.target = { pid: target.pid, executable: canonical, finishedLaunching: Boolean(current[0].finishedLaunching), active: Boolean(current[0].active) };
     // sample reads symbolic stacks of this revalidated app for one second.
     // Its raw output is never retained; only known main-thread frame markers.
-    report.stack = stackMarkers(await read('/usr/bin/sample', [String(target.pid), '1', '10', '-file', '/dev/stdout']));
+    // The final read can spend the remaining budget on capture and completion overhead.
+    report.stack = stackMarkers(await read('/usr/bin/sample', [String(target.pid), '1', '10', '-file', '/dev/stdout'], evidenceBudgetMs));
     report.status = 'captured';
   } catch (error) {
     report.status = error.code === 'EVIDENCE_BUDGET' ? 'budget-expired' : failureCategory(error);
