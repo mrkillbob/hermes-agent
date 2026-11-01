@@ -64,10 +64,12 @@ def _remove_merged_file(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def _selected_task_rows(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+def _selected_task_rows(conn: sqlite3.Connection, task_ids: list[str], *,
+                        max_bytes: int | None = None) -> dict[str, list[dict[str, Any]]]:
     """Full selected records, including local subscriptions that pruning intentionally drops."""
     placeholders = _placeholders(task_ids)
     result = {}
+    used_bytes = 0
     for table in (*_COUNTED_TABLES, "kanban_notify_subs"):
         if table == "task_links":
             where, values = f"parent_id IN ({placeholders}) OR child_id IN ({placeholders})", [*task_ids, *task_ids]
@@ -75,7 +77,14 @@ def _selected_task_rows(conn: sqlite3.Connection, task_ids: list[str]) -> dict[s
         else:
             where, values = f"{'id' if table == 'tasks' else 'task_id'} IN ({placeholders})", task_ids
             order = "task_id, platform, chat_id, thread_id" if table == "kanban_notify_subs" else "id"
-        result[table] = [dict(row) for row in conn.execute(f'SELECT * FROM "{table}" WHERE {where} ORDER BY {order}', values)]
+        result[table] = []
+        for row in conn.execute(f'SELECT * FROM "{table}" WHERE {where} ORDER BY {order}', values):
+            item = dict(row)
+            if max_bytes is not None:
+                used_bytes += len(json.dumps(item, ensure_ascii=False).encode('utf-8'))
+                if used_bytes > max_bytes:
+                    raise ValueError('selected task rows exceed inspection size limit')
+            result[table].append(item)
     return result
 
 
