@@ -1177,7 +1177,7 @@ class TestSpawnRewriteCompoundBackground:
         with patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
              patch("subprocess.Popen", side_effect=fake_popen), \
              patch("threading.Thread", return_value=fake_thread), \
-             patch.object(registry, "_write_checkpoint"):
+             patch.object(registry, "_write_checkpoint"), patch.object(registry, "_owns_job", return_value=False):
             registry.spawn_local("cd /app && node server.js &>/tmp/srv.log &", cwd="/tmp")
 
         assert len(captured_cmd) == 1
@@ -1200,7 +1200,7 @@ class TestSpawnRewriteCompoundBackground:
         with patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
              patch.dict("sys.modules", {"ptyprocess": mock_pty_module}), \
              patch("threading.Thread", return_value=fake_thread), \
-             patch.object(registry, "_write_checkpoint"):
+             patch.object(registry, "_write_checkpoint"), patch.object(registry, "_owns_job", return_value=False):
             session = registry.spawn_local(
                 "cd /app && node server.js &",
                 cwd="/tmp",
