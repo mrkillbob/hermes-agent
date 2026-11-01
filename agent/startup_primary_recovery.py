@@ -216,5 +216,7 @@ def recover_pending_primary(agent, lease):
         with suppress(Exception):
             agent._retire_shared_openai_client(old_client, reason='startup_primary_recovered')
     with suppress(Exception):
+        agent._emit_pending_fallback_notice()
+        agent._clear_status_buffer()
         agent._emit_diagnostic_status(f'Primary model restored: {intent.model} via {intent.provider}.')
     return True
