@@ -16,7 +16,7 @@ import math
 import os
 import re
 import stat
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from hmac import compare_digest
 from hashlib import sha256
@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
+from agent.llm_egress_receipt_metadata import receipt_envelope
 from agent.llm_egress_context_atoms import PUBLIC_CONTEXT_ATOMS, canonical_chunked_context_atom
 from agent.file_safety import get_read_block_error
 from agent.egress_source_annotations import mask_builtin_annotations
@@ -2259,7 +2260,6 @@ class LLMEgressFirewall:
                 reason_codes=tuple(dict.fromkeys((*decision.reason_codes, "receipt_unavailable"))),
             )
         raise EgressBlocked(decision)
-
     def _append_receipt(
         self,
         decision: EgressDecision,
@@ -2272,7 +2272,7 @@ class LLMEgressFirewall:
         except OSError:
             raise
         self._state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        receipt = asdict(decision)
+        receipt = receipt_envelope(decision)
         receipt["destination_class"] = decision.destination_class.value
         receipt["decision"] = "allow" if decision.allowed else "block"
         for field in (
