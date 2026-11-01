@@ -115,7 +115,7 @@ def commit_current_adoption(candidate, publish):
     from hermes_constants import get_hermes_home, hermes_home_key
     if hermes_home_key(get_hermes_home()) != candidate.profile_home:
         return False
-    with _auth_store_lock(timeout_seconds=0.0):
+    with _auth_store_lock(timeout_seconds=1.0):
         if not adoption_is_current(candidate):
             return False
         publish()
