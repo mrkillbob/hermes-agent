@@ -30,7 +30,6 @@ def test_darwin_status_never_spawns(monkeypatch, state, exists, expected):
                            STATUS_ZOMBIE='zombie', NoSuchProcess=Gone,
                            pid_exists=lambda _: exists)
     monkeypatch.setitem(sys.modules, 'psutil', fake)
-    monkeypatch.setattr(dispatch.sys, 'platform', 'darwin')
     monkeypatch.setattr(dispatch.subprocess, 'run', lambda *a, **k: pytest.fail('spawn attempted'))
     monkeypatch.setattr(status, 'pid_exists_stdlib', lambda _: pytest.fail('unexpected native fallback'))
     assert dispatch._pid_alive(123456789) is expected
@@ -41,7 +40,6 @@ def test_missing_psutil_keeps_conservative_native_answer(monkeypatch, exists):
     from gateway import status
     from hermes_cli import kanban_db_dispatch as dispatch
     monkeypatch.setitem(sys.modules, 'psutil', None)
-    monkeypatch.setattr(dispatch.sys, 'platform', 'darwin')
     monkeypatch.setattr(status, 'pid_exists_stdlib', lambda _: exists)
     monkeypatch.setattr(dispatch.subprocess, 'run', lambda *a, **k: pytest.fail('spawn attempted'))
     assert dispatch._pid_alive(123456789) is exists
