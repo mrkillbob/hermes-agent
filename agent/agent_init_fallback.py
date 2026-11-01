@@ -64,3 +64,15 @@ def recompute_init_fallback_api_mode(agent, fb_client) -> None:
         return
     if hasattr(agent, "_transport_cache"):
         agent._transport_cache.clear()
+
+
+def record_startup_fallback(agent, primary_route) -> None:
+    """Retain the startup switch until a turn has a viewer, like runtime failover."""
+    from agent.chat_completion_helpers import _buffer_fallback_notice
+    old_model, old_provider = primary_route
+    _buffer_fallback_notice(agent, (
+        f"⚠️ Model fallback: {old_model} via {old_provider} unavailable "
+        f"(no usable credentials at startup); using {agent.model} via {agent.provider}."
+    ))
+    agent._provider_fallback_active = True
+    agent._provider_fallback_route = (str(agent.model), str(agent.provider))

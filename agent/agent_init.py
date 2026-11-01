@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from agent.context_compressor import ContextCompressor
-from agent.agent_init_fallback import _fallback_entries, _init_fallback_chain, recompute_init_fallback_api_mode
+from agent.agent_init_fallback import _fallback_entries, _init_fallback_chain, recompute_init_fallback_api_mode, record_startup_fallback
 from agent.agent_init_context_values import _compressor_max_tokens
 from agent.agent_init_params import _CALLBACK_PARAMS, _GATEWAY_IDENTITY_PARAMS, _PASSTHROUGH_PARAMS
 from agent.agent_runtime_helpers import _ra
@@ -786,7 +786,6 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
     # No credentials: try the fallback chain BEFORE failing (an exhausted single-entry pool
     # must not die with a misleading "No LLM provider configured"); only explicitly named
     # providers keep the missing-key diagnostic.
-    # Exhausted single-entry pools must still reach the fallback chain (#17929).
     _explicit = (agent.provider or "").strip().lower()
     from agent.startup_primary_recovery import pending_primary_intent
     agent._pending_primary_intent = pending_primary_intent(agent)
@@ -813,17 +812,18 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
             )
             _refused_entries.append((_fb_provider, "no usable credentials"))
             continue
+        primary_route = (agent.model, agent.provider)
         agent._fallback_activated = True
         if _fb_provider.strip().lower() == "moa":
-            # The chokepoint handed back the preset's aggregator client, which only proves the
-            # preset resolves and its aggregator has credentials. A MoA entry means the preset
-            # itself (same as ``provider: moa`` in config), so bind the facade, not the aggregator.
+            # MoA denotes the preset facade, not the resolved aggregator client.
             from agent.moa_loop import bind_moa_runtime
             bind_moa_runtime(agent, _fb["model"])
+            record_startup_fallback(agent, primary_route)
             return None
         agent.provider = agent.requested_provider = _fb["provider"]
         agent.model = _fb_model or _fb["model"]
         recompute_init_fallback_api_mode(agent, _fb_client)
+        record_startup_fallback(agent, primary_route)
         return _client_kwargs_from_routed(_fb_client, _provider_timeout)
     # A burned credential pool (#119533) is otherwise indistinguishable from missing config,
     # so name it even when no fallback entries are configured.
