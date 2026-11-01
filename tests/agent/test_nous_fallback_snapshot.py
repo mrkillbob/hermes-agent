@@ -57,7 +57,7 @@ def test_resolved_nous_primary_restores_after_fallback(
         database.close()
 
 
-def test_unresolved_nous_startup_does_not_enter_api_key_preparation(offline_runtime, monkeypatch):
+def test_unresolved_nous_startup_captures_only_profile_bound_intent(offline_runtime, monkeypatch):
     from types import SimpleNamespace
     from agent.startup_primary_recovery import pending_primary_intent
 
@@ -65,8 +65,12 @@ def test_unresolved_nous_startup_does_not_enter_api_key_preparation(offline_runt
         pytest.fail('qualification must not refresh OAuth credentials')
 
     monkeypatch.setattr('hermes_cli.auth.resolve_nous_runtime_credentials', unexpected_refresh)
-    assert pending_primary_intent(SimpleNamespace(provider='nous', requested_provider='nous',
-        base_url='', api_mode='chat_completions', model='meituan/longcat-2.5-preview:free')) is None
+    from agent.startup_nous_adoption import NousPrimaryIntent
+    intent = pending_primary_intent(SimpleNamespace(provider='nous', requested_provider='nous',
+        base_url='', api_mode='chat_completions', model='meituan/longcat-2.5-preview:free'))
+    assert isinstance(intent, NousPrimaryIntent)
+    assert intent.profile_home == str(offline_runtime[0].resolve())
+    assert intent.model == 'meituan/longcat-2.5-preview:free'
 
 
 @pytest.mark.parametrize('primary,recovers', [('nous', False), ('openai-api', True)])

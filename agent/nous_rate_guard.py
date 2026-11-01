@@ -87,7 +87,7 @@ def record_nous_rate_limit(
         logger.debug("Failed to write Nous rate limit state: %s", exc)
 
 
-def nous_rate_limit_remaining(*, anonymous: bool = False) -> Optional[float]:
+def nous_rate_limit_remaining(*, anonymous: bool = False, read_only: bool = False) -> Optional[float]:
     """Seconds remaining until reset, or None if not rate-limited (expired state is removed)."""
     path = _state_path(anonymous=anonymous)
     try:
@@ -96,8 +96,9 @@ def nous_rate_limit_remaining(*, anonymous: bool = False) -> Optional[float]:
         remaining = state.get("reset_at", 0) - time.time()
         if remaining > 0:
             return remaining
-        with contextlib.suppress(OSError):
-            os.unlink(path)
+        if not read_only:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
         return None
     except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
         return None
